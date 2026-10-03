@@ -1,3 +1,4 @@
+import { openChats, activeConversationId, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import {
@@ -17,10 +18,8 @@ async function openProjectSettings(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("project-access-section")).toBeVisible();
 }
 
-function conversationTabLocator(page: import("@playwright/test").Page) {
-  return page
-    .getByTestId("workspace-tabs")
-    .locator('[data-tab-kind="conversation"]');
+function conversationRows(page: import("@playwright/test").Page) {
+  return page.getByTestId("conversation-history-item");
 }
 
 async function waitForConversationControllerId(page: import("@playwright/test").Page) {
@@ -58,7 +57,7 @@ test.describe("Org multi-user conversation rename", () => {
       throw new Error("Invite link URL missing.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const guestContext = await browser.newContext();
     const guestPage = await guestContext.newPage();
@@ -68,12 +67,14 @@ test.describe("Org multi-user conversation rename", () => {
       timeout: 60_000,
     });
     await waitForStoreProjectId(guestPage, projectId, 20_000);
-    await guestPage.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(guestPage);
 
-    const ownerConversationTabs = conversationTabLocator(page);
-    const guestConversationTabs = conversationTabLocator(guestPage);
-    await expect(ownerConversationTabs).toHaveCount(1);
-    await expect(guestConversationTabs).toHaveCount(1);
+    await openChats(page);
+    await openChats(guestPage);
+    const ownerConversationRows = conversationRows(page);
+    const guestConversationRows = conversationRows(guestPage);
+    await expect(ownerConversationRows).toHaveCount(1);
+    await expect(guestConversationRows).toHaveCount(1);
 
     const ownerCreateConversation = page.waitForResponse((response) => {
       return (
@@ -84,9 +85,9 @@ test.describe("Org multi-user conversation rename", () => {
     });
     await createPublicChatFromTopBar(page);
     await ownerCreateConversation;
-    await expect(ownerConversationTabs).toHaveCount(2);
-    await expect(guestConversationTabs).toHaveCount(2, { timeout: 30_000 });
-    await ownerConversationTabs.last().click();
+    await expect(ownerConversationRows).toHaveCount(2);
+    await expect(guestConversationRows).toHaveCount(2, { timeout: 30_000 });
+    await ownerConversationRows.filter({ hasText: "Conversation 2" }).first().click();
     await waitForConversationControllerId(page);
 
     const newTitle = `Teammate sync ${Date.now()}`;
@@ -97,18 +98,19 @@ test.describe("Org multi-user conversation rename", () => {
         response.url().includes("/conversations/")
       );
     });
-    await ownerConversationTabs.last().click({ button: "right" });
-    await page.getByTestId("conversation-tab-menu-rename").click();
-    await page.getByTestId("conversation-tab-rename-input").fill(newTitle);
-    await page.getByTestId("conversation-tab-rename-input").press("Enter");
+    const renamedId = await activeConversationId(page);
+    await page.getByTestId(`conversation-history-menu-${renamedId}`).click();
+    await page.getByTestId("conversation-history-menu-rename").click();
+    await page.getByTestId("conversation-history-rename-input").fill(newTitle);
+    await page.getByTestId("conversation-history-rename-input").press("Enter");
     await renameResponse;
 
-    await expect(ownerConversationTabs.filter({ hasText: newTitle })).toHaveCount(1);
-    await expect(guestConversationTabs.filter({ hasText: newTitle })).toHaveCount(1, {
+    await expect(ownerConversationRows.filter({ hasText: newTitle })).toHaveCount(1);
+    await expect(guestConversationRows.filter({ hasText: newTitle })).toHaveCount(1, {
       timeout: 30_000,
     });
 
-    const guestRenamedTab = guestConversationTabs.filter({ hasText: newTitle }).first();
+    const guestRenamedTab = guestConversationRows.filter({ hasText: newTitle }).first();
     await guestRenamedTab.click();
     await expect(guestRenamedTab).toHaveAttribute("aria-current", "page");
 

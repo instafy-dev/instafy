@@ -79,6 +79,15 @@ describe("StudioMobileContextHeader", () => {
     await act(async () => button(testId).click());
   }
 
+  it("uses the current organization's tint and clears it on global pages", async () => {
+    await render({ ...props, accentColor: "teal" });
+    expect(container.querySelector("header")?.getAttribute("data-org-accent")).toBe("teal");
+    await render({ ...props, homeOverview: true });
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+    await render({ ...props, homeOverview: false, orgContext: false });
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+  });
+
   it("opens the shared account sheet without navigating and keeps Home and search separate", async () => {
     await render();
     expect(document.querySelectorAll('[aria-label="Home — all teams"]')).toHaveLength(1);
@@ -101,6 +110,36 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onProfile).toHaveBeenCalledOnce();
     expect(document.querySelector('[data-testid="profile-account-sheet"]')).toBeNull();
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
+  });
+
+  it("gives Home one row with global navigation, search and the account menu", async () => {
+    await render({ ...props, homeOverview: true });
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
+    expect(container.querySelector("h1")?.textContent).toBe("Home");
+    expect(container.querySelector('[aria-label="Team and space"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
+    expect(container.querySelector('[data-testid="home-return-navigation"]')).toBeNull();
+    await click("home-browse-navigation");
+    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    await click("studio-mobile-search-trigger");
+    expect(props.onSearch).toHaveBeenCalledOnce();
+    await click("topbar-profile-button");
+    expect(document.querySelector('[data-testid="profile-account-sheet"]')).not.toBeNull();
+  });
+
+  it("separates returning from Home from browsing teams and spaces", async () => {
+    const onHomeReturn = vi.fn();
+    await render({ ...props, homeOverview: true, onHomeReturn });
+    expect(button("home-return-navigation").getAttribute("aria-label")).toBe("Back to previous page");
+    expect(button("home-browse-navigation").getAttribute("aria-label")).toBe("Browse teams and spaces");
+    await click("home-return-navigation");
+    expect(onHomeReturn).toHaveBeenCalledOnce();
+    expect(props.onSwitchTeam).not.toHaveBeenCalled();
+    await click("home-browse-navigation");
+    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    expect(onHomeReturn).toHaveBeenCalledOnce();
+    await render({ ...props, homeOverview: false });
+    expect(container.querySelector('[data-testid="home-return-navigation"]')).toBeNull();
   });
 
   it("uses the same Support and sign-out actions in the compact account sheet", async () => {
@@ -164,19 +203,19 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
   });
 
-  it("keeps team actions in the anchored menu and hides settings when unavailable", async () => {
+  it("opens the team chooser directly, including when settings are unavailable", async () => {
     await render();
     await click("sidebar-team-menu-trigger");
-    await click("sidebar-team-menu-overview");
-    expect(props.onTeam).toHaveBeenCalledOnce();
-    await click("sidebar-team-menu-trigger");
-    await click("sidebar-team-menu-settings");
-    expect(props.onSettings).toHaveBeenCalledOnce();
+    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    expect(button("sidebar-team-menu-trigger").getAttribute("aria-label")).toContain("Choose team:");
+    expect(document.querySelector('[data-testid="sidebar-team-menu-overview"]')).toBeNull();
+    expect(props.onTeam).not.toHaveBeenCalled();
+    expect(props.onSettings).not.toHaveBeenCalled();
     await render({ ...props, onSettings: undefined });
     await click("sidebar-team-menu-trigger");
     expect(document.querySelector('[data-testid="sidebar-team-menu-settings"]')).toBeNull();
-    await click("sidebar-team-menu-switch");
-    expect(props.onSwitchTeam).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).toBeNull();
+    expect(props.onSwitchTeam).toHaveBeenCalledTimes(2);
   });
 
   it("uses the signed-in profile and changes initials when the account profile changes", async () => {

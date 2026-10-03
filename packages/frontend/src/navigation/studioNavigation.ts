@@ -32,6 +32,8 @@ export type StudioDestination =
       conversationControllerId?: string | null;
       jobId?: string | null;
       messageId?: string | null;
+      /** Session-local resource view, validated against the destination chat owner. */
+      viewTabId?: string | null;
     }
   | {
       kind: "panel";
@@ -43,6 +45,13 @@ export type StudioDestination =
       teamId?: string | null;
       workspaceTab?: "history" | "files" | "sourceControl" | "workspaces" | null;
     };
+
+/** Desktop chat lists toggle beside the current tab; mobile Chats is a destination. */
+export function chatListDestination(isDesktop: boolean, historyOpen: boolean): StudioDestination {
+  return isDesktop
+    ? { kind: "drawer", workspaceTab: historyOpen ? null : "history" }
+    : { kind: "panel", panel: "chat", workspaceTab: "history" };
+}
 
 /** A destination is written once; route hydration selects the corresponding UI. */
 export function buildStudioDestinationSearch(search: string, destination: StudioDestination): string {
@@ -58,7 +67,7 @@ export function buildStudioDestinationSearch(search: string, destination: Studio
     return next ? `?${next}` : "";
   }
   const currentTeam = params.get("teamId") ?? params.get("settingsOrgId");
-  for (const key of ["jobId", "messageId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "settingsOrgId", "teamId", "view"]) {
+  for (const key of ["chatView", "jobId", "messageId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "settingsOrgId", "teamId", "view"]) {
     params.delete(key);
   }
   if (destination.kind === "conversation") {
@@ -69,6 +78,7 @@ export function buildStudioDestinationSearch(search: string, destination: Studio
       if (value) params.set(key, value);
       else params.delete(key);
     }
+    if (destination.viewTabId) params.set("chatView", destination.viewTabId);
     // A browser-session resume target belongs to its original space.
     if (new URLSearchParams(search).get("projectId") !== destination.projectId) {
       params.delete("browserRuntimeId");

@@ -1,3 +1,4 @@
+import { openChats, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState, waitForStoreProjectId } from "../utils/harness.js";
@@ -13,11 +14,8 @@ async function openProjectSettings(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("project-access-section")).toBeVisible();
 }
 
-function conversationTabLocator(page: import("@playwright/test").Page) {
-  return page
-    .getByTestId("workspace-tabs")
-    .locator('[data-tab-kind="conversation"]')
-    .filter({ hasText: /^Conversation\s+\d+/ });
+function conversationRows(page: import("@playwright/test").Page) {
+  return page.getByTestId("conversation-history-item");
 }
 
 async function waitForConversationControllerId(page: import("@playwright/test").Page) {
@@ -35,7 +33,7 @@ test.describe("Org multi-user conversations", () => {
     await resetRuntimeUserState(page, { source: "org-multi-user-conversation-tabs:cleanup" }).catch(() => {});
   });
 
-  test("new conversation tabs sync across sessions", async ({ page, browser }) => {
+  test("new conversations sync across sessions", async ({ page, browser }) => {
     page.setDefaultTimeout(60_000);
 
     const projectId = await prepareStudio(page, { waitForHostedRuntime: false });
@@ -51,7 +49,7 @@ test.describe("Org multi-user conversations", () => {
       throw new Error("Invite link URL missing.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const guestContext = await browser.newContext();
     const guestPage = await guestContext.newPage();
@@ -59,12 +57,14 @@ test.describe("Org multi-user conversations", () => {
     await guestPage.goto(inviteLinkUrl, { waitUntil: "domcontentloaded" });
     await guestPage.waitForURL((url) => url.pathname.includes("/studio"), { timeout: 60_000 });
     await waitForStoreProjectId(guestPage, projectId, 20_000);
-    await guestPage.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(guestPage);
 
-    const ownerConversationTabs = conversationTabLocator(page);
-    const guestConversationTabs = conversationTabLocator(guestPage);
-    await expect(ownerConversationTabs).toHaveCount(1);
-    await expect(guestConversationTabs).toHaveCount(1);
+    await openChats(page);
+    await openChats(guestPage);
+    const ownerConversationRows = conversationRows(page);
+    const guestConversationRows = conversationRows(guestPage);
+    await expect(ownerConversationRows).toHaveCount(1);
+    await expect(guestConversationRows).toHaveCount(1);
 
     const ownerCreateConversation = page.waitForResponse(
       (response) =>
@@ -74,9 +74,9 @@ test.describe("Org multi-user conversations", () => {
     );
     await createPublicChatFromTopBar(page);
     await ownerCreateConversation;
-    await expect(ownerConversationTabs).toHaveCount(2);
-    await expect(guestConversationTabs).toHaveCount(2, { timeout: 30_000 });
-    await ownerConversationTabs.nth(1).click();
+    await expect(ownerConversationRows).toHaveCount(2);
+    await expect(guestConversationRows).toHaveCount(2, { timeout: 30_000 });
+    await ownerConversationRows.filter({ hasText: "Conversation 2" }).first().click();
     await waitForConversationControllerId(page);
 
     const guestCreateConversation = guestPage.waitForResponse(
@@ -87,15 +87,15 @@ test.describe("Org multi-user conversations", () => {
     );
     await createPublicChatFromTopBar(guestPage);
     await guestCreateConversation;
-    await expect(guestConversationTabs).toHaveCount(3, { timeout: 30_000 });
-    await expect(ownerConversationTabs).toHaveCount(3, { timeout: 30_000 });
+    await expect(guestConversationRows).toHaveCount(3, { timeout: 30_000 });
+    await expect(ownerConversationRows).toHaveCount(3, { timeout: 30_000 });
 
-    await guestConversationTabs.nth(2).click();
+    await guestConversationRows.filter({ hasText: "Conversation 3" }).first().click();
     await waitForConversationControllerId(guestPage);
     await disableAssistantIfPossible(guestPage);
     // Open the chat on the owner's side first: once the guest's message lands
-    // the chat is titled from it, and these tabs are found by numbered titles.
-    await ownerConversationTabs.nth(2).click();
+    // the chat is titled from it, and these rows are found by numbered titles.
+    await ownerConversationRows.filter({ hasText: "Conversation 3" }).first().click();
     const guestMessage = `hello from guest ${Date.now()}`;
     await guestPage.getByTestId("chat-input").fill(guestMessage);
     await guestPage.getByTestId("chat-send-button").click();

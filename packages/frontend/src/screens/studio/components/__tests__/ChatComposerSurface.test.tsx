@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatComposerSurface } from "../ChatComposerSurface";
+import { ConversationSurfaceTabs } from "../../../../workspace/ConversationSurfaceLayout";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "../ChatColumn";
 import { deriveChatVoiceComposerViewState } from "../chatVoiceComposerViewState";
 import {
@@ -347,6 +348,29 @@ describe("ChatComposerSurface", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("keeps view navigation reachable above the input without submitting or replacing the composer", async () => {
+    const onSelect = vi.fn();
+    const onSubmit = vi.fn(event => event.preventDefault());
+    const props = createProps({ composerAutoHidden: true, compactBrowserViewport: true, onSubmit });
+    await act(async () => root.render(<ChatComposerSurface {...props} viewNavigation={<ConversationSurfaceTabs
+      presentation="composer" chatPanelId="chat" resources={[{ id: "browser", label: "Browser", panelId: "browser" }]}
+      activeId="chat" resourceId="browser" split={false} wide={false} ratio={.55} onSelect={onSelect} onSplitChange={vi.fn()}
+    />} />));
+    const overlay = container.querySelector<HTMLElement>('[data-testid="chat-composer-overlay"]')!;
+    const input = container.querySelector('[data-testid="chat-input"]');
+    const tablist = overlay.querySelector('[role="tablist"]')!;
+    expect(overlay.className).toContain("translate-y-0");
+    expect(overlay.style.transform).toBe("");
+    expect(tablist.compareDocumentPosition(input!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    await act(async () => overlay.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-browser"]')!.click());
+    expect(onSelect).toHaveBeenCalledWith("browser");
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    expect(overlay.className).toContain("translate-y-full");
   });
 
   it("expands in place and collapses with Escape without remounting the editor or attachments", async () => {
@@ -704,7 +728,7 @@ describe("ChatComposerSurface", () => {
     const navigation = layoutNodes().navigation;
     expect(layoutNodes().leading?.contains(navigation)).toBe(true);
     expect(layoutNodes().leading?.firstElementChild).toBe(navigation);
-    expect(navigation?.getAttribute("aria-label")).toBe("Open navigation and recent chats");
+    expect(navigation?.getAttribute("aria-label")).toBe("Open navigation");
     expect(navigation?.className.split(" ")).toContain("ghost");
     expect(navigation?.querySelector('[data-testid="chat-composer-navigation-badge"]')?.textContent).toBe("2");
     const navigationClass = navigation?.className;
@@ -733,6 +757,27 @@ describe("ChatComposerSurface", () => {
     expect(onOpenNavigation).toHaveBeenCalledTimes(1);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(editor);
+  });
+
+  it("uses a navigation menu for the bottom sheet while retaining the one-row mobile layout and draft", async () => {
+    const onOpenNavigation = vi.fn();
+    const onSubmit = vi.fn();
+    for (const keyboardOpen of [false, true]) {
+      await act(async () => renderLayout({
+        showComposerNavigationButton: true, composerNavigationDestination: "sheet",
+        compactBrowserViewport: true, nativeKeyboardOpen: keyboardOpen,
+        chatInputProps: { value: "Keep this draft" } as never,
+        onOpenNavigation, onSubmit,
+      }));
+      const navigation = layoutNodes().navigation as HTMLButtonElement;
+      expect(navigation.getAttribute("aria-label")).toBe("Open navigation");
+      expect(navigation.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(layoutNodes().leading?.firstElementChild).toBe(navigation);
+      expect(layoutNodes().trailing?.contains(layoutNodes().menu)).toBe(true);
+      await act(async () => navigation.click());
+    }
+    expect(onOpenNavigation).toHaveBeenCalledTimes(2);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("keeps an icon-only Chats destination in the writing row through keyboard and draft changes", async () => {
@@ -768,6 +813,15 @@ describe("ChatComposerSurface", () => {
     await act(async () => navigation.click());
     expect(onOpenNavigation).toHaveBeenCalledOnce();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(["Back to Home", "Back to results"])("names the actual return destination %s without adding visible text", async label => {
+    await act(async () => renderLayout({ showComposerNavigationButton: true, composerNavigationDestination: "chats", composerNavigationLabel: label }));
+    const button = layoutNodes().navigation!;
+    expect(button.getAttribute("aria-label")).toBe(label);
+    expect(button.getAttribute("title")).toBe(label);
+    expect(button.textContent).toBe("");
+    expect(layoutNodes().leading?.firstElementChild).toBe(button);
   });
 
   it("omits composer navigation when the wide sidebar owns switching", async () => {

@@ -1,10 +1,11 @@
-import { fileExplorerAction } from "../utils/filesExplorer.js";
+import { returnToConversation, activeConversationId as resolveActiveConversationLocalId } from "../utils/conversationNavigation.js";
+import { fileExplorerAction, fileExplorerSearch } from "../utils/filesExplorer.js";
 import { expect, test, type APIResponse, type Page } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { randomUUID } from "node:crypto";
 import { deriveGithubImportTargetPath } from "../../../src/services/runtimeController/githubImportPath.js";
-import {
 import { chooseOption } from "../utils/select.js";
+import {
   assertGitRemoteFileText,
   getControllerUrl,
   getSupabaseAuthHeaders,
@@ -46,21 +47,6 @@ type InstafyBrowserWindow = Window & {
   __INSTAFY_SUPABASE__?: BrowserSupabaseClient;
 };
 
-function conversationTabButtons(page: Page) {
-  return page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-}
-
-async function resolveActiveConversationLocalId(page: Page): Promise<string> {
-  const tabs = conversationTabButtons(page);
-  await expect(tabs).toHaveCount(1);
-  const tabId = await tabs.first().getAttribute("data-tab-id");
-  if (!tabId) {
-    throw new Error("Conversation tab missing data-tab-id.");
-  }
-  return tabId.startsWith("workspace-conversation-")
-    ? tabId.replace("workspace-conversation-", "")
-    : tabId;
-}
 
 async function createBlankControllerConversationId(params: {
   page: Page;
@@ -264,7 +250,7 @@ async function openWorkspaceFile(page: Page, filePath: string) {
   const refreshButton = await fileExplorerAction(page, "refresh");
   await expect(refreshButton).toBeEnabled({ timeout: 30_000 });
   await refreshButton.click();
-  await page.getByTestId("code-search-input").fill("");
+  await (await fileExplorerSearch(page)).fill("");
 
   const segments = filePath.split("/").filter((segment) => segment.length > 0);
   let currentPath = "";
@@ -315,7 +301,7 @@ test.describe("Org invite link GitHub import durability", () => {
     }
     createdProjectId = projectId;
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     const localConversationId = await resolveActiveConversationLocalId(page);
     const sharedConversationControllerId = await createBlankControllerConversationId({
       page,
@@ -331,7 +317,7 @@ test.describe("Org invite link GitHub import durability", () => {
     inviteLink.searchParams.set("conversationControllerId", sharedConversationControllerId);
     inviteLink.searchParams.set("panel", "chat");
     const inviteLinkUrl = inviteLink.toString();
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const memberContext = await browser.newContext();
     const memberPage = await memberContext.newPage();

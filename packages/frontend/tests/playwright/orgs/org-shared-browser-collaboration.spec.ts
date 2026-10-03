@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { parseSharedBrowserCollaborationServerMessage } from "../../../src/screens/studio/components/sharedBrowserCollaboration.js";
@@ -10,8 +11,8 @@ import {
   resetRuntimeUserState,
   waitForStoreProjectId,
 } from "../utils/harness.js";
-import {
 import { chooseOption } from "../utils/select.js";
+import {
   authenticatedActorLabel,
   collaborationAction,
   collaborationSocketProbeSnapshot,
@@ -212,7 +213,7 @@ test.describe("Org Shared Browser collaboration", () => {
       if (!inviteLinkUrl) {
         throw new Error("Shared Browser builder invite link is missing.");
       }
-      await page.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(page);
       await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
 
       memberContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -225,7 +226,7 @@ test.describe("Org Shared Browser collaboration", () => {
         timeout: 60_000,
       });
       expect(await waitForStoreProjectId(memberPage, projectId, 20_000)).toBe(true);
-      await memberPage.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(memberPage);
       await expect(memberPage.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
       const memberLabel = await authenticatedActorLabel(memberPage);
 
@@ -333,7 +334,7 @@ test.describe("Org Shared Browser collaboration", () => {
       await page.getByTestId("org-invite-link-create").click();
       const inviteUrl = await page.getByTestId("org-invite-link-url").inputValue();
       if (!inviteUrl) throw new Error("Shared Browser read-only invite link is missing.");
-      await page.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(page);
       await expect(page.getByTestId("chat-input")).toBeVisible();
 
       // Copy only this test account's browser state, in memory, to model its
@@ -348,7 +349,7 @@ test.describe("Org Shared Browser collaboration", () => {
       secondDeviceUrl.searchParams.set("panel", "chat");
       await secondDevice.goto(secondDeviceUrl.toString(), { waitUntil: "domcontentloaded" });
       expect(await waitForStoreProjectId(secondDevice, projectId, 30_000)).toBe(true);
-      await secondDevice.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(secondDevice);
       await expect(secondDevice.getByTestId("chat-input")).toBeVisible();
       expect(await authenticatedActorLabel(secondDevice)).toBe(await authenticatedActorLabel(page));
       expect(await secondDevice.evaluate(async (ownerUserId) => {
@@ -366,7 +367,7 @@ test.describe("Org Shared Browser collaboration", () => {
       await viewer.goto(inviteUrl, { waitUntil: "domcontentloaded" });
       await viewer.waitForURL((url) => url.pathname.includes("/studio"));
       expect(await waitForStoreProjectId(viewer, projectId, 30_000)).toBe(true);
-      await viewer.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(viewer);
 
       const firstBinding = await openSharedBrowser(page);
       await expect(collaborationState(page)).toContainText("You control");

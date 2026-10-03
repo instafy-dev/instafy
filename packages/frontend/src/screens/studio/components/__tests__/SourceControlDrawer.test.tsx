@@ -146,6 +146,67 @@ describe("SourceControlDrawer project access", () => {
     expect(container.querySelector('[data-testid="source-control-rolling-diff-sheet"]') !== null).toBe(!desktop);
   });
 
+  it.each([390, 1280])("places Changes controls in the top row only on desktop (%ipx)", async (width) => {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    const header = document.createElement("div");
+    document.body.append(header);
+    const close = vi.fn();
+    try {
+      await act(async () => root.render(<SourceControlDrawer headerPortalTarget={header} onRequestClose={close} />));
+      await flushAsyncWork();
+      const target = width >= 900 ? header : container;
+      const other = width >= 900 ? container : header;
+      expect(target.querySelector('[data-testid="source-control-refresh"]')).not.toBeNull();
+      expect(other.querySelector('[data-testid="source-control-refresh"]')).toBeNull();
+      mocks.fetchStatus.mockClear();
+      await act(async () => target.querySelector<HTMLButtonElement>('[data-testid="source-control-refresh"]')?.click());
+      await flushAsyncWork();
+      expect(mocks.fetchStatus).toHaveBeenCalledOnce();
+      await act(async () => target.querySelector<HTMLButtonElement>('[data-testid="source-control-close"]')?.click());
+      expect(close).toHaveBeenCalledOnce();
+      expect(container.querySelector('[data-testid="source-control-commit-message"]')).not.toBeNull();
+    } finally {
+      header.remove();
+    }
+  });
+
+  it("omits version and selection controls for a clean workspace but retains saved versions", async () => {
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyCount: 0, dirtyPaths: [], busy: false });
+    await act(async () => root.render(<SourceControlDrawer />));
+    await flushAsyncWork();
+    expect(container.textContent).toContain("No pending changes.");
+    expect(container.querySelector('[data-testid="source-control-commit-message"]')).toBeNull();
+    expect(container.querySelector('[data-testid="source-control-select-all"]')).toBeNull();
+    expect(container.querySelector('[data-testid="source-control-history-review"]')).not.toBeNull();
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyCount: 1, dirtyPaths: [{ path: "src/app.ts", code: "M" }], busy: false });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="source-control-refresh"]')?.click());
+    await flushAsyncWork();
+    expect(container.querySelector('[data-testid="source-control-commit-message"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="source-control-select-all"]')).not.toBeNull();
+  });
+
+  it("does not report a clean workspace when status is unavailable", async () => {
+    mocks.fetchStatus.mockResolvedValue(null);
+    mocks.fetchHistory.mockResolvedValue(null);
+    await act(async () => root.render(<SourceControlDrawer />));
+    await flushAsyncWork();
+    expect(container.textContent).toContain("Changes are unavailable");
+    expect(container.textContent).not.toContain("No pending changes.");
+  });
+
+  it("puts mobile refresh in the navigation header without another heading or close button", async () => {
+    const header = document.createElement("div");
+    document.body.append(header);
+    try {
+      await act(async () => root.render(<SourceControlDrawer actionsPortalTarget={header} onRequestClose={vi.fn()} />));
+      await flushAsyncWork();
+      expect(header.querySelector('[data-testid="source-control-refresh"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="source-control-refresh"]')).toBeNull();
+      expect(document.querySelector('[data-testid="source-control-close"]')).toBeNull();
+      expect(header.textContent).not.toContain("Changes");
+    } finally { header.remove(); }
+  });
+
   it("keeps review available but disables every destructive version-control action for a viewer", async () => {
     await act(async () => {
       root.render(<SourceControlDrawer />);

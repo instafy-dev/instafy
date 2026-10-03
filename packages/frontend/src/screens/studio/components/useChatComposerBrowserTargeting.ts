@@ -174,7 +174,7 @@ export function useChatComposerBrowserTargeting({
     }
     setPendingBrowserLaunchMode("new_page");
     showStatus(
-      "Next browser request will open another site while keeping the current browser available.",
+      "Your next AI message will request a new tab while keeping the existing pages available.",
       "info",
       3000,
     );
@@ -191,7 +191,7 @@ export function useChatComposerBrowserTargeting({
   ]);
   const handleClearPendingNewBrowserSession = useCallback(() => {
     setPendingBrowserLaunchMode(null);
-    showStatus("New-site browser targeting cleared.", "info", 2500);
+    showStatus("New tab request canceled. Existing browser pages are unchanged.", "info", 2500);
     focusInput({ force: true });
   }, [focusInput, showStatus]);
   const clearPendingBrowserLaunchMode = useCallback(() => {

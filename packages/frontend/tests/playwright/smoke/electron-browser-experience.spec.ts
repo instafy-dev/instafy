@@ -296,10 +296,7 @@ test.describe("Electron browser experience", () => {
       if (await dismissIntro.isVisible().catch(() => false)) {
         await dismissIntro.click();
       }
-      const conversationTab = page
-        .getByTestId("workspace-tabs")
-        .getByRole("button", { name: /Conversation/i })
-        .first();
+      const conversationTab = page.getByRole("button", { name: /^Return to / }).or(page.getByTestId("home-resume-conversation"));
       if (await conversationTab.isVisible().catch(() => false)) {
         await conversationTab.click();
       }

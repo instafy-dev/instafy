@@ -79,9 +79,10 @@ On narrow screens and split panes, the address bar keeps participant avatars on 
 right. Open the avatars to see the participant list, where a cursor icon marks the
 current controller. **Request control** appears below the list; this
 asks the current driver to hand over input, rather than sending a chat message.
-Pending requests show a badge for the current driver. **Browser options** contains
-history navigation, page selection and **Expand browser** so the toolbar stays on
-one row. AI takeover and **Let AI continue** are in the same participant controls;
+Pending requests show a badge for the current driver. A compact page-count picker
+beside the address switches browser tabs. **Browser options** contains history
+navigation, reload and **Expand browser** so the toolbar stays on one row. AI
+takeover and **Let AI continue** are in the same participant controls;
 clicking the shared page can still open the takeover confirmation.
 
 Personal and Shared Browser use one `BrowserAddressField` and the common Instafy

@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -117,7 +118,7 @@ test.describe("Learn command", () => {
     if (!projectId) {
       throw new Error("Project id missing for learn test.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "learn-command" }).catch(() => {});
     // Guest sessions have no AI access in the BYOC stack; onboard the
     // canonical local Codex login so the AI-targeted send is actually enabled.
@@ -165,7 +166,7 @@ test.describe("Learn command", () => {
     if (!projectId) {
       throw new Error("Project id missing for learn test.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "learn-command:reply-style" }).catch(() => {});
     // Guest sessions have no AI access in the BYOC stack; onboard the
     // canonical local Codex login so the AI-targeted send is actually enabled.

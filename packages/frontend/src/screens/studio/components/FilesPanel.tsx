@@ -8,14 +8,14 @@ import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { DRAWER_ICON_BUTTON_TONE_CLASS, LIST_ROW_SURFACE_BASE, LIST_ROW_FOCUS_RING, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
-import { DrawerHeader } from "../../../components/DrawerHeader";
+import type { MobilePageHeader } from "./MobileStudioNavigationHeader";
+import { FilesExplorerToolbar } from "./FilesExplorerToolbar";
 import { Heading } from "../../../components/Heading";
 import { MarkdownPreview } from "../../../components/MarkdownPreview";
 import { type MarkdownOutlineItem } from "../../../components/markdownOutline";
 import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
-import { SearchInput } from "../../../components/SearchInput";
 import { useCode } from "../../../code/useCode";
 import { useStatus } from "../../../status/useStatus";
 import { useProject } from "../../../projects/useProject";
@@ -38,7 +38,6 @@ import {
   NavArrowLeft,
   PagePlus,
   Refresh,
-  Search,
   Trash,
   Xmark,
 } from "iconoir-react";
@@ -77,6 +76,8 @@ interface FilesPanelProps {
   previewOwnerId: string | null;
   showExplorer?: boolean;
   explorerPortalTarget?: HTMLDivElement | null;
+  explorerHeaderPortalTarget?: HTMLElement | null;
+  renderMobileExplorerHeader?: (header: MobilePageHeader) => ReactNode;
   mobileView?: FilesPanelMobileView;
   onMobileViewChange?: (value: FilesPanelMobileView) => void;
   onRequestOpenExplorer?: () => void;
@@ -449,6 +450,8 @@ export function FilesPanel({
   previewOwnerId,
   showExplorer = true,
   explorerPortalTarget,
+  explorerHeaderPortalTarget,
+  renderMobileExplorerHeader,
   mobileView: controlledMobileView,
   onMobileViewChange,
   onRequestOpenExplorer,
@@ -503,8 +506,6 @@ export function FilesPanel({
   const saveDraftShortcutHandlerRef = useRef<(() => Promise<void>) | null>(null);
   const saveVersionShortcutHandlerRef = useRef<(() => Promise<void>) | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [mobileSearchOpen, setMobileSearchOpen] = useState(() => searchTerm.trim().length > 0);
   const lastLocalCommitRef = useRef<{ rev: string; at: number } | null>(null);
   const [activeFileHasVersionChanges, setActiveFileHasVersionChanges] = useState<boolean | null>(null);
   const activeFileVersionEpochRef = useRef(0);
@@ -856,26 +857,6 @@ export function FilesPanel({
       setMobileView("tree");
     }
   }, [isLargeScreen, setMobileView]);
-
-  useEffect(() => {
-    if (isLargeScreen) {
-      setMobileSearchOpen(false);
-      return;
-    }
-    if (searchTerm.trim().length > 0) {
-      setMobileSearchOpen(true);
-    }
-  }, [isLargeScreen, searchTerm]);
-
-  useEffect(() => {
-    if (isLargeScreen || !mobileSearchOpen) {
-      return;
-    }
-    const frameId = window.requestAnimationFrame(() => {
-      searchInputRef.current?.focus();
-    });
-    return () => window.cancelAnimationFrame(frameId);
-  }, [isLargeScreen, mobileSearchOpen]);
 
   useEffect(() => {
     return () => {
@@ -1487,17 +1468,6 @@ export function FilesPanel({
     [activeFile, projectWriteDisabled, updateFileContent]
   );
 
-  const breadcrumbs = useMemo(() => {
-    const segments = normalizedRootPath ? normalizedRootPath.split("/") : [];
-    const crumbs: Array<{ label: string; path: string }> = [];
-    let cursor = "";
-    segments.forEach((segment) => {
-      cursor = cursor ? `${cursor}/${segment}` : segment;
-      crumbs.push({ label: segment, path: cursor });
-    });
-    return crumbs;
-  }, [normalizedRootPath]);
-
   const normalizedSearch = searchTerm.trim().toLowerCase();
 
   const searchResults = useMemo(() => {
@@ -1558,17 +1528,6 @@ export function FilesPanel({
     };
   }, [loadDirectory, normalizedRootPath, showRootDirectoryErrorCard]);
 
-  const handleToggleMobileSearch = useCallback(() => {
-    if (mobileSearchOpen) {
-      if (searchTerm.trim().length > 0) {
-        setSearchTerm("");
-      }
-      setMobileSearchOpen(false);
-      return;
-    }
-    setMobileSearchOpen(true);
-  }, [mobileSearchOpen, searchTerm]);
-
   const handleOpenRootExplorerMenu = useCallback(() => {
     const buttonBounds = rootExplorerMenuButtonRef.current?.getBoundingClientRect();
     openExplorerMenu({
@@ -1578,41 +1537,22 @@ export function FilesPanel({
     });
   }, [openExplorerMenu, resolveCreateEntryParentPath]);
 
-  const showInlineSearch = isLargeScreen || mobileSearchOpen || touchExplorer;
-  const showBreadcrumbs = isLargeScreen || (!mobileSearchOpen && !touchExplorer);
-  const rootLabel = normalizedRootPath ? breadcrumbs[breadcrumbs.length - 1]?.label ?? normalizedRootPath : "Root";
-  const fileExplorerSubtitle = `${rootLabel} · ${rootEntries.length} ${rootEntries.length === 1 ? "item" : "items"}`;
-
-  const treeContent = (
-    <div
-      className="flex h-full min-h-0 flex-col px-4 pb-3"
-      data-testid="files-explorer-tree"
-    >
-      <DrawerHeader
-        title="Files"
-        frame="rail"
-        className="-mx-4"
-        actions={
-          <>
-            {!isLargeScreen && !touchExplorer ? (
-              <IconButton
-                variant={mobileSearchOpen ? "secondary" : "ghost"}
-                size="sm"
-                radius="full"
-                aria-label={mobileSearchOpen ? "Close file search" : "Search files"}
-                title={mobileSearchOpen ? "Close search" : "Search files"}
-                data-testid="files-explorer-search-toggle"
-                onPress={handleToggleMobileSearch}
-                className={[
-                  "h-11 w-11 shadow-none",
-                  mobileSearchOpen
-                    ? "bg-slate-100 text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100"
-                    : DRAWER_ICON_BUTTON_TONE_CLASS,
-                ].join(" ")}
-              >
-                <Search className="h-4 w-4" aria-hidden="true" />
-              </IconButton>
-            ) : null}
+  const explorerToolbar = (
+    <FilesExplorerToolbar
+      headerPortalTarget={explorerHeaderPortalTarget}
+      renderMobileHeader={renderMobileExplorerHeader}
+      menuActions={runtimeControllerEnabled && activeProjectId ? [{
+        label: "File actions", icon: <PagePlus className="h-5 w-5" aria-hidden="true" />,
+        onPress: handleOpenRootExplorerMenu,
+        testId: touchExplorer ? "files-explorer-touch-actions" : "files-explorer-actions",
+      }] : undefined}
+      rootPath={normalizedRootPath}
+      onFocusDirectory={focusDirectory}
+      searchTerm={searchTerm}
+      onSearchTermChange={setSearchTerm}
+      actions={
+        <>
+          {runtimeControllerEnabled && activeProjectId ? <>
             <IconButton
               variant="ghost"
               size="sm"
@@ -1626,7 +1566,7 @@ export function FilesPanel({
             >
               <PagePlus className="h-4 w-4" aria-hidden="true" />
             </IconButton>
-            <IconButton
+            {isLargeScreen || !renderMobileExplorerHeader ? <IconButton
               ref={rootExplorerMenuButtonRef}
               variant="ghost"
               size="sm"
@@ -1638,66 +1578,33 @@ export function FilesPanel({
               className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <MoreHoriz className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-            {onRequestCloseExplorer ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label="Close file explorer"
-                title="Close"
-                data-testid="files-explorer-close"
-                onPress={onRequestCloseExplorer}
-                className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
-              >
-                <Xmark className="h-4 w-4" aria-hidden="true" />
-              </IconButton>
-            ) : null}
-          </>
-        }
-      />
-      {touchExplorer ? (
-        <Text variant="caption" tone="muted" className="mb-2 truncate">{fileExplorerSubtitle}</Text>
-      ) : null}
-      {showBreadcrumbs ? (
-        <nav aria-label="File location" className="flex min-w-0 items-center gap-1 overflow-hidden mb-2 min-h-6 text-xs font-medium text-slate-500 dark:text-slate-400">
-          {breadcrumbs.length === 0 ? (
-            <span className="truncate text-slate-700 dark:text-slate-200">/</span>
-          ) : (
-            <Button
-              onPress={() => focusDirectory("")}
+            </IconButton> : null}
+          </> : null}
+          {onRequestCloseExplorer && (isLargeScreen || !renderMobileExplorerHeader) ? (
+            <IconButton
               variant="ghost"
-              size="xs"
+              size="sm"
               radius="full"
-              className="shrink-0 px-0 text-slate-500 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-400 dark:hover:text-slate-100"
-              aria-label="Focus root folder"
+              aria-label="Close file explorer"
+              title="Close"
+              data-testid="files-explorer-close"
+              onPress={onRequestCloseExplorer}
+              className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
-              /
-            </Button>
-          )}
-          {breadcrumbs.map((crumb, index) => {
-            const isLast = index === breadcrumbs.length - 1;
-            return (
-              <span key={crumb.path} className="flex min-w-0 items-center gap-1">
-                {index > 0 ? <span className="shrink-0 text-slate-300 dark:text-slate-700">/</span> : null}
-                {isLast ? (
-                  <span className="truncate text-slate-700 dark:text-slate-200">{crumb.label}</span>
-                ) : (
-                  <Button
-                    onPress={() => focusDirectory(crumb.path)}
-                    variant="ghost"
-                    size="xs"
-                    radius="full"
-                    className="max-w-[10rem] truncate px-0 text-slate-500 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-400 dark:hover:text-slate-100"
-                  >
-                    {crumb.label}
-                  </Button>
-                )}
-              </span>
-            );
-          })}
-        </nav>
-      ) : null}
+              <Xmark className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+          ) : null}
+        </>
+      }
+    />
+  );
+
+  const treeContent = (
+    <div
+      className="flex h-full min-h-0 flex-col px-4 pb-3"
+      data-testid="files-explorer-tree"
+    >
+      {explorerToolbar}
 
       {showRootDirectoryErrorCard ? (
         <Card
@@ -1741,44 +1648,6 @@ export function FilesPanel({
         </div>
       ) : null}
 
-      {showInlineSearch ? (
-        <div
-          className="mt-1 flex items-center gap-2"
-          data-testid="files-explorer-search-row"
-        >
-          <div className="min-w-0 flex-1">
-            <SearchInput
-              ref={searchInputRef}
-              id="code-search"
-              label="Search files"
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Search name or path"
-              tone="default"
-              radius="xl"
-              size={isLargeScreen ? "sm" : "md"}
-              className="min-h-10 max-[899px]:min-h-11 pointer-coarse:min-h-11"
-              iconTestId="code-search-icon"
-              inputTestId="code-search-input"
-            />
-          </div>
-          {!isLargeScreen && !touchExplorer ? (
-            <IconButton
-              onPress={handleToggleMobileSearch}
-              variant="ghost"
-              size="xs"
-              radius="full"
-              aria-label="Cancel file search"
-              title="Cancel search"
-              data-testid="files-explorer-search-cancel"
-              className={`h-11 w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
-            >
-              <Xmark className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-          ) : null}
-        </div>
-      ) : null}
-
       <div
         className="mt-3 min-h-0 flex-1 overflow-y-auto"
         onContextMenu={(event) => {
@@ -1801,7 +1670,7 @@ export function FilesPanel({
                   padding="sm"
                   className="py-1.5 text-xs text-slate-500"
                 >
-                  No files matched “{searchTerm}”.
+                  No loaded files matched “{searchTerm}”.
                 </Card>
               </li>
             ) : (
@@ -2386,22 +2255,7 @@ export function FilesPanel({
         shadow="none"
         className="flex h-full flex-col gap-4 p-4 text-sm text-slate-600 dark:text-slate-300"
       >
-        <div className="flex items-center justify-end">
-          {onRequestCloseExplorer ? (
-            <IconButton
-              variant="ghost"
-              size="xs"
-              radius="full"
-              aria-label="Close file explorer"
-              title="Close"
-              data-testid="files-explorer-close"
-              onPress={onRequestCloseExplorer}
-              className={`h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}  lg:h-6 lg:w-6`}
-            >
-              <Xmark className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-          ) : null}
-        </div>
+        {explorerToolbar}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
             Connect the runtime controller to browse space files.
@@ -2432,22 +2286,7 @@ export function FilesPanel({
         shadow="none"
         className="flex h-full flex-col gap-4 p-4 text-sm text-slate-600 dark:text-slate-300"
       >
-        <div className="flex items-center justify-end">
-          {onRequestCloseExplorer ? (
-            <IconButton
-              variant="ghost"
-              size="xs"
-              radius="full"
-              aria-label="Close file explorer"
-              title="Close"
-              data-testid="files-explorer-close"
-              onPress={onRequestCloseExplorer}
-              className={`h-10 w-10 text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 ${DARK_RAIL_HOVER_CLASS}  lg:h-6 lg:w-6`}
-            >
-              <Xmark className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-          ) : null}
-        </div>
+        {explorerToolbar}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
           <Text variant="body" tone="subtle" className="max-w-[22rem]">
             Select or create a space to view its files.

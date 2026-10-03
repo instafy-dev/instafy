@@ -153,7 +153,7 @@ export function BrowserChromeShell({
         role="toolbar"
       >
         {leading ? <div className="flex shrink-0 items-center">{leading}</div> : null}
-        <div className="flex shrink-0 items-center">{navigation}</div>
+        {navigation ? <div className="flex shrink-0 items-center">{navigation}</div> : null}
         <div className={`min-w-0 flex-1 ${compact ? "" : "max-[540px]:basis-24"}`}>{address}</div>
         {status || actions ? (
           <div

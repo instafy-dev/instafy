@@ -1,3 +1,4 @@
+import { conversationSurfaceScope } from "./conversationSurfaces";
 import { useCallback, type MutableRefObject } from "react";
 import type { CodeFile } from "../types";
 import type { ChatMessageCommitRange, StudioPanel } from "../screens/studio/types";
@@ -24,6 +25,8 @@ import { prepareConversationTabOpen } from "./workspaceConversationPreview";
 import { insertPreviewTab } from "./workspacePreviewTabs";
 
 interface UseWorkspaceTabOpenersArgs {
+  lastConversationViewRef?: MutableRefObject<Map<string, string>>;
+  conversationWorkspaceUserId?: string | null;
   activeConversationId: string | null;
   conversations: ConversationState[];
   createConversation: (options?: { title?: string; select?: boolean }) => ConversationState;
@@ -40,6 +43,8 @@ interface UseWorkspaceTabOpenersArgs {
 }
 
 export function useWorkspaceTabOpeners({
+  lastConversationViewRef,
+  conversationWorkspaceUserId = null,
   activeConversationId,
   conversations,
   createConversation,
@@ -51,11 +56,30 @@ export function useWorkspaceTabOpeners({
   setActiveTabInternal,
   ensureTabForPanel,
 }: UseWorkspaceTabOpenersArgs) {
+  const ownerFor = useCallback((conversationId: string | null = activeConversationId) =>
+    conversationWorkspaceUserId && workspaceProjectId && conversationId
+      ? { userId: conversationWorkspaceUserId, projectId: workspaceProjectId, conversationId } : undefined,
+  [activeConversationId, conversationWorkspaceUserId, workspaceProjectId]);
+  const sameOwner = useCallback((tab: Pick<WorkspaceTabState, "workspaceOwner">) => {
+    const owner = ownerFor();
+    return owner ? (tab.workspaceOwner?.userId === owner.userId &&
+      tab.workspaceOwner?.projectId === owner.projectId && tab.workspaceOwner?.conversationId === owner.conversationId) : !tab.workspaceOwner;
+  }, [ownerFor]);
+  const activateConversation = useCallback((tab: WorkspaceConversationTabState, restore?: boolean) => {
+    const scope = conversationSurfaceScope(conversationWorkspaceUserId, workspaceProjectId, tab.conversationId);
+    const remembered = scope && restore ? lastConversationViewRef?.current.get(scope) : null;
+    const view = remembered ? tabsRef.current.find(candidate => candidate.id === remembered &&
+      candidate.workspaceOwner?.userId === conversationWorkspaceUserId && candidate.workspaceOwner?.projectId === workspaceProjectId &&
+      candidate.workspaceOwner?.conversationId === tab.conversationId) : null;
+    setActiveTabInternal(view ?? tab);
+  }, [conversationWorkspaceUserId, workspaceProjectId, lastConversationViewRef, tabsRef, setActiveTabInternal]);
+
   const openConversationTab = useCallback(
     (
       conversationId: string,
       options?: {
         activate?: boolean;
+        restoreWorkspace?: boolean;
         fallbackConversation?: ConversationState | null;
         preview?: boolean;
       },
@@ -75,7 +99,7 @@ export function useWorkspaceTabOpeners({
         if (!existing) return;
         const tab = existing.preview && !options?.preview ? { ...existing, preview: false } : existing;
         if (tab !== existing) commitTabs(tabsRef.current.map((entry) => entry.id === tab.id ? tab : entry));
-        if (options?.activate !== false) setActiveTabInternal(tab);
+        if (options?.activate !== false) activateConversation(tab, options?.restoreWorkspace);
         return;
       }
       if (conversation.lifecycleStatus === "deleted") return;
@@ -88,9 +112,9 @@ export function useWorkspaceTabOpeners({
       if (options?.activate === false) {
         return;
       }
-      setActiveTabInternal(tab);
+      activateConversation(tab, options?.restoreWorkspace);
     },
-    [commitTabs, conversations, setActiveTabInternal, tabsRef],
+    [activateConversation, commitTabs, conversations, tabsRef],
   );
 
   const openJobThreadTab = useCallback(
@@ -129,7 +153,7 @@ export function useWorkspaceTabOpeners({
           );
           return index === -1 ? tabsRef.current.length : index;
         })();
-        tab = createTabForJobThread({ ...params, conversationId });
+        tab = { ...createTabForJobThread({ ...params, conversationId }), workspaceOwner: ownerFor(conversationId) };
         commitTabs([
           ...tabsRef.current.slice(0, insertAt),
           tab,
@@ -142,7 +166,7 @@ export function useWorkspaceTabOpeners({
       }
       setActiveTabInternal(tab);
     },
-    [commitTabs, conversations, setActiveTabInternal, tabsRef],
+    [commitTabs, conversations, ownerFor, setActiveTabInternal, tabsRef],
   );
 
   const openPanelTab = useCallback(
@@ -283,7 +307,7 @@ export function useWorkspaceTabOpeners({
 
       const existing = tabsRef.current.find(
         (tab): tab is WorkspaceGitDiffTabState =>
-          tab.kind === "gitDiff" && tab.path === normalizedPath,
+          tab.kind === "gitDiff" && tab.path === normalizedPath && sameOwner(tab),
       );
       // One diff tab per path; the latest request decides its pinning. An
       // opener without a range asks for the current worktree view, so an
@@ -301,11 +325,14 @@ export function useWorkspaceTabOpeners({
         return;
       }
 
-      const target = createGitDiffTab(normalizedPath, label, requestedRange);
+      const owner = ownerFor();
+      const base = createGitDiffTab(normalizedPath, label, requestedRange);
+      const target = { ...base, workspaceOwner: owner,
+        id: owner ? `${base.id}:${encodeURIComponent(JSON.stringify(owner))}` : base.id };
       commitTabs([...tabsRef.current, target]);
       setActiveTabInternal(target);
     },
-    [commitTabs, setActiveTabInternal, tabsRef],
+    [commitTabs, ownerFor, sameOwner, setActiveTabInternal, tabsRef],
   );
 
   const openGitReviewTab = useCallback(
@@ -316,7 +343,7 @@ export function useWorkspaceTabOpeners({
           (tab): tab is WorkspaceGitReviewTabState =>
             tab.kind === "gitReview" &&
             tab.review.kind === "savedVersion" &&
-            tab.review.commit === review.commit,
+            tab.review.commit === review.commit && sameOwner(tab),
         );
         if (existing) {
           const updated: WorkspaceGitReviewTabState = {
@@ -333,11 +360,11 @@ export function useWorkspaceTabOpeners({
         }
       }
 
-      const target = createGitReviewTab(review, returnTabId);
+      const target = { ...createGitReviewTab(review, returnTabId), workspaceOwner: ownerFor() };
       commitTabs([...tabsRef.current, target]);
       setActiveTabInternal(target);
     },
-    [activeTabIdRef, commitTabs, setActiveTabInternal, tabsRef],
+    [activeTabIdRef, commitTabs, ownerFor, sameOwner, setActiveTabInternal, tabsRef],
   );
 
   const restoreGitReviewTab = useCallback(
@@ -348,7 +375,7 @@ export function useWorkspaceTabOpeners({
       }
       const existing = tabsRef.current.find(
         (tab): tab is WorkspaceGitReviewTabState =>
-          tab.kind === "gitReview" && tab.id === normalizedId,
+          tab.kind === "gitReview" && tab.id === normalizedId && sameOwner(tab),
       );
       if (existing) {
         setActiveTabInternal(existing);
@@ -357,12 +384,12 @@ export function useWorkspaceTabOpeners({
       const projectState =
         persistedGitReviewStateRef.current?.projects?.[workspaceProjectId] ?? null;
       const persisted = projectState?.tabs.find((tab) => tab.id === normalizedId) ?? null;
-      if (!persisted) {
+      if (!persisted || (persisted.workspaceOwner && !sameOwner(persisted))) {
         return false;
       }
-      const target = createGitReviewTab(persisted.review, persisted.returnTabId ?? null, {
+      const target = { ...createGitReviewTab(persisted.review, persisted.returnTabId ?? null, {
         id: normalizedId,
-      });
+      }), workspaceOwner: persisted.workspaceOwner ?? ownerFor() };
       commitTabs([...tabsRef.current, target]);
       setActiveTabInternal(target);
       return true;
@@ -370,6 +397,8 @@ export function useWorkspaceTabOpeners({
     [
       commitTabs,
       persistedGitReviewStateRef,
+      ownerFor,
+      sameOwner,
       setActiveTabInternal,
       tabsRef,
       workspaceProjectId,
@@ -385,11 +414,11 @@ export function useWorkspaceTabOpeners({
           : normalized
             ? normalized.split("/").pop() ?? normalized
             : "Project";
-      const tab = createExplorerTab(normalized, label);
+      const tab = { ...createExplorerTab(normalized, label), workspaceOwner: ownerFor() };
       commitTabs([...tabsRef.current, tab]);
       setActiveTabInternal(tab);
     },
-    [commitTabs, setActiveTabInternal, tabsRef],
+    [commitTabs, ownerFor, setActiveTabInternal, tabsRef],
   );
 
   return {

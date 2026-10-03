@@ -392,7 +392,8 @@ describe("SharedBrowserChrome", () => {
       container.querySelector('[data-testid="browser-chrome-context-row"]')?.className,
     ).not.toContain("max-[540px]:basis-full");
     expect(select.className).not.toContain("hidden");
-    expect(select.className).toContain("w-10");
+    expect(select.closest('[data-testid="shared-browser-tabs-picker"]')?.textContent).toContain("2");
+    expect(select.getAttribute("aria-description")).toContain("Current tab: First");
     expect(select.title).toBe("First");
     expect(select.disabled).toBe(true);
     expect(address.disabled).toBe(true);
@@ -438,7 +439,7 @@ describe("SharedBrowserChrome", () => {
       .toContain("Agent controls");
   });
 
-  it("moves compact history and page selection into the supplied menu without losing their behavior", async () => {
+  it("keeps compact page selection in the toolbar while history and reload stay in the supplied menu", async () => {
     const model = props({
       compact: true,
       pages: [
@@ -449,36 +450,50 @@ describe("SharedBrowserChrome", () => {
     });
     await act(async () => root.render(<SharedBrowserChrome {...model} />));
     const menu = container.querySelector('[data-testid="compact-menu"]')!;
-    const select = menu.querySelector<HTMLSelectElement>('[data-testid="shared-browser-page-select"]')!;
+    const select = container.querySelector<HTMLSelectElement>('[data-testid="shared-browser-page-select"]')!;
     const back = menu.querySelector<HTMLButtonElement>('[data-testid="shared-browser-back"]')!;
     const forward = menu.querySelector<HTMLButtonElement>('[data-testid="shared-browser-forward"]')!;
+    const reload = menu.querySelector<HTMLButtonElement>('[data-testid="shared-browser-reload"]')!;
     expect(select).not.toBeNull();
+    expect(menu.contains(select)).toBe(false);
+    expect(select.closest('[data-testid="shared-browser-chrome"]')).not.toBeNull();
     expect(back.disabled).toBe(true);
     expect(forward.disabled).toBe(false);
-    expect(menu.querySelector('[data-testid="shared-browser-reload"]')).toBeNull();
+    expect(reload.disabled).toBe(false);
+    expect(container.querySelectorAll('[data-testid="shared-browser-reload"]')).toHaveLength(1);
     expect(container.querySelectorAll('[data-testid="shared-browser-page-select"]')).toHaveLength(1);
 
     await act(async () => {
       back.click();
       forward.click();
+      reload.click();
       select.value = "page-2";
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
     expect(model.onBack).not.toHaveBeenCalled();
     expect(model.onForward).toHaveBeenCalledExactlyOnceWith("page-1");
+    expect(model.onReload).toHaveBeenCalledExactlyOnceWith("page-1");
     expect(model.onFocusPage).toHaveBeenCalledExactlyOnceWith("page-2");
 
     await act(async () => root.render(<SharedBrowserChrome {...model} pendingAction="reload" />));
     expect(back.disabled).toBe(true);
     expect(forward.disabled).toBe(true);
+    expect(reload.disabled).toBe(true);
     expect(select.disabled).toBe(true);
-    await act(async () => forward.click());
+    await act(async () => {
+      forward.click();
+      reload.click();
+    });
     expect(model.onForward).toHaveBeenCalledTimes(1);
+    expect(model.onReload).toHaveBeenCalledTimes(1);
 
     await act(async () => root.render(<SharedBrowserChrome {...model} interactionEnabled={false} />));
     expect(back.disabled).toBe(true);
     expect(forward.disabled).toBe(true);
+    expect(reload.disabled).toBe(true);
     expect(select.disabled).toBe(true);
+    await act(async () => reload.click());
+    expect(model.onReload).toHaveBeenCalledTimes(1);
   });
 
   it("leaves full-width navigation inline when a toolbar callback is supplied", async () => {
@@ -490,8 +505,10 @@ describe("SharedBrowserChrome", () => {
     expect(renderActions).toHaveBeenCalledWith(null);
     const context = container.querySelector('[data-testid="browser-chrome-context-row"]')!;
     expect(context.querySelector('[data-testid="shared-browser-back"]')).toBeNull();
+    expect(context.querySelector('[data-testid="shared-browser-reload"]')).toBeNull();
     expect(context.querySelector('[data-testid="shared-browser-page-select"]')).toBeNull();
     expect(container.querySelector('[data-testid="shared-browser-back"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="shared-browser-reload"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="shared-browser-page-select"]')).not.toBeNull();
   });
 

@@ -1,0 +1,75 @@
+.conversation-quick-tabs {
+  --conversation-tab-surface: white;
+  --conversation-tab-border: var(--color-slate-200);
+  --conversation-tab-foot: 8px;
+  /* Meet the header divider instead of leaving it beneath the active tab. */
+  position: relative;
+  top: 1px;
+}
+
+.conversation-quick-tab-content {
+  padding-inline: var(--conversation-tab-foot);
+}
+
+.conversation-quick-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+  max-width: 280px;
+  border: 1px solid transparent;
+  border-radius: 10px 10px 0 0;
+  color: var(--color-slate-600);
+}
+
+.conversation-quick-tab:hover {
+  background: color-mix(in srgb, var(--org-avatar, var(--color-slate-200)) 55%, transparent);
+}
+
+.conversation-quick-tab[data-active=true] {
+  z-index: 1;
+  background: var(--conversation-tab-surface);
+  border-color: var(--conversation-tab-border);
+  border-bottom-color: var(--conversation-tab-surface);
+  color: var(--color-slate-950);
+}
+
+/* Reverse curves join the tab's sides to the panel's horizontal divider. */
+.conversation-quick-tab[data-active=true]::before,
+.conversation-quick-tab[data-active=true]::after {
+  content: "";
+  position: absolute;
+  bottom: -1px;
+  width: calc(var(--conversation-tab-foot) + 1px);
+  height: calc(var(--conversation-tab-foot) + 1px);
+  pointer-events: none;
+  background: radial-gradient(circle at var(--conversation-tab-corner),
+    transparent calc(var(--conversation-tab-foot) - 0.5px),
+    var(--conversation-tab-border) var(--conversation-tab-foot),
+    var(--conversation-tab-border) calc(var(--conversation-tab-foot) + 0.5px),
+    var(--conversation-tab-surface) calc(var(--conversation-tab-foot) + 1px));
+}
+
+.conversation-quick-tab[data-active=true]::before {
+  --conversation-tab-corner: top left;
+  left: calc(-1 * (var(--conversation-tab-foot) + 1px));
+}
+
+.conversation-quick-tab[data-active=true]::after {
+  --conversation-tab-corner: top right;
+  right: calc(-1 * (var(--conversation-tab-foot) + 1px));
+}
+
+.dark .conversation-quick-tabs {
+  --conversation-tab-surface: var(--color-studio-dark-panel);
+  --conversation-tab-border: var(--color-studio-dark-divider);
+}
+
+.dark .conversation-quick-tab { color: var(--color-slate-300); }
+.dark .conversation-quick-tab[data-active=true] { color: var(--color-slate-50); }
+
+@media (forced-colors: active) {
+  .conversation-quick-tab[data-active=true] { border-color: Highlight; }
+  .conversation-quick-tab[data-active=true]::before,
+  .conversation-quick-tab[data-active=true]::after { display: none; }
+}

@@ -1,8 +1,26 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { SettingsShell } from "../SettingsShell";
+import { PageTitleInNavigationContext } from "../../../../components/PageTitleContext";
 
 describe("SettingsShell", () => {
+  it("uses the navigation title while preserving content, description and actions", () => {
+    const panel = <SettingsShell title="Automations" subtitle="Run prompts on a schedule."
+      actions={<button>Create automation</button>}><h2>Scheduled prompts</h2></SettingsShell>;
+    const compact = renderToStaticMarkup(
+      <PageTitleInNavigationContext.Provider value="Automations">{panel}</PageTitleInNavigationContext.Provider>,
+    );
+    expect(compact).not.toContain(">Automations<");
+    expect(compact).toContain("Run prompts on a schedule.");
+    expect(compact).toContain("Create automation");
+    expect(compact).toContain("Scheduled prompts");
+    // Standalone panels have no navigation owner, including at narrow widths.
+    expect(renderToStaticMarkup(panel)).toContain(">Automations<");
+    expect(renderToStaticMarkup(
+      <PageTitleInNavigationContext.Provider value={null}>{panel}</PageTitleInNavigationContext.Provider>,
+    )).toContain(">Automations<");
+  });
+
   it("renders one compact category path for nested settings", () => {
     const html = renderToStaticMarkup(
       <SettingsShell

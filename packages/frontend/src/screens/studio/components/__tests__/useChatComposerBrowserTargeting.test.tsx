@@ -155,4 +155,33 @@ describe("useChatComposerBrowserTargeting", () => {
     expect(latestResult?.pendingBrowserLaunchMode).toBeNull();
     expect(focusPageMock).not.toHaveBeenCalled();
   });
+
+  it("describes a pending request without changing the current page and lets it be canceled", async () => {
+    await act(async () => {
+      root.render(<Harness browserTransport="shared" />);
+    });
+    await act(async () => {
+      latestResult?.handlePrepareNewBrowserSession();
+    });
+    expect(latestResult?.pendingBrowserLaunchMode).toBe("new_page");
+    expect(latestResult?.browserSessionPages).toEqual(browserPages);
+    expect(focusPageMock).not.toHaveBeenCalled();
+    expect(showStatus).toHaveBeenLastCalledWith(
+      "Your next AI message will request a new tab while keeping the existing pages available.",
+      "info",
+      3000,
+    );
+    expect(focusInput).toHaveBeenLastCalledWith({ force: true });
+
+    await act(async () => {
+      latestResult?.handleClearPendingNewBrowserSession();
+    });
+    expect(latestResult?.pendingBrowserLaunchMode).toBeNull();
+    expect(latestResult?.browserSessionPages).toEqual(browserPages);
+    expect(showStatus).toHaveBeenLastCalledWith(
+      "New tab request canceled. Existing browser pages are unchanged.",
+      "info",
+      2500,
+    );
+  });
 });

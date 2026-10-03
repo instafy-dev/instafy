@@ -9,7 +9,7 @@ describe("sidebar entry validation", () => {
   const entry = { version: 1, scopeKey: "user:project", baseKey: "base", baseIndex: 3, depth: 2, view: "workspace" };
   it("accepts only the exact scope and bounded matching history depth", () => {
     expect(readMobileSidebarEntry({ instafySidebar: entry }, "user:project", 5)).toEqual(entry);
-    for (const value of [null, [], {}, { ...entry, depth: 3 }, { ...entry, view: "unknown" }, { ...entry, baseIndex: -1 }]) {
+    for (const value of [null, [], {}, { ...entry, presentation: "unknown" }, { ...entry, depth: 3 }, { ...entry, view: "unknown" }, { ...entry, baseIndex: -1 }]) {
       expect(readMobileSidebarEntry({ instafySidebar: value }, "user:project", 5)).toBeNull();
     }
     expect(readMobileSidebarEntry({ instafySidebar: entry }, "other:project", 5)).toBeNull();
@@ -77,6 +77,24 @@ describe("mobile sidebar browser history", () => {
     expect(api.mobileSidebarNavigation.view).toBe("sidebar");
     await pop(1);
     expect(api.mobileSidebarNavigation.view).toBe("workspace");
+  });
+
+  it("preserves the bottom presentation through drill-ins and Back/Forward, but opens a fresh sidebar from the side", async () => {
+    await act(async () => api.mobileSidebarNavigation.openView("sidebar", "bottom"));
+    expect(api.mobileSidebarNavigation.presentation).toBe("bottom");
+    expect(currentLocation.search).toBe("?panel=chat");
+    await act(async () => api.mobileSidebarNavigation.openView("workspace"));
+    expect(api.mobileSidebarNavigation.presentation).toBe("bottom");
+    await pop(-1);
+    expect(api.mobileSidebarNavigation.view).toBe("sidebar");
+    expect(api.mobileSidebarNavigation.presentation).toBe("bottom");
+    await pop(-1);
+    expect(api.mobileSidebarOpen).toBe(false);
+    await pop(1);
+    expect(api.mobileSidebarNavigation.presentation).toBe("bottom");
+    await pop(-1);
+    await act(async () => api.setMobileSidebarOpen(true));
+    expect(api.mobileSidebarNavigation.presentation).toBe("side");
   });
 
   it("opens the global team picker directly and Back returns to the original global visit", async () => {

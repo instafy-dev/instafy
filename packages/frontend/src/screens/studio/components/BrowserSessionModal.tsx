@@ -620,6 +620,14 @@ export function BrowserSessionModal({
   const [runtimeChoice, setRuntimeChoice] = useState<{ scope: string; runtimeId: string } | null>(null);
   const [sessionIdentity, setSessionIdentity] = useState<{ scope: string; runtimeId: string } | null>(null);
   const [sessionChooserOpen, setSessionChooserOpen] = useState(false);
+  const sessionControlsVisible = isOpen && transportActive;
+  const sessionControlsVisibleRef = useRef(sessionControlsVisible);
+  sessionControlsVisibleRef.current = sessionControlsVisible;
+  useLayoutEffect(() => {
+    // The browser stays mounted while Chat or another resource is selected.
+    // Its portalled menu must not outlive the visible toolbar that anchors it.
+    if (!sessionControlsVisible) setSessionChooserOpen(false);
+  }, [sessionControlsVisible]);
   const [sessionChoices, setSessionChoices] = useState<{
     scope: string; candidates: BrowserRuntimeCandidate[]; loading: boolean; error: string | null;
   }>({ scope: selectionScope, candidates: [], loading: false, error: null });
@@ -1216,7 +1224,7 @@ export function BrowserSessionModal({
       if (!statusSnapshot) {
         setStatus("error");
         setError("Could not discover Shared sessions. Refresh sessions to retry.");
-        setSessionChooserOpen(true);
+        setSessionChooserOpen(sessionControlsVisibleRef.current);
         setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: "Session discovery is unavailable; no new browser was started." });
         return;
       }
@@ -1239,7 +1247,7 @@ export function BrowserSessionModal({
           setBrowserInputWsUrl(null);
           setWebRtcConnection(null);
           setSessionChoices({ scope: selectionScope, candidates, loading: false, error: message });
-          setSessionChooserOpen(true);
+          setSessionChooserOpen(sessionControlsVisibleRef.current);
           return;
         }
         if (selection.kind === "selected") {
@@ -2513,13 +2521,13 @@ export function BrowserSessionModal({
       runtimeId={selectedSessionRuntimeId ?? chosenRuntimeId ?? resumeRuntimeId}
       resumeUrl={sessionResumeUrl}
       actions={actions}
-      open={sessionChooserOpen}
+      open={sessionControlsVisible && sessionChooserOpen}
       busy={sessionChoices.scope === selectionScope && sessionChoices.loading}
       candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
       error={sessionChoices.scope === selectionScope ? sessionChoices.error : null}
       selectionRequired={status === "selecting"}
       canStart={canControlBrowser}
-      onOpenChange={(open) => { setSessionChooserOpen(open); if (open) void refreshSessionChoices(); }}
+      onOpenChange={(open) => { setSessionChooserOpen(open && sessionControlsVisible); if (open && sessionControlsVisible) void refreshSessionChoices(); }}
       onChoose={chooseSession}
       onStart={startNewSession}
       onRefresh={() => { void refreshSessionChoices(); setConnectAttempt((value) => value + 1); }}
@@ -2533,7 +2541,7 @@ export function BrowserSessionModal({
         />
       </div> : null}
     >
-      {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
+      {sessionControlsVisible && sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
     </SharedBrowserSessionControl>
   ) : null;
 

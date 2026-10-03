@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useState } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialConversation, type ConversationState } from "../../conversations/conversationState";
 import { ConversationHistoryTab, type ConversationHistoryTabProps } from "../ConversationHistoryTab";
+import { StudioListNavigationProvider, useStudioListNavigation } from "../../navigation/StudioListNavigation";
+import { MobileStudioNavigationHeader } from "../../screens/studio/components/MobileStudioNavigationHeader";
 
 const mocks = vi.hoisted(() => ({
   conversations: [] as ConversationState[],
@@ -14,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   closeTab: vi.fn(),
   keepTabOpen: vi.fn(),
   preview: false,
+  startThread: vi.fn(),
+  requestConversationInvite: vi.fn(),
   openConversationTab: vi.fn(),
   requestUrlPush: vi.fn(),
   showStatus: vi.fn(),
@@ -28,6 +33,8 @@ vi.mock("../WorkspaceTabsProvider", () => ({
     tabs: [{ id: "tab-a", kind: "conversation", conversationId: "a", preview: mocks.preview }],
   }),
 }));
+vi.mock("../useStartConversationThread", () => ({ useStartConversationThread: () => mocks.startThread }));
+vi.mock("../useWorkspace", () => ({ useWorkspaceUi: () => mocks }));
 vi.mock("../../status/useStatus", () => ({ useStatus: () => mocks }));
 vi.mock("../../sdk/instafy", () => ({ controllerClient: { conversations: { updateMetadata: vi.fn() } } }));
 
@@ -77,6 +84,9 @@ describe("ConversationHistoryTab", () => {
   }
 
   async function search(value: string) {
+    if (!container.querySelector('[data-testid="conversation-history-search"]')) {
+      await click('[data-testid="conversation-history-search-toggle"]');
+    }
     const input = container.querySelector<HTMLInputElement>('[data-testid="conversation-history-search"]');
     expect(input).not.toBeNull();
     await act(async () => {
@@ -90,12 +100,19 @@ describe("ConversationHistoryTab", () => {
     await click(`[role="menuitemradio"][data-key="${status}"]`);
   }
 
-  it.each([320, 800, 900, 1280])("provides search immediately at %ipx and filters the chat list", async (width) => {
+  it.each([320, 800, 900, 1280])("uses compact mobile search and persistent desktop search at %ipx", async (width) => {
     viewportWidth = width;
     await render();
-    expect(container.querySelector("h2")?.textContent).toBe("All chats");
-    expect(container.querySelector('[data-testid="conversation-history-search-toggle"]')).toBeNull();
+    expect(container.querySelector("h2")?.textContent).toBe("Chats");
+    const toggle = container.querySelector('[data-testid="conversation-history-search-toggle"]');
+    expect(Boolean(toggle)).toBe(width < 900);
+    expect(Boolean(container.querySelector('[data-testid="conversation-history-search"]'))).toBe(width >= 900);
+    expect(container.querySelector('[data-testid="conversation-history-filter"]')).not.toBeNull();
     await search("Chat b");
+    if (width < 900) {
+      expect(document.activeElement).toBe(container.querySelector('[data-testid="conversation-history-search"]'));
+      expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+    }
     const rows = container.querySelectorAll('[data-testid="conversation-history-item"]');
     expect(rows).toHaveLength(1);
     expect(rows[0]?.textContent).toBe("Chat b");
@@ -113,6 +130,65 @@ describe("ConversationHistoryTab", () => {
     expect(onRequestClose).toHaveBeenCalledTimes(width < 900 ? 1 : 0);
   });
 
+  it("keeps thread creation and private invitations reachable in each chat menu", async () => {
+    mocks.conversations = [conversation("a", { visibility: "private" }), conversation("b")];
+    await render();
+    await click('[data-testid="conversation-history-menu-a"]');
+    await click('[data-testid="conversation-history-menu-new-thread"]');
+    expect(mocks.startThread).toHaveBeenCalledWith("a");
+    await click('[data-testid="conversation-history-menu-a"]');
+    await click('[data-testid="conversation-history-menu-invite"]');
+    expect(mocks.openConversationTab).toHaveBeenCalledWith("a");
+    expect(mocks.requestConversationInvite).toHaveBeenCalledWith("a");
+    await click('[data-testid="conversation-history-menu-b"]');
+    expect(document.querySelector('[data-testid="conversation-history-menu-invite"]')).toBeNull();
+  });
+
+  function DockedHistory({ portaled = true, onClose = () => {}, onNewChat = () => {} }: {
+    portaled?: boolean; onClose?: () => void; onNewChat?: () => void;
+  }) {
+    const [header, setHeader] = useState<HTMLDivElement | null>(null);
+    return <>
+      <div ref={setHeader} data-testid="docked-header" />
+      <ConversationHistoryTab headerPortalTarget={portaled ? header : null}
+        onRequestClose={onClose} onStartNewConversation={onNewChat} />
+    </>;
+  }
+
+  it("puts desktop Chats controls in the shared row, filters on demand, and leaves the list open when selecting", async () => {
+    const onClose = vi.fn();
+    await act(async () => root.render(<DockedHistory onClose={onClose} />));
+    const header = container.querySelector('[data-testid="docked-header"]')!;
+    const panel = container.querySelector('[data-testid="conversation-history-panel"]')!;
+    expect(header.querySelector("h2")?.textContent).toBe("Chats");
+    expect(panel.querySelector("h2")).toBeNull();
+    expect(container.querySelector('[data-testid="conversation-history-search"]')).toBeNull();
+    expect(header.querySelector('[data-testid="conversation-history-filter"]')).not.toBeNull();
+    await search("Chat b");
+    expect(document.activeElement).toBe(panel.querySelector("input"));
+    await click('[data-testid="conversation-history-item"]');
+    expect(mocks.openConversationTab).toHaveBeenCalledWith("b", { preview: true });
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => panel.querySelector('input')?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(panel.querySelector("input")).toBeNull();
+    expect(document.activeElement).toBe(header.querySelector('[data-testid="conversation-history-search-toggle"]'));
+    expect(panel.querySelectorAll('[data-testid="conversation-history-item"]')).toHaveLength(2);
+    await click('[data-testid="conversation-history-close"]');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the filter when moving the heading back into a collapsed navigation pane", async () => {
+    await act(async () => root.render(<DockedHistory />));
+    await search("Chat b");
+    await act(async () => root.render(<DockedHistory portaled={false} />));
+    expect(container.querySelector('[data-testid="docked-header"]')?.textContent).toBe("");
+    expect(container.querySelector('[data-testid="conversation-history-panel"] h2')?.textContent).toBe("Chats");
+    expect(container.querySelector<HTMLInputElement>('input')?.value).toBe("Chat b");
+    await act(async () => root.render(<DockedHistory />));
+    expect(container.querySelectorAll("h2")).toHaveLength(1);
+    expect(container.querySelector<HTMLInputElement>('input')?.value).toBe("Chat b");
+  });
+
   it.each([800, 1280])("keeps New chat accessible, clears filters, and closes only the narrow drawer (%ipx)", async (width) => {
     viewportWidth = width;
     const onStartNewConversation = vi.fn();
@@ -126,11 +202,111 @@ describe("ConversationHistoryTab", () => {
     await click('[data-testid="conversation-history-new-chat"]');
     expect(onStartNewConversation).toHaveBeenCalledTimes(1);
     expect(onRequestClose).toHaveBeenCalledTimes(width < 900 ? 1 : 0);
-    expect(container.querySelector<HTMLInputElement>('[data-testid="conversation-history-search"]')?.value).toBe("");
-    expect(container.querySelector("h2")?.textContent).toBe("All chats");
+    expect(container.querySelector<HTMLInputElement>('[data-testid="conversation-history-search"]')?.value).toBe(width < 900 ? undefined : "");
+    expect(container.querySelector("h2")?.textContent).toBe("Chats");
     expect(container.querySelector('[data-testid="conversation-history-filter"]')?.getAttribute("aria-label")).toBe("Filter chats: Active");
     expect(container.querySelector('[data-testid="conversation-history-filter-indicator"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="conversation-history-item"]')).toHaveLength(2);
+  });
+
+  it.each([320, 390])("combines the mobile title and working controls in one navigation header (%ipx)", async (width) => {
+    viewportWidth = width;
+    const history = { canGoBack: true, canGoForward: true, goBack: vi.fn(), goForward: vi.fn() };
+    const onStartNewConversation = vi.fn();
+    const onRequestClose = vi.fn();
+    await render({
+      onStartNewConversation, onRequestClose,
+      renderMobileHeader: ({ title, actions }) => <MobileStudioNavigationHeader
+        title={title} primaryActions={actions} spaceName="Autofix" showSpaceName={false}
+        history={history} onOpenPicker={vi.fn()}
+      />,
+    });
+    const header = container.querySelector('[data-testid="mobile-studio-navigation-header"]')!;
+    expect(container.querySelectorAll("h1, h2")).toHaveLength(1);
+    expect(container.querySelector("h1")?.textContent).toBe("Chats");
+    expect(container.textContent).not.toContain("Chats in Autofix");
+    for (const action of ["search-toggle", "filter", "new-chat"]) {
+      expect(header.contains(container.querySelector(`[data-testid="conversation-history-${action}"]`))).toBe(true);
+    }
+    expect(container.querySelector('[data-testid="conversation-history-close"]')).toBeNull();
+    expect(container.querySelector('[data-testid="mobile-history-controls"]')).toBeNull();
+    await search("Chat b");
+    expect(document.activeElement).toBe(container.querySelector('input'));
+    expect(header.contains(container.querySelector('input'))).toBe(false);
+    expect(container.querySelectorAll('[data-testid="conversation-history-item"]')).toHaveLength(1);
+    await click('[data-testid="conversation-history-search-toggle"]');
+    await selectFilter("archived");
+    expect(container.querySelector("h1")?.textContent).toBe("Archived");
+    expect(container.querySelectorAll("h1, h2")).toHaveLength(1);
+    await selectFilter("active");
+    expect(container.querySelector("h1")?.textContent).toBe("Chats");
+    await click('[data-testid="mobile-header-more"]');
+    await click('[data-testid="mobile-header-back"]');
+    expect(history.goBack).toHaveBeenCalledOnce();
+    await click('[data-testid="conversation-history-new-chat"]');
+    expect(onStartNewConversation).toHaveBeenCalledOnce();
+    expect(onRequestClose).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the desktop drawer title and controls when a mobile header renderer is supplied", async () => {
+    const renderMobileHeader = vi.fn(() => null);
+    await render({ renderMobileHeader, onRequestClose: vi.fn() });
+    expect(renderMobileHeader).not.toHaveBeenCalled();
+    expect(container.querySelector("h2")?.textContent).toBe("Chats");
+    expect(container.querySelector('[data-testid="conversation-history-close"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="conversation-history-search"]')).not.toBeNull();
+  });
+
+  it("keeps mobile status filters accessible while name search is collapsed", async () => {
+    viewportWidth = 390;
+    mocks.conversations.push(conversation("archived", { lifecycleStatus: "archived" }));
+    const onRequestClose = vi.fn();
+    await render({ onRequestClose });
+    expect(container.querySelector('[data-testid="conversation-history-close"]')).toBeNull();
+    await selectFilter("archived");
+    expect(container.querySelector('[data-testid="conversation-history-search"]')).toBeNull();
+    expect(container.querySelector('[data-testid="conversation-history-filter-indicator"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="conversation-history-item"]')?.textContent).toBe("Chat archived");
+    await selectFilter("active");
+    expect(container.querySelector('[data-testid="conversation-history-filter-indicator"]')).toBeNull();
+    expect(onRequestClose).not.toHaveBeenCalled();
+  });
+
+  it.each(["toggle", "Escape"])("clears and collapses name search with %s without closing Chats", async (method) => {
+    viewportWidth = 390;
+    const onRequestClose = vi.fn();
+    await render({ onRequestClose });
+    await search("Chat b");
+    if (method === "toggle") await click('[data-testid="conversation-history-search-toggle"]');
+    else await act(async () => {
+      container.querySelector('input')?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    expect(container.querySelector('[data-testid="conversation-history-search"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid="conversation-history-item"]')).toHaveLength(2);
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="conversation-history-search-toggle"]'));
+    expect(onRequestClose).not.toHaveBeenCalled();
+  });
+
+  it("reveals a restored query when Chats remounts without focusing the input", async () => {
+    viewportWidth = 390;
+    function Harness() {
+      const navigation = useStudioListNavigation("viewer");
+      const [visible, setVisible] = useState(true);
+      return <StudioListNavigationProvider value={navigation}>
+        <button data-testid="return-to-chats" onClick={() => setVisible(true)}>Return to Chats</button>
+        {visible ? <ConversationHistoryTab onRequestClose={() => setVisible(false)} /> : null}
+      </StudioListNavigationProvider>;
+    }
+    await act(async () => root.render(<MemoryRouter initialEntries={["/studio?workspaceTab=history"]}><Harness /></MemoryRouter>));
+    await search("Chat b");
+    await click('[data-testid="conversation-history-item"]');
+    expect(container.querySelector('[data-testid="conversation-history-panel"]')).toBeNull();
+    const back = container.querySelector<HTMLButtonElement>('[data-testid="return-to-chats"]')!;
+    back.focus();
+    await click('[data-testid="return-to-chats"]');
+    expect(container.querySelector<HTMLInputElement>('[data-testid="conversation-history-search"]')?.value).toBe("Chat b");
+    expect(container.querySelectorAll('[data-testid="conversation-history-item"]')).toHaveLength(1);
+    expect(document.activeElement).toBe(back);
   });
 
   it("shows status counts and selection, dismissing the menu without clearing the search", async () => {
@@ -178,7 +354,7 @@ describe("ConversationHistoryTab", () => {
     expect(container.querySelector('[data-testid="conversation-history-filter"]')?.getAttribute("aria-label")).toBe(`Filter chats: ${label}`);
     expect(container.querySelector('[data-testid="conversation-history-filter-indicator"]')).not.toBeNull();
     await selectFilter("active");
-    expect(container.querySelector("h2")?.textContent).toBe("All chats");
+    expect(container.querySelector("h2")?.textContent).toBe("Chats");
     expect(container.querySelector('[data-testid="conversation-history-filter"]')?.getAttribute("aria-label")).toBe("Filter chats: Active");
     expect(container.querySelector('[data-testid="conversation-history-filter-indicator"]')).toBeNull();
   });

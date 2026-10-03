@@ -60,7 +60,7 @@ export function BrowserTransportSelector({
   const location = mode === "personal" ? "This device" : "Workspace";
   return <div data-browser-session-safe-zone="true" data-testid="browser-transport-selector" data-compact={compact ? "true" : "false"}>
     <BrowserToolsPopover placement="bottom start" label="Browser location" isOpen={open} onOpenChange={setOpen} trigger={
-      <Button variant="ghost" size="sm" className="max-[540px]:h-10 pointer-coarse:min-h-11" aria-label={`Browser location: ${location}`} data-testid="browser-location-menu" title={`Runs on ${location.toLowerCase()}`}>
+      <Button variant="ghost" size={compact ? "icon" : "sm"} className={compact ? "h-10 w-11 shrink-0 pointer-coarse:h-11" : "max-[540px]:h-10 pointer-coarse:min-h-11"} aria-label={`Browser location: ${location}`} data-testid="browser-location-menu" title={`Runs on ${location.toLowerCase()}`}>
         {mode === "personal" ? <Computer className="h-3.5 w-3.5" aria-hidden="true" /> : <Globe className="h-3.5 w-3.5" aria-hidden="true" />}
         <NavArrowDown className="h-3 w-3" aria-hidden="true" />
       </Button>

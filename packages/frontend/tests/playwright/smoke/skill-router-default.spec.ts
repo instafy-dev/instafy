@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -39,7 +40,7 @@ test.describe("Default skills scaffold", () => {
     if (!projectId) {
       throw new Error("Project id missing for skill-router scaffold test.");
     }
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "skill-router-default" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
 

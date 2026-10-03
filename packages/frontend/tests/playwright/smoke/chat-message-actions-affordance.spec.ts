@@ -1,3 +1,4 @@
+import { returnToConversation, activeConversationId as resolveActiveConversationLocalId } from "../utils/conversationNavigation.js";
 import { randomUUID } from "node:crypto";
 import { test, expect, type Page } from "@playwright/test";
 import {
@@ -7,45 +8,6 @@ import {
   resetRuntimeUserState,
 } from "../utils/harness.js";
 
-function conversationTabButtons(page: Page) {
-  return page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-}
-
-async function resolveActiveConversationLocalId(page: Page): Promise<string> {
-  const fromUrl = await page
-    .evaluate(() => {
-      try {
-        return new URL(window.location.href).searchParams.get("conversationId");
-      } catch {
-        return null;
-      }
-    })
-    .catch(() => null);
-  if (typeof fromUrl === "string" && fromUrl.trim().length > 0) {
-    return fromUrl.trim();
-  }
-
-  const fromStore = await page
-    .evaluate(() => {
-      const store = (window as any)?.__INSTAFY_STORE__;
-      const state = store?.getState?.();
-      return typeof state?.activeConversationId === "string" ? state.activeConversationId : null;
-    })
-    .catch(() => null);
-  if (typeof fromStore === "string" && fromStore.trim().length > 0) {
-    return fromStore.trim();
-  }
-
-  const tabs = conversationTabButtons(page);
-  await expect(tabs).toHaveCount(1);
-  const tabId = await tabs.first().getAttribute("data-tab-id");
-  if (!tabId) {
-    throw new Error("Conversation tab missing data-tab-id.");
-  }
-  return tabId.startsWith("workspace-conversation-")
-    ? tabId.replace("workspace-conversation-", "")
-    : tabId;
-}
 
 async function seedAssistantBubble(page: Page, projectId: string): Promise<void> {
   await expect
@@ -147,7 +109,7 @@ test.describe("Chat message actions affordance", () => {
       throw new Error("Active project id missing for message actions affordance test.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const actionsButtons = page.getByTestId("chat-message-actions");
     let actionsCount = await actionsButtons.count();

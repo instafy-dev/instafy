@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -67,7 +68,7 @@ test.describe("Bench: /learn improves deterministic filter-table navigation (opt
     const projectId = await prepareStudio(page);
     if (!projectId) throw new Error("Project id missing for fixture-news-directory-epsilon bench.");
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:fixture-news-directory-epsilon" }).catch(() => {});
     await ensureHostedRuntimeReadyForBench(page, projectId);
     await selectPrimaryAgentModel(page, FIXTURE_BENCH_MODEL);

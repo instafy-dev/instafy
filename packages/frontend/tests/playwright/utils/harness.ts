@@ -1,3 +1,4 @@
+import { returnToConversation } from "./conversationNavigation.js";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { switchToProject } from "./projects.js";
 import { Buffer } from "node:buffer";
@@ -2357,26 +2358,12 @@ async function ensureGuestArrivesInStudio(page: Page, timeoutMs: number): Promis
 }
 
 async function ensureWorkspaceConversationTab(page: Page): Promise<void> {
-  const conversationTabs = page
-    .getByTestId("workspace-tabs")
-    .locator('[data-tab-kind="conversation"]');
-  const countConversationTabs = async () => await conversationTabs.count().catch(() => 0);
-  const topbarTabSelector = page.locator('[data-testid="topbar-tab-selector"], [data-testid="mobile-header-title"]');
-  const hasConversationWorkspace = async (): Promise<boolean> => {
-    if ((await countConversationTabs()) > 0) {
-      return true;
-    }
-    const chatInputVisible = await page.getByTestId("chat-input").isVisible().catch(() => false);
-    if (!chatInputVisible) {
-      return false;
-    }
-    const topbarSelectorVisible = await topbarTabSelector.isVisible().catch(() => false);
-    if (!topbarSelectorVisible) {
-      return false;
-    }
-    const topbarLabel = (await topbarTabSelector.innerText().catch(() => "")).trim().toLowerCase();
-    return topbarLabel.includes("conversation") || topbarLabel.includes("chat");
-  };
+  const conversationHeader = page.locator(
+    '[data-testid="conversation-workspace-title"], [data-testid="mobile-header-title"]',
+  ).filter({ visible: true }).first();
+  const hasConversationWorkspace = async (): Promise<boolean> =>
+    await page.getByTestId("chat-input").isVisible().catch(() => false) &&
+    await conversationHeader.isVisible().catch(() => false);
 
   if (await hasConversationWorkspace()) {
     return;
@@ -2466,7 +2453,7 @@ async function ensureWorkspaceConversationTab(page: Page): Promise<void> {
   }
 
   const openConversationMenu = async (): Promise<boolean> => {
-    const newConversationButton = page.getByTestId("chat-new-conversation");
+    const newConversationButton = page.getByTestId("topbar-new-conversation").or(page.getByTestId("sidebar-new-chat")).filter({ visible: true }).first();
     const visible = await newConversationButton.isVisible().catch(() => false);
     if (!visible) {
       return false;
@@ -2482,7 +2469,7 @@ async function ensureWorkspaceConversationTab(page: Page): Promise<void> {
   };
 
   if (!(await openConversationMenu())) {
-    await page.getByTestId("sidebar-nav-chat").click().catch(() => {});
+    await returnToConversation(page).catch(() => {});
     await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
     if (!(await hasConversationWorkspace())) {
       await openConversationMenu();

@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeClosed, Plus } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Heading } from "../../../components/Heading";
+import { usePageTitleInNavigation } from "../../../components/PageTitleContext";
 import { Button } from "../../../components/Button";
 import { Checkbox } from "../../../components/Checkbox";
 import { ToggleIconButton } from "../../../components/ToggleIconButton";
@@ -329,6 +330,7 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
 }
 
 function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | null; userId: string | null }) {
+  const titleInNavigation = usePageTitleInNavigation();
   const { showStatus } = useStatus();
   const { openPanelTab, requestUrlPush } = useWorkspaceTabs();
   const queryClient = useQueryClient();
@@ -645,8 +647,8 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
   return (
     <>
       <div className="space-y-3" data-testid="project-secrets-card">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <Heading level={3}>Secrets</Heading>
+        <div className={`flex flex-wrap items-center gap-3 ${titleInNavigation ? "justify-end" : "justify-between"}`}>
+          {!titleInNavigation ? <Heading level={3}>Secrets</Heading> : null}
           <Button
             onPress={() => openCreateModal(null)}
             isDisabled={!projectId || loading || Boolean(loadError)}

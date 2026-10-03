@@ -34,8 +34,7 @@ import {
   DARK_PANEL_SHADOW_CLASS,
   DARK_RAIL_HOVER_CLASS,
 } from "../theme/darkSurfaces";
-import { useProject } from "../projects/useProject";
-import { isUUID } from "../utils/uuid";
+import { useStartConversationThread } from "./useStartConversationThread";
 import {
   addFloatingSurfaceViewportChangeListener,
   clampFloatingSurfacePositionToStudioViewport,
@@ -107,17 +106,15 @@ export function WorkspaceTabs({
   // Integrated macOS title bar: the strip sits on row zero and must clear
   // the window buttons. False on every other target and on older shells.
   const titleBarFree = desktopTitleBarFree();
-  const { tabs, activeTabId, focusTab, closeTab, keepTabOpen, moveTab, openConversationTab, requestUrlPush } = useWorkspaceTabs();
+  const { tabs, activeTabId, focusTab, closeTab, keepTabOpen, moveTab, requestUrlPush } = useWorkspaceTabs();
   const {
     conversations,
-    createConversation,
-    setConversationControllerId,
     setConversationTitle,
     setConversationLifecycleStatus,
   } = useConversations();
   const { showStatus } = useStatus();
   const { requestConversationInvite } = useWorkspaceUi();
-  const { activeProjectId } = useProject();
+  const startThread = useStartConversationThread();
   const [conversationMenu, setConversationMenu] = useState<{
     tabId: string;
     conversationId?: string;
@@ -130,7 +127,6 @@ export function WorkspaceTabs({
     conversationId: string;
     draft: string;
   } | null>(null);
-  const [pendingThreadOpenId, setPendingThreadOpenId] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const renameIgnoreBlurRef = useRef(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -169,15 +165,6 @@ export function WorkspaceTabs({
     };
   }, [conversationMenu]);
 
-  useEffect(() => {
-    if (!pendingThreadOpenId) {
-      return;
-    }
-    const target = pendingThreadOpenId;
-    setPendingThreadOpenId(null);
-    requestUrlPush();
-    openConversationTab(target);
-  }, [openConversationTab, pendingThreadOpenId, requestUrlPush]);
 
   useEffect(() => {
     const conversationId = conversationRename?.conversationId;
@@ -388,77 +375,10 @@ export function WorkspaceTabs({
   }, [beginConversationRename, conversationMenu]);
 
   const handleConversationMenuNewThread = useCallback(() => {
-    if (!conversationMenu) {
-      return;
-    }
-    const parentConversation =
-      conversations.find((entry) => entry.localId === conversationMenu.conversationId) ?? null;
-    if (!parentConversation) {
-      return;
-    }
+    if (!conversationMenu?.conversationId) return;
+    void startThread(conversationMenu.conversationId);
     setConversationMenu(null);
-
-    const projectId = activeProjectId && isUUID(activeProjectId) ? activeProjectId : null;
-    if (!projectId) {
-      return;
-    }
-
-    void (async () => {
-      let parentControllerId = parentConversation.controllerId;
-      if (!parentControllerId) {
-        const parentResponse = await controllerClient.conversations.createBlank({
-          projectId,
-          metadata: {
-            title: parentConversation.title,
-            localId: parentConversation.localId,
-            visibility: parentConversation.visibility,
-          },
-        });
-        if (!parentResponse?.conversationId) {
-          showStatus("Controller unavailable. Try again shortly.", "error", 4000);
-          return;
-        }
-        parentControllerId = parentResponse.conversationId;
-        setConversationControllerId(parentConversation.localId, parentControllerId);
-      }
-
-      const existingThreads = conversations.filter(
-        (entry) =>
-          entry.parentConversationId === parentControllerId &&
-          (entry.threadKind ?? "thread") === "thread",
-      ).length;
-      const threadTitle = `Thread ${existingThreads + 1}`;
-      const threadConversation = createConversation({
-        title: threadTitle,
-        visibility: parentConversation.visibility,
-        parentConversationId: parentControllerId,
-        threadKind: "thread",
-        select: false
-      });
-      setPendingThreadOpenId(threadConversation.localId);
-
-      const response = await controllerClient.conversations.createBlank({
-        projectId,
-        metadata: {
-          title: threadTitle,
-          localId: threadConversation.localId,
-          visibility: threadConversation.visibility,
-        },
-        parentConversationId: parentControllerId,
-        threadKind: "thread",
-      });
-      if (response?.conversationId) {
-        setConversationControllerId(threadConversation.localId, response.conversationId);
-      }
-    })();
-  }, [
-    activeProjectId,
-    conversationMenu,
-    conversations,
-    createConversation,
-    setConversationControllerId,
-    showStatus
-  ]);
+  }, [conversationMenu, startThread]);
 
   const handleConversationMenuClose = useCallback(() => {
     if (!conversationMenu) {

@@ -1,5 +1,5 @@
 import { Capacitor } from "@capacitor/core";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { logAppInfo, logAppWarn } from "../../../debug/appLogs";
 import { useAppLogs } from "../../../debug/useAppLogs";
 import { useStatus } from "../../../status/useStatus";
@@ -27,6 +27,13 @@ const SUPPORT_POLL_ACTIVE_MS = 20_000;
 const SUPPORT_POLL_IDLE_MS = 120_000;
 const EMPTY_SUPPORT_REPORTS: HomeSupportReport[] = [];
 
+// A render-time warning must not re-render Studio and produce the same warning
+// again. Keep live diagnostic updates inside their consumer, not the shell.
+function LiveBugReportDialog(props: Omit<ComponentProps<typeof BugReportDialog>, "appLogs">) {
+  const { logs: appLogs } = useAppLogs();
+  return <BugReportDialog {...props} appLogs={appLogs} />;
+}
+
 interface UseStudioBugReportControllerOptions {
   currentUserId: string | null;
   activeProjectId: string | null;
@@ -51,7 +58,6 @@ export function useStudioBugReportController({
   onOpenDiagnostics,
 }: UseStudioBugReportControllerOptions) {
   const { hideStatus, showStatus } = useStatus();
-  const { logs: appLogs } = useAppLogs();
   const [bugReportOpenForUserId, setBugReportOpenForUserId] = useState<string | null>(null);
   const [bugReportInboxOpenForUserId, setBugReportInboxOpenForUserId] = useState<string | null>(
     null,
@@ -489,7 +495,7 @@ export function useStudioBugReportController({
 
   const dialogs = (
     <>
-      <BugReportDialog
+      <LiveBugReportDialog
         key={`${currentUserId ?? "signed-out"}:${bugReportSessionKey}`}
         isOpen={bugReportOpen}
         currentUserId={currentUserId ?? ""}
@@ -510,7 +516,6 @@ export function useStudioBugReportController({
         activeConversationLocalId={activeConversationLocalId}
         activeRuntimeId={activeRuntimeId}
         controllerProjectMissing={controllerProjectMissing}
-        appLogs={appLogs}
         buildLogs={buildLogs}
       />
       <BugReportInboxDialog

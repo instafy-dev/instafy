@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -60,7 +61,7 @@ test.describe("Bench: seeded learned blocks compose on catalog flow (opt-in)", (
     const projectId = await prepareStudio(page);
     if (!projectId) throw new Error("Project id missing for fixture-news-catalog-composition-routing bench.");
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:fixture-news-catalog-composition-routing" }).catch(() => {});
     await ensureHostedRuntimeReadyForBench(page, projectId);
     await selectPrimaryAgentModel(page, FIXTURE_BENCH_MODEL);

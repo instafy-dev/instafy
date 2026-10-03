@@ -73,6 +73,7 @@ vi.mock("../../../../updates/useAppUpdateMetadata", () => ({ useAppUpdateMetadat
 vi.mock("../../../../updates/useDesktopReleaseLookup", () => ({ useDesktopReleaseLookup: () => ({ lookup: { status: "unavailable" } }) }));
 
 import { StudioSidebar } from "../StudioSidebar";
+import { OpenChatList } from "../OpenChatList";
 import { StudioSearchContext } from "../StudioSearchContext";
 import { useStudioSearch } from "../useStudioSearch";
 import { recordProjectOpened } from "../../../../projects/projectRecency";
@@ -105,7 +106,8 @@ describe("StudioSidebar organization navigation", () => {
   };
   const chooseTeamAction = async (action: "overview" | "settings" | "switch") => {
     await click("sidebar-team-menu-trigger");
-    await click(`sidebar-team-menu-${action}`);
+    if (fixture.desktop) await click(`sidebar-team-menu-${action}`);
+    else if (action !== "switch") await click(`sidebar-org-${action}-button`);
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
   };
   it("routes rail context actions to the clicked team without switching its space first", async () => {
@@ -126,7 +128,6 @@ describe("StudioSidebar organization navigation", () => {
   const secondaryNavigationProps = (): Partial<ComponentProps<typeof StudioSidebar>> => ({
     mobileOverlay: true,
     navigationHeaderExternal: true,
-    onSelectConversation: vi.fn(),
     items: [
       { id: "chat", label: "Chats" }, { id: "automations", label: "Automations" },
       { id: "code", label: "Files" }, { id: "sourceControl", label: "Changes" },
@@ -189,6 +190,57 @@ describe("StudioSidebar organization navigation", () => {
     headerPortal.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each([false, true])("opens Chats directly without desktop recent-list UI (collapsed=%s)", async collapsed => {
+    const onOpenConversationHistory = vi.fn();
+    const props: Partial<ComponentProps<typeof StudioSidebar>> = {
+      collapsed, onOpenConversationHistory,
+      items: [{ id: "chat", label: "Assistant", icon: () => <span />, accent: "" }],
+    };
+    await render(props);
+    const chats = () => container.querySelector('[data-testid="sidebar-nav-history"]');
+    expect(chats()?.getAttribute("aria-label")).toBe("Chats");
+    expect(chats()?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-browse-all-chats"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    await click("sidebar-nav-history");
+    expect(onOpenConversationHistory).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    await render({ ...props, activePanel: "settings", isConversationHistoryActive: true });
+    expect(chats()?.getAttribute("aria-expanded")).toBe("true");
+    expect(chats()?.hasAttribute("aria-current")).toBe(false);
+    await click("sidebar-nav-history");
+    expect(onOpenConversationHistory).toHaveBeenCalledTimes(2);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("opens the full Chats destination in compact conversation workspaces (touch=%s)", async touch => {
+    fixture.desktop = false;
+    fixture.touchLikeInput = touch;
+    const onOpenConversationHistory = vi.fn();
+    const props: Partial<ComponentProps<typeof StudioSidebar>> = {
+      mobileOverlay: true, navigationHeaderExternal: true,
+      onOpenConversationHistory,
+    };
+    await render(props);
+    const chats = () => container.querySelector('[data-testid="sidebar-nav-history"]');
+    expect(container.querySelectorAll('[data-testid="sidebar-nav-history"]')).toHaveLength(1);
+    expect(chats()?.getAttribute("aria-label")).toBe("Chats");
+    expect(chats()?.hasAttribute("aria-expanded")).toBe(false);
+    expect(chats()?.hasAttribute("aria-current")).toBe(false);
+    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-browse-all-chats"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    await click("sidebar-nav-history");
+    expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(onOpenConversationHistory).toHaveBeenCalledOnce();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    await render({ ...props, isConversationHistoryActive: true });
+    expect(chats()?.getAttribute("aria-current")).toBe("page");
+    expect(chats()?.hasAttribute("aria-expanded")).toBe(false);
   });
 
   it.each([
@@ -492,7 +544,7 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
     const trigger = headerPortal.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     expect(trigger.textContent).toBe("A");
-    expect(trigger.getAttribute("aria-label")).toBe("Team menu: Alpha");
+    expect(trigger.getAttribute("aria-label")).toBe(fixture.desktop ? "Team menu: Alpha" : "Choose team: Alpha");
     await chooseTeamAction("switch");
     expect(navigation.openView).toHaveBeenCalledExactlyOnceWith("workspace");
     navigation.view = "workspace";
@@ -512,7 +564,7 @@ describe("StudioSidebar organization navigation", () => {
 
   it.each([true, false])("keeps the path above chats and preserves the existing space destination (desktop=%s)", async (desktop) => {
     fixture.desktop = desktop;
-    await render({ navigationPresentation: "path", mobileOverlay: !desktop, onSelectConversation: vi.fn() });
+    await render({ navigationPresentation: "path", mobileOverlay: !desktop });
     const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
     const path = header.querySelector('[data-testid="sidebar-navigation-path"]')!;
     expect(path).not.toBeNull();
@@ -535,16 +587,19 @@ describe("StudioSidebar organization navigation", () => {
     await render({ navigationPresentation: "path", mobileOverlay: !desktop });
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     expect(trigger.textContent).toBe("A");
-    expect(trigger.getAttribute("aria-label")).toBe("Team menu: Alpha");
-    expect(trigger.title).toBe("Team menu: Alpha");
+    expect(trigger.getAttribute("aria-label")).toBe(fixture.desktop ? "Team menu: Alpha" : "Choose team: Alpha");
+    expect(trigger.title).toBe(desktop ? "Team menu: Alpha" : "Choose team: Alpha");
     await click("sidebar-team-menu-trigger");
-    const menu = document.querySelector('[role="menu"][aria-label="Team actions: Alpha"]')!;
-    expect(menu).not.toBeNull();
-    expect(menu.closest('[data-testid="sidebar-team-menu"]')?.textContent).toContain("Alpha");
-    expect(menu.querySelector('[data-testid="sidebar-team-menu-switch"]')?.textContent).toBe("Switch team");
-    expect(menu.querySelector('[data-testid="sidebar-team-menu-overview"]')?.textContent).toBe("Team overview");
-    expect(menu.querySelector('[data-testid="sidebar-team-menu-settings"]')?.textContent).toBe("Team settings");
-    await click("sidebar-team-menu-settings");
+    if (desktop) {
+      const menu = document.querySelector('[role="menu"][aria-label="Team actions: Alpha"]')!;
+      expect(menu).not.toBeNull();
+      expect(menu.closest('[data-testid="sidebar-team-menu"]')?.textContent).toContain("Alpha");
+      expect(menu.querySelector('[data-testid="sidebar-team-menu-switch"]')?.textContent).toBe("Switch team");
+      await click("sidebar-team-menu-settings");
+    } else {
+      expect(document.querySelector('[data-testid="sidebar-org-selector"]')?.textContent).toContain("Alpha");
+      await click("sidebar-org-settings-button");
+    }
     expect(fixture.onSettings).toHaveBeenCalledExactlyOnceWith("org-a");
     expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onSettings.mock.invocationCallOrder[0]);
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
@@ -557,7 +612,7 @@ describe("StudioSidebar organization navigation", () => {
     const avatar = trigger.querySelector("img")!;
     expect(avatar.getAttribute("src")).toBe("https://assets.example.test/alpha.png");
     expect(avatar.getAttribute("alt")).toBe("");
-    expect(trigger.getAttribute("aria-label")).toBe("Team menu: Alpha");
+    expect(trigger.getAttribute("aria-label")).toBe(fixture.desktop ? "Team menu: Alpha" : "Choose team: Alpha");
     await render({ navigationPresentation: "path", selectedOrgKey: "org-b", activePanel: "team" });
     const emptyTeamTrigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     expect(emptyTeamTrigger.querySelector("img")).toBeNull();
@@ -682,7 +737,6 @@ describe("StudioSidebar organization navigation", () => {
     const onBrowseAll = vi.fn();
     const props: Partial<ComponentProps<typeof StudioSidebar>> = {
       collapsed: true,
-      onSelectConversation: vi.fn(),
       onOpenConversationHistory: onBrowseAll,
       items: [
         { id: "chat", label: "Chats", icon: () => <span />, accent: "" },
@@ -702,8 +756,7 @@ describe("StudioSidebar organization navigation", () => {
       expect(onSelect).toHaveBeenLastCalledWith(id);
     }
     await click("sidebar-nav-history");
-    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).not.toBeNull();
-    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="sidebar-browse-all-chats"]')?.click());
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
     expect(onBrowseAll).toHaveBeenCalledOnce();
     const more = container.querySelector('[data-testid="sidebar-nav-more"]');
     expect(more?.getAttribute("aria-label")).toBe("More");
@@ -816,6 +869,68 @@ describe("StudioSidebar organization navigation", () => {
     expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
   });
 
+  it("keeps sheet New chat in the external toolbar and only conversations in its scrolling body", async () => {
+    fixture.desktop = false;
+    const selectChat = vi.fn();
+    const props = {
+      ...secondaryNavigationProps(), navigationPresentation: "path" as const,
+      navigationToggleExternal: true, navigationHeaderPortalTarget: headerPortal,
+      navigationActionsPortalTarget: headerPortal, mobileSheet: true,
+      mobileSheetContent: <OpenChatList tabs={[
+        { id: "current", title: "Current chat", spaceName: "Core" },
+        { id: "other", title: "Other chat", spaceName: "Design", badge: "2" },
+      ]} activeId="current" spaceName="Core" testIdPrefix="sheet" onSelect={selectChat} />,
+    };
+    await render(props);
+    expect(container.querySelector('[data-testid="sidebar-team-header"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-new-chat"]')).toBeNull();
+    const newChat = headerPortal.querySelector<HTMLButtonElement>('[data-testid="sidebar-new-chat"]')!;
+    expect(newChat.getAttribute("aria-label")).toBe("New chat");
+    expect(headerPortal.querySelector('[data-testid="sidebar-team-menu-trigger"]')).not.toBeNull();
+    expect(headerPortal.querySelector('[data-testid="sidebar-space-button"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-context-scroll"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-account-navigation"]')).toBeNull();
+    const chatList = container.querySelector('[data-testid="sidebar-chat-switcher"]')!;
+    expect(chatList.querySelectorAll("button")).toHaveLength(2);
+    expect(container.querySelector('[data-testid="sheet-tab-current"]')?.getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector('[data-testid="sheet-tab-other"]')?.textContent).toContain("Design");
+    expect(container.querySelector('[aria-label="2 unread messages"]')).not.toBeNull();
+    await click("sheet-tab-other");
+    expect(selectChat).toHaveBeenCalledExactlyOnceWith("other");
+    await click("sidebar-new-chat");
+    await click("chat-new-chat-public");
+    expect(fixture.onStartNewConversation).toHaveBeenCalledOnce();
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onStartNewConversation.mock.invocationCallOrder[0]);
+    await click("sidebar-team-menu-trigger");
+    expect(newChat.disabled).toBe(true);
+    expect(container.querySelector('[data-testid="sidebar-chat-switcher"]')?.getAttribute("aria-hidden")).toBe("true");
+    await render({ ...props, mobileSheet: false });
+    expect(headerPortal.querySelector('[data-testid="sidebar-new-chat"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-team-header"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-chat-switcher"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-context-scroll"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-account-navigation"]')).not.toBeNull();
+  });
+
+  it("leaves closing to the mobile header while keeping labeled Home and New chat actions", async () => {
+    fixture.desktop = false;
+    fixture.homeAttentionCount = 3;
+    await render({ mobileOverlay: true, navigationHeaderExternal: true, navigationToggleExternal: true });
+    const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
+    const home = header.querySelector<HTMLButtonElement>('[data-testid="sidebar-home-button"]')!;
+    expect(header.firstElementChild).toBe(home);
+    expect(home.textContent).toContain("Home");
+    expect(home.getAttribute("aria-label")).toBe("Home — all teams");
+    expect(home.querySelector('[data-testid="sidebar-home-badge"]')?.textContent).toBe("3");
+    expect(header.querySelector('[data-testid="sidebar-new-chat"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')).toBeNull();
+    await click("sidebar-home-button");
+    expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(onSelect).toHaveBeenCalledWith("home");
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onSelect.mock.invocationCallOrder[0]);
+    expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
+  });
+
   it.each(["home", "chat", "settings"] as const)("keeps Home a close-before-navigation destination on narrow %s", async (activePanel) => {
     fixture.desktop = false;
     await render({ mobileOverlay: true, activePanel, hideContext: activePanel === "settings" });
@@ -838,10 +953,7 @@ describe("StudioSidebar organization navigation", () => {
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
     const search = window.location.search;
     await click("sidebar-team-menu-trigger");
-    expect(navigation.openView).not.toHaveBeenCalled();
     expect(onOpenTeam).not.toHaveBeenCalled();
-    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).not.toBeNull();
-    await click("sidebar-team-menu-switch");
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
     expect(navigation.openView).toHaveBeenCalledExactlyOnceWith("workspace");
     expect(onRequestClose).not.toHaveBeenCalled();
@@ -890,7 +1002,7 @@ describe("StudioSidebar organization navigation", () => {
   it("returns from More to its persistent trigger before resuming mobile navigation", async () => {
     fixture.desktop = false;
     const navigation = { view: "root", openView: vi.fn(), back: vi.fn() };
-    const props = { mobileOverlay: true, mobileNavigation: navigation as never, onSelectConversation: vi.fn(),
+    const props = { mobileOverlay: true, mobileNavigation: navigation as never,
       moreItems: [{ id: "secrets" as const, label: "Secrets", icon: () => <span />, accent: "" }],
     };
     await render(props);
@@ -923,7 +1035,7 @@ describe("StudioSidebar organization navigation", () => {
 
   it("keeps only overflowing mobile tools in More and reallocates them after a height change", async () => {
     fixture.desktop = false;
-    const resize = mockSidebarHeight(580);
+    const resize = mockSidebarHeight(484);
     await render(secondaryNavigationProps());
     expect(visibleSecondaryIds()).toEqual(["extensions"]);
     expect(container.querySelector('[data-testid="sidebar-context-scroll"]')?.classList.contains("overflow-y-auto")).toBe(true);
@@ -934,14 +1046,14 @@ describe("StudioSidebar organization navigation", () => {
     await resize(1067);
     expect(visibleSecondaryIds()).toEqual(["extensions", "secrets", "skills", "ai", "machines", "credits"]);
     expect(container.querySelector('[data-testid="sidebar-nav-more"]')).toBeNull();
-    await resize(580);
+    await resize(484);
     expect(visibleSecondaryIds()).toEqual(["extensions"]);
     expect(container.querySelector('[data-testid="sidebar-nav-more"]')).not.toBeNull();
   });
 
   it("keeps an open mobile More view stable during resize and returns focus to its newly inline tools", async () => {
     fixture.desktop = false;
-    const resize = mockSidebarHeight(580);
+    const resize = mockSidebarHeight(484);
     const navigation = { view: "sidebar", openView: vi.fn(), back: vi.fn() };
     const props = { ...secondaryNavigationProps(), mobileNavigation: navigation as never };
     await render(props);
@@ -1032,9 +1144,9 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
     expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
     await click("sidebar-team-menu-trigger");
-    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).not.toBeNull();
-    expect(Boolean(document.querySelector('[data-testid="sidebar-team-menu-settings"]'))).toBe(selectedOrgKey !== "personal");
-    await click("sidebar-team-menu-overview");
+    expect(document.querySelector('[data-testid="sidebar-org-selector"]')).not.toBeNull();
+    expect(document.querySelector<HTMLButtonElement>('[data-testid="sidebar-org-settings-button"]')?.disabled).toBe(selectedOrgKey === "personal");
+    await click("sidebar-org-overview-button");
     expect(onOpenTeam).toHaveBeenCalledExactlyOnceWith(selectedOrgKey);
     expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onOpenTeam.mock.invocationCallOrder[0]);
   });

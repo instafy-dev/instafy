@@ -73,7 +73,7 @@ test.describe("Agent file creation", () => {
     // Optionally verify in Files explorer; origin-only explorer may not
     // reflect controller-written files in this smoke path, so make it soft.
     await page.getByTestId("sidebar-nav-code").click();
-    const searchInput = page.getByTestId("code-search-input");
+    const searchInput = page.getByTestId("files-explorer-search-toggle");
     await searchInput.waitFor({ timeout: 10_000 }).catch(() => {});
     if (await searchInput.isVisible().catch(() => false)) {
       const fileEntry = page.getByTestId("files-entry-hello-md");
