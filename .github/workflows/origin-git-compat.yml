@@ -74,6 +74,9 @@ jobs:
       # The suite runs many git processes in parallel. One older test of the
       # import baseline commit (commit_apply_locally, outside the publish
       # path) does not pass on git 2.34 yet; it is skipped by exact name.
+      # Follow-up: make the import baseline pass on git 2.34 (or retire it
+      # with the gateway's working copies) and drop the skip; hosted images
+      # ship git 2.43 or newer, so production does not run that path on 2.34.
       - name: Test the origin server against git 2.34.1
         shell: bash
         run: |

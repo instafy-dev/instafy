@@ -343,37 +343,55 @@ loses only work that never reached the remote:
   provider-managed runtime (idle reaper, credit stop, a user's Stop or
   removal, ensure replacement, the sweeps), and before it fences the runtime,
   it calls the hosted origin's `POST /git/flush` and waits at most 25 seconds.
-  The flush publishes finished local commits by merge, parks files no turn
-  saved on a recovery ref, and pushes it. When a job is running on the runtime,
-  or was cancelled in the last minute, the request says `turnActive` and that
-  turn's local commits are parked too instead of reaching `main`. The origin
-  gets `git.write` with a 60-second `fs.write` token the controller mints for
-  the holder of the project's workspace lease (taking a short lease for the
-  project owner when nobody holds one); the runtime's machine token still
-  cannot mint `git.write`. The response's `unpushedRefs` and
-  `unpushedRefNames` list what is still only on the node, and the outcome is
-  recorded as a `workspace_flush` runtime event. The flush is best effort: a
-  failure is logged and the stop goes on.
+  The flush first stores everything on local recovery refs, with no network
+  call: finished local commits that are not on `main` as `unpublished`, and
+  files no turn saved as `unsaved`. When a job is running on the runtime, or
+  was cancelled in the last minute, the request says `turnActive`, and that
+  turn's local commits go to the `unsaved` ref with its files and leave the
+  branch instead of reaching `main`. Then, best effort and within its time,
+  it publishes the finished commits by merge (which retires their local
+  copy) and pushes the refs. Until the next refresh, the origin refuses
+  further saves (409), so a checkpoint racing the stop cannot put the parked
+  work on `main` as well. The origin gets `git.write` with a 60-second
+  `fs.write` token the controller mints for the holder of the project's
+  active workspace lease; the runtime's machine token still cannot mint
+  `git.write`. When nobody holds a lease this runtime may save under (an idle
+  stop, say), the controller mints nothing for anyone and does not call the
+  origin (`no_writer`), and the runtime's own shutdown flush keeps the work
+  locally. The response's `unpushedRefs` and `unpushedRefNames` list what is
+  still only on the node, and the outcome is recorded as a `workspace_flush`
+  runtime event. A failure is logged and the stop goes on; whatever was
+  stored stays on the local refs.
 - On the process's own graceful stop of a hosted runtime,
-  `flush_workspace_before_shutdown` parks files no turn saved on a local
-  recovery ref (`refs/instafy/local-recovery/<name>`), without network or
-  credentials, and leaves finished local commits on the branch. The next
-  publish or pre-turn refresh with `git.write` pushes the ref and publishes the
-  commits. Work parked only locally is lost if the node is replaced before
-  that push. Desktop folders are never flushed.
+  `flush_workspace_before_shutdown` does the same local step without network
+  or credentials: finished local commits are kept on a local `unpublished`
+  ref (and stay on the branch for the next refresh to publish), files no turn
+  saved on a local `unsaved` ref. When the last job lost its lease before its
+  turn finished (a stop requeued or cancelled it), that turn's commits are
+  set aside instead of left for the next publish. After it succeeds it writes
+  `.instafy/.git/instafy-stopped-clean`, which every origin start removes. The
+  next publish or pre-turn refresh with `git.write` pushes the refs. Work
+  parked only locally is lost if the node is replaced before that push.
+  Desktop folders are never flushed.
 - Residual exposure: a hard node loss mid-run (the in-flight run's work), work
   parked locally whose push has not happened yet, and gitignored files.
 
 **Recovery refs.** Work that cannot reach `main` is never dropped. It is
 committed first to a local ref, `refs/instafy/local-recovery/<name>`, without
 any network call, then pushed to `refs/instafy/recovery/<origin id>/<name>` by
-the next save, refresh or controller flush that holds `git.write`. A local ref
-moves to `refs/instafy/local-recovery-pushed/<name>` only after the push is
-confirmed. Each refresh mirrors the space's `refs/instafy/recovery/*` into the
-checkout, so an agent can read kept work on any machine with
+the next save, refresh or controller flush that holds `git.write`. The origin
+id is the one recorded in the commit (`Instafy-Origin`), so a later runtime on
+the same checkout, which has a new origin id, pushes and reads earlier refs
+where they belong. A local ref moves to
+`refs/instafy/local-recovery-pushed/<name>` only after the push is confirmed.
+Each refresh mirrors the space's `refs/instafy/recovery/*` into the checkout,
+so an agent can read kept work on any machine with
 `instafy git show <ref>:<path>` and merge it
 (`.agents/skills/instafy-git-canonical-conflicts/SKILL.md`). Kept work stays
-until someone restores or dismisses it.
+until someone restores or dismisses it; dismissed work is never published
+again, and later local commits built on it are published without it. A
+recovery ref never carries a file that may not be published (secrets, legacy
+chat uploads, build output): such files stay on the runtime's disk only.
 
 **Checkout lifetime.** The hosted checkout is a bind mount of the node's disk,
 `DOCKER_REPO_HOST/<project>`. It survives container stops and re-provisioning
@@ -390,7 +408,16 @@ evicts stopped checkouts:
   never for a workspace without a canonical remote;
 - never while the checkout holds a `refs/instafy/local-recovery/*` ref: that
   work is not pushed yet. The sweep logs the project and keeps the checkout;
-  the next start pushes the refs, and a later sweep evicts.
+  the next start pushes the refs, and a later sweep evicts;
+- never unless the runtime that last used it stopped cleanly
+  (`.instafy/.git/instafy-stopped-clean`, see above). A crash, a kill or a
+  stop that could not keep its work may leave files or commits that exist
+  nowhere else; such a checkout is kept until a later start and clean stop.
+  Checkouts from before this marker are kept the same way.
+
+A stop takes the same per-project lock as a start while it runs and marks the
+checkout as used, and the sweep reads that mark again once it holds the lock,
+so a checkout is never evicted as its runtime stops.
 
 The sweep runs every `RUNTIME_CHECKOUT_SWEEP_INTERVAL_SECS` (default six
 hours, 0 turns it off). It reads refs from the repository files without
