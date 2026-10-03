@@ -229,6 +229,7 @@ already accepted. The bounds are code constants in `runtime/provider.rs` and
 | `POST /runtime/ensure` | launch | 120 s | Handled like any provider error: the new lease is quarantined as `cleanup_pending`, then a compensating release (up to 15 min) runs outside the database fence. |
 | `POST /runtime/release` | stop, remove, the idle, credit, heartbeat and launch-timeout sweeps, idle-slot reclaim, the dev-only offline endpoint | 180 s | The stop fails with 502 (a sweep logs it and moves on) and the generation stays quarantined (see below). The dev-only offline endpoint only logs it. |
 | `POST /runtime/inspect` | OOM post-mortem in the heartbeat-timeout sweep | 15 s | The attribution is unknown and the stop proceeds as `heartbeat_timeout`. |
+| `POST /runtime/census` | the pool-retirement drain (census, drain stop, flush-checkout) | 30 s | The census marks the provider as not answering (`complete: false`); a drain must then hold the node. |
 
 An idle-slot reclaim (stopping an organization's idle machine so a waiting
 space can launch) runs while that launch holds the controller's single
@@ -350,25 +351,47 @@ loses only work that never reached the remote:
   turn's local commits go to the `unsaved` ref with its files and leave the
   branch instead of reaching `main`. Then, best effort and within its time,
   it publishes the finished commits by merge (which retires their local
-  copy) and pushes the refs. Until the next refresh, the origin refuses
-  further saves (409), so a checkpoint racing the stop cannot put the parked
-  work on `main` as well. The origin gets `git.write` with a 60-second
-  `fs.write` token the controller mints for the holder of the project's
-  active workspace lease; the runtime's machine token still cannot mint
-  `git.write`. When nobody holds a lease this runtime may save under (an idle
-  stop, say), the controller mints nothing for anyone and does not call the
-  origin (`no_writer`), and the runtime's own shutdown flush keeps the work
-  locally. The response's `unpushedRefs` and `unpushedRefNames` list what is
-  still only on the node, and the outcome is recorded as a `workspace_flush`
-  runtime event. A failure is logged and the stop goes on; whatever was
-  stored stays on the local refs.
+  copy) and pushes the refs; every fetch, push and connection attempt stops
+  at the end of its 18-second budget. Until the next refresh, the origin
+  refuses further saves with 503 `workspace_stopping` (the runtime agent
+  says the workspace is stopping, not that a save conflicted), so a
+  checkpoint racing the stop cannot put the parked work on `main` as well.
+  The origin gets `git.write` with one of two short-lived credentials; the
+  runtime's machine token still cannot mint `git.write`:
+  - the holder of the project's active workspace lease (bound to this
+    runtime or to none) gets a 60-second `fs.write` token;
+  - when nobody holds such a lease (an idle stop, or a lease bound to
+    another runtime, as after a pool cutover) and the controller stops the
+    runtime on its own (its sweeps, idle-slot reclaim, stale-generation
+    cleanup and the pool-retirement drain, never a stop a user or a runtime
+    asked for), the space owner gets a 60-second save-only permission (scope
+    `workspace.flush`). It is bound to the project, the runtime, its lease
+    generation and its origin, opens `/git/flush` and nothing else, and takes
+    no workspace lease, so someone who opens the space during the flush gets
+    their own lease as usual. The controller exchanges it for `git.write`
+    only while that generation is still active (not yet quarantined), its
+    origin online, and the subject still the owner with write access; the git
+    token never outlives it. Commits stay authored by the origin. Each
+    exchange is logged with the project, runtime and origin, never a token.
+  Otherwise (no owner, or a requested stop with no lease holder) the
+  controller mints nothing and does not call the origin (`no_writer`), and
+  the runtime's own shutdown flush keeps the work locally. The origin's
+  `unpushedRefs` and `unpushedRefNames` list what is still only on the node.
+  The outcome, with whose name it saved under (`lease_holder`, `owner_grant`
+  or `none`), is recorded as a `workspace_flush` runtime event, and the stop
+  response carries it as `flush: {status, unpushedRefs, unpushedRefNames}`
+  (`status` is `flushed`, `no_writer`, `failed`, `skipped` or `not_running`;
+  `unpushedRefs` is `null` when unknown). A failure is logged and the stop
+  goes on; whatever was stored stays on the local refs.
 - On the process's own graceful stop of a hosted runtime,
   `flush_workspace_before_shutdown` does the same local step without network
   or credentials: finished local commits are kept on a local `unpublished`
   ref (and stay on the branch for the next refresh to publish), files no turn
-  saved on a local `unsaved` ref. When the last job lost its lease before its
-  turn finished (a stop requeued or cancelled it), that turn's commits are
-  set aside instead of left for the next publish. After it succeeds it writes
+  saved on a local `unsaved` ref. When a turn is still running, or one lost
+  its lease (a cancel, or a stop's requeue) within the last minute, its
+  commits are set aside instead of left for the next publish; each job counts
+  on its own, as the controller's `turnActive` does, so one worker finishing
+  never hides another's cancel. After it succeeds it writes
   `.instafy/.git/instafy-stopped-clean`, which every origin start removes. The
   next publish or pre-turn refresh with `git.write` pushes the refs. Work
   parked only locally is lost if the node is replaced before that push.
@@ -389,7 +412,11 @@ so an agent can read kept work on any machine with
 `instafy git show <ref>:<path>` and merge it
 (`.agents/skills/instafy-git-canonical-conflicts/SKILL.md`). Kept work stays
 until someone restores or dismisses it; dismissed work is never published
-again, and later local commits built on it are published without it. A
+again, and later local commits built on it are published without it. Several
+dismissed refs from one chain are handled deepest first, and a dismissal is
+marked done only after the branch no longer carries its commits: one that
+cannot be applied yet fails that save, keeps a stop from publishing, and is
+tried again by the next publish. A
 recovery ref never carries a file that may not be published (secrets, legacy
 chat uploads, build output): such files stay on the runtime's disk only.
 
@@ -422,6 +449,49 @@ so a checkout is never evicted as its runtime stops.
 The sweep runs every `RUNTIME_CHECKOUT_SWEEP_INTERVAL_SECS` (default six
 hours, 0 turns it off). It reads refs from the repository files without
 running git, and keeps any checkout whose state it cannot read with certainty.
+
+**Draining a node before its pool is retired.** Hosted runtimes run on the
+node of the controller that started them, and their checkouts live on its
+disk, so deleting the node deletes both, including work that is only on a
+checkout's local recovery refs. Before a release retires the previous
+controller pool, the release workflow asks that controller (directly, with
+the service-role bearer; user, operator and scoped tokens get 403) to drain
+its node:
+
+- `GET /operator/runtime-drain/census` lists what the node-local provider
+  holds (`POST /runtime/census`: runtimes from their containers' `SPACE_ID`,
+  `RUNTIME_ID` and `RUNTIME_LEASE_ID`, and checkouts with their unpushed
+  local refs and clean-stop marker, read from the files without git), joined
+  with the database: a runtime is `live` when its container runs the
+  runtime's active generation and `orphan` otherwise, and a checkout with no
+  runtime `needsFlush` when it holds unpushed refs, lacks the clean-stop
+  marker or cannot be read. `complete: false` means a provider did not answer
+  or cut its lists.
+- `POST /operator/runtime-drain/fence {fenced, ttlSeconds <= 3600}` makes this
+  process start no runtime (503 `controller_retiring`) and skip its own stop
+  sweeps and reclaims (`controller_retiring`), which after a cutover act
+  through this node's provider on runtimes that may now live elsewhere. It is
+  process-local, so the serving controller on the same database is never
+  fenced, and it lapses on its own.
+- `POST /operator/runtime-drain/stop {runtimeId, projectId, leaseId}` stops
+  one live runtime through the safe stop with the drain's source. It is
+  skipped as `runtime_lease_mismatch` unless the runtime's active generation
+  is `leaseId`, before anything is flushed or fenced. An active turn is
+  interrupted (its commits go to a recovery ref and its job is requeued). The
+  answer carries the stop's `flush` and the checkout as the census sees it
+  afterwards. `/runtime/stop` takes the same guard as `expected_lease_id`.
+- `POST /operator/runtime-drain/flush-checkout {projectId}` saves a stopped
+  checkout: it releases containers of other generations by their own ids,
+  then, when the checkout still holds work and the space runs nowhere else
+  (`busy_elsewhere` otherwise), starts the space's runtime on this node even
+  while fenced, stops it again through the same flush and reports the
+  checkout. That wake leases no job and is never billed (a
+  `pool_retirement_flush_wake` runtime event marks its generation). It
+  answers `clean`, `flushed`, `busy_here`, `busy_elsewhere`, `no_runtime`,
+  `wake_failed` or `failed`.
+
+Every drain action is recorded as a `pool_retirement_drain` runtime event
+with ids, statuses and counts only.
 
 **Compatibility: upgrading the provider compose file turns the remote on.**
 Before `docker/docker-compose.runtime.provider.yml` forwarded
