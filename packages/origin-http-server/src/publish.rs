@@ -232,8 +232,22 @@ pub struct FlushReport {
 /// without write access or network, or one cut short, keeps everything on
 /// local refs for the next publish or refresh to push.
 pub fn flush(ctx: &PublishContext<'_>, turn_active: bool) -> Result<FlushReport, OriginError> {
-    let mut publisher = Publisher::new(ctx, FLUSH_BUDGET);
-    publisher.git = publisher.git.with_stall_limit(FLUSH_STALL_SECONDS);
+    flush_within(ctx, turn_active, FLUSH_BUDGET)
+}
+
+/// [`flush`] with its own budget. Every network command (fetch retries, a
+/// push started near the end, connecting included) stops at the budget's
+/// end, so the flush answers before the controller stops waiting.
+pub(crate) fn flush_within(
+    ctx: &PublishContext<'_>,
+    turn_active: bool,
+    budget: Duration,
+) -> Result<FlushReport, OriginError> {
+    let mut publisher = Publisher::new(ctx, budget);
+    publisher.git = publisher
+        .git
+        .with_stall_limit(FLUSH_STALL_SECONDS)
+        .with_network_deadline(publisher.deadline);
     publisher.push_deadline = Some(publisher.deadline);
     publisher.flush(turn_active).map_err(internal)
 }
@@ -474,8 +488,12 @@ impl<'a> Publisher<'a> {
                 break;
             }
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if attempts < 2 && looks_like_transient_http_error(&stderr) {
-                std::thread::sleep(Duration::from_millis(250 << attempts));
+            let backoff = Duration::from_millis(250 << attempts);
+            if attempts < 2
+                && looks_like_transient_http_error(&stderr)
+                && Instant::now() + backoff < self.deadline
+            {
+                std::thread::sleep(backoff);
                 attempts += 1;
                 continue;
             }
@@ -488,21 +506,56 @@ impl<'a> Publisher<'a> {
         self.git.commit_id(&self.tracking_ref)
     }
 
-    /// Retire pushed markers whose canonical ref was dismissed, and take the
-    /// commits of a dismissed `unpublished` ref off the local branch, so no
-    /// later publish (or stop) sends them. Returns whether the branch moved.
+    /// Take the commits of every dismissed `unpublished` ref off the local
+    /// branch, so no later publish (or stop) sends them, and retire each
+    /// pushed marker whose canonical ref was dismissed. A marker is retired
+    /// only after the branch no longer carries its commits: when that fails,
+    /// the error is returned and the next call sees the dismissal again.
+    /// Returns whether the branch moved.
     fn retire_dismissed(&mut self) -> Result<bool> {
-        let dismissed = recovery::retire_dismissed(&self.git, self.config.origin_id)?;
-        let mut moved = false;
+        let dismissed = recovery::dismissed_markers(&self.git, self.config.origin_id)?;
+        let mut done = Vec::new();
+        let mut unpublished = Vec::new();
         for (name, rev) in dismissed {
             info!(%name, "recovery work was dismissed");
-            if recovery::kind_of_name(&name) != Some(RecoveryKind::Unpublished) {
-                continue;
-            }
-            let Some(source) = recovery::source_of(&self.git, &rev)? else {
-                continue;
+            let source = if recovery::kind_of_name(&name) == Some(RecoveryKind::Unpublished) {
+                recovery::source_of(&self.git, &rev)?
+            } else {
+                None
             };
+            match source {
+                Some(source) => unpublished.push((name, rev, source)),
+                // Nothing on the branch to undo: retiring the marker is the
+                // whole dismissal.
+                None => done.push((name, rev)),
+            }
+        }
+        recovery::retire_markers(&self.git, &done)?;
+
+        // Deepest source first. Refs parked from the same chain share their
+        // base, so a later ref's commits include an earlier one's: stepping
+        // back below the later ref first leaves the earlier one's commits off
+        // the branch too. The other order would replay the later commits as
+        // new ones that no longer match the later ref's source, and publish
+        // them.
+        let mut ordered = Vec::new();
+        for (name, rev, source) in unpublished {
+            let depth = match self.git.commit_id(&source)? {
+                Some(_) => self
+                    .git
+                    .stdout(&["rev-list", "--count", &source])?
+                    .trim()
+                    .parse::<u64>()
+                    .unwrap_or(0),
+                None => 0,
+            };
+            ordered.push((depth, name, rev, source));
+        }
+        ordered.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut moved = false;
+        for (_, name, rev, source) in ordered {
             moved |= self.drop_dismissed_commits(&name, &rev, &source)?;
+            recovery::retire_markers(&self.git, &[(name, rev)])?;
         }
         Ok(moved)
     }
@@ -529,7 +582,15 @@ impl<'a> Publisher<'a> {
         let target = if head == source {
             Some(base.clone())
         } else {
-            self.replay_without(source, &head, &base)?
+            match self.replay_without(source, &head, &base) {
+                Ok(target) => target,
+                // A replay that cannot even be attempted (a path the merge
+                // cannot read) is handled like a conflicting one.
+                Err(error) => {
+                    warn!(error = %format!("{error:#}"), %name, "could not replay later commits without the dismissed ones");
+                    None
+                }
+            }
         };
         match target {
             Some(target) => {
@@ -1833,7 +1894,10 @@ impl<'a> Publisher<'a> {
 
         // 2. Best effort, with write access: notice dismissed work, publish
         // finished commits, push what is parked. A failure here leaves the
-        // work on the local refs stored above.
+        // work on the local refs stored above. A dismissal this stop could not
+        // apply keeps the finished commits unpublished: they may carry the
+        // dismissed work, and the next publish applies the dismissal first.
+        let mut dismissals_applied = true;
         if self.can_write && Instant::now() < self.deadline {
             match self.fetch(true) {
                 Ok(_) => {
@@ -1855,7 +1919,8 @@ impl<'a> Publisher<'a> {
                         }
                         Ok(_) => {}
                         Err(error) => {
-                            warn!(error = %format!("{error:#}"), "could not apply dismissed recovery work");
+                            dismissals_applied = false;
+                            warn!(error = %format!("{error:#}"), "could not apply dismissed recovery work; this stop publishes nothing");
                         }
                     }
                 }
@@ -1864,7 +1929,12 @@ impl<'a> Publisher<'a> {
                 }
             }
         }
-        if self.can_write && self.fetched && !turn_active && Instant::now() < self.deadline {
+        if self.can_write
+            && self.fetched
+            && dismissals_applied
+            && !turn_active
+            && Instant::now() < self.deadline
+        {
             if let Some(head) = self.git.commit_id("HEAD")? {
                 let main = self.tracked_main()?;
                 if !self.is_published(&head, main.as_deref())? {

@@ -845,11 +845,14 @@ pub(crate) fn ls_remote(
     Ok(found)
 }
 
-/// After a fetch that mirrored `refs/instafy/recovery/*` with `--prune`,
-/// retire every pushed marker whose canonical ref is gone. A marker's
-/// canonical ref is under the origin that made it (its trailer), not under
-/// the origin running now. Returns the dismissed `(name, rev)` pairs.
-pub(crate) fn retire_dismissed(
+/// After a fetch that mirrored `refs/instafy/recovery/*` with `--prune`, the
+/// pushed markers whose canonical ref is gone: someone dismissed that work.
+/// A marker's canonical ref is under the origin that made it (its trailer),
+/// not under the origin running now. Returns the `(name, rev)` pairs and
+/// moves nothing: the caller retires each marker with [`retire_markers`]
+/// only once it has acted on the dismissal, so a dismissal it could not
+/// apply is seen again by the next call.
+pub(crate) fn dismissed_markers(
     git: &WorkspaceGit<'_>,
     origin_id: Uuid,
 ) -> Result<Vec<(String, String)>> {
@@ -858,7 +861,6 @@ pub(crate) fn retire_dismissed(
         .into_iter()
         .collect();
     let mut dismissed = Vec::new();
-    let mut transaction = String::new();
     for (reference, rev) in git.refs_under(LOCAL_RECOVERY_PUSHED_ROOT)? {
         let Some(name) = reference.strip_prefix(&format!("{LOCAL_RECOVERY_PUSHED_ROOT}/")) else {
             continue;
@@ -866,25 +868,34 @@ pub(crate) fn retire_dismissed(
         if mirrored.contains_key(&canonical_ref(origin_of(git, &rev, origin_id), name)) {
             continue;
         }
-        transaction.push_str(&format!("update {} {rev}\n", dismissed_ref(name)));
-        transaction.push_str(&format!("delete {reference} {rev}\n"));
         dismissed.push((name.to_string(), rev));
     }
-    if !transaction.is_empty() {
-        git.ok_opts(
-            &[
-                "update-ref",
-                "--stdin",
-                "-m",
-                "instafy: recovery work dismissed",
-            ],
-            &RunOpts {
-                stdin: Some(transaction.as_bytes()),
-                ..RunOpts::default()
-            },
-        )?;
-    }
     Ok(dismissed)
+}
+
+/// Move pushed markers to `local-recovery-dismissed`, in one transaction
+/// that fails (and moves none of them) when a marker changed meanwhile.
+pub(crate) fn retire_markers(git: &WorkspaceGit<'_>, markers: &[(String, String)]) -> Result<()> {
+    if markers.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = String::new();
+    for (name, rev) in markers {
+        transaction.push_str(&format!("update {} {rev}\n", dismissed_ref(name)));
+        transaction.push_str(&format!("delete {} {rev}\n", pushed_ref(name)));
+    }
+    git.ok_opts(
+        &[
+            "update-ref",
+            "--stdin",
+            "-m",
+            "instafy: recovery work dismissed",
+        ],
+        &RunOpts {
+            stdin: Some(transaction.as_bytes()),
+            ..RunOpts::default()
+        },
+    )
 }
 
 /// The value of the last `<key>: <value>` line of a commit's message.

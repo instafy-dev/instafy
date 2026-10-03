@@ -11,7 +11,7 @@ use std::ffi::OsString;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -94,6 +94,9 @@ pub(crate) struct WorkspaceGit<'a> {
     token: Option<&'a str>,
     /// A shorter stall window for commands that talk to the remote.
     stall_seconds: Option<u32>,
+    /// Commands that talk to the remote are stopped at this time, and none
+    /// starts after it.
+    network_deadline: Option<Instant>,
 }
 
 impl<'a> WorkspaceGit<'a> {
@@ -102,6 +105,7 @@ impl<'a> WorkspaceGit<'a> {
             root,
             token,
             stall_seconds: None,
+            network_deadline: None,
         }
     }
 
@@ -111,6 +115,14 @@ impl<'a> WorkspaceGit<'a> {
     /// before it talks to the remote.
     pub(crate) fn with_stall_limit(mut self, seconds: u32) -> Self {
         self.stall_seconds = Some(seconds);
+        self
+    }
+
+    /// Stop every fetch, push or ls-remote at `deadline`, connecting
+    /// included, and start none after it. A stop's time to keep its work is
+    /// fixed; what it parked locally first stays for the next publish.
+    pub(crate) fn with_network_deadline(mut self, deadline: Instant) -> Self {
+        self.network_deadline = Some(deadline);
         self
     }
 
@@ -152,6 +164,10 @@ impl<'a> WorkspaceGit<'a> {
     }
 
     fn spawn(&self, args: &[&str], opts: &RunOpts<'_>, network: bool) -> Result<Output> {
+        let deadline = self.network_deadline.filter(|_| network);
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            bail!("no time left to run git {}", describe(args));
+        }
         validate_instafy_git_layout(self.root)?;
         refresh_instafy_git_worktree_config(self.root)?;
         let workspace = WorkspaceDir::open(self.root)
@@ -209,9 +225,38 @@ impl<'a> WorkspaceGit<'a> {
             }
             _ => None,
         };
-        let output = child
-            .wait_with_output()
-            .with_context(|| format!("failed to run git {}", describe(args)))?;
+        let output = match deadline {
+            // Read the output on other threads so a full pipe never blocks
+            // the command, and kill it at the deadline.
+            Some(deadline) => {
+                let stdout = child.stdout.take().map(read_on_thread);
+                let stderr = child.stderr.take().map(read_on_thread);
+                let status = loop {
+                    if let Some(status) = child
+                        .try_wait()
+                        .with_context(|| format!("failed to run git {}", describe(args)))?
+                    {
+                        break status;
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        // A helper the command started can hold the pipes
+                        // open, so the readers are left to finish on their own.
+                        bail!("git {} ran out of time", describe(args));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                Output {
+                    status,
+                    stdout: joined(stdout),
+                    stderr: joined(stderr),
+                }
+            }
+            None => child
+                .wait_with_output()
+                .with_context(|| format!("failed to run git {}", describe(args)))?,
+        };
         if let Some(writer) = writer {
             let _ = writer.join();
         }
@@ -538,6 +583,23 @@ fn size_or_missing(kind: &str) -> bool {
 /// The all-zero id in the same object format as `like`.
 pub(crate) fn zero_oid(like: &str) -> String {
     "0".repeat(if like.len() == 64 { 64 } else { 40 })
+}
+
+/// Read all of `pipe` on a thread of its own.
+fn read_on_thread<R: std::io::Read + Send + 'static>(
+    mut pipe: R,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
+}
+
+fn joined(reader: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    reader
+        .map(|reader| reader.join().unwrap_or_default())
+        .unwrap_or_default()
 }
 
 fn describe(args: &[&str]) -> String {

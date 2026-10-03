@@ -2113,6 +2113,41 @@ impl StubController {
         }
     }
 
+    /// The save-only permission the controller's own stop path issues when
+    /// nobody holds a workspace lease: scope `workspace.flush`, bound to the
+    /// runtime generation (`lease_id` is the runtime lease), in the space
+    /// owner's name.
+    fn save_grant_token(
+        &self,
+        config: &ServerConfig,
+        owner: Uuid,
+        runtime_id: Uuid,
+        runtime_lease_id: Uuid,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let header = jsonwebtoken::Header {
+            kid: Some("stub-key".to_string()),
+            ..jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA)
+        };
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({
+                "aud": config.origin_id.to_string(),
+                "sub": owner.to_string(),
+                "project_id": config.project_id.to_string(),
+                "origin_id": config.origin_id.to_string(),
+                "runtime_id": runtime_id.to_string(),
+                "protocol": "http",
+                "scopes": [crate::routes::PRE_STOP_SAVE_SCOPE],
+                "lease_id": runtime_lease_id.to_string(),
+                "iat": now,
+                "exp": now + 60,
+            }),
+            &self.encoding_key,
+        )
+        .unwrap()
+    }
+
     /// The short-lived fs.write origin token the controller mints for the
     /// workspace lease holder before a stop.
     fn origin_token(
@@ -3151,7 +3186,14 @@ async fn saves_after_a_flush_wait_for_the_next_refresh() {
         .send()
         .await
         .unwrap();
-    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(refused.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(
+        body["code"],
+        crate::routes::WORKSPACE_STOPPING_CODE,
+        "{body}"
+    );
+    assert_eq!(body["retryable"], true, "{body}");
     assert_eq!(
         sc.remote_file("doc.md").as_deref(),
         Some("alpha\nbeta\ngamma\ndelta\n")
@@ -3391,4 +3433,256 @@ fn the_conflict_copy_exists_before_the_merge_is_pushed() {
         .as_deref()
         .is_some_and(|reference| reference.contains("-conflict-")));
     assert_eq!(report.unpushed_refs, 0);
+}
+
+/// Two dismissed `unpublished` refs from the same chain: the later one's
+/// commits include the earlier one's. Neither ref's work reaches main, in
+/// whatever order the markers are found.
+#[test]
+fn two_dismissals_on_one_chain_publish_neither() {
+    let sc = Scenario::new(Options::default());
+    let main_before = sc.main();
+    let hook = close_main(&sc);
+    sc.write("x.rs", b"fn x() {}\n");
+    let first = sc.publish_paths(&["x.rs"]);
+    assert_eq!(first.git_sync_status, SyncStatus::Unpublished, "{first:?}");
+    let first_ref = first.recovery_ref.clone().expect("parked");
+    sc.write("later.rs", b"fn later() {}\n");
+    let second = sc.publish_paths(&["later.rs"]);
+    assert_eq!(
+        second.git_sync_status,
+        SyncStatus::Unpublished,
+        "{second:?}"
+    );
+    let second_ref = second.recovery_ref.clone().expect("parked");
+    assert_ne!(first_ref, second_ref);
+    for reference in [&first_ref, &second_ref] {
+        assert!(
+            reference.starts_with("refs/instafy/recovery/"),
+            "{reference}"
+        );
+    }
+    assert!(
+        sc.recovery_file(&second_ref, "x.rs").is_some(),
+        "the later copy carries the earlier work too"
+    );
+    fs::remove_file(hook).unwrap();
+
+    git_in(&sc.remote, &["update-ref", "-d", &first_ref]);
+    git_in(&sc.remote, &["update-ref", "-d", &second_ref]);
+    let report = refresh(&sc.ctx(true)).unwrap();
+    assert_eq!(sc.main(), main_before, "{report:?}");
+    assert!(sc.remote_file("x.rs").is_none());
+    assert!(sc.remote_file("later.rs").is_none());
+    assert!(!sc.anywhere_on_remote("fn later()"));
+    assert!(sc.disk("later.rs").is_none());
+    assert!(sc.disk("x.rs").is_none());
+    assert!(sc.local_refs(LOCAL_RECOVERY_PUSHED_ROOT).is_empty());
+    assert_eq!(sc.local_refs(LOCAL_RECOVERY_DISMISSED_ROOT).len(), 2);
+
+    // A later save publishes only itself.
+    sc.write("y.rs", b"fn y() {}\n");
+    let saved = sc.publish_paths(&["y.rs"]);
+    assert_eq!(saved.git_sync_status, SyncStatus::Published, "{saved:?}");
+    assert!(sc.remote_file("later.rs").is_none());
+    assert!(sc.remote_file("x.rs").is_none());
+}
+
+/// A git whose branch moves fail, so a dismissal cannot be applied.
+fn with_branch_moves_failing<T>(sc: &Scenario, body: impl FnOnce() -> T) -> T {
+    use std::os::unix::fs::PermissionsExt as _;
+    let real_git = git_in(&sc.root, &["--exec-path"]);
+    let real_git = Path::new(&real_git).join("git");
+    let wrapper = sc.root.join("stuck-branch-git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nupdate=0\nhead=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    reset) echo 'reset broke' >&2; exit 1 ;;\n    update-ref) update=1 ;;\n    HEAD) head=1 ;;\n  esac\ndone\nif [ $update = 1 ] && [ $head = 1 ]; then echo 'branch move broke' >&2; exit 1; fi\nexec '{}' \"$@\"\n",
+            real_git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
+    let result = body();
+    crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+    result
+}
+
+/// A dismissal that cannot be applied is not lost: its marker stays, the
+/// stop publishes nothing, and the next publish applies it.
+#[test]
+fn a_dismissal_that_cannot_be_applied_is_retried_and_never_published() {
+    let sc = Scenario::new(Options::default());
+    let (local, reference) = parked_and_pushed(&sc);
+    git_in(&sc.remote, &["update-ref", "-d", &reference]);
+    let main_before = sc.main();
+
+    let report = with_branch_moves_failing(&sc, || flush(&sc.ctx(true), false)).unwrap();
+    assert!(report.publish.is_none(), "{report:?}");
+    assert_eq!(sc.main(), main_before);
+    assert!(!on_main(&sc, &local));
+    assert_eq!(
+        sc.local_refs(LOCAL_RECOVERY_PUSHED_ROOT).len(),
+        1,
+        "the marker waits for the dismissal to be applied"
+    );
+    assert!(sc.local_refs(LOCAL_RECOVERY_DISMISSED_ROOT).is_empty());
+
+    // A save hits the same failure: it fails instead of sending the work.
+    sc.write("y.rs", b"fn y() {}\n");
+    let failed = with_branch_moves_failing(&sc, || {
+        publish(
+            &sc.ctx(true),
+            PublishRequest {
+                selection: Selection::Paths(vec!["y.rs".to_string()]),
+                message: "instafy: agent sync".to_string(),
+                author: None,
+                budget: Duration::from_secs(30),
+            },
+        )
+    });
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(!on_main(&sc, &local));
+
+    let refreshed = refresh(&sc.ctx(true)).unwrap();
+    assert!(!on_main(&sc, &local), "{refreshed:?}");
+    assert!(sc.remote_file("x.rs").is_none());
+    assert!(sc.local_refs(LOCAL_RECOVERY_PUSHED_ROOT).is_empty());
+    assert_eq!(sc.local_refs(LOCAL_RECOVERY_DISMISSED_ROOT).len(), 1);
+}
+
+/// A remote that accepts the connection and never answers: the stop's
+/// fetch and push are stopped at its budget, and everything stays parked
+/// locally for the next publish.
+#[test]
+fn a_hanging_remote_never_holds_a_flush_past_its_budget() {
+    let sc = Scenario::new(Options::default());
+    sc.write("done.rs", b"fn done() {}\n");
+    sc.agent_commit(&["done.rs"], "finished work");
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nunsaved\n");
+    // The kernel completes the handshake; nothing ever answers.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/remote.git", silent.local_addr().unwrap());
+    let real = ig(&sc.ws, &["remote", "get-url", "origin"]);
+    ig(&sc.ws, &["remote", "set-url", "origin", &url]);
+
+    let started = Instant::now();
+    let report =
+        crate::publish::flush_within(&sc.ctx(true), false, Duration::from_secs(2)).unwrap();
+    let elapsed = started.elapsed();
+    ig(&sc.ws, &["remote", "set-url", "origin", &real]);
+    drop(silent);
+
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    assert_eq!(report.unpushed_refs, 2, "{report:?}");
+    assert!(report.publish.is_none(), "{report:?}");
+    let refreshed = refresh(&sc.ctx(true)).unwrap();
+    assert_eq!(refreshed.unpushed_refs, 0, "{refreshed:?}");
+    assert_eq!(sc.remote_file("done.rs").as_deref(), Some("fn done() {}\n"));
+}
+
+/// The controller's save-only permission (no workspace lease) opens
+/// `/git/flush` and nothing else, and is the credential the origin
+/// exchanges for git.write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_only_permission_opens_the_flush_and_nothing_else() {
+    let sc = Scenario::new(Options::default());
+    let owner = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let runtime_lease_id = Uuid::new_v4();
+    // The stand-in's workspace lease belongs to someone else, as when a
+    // collaborator holds it on another runtime.
+    let controller = StubController::start(
+        sc.config.project_id,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    )
+    .await;
+    let mut config = sc.config.clone();
+    config.skip_auth = false;
+    config.controller_base_url = Url::parse(&controller.base).unwrap();
+    config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
+    config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
+    let grant = controller.save_grant_token(&config, owner, runtime_id, runtime_lease_id);
+    let mut other_origin = config.clone();
+    other_origin.origin_id = Uuid::new_v4();
+    let foreign = controller.save_grant_token(&other_origin, owner, runtime_id, runtime_lease_id);
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    let client = reqwest::Client::new();
+    sc.write("notes.md", b"left behind\n");
+
+    for (method, path, body) in [
+        (
+            "POST",
+            "/git/sync",
+            serde_json::json!({ "paths": ["notes.md"] }),
+        ),
+        (
+            "POST",
+            "/git/revert",
+            serde_json::json!({ "paths": ["notes.md"] }),
+        ),
+        ("POST", "/apply-json", serde_json::json!({})),
+        ("GET", "/entries", serde_json::Value::Null),
+        ("GET", "/git/status", serde_json::Value::Null),
+    ] {
+        let request = match method {
+            "GET" => client.get(format!("{base}{path}")),
+            _ => client.post(format!("{base}{path}")).json(&body),
+        };
+        let response = request.bearer_auth(&grant).send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{method} {path} accepted the save-only permission"
+        );
+    }
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .bearer_auth(&foreign)
+        .json(&serde_json::json!({ "turnActive": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a permission for another origin"
+    );
+    assert!(sc.local_refs("refs/instafy/").is_empty());
+
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .bearer_auth(&grant)
+        .json(&serde_json::json!({ "turnActive": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["unpushedRefs"], 0, "{body}");
+    let parked = body["recoveryRefs"][0]["reference"].as_str().unwrap();
+    assert_eq!(
+        sc.recovery_file(parked, "notes.md").as_deref(),
+        Some("left behind\n")
+    );
+    assert!(sc.remote_file("notes.md").is_none());
+    {
+        let calls = controller.calls.lock().unwrap();
+        assert!(
+            !calls.lease_checks.contains(&grant),
+            "the permission needs no workspace lease check"
+        );
+        let writes: Vec<&String> = calls
+            .git_tokens
+            .iter()
+            .filter(|(_, scopes)| scopes.iter().any(|scope| scope == "git.write"))
+            .map(|(bearer, _)| bearer)
+            .collect();
+        assert_eq!(writes, vec![&grant]);
+    }
+    server.abort();
+    controller.server.abort();
 }

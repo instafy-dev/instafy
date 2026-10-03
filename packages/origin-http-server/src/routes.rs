@@ -193,10 +193,16 @@ pub fn router(state: AppState) -> Router {
         .route("/git/revert", post(handle_git_revert))
         .route("/git/revert-commit", post(handle_git_revert_commit))
         .route("/git/sync", post(handle_git_sync))
-        .route("/git/flush", post(handle_git_flush))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_write,
+        ));
+
+    let flush_routes = Router::new()
+        .route("/git/flush", post(handle_git_flush))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_flush,
         ));
 
     let browser_view_routes = browser::view_routes().route_layer(
@@ -215,6 +221,7 @@ pub fn router(state: AppState) -> Router {
         .merge(health_routes)
         .merge(read_routes)
         .merge(write_routes)
+        .merge(flush_routes)
         .merge(browser_view_routes)
         .merge(browser_control_routes)
         .merge(browser_interactive_transport_routes)
@@ -252,6 +259,41 @@ async fn require_write(
     request: Request,
     next: Next,
 ) -> Result<Response, OriginError> {
+    authorize_and_continue(state, request, next, &["fs.write"]).await
+}
+
+/// The scope of the save-only permission the controller's own stop path
+/// issues when nobody holds a workspace lease (the controller's
+/// `PRE_STOP_SAVE_SCOPE`). It opens `/git/flush` and nothing else, here or
+/// at the controller, which exchanges it for `git.write` only while the
+/// runtime generation it names is still active.
+pub const PRE_STOP_SAVE_SCOPE: &str = "workspace.flush";
+
+/// `/git/flush` takes either an `fs.write` token under a live workspace lease
+/// (checked like every other write) or the controller's save-only
+/// permission. The latter needs no workspace lease: the controller checks it
+/// again, against the runtime generation, before it grants any push.
+async fn require_flush(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, OriginError> {
+    if !state.config.skip_auth {
+        let claims = state
+            .token_validator
+            .authorize(&state.config, request.headers(), &[])
+            .await?;
+        if claims
+            .scopes
+            .iter()
+            .any(|scope| scope == PRE_STOP_SAVE_SCOPE)
+        {
+            let token = bearer_token_from_headers(request.headers()).unwrap_or_default();
+            request.extensions_mut().insert(claims);
+            request.extensions_mut().insert(OriginAccessToken { token });
+            return Ok(next.run(request).await);
+        }
+    }
     authorize_and_continue(state, request, next, &["fs.write"]).await
 }
 
@@ -2040,6 +2082,11 @@ async fn handle_git_revert(
     }
 }
 
+/// The code of a save refused because a stop has already kept the
+/// workspace's work: clients say the workspace is stopping, never that it
+/// has conflicts.
+pub const WORKSPACE_STOPPING_CODE: &str = "workspace_stopping";
+
 async fn handle_git_sync(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
@@ -2154,8 +2201,13 @@ async fn handle_git_sync(
                 .stopping
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         } else if state.stopping.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(OriginError::conflict(
+            // Not a merge conflict: nothing needs resolving, the save just
+            // waits for the next start (whose refresh lifts this).
+            return Err(OriginError::with_report(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                WORKSPACE_STOPPING_CODE,
                 "the workspace is stopping and its work is kept on recovery refs; save again after it restarts",
+                serde_json::json!({ "retryable": true }),
             ));
         }
         // Saves are authored by the origin's own identity until the
