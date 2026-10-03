@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
+use axum::response::IntoResponse as _;
 use axum::Json;
 use serde_json::{json, Value as JsonValue};
 use tower::ServiceExt as _;
@@ -27,6 +28,11 @@ const PROVIDER_ID: &str = "drain_test_provider";
 #[derive(Clone, Default)]
 struct Node {
     census: Arc<Mutex<JsonValue>>,
+    /// Answers for the next census calls, in order, before `census` is
+    /// used again: a body, or `None` for a failed call.
+    census_script: Arc<Mutex<Vec<Option<JsonValue>>>>,
+    /// A woken runtime never registers its origin.
+    never_registers: Arc<Mutex<bool>>,
     /// The census after each release, in order.
     after_release: Arc<Mutex<Vec<JsonValue>>>,
     released: Arc<Mutex<Vec<JsonValue>>>,
@@ -184,6 +190,8 @@ impl DrainFixture {
 
         let provider_app = {
             let census = node.census.clone();
+            let census_script = node.census_script.clone();
+            let never_registers = node.never_registers.clone();
             let after_release = node.after_release.clone();
             let released = node.released.clone();
             let ensured = node.ensured.clone();
@@ -194,7 +202,18 @@ impl DrainFixture {
                     "/runtime/census",
                     axum::routing::post(move || {
                         let census = census.clone();
-                        async move { Json(census.lock().unwrap().clone()) }
+                        let census_script = census_script.clone();
+                        async move {
+                            let scripted = {
+                                let mut script = census_script.lock().unwrap();
+                                (!script.is_empty()).then(|| script.remove(0))
+                            };
+                            match scripted {
+                                Some(Some(body)) => Json(body).into_response(),
+                                Some(None) => StatusCode::BAD_GATEWAY.into_response(),
+                                None => Json(census.lock().unwrap().clone()).into_response(),
+                            }
+                        }
                     }),
                 )
                 .route(
@@ -225,6 +244,7 @@ impl DrainFixture {
                             let census = census.clone();
                             let pool = pool.clone();
                             let endpoint = endpoint.clone();
+                            let never_registers = never_registers.clone();
                             async move {
                                 ensured.lock().unwrap().push(body.clone());
                                 let project: Uuid =
@@ -253,7 +273,9 @@ impl DrainFixture {
                                 }
                                 // The runtime boots and registers once the
                                 // launch fence lets go of its rows.
-                                tokio::spawn(register(pool, project, runtime, lease, instance, endpoint));
+                                if !*never_registers.lock().unwrap() {
+                                    tokio::spawn(register(pool, project, runtime, lease, instance, endpoint));
+                                }
                                 Json(json!({ "message": "ensured" }))
                             }
                         }
@@ -371,6 +393,12 @@ impl DrainFixture {
 
     fn set_census(&self, census: JsonValue) {
         *self.node.census.lock().unwrap() = census;
+    }
+
+    /// The next census calls answer these, in order (`None`: the call
+    /// fails).
+    fn script_census(&self, answers: Vec<Option<JsonValue>>) {
+        *self.node.census_script.lock().unwrap() = answers;
     }
 
     fn after_releases(&self, censuses: Vec<JsonValue>) {
@@ -597,6 +625,7 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
         let stale_lease = Uuid::new_v4();
         let other_project = Uuid::new_v4();
         let clean_project = Uuid::new_v4();
+        let crashed_project = Uuid::new_v4();
         fx.set_census(json!({
             "supported": true,
             "truncated": false,
@@ -613,6 +642,13 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
                     "projectId": fx.project_id,
                     "runtimeId": fx.runtime_id,
                     "leaseId": stale_lease,
+                    "running": false,
+                },
+                {
+                    "composeProject": "instafy-runtime-crashed",
+                    "projectId": crashed_project,
+                    "runtimeId": Uuid::new_v4(),
+                    "leaseId": Uuid::new_v4(),
                     "running": false,
                 },
             ],
@@ -636,6 +672,15 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
                     "unreadable": null,
                     "empty": false,
                 },
+                {
+                    "projectId": crashed_project,
+                    "runtimePresent": true,
+                    "stoppedCleanly": false,
+                    "unpushedRefs": 1,
+                    "unpushedRefNames": ["20261003T101010Z-unsaved-def"],
+                    "unreadable": null,
+                    "empty": false,
+                },
             ],
         }));
         let (status, census) = fx
@@ -645,7 +690,7 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
         assert_eq!(census["fenced"], false);
         assert_eq!(census["complete"], true, "{census}");
         let runtimes = census["runtimes"].as_array().unwrap();
-        assert_eq!(runtimes.len(), 2, "{census}");
+        assert_eq!(runtimes.len(), 3, "{census}");
         let class_of = |compose: &str| {
             runtimes
                 .iter()
@@ -671,6 +716,11 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
         assert_eq!(needs(fx.project_id), Some(false), "its runtime drains it");
         assert_eq!(needs(other_project), Some(true));
         assert_eq!(needs(clean_project), Some(false));
+        assert_eq!(
+            needs(crashed_project),
+            Some(true),
+            "a stopped container flushes nothing"
+        );
         let own = checkouts
             .iter()
             .find(|checkout| checkout["projectId"] == json!(fx.project_id))
@@ -1196,4 +1246,153 @@ async fn the_credit_sweep_never_bills_a_drain_wake() -> anyhow::Result<()> {
         Ok(())
     })
     .await
+}
+
+/// A census that cannot say what a checkout holds is never read as clean:
+/// one cut short at its bound, one that fails before the wake, and one that
+/// fails after the woken runtime's stop all answer `failed` with the reason,
+/// and the stop route says `ok: false` with `checkoutError`.
+#[tokio::test]
+async fn an_unknown_census_is_never_read_as_clean() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("runtime drain unknown census test").await?;
+    for case in [
+        "truncated",
+        "fails_before_wake",
+        "fails_after_stop",
+        "stop_route",
+    ] {
+        let project_id = Uuid::new_v4();
+        let owner = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
+            let dirty = json!({
+                "supported": true,
+                "containers": [],
+                "checkouts": [fx.checkout(false, false, &["20261003T101010Z-unsaved-abc"])],
+            });
+            if case == "stop_route" {
+                let lease = fx.start_live().await?;
+                fx.script_census(vec![None]);
+                let (status, stopped) = fx
+                    .call(
+                        "POST",
+                        "/operator/runtime-drain/stop",
+                        SERVICE,
+                        Some(json!({
+                            "runtimeId": fx.runtime_id,
+                            "projectId": fx.project_id,
+                            "leaseId": lease,
+                        })),
+                    )
+                    .await;
+                assert_eq!(status, StatusCode::OK, "{stopped}");
+                assert_eq!(stopped["ok"], false, "{stopped}");
+                assert_eq!(stopped["statusChanged"], true, "{stopped}");
+                assert_eq!(
+                    stopped["checkoutError"], "the provider did not answer the census",
+                    "{stopped}"
+                );
+                assert_eq!(stopped["checkout"], JsonValue::Null);
+                let events = fx.events("pool_retirement_drain").await?;
+                assert_eq!(events.last().unwrap()["checkoutKnown"], false, "{events:?}");
+                return Ok(());
+            }
+            // The calls: the route's own census, the look before the wake,
+            // the stop's look and the look after it.
+            match case {
+                "truncated" => fx.set_census(json!({
+                    "supported": true,
+                    "truncated": true,
+                    "containers": [],
+                    "checkouts": [],
+                })),
+                "fails_before_wake" => fx.script_census(vec![Some(dirty.clone()), None]),
+                _ => fx.script_census(vec![Some(dirty.clone()), Some(dirty.clone()), None, None]),
+            }
+            let (status, flushed) = fx
+                .call(
+                    "POST",
+                    "/operator/runtime-drain/flush-checkout",
+                    SERVICE,
+                    Some(json!({ "projectId": fx.project_id })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{case}: {flushed}");
+            assert_eq!(flushed["status"], "failed", "{case}: {flushed}");
+            assert_eq!(
+                flushed["error"],
+                match case {
+                    "truncated" => "the provider's census was cut short",
+                    _ => "the provider did not answer the census",
+                },
+                "{case}: {flushed}"
+            );
+            let ensured = fx.node.ensured.lock().unwrap().len();
+            if case == "fails_after_stop" {
+                assert_eq!(ensured, 1, "{case}: woken and stopped");
+                assert_eq!(flushed["flush"]["status"], "flushed", "{flushed}");
+                assert_eq!(fx.runtime_row().await?.0, "stopped");
+            } else {
+                assert_eq!(ensured, 0, "{case}: nothing is woken on an unknown census");
+                assert!(fx.flushes.lock().unwrap().is_empty(), "{case}");
+            }
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// A woken runtime whose origin never comes online is stopped again and
+/// answered `wake_failed`, not `flushed`.
+#[tokio::test]
+async fn flush_checkout_answers_wake_failed_when_the_origin_never_comes_online(
+) -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("runtime drain wake failure test").await?;
+    let project_id = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
+        *fx.node.never_registers.lock().unwrap() = true;
+        fx.set_census(json!({
+            "supported": true,
+            "containers": [],
+            "checkouts": [fx.checkout(false, false, &["20261003T101010Z-unsaved-abc"])],
+        }));
+        // Whatever the census says after the stop, the wake failed.
+        fx.after_releases(vec![json!({
+            "supported": true,
+            "containers": [],
+            "checkouts": [fx.checkout(false, true, &[])],
+        })]);
+        let (status, flushed) = fx
+            .call(
+                "POST",
+                "/operator/runtime-drain/flush-checkout",
+                SERVICE,
+                Some(json!({ "projectId": fx.project_id })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{flushed}");
+        assert_eq!(flushed["status"], "wake_failed", "{flushed}");
+        assert_eq!(fx.node.ensured.lock().unwrap().len(), 1);
+        assert!(fx.flushes.lock().unwrap().is_empty(), "nothing to flush");
+        assert_eq!(fx.node.released.lock().unwrap().len(), 1, "stopped again");
+        assert_ne!(fx.runtime_row().await?.0, "ready");
+        assert!(!fx.state.runtime_drain.is_flush_wake(&fx.runtime_id));
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner]).await?;
+    result
 }

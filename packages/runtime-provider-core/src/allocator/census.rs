@@ -131,14 +131,25 @@ pub(crate) fn group_containers(prefix: &str, facts: Vec<ContainerFacts>) -> Vec<
     grouped.into_values().collect()
 }
 
+/// The projects with a runtime container on the node, running or stopped.
+pub(crate) fn projects_present(containers: &[CensusContainer]) -> HashSet<Uuid> {
+    containers
+        .iter()
+        .filter_map(|container| container.project_id)
+        .collect()
+}
+
 /// The checkouts under `repo_base` (directories named by a project id).
-/// Returns them and whether the listing reached its bound.
+/// Returns them and whether the listing is incomplete: it reached its bound,
+/// or `repo_base` exists but cannot be read (a missing one holds nothing).
 pub(crate) fn census_checkouts(
     repo_base: &Path,
     present: &HashSet<Uuid>,
 ) -> (Vec<CensusCheckout>, bool) {
-    let Ok(entries) = fs::read_dir(repo_base) else {
-        return (Vec::new(), false);
+    let entries = match fs::read_dir(repo_base) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), false),
+        Err(_) => return (Vec::new(), true),
     };
     let mut checkouts = Vec::new();
     for entry in entries.flatten() {
@@ -239,11 +250,7 @@ mod tests {
         let grouped = group_containers(
             prefix,
             vec![
-                ContainerFacts {
-                    compose_project: name.clone(),
-                    running: false,
-                    env: vec!["PATH=/usr/bin".to_string()],
-                },
+                // The runtime runs; a sidecar listed after it has exited.
                 ContainerFacts {
                     compose_project: name.clone(),
                     running: true,
@@ -252,6 +259,11 @@ mod tests {
                         format!("RUNTIME_ID={runtime}"),
                         format!("RUNTIME_LEASE_ID={lease}"),
                     ],
+                },
+                ContainerFacts {
+                    compose_project: name.clone(),
+                    running: false,
+                    env: vec!["PATH=/usr/bin".to_string()],
                 },
                 ContainerFacts {
                     compose_project: stopped.clone(),
@@ -283,6 +295,26 @@ mod tests {
         ];
         expected.sort_by(|a, b| a.compose_project.cmp(&b.compose_project));
         assert_eq!(grouped, expected);
+        assert_eq!(
+            projects_present(&grouped),
+            HashSet::from([project, other_project]),
+            "a stopped runtime is present too"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_checkout_base_is_an_incomplete_census() {
+        let base = TempDir::new();
+        let (checkouts, truncated) = census_checkouts(&base.0.join("missing"), &HashSet::new());
+        assert!(
+            checkouts.is_empty() && !truncated,
+            "a missing base holds nothing"
+        );
+        let file = base.0.join("not-a-directory");
+        fs::write(&file, b"x").unwrap();
+        let (checkouts, truncated) = census_checkouts(&file, &HashSet::new());
+        assert!(checkouts.is_empty());
+        assert!(truncated, "a base that cannot be read says nothing");
     }
 
     #[test]

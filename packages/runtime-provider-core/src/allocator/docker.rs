@@ -14,7 +14,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::census::{
-    census_checkouts, group_containers, ContainerFacts, RuntimeCensus, MAX_CENSUS_CONTAINERS,
+    census_checkouts, group_containers, projects_present, ContainerFacts, RuntimeCensus,
+    MAX_CENSUS_CONTAINERS,
 };
 use super::checkout_eviction::{
     sweep_checkouts, touch_checkout, CheckoutEvictionPolicy, CheckoutHost, CheckoutSweepReport,
@@ -1306,10 +1307,7 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
         let (facts, truncated) =
             task::spawn_blocking(move || list_runtime_containers(&prefix)).await??;
         let containers = group_containers(&self.project_prefix, facts);
-        let present: HashSet<Uuid> = containers
-            .iter()
-            .filter_map(|container| container.project_id)
-            .collect();
+        let present = projects_present(&containers);
         let (checkouts, checkouts_truncated) = match self.repo_base.clone() {
             Some(repo_base) => {
                 task::spawn_blocking(move || census_checkouts(&repo_base, &present)).await?

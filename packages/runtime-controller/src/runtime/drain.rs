@@ -11,7 +11,8 @@
 //!   its node-local provider holds, joined with the database: `live` runtimes
 //!   (the container runs the runtime's active lease generation), `orphan`
 //!   containers (any other generation), and checkouts that `needsFlush`
-//!   (no container, and unpushed local refs, no clean stop, or unreadable);
+//!   (no running container, and unpushed local refs, no clean stop, or
+//!   unreadable);
 //! - `POST /operator/runtime-drain/fence` stops this process from starting
 //!   runtimes and from running its own stop sweeps, which after a cutover act
 //!   through this node's provider on runtimes that may live elsewhere;
@@ -60,7 +61,10 @@ const MAX_FENCE_SECONDS: u64 = 3600;
 /// How long a census may wait for the node's provider.
 const CENSUS_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a woken runtime may take to bring its origin online.
+#[cfg(not(test))]
 const WAKE_ORIGIN_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const WAKE_ORIGIN_TIMEOUT: Duration = Duration::from_secs(3);
 const WAKE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// The kind of the runtime event that marks a drain's wake generation; the
 /// hosted runtime credit sweep never bills that generation.
@@ -253,17 +257,55 @@ pub(crate) struct DrainCheckout {
     unpushed_ref_names: Vec<String>,
     unreadable: Option<String>,
     empty: bool,
-    /// Deleting the node now could lose work: no runtime, and unpushed
-    /// refs, no clean stop, or refs that cannot be read.
+    /// Deleting the node now could lose work, and no running runtime of the
+    /// space is here to flush it: unpushed refs, no clean stop, or refs that
+    /// cannot be read. A stopped container does not count as running.
     needs_flush: bool,
 }
 
 impl DrainCheckout {
-    /// Nothing on this checkout exists only here.
+    /// Nothing on this checkout exists only here, and no runtime uses it.
     fn is_clean(&self) -> bool {
-        !self.runtime_present
-            && (self.empty
-                || (self.stopped_cleanly && self.unpushed_refs == 0 && self.unreadable.is_none()))
+        !self.runtime_present && self.holds_nothing_only_here()
+    }
+
+    fn holds_nothing_only_here(&self) -> bool {
+        self.empty || (self.stopped_cleanly && self.unpushed_refs == 0 && self.unreadable.is_none())
+    }
+}
+
+/// What a census says about one space's checkout.
+#[derive(Debug)]
+enum CheckoutLookup {
+    Listed(DrainCheckout),
+    /// A complete census that does not list it: nothing of it is here.
+    NotListed,
+    /// The census failed, cannot list the node or was cut short: unknown.
+    Unknown(&'static str),
+}
+
+impl CheckoutLookup {
+    /// `Some(true)` when nothing of the space is only here.
+    fn is_clean(&self) -> Option<bool> {
+        match self {
+            Self::Listed(checkout) => Some(checkout.is_clean()),
+            Self::NotListed => Some(true),
+            Self::Unknown(_) => None,
+        }
+    }
+
+    fn into_checkout(self) -> Option<DrainCheckout> {
+        match self {
+            Self::Listed(checkout) => Some(checkout),
+            _ => None,
+        }
+    }
+
+    fn error(&self) -> Option<&'static str> {
+        match self {
+            Self::Unknown(error) => Some(error),
+            _ => None,
+        }
     }
 }
 
@@ -441,11 +483,22 @@ fn classify(container: &ProviderContainer, db: Option<&DbRuntime>) -> &'static s
     }
 }
 
+/// The spaces with a running container in `census`.
+fn running_projects(census: &ProviderCensus) -> HashSet<Uuid> {
+    census
+        .containers
+        .iter()
+        .filter(|container| container.running)
+        .filter_map(|container| container.project_id)
+        .collect()
+}
+
 fn drain_checkout(
     provider: &str,
     checkout: &ProviderCheckout,
     project_id: Uuid,
     runtime_id: Option<Uuid>,
+    runtime_running: bool,
 ) -> DrainCheckout {
     let mut entry = DrainCheckout {
         provider: provider.to_string(),
@@ -459,7 +512,7 @@ fn drain_checkout(
         empty: checkout.empty,
         needs_flush: false,
     };
-    entry.needs_flush = !entry.runtime_present && !entry.is_clean();
+    entry.needs_flush = !runtime_running && !entry.holds_nothing_only_here();
     entry
 }
 
@@ -515,6 +568,7 @@ async fn census_for(
         .filter_map(|checkout| checkout.project_id)
         .collect();
     let newest = newest_runtimes(state, &provider.id, &project_ids).await?;
+    let running = running_projects(&census);
     let checkouts = census
         .checkouts
         .iter()
@@ -525,6 +579,7 @@ async fn census_for(
                 checkout,
                 project_id,
                 newest.get(&project_id).copied(),
+                running.contains(&project_id),
             ))
         })
         .collect();
@@ -564,26 +619,44 @@ pub(super) async fn drain_census(
     Ok(Json(response))
 }
 
-/// The checkout of `project_id` on `provider`'s node, if the census lists it.
+/// The checkout of `project_id` on `provider`'s node, from a fresh census.
+/// Absent only when a complete census does not list it: a census that
+/// failed, cannot list the node or was cut short says nothing.
 async fn checkout_of(
     state: &AppState,
     provider: &RuntimeProviderConfig,
     project_id: Uuid,
-) -> Option<DrainCheckout> {
-    let census = provider_census(state, provider).await.ok()?;
-    let checkout = census
+) -> CheckoutLookup {
+    let census = match provider_census(state, provider).await {
+        Ok(census) => census,
+        Err(error) => {
+            warn!(provider = %provider.id, %project_id, %error, "runtime census failed");
+            return CheckoutLookup::Unknown("the provider did not answer the census");
+        }
+    };
+    let Some(checkout) = census
         .checkouts
         .iter()
-        .find(|checkout| checkout.project_id == Some(project_id))?;
+        .find(|checkout| checkout.project_id == Some(project_id))
+    else {
+        return if !census.supported {
+            CheckoutLookup::Unknown("the provider cannot list its node")
+        } else if census.truncated {
+            CheckoutLookup::Unknown("the provider's census was cut short")
+        } else {
+            CheckoutLookup::NotListed
+        };
+    };
     let runtime_id = newest_runtimes(state, &provider.id, &[project_id])
         .await
         .ok()
         .and_then(|newest| newest.get(&project_id).copied());
-    Some(drain_checkout(
+    CheckoutLookup::Listed(drain_checkout(
         &provider.id,
         checkout,
         project_id,
         runtime_id,
+        running_projects(&census).contains(&project_id),
     ))
 }
 
@@ -651,14 +724,20 @@ pub(crate) struct DrainStopRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DrainStopResponse {
+    /// The stop ran and its census answered: `false` when the checkout's
+    /// state after the stop is unknown (`checkoutError`).
     ok: bool,
     status_changed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     skip_reason: Option<String>,
     flush: FlushSummary,
     /// The space's checkout on this node after the stop, when the census
-    /// lists it.
+    /// lists it; `null` with no `checkoutError` when a complete census does
+    /// not.
     checkout: Option<DrainCheckout>,
+    /// Why the checkout's state after the stop is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkout_error: Option<&'static str>,
 }
 
 async fn record_drain_event(state: &AppState, runtime_id: Uuid, project_id: Uuid, data: JsonValue) {
@@ -730,21 +809,23 @@ async fn drain_stop_runtime(
             );
         }
     }
-    let provider = resolve_provider(state, &stopped.runtime.provider)
-        .await
-        .ok();
-    let checkout = match provider.as_ref() {
-        Some(provider) => checkout_of(state, provider, project_id).await,
-        None => None,
+    let checkout = match resolve_provider(state, &stopped.runtime.provider).await {
+        Ok(provider) => checkout_of(state, &provider, project_id).await,
+        Err(_) => CheckoutLookup::Unknown("the runtime's provider is not configured here"),
     };
     let mut flush = stopped.flush;
     if flush.status == "not_running" {
         // Nothing live to flush: what the checkout still holds is the answer.
-        if let Some(checkout) = checkout.as_ref() {
-            flush.unpushed_refs = Some(checkout.unpushed_refs);
-            flush.unpushed_ref_names = checkout.unpushed_ref_names.clone();
+        match &checkout {
+            CheckoutLookup::Listed(listed) => {
+                flush.unpushed_refs = Some(listed.unpushed_refs);
+                flush.unpushed_ref_names = listed.unpushed_ref_names.clone();
+            }
+            CheckoutLookup::NotListed => flush.unpushed_refs = Some(0),
+            CheckoutLookup::Unknown(_) => {}
         }
     }
+    let checkout_error = checkout.error();
     record_drain_event(
         state,
         runtime_id,
@@ -756,15 +837,17 @@ async fn drain_stop_runtime(
             "skipReason": stopped.outcome.skip_reason,
             "flushStatus": flush.status,
             "unpushedRefs": flush.unpushed_refs,
+            "checkoutKnown": checkout_error.is_none(),
         }),
     )
     .await;
     Ok(DrainStopResponse {
-        ok: true,
+        ok: checkout_error.is_none(),
         status_changed: stopped.outcome.status_changed,
         skip_reason: stopped.outcome.skip_reason,
         flush,
-        checkout,
+        checkout: checkout.into_checkout(),
+        checkout_error,
     })
 }
 
@@ -804,7 +887,8 @@ pub(crate) struct DrainFlushCheckoutResponse {
     /// `clean` (nothing left only here), `flushed` (woken, flushed and
     /// clean), `busy_here` (a live runtime: use `stop`), `busy_elsewhere`
     /// (the space's runtime runs on another node), `no_runtime` (no runtime
-    /// row to wake), `wake_failed`, or `failed` (still not clean).
+    /// row to wake), `wake_failed`, or `failed` (still not clean, or the
+    /// census could not say: then `error` says why).
     status: &'static str,
     project_id: Uuid,
     runtime_id: Option<Uuid>,
@@ -951,7 +1035,9 @@ pub(super) async fn drain_flush_checkout(
         });
         if live {
             response.status = "busy_here";
-            response.checkout = checkout_of(&state, &provider, project_id).await;
+            response.checkout = checkout_of(&state, &provider, project_id)
+                .await
+                .into_checkout();
             return Ok(Json(response));
         }
         let (Some(orphan_runtime), Some(orphan_lease)) = (container.runtime_id, container.lease_id)
@@ -960,7 +1046,9 @@ pub(super) async fn drain_flush_checkout(
                 "a container without a runtime generation is left on the node: {}",
                 container.compose_project
             ));
-            response.checkout = checkout_of(&state, &provider, project_id).await;
+            response.checkout = checkout_of(&state, &provider, project_id)
+                .await
+                .into_checkout();
             return Ok(Json(response));
         };
         if let Err(error) = call_provider_endpoint(
@@ -978,7 +1066,9 @@ pub(super) async fn drain_flush_checkout(
         {
             warn!(%project_id, runtime_id = %orphan_runtime, %error, "could not release an orphan runtime");
             response.error = Some("an orphan runtime could not be released".to_string());
-            response.checkout = checkout_of(&state, &provider, project_id).await;
+            response.checkout = checkout_of(&state, &provider, project_id)
+                .await
+                .into_checkout();
             return Ok(Json(response));
         }
         record_drain_event(
@@ -993,12 +1083,21 @@ pub(super) async fn drain_flush_checkout(
             .push(container.compose_project.clone());
     }
 
-    let checkout = checkout_of(&state, &provider, project_id).await;
-    if checkout.as_ref().is_none_or(DrainCheckout::is_clean) {
-        response.status = "clean";
-        response.checkout = checkout;
-        return Ok(Json(response));
+    let lookup = checkout_of(&state, &provider, project_id).await;
+    match lookup.is_clean() {
+        None => {
+            // A census that cannot say is never read as clean.
+            response.error = lookup.error().map(str::to_string);
+            return Ok(Json(response));
+        }
+        Some(true) => {
+            response.status = "clean";
+            response.checkout = lookup.into_checkout();
+            return Ok(Json(response));
+        }
+        Some(false) => {}
     }
+    let checkout = lookup.into_checkout();
     let Some(runtime) = runtime else {
         response.status = "no_runtime";
         response.checkout = checkout;
@@ -1059,20 +1158,21 @@ pub(super) async fn drain_flush_checkout(
     match stopped {
         Ok(stopped) => {
             response.flush = Some(stopped.flush);
-            response.status = if !online {
-                "wake_failed"
-            } else if after.as_ref().is_none_or(DrainCheckout::is_clean) {
-                "flushed"
-            } else {
-                "failed"
+            response.status = match (online, after.is_clean()) {
+                (false, _) => "wake_failed",
+                (true, Some(true)) => "flushed",
+                (true, _) => "failed",
             };
+            if let Some(error) = after.error() {
+                response.error = Some(error.to_string());
+            }
         }
         Err((_, body)) => {
             response.status = "failed";
             response.error = Some(body.0.message);
         }
     }
-    response.checkout = after;
+    response.checkout = after.into_checkout();
     Ok(Json(response))
 }
 
@@ -1180,7 +1280,7 @@ mod tests {
             empty: false,
         };
         let project = base.project_id.unwrap();
-        assert!(!drain_checkout("p", &base, project, None).needs_flush);
+        assert!(!drain_checkout("p", &base, project, None, false).needs_flush);
         for checkout in [
             ProviderCheckout {
                 unpushed_refs: 1,
@@ -1195,7 +1295,35 @@ mod tests {
                 ..base.clone()
             },
         ] {
-            assert!(drain_checkout("p", &checkout, project, None).needs_flush);
+            assert!(drain_checkout("p", &checkout, project, None, false).needs_flush);
+            assert!(
+                drain_checkout(
+                    "p",
+                    &ProviderCheckout {
+                        runtime_present: true,
+                        ..checkout.clone()
+                    },
+                    project,
+                    None,
+                    false
+                )
+                .needs_flush,
+                "a stopped container flushes nothing"
+            );
+            assert!(
+                !drain_checkout(
+                    "p",
+                    &ProviderCheckout {
+                        runtime_present: true,
+                        ..checkout.clone()
+                    },
+                    project,
+                    None,
+                    true
+                )
+                .needs_flush,
+                "a running runtime is the stop route's to drain"
+            );
         }
         let empty = ProviderCheckout {
             stopped_cleanly: false,
@@ -1203,16 +1331,17 @@ mod tests {
             empty: true,
             ..base.clone()
         };
-        assert!(!drain_checkout("p", &empty, project, None).needs_flush);
+        assert!(!drain_checkout("p", &empty, project, None, false).needs_flush);
         let running = ProviderCheckout {
             runtime_present: true,
             stopped_cleanly: false,
             ..base
         };
         assert!(
-            !drain_checkout("p", &running, project, None).needs_flush,
-            "a checkout with a runtime is the runtime's to drain"
+            !drain_checkout("p", &running, project, None, true).needs_flush,
+            "a checkout with a running runtime is the runtime's to drain"
         );
+        assert!(!drain_checkout("p", &running, project, None, true).is_clean());
     }
 
     #[test]
