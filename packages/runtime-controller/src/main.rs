@@ -426,6 +426,9 @@ async fn main() -> anyhow::Result<()> {
                         HeaderValue::from_static("1"),
                     );
                 }
+                // Release tooling tells a controller that serves the node drain
+                // routes apart from one that predates them by this header.
+                headers.insert("x-instafy-runtime-drain", HeaderValue::from_static("1"));
                 if let Ok(value) =
                     HeaderValue::from_str(&state.config.database_pool_size.to_string())
                 {

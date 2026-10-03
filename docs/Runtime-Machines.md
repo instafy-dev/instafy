@@ -489,7 +489,9 @@ disk, so deleting the node deletes both, including work that is only on a
 checkout's local recovery refs. Before a release retires the previous
 controller pool, the release workflow asks that controller (directly, with
 the service-role bearer; user, operator and scoped tokens get 403) to drain
-its node:
+its node. A controller that serves these routes answers `/healthz` with
+`x-instafy-runtime-drain: 1`, so release tooling can tell it apart from one
+that predates them:
 
 - `GET /operator/runtime-drain/census` lists what the node-local provider
   holds (`POST /runtime/census`: runtimes from their containers' `SPACE_ID`,
