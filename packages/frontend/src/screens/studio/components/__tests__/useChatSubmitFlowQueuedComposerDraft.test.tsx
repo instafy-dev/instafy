@@ -102,7 +102,7 @@ function createOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     outOfCredits: false,
     pendingBrowserLaunchMode: null,
     pendingTypingBroadcastRef: { current: null },
-    performSubmit: vi.fn(async () => undefined),
+    performSubmit: vi.fn(async () => true),
     personalBrowserActive: false,
     personalBrowserAgentControlEnabled: false,
     personalBrowserAgentError: null,
@@ -375,6 +375,28 @@ describe("useChatSubmitFlow sends made for the person", () => {
     });
 
     expect(onQueued).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [true, true],
+    [false, false],
+  ])("uses up an armed new browser page only when the send went out (sent=%s)", async (sent, consumed) => {
+    // A failed attachment upload resolves false: the draft is back in the
+    // composer and must still open the new page when it is sent again.
+    const options = createOptions({
+      isAssistantTyping: false,
+      browserSessionOpen: true,
+      pendingBrowserLaunchMode: "new_page",
+      performSubmit: vi.fn(async () => sent),
+    });
+    const resultRef = await mount(options);
+
+    await act(async () => {
+      await expect(resultRef.current?.submitMessage()).resolves.toBe(sent);
+    });
+
+    expect(options.performSubmit).toHaveBeenCalledTimes(1);
+    expect(options.clearPendingBrowserLaunchMode).toHaveBeenCalledTimes(consumed ? 1 : 0);
   });
 
   it("aims a typed send at the open browser page", async () => {

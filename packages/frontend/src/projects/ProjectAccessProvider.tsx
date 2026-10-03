@@ -36,7 +36,9 @@ import {
 import { recordProjectOpened } from "./projectRecency";
 import {
   ownerProjectCapabilities,
+  resolveChatAttachmentsMode,
   resolveProjectCapabilities,
+  type ChatAttachmentsMode,
   type EffectiveProjectRole,
   type ProjectCapabilities,
 } from "./projectCapabilities";
@@ -81,6 +83,11 @@ export interface ProjectAccessContextValue {
   canWriteProject: boolean;
   canShareProject: boolean;
   canManageProject: boolean;
+  /**
+   * `none` when this server cannot store chat attachments (no Supabase
+   * Storage), null while unknown. Clients turn uploads off only for `none`.
+   */
+  chatAttachments: ChatAttachmentsMode | null;
 }
 
 const ProjectAccessContext = createContext<ProjectAccessContextValue | null>(null);
@@ -1096,6 +1103,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       canWriteProject: activeCapabilities?.canWrite ?? !hasSupabaseConfig,
       canShareProject: activeCapabilities?.canShare ?? !hasSupabaseConfig,
       canManageProject: activeCapabilities?.canManage ?? !hasSupabaseConfig,
+      chatAttachments: resolveChatAttachmentsMode(hasSupabaseConfig, activeCapabilities),
     }),
     [
       activeCapabilities,

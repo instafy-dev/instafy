@@ -75,6 +75,7 @@ describe("ComposerActionMenu", () => {
       onExpandDraft?: () => void;
       onUploadImage?: () => void;
       uploadImageDisabled?: boolean;
+      uploadImageUnavailableReason?: string | null;
       onInsertSuggestion?: () => void;
       onStartVoiceInput?: () => void;
       voiceInputDisabled?: boolean;
@@ -192,6 +193,26 @@ describe("ComposerActionMenu", () => {
 
     await renderMenu(true, true, { onUploadImage: vi.fn(), mutationDisabled: true });
     expect(container.querySelector('[data-testid="composer-action-menu-upload-image"]')).toBeNull();
+  });
+
+  it("turns Upload image off with a short reason when this server can't store attachments", async () => {
+    const onUploadImage = vi.fn();
+    await renderMenu(true, true, {
+      onUploadImage,
+      uploadImageUnavailableReason: "This server can't store attachments.",
+    });
+    const upload = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-upload-image"]');
+    expect(upload?.disabled).toBe(true);
+    expect(upload?.textContent).toContain("Upload image");
+    expect(upload?.textContent).toContain("This server can't store attachments.");
+    expect(upload?.parentElement?.getAttribute("title")).toBe("This server can't store attachments.");
+    await act(async () => upload?.click());
+    expect(onUploadImage).not.toHaveBeenCalled();
+
+    await renderMenu(true, true, { onUploadImage, uploadImageUnavailableReason: null });
+    const enabled = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-upload-image"]');
+    expect(enabled?.disabled).toBe(false);
+    expect(enabled?.textContent).not.toContain("store attachments");
   });
 
   it("keeps dictation reachable when the composer hands it to the menu", async () => {

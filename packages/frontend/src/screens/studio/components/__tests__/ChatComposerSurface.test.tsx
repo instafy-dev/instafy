@@ -24,6 +24,7 @@ vi.mock("../ComposerActionMenu", () => ({
     <div
       data-testid="mock-composer-action-menu"
       data-upload-image={String(typeof props.onUploadImage === "function")}
+      data-upload-image-unavailable={String(props.uploadImageUnavailableReason ?? "")}
       data-insert-suggestion={String(typeof props.onInsertSuggestion === "function")}
       data-trigger-class={String(props.triggerClassName ?? "")}
       data-trigger-icon-class={String(props.triggerIconClassName ?? "")}
@@ -446,6 +447,46 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-image-upload-input"]')).not.toBeNull();
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mock-menu-upload-image"]')?.click());
     expect(onOpenImagePicker).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers only the image types Storage takes, and turns uploads off when it can't store them", async () => {
+    await act(async () => renderLayout());
+    const input = container.querySelector<HTMLInputElement>('[data-testid="chat-image-upload-input"]');
+    expect(input?.accept).toBe("image/png,image/jpeg,image/webp,image/gif");
+    expect(input?.disabled).toBe(false);
+
+    await act(async () => renderLayout({ imageUploadUnavailableReason: "This server can't store attachments." }));
+    const menu = layoutNodes().menu;
+    expect(menu?.getAttribute("data-upload-image-unavailable")).toBe("This server can't store attachments.");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="mock-menu-upload-image"]')?.disabled).toBe(true);
+    expect(container.querySelector<HTMLInputElement>('[data-testid="chat-image-upload-input"]')?.disabled).toBe(true);
+  });
+
+  it("says a send is on its way and keeps its images in place until they are stored", async () => {
+    const uploading = { id: "image-1", file: new File(["image"], "shot.png", { type: "image/png" }), previewUrl: "blob:shot", sending: true };
+    const later = { id: "image-2", file: new File([new Uint8Array(3 * 1024 * 1024)], "later.png", { type: "image/png" }), previewUrl: "blob:later" };
+    const onRemoveImageAttachment = vi.fn();
+    await act(async () => renderLayout({ imageAttachments: [uploading, later], onRemoveImageAttachment, sendingAttachment: true }));
+
+    const tray = container.querySelector('[data-testid="chat-image-upload-preview"]');
+    expect(tray?.getAttribute("aria-busy")).toBe("true");
+    const status = container.querySelector('[data-testid="chat-image-upload-status"]');
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.textContent).toBe("Sending your message with 1 image\u2026");
+    const [first, second] = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-image-upload-remove"]')];
+    expect(first.disabled).toBe(true);
+    // An image staged after the send began can still be removed.
+    expect(second.disabled).toBe(false);
+    expect(tray?.textContent).toContain("3.0 MB");
+    await act(async () => second.click());
+    expect(onRemoveImageAttachment).toHaveBeenCalledExactlyOnceWith("image-2");
+
+    // The status region stays mounted (and quiet) between sends.
+    await act(async () => renderLayout({ imageAttachments: [later] }));
+    const idle = container.querySelector('[data-testid="chat-image-upload-status"]');
+    expect(idle?.textContent).toBe("");
+    expect(container.querySelector('[data-testid="chat-image-upload-preview"]')?.hasAttribute("aria-busy")).toBe(false);
   });
 
   it("owns the chat safe area and retains composer controls across keyboard transitions", async () => {

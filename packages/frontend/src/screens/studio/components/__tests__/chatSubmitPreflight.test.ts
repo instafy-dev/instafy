@@ -224,6 +224,21 @@ describe("chatSubmitPreflight", () => {
     expect(params.clearQueuedComposerDraft).toHaveBeenCalledTimes(1);
   });
 
+  it("says the last message is still sending, not that a reply is running, while it uploads", async () => {
+    const params = createParams({
+      attachedImageCount: 1,
+      isAssistantTyping: false,
+      resolveRuntimeAvailable: vi.fn(async () => true),
+      sendingAttachment: true,
+    });
+    await expect(runChatSubmitPreflight(params)).resolves.toEqual({ status: "handled", submitted: false });
+    expect(params.showStatus).toHaveBeenCalledExactlyOnceWith(
+      "Wait for your last message to finish sending.",
+      "info",
+      4000,
+    );
+  });
+
   it("keeps attachment sends on the local queue so upload ordering is preserved", async () => {
     const params = createParams({
       queueMessageToServer: vi.fn(async () => true),

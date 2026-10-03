@@ -102,6 +102,7 @@ import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { useWorkspaceUi } from "../../../workspace/useWorkspace";
 import { useWorkspaceControls } from "../workspaceControls";
 import { hasSupabaseConfig, supabase } from "../../../lib/supabaseClient";
+import { chatAttachmentsUnavailableReason as resolveChatAttachmentsUnavailableReason } from "../../../lib/chatAttachments";
 import {
   enableMessageNotifications,
   markBrowserNotificationsNudgeSeen,
@@ -139,7 +140,7 @@ import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import {
   AssistantMessageEntry,
-  extractImageAttachments,
+  extractChatAttachments,
   UserMessageBubble,
   ChatRuntimeActivityContext,
 } from "./ChatMessageEntries";
@@ -246,6 +247,7 @@ import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
 import { useChatVoiceComposerController } from "./useChatVoiceComposerController";
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
 import { mergeMentionableMembers } from "./mentionableMembers";
+import { sendWorkspaceFileStaleMerge } from "./workspaceFileStaleMerge";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
@@ -377,7 +379,6 @@ const { createInvitationStrict: createControllerOrgInvitationStrict } =
   controllerClient.organizations;
 const { fetchStatus: fetchRuntimeStatus } = controllerClient.runtimes;
 const { requestProjectEditorInline: requestProjectEditorInlineCompletion } = controllerClient.completions;
-const { write: writeWorkspaceFileToController } = controllerClient.workspace.files;
 
 const AI_CONNECT_WIZARD_STORAGE_PREFIX = "instafy.chat.aiConnectWizard.v1";
 const DEFAULT_CHAT_INPUT_PLACEHOLDER = "Ask for something…";
@@ -580,7 +581,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     effectiveProjectRole,
     canWriteProject,
     canShareProject: serverCanShareProject,
+    chatAttachments,
   } = useProject();
+  const chatAttachmentsUnavailableReason = resolveChatAttachmentsUnavailableReason(chatAttachments);
   const projectWriteDisabled =
     projectCapabilitiesResolved === false ||
     (projectCapabilitiesResolved === true && canWriteProject === false);
@@ -1403,122 +1406,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setWorkspaceFileStaleError(null);
 
     try {
-      const sizeEstimate = notice.baseText.length + notice.localText.length;
-      const shouldWriteSnapshots = sizeEstimate > 12_000;
-      const snapshotPaths: { basePath: string; localPath: string } | null = shouldWriteSnapshots
-        ? (() => {
-            const stamp = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-            const folder = `artifacts/instafy-merge/${stamp}`;
-            const safeStemRaw = notice.path.replace(/[^a-zA-Z0-9._-]+/g, "_");
-            const safeStem = safeStemRaw.length > 96 ? safeStemRaw.slice(-96) : safeStemRaw;
-            const dotIndex = safeStem.lastIndexOf(".");
-            const baseName =
-              dotIndex > 0
-                ? `${safeStem.slice(0, dotIndex)}.base${safeStem.slice(dotIndex)}`
-                : `${safeStem}.base.txt`;
-            const localName =
-              dotIndex > 0
-                ? `${safeStem.slice(0, dotIndex)}.local${safeStem.slice(dotIndex)}`
-                : `${safeStem}.local.txt`;
-            return {
-              basePath: `${folder}/${baseName}`,
-              localPath: `${folder}/${localName}`,
-            };
-          })()
-        : null;
-
-      let persistedSnapshots = snapshotPaths;
-      if (snapshotPaths) {
-        const [baseWrite, localWrite] = await Promise.all([
-          writeWorkspaceFileToController({
-            projectId,
-            path: snapshotPaths.basePath,
-            content: notice.baseText,
-            runtimeId: effectiveRuntimeId ?? null,
-          }),
-          writeWorkspaceFileToController({
-            projectId,
-            path: snapshotPaths.localPath,
-            content: notice.localText,
-            runtimeId: effectiveRuntimeId ?? null,
-          }),
-        ]);
-        if (!baseWrite?.ok || !localWrite?.ok) {
-          persistedSnapshots = null;
-        }
-      }
-
-      const extension = notice.path.split("/").pop()?.split(".").pop()?.toLowerCase() ?? "";
-      const fence = (() => {
-        if (extension === "ts" || extension === "tsx") {
-          return "tsx";
-        }
-        if (extension === "js" || extension === "jsx") {
-          return "jsx";
-        }
-        if (extension === "json") {
-          return "json";
-        }
-        if (extension === "md" || extension === "mdx") {
-          return "md";
-        }
-        if (extension === "toml") {
-          return "toml";
-        }
-        if (extension === "rs") {
-          return "rust";
-        }
-        return "";
-      })();
-
-      const prompt = persistedSnapshots
-        ? [
-            `A teammate (or another tab) updated the workspace version of \`${notice.path}\` while I have unsaved edits.`,
-            "",
-            "Please merge my edits into the latest workspace version and keep it clean.",
-            "",
-            "Files:",
-            `- Target (latest): ${notice.path}`,
-            `- Base snapshot (what I started from): ${persistedSnapshots.basePath}`,
-            `- My unsaved edits snapshot: ${persistedSnapshots.localPath}`,
-            "",
-            "Instructions:",
-            `1. Read the latest content from \`${notice.path}\`.`,
-            `2. Read the base + local snapshot files.`,
-            `3. Produce a merged result and write it back to \`${notice.path}\`.`,
-            "4. Keep your explanation non-technical; summarize what changed.",
-            "5. If something is ambiguous, ask me which version to keep (only ask when needed).",
-          ].join("\n")
-        : [
-            `A teammate (or another tab) updated the workspace version of \`${notice.path}\` while I have unsaved edits.`,
-            "",
-            "Please merge my edits into the latest workspace version and keep it clean.",
-            "",
-            "Instructions:",
-            `1. Read the latest content from \`${notice.path}\`.`,
-            `2. Use the two versions below to do a 3-way merge (base vs my edits vs latest).`,
-            `3. Write the merged result back to \`${notice.path}\`.`,
-            "4. Keep your explanation non-technical; summarize what changed.",
-            "5. If something is ambiguous, ask me which version to keep (only ask when needed).",
-            "",
-            "Base version:",
-            "```" + fence,
-            notice.baseText,
-            "```",
-            "",
-            "My unsaved edits:",
-            "```" + fence,
-            notice.localText,
-            "```",
-          ].join("\n");
-
       const preservedDraft = latestInputValueRef.current;
       const preservedEditorState = latestInputEditorStateRef.current;
 
       if (!ensureProjectWriteAccess()) {
         return;
       }
-      await onSubmit(conversationId, prompt);
+      // Large versions go to the agent as two attached snapshots in this
+      // chat's Storage folder; without attachment storage they stay inline.
+      await sendWorkspaceFileStaleMerge({
+        notice,
+        chatAttachments,
+        submit: (prompt, options) => onSubmit(conversationId, prompt, options),
+      });
 
       if (preservedDraft.trim().length > 0) {
         onInputChange(activeConversationId ?? conversationId, preservedDraft, preservedEditorState);
@@ -1534,8 +1434,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [
     activeConversationId,
     activeProjectId,
+    chatAttachments,
     createConversation,
-    effectiveRuntimeId,
     ensureProjectWriteAccess,
     handleWorkspaceFileStaleDismiss,
     onInputChange,
@@ -1943,20 +1843,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
 
   const {
-    clearImageAttachments,
     handleComposerDragOver,
     handleComposerDrop,
     handleComposerPaste,
     handleImageInputChange,
     imageAttachments,
     imageInputRef,
+    markImageAttachmentsSending,
     openImagePicker,
     removeImageAttachment,
+    removeSentImageAttachments,
   } = useChatComposerAttachments({
     draftKey: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
     onAttachmentsAdded: keepComposerTabOpen,
     isInputLocked: () => onboardingInputLocked,
     showStatus,
+    unavailableReason: chatAttachmentsUnavailableReason,
   });
 
   const openImageLightbox = useCallback((src: string, alt: string) => {
@@ -2218,6 +2120,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     const submitted = await submitMessageRef.current(nextOverride, nextOptions);
     if (submitted && !automatic && pendingReplyContextRef.current === pendingReplyContext) {
       pendingReplyContextRef.current = null;
+    }
+    if (
+      !submitted &&
+      !automatic &&
+      pendingReplyContext &&
+      pendingReplyContextRef.current === null &&
+      shouldAttachPendingReplyContext(pendingReplyContext, latestInputValueRef.current ?? "")
+    ) {
+      // Clearing the composer for the send dropped the reply context; a send
+      // that failed put the quoted draft back, so it answers the same message.
+      pendingReplyContextRef.current = pendingReplyContext;
     }
     if (
       restoredStash &&
@@ -4018,7 +3931,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const { clearComposerAfterQueue, clearComposerIfUnchanged, performSubmit } = useChatSubmitDispatch({
     activeConversationId,
     clearInputEditor,
-    clearImageAttachments,
+    markImageAttachmentsSending,
+    removeSentImageAttachments,
     focusInput,
     isChatInputFocused,
     latestInputValueRef,
@@ -5412,7 +5326,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 message.role === "assistant" &&
                 shouldShowAssistantIdentityForMessage(message, previousAssistantHandle, runAgentHandleByRunId);
               const trimmedContent = message.content.trim();
-              const hasImageAttachments = extractImageAttachments(message).length > 0;
+              const hasImageAttachments = extractChatAttachments(message).length > 0;
               const hasFileChanges = Array.isArray(message.files) && message.files.length > 0;
               const groupIdentity =
                 message.role === "assistant"
@@ -6181,6 +6095,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             !activeConversationEntry?.controllerId,
         }}
         onOpenImagePicker={openImagePicker}
+        imageUploadUnavailableReason={chatAttachmentsUnavailableReason}
         sendingAttachment={sendingAttachment}
         showMobileGhostSuggestionAcceptButton={showMobileGhostSuggestionAcceptButton}
         onAcceptGhostSuggestion={handleAcceptGhostSuggestion}
