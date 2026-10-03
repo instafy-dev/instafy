@@ -63,11 +63,12 @@ function route(key, github, enabled = '') {
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget and read-reference selectors, the
-  // code-mode host build and the per-model proxy_retry_budget runs, independently
-  // bound by check-rust-ci; other commands and authority are exact.
+  // code-mode host build, the per-model proxy_retry_budget runs and the runtime
+  // provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // wrapper suite bound below; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '9de0757d8928879677f46f8cc5a288c354dcb170067231d12a0fe286b703912f' },
+    previousHash: '0ca0310f55cd19ce4264543c9cba158f94fe27aa7006a7665b482ce946cafc62' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
@@ -359,6 +360,7 @@ test('the complete pre-split command inventory and working directories are uncha
     'Test CLI package artifact': 'dc53d4deb7f3e7c8871633518a5ed275082e12e4735fa878399600f589d01356',
     'Validate provider contract package artifact': '70cfd1c44e4399e020c5a23459544c7e30820717e8b921ff814b963c4d8cb3c2',
     'Test CLI automations': '3da818db0a82364c31588e4bf6ba8a38a7cd30e5bd3d755eea0058644a5c9001',
+    'Test CLI git wrapper': '6fdd53c9d5a5af59ed4e4fc820e739f9122e3c252d16c3dd5e61f814ba6f1ee1',
     'Build and test desktop runtime': '4404b931ad4c93454f1acb37955f5059b7f3df6ac9cf9ffa81e92d3306481e73',
     'Build and test desktop app': '189e65ceed9465ec56589e5b804be189a9adc623daf4f4f3cee05b4b846a5ba5',
   };
@@ -382,7 +384,7 @@ test('the complete pre-split command inventory and working directories are uncha
 test('the full frontend, CLI, provider artifact and Desktop commands are preserved without filtering', () => {
   const commands = {
     'javascript-frontend': ['pnpm --filter @instafy/frontend lint', 'pnpm --filter @instafy/frontend build', 'pnpm --filter @instafy/frontend test:unit'],
-    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts'],
+    'javascript-cli': ['pnpm --filter @instafy/cli test:package', 'npm pack --dry-run --ignore-scripts', 'pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts', 'pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts'],
     'javascript-desktop': ['pnpm --filter @instafy/desktop-runtime-agent build', 'pnpm --filter @instafy/desktop-runtime-agent exec vitest run', 'pnpm --filter @instafy/desktop-app test'],
   };
   for (const [key, list] of Object.entries(commands)) for (const command of list) {
