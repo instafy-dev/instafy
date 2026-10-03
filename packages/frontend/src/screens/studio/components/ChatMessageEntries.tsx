@@ -15,7 +15,8 @@ import { MoreHoriz, WarningTriangle } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { useConversations } from "../../../conversations/ConversationsProvider";
-import { downloadChatAttachment, isChatAttachmentStoragePath } from "../../../lib/chatAttachments";
+import { isChatAttachmentStoragePath } from "../../../lib/chatAttachments";
+import { loadChatAttachmentPreview } from "../../../lib/chatAttachmentPreviews";
 import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
@@ -204,7 +205,10 @@ function parseAttachment(value: unknown): ChatAttachmentDescriptor | null {
     return storagePath ? { kind: "file", storagePath, ...details } : null;
   }
   const workspacePath = readTrimmedString(value, "workspacePath", "workspace_path");
-  const previewUrl = readTrimmedString(value, "previewUrl");
+  // Only a local preview: a URL another member wrote into the metadata would
+  // make every reader's client fetch it.
+  const previewUrlRaw = readTrimmedString(value, "previewUrl");
+  const previewUrl = previewUrlRaw && /^(blob:|data:image\/)/i.test(previewUrlRaw) ? previewUrlRaw : null;
   if (!storagePath && !workspacePath && !previewUrl) {
     return null;
   }
@@ -252,26 +256,71 @@ const ATTACHMENT_TILE_CLASS =
 type StorageImageState =
   | { storagePath: string; status: "loading" }
   | { storagePath: string; status: "ready"; url: string }
-  | { storagePath: string; status: "unavailable" };
+  | { storagePath: string; status: "unavailable" }
+  | { storagePath: string; status: "failed" };
+
+// Images further than this from the visible part of the transcript wait to
+// download until the person scrolls toward them.
+const STORAGE_IMAGE_PRELOAD_MARGIN_PX = 800;
 
 /**
- * Downloads a Storage image with the person's own session and shows it from
- * an object URL that is revoked when the image goes away. A read Storage
- * refuses (someone who is not a reader of the conversation) or an object
- * that is gone shows a plain placeholder.
+ * True once the element is on screen or close to it, and from then on. Without
+ * IntersectionObserver every image counts as near.
  */
-function useChatStorageImageUrl(storagePath: string): StorageImageState {
+function useNearViewport(): [(node: HTMLElement | null) => void, boolean] {
+  const [near, setNear] = useState(() => typeof IntersectionObserver === "undefined");
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const ref = useCallback((node: HTMLElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
+    if (!node || typeof IntersectionObserver === "undefined") {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          observer.disconnect();
+          setNear(true);
+        }
+      },
+      {
+        root: node.closest('[data-testid="chat-message-scroll"]'),
+        rootMargin: `${STORAGE_IMAGE_PRELOAD_MARGIN_PX}px 0px`,
+      },
+    );
+    observer.observe(node);
+    observerRef.current = observer;
+  }, []);
+  useEffect(() => () => observerRef.current?.disconnect(), []);
+  return [ref, near];
+}
+
+/**
+ * Downloads a Storage image with the person's own session once it is near the
+ * screen, and shows it from an object URL that is revoked when the image goes
+ * away. A read Storage refuses (someone who is not a reader of the
+ * conversation) or an object that is gone is `unavailable`; a download that
+ * could not reach Storage is `failed`, and `retry` tries it again.
+ */
+function useChatStorageImageUrl(
+  storagePath: string,
+  enabled: boolean,
+): { state: StorageImageState; retry: () => void } {
   const [state, setState] = useState<StorageImageState>({ storagePath, status: "loading" });
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
+    if (!enabled) {
+      return;
+    }
     let cancelled = false;
     let objectUrl: string | null = null;
-    void downloadChatAttachment(storagePath).then((result) => {
+    void loadChatAttachmentPreview(storagePath).then((result) => {
       if (cancelled) {
         return;
       }
       if (!result.ok) {
-        setState({ storagePath, status: "unavailable" });
+        setState({ storagePath, status: result.reason === "transient" ? "failed" : "unavailable" });
         return;
       }
       objectUrl = URL.createObjectURL(result.blob);
@@ -283,10 +332,18 @@ function useChatStorageImageUrl(storagePath: string): StorageImageState {
         URL.revokeObjectURL(objectUrl);
       }
     };
+  }, [attempt, enabled, storagePath]);
+
+  const retry = useCallback(() => {
+    setState({ storagePath, status: "loading" });
+    setAttempt((value) => value + 1);
   }, [storagePath]);
 
   // A new path shows as loading until its own download settles.
-  return state.storagePath === storagePath ? state : { storagePath, status: "loading" };
+  return {
+    state: state.storagePath === storagePath ? state : { storagePath, status: "loading" },
+    retry,
+  };
 }
 
 function ChatAttachmentImageTile({
@@ -301,8 +358,10 @@ function ChatAttachmentImageTile({
   if (!imageUrl) {
     return (
       <div
+        role="img"
+        aria-label={`Loading ${alt}`}
+        aria-busy="true"
         className={ATTACHMENT_TILE_CLASS}
-        aria-label={alt}
         data-testid="chat-image-attachment-placeholder"
       />
     );
@@ -330,9 +389,11 @@ function ChatMessageStorageImage({
   alt: string;
   onOpenImage?: (src: string, alt: string) => void;
 }) {
-  const state = useChatStorageImageUrl(storagePath);
+  const [nearRef, near] = useNearViewport();
+  const { state, retry } = useChatStorageImageUrl(storagePath, near);
+  let tile: ReactNode;
   if (state.status === "unavailable") {
-    return (
+    tile = (
       <div
         role="img"
         aria-label={`${alt} is unavailable`}
@@ -343,13 +404,33 @@ function ChatMessageStorageImage({
         Image unavailable
       </div>
     );
+  } else if (state.status === "failed") {
+    tile = (
+      <button
+        type="button"
+        onClick={retry}
+        aria-label={`Couldn't load ${alt}. Try again`}
+        title={alt}
+        className={`${ATTACHMENT_TILE_CLASS} flex flex-col items-center justify-center gap-1 p-2 text-center text-xs text-slate-500 transition hover:bg-slate-100/60 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)]`}
+        data-testid="chat-image-attachment-retry"
+      >
+        <span>Couldn't load image</span>
+        <span className="font-medium text-slate-700 dark:text-slate-200">Try again</span>
+      </button>
+    );
+  } else {
+    tile = (
+      <ChatAttachmentImageTile
+        imageUrl={state.status === "ready" ? state.url : null}
+        alt={alt}
+        onOpenImage={onOpenImage}
+      />
+    );
   }
   return (
-    <ChatAttachmentImageTile
-      imageUrl={state.status === "ready" ? state.url : null}
-      alt={alt}
-      onOpenImage={onOpenImage}
-    />
+    <div ref={nearRef} className="h-24 w-24">
+      {tile}
+    </div>
   );
 }
 
@@ -409,7 +490,7 @@ function ChatMessageImageAttachment({
   onOpenImage?: (src: string, alt: string) => void;
 }) {
   const alt = attachment.fileName ?? "Image attachment";
-  if (attachment.storagePath && !attachment.previewUrl) {
+  if (attachment.storagePath) {
     return (
       <ChatMessageStorageImage
         storagePath={attachment.storagePath}

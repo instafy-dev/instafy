@@ -5,6 +5,7 @@ import {
   uploadChatAttachment,
   type ChatStorageAttachment,
 } from "../lib/chatAttachments";
+import { seedChatAttachmentPreview } from "../lib/chatAttachmentPreviews";
 import type { ChatMessage } from "../screens/studio/types";
 
 export function detectClientTimezone(): string {
@@ -99,13 +100,18 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
 
+/** The longest attachment `fileName` a message records. */
+export const CHAT_UPLOAD_FILE_NAME_MAX_LENGTH = 80;
+
 export function sanitizeChatUploadFileName(rawName: string): string {
   const trimmed = rawName.trim();
   if (!trimmed) {
     return "image";
   }
   const cleaned = trimmed.replace(/[/\\?%*:|"<>]/g, "-").replace(/\s+/g, "-");
-  return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
+  return cleaned.length > CHAT_UPLOAD_FILE_NAME_MAX_LENGTH
+    ? cleaned.slice(0, CHAT_UPLOAD_FILE_NAME_MAX_LENGTH)
+    : cleaned;
 }
 
 export function resolveSubmittedImageFiles(imageFile?: File | null, imageFiles?: File[]) {
@@ -143,13 +149,46 @@ export function patchConversationMessageMetadata(
   });
 }
 
+/** At most this many of a message's attachments upload at once. */
+export const CHAT_ATTACHMENT_UPLOAD_CONCURRENCY = 3;
+
+/**
+ * Runs `run` over `items`, at most `limit` at a time, in order. After the
+ * first failure no further item starts; those that did not run are left out
+ * of the results.
+ */
+async function settleInTurn<T, R>(
+  items: T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R> | undefined>> {
+  const results: Array<PromiseSettledResult<R> | undefined> = new Array(items.length).fill(undefined);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await run(items[index]) };
+      } catch (reason) {
+        failed = true;
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
+
 /**
  * Stores a message's attachments in its conversation's Storage folder with the
  * person's session and returns their message metadata, in order. The
  * conversation must already exist on the controller. When any upload fails,
  * the ones that succeeded are removed again and a ChatAttachmentUploadError
  * with plain copy is thrown, so a message is sent with all of its attachments
- * or not at all.
+ * or not at all. Stored images are kept as local previews, so the sender's
+ * own message shows them without downloading them again.
  */
 export async function uploadConversationAttachments(args: {
   projectId: string;
@@ -157,27 +196,31 @@ export async function uploadConversationAttachments(args: {
   files: File[];
 }): Promise<ChatStorageAttachment[]> {
   const { projectId, conversationId, files } = args;
-  const results = await Promise.allSettled(
-    files.map((file) =>
-      uploadChatAttachment({
-        projectId,
-        conversationId,
-        file,
-        fileName: sanitizeChatUploadFileName(file.name || "attachment"),
-      }),
-    ),
+  const results = await settleInTurn(files, CHAT_ATTACHMENT_UPLOAD_CONCURRENCY, (file) =>
+    uploadChatAttachment({
+      projectId,
+      conversationId,
+      file,
+      fileName: sanitizeChatUploadFileName(file.name || "attachment"),
+    }),
   );
   const failure = results.find(
-    (result): result is PromiseRejectedResult => result.status === "rejected",
+    (result): result is PromiseRejectedResult => result?.status === "rejected",
   );
-  if (failure) {
+  if (failure || results.some((result) => result === undefined)) {
     await removeChatAttachments(
-      results.flatMap((result) => (result.status === "fulfilled" ? [result.value.storagePath] : [])),
+      results.flatMap((result) => (result?.status === "fulfilled" ? [result.value.storagePath] : [])),
     );
-    const reason: unknown = failure.reason;
+    const reason: unknown = failure?.reason;
     throw reason instanceof ChatAttachmentUploadError
       ? reason
       : new ChatAttachmentUploadError(describeChatAttachmentUploadError(reason), { cause: reason });
   }
-  return results.map((result) => (result as PromiseFulfilledResult<ChatStorageAttachment>).value);
+  const attachments = results.map((result) => (result as PromiseFulfilledResult<ChatStorageAttachment>).value);
+  attachments.forEach((attachment, index) => {
+    if (attachment.kind === "image") {
+      seedChatAttachmentPreview(attachment.storagePath, files[index]);
+    }
+  });
+  return attachments;
 }

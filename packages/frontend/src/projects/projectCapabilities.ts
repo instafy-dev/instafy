@@ -13,6 +13,18 @@ export interface ProjectCapabilities {
   chatAttachments: ChatAttachmentsMode | null;
 }
 
+/**
+ * What the composer is told about chat attachments in a space. Attachments go
+ * to Supabase Storage with the person's own session, so an app without a
+ * Supabase configuration has nowhere to put them whatever the server says.
+ */
+export function resolveChatAttachmentsMode(
+  hasSupabaseConfig: boolean,
+  capabilities: Pick<ProjectCapabilities, "chatAttachments"> | null | undefined,
+): ChatAttachmentsMode | null {
+  return hasSupabaseConfig ? capabilities?.chatAttachments ?? null : "none";
+}
+
 function normalizeChatAttachmentsMode(value: unknown): ChatAttachmentsMode | null {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return normalized === "storage" || normalized === "none" ? normalized : null;

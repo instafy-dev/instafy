@@ -74,7 +74,7 @@ function createOptions(
     outOfCredits: true,
     pendingBrowserLaunchMode: null,
     pendingTypingBroadcastRef: { current: null },
-    performSubmit: vi.fn(async () => undefined),
+    performSubmit: vi.fn(async () => true),
     personalBrowserActive: false,
     personalBrowserAgentControlEnabled: false,
     personalBrowserAgentError: null,

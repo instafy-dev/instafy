@@ -615,7 +615,9 @@ export function useConversationSubmitFlow({
         // sent until every attachment is stored: a failure leaves no message
         // behind and the composer gets the draft back (useChatSubmitDispatch).
         const failSend = (failure: ChatAttachmentUploadError): never => {
-          showStatus(`Your message wasn't sent. ${failure.message}`, "error", 6000);
+          if (!options?.callerReportsAttachmentErrors) {
+            showStatus(`Your message wasn't sent. ${failure.message}`, "error", 6000);
+          }
           throw failure;
         };
         let attachmentConversationId: string | null = null;
@@ -673,6 +675,9 @@ export function useConversationSubmitFlow({
       // failed run, and only for a run it started (useRunFailureAutoRetry).
       rememberPromptSentFromThisPage(userMessage);
       appendMessages(displayConversationId, [userMessage]);
+      if (attachmentFiles.length > 0) {
+        options?.onAttachmentsStored?.();
+      }
       // What the list will hold once this message lands; null for a chat whose
       // history lives on the controller.
       const autoTitleOpeningMessage = shouldAttemptAutoTitle

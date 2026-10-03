@@ -22,10 +22,14 @@ const mocks = vi.hoisted(() => ({
   // remembered, so a test can empty the active project and the URL.
   activeProjectId: "11111111-1111-4111-8111-111111111111",
   locationSearch: "?projectId=11111111-1111-4111-8111-111111111111",
+  // Mutable per test: a self-hosted app built without Supabase.
+  hasSupabaseConfig: true,
 }));
 
 vi.mock("../../lib/supabaseClient", () => ({
-  hasSupabaseConfig: true,
+  get hasSupabaseConfig() {
+    return mocks.hasSupabaseConfig;
+  },
 }));
 
 vi.mock("../../sdk/instafy", () => ({
@@ -388,6 +392,21 @@ describe("ProjectAccessProvider capability refresh", () => {
       window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, { detail: { projectId: PROJECT_ID } }));
     });
     await vi.waitFor(() => expect(probe?.getAttribute("data-attachments")).toBe("storage"));
+  });
+
+  it("turns attachments off in an app without a Supabase configuration", async () => {
+    mocks.hasSupabaseConfig = false;
+    try {
+      mocks.getSummaryResult.mockResolvedValue({
+        ...summaryFor("admin"),
+        summary: { ...summaryFor("admin").summary, attachments: "storage" },
+      });
+      await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+      const probe = container.querySelector('[data-testid="access-probe"]');
+      await vi.waitFor(() => expect(probe?.getAttribute("data-attachments")).toBe("none"));
+    } finally {
+      mocks.hasSupabaseConfig = true;
+    }
   });
 
   it("leaves attachments on while an older controller says nothing about them", async () => {
