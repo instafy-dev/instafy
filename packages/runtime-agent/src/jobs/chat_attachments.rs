@@ -1,10 +1,11 @@
 //! Chat attachments kept in Storage rather than in the workspace.
 //!
-//! A message's Storage attachment is `<projectId>/<uuid>.<ext>` in the private
-//! `chat-attachments` bucket. For a runtime that advertises
-//! `attachmentDownloads`, the controller signs the ones of the leased space and
-//! puts `attachment_downloads: [{name, url, sizeBytes}]` in the job payload.
-//! Before the turn each one is downloaded to `.instafy/attachments/<name>`,
+//! A message's Storage attachment is `<projectId>/<conversationId>/<uuid>.<ext>`
+//! in the private `chat-attachments` bucket. For a runtime that advertises
+//! `attachmentDownloads`, the controller signs the ones of the leased
+//! conversation and puts `attachment_downloads: [{name, url, sizeBytes}]` in
+//! the job payload, `name` being the object's `<uuid>.<ext>`. Before the turn
+//! each one is downloaded to `.instafy/attachments/<name>`,
 //! which is reserved: it is never published, and a `.gitignore` keeps it out
 //! of every git status. The prompt then lists only the attachments this lease
 //! signed whose file is there, and says the others are unavailable.
@@ -67,32 +68,43 @@ impl Default for DownloadLimits {
     }
 }
 
-/// `<uuid>.<ext>`: 36 characters of lowercase hex and hyphens and one of the
+/// `<uuid>.<ext>`: a canonical (lower-case, hyphenated) uuid and one of the
 /// bucket's extensions, so the name has no separator, dot segment or
 /// unexpected type.
 pub(super) fn file_name_is_valid(name: &str) -> bool {
     let Some((stem, extension)) = name.split_once('.') else {
         return false;
     };
-    is_uuid_shaped(stem) && EXTENSIONS.contains(&extension)
+    is_canonical_uuid(stem) && EXTENSIONS.contains(&extension)
 }
 
-/// The file name of a `storagePath` in this job's space, or `None` for a path
-/// of another shape or space. Such an attachment is never downloaded.
+/// The file name of a `storagePath` in this job's own conversation,
+/// `<projectId>/<conversationId>/<uuid>.<ext>`, or `None` for a path of another
+/// shape, space or conversation, or a job without a conversation. The
+/// controller never signs such an attachment, so it is never offered.
 pub(super) fn storage_path_file_name<'a>(
     storage_path: &'a str,
     project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
 ) -> Option<&'a str> {
-    let (space, file) = storage_path.split_once('/')?;
-    (is_uuid_shaped(space) && space == project_id.to_string() && file_name_is_valid(file))
-        .then_some(file)
+    let mut segments = storage_path.splitn(3, '/');
+    let (space, conversation, file) = (segments.next()?, segments.next()?, segments.next()?);
+    let conversation_id = conversation_id?;
+    (is_canonical_uuid(space)
+        && is_canonical_uuid(conversation)
+        && space == project_id.to_string()
+        && conversation == conversation_id.to_string()
+        && file_name_is_valid(file))
+    .then_some(file)
 }
 
-fn is_uuid_shaped(value: &str) -> bool {
+/// The spelling a uuid is printed in, the only one the Storage policies accept.
+fn is_canonical_uuid(value: &str) -> bool {
     value.len() == 36
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-')
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
 }
 
 fn attachment_relative_path(name: &str) -> String {
@@ -503,6 +515,8 @@ mod tests {
 
     const STEM: &str = "6a000000-0000-4000-8000-000000000001";
     const PROJECT: &str = "11111111-1111-4111-8111-111111111111";
+    const CONVERSATION: &str = "c0c0c0c0-3333-4333-8333-333333333333";
+    const OTHER_CONVERSATION: &str = "44444444-4444-4444-8444-444444444444";
 
     fn name(n: u32, extension: &str) -> String {
         format!("6a000000-0000-4000-8000-{n:012}.{extension}")
@@ -573,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn names_are_checked_without_the_space_segment() {
+    fn names_are_checked_without_the_space_and_conversation_segments() {
         let project = Uuid::parse_str(PROJECT).unwrap();
         assert!(file_name_is_valid(&format!("{STEM}.png")));
         for bad in [
@@ -582,25 +596,41 @@ mod tests {
             format!("{STEM}.svg"),
             format!("{STEM}.PNG"),
             format!("{STEM}.png.txt"),
+            // The same uuid, spelled other than canonically.
+            "6a00-0000-0000-4000-8000000000000001.png".to_string(),
+            "6A000000-0000-4000-8000-000000000001.png".to_string(),
             ".gitignore".to_string(),
             format!("sub/{STEM}.png"),
             String::new(),
         ] {
             assert!(!file_name_is_valid(&bad), "{bad:?} must be refused");
         }
+        fn file_name(path: &str) -> Option<&str> {
+            let project = Uuid::parse_str(PROJECT).unwrap();
+            let conversation = Uuid::parse_str(CONVERSATION).unwrap();
+            storage_path_file_name(path, &project, Some(&conversation))
+        }
         assert_eq!(
-            storage_path_file_name(&format!("{PROJECT}/{STEM}.md"), &project),
+            file_name(&format!("{PROJECT}/{CONVERSATION}/{STEM}.md")),
             Some(format!("{STEM}.md").as_str())
         );
+        for other in [
+            format!("22222222-2222-4222-8222-222222222222/{CONVERSATION}/{STEM}.md"),
+            format!("{PROJECT}/{OTHER_CONVERSATION}/{STEM}.md"),
+            format!("{PROJECT}/{}/{STEM}.md", CONVERSATION.to_uppercase()),
+            format!("{PROJECT}/{CONVERSATION}/../{STEM}.md"),
+            format!("{PROJECT}/{CONVERSATION}/x/{STEM}.md"),
+            // A name without a conversation.
+            format!("{PROJECT}/{STEM}.md"),
+        ] {
+            assert_eq!(file_name(&other), None, "{other}");
+        }
         assert_eq!(
             storage_path_file_name(
-                &format!("22222222-2222-4222-8222-222222222222/{STEM}.md"),
-                &project
+                &format!("{PROJECT}/{CONVERSATION}/{STEM}.md"),
+                &project,
+                None
             ),
-            None
-        );
-        assert_eq!(
-            storage_path_file_name(&format!("{PROJECT}/../{STEM}.md"), &project),
             None
         );
     }
@@ -906,6 +936,7 @@ mod tests {
             attachments.as_array().unwrap(),
             workspace,
             &Uuid::parse_str(PROJECT).unwrap(),
+            Some(&Uuid::parse_str(CONVERSATION).unwrap()),
             &leased.iter().cloned().collect(),
         )
     }
@@ -941,23 +972,29 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
         std::fs::write(dir.join(name(2, "md")), b"# notes").unwrap();
-        // The same file name under another space: present on disk, but the
-        // controller never signs it, so it is not this message's attachment.
+        // A file name of another space: present on disk, but the controller
+        // never signs it for this job, so it is not this conversation's
+        // attachment.
         std::fs::write(dir.join(name(3, "png")), b"png").unwrap();
         // Signed, but its download failed: name(4) is not on disk.
         let leased = [name(1, "png"), name(2, "md"), name(4, "png")];
         let section = prompt_section(
             json!([
-                { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(1, "png")),
+                { "kind": "image", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")),
                   "fileName": "photo.png", "mimeType": "image/png", "sizeBytes": 3 },
-                { "kind": "file", "storagePath": format!("{PROJECT}/{}", name(2, "md")),
+                { "kind": "file", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(2, "md")),
                   "fileName": "notes.md", "mimeType": "text/markdown" },
-                { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(4, "png")),
+                { "kind": "image", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(4, "png")),
                   "fileName": "missing.png" },
                 { "kind": "image",
-                  "storagePath": format!("22222222-2222-4222-8222-222222222222/{}", name(3, "png")),
+                  "storagePath": format!("22222222-2222-4222-8222-222222222222/{CONVERSATION}/{}", name(3, "png")),
                   "fileName": "other-space.png" },
-                { "kind": "file", "storagePath": format!("{PROJECT}/../{}", name(5, "md")) },
+                // Signed and on disk under the same file name, but as another
+                // conversation's object it is not this one's to offer.
+                { "kind": "image",
+                  "storagePath": format!("{PROJECT}/{OTHER_CONVERSATION}/{}", name(1, "png")),
+                  "fileName": "other-conversation.png" },
+                { "kind": "file", "storagePath": format!("{PROJECT}/{CONVERSATION}/../{}", name(5, "md")) },
             ]),
             workspace.path(),
             &leased,
@@ -978,11 +1015,13 @@ mod tests {
         assert!(section.contains("call the `view_image` tool"));
         assert!(section.contains("Read the attached text file(s)"));
         assert!(section.contains(
-            "not available in this workspace:\n- missing.png\n- other-space.png\n- a text file\n"
+            "not available in this workspace:\n- missing.png\n- other-space.png\n- other-conversation.png\n- a text file\n"
         ));
         assert!(!section.contains(&name(3, "png")));
         assert!(!section.contains(&name(4, "png")));
+        assert_eq!(section.matches(&name(1, "png")).count(), 1, "{section}");
         assert!(!section.contains("22222222"));
+        assert!(!section.contains(OTHER_CONVERSATION));
     }
 
     #[test]
@@ -994,7 +1033,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
         let attachments = json!([{ "kind": "image",
-            "storagePath": format!("{PROJECT}/{}", name(1, "png")), "fileName": "deleted.png" }]);
+            "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")), "fileName": "deleted.png" }]);
 
         let section = prompt_section(attachments.clone(), workspace.path(), &[]).unwrap();
         assert!(!section.contains(&name(1, "png")), "{section}");
@@ -1029,7 +1068,7 @@ mod tests {
     fn nothing_downloaded_means_no_path_and_no_view_image_instruction() {
         let workspace = tempfile::tempdir().unwrap();
         let section = prompt_section(
-            json!([{ "kind": "image", "storagePath": format!("{PROJECT}/{}", name(1, "png")),
+            json!([{ "kind": "image", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")),
                 "fileName": "photo.png" }]),
             workspace.path(),
             &[name(1, "png")],
@@ -1048,12 +1087,12 @@ mod tests {
         let history = json!([
             { "role": "user", "metadata": { "attachments": [
                 { "kind": "image", "workspacePath": "chat-upload-1.png" },
-                { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(1, "png")) },
+                { "kind": "image", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")) },
             ]}},
             { "role": "user", "metadata": { "promptMetadata": { "attachments": [
-                { "kind": "file", "storagePath": format!("{PROJECT}/{}", name(1, "png")) },
-                { "kind": "file", "storagePath": format!("{PROJECT}/{}", name(2, "txt")) },
-                { "kind": "video", "storagePath": format!("{PROJECT}/{}", name(3, "png")) },
+                { "kind": "file", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")) },
+                { "kind": "file", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(2, "txt")) },
+                { "kind": "video", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(3, "png")) },
                 { "kind": "file", "workspacePath": "notes.txt" },
             ]}}},
         ]);
@@ -1066,8 +1105,8 @@ mod tests {
             keys,
             vec![
                 "chat-upload-1.png".to_string(),
-                format!("{PROJECT}/{}", name(1, "png")),
-                format!("{PROJECT}/{}", name(2, "txt")),
+                format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")),
+                format!("{PROJECT}/{CONVERSATION}/{}", name(2, "txt")),
             ]
         );
     }
@@ -1080,12 +1119,12 @@ mod tests {
         // Twelve user messages with a Storage attachment each, oldest first.
         for n in 1..=12 {
             history.push(json!({ "role": "user", "metadata": { "attachments": [
-                { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(n, "png")) },
+                { "kind": "image", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(n, "png")) },
             ]}}));
         }
         // An assistant row is never a user's attachment.
         history.push(json!({ "role": "assistant", "metadata": { "attachments": [
-            { "kind": "image", "storagePath": format!("{PROJECT}/{}", name(99, "png")) },
+            { "kind": "image", "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(99, "png")) },
         ]}}));
         let collected =
             super::super::collect_image_attachments_from_history(Some(&JsonValue::Array(history)));
@@ -1094,7 +1133,7 @@ mod tests {
             .filter_map(|entry| super::super::attachment_identity(entry.as_object().unwrap()))
             .collect();
         let mut expected = vec!["chat-upload-old.png".to_string()];
-        expected.extend((3..=12).map(|n| format!("{PROJECT}/{}", name(n, "png"))));
+        expected.extend((3..=12).map(|n| format!("{PROJECT}/{CONVERSATION}/{}", name(n, "png"))));
         assert_eq!(keys, expected);
     }
 

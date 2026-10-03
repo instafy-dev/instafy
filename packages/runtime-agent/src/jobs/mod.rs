@@ -8151,6 +8151,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             job.payload.get("metadata"),
             workspace_dir,
             project_id,
+            job.conversation_id.as_ref(),
             &leased_attachments,
         )
         .or_else(|| {
@@ -8160,6 +8161,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 &attachments,
                 workspace_dir,
                 project_id,
+                job.conversation_id.as_ref(),
                 &leased_attachments,
             )
         });
@@ -14574,6 +14576,7 @@ fn format_image_attachment_section(
     metadata: Option<&JsonValue>,
     workspace_dir: &Path,
     project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
     leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let Some(metadata) = metadata.and_then(JsonValue::as_object) else {
@@ -14588,6 +14591,7 @@ fn format_image_attachment_section(
         attachments,
         workspace_dir,
         project_id,
+        conversation_id,
         leased_attachments,
     )
 }
@@ -15380,13 +15384,15 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
 
 /// The prompt's attachments section. Legacy images name their workspace
 /// path. A Storage image or text file is listed at `.instafy/attachments/`
-/// only when this lease signed it and the pre-turn download left its file
-/// there; the others are named as unavailable so the agent neither guesses a
-/// path nor pretends to have read them.
+/// only when it belongs to the job's own conversation, this lease signed it
+/// and the pre-turn download left its file there; the others are named as
+/// unavailable so the agent neither guesses a path nor pretends to have read
+/// them.
 fn format_image_attachment_section_from_attachments(
     attachments: &[JsonValue],
     workspace_dir: &Path,
     project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
     leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let mut lines = Vec::new();
@@ -15413,11 +15419,15 @@ fn format_image_attachment_section_from_attachments(
 
         let workspace_path = match attachment_text_field(entry, "storagePath", "storage_path") {
             Some(storage_path) => {
-                let downloaded = chat_attachments::storage_path_file_name(storage_path, project_id)
-                    .filter(|name| {
-                        leased_attachments.contains(*name)
-                            && chat_attachments::attachment_is_available(workspace_dir, name)
-                    });
+                let downloaded = chat_attachments::storage_path_file_name(
+                    storage_path,
+                    project_id,
+                    conversation_id,
+                )
+                .filter(|name| {
+                    leased_attachments.contains(*name)
+                        && chat_attachments::attachment_is_available(workspace_dir, name)
+                });
                 let Some(name) = downloaded else {
                     unavailable.push(describe_unavailable_attachment(
                         file_name, mime_type, size_bytes, is_image,
@@ -16865,6 +16875,7 @@ mod tests {
             expires_at: None,
         });
         let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
         let name = "6a000000-0000-4000-8000-000000000001.png";
         // A worker's metadata carries no attachments, so its prompt takes them
         // from the conversation history, as on a runtime spread.
@@ -16881,7 +16892,7 @@ mod tests {
                     "content": "Here is the screenshot.",
                     "metadata": { "attachments": [{
                         "kind": "image",
-                        "storagePath": format!("{project_id}/{name}"),
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
                         "fileName": "screenshot.png",
                         "mimeType": "image/png"
                     }]}
@@ -16894,6 +16905,7 @@ mod tests {
             }),
         );
         job.project_id = Some(project_id);
+        job.conversation_id = Some(conversation_id);
         assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
 
         processor
