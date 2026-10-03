@@ -38,6 +38,8 @@ use uuid::Uuid;
 
 mod browser_request;
 mod card_text;
+mod chat_attachments;
+pub(crate) use chat_attachments::TurnAttachments;
 mod conversation_context;
 mod git_sync;
 mod known_safe_command;
@@ -4295,6 +4297,33 @@ impl JobProcessor {
             .ok_or_else(|| anyhow!("job missing project scope"))
     }
 
+    /// Holds the chat attachments folder of a leased batch's conversation
+    /// until the batch is done. The controller batches only one
+    /// conversation's jobs, and they may run one after another: without the
+    /// hold, each would remove the folder at its end and the next would
+    /// download again, after its signed URLs may have expired. Nothing is
+    /// held for a single job, or for a batch that is not one conversation's.
+    pub(crate) fn hold_batch_attachments(&self, jobs: &[LeaseJob]) -> Option<TurnAttachments> {
+        let [first, rest @ ..] = jobs else {
+            return None;
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        let conversation_id = first.conversation_id?;
+        let project_id = self.project_id_for_job(first).ok()?;
+        let same_conversation = rest.iter().all(|job| {
+            job.conversation_id == Some(conversation_id)
+                && self.project_id_for_job(job).ok() == Some(project_id)
+        });
+        same_conversation.then(|| {
+            TurnAttachments::begin(
+                &self.config.project_workspace_dir(&project_id),
+                Some(&conversation_id),
+            )
+        })
+    }
+
     pub async fn cleanup_after_lease_lost(&self, job: &LeaseJob) {
         let intent = job.intent.as_deref().unwrap_or("").trim();
         if !intent.eq_ignore_ascii_case("terminal_command") {
@@ -4372,17 +4401,20 @@ impl JobProcessor {
         let project_context_cards = self
             .load_relevant_project_context_cards(job, project_id, prompt_text)
             .await;
-        let (prompt, _loaded_learned_blocks, mut prompt_context) = self.build_prompt_with_text(
-            &project_id,
-            job,
-            &workspace_dir,
-            prompt_text,
-            true,
-            None,
-            &project_context_cards,
-            None,
-            None,
-        )?;
+        // As in run_apply_job: a worker may run on another runtime than the
+        // turn that received the attachments, so it fetches its own.
+        let (prompt, _loaded_learned_blocks, mut prompt_context, _turn_attachments) = self
+            .build_turn_prompt(
+                &project_id,
+                job,
+                &workspace_dir,
+                prompt_text,
+                None,
+                &project_context_cards,
+                None,
+                None,
+            )
+            .await?;
         annotate_prompt_context_final_output_mode(
             &mut prompt_context,
             final_output_mode_for_runtime_job(job, false, runtime_job_expectations(&job.payload)),
@@ -5795,25 +5827,34 @@ impl JobProcessor {
                 || expects_generic_mcp_tool_execution,
         );
 
-        let (mut prompt, loaded_learned_blocks, mut prompt_context) =
+        // The turn's chat attachments stay on disk until it returns.
+        let (mut prompt, loaded_learned_blocks, mut prompt_context, _turn_attachments) =
             if expects_generic_mcp_tool_execution {
                 (
                     self.build_mcp_task_prompt(prompt_text)?,
                     Vec::new(),
                     JsonValue::Null,
+                    None,
                 )
             } else {
-                self.build_prompt_with_text(
-                    &project_id,
-                    job,
-                    &workspace_dir,
-                    prompt_text,
-                    true,
-                    provider_conversation_state_for_run.as_ref(),
-                    &project_context_cards,
-                    scoped_worker_path_observation.as_ref(),
-                    routing_pre_observation.as_ref(),
-                )?
+                let (prompt, loaded_learned_blocks, prompt_context, attachments) = self
+                    .build_turn_prompt(
+                        &project_id,
+                        job,
+                        &workspace_dir,
+                        prompt_text,
+                        provider_conversation_state_for_run.as_ref(),
+                        &project_context_cards,
+                        scoped_worker_path_observation.as_ref(),
+                        routing_pre_observation.as_ref(),
+                    )
+                    .await?;
+                (
+                    prompt,
+                    loaded_learned_blocks,
+                    prompt_context,
+                    Some(attachments),
+                )
             };
 
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
@@ -7446,6 +7487,50 @@ impl JobProcessor {
         Ok(prompt)
     }
 
+    /// A turn's prompt. The Storage attachments the controller signed for
+    /// the turn are downloaded into its conversation's folder first, so the
+    /// prompt lists the ones that arrived; a failure only leaves that
+    /// attachment out of the list. Every lane that runs a turn from a prompt
+    /// builds it here. The downloads stay until the returned
+    /// [`chat_attachments::TurnAttachments`] drops at the end of the turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_turn_prompt(
+        &self,
+        project_id: &Uuid,
+        job: &LeaseJob,
+        workspace_dir: &Path,
+        prompt_text: &str,
+        provider_conversation_state: Option<&JsonValue>,
+        project_context_cards: &[PromptContextCard],
+        scoped_worker_path_observation: Option<&ScopedWorkerPathObservation>,
+        routing_pre_observation: Option<&RoutingPreObservation>,
+    ) -> Result<(
+        String,
+        Vec<LoadedLearnedBlock>,
+        JsonValue,
+        chat_attachments::TurnAttachments,
+    )> {
+        let attachments = chat_attachments::download_job_attachments(
+            job.id,
+            job.conversation_id.as_ref(),
+            &job.payload,
+            workspace_dir,
+        )
+        .await;
+        let (prompt, loaded_learned_blocks, prompt_context) = self.build_prompt_with_text(
+            project_id,
+            job,
+            workspace_dir,
+            prompt_text,
+            true,
+            provider_conversation_state,
+            project_context_cards,
+            scoped_worker_path_observation,
+            routing_pre_observation,
+        )?;
+        Ok((prompt, loaded_learned_blocks, prompt_context, attachments))
+    }
+
     fn build_prompt_with_text(
         &self,
         project_id: &Uuid,
@@ -8136,14 +8221,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        let leased_attachments = chat_attachments::leased_attachment_names(&job.payload);
         let attachment_section = format_image_attachment_section(
             job.payload.get("metadata"),
             workspace_dir,
+            project_id,
+            job.conversation_id.as_ref(),
+            &leased_attachments,
         )
         .or_else(|| {
             let attachments =
                 collect_image_attachments_from_history(job.payload.get("conversation_history"));
-            format_image_attachment_section_from_attachments(&attachments, workspace_dir)
+            format_image_attachment_section_from_attachments(
+                &attachments,
+                workspace_dir,
+                project_id,
+                job.conversation_id.as_ref(),
+                &leased_attachments,
+            )
         });
 
         if let Some(section) = attachment_section {
@@ -14476,15 +14571,31 @@ fn collect_job_context(payload: &JsonValue) -> Vec<String> {
         .collect()
 }
 
+/// The attachments of the conversation history, oldest first. A Storage
+/// attachment counts only from the user messages the controller signs for, so
+/// the prompt never names an older one as missing on every turn.
 fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<JsonValue> {
     let Some(JsonValue::Array(entries)) = history else {
         return Vec::new();
     };
+    let recent_user_messages: HashSet<usize> = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, entry)| {
+            entry
+                .get("role")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|role| role.eq_ignore_ascii_case("user"))
+        })
+        .take(chat_attachments::HISTORY_USER_MESSAGES)
+        .map(|(index, _)| index)
+        .collect();
 
     let mut unique_paths = HashSet::new();
     let mut attachments = Vec::new();
 
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         let Some(map) = entry.as_object() else {
             continue;
         };
@@ -14517,25 +14628,15 @@ fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<Js
                 let Some(entry) = attachment.as_object() else {
                     continue;
                 };
-                let kind = entry
-                    .get("kind")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_ascii_lowercase();
-                if kind != "image" {
-                    continue;
-                }
-                let workspace_path = entry
-                    .get("workspacePath")
-                    .and_then(JsonValue::as_str)
-                    .or_else(|| entry.get("workspace_path").and_then(JsonValue::as_str))
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty());
-                let Some(workspace_path) = workspace_path else {
+                let Some(key) = attachment_identity(entry) else {
                     continue;
                 };
-                if !unique_paths.insert(workspace_path.to_string()) {
+                if attachment_text_field(entry, "storagePath", "storage_path").is_some()
+                    && !recent_user_messages.contains(&index)
+                {
+                    continue;
+                }
+                if !unique_paths.insert(key) {
                     continue;
                 }
                 attachments.push(attachment.clone());
@@ -14549,6 +14650,9 @@ fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<Js
 fn format_image_attachment_section(
     metadata: Option<&JsonValue>,
     workspace_dir: &Path,
+    project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
+    leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let Some(metadata) = metadata.and_then(JsonValue::as_object) else {
         return None;
@@ -14558,7 +14662,45 @@ fn format_image_attachment_section(
         return None;
     };
 
-    format_image_attachment_section_from_attachments(attachments, workspace_dir)
+    format_image_attachment_section_from_attachments(
+        attachments,
+        workspace_dir,
+        project_id,
+        conversation_id,
+        leased_attachments,
+    )
+}
+
+/// How an attachment is told apart from the others: a legacy image by its
+/// `workspacePath`, a Storage image or text file by its `storagePath`. Any
+/// other entry is not an attachment the prompt lists.
+fn attachment_identity(entry: &JsonMap<String, JsonValue>) -> Option<String> {
+    let kind = entry
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if let Some(storage_path) = attachment_text_field(entry, "storagePath", "storage_path") {
+        return matches!(kind.as_str(), "image" | "file").then(|| storage_path.to_string());
+    }
+    if kind != "image" {
+        return None;
+    }
+    attachment_text_field(entry, "workspacePath", "workspace_path").map(str::to_string)
+}
+
+fn attachment_text_field<'a>(
+    entry: &'a JsonMap<String, JsonValue>,
+    key: &str,
+    snake_key: &str,
+) -> Option<&'a str> {
+    entry
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .or_else(|| entry.get(snake_key).and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn client_metadata(metadata: Option<&JsonValue>) -> Option<&serde_json::Map<String, JsonValue>> {
@@ -15315,53 +15457,82 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
     Some(formatted)
 }
 
+/// The prompt's attachments section. Legacy images name their workspace
+/// path. A Storage image or text file is listed at
+/// `.instafy/attachments/<conversationId>/` only when it belongs to the job's
+/// own conversation, this lease signed it and the pre-turn download left its
+/// file there; the others are named as unavailable so the agent neither
+/// guesses a path nor pretends to have read them.
 fn format_image_attachment_section_from_attachments(
     attachments: &[JsonValue],
     workspace_dir: &Path,
+    project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
+    leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let mut lines = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut lists_image = false;
+    let mut lists_text_file = false;
     for attachment in attachments {
         let Some(entry) = attachment.as_object() else {
             continue;
         };
-        let kind = entry
-            .get("kind")
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        if kind != "image" {
+        if attachment_identity(entry).is_none() {
             continue;
         }
-        let workspace_path = entry
-            .get("workspacePath")
+        let is_image = entry
+            .get("kind")
             .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("workspace_path").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let Some(workspace_path) = workspace_path else {
-            continue;
-        };
-        let file_name = entry
-            .get("fileName")
-            .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("file_name").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let mime_type = entry
-            .get("mimeType")
-            .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("mime_type").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
+            .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("image"));
+        let file_name = attachment_text_field(entry, "fileName", "file_name");
+        let mime_type = attachment_text_field(entry, "mimeType", "mime_type");
         let size_bytes = entry
             .get("sizeBytes")
             .and_then(JsonValue::as_u64)
             .or_else(|| entry.get("size_bytes").and_then(JsonValue::as_u64));
 
+        let workspace_path = match attachment_text_field(entry, "storagePath", "storage_path") {
+            Some(storage_path) => {
+                let downloaded = conversation_id
+                    .zip(chat_attachments::storage_path_file_name(
+                        storage_path,
+                        project_id,
+                        conversation_id,
+                    ))
+                    .filter(|(conversation_id, name)| {
+                        leased_attachments.contains(*name)
+                            && chat_attachments::attachment_is_available(
+                                workspace_dir,
+                                conversation_id,
+                                name,
+                            )
+                    });
+                let Some((conversation_id, name)) = downloaded else {
+                    unavailable.push(describe_unavailable_attachment(
+                        file_name, mime_type, size_bytes, is_image,
+                    ));
+                    continue;
+                };
+                chat_attachments::attachment_workspace_path(conversation_id, name)
+            }
+            None => {
+                let Some(path) = attachment_text_field(entry, "workspacePath", "workspace_path")
+                else {
+                    continue;
+                };
+                path.to_string()
+            }
+        };
+        if is_image {
+            lists_image = true;
+        } else {
+            lists_text_file = true;
+        }
+
         let mut line = String::new();
         line.push_str("workspacePath: ");
-        line.push_str(workspace_path);
+        line.push_str(&workspace_path);
         if file_name.is_some() || mime_type.is_some() || size_bytes.is_some() {
             line.push_str(" (");
             let mut wrote_detail = false;
@@ -15389,27 +15560,97 @@ fn format_image_attachment_section_from_attachments(
         lines.push(line);
     }
 
-    if lines.is_empty() {
+    if lines.is_empty() && unavailable.is_empty() {
         return None;
     }
 
     let mut section = String::new();
-    section.push_str("\nUser attached image(s):\n");
-    for line in lines {
-        section.push_str("- ");
-        section.push_str(&line);
-        section.push('\n');
-    }
-    section.push_str(&format!(
-        "\nPaths above are relative to the workspace root \"{}\".\n",
-        workspace_dir.display()
-    ));
-    section.push_str(
-        "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
+    if !lines.is_empty() {
+        section.push_str(if lists_text_file {
+            "\nUser attached file(s):\n"
+        } else {
+            "\nUser attached image(s):\n"
+        });
+        for line in lines {
+            section.push_str("- ");
+            section.push_str(&line);
+            section.push('\n');
+        }
+        section.push_str(&format!(
+            "\nPaths above are relative to the workspace root \"{}\".\n",
+            workspace_dir.display()
+        ));
+        if lists_image {
+            section.push_str(
+                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
 When calling `view_image`, use the `workspacePath` value (not the fileName).\n\
 If you cannot view the image for any reason, do your best using the filename/path context.\n",
-    );
+            );
+        }
+        if lists_text_file {
+            section.push_str(
+                "Read the attached text file(s) at their `workspacePath` before answering.\n",
+            );
+        }
+    }
+    if !unavailable.is_empty() {
+        section.push_str(
+            "\nThe user also attached file(s) that are not available in this workspace:\n",
+        );
+        let shown = unavailable.len().min(UNAVAILABLE_ATTACHMENTS_LISTED);
+        for description in &unavailable[..shown] {
+            section.push_str("- ");
+            section.push_str(description);
+            section.push('\n');
+        }
+        if unavailable.len() > shown {
+            section.push_str(&format!("- and {} more\n", unavailable.len() - shown));
+        }
+        section.push_str(
+            "You cannot open these. If the answer depends on one, say that it could not be loaded and ask the user to attach it again.\n",
+        );
+    }
     Some(section)
+}
+
+const UNAVAILABLE_ATTACHMENTS_LISTED: usize = 10;
+
+fn describe_unavailable_attachment(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    size_bytes: Option<u64>,
+    is_image: bool,
+) -> String {
+    // The client supplies the name and type, so each is kept to one bounded line.
+    let one_line = |value: &str| -> String {
+        value
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .take(120)
+            .collect()
+    };
+    let name = file_name
+        .map(one_line)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| if is_image { "an image" } else { "a text file" }.to_string());
+    let mut details = Vec::new();
+    if let Some(mime_type) = mime_type {
+        details.push(format!("mimeType: {}", one_line(mime_type)));
+    }
+    if let Some(size) = size_bytes {
+        details.push(format!("sizeBytes: {size}"));
+    }
+    if details.is_empty() {
+        name
+    } else {
+        format!("{name} ({})", details.join(", "))
+    }
 }
 
 fn append_context_value(value: &JsonValue, output: &mut Vec<String>) {
@@ -16675,6 +16916,310 @@ mod tests {
             Some(vec!["docs/**".to_string()])
         );
         assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+    }
+
+    #[tokio::test]
+    async fn parallel_write_scoped_worker_downloads_signed_attachments_before_its_prompt() {
+        use axum::extract::State;
+        use axum::routing::{get, post};
+
+        type Captured = Arc<Mutex<Option<JsonValue>>>;
+        async fn completions(
+            State(captured): State<Captured>,
+            axum::Json(body): axum::Json<JsonValue>,
+        ) -> axum::Json<JsonValue> {
+            *captured.lock() = Some(body);
+            let plan = json!({
+                "summary": "Wrote the alpha file.",
+                "files": [{ "path": "tmp/alpha.txt", "content": "alpha\n" }],
+            });
+            axum::Json(json!({ "choices": [{ "message": { "content": plan.to_string() } }] }))
+        }
+        let captured: Captured = Arc::new(Mutex::new(None));
+        let app = axum::Router::new()
+            .route("/object/screenshot", get(|| async { "png bytes" }))
+            .route("/v1/chat/completions", post(completions))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let mut registration = test_registration_with_proxy();
+        registration.proxy = Some(ProxyEnvelopePayload {
+            url: base.clone(),
+            token: "proxy-token".to_string(),
+            expires_at: None,
+        });
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        // A worker's metadata carries no attachments, so its prompt takes them
+        // from the conversation history, as on a runtime spread.
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": "Write the alpha file from the screenshot.",
+                "metadata": {
+                    "multiAgentPlan": { "role": "worker", "groupId": "group-1" },
+                    "writeScope": { "mode": "owned", "ownedPaths": ["tmp/alpha.txt"] }
+                },
+                "conversation_history": [{
+                    "role": "user",
+                    "content": "Here is the screenshot.",
+                    "metadata": { "attachments": [{
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+                        "fileName": "screenshot.png",
+                        "mimeType": "image/png"
+                    }]}
+                }],
+                "attachment_downloads": [{
+                    "name": name,
+                    "url": format!("{base}/object/screenshot?token=signed"),
+                    "sizeBytes": 9
+                }]
+            }),
+        );
+        job.project_id = Some(project_id);
+        job.conversation_id = Some(conversation_id);
+        assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+
+        processor
+            .run_parallel_direct_write_scoped_worker_job(&registration, &job, None, None)
+            .await
+            .expect("worker job runs");
+
+        // The prompt lists only a file that is on disk, so the download came
+        // first; the turn's end removed it again.
+        let request = captured.lock().clone().expect("worker called the proxy");
+        let worker_input = request["messages"][0]["content"]
+            .as_str()
+            .expect("worker input");
+        assert!(
+            worker_input.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: screenshot.png, mimeType: image/png)"
+            )),
+            "{worker_input}"
+        );
+        assert!(!worker_input.contains("not available"), "{worker_input}");
+        assert!(!worker_input.contains("token=signed"), "{worker_input}");
+        let workspace = tmp.path().join(project_id.to_string());
+        assert!(
+            !workspace
+                .join(".instafy/attachments")
+                .join(conversation_id.to_string())
+                .exists(),
+            "the worker's downloads outlived its turn"
+        );
+    }
+
+    /// The main turn lane builds its prompt through `build_turn_prompt` too:
+    /// the turn's message's own Storage attachment is downloaded into its
+    /// conversation's folder and listed there, the same file name under
+    /// another conversation is not, and the download lasts as long as the
+    /// turn.
+    #[tokio::test]
+    async fn a_turn_prompt_lists_its_messages_downloaded_attachments_until_the_turn_ends() {
+        let app = axum::Router::new().route(
+            "/object/photo",
+            axum::routing::get(|| async { "png bytes" }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let other_conversation_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        let prompt_text = "What is in the photo?";
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": prompt_text,
+                "metadata": { "attachments": [
+                    {
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+                        "fileName": "photo.png",
+                        "mimeType": "image/png"
+                    },
+                    {
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{other_conversation_id}/{name}"),
+                        "fileName": "elsewhere.png"
+                    }
+                ]},
+                "attachment_downloads": [{
+                    "name": name,
+                    "url": format!("{base}/object/photo?token=signed"),
+                    "sizeBytes": 9
+                }]
+            }),
+        );
+        job.project_id = Some(project_id);
+        job.conversation_id = Some(conversation_id);
+        let workspace = processor.prepare_workspace(&project_id).expect("workspace");
+
+        let (prompt, _, _, attachments) = processor
+            .build_turn_prompt(
+                &project_id,
+                &job,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect("turn prompt");
+
+        let folder = workspace
+            .join(".instafy/attachments")
+            .join(conversation_id.to_string());
+        assert_eq!(
+            fs::read(folder.join(name)).expect("downloaded"),
+            b"png bytes"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: photo.png, mimeType: image/png)\n"
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("not available in this workspace:\n- elsewhere.png\n"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains(&other_conversation_id.to_string()),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("token=signed"), "{prompt}");
+
+        drop(attachments);
+        assert!(!folder.exists(), "the downloads outlived the turn");
+    }
+
+    /// A leased batch is one conversation's jobs, which may run one after
+    /// another. Its hold keeps their attachments folder between them, so a
+    /// later job reuses an earlier job's download even when its own signed URL
+    /// no longer works; the folder goes when the batch is done.
+    #[tokio::test]
+    async fn a_batch_keeps_its_conversations_attachments_until_it_is_done() {
+        let app = axum::Router::new()
+            .route(
+                "/object/photo",
+                axum::routing::get(|| async { "png bytes" }),
+            )
+            .route(
+                "/object/expired",
+                axum::routing::get(|| async { axum::http::StatusCode::BAD_REQUEST }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        let prompt_text = "Compare the photo with the plan.";
+        let job = |object: &str| {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({
+                    "prompt_text": prompt_text,
+                    "metadata": { "attachments": [{
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+                        "fileName": "photo.png"
+                    }]},
+                    "attachment_downloads": [{
+                        "name": name,
+                        "url": format!("{base}/object/{object}?token=signed")
+                    }]
+                }),
+            );
+            job.project_id = Some(project_id);
+            job.conversation_id = Some(conversation_id);
+            job
+        };
+        let (first, second) = (job("photo"), job("expired"));
+        let workspace = processor.prepare_workspace(&project_id).expect("workspace");
+        let folder = workspace
+            .join(".instafy/attachments")
+            .join(conversation_id.to_string());
+
+        let batch = processor
+            .hold_batch_attachments(&[first.clone(), second.clone()])
+            .expect("a batch of one conversation is held");
+        let (_, _, _, turn) = processor
+            .build_turn_prompt(
+                &project_id,
+                &first,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect("first prompt");
+        drop(turn);
+        assert_eq!(
+            fs::read(folder.join(name)).expect("kept for the batch"),
+            b"png bytes"
+        );
+        let (prompt, _, _, turn) = processor
+            .build_turn_prompt(
+                &project_id,
+                &second,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect("second prompt");
+        assert!(
+            prompt.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: photo.png)\n"
+            )),
+            "{prompt}"
+        );
+        drop(turn);
+        drop(batch);
+        assert!(!folder.exists(), "the downloads outlived the batch");
+
+        // Nothing is held for one job, or for jobs of two conversations.
+        let mut elsewhere = job("photo");
+        elsewhere.conversation_id = Some(Uuid::new_v4());
+        assert!(
+            processor
+                .hold_batch_attachments(std::slice::from_ref(&first))
+                .is_none()
+        );
+        assert!(
+            processor
+                .hold_batch_attachments(&[first, elsewhere])
+                .is_none()
+        );
     }
 
     #[test]

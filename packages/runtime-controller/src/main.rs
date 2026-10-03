@@ -25,6 +25,7 @@ mod browser_profile;
 mod browser_shares;
 mod browser_turn;
 mod bug_reports;
+mod chat_attachments;
 mod config;
 mod connection_limit;
 mod conversations;
@@ -79,6 +80,10 @@ mod telemetry;
 mod tests;
 #[cfg(test)]
 mod tests_ai_metering_schema;
+#[cfg(test)]
+mod tests_chat_attachment_lease;
+#[cfg(test)]
+mod tests_chat_attachment_policies;
 #[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]

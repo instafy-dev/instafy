@@ -717,6 +717,12 @@ struct ProjectSummary {
     /// endpoints compute it.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_activity_at: Option<String>,
+    /// `storage` when chat attachments can be uploaded to the private bucket
+    /// and handed to runtimes, `none` on an install without Storage or a
+    /// service-role key, or whose Storage has not answered for a while. Only
+    /// the single-space summary reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachments: Option<&'static str>,
 }
 
 impl ProjectSummary {
@@ -1846,8 +1852,18 @@ async fn get_project_summary(
             "failed to finalize project summary transaction: {error}"
         ))
     })?;
+    // The pool slot goes back before the first Storage probe after a start.
+    drop(connection);
 
-    Ok(Json(map_project_summary(row).with_access(access)))
+    let storage =
+        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config);
+    let mut summary = map_project_summary(row).with_access(access);
+    summary.attachments = Some(
+        crate::chat_attachments::attachments_mode(storage.as_ref())
+            .await
+            .as_str(),
+    );
+    Ok(Json(summary))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2062,6 +2078,13 @@ async fn delete_project(
             "failed to finalize project delete transaction: {error}"
         ))
     })?;
+
+    // Browsers already lost access with the status change; this frees the
+    // space's chat attachments and never fails the delete.
+    crate::chat_attachments::spawn_projects_purge(
+        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
+        vec![project_id],
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -4517,6 +4540,25 @@ async fn delete_organization(
             ))
         })?;
 
+    // Every space of the team goes with it through the projects foreign key.
+    // Their chat attachments are purged after the commit, so remember the
+    // spaces first. The team's row lock keeps a space from being added between
+    // this read and the delete.
+    transaction
+        .execute(
+            "select 1 from organizations where id = $1 for update",
+            &[&org_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock organization: {error}")))?;
+    let project_ids: Vec<Uuid> = transaction
+        .query("select id from projects where org_id = $1", &[&org_id])
+        .await
+        .map_err(|error| internal_error(format!("failed to list organization spaces: {error}")))?
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+
     transaction
         .execute("delete from organizations where id = $1", &[&org_id])
         .await
@@ -4527,6 +4569,13 @@ async fn delete_organization(
             "failed to finalize organization delete transaction: {error}"
         ))
     })?;
+
+    // Browsers lost access with the spaces' rows; this frees their chat
+    // attachments and never fails the delete.
+    crate::chat_attachments::spawn_projects_purge(
+        crate::chat_attachments::StorageAccess::from_config(&state.http_client, &state.config),
+        project_ids,
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -5574,6 +5623,7 @@ fn map_project_summary(row: tokio_postgres::Row) -> ProjectSummary {
             .ok()
             .flatten()
             .map(|value| value.to_rfc3339()),
+        attachments: None,
     }
 }
 

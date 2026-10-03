@@ -16,6 +16,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / 'supabase/migrations/20260906120000_durable_notifications.sql'
+CHAT_ATTACHMENTS_MIGRATION = ROOT / 'supabase/migrations/20261003120000_chat_attachments.sql'
 PG = Path(os.environ.get('PG_BIN', Path(shutil.which('initdb') or '/opt/homebrew/opt/postgresql@17/bin/initdb').parent))
 
 
@@ -84,6 +85,14 @@ def main():
             print('PASS: the managed credential id is reserved; ordinary credential rows still insert and update')
             sql((ROOT/'supabase/tests/agent_credential_owner.sql').read_text())
             print('PASS: an agent pins only a credential its owner holds; owners still pin, switch and clear their own')
+            # The cluster has no Storage, so the chat attachments migration took its
+            # notice path above. Add the Storage tables and rerun it, as an install that
+            # adds Storage later does; the second run shows that a rerun changes nothing.
+            sql((ROOT/'supabase/tests/storage_stub.sql').read_text())
+            for _ in range(2):
+                sql('begin;\n' + CHAT_ATTACHMENTS_MIGRATION.read_text() + '\ncommit;')
+            sql('begin;\n' + (ROOT/'supabase/tests/chat_attachments.sql').read_text() + '\nrollback;')
+            print('PASS: chat attachments: whoever reads a conversation reads its attachments, writers among them upload and delete their own, one spelling per name, nobody updates one')
             before = sql('select count(*) from notification_events;')
             sql('begin;\n' + MIGRATION.read_text() + '\ncommit;')
             assert before == sql('select count(*) from notification_events;'), 'migration replay emitted historical events'

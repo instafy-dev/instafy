@@ -63,6 +63,36 @@ credential its owner does not hold, on insert, on update and when the agent move
 another user, while owners still pin, switch and clear their own credentials and
 deleting a credential still clears pins to it. It also rolls back.
 
+The cluster has no Supabase Storage, so the replay also proves that
+`20261003120000_chat_attachments.sql` succeeds without it and only reports a notice. The
+run then installs `storage_stub.sql`, the buckets and objects columns the Storage policies
+read, and reruns that migration twice, as an install that adds Storage later does.
+`chat_attachments.sql` then checks the private `chat-attachments` bucket, inside a transaction
+the run rolls back. It acts as the signed-in and anonymous roles, through the `storage.objects`
+row-level security policies, and checks these rules:
+
+- `<projectId>/<conversationId>/<uuid>.<ext>` objects are read and listed by whoever reads the
+  conversation's messages (`has_conversation_access`). That is any member of a live space for a
+  public conversation, and only the creator and participants for a private one.
+- A member of the space who is not in a private conversation neither reads, lists nor uploads
+  there, even when they know a name. A participant who is no longer a member of the space reads
+  nothing.
+- Only those readers who also write to the space upload: its owner, and owners, admins and
+  builders of the space or its team.
+- Non-members, a deleted space and anon are refused.
+- These names are refused: a free-form name, another extension, anything after the extension,
+  a name without a conversation, a malformed id, any spelling of an id other than the canonical
+  one (upper case and moved hyphens included, for ids of a real space and conversation), and a
+  conversation that is missing or belongs to another space.
+- Nobody updates or upserts an object.
+- An uploader deletes only their own objects, and only while they can still write to the space
+  and read the conversation.
+
+The controller test `chat_attachment_sql_fixture_passes_on_storage` runs the same file against
+Storage's own schema on the local stack, so CI checks the policies against the real table. There
+the fixture lists folders through Storage's own `storage.search`. The stub has no such function,
+so in this harness it derives them from the objects the caller can read.
+
 To also run the real controller HTTP and mocked transport tests against a clean,
 fully migrated database in that same disposable cluster:
 

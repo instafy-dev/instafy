@@ -1057,6 +1057,9 @@ impl RuntimeAgent {
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Result<()> {
         let processor = executor.processor();
+        // A batch's jobs share their conversation's chat attachments until
+        // the last of them is done.
+        let _batch_attachments = processor.hold_batch_attachments(&jobs);
         if should_run_batch_as_parallel_direct_write_group(&processor, registration, &jobs) {
             info!(
                 job_count = jobs.len(),
