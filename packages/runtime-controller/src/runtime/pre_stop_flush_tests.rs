@@ -395,6 +395,47 @@ impl Fixture {
             .collect())
     }
 
+    /// A workspace lease for the owner, bound to this runtime, as a turn's
+    /// checkpoint or a user's edit holds one.
+    async fn hold_owner_lease(&self) -> anyhow::Result<Uuid> {
+        match crate::origins::acquire_lease(
+            &self.pool,
+            &self.project_id,
+            Some(&self.owner_user_id),
+            Some(&self.runtime_id),
+            300,
+            None,
+        )
+        .await?
+        {
+            crate::origins::LeaseAcquireOutcome::Granted(lease) => Ok(lease.id),
+            other => anyhow::bail!("expected a new workspace lease, got {other:?}"),
+        }
+    }
+
+    async fn insert_job(&self, status: &str, completed_seconds_ago: i64) -> anyhow::Result<Uuid> {
+        let job_id = Uuid::new_v4();
+        self.pool
+            .get()
+            .await?
+            .execute(
+                "insert into agent_jobs
+                    (id, project_id, status, payload, leased_by_runtime_id,
+                     leased_at, completed_at)
+                 values ($1, $2, $3, '{}'::jsonb, $4, now() - interval '5 minutes',
+                         now() - make_interval(secs => $5::double precision))",
+                &[
+                    &job_id,
+                    &self.project_id,
+                    &status,
+                    &self.runtime_id,
+                    &(completed_seconds_ago as f64),
+                ],
+            )
+            .await?;
+        Ok(job_id)
+    }
+
     /// The workspace leases of the project, as (id, user, runtime, status).
     async fn workspace_leases(
         &self,
@@ -435,11 +476,11 @@ async fn delete_users(users: &[Uuid]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The idle reaper, a credit stop or an ensure replacement, mid-turn and with
-/// no workspace lease: the controller takes a lease for the owner, mints an
-/// fs.write token for it, and calls `/git/flush` with `turnActive` before
-/// the quarantine. The origin can mint git.write with that token, while the
-/// runtime's machine token still cannot.
+/// A credit stop (or the idle reaper, or an ensure replacement) mid-turn,
+/// with the owner holding the workspace lease: the controller mints an
+/// fs.write token for that holder and calls `/git/flush` with `turnActive`
+/// before the quarantine. The origin can mint git.write with that token,
+/// while the runtime's machine token still cannot.
 #[tokio::test]
 async fn safe_stop_flushes_the_workspace_before_the_quarantine() -> anyhow::Result<()> {
     let pool = crate::tests::require_origin_test_pool("pre-stop flush safe stop test").await?;
@@ -463,6 +504,7 @@ async fn safe_stop_flushes_the_workspace_before_the_quarantine() -> anyhow::Resu
         )
         .await?;
         fx.insert_leased_job().await?;
+        let held = fx.hold_owner_lease().await?;
 
         let stopped = super::super::stop::stop_runtime_safely(
             &fx.state,
@@ -504,18 +546,15 @@ async fn safe_stop_flushes_the_workspace_before_the_quarantine() -> anyhow::Resu
         assert!(claims.exp - claims.iat <= 60, "{claims:?}");
 
         let leases = fx.workspace_leases().await?;
-        assert_eq!(leases.len(), 1, "{leases:?}");
-        let (lease_id, lease_user, lease_runtime, lease_status) = &leases[0];
-        assert_eq!(claims.lease_id, Some(lease_id.to_string()));
+        assert_eq!(leases.len(), 1, "no lease of its own: {leases:?}");
+        let (lease_id, lease_user, lease_runtime, _) = &leases[0];
+        assert_eq!(*lease_id, held);
+        assert_eq!(claims.lease_id, Some(held.to_string()));
         assert_eq!(*lease_user, Some(fx.owner_user_id));
         assert_eq!(*lease_runtime, Some(fx.runtime_id));
-        assert_eq!(
-            lease_status, "released",
-            "the flush's own lease is released"
-        );
 
         assert_eq!(call.lease_check, StatusCode::OK);
-        assert_eq!(call.lease["lease"]["leaseId"], json!(lease_id));
+        assert_eq!(call.lease["lease"]["leaseId"], json!(held));
         assert_eq!(
             call.git_write,
             StatusCode::OK,
@@ -739,6 +778,7 @@ async fn a_failed_flush_does_not_hold_up_the_stop() -> anyhow::Result<()> {
     };
     let result = with_shared_db_fixture(fixture, async {
         let fx = Fixture::new(pool.clone(), project_id, owner_user_id, json!({})).await?;
+        let held = fx.hold_owner_lease().await?;
         // Point the origin at a path without the route.
         fx.pool
             .get()
@@ -771,11 +811,195 @@ async fn a_failed_flush_does_not_hold_up_the_stop() -> anyhow::Result<()> {
         );
         let leases = fx.workspace_leases().await?;
         assert_eq!(leases.len(), 1, "{leases:?}");
-        assert_eq!(leases[0].3, "released");
+        assert_eq!(leases[0].0, held);
         assert_eq!(fx.runtime_state().await?.0, "stopped");
         Ok(())
     })
     .await;
     delete_users(&[owner_user_id]).await?;
     result
+}
+
+/// With nobody holding a workspace lease (an idle stop), the controller
+/// mints nothing for anyone and does not call the origin: the runtime's own
+/// shutdown flush keeps the work on local recovery refs.
+#[tokio::test]
+async fn a_stop_without_a_lease_holder_mints_nothing_and_skips_the_origin() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush no-writer test").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(
+            pool.clone(),
+            project_id,
+            owner_user_id,
+            json!({ "unpushedRefs": 0 }),
+        )
+        .await?;
+        let stopped = super::super::stop::stop_runtime_safely(
+            &fx.state,
+            &fx.runtime_id,
+            super::super::stop::StopOptions {
+                source: "pre_stop_flush_test",
+                reason: Some("idle".to_string()),
+                skip_if_active_jobs: true,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity: None,
+            },
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        assert!(stopped.outcome.status_changed);
+        assert!(fx.flush_calls().is_empty(), "{:?}", fx.flush_calls());
+        assert_eq!(fx.order(), vec!["release"]);
+        assert!(
+            fx.workspace_leases().await?.is_empty(),
+            "no lease is taken for anyone"
+        );
+        assert_eq!(
+            fx.flush_events().await?,
+            vec![json!({ "status": "no_writer", "turnActive": false })]
+        );
+        assert_eq!(fx.runtime_state().await?.0, "stopped");
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner_user_id]).await?;
+    result
+}
+
+/// A turn cancelled moments before the stop (a user Stop) counts as an
+/// active turn; one that ended long ago does not.
+#[tokio::test]
+async fn a_turn_cancelled_just_before_the_stop_is_still_active() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush cancelled turn test").await?;
+    for (status, seconds_ago, expected) in [
+        ("canceled", 5, true),
+        ("canceled", 600, false),
+        ("completed", 5, false),
+    ] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({ "unpushedRefs": 0 }),
+            )
+            .await?;
+            fx.insert_job(status, seconds_ago).await?;
+            fx.hold_owner_lease().await?;
+            super::super::stop::stop_runtime_safely(
+                &fx.state,
+                &fx.runtime_id,
+                super::super::stop::StopOptions {
+                    source: "pre_stop_flush_test",
+                    reason: Some("user_stop".to_string()),
+                    skip_if_active_jobs: false,
+                    require_idle_timeout: false,
+                    allow_cleanup_pending_release: false,
+                    expected_identity: None,
+                },
+            )
+            .await
+            .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+            let calls = fx.flush_calls();
+            assert_eq!(calls.len(), 1, "{status} {seconds_ago}s: {calls:?}");
+            assert_eq!(
+                calls[0].body,
+                json!({ "turnActive": expected }),
+                "{status} {seconds_ago}s ago"
+            );
+            assert_eq!(fx.order(), vec!["flush", "release"]);
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// `/runtime/remove` and a project's own stop flush before they fence the
+/// runtime, like every other stop.
+#[tokio::test]
+async fn remove_and_project_stops_flush_before_the_release() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush remove test").await?;
+    for path in ["remove", "project_stop"] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({ "unpushedRefs": 0 }),
+            )
+            .await?;
+            fx.hold_owner_lease().await?;
+            match path {
+                "remove" => {
+                    let user_token =
+                        crate::auth::issue_controller_token(&fx.state.config, &fx.owner_user_id)
+                            .map_err(|(_, body)| {
+                                anyhow::anyhow!("issue user token: {}", body.0.message)
+                            })?
+                            .token;
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        axum::http::header::AUTHORIZATION,
+                        HeaderValue::from_str(&format!("Bearer {user_token}"))?,
+                    );
+                    let payload: super::super::stop::RuntimeRemovePayload =
+                        serde_json::from_value(json!({
+                            "runtimeId": fx.runtime_id,
+                            "reason": "user_remove",
+                        }))?;
+                    let Json(removed) = super::super::stop::runtime_remove(
+                        State(fx.state.clone()),
+                        headers,
+                        axum::Json(payload),
+                    )
+                    .await
+                    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+                    assert!(removed.ok);
+                }
+                _ => {
+                    super::super::stop::stop_runtime_for_project(
+                        &fx.state,
+                        &fx.project_id,
+                        &fx.runtime_id,
+                        Some("project_stop".to_string()),
+                        "pre_stop_flush_test",
+                    )
+                    .await
+                    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+                }
+            }
+            assert_eq!(fx.order(), vec!["flush", "release"], "{path}");
+            let calls = fx.flush_calls();
+            assert_eq!(calls.len(), 1, "{path}: {calls:?}");
+            assert_eq!(calls[0].runtime_status, "ready", "{path}");
+            assert_eq!(calls[0].runtime_lease_status, "active", "{path}");
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id]).await?;
+        result?;
+    }
+    Ok(())
 }

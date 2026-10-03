@@ -14,9 +14,11 @@
 //! token for the holder of the project's active workspace lease, the same way
 //! a GitHub import does. The origin exchanges that exact token for
 //! `git.write`, which the controller grants only while the lease is active and
-//! its holder may still write. When nobody holds the lease, the controller
-//! takes a fresh one for the project owner for the length of the flush and
-//! releases it afterwards.
+//! its holder may still write. When nobody holds a lease this runtime may
+//! save under, the controller mints nothing for anyone and does not call the
+//! origin (`no_writer`): the runtime's own shutdown flush keeps the work on
+//! local recovery refs, the checkout is kept on the node while they exist,
+//! and the next start pushes them.
 //!
 //! Best effort and bounded by [`PRE_STOP_FLUSH_TIMEOUT`]: a failure is logged,
 //! recorded as a `workspace_flush` runtime event, and the stop goes on. Work
@@ -32,10 +34,7 @@ use tokio_postgres::Transaction;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::origins::{
-    acquire_fresh_lease, release_lease, resolve_origin_proxy_upstream_endpoint,
-    LeaseAcquireOutcome, WorkspaceLeaseRecord,
-};
+use crate::origins::{resolve_origin_proxy_upstream_endpoint, WorkspaceLeaseRecord};
 use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
 use crate::{internal_error, ApiError, AppState};
 
@@ -47,8 +46,6 @@ const PRE_STOP_FLUSH_TIMEOUT: Duration = Duration::from_secs(25);
 /// The mint happens at the start of the flush, so the token never needs to
 /// outlive [`PRE_STOP_FLUSH_TIMEOUT`] by much.
 const PRE_STOP_FLUSH_TOKEN_TTL_SECONDS: i64 = 60;
-/// Lifetime of a workspace lease the controller takes for the flush itself.
-const PRE_STOP_FLUSH_LEASE_SECONDS: i64 = 60;
 
 /// A hosted origin that should be flushed before its runtime stops.
 #[derive(Debug, Clone)]
@@ -61,7 +58,6 @@ pub(super) struct PreStopFlushTarget {
     /// this stop: its local commits are unfinished and must not reach `main`.
     turn_active: bool,
     lease: WorkspaceLeaseState,
-    owner_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,8 +108,9 @@ pub(super) enum PreStopFlushOutcome {
         parked_commits: usize,
         git_sync_status: Option<String>,
     },
-    /// No workspace lease holder could save the work, so the origin was not
-    /// asked; the runtime's own shutdown keeps it locally.
+    /// Nobody holds a workspace lease this runtime may save under, so no
+    /// token was minted and the origin was not asked; the runtime's own
+    /// shutdown flush keeps the work on local recovery refs.
     NoWriter,
     /// The origin was unreachable, refused, timed out or has no flush route.
     Failed(String),
@@ -225,15 +222,6 @@ pub(super) async fn find_target(
         .map_err(|error| internal_error(format!("failed to load the workspace lease: {error}")))?
         .map(|row| crate::origins::lease_from_row(&row));
 
-    let owner_user_id: Option<Uuid> = transaction
-        .query_opt(
-            "select owner_user_id from projects where id = $1",
-            &[&runtime.project_id],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to load the project owner: {error}")))?
-        .and_then(|row| row.get("owner_user_id"));
-
     Ok(Some(PreStopFlushTarget {
         runtime_id: runtime.id,
         project_id: runtime.project_id,
@@ -241,96 +229,21 @@ pub(super) async fn find_target(
         origin_endpoint,
         turn_active,
         lease: WorkspaceLeaseState::of(lease.as_ref(), &runtime.id),
-        owner_user_id,
     }))
 }
 
 /// Ask the origin to flush, holding no database connection while it works.
 /// Never fails: the outcome is logged and recorded as a runtime event.
+/// Only the holder of the project's active workspace lease is minted a
+/// token; nobody else's credential is ever used to save a stopping runtime.
 pub(super) async fn flush(state: &AppState, target: PreStopFlushTarget) -> PreStopFlushOutcome {
-    let (holder, taken_for_flush) = match target.lease {
-        WorkspaceLeaseState::Held(holder) => (Some(holder), false),
-        WorkspaceLeaseState::Unusable => (None, false),
-        WorkspaceLeaseState::Free => match take_flush_lease(state, &target).await {
-            Some((holder, taken)) => (Some(holder), taken),
-            None => (None, false),
-        },
+    let outcome = match target.lease {
+        WorkspaceLeaseState::Held(holder) => call_origin_flush(state, &target, &holder).await,
+        WorkspaceLeaseState::Unusable | WorkspaceLeaseState::Free => PreStopFlushOutcome::NoWriter,
     };
-
-    let outcome = match holder {
-        Some(holder) => call_origin_flush(state, &target, &holder).await,
-        None => PreStopFlushOutcome::NoWriter,
-    };
-
-    if let (true, Some(holder)) = (taken_for_flush, holder) {
-        if let Err(error) = release_lease(
-            &state.pool,
-            &holder.lease_id,
-            &target.project_id,
-            Some(&holder.user_id),
-            holder.runtime_id.as_ref(),
-            "released",
-        )
-        .await
-        {
-            // It expires on its own within PRE_STOP_FLUSH_LEASE_SECONDS.
-            warn!(
-                ?error,
-                project_id = %target.project_id,
-                lease_id = %holder.lease_id,
-                "failed to release the pre-stop flush workspace lease"
-            );
-        }
-    }
-
     log_outcome(&target, &outcome);
     record_outcome(state, &target, &outcome).await;
     outcome
-}
-
-/// Take a fresh workspace lease for the flush, for the project owner (or the
-/// configured service user). A lease someone took in the meantime is used
-/// when it may be, and never released here.
-async fn take_flush_lease(
-    state: &AppState,
-    target: &PreStopFlushTarget,
-) -> Option<(WorkspaceLeaseHolder, bool)> {
-    let subject = target
-        .owner_user_id
-        .or(state.config.service_runtime_user_id)?;
-    let outcome = acquire_fresh_lease(
-        &state.pool,
-        &target.project_id,
-        Some(&subject),
-        Some(&target.runtime_id),
-        PRE_STOP_FLUSH_LEASE_SECONDS,
-        Some(&json!({ "source": "runtime_pre_stop_flush" })),
-    )
-    .await;
-    match outcome {
-        Ok(LeaseAcquireOutcome::Granted(lease)) => Some((
-            WorkspaceLeaseHolder {
-                lease_id: lease.id,
-                user_id: subject,
-                runtime_id: lease.runtime_id,
-            },
-            true,
-        )),
-        Ok(
-            LeaseAcquireOutcome::Renewed(lease) | LeaseAcquireOutcome::Conflict { holder: lease },
-        ) => match WorkspaceLeaseState::of(Some(&lease), &target.runtime_id) {
-            WorkspaceLeaseState::Held(holder) => Some((holder, false)),
-            _ => None,
-        },
-        Err(error) => {
-            warn!(
-                ?error,
-                project_id = %target.project_id,
-                "failed to take a workspace lease for the pre-stop flush"
-            );
-            None
-        }
-    }
 }
 
 /// The short-lived `fs.write` origin token for the lease holder, minted the
@@ -460,7 +373,8 @@ fn log_outcome(target: &PreStopFlushTarget, outcome: &PreStopFlushOutcome) {
             runtime_id = %target.runtime_id,
             project_id = %target.project_id,
             origin_id = %target.origin_id,
-            "no workspace lease holder can save before the stop; the runtime keeps its work locally"
+            turn_active = target.turn_active,
+            "no workspace lease holder can save before the stop; the runtime keeps its work on local recovery refs"
         ),
         PreStopFlushOutcome::Failed(error) => warn!(
             runtime_id = %target.runtime_id,
