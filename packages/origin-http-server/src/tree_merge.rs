@@ -357,6 +357,31 @@ pub(crate) fn tree_with_entries_from(
         .context("could not rebuild the tree after filtering paths")
 }
 
+/// `base` with every path `top` adds or changes taken from `top`, except the
+/// paths in `keep` (and anything below them), which keep `base`'s entry.
+/// Paths only `base` has stay: for two unrelated histories nothing says
+/// `top` deleted them, so a commit of this tree on `base` changes exactly
+/// what `top` holds and removes nothing.
+pub(crate) fn overlay(
+    git: &WorkspaceGit<'_>,
+    base: &str,
+    top: &str,
+    keep: &[String],
+) -> Result<String> {
+    let raw = git.bytes(&["diff-tree", "-r", "-z", "--no-renames", "--raw", base, top])?;
+    let paths: Vec<String> = crate::publish::parse_raw_changes(&raw)
+        .into_iter()
+        .filter(|change| change.status != 'D')
+        .map(|change| change.path)
+        .filter(|path| {
+            !keep
+                .iter()
+                .any(|kept| path == kept || path.starts_with(&format!("{kept}/")))
+        })
+        .collect();
+    tree_with_entries_from(git, base, Some(top), &paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,5 +677,55 @@ mod tests {
             blob(&git, &result.tree, "AGENTS.md").as_deref(),
             Some("agents\n")
         );
+    }
+
+    #[test]
+    fn overlay_takes_top_changes_and_keeps_base_only_paths() {
+        let fx = fixture();
+        let git = ws_git(&fx.root);
+        let base = commit_files(
+            &fx.root,
+            None,
+            &[
+                ("README.md", Some("main\n")),
+                ("LICENSE", Some("license\n")),
+                ("dir", Some("a file in main\n")),
+                ("secret.txt", Some("main secret\n")),
+            ],
+        );
+        let top = commit_files(
+            &fx.root,
+            None,
+            &[
+                ("README.md", Some("agent\n")),
+                ("AGENTS.md", Some("agents\n")),
+                ("dir/inner.txt", Some("inner\n")),
+                ("secret.txt", Some("agent secret\n")),
+            ],
+        );
+        let tree = overlay(&git, &base, &top, &["secret.txt".to_string()]).unwrap();
+        assert_eq!(blob(&git, &tree, "README.md").as_deref(), Some("agent\n"));
+        assert_eq!(blob(&git, &tree, "AGENTS.md").as_deref(), Some("agents\n"));
+        assert_eq!(blob(&git, &tree, "LICENSE").as_deref(), Some("license\n"));
+        assert_eq!(
+            blob(&git, &tree, "dir/inner.txt").as_deref(),
+            Some("inner\n")
+        );
+        assert_eq!(
+            blob(&git, &tree, "secret.txt").as_deref(),
+            Some("main secret\n")
+        );
+        let deleted = git
+            .stdout(&[
+                "diff-tree",
+                "-r",
+                "--name-only",
+                "--diff-filter=D",
+                &base,
+                &tree,
+            ])
+            .unwrap();
+        // Only the file that had to become a directory is replaced.
+        assert_eq!(deleted, "dir");
     }
 }

@@ -79,6 +79,10 @@ pub struct AppState {
     pub apply_locks: Arc<Mutex<std::collections::HashMap<Uuid, Arc<Mutex<()>>>>>,
     pub git_last_sync: Arc<Mutex<std::collections::HashMap<Uuid, Instant>>>,
     pub apply_slots: Arc<Semaphore>,
+    /// A pre-stop flush kept this workspace's work on recovery refs: until a
+    /// refresh, a later save would publish the same work to `main` and leave
+    /// its recovery copy behind, so saves are refused.
+    pub stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -104,6 +108,7 @@ impl AppState {
             // single bounded admission point across all projects served by a
             // multi-tenant origin process.
             apply_slots: Arc::new(Semaphore::new(1)),
+            stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 }
@@ -1897,12 +1902,11 @@ async fn handle_git_revert_commit(
     let target_commit = payload.commit.clone();
 
     if !config.multi_tenant {
-        let author = caller_identity(&config, &claims);
         let base = payload.base.clone();
         let report = tokio::task::spawn_blocking(move || {
             let _apply_guard = apply_guard;
             let _workspace_apply_guard = workspace_apply_guard;
-            git::ensure_git_checkout(&config_clone, token.as_deref())?;
+            ensure_checkout_for_publish(&config_clone, token.as_deref())?;
             publish::revert_commit(
                 &PublishContext {
                     config: &config_clone,
@@ -1912,7 +1916,9 @@ async fn handle_git_revert_commit(
                 },
                 &target_commit,
                 base.as_deref(),
-                author,
+                // The origin's own identity until the controller issues the
+                // per-project author pseudonym; user ids never enter history.
+                None,
             )
         })
         .await
@@ -2143,17 +2149,23 @@ async fn handle_git_sync(
                 None => Selection::AllDirty,
             }
         };
-        // A person saving everything from their own Desktop folder is the
-        // author of that save; agent turns carry a run id and keep the
-        // origin's identity.
-        let author = match selection {
-            Selection::AllDirty if !config.hosted_checkout => caller_identity(&config, &claims),
-            _ => None,
-        };
+        if refresh {
+            state
+                .stopping
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        } else if state.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(OriginError::conflict(
+                "the workspace is stopping and its work is kept on recovery refs; save again after it restarts",
+            ));
+        }
+        // Saves are authored by the origin's own identity until the
+        // controller issues the per-project author pseudonym (with PR-5):
+        // user ids never enter permanent history.
+        let author: Option<GitIdentity> = None;
         let report = tokio::task::spawn_blocking(move || {
             let _apply_guard = apply_guard;
             let _workspace_apply_guard = workspace_apply_guard;
-            git::ensure_git_checkout(&config_clone, token.as_deref())?;
+            ensure_checkout_for_publish(&config_clone, token.as_deref())?;
             let ctx = PublishContext {
                 config: &config_clone,
                 workspace_root: canonical_root.as_path(),
@@ -2268,33 +2280,32 @@ async fn mint_git_write_token(
     .map(|minted| minted.token))
 }
 
-/// The identity of the person behind a user token without a run id, used
-/// as the author of what they save; `None` for agent and service tokens.
-fn caller_identity(config: &ServerConfig, claims: &OriginClaims) -> Option<GitIdentity> {
-    if config.multi_tenant
-        || claims
-            .run_id
-            .as_deref()
-            .is_some_and(|run| !run.trim().is_empty())
-    {
-        return None;
+/// Bring a single-tenant checkout up to date before a publish. The publish
+/// fetches on its own and keeps the work on a local recovery ref when the
+/// remote cannot be reached, so a failure here only matters when there is
+/// no checkout to publish from yet.
+fn ensure_checkout_for_publish(
+    config: &ServerConfig,
+    token: Option<&str>,
+) -> Result<(), OriginError> {
+    match git::ensure_git_checkout(config, token) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let has_checkout =
+                std::fs::symlink_metadata(config.workspace_root.join(".instafy").join(".git"))
+                    .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+                    .unwrap_or(false);
+            if has_checkout {
+                warn!(
+                    ?error,
+                    "git checkout refresh failed; publishing from the existing checkout"
+                );
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
     }
-    let subject = Uuid::parse_str(claims.sub.trim()).ok()?;
-    let name = claims
-        .actor_label
-        .as_deref()
-        .map(|label| {
-            label
-                .replace(['<', '>', '\n', '\r'], " ")
-                .trim()
-                .to_string()
-        })
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| "Instafy user".to_string());
-    Some(GitIdentity::new(
-        name,
-        format!("{}@users.noreply.instafy.dev", subject.as_hyphenated()),
-    ))
 }
 
 /// Turn a publish report into the HTTP response: 200 with the report when
@@ -2404,10 +2415,11 @@ async fn handle_git_flush(
     let mut config_clone = (*config).clone();
     config_clone.workspace_root = workspace_root.clone();
     config_clone.git_remote_url = Some(remote_url);
+    let stopping = state.stopping.clone();
     let report = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
-        publish::flush(
+        let report = publish::flush(
             &PublishContext {
                 config: &config_clone,
                 workspace_root: workspace_root.as_path(),
@@ -2415,7 +2427,10 @@ async fn handle_git_flush(
                 can_write: token.is_some() || config_clone.skip_auth,
             },
             turn_active,
-        )
+        )?;
+        // Set before the locks are released, so no save slips in between.
+        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok::<_, OriginError>(report)
     })
     .await
     .map_err(|error| OriginError::internal(format!("git flush task failed: {error}")))??;
@@ -2457,11 +2472,15 @@ pub(crate) async fn refresh_checkout_read_only(
     let mut config = (*state.config).clone();
     config.workspace_root = workspace_root.clone();
     config.git_remote_url = Some(remote_url);
+    // A new turn: the workspace is not stopping after all.
+    state
+        .stopping
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = try_acquire_workspace_apply_lock(&workspace_root)?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
-        git::ensure_git_checkout(&config, token.as_deref())?;
+        ensure_checkout_for_publish(&config, token.as_deref())?;
         publish::refresh(&PublishContext {
             config: &config,
             workspace_root: workspace_root.as_path(),
@@ -3566,41 +3585,6 @@ mod tests {
         expected.insert("old/seen.txt".to_string(), Some(HELLO_BLOB.to_string()));
         expected.insert("missing.txt".to_string(), None);
         super::check_expected_blobs(workspace.path(), &expected, &[]).expect("fresh reads pass");
-    }
-
-    #[test]
-    fn user_saves_are_authored_by_the_user_and_agent_saves_by_the_origin() {
-        let workspace = TempDir::new().expect("workspace");
-        let state = test_app_state(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            &workspace,
-            "http://127.0.0.1:1".parse().expect("controller url"),
-            true,
-        );
-        let user = Uuid::new_v4();
-        let mut claims = OriginClaims {
-            aud: "origin".to_string(),
-            sub: user.to_string(),
-            project_id: Uuid::new_v4().to_string(),
-            origin_id: None,
-            runtime_id: None,
-            protocol: None,
-            scopes: vec!["fs.write".to_string()],
-            lease_id: None,
-            run_id: None,
-            prefer_runtime: None,
-            iat: None,
-            exp: None,
-            jti: None,
-            actor_label: Some("Grace <Hopper>".to_string()),
-            browser_session_id: None,
-        };
-        let identity = super::caller_identity(&state.config, &claims).expect("user identity");
-        assert_eq!(identity.name, "Grace  Hopper");
-        assert_eq!(identity.email, format!("{user}@users.noreply.instafy.dev"));
-        claims.run_id = Some("run-1".to_string());
-        assert!(super::caller_identity(&state.config, &claims).is_none());
     }
 
     #[cfg(unix)]

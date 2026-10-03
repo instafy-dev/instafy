@@ -23,6 +23,23 @@ use crate::git_tokens;
 use crate::routes::{self, AppState};
 use serde_json::Value as JsonValue;
 
+/// Written into a hosted checkout's repository by a shutdown flush that kept
+/// everything (every local commit and unsaved edit is on `main` or on a
+/// recovery ref), and removed when an origin starts there. The provider's
+/// checkout eviction keeps any checkout without it: the runtime that last
+/// used it crashed, was killed, or could not finish keeping its work.
+pub const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
+
+fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
+    match crate::workspace_fs::WorkspaceDir::open(workspace_root)
+        .and_then(|workspace| workspace.remove(CLEAN_STOP_MARKER))
+    {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => warn!(%error, "could not clear the clean-stop marker"),
+    }
+}
+
 pub struct OriginHttpServer {
     config: Arc<ServerConfig>,
     http_client: reqwest::Client,
@@ -119,6 +136,10 @@ impl OriginHttpServer {
             let mut canonical_config = (*self.config).clone();
             canonical_config.workspace_root = canonical_root.clone();
             self.config = Arc::new(canonical_config);
+        }
+        if self.config.hosted_checkout && !self.config.multi_tenant {
+            // From now on the checkout holds work only this process can keep.
+            clear_clean_stop_marker(&self.config.workspace_root);
         }
 
         if !self.config.multi_tenant {
@@ -222,14 +243,16 @@ impl OriginHttpServer {
 
     /// Last chance to keep work when the process stops. Hosted runtime
     /// checkouts only: a Desktop folder belongs to the user and keeps its
-    /// files. Nothing reaches `main` from here. Finished local commits stay
-    /// on the branch for the next refresh to publish, and unsaved edits (or
-    /// the whole turn, when `turn_active`) are parked on local recovery refs
-    /// before any network call. A machine credential cannot mint `git.write`,
-    /// so those refs are pushed by the next publish or refresh. The controller
-    /// calls `POST /git/flush` with a write credential before it stops a
-    /// runtime; this is the fallback for stops it did not drive. Best-effort
-    /// and time-boxed, so shutdown never outlasts the stop grace period.
+    /// files. Nothing reaches `main` from here. Finished local commits are
+    /// kept on a local `unpublished` recovery ref (and stay on the branch for
+    /// the next refresh to publish), and unsaved edits (or the whole turn,
+    /// when `turn_active`) on local `unsaved` refs, all without any network
+    /// call. A machine credential cannot mint `git.write`, so those refs are
+    /// pushed by the next publish or refresh. The controller calls
+    /// `POST /git/flush` with a write credential before it stops a runtime;
+    /// this is the fallback for stops it did not drive. When it succeeds it
+    /// writes [`CLEAN_STOP_MARKER`]. Best-effort and time-boxed, so shutdown
+    /// never outlasts the stop grace period.
     async fn flush_workspace_before_shutdown(&self, turn_active: bool) {
         if self.config.multi_tenant || !self.config.hosted_checkout {
             return;
@@ -251,7 +274,7 @@ impl OriginHttpServer {
                     "the workspace is busy; skipping the shutdown flush",
                 ));
             };
-            crate::publish::flush(
+            let report = crate::publish::flush(
                 &crate::publish::PublishContext {
                     config: &config,
                     workspace_root: workspace_root.as_path(),
@@ -259,7 +282,16 @@ impl OriginHttpServer {
                     can_write: false,
                 },
                 turn_active,
-            )
+            )?;
+            // Everything is on `main` or on a recovery ref now; the refs not
+            // pushed yet keep the checkout from eviction on their own.
+            let mut marker: &[u8] = b"stopped\n";
+            if let Err(error) = crate::workspace_fs::WorkspaceDir::open(&workspace_root)
+                .and_then(|workspace| workspace.replace_file(CLEAN_STOP_MARKER, &mut marker, false))
+            {
+                warn!(%error, "could not record the clean stop");
+            }
+            Ok(report)
         });
         match tokio::time::timeout(std::time::Duration::from_secs(25), flush).await {
             Ok(Ok(Ok(report))) => {

@@ -92,11 +92,26 @@ impl GitIdentity {
 pub(crate) struct WorkspaceGit<'a> {
     root: &'a Path,
     token: Option<&'a str>,
+    /// A shorter stall window for commands that talk to the remote.
+    stall_seconds: Option<u32>,
 }
 
 impl<'a> WorkspaceGit<'a> {
     pub(crate) fn new(root: &'a Path, token: Option<&'a str>) -> Self {
-        Self { root, token }
+        Self {
+            root,
+            token,
+            stall_seconds: None,
+        }
+    }
+
+    /// Give up on a fetch, push or ls-remote that moves no data for
+    /// `seconds`, instead of the server-wide window. A stop has a fixed
+    /// time to keep its work, and everything it parks is stored locally
+    /// before it talks to the remote.
+    pub(crate) fn with_stall_limit(mut self, seconds: u32) -> Self {
+        self.stall_seconds = Some(seconds);
+        self
     }
 
     pub(crate) fn root(&self) -> &'a Path {
@@ -157,6 +172,10 @@ impl<'a> WorkspaceGit<'a> {
                 command
                     .arg("-c")
                     .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
+            }
+            if let Some(seconds) = self.stall_seconds {
+                // The environment overrides the configured window.
+                command.env("GIT_HTTP_LOW_SPEED_TIME", seconds.to_string());
             }
         }
         if let Some(index) = opts.index_file {

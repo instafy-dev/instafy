@@ -1,23 +1,33 @@
 //! One-time repair of checkouts left behind by the old sync.
 //!
 //! Before publish-by-merge, a sync moved the branch onto the remote tip with
-//! `reset --mixed <remote>/<branch>` whenever the remote had moved, then
-//! committed only the paths it was asked about. Every other file the remote
-//! had changed stayed in the work tree with its old content: files the remote
-//! edited looked locally modified, and files it added looked deleted. Saving
+//! `reset --mixed <remote>/<branch>` whenever the remote had moved, or after
+//! a push failed, then committed only the paths it was asked about. Every
+//! other file stayed in the work tree as it was: files the remote edited
+//! looked locally modified, files it added looked deleted, and the files of
+//! a local commit the reset abandoned looked like unsaved edits. Saving
 //! "everything dirty" from such a checkout would quietly undo the remote's
 //! changes.
 //!
 //! This runs once per checkout, under the apply lock, before its first
-//! publish, refresh, flush or Desktop status count:
-//! - a dirty file whose content (or absence) equals the pre-reset commit's
-//!   version is a leftover, and gets the current version back;
-//! - otherwise its edits are merged onto the current version when they do
-//!   not conflict;
-//! - anything else is parked on a `stale` recovery ref first, then restored.
+//! publish, refresh, flush or Desktop status count. For each changed path it
+//! takes the newest reset whose old head held exactly the file's current
+//! content (else the latest reset), and the merge base B of that old head
+//! and HEAD:
+//! - HEAD has B's version: the file is a local edit (including the work of
+//!   an abandoned local commit) and stays;
+//! - the file has B's version: it is a copy of the saved version from before
+//!   the reset, and gets HEAD's version back (after an older reset, it is
+//!   parked first);
+//! - otherwise both changed it: the edits are merged onto HEAD's version when
+//!   they do not conflict, and anything else is parked on a `stale` recovery
+//!   ref first, then restored.
 //!
-//! Without a reflog, modifications that match an older version of the path,
-//! and deletions, are parked and restored.
+//! Every file the repair replaces is first kept on a local backup ref that is
+//! never pushed. Files that may never be published (secrets, attachments,
+//! build output, oversized files) are never parked and never replaced: they
+//! stay on disk only. Without a reflog, modifications that match an older
+//! version of the path, and deletions, are parked and restored.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,6 +35,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use crate::config::ServerConfig;
+use crate::publish_policy::{is_unpublishable, is_unsafe_path, MAX_PUBLISH_BLOB_BYTES};
 use crate::recovery::{self, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::tree_merge::changed_paths;
 use crate::workspace_fs::WorkspaceDir;
@@ -34,6 +45,8 @@ use crate::workspace_git::{
 
 /// Marker file inside the repository: present once the repair has run.
 const MARKER: &str = ".instafy/.git/instafy-stale-align-v1";
+/// Local ref holding a copy of every file the repair replaced. Never pushed.
+pub(crate) const BACKUP_REF: &str = "refs/instafy/stale-align-backup";
 /// How many old resets to compare against.
 const MAX_RESETS: usize = 20;
 /// How many older versions of a path to compare against without a reflog.
@@ -45,6 +58,8 @@ pub(crate) struct StaleRepair {
     pub merged: Vec<String>,
     pub parked: Option<RecoveryRefReport>,
     pub parked_paths: Vec<String>,
+    /// Paths that may not be published, left on disk as they were.
+    pub kept_local: Vec<String>,
 }
 
 /// Run the repair if this checkout has not had it yet.
@@ -63,6 +78,7 @@ pub(crate) fn repair_once(git: &WorkspaceGit<'_>, config: &ServerConfig) -> Resu
             restored = repair.restored.len(),
             merged = repair.merged.len(),
             parked = repair.parked_paths.len(),
+            kept_local = repair.kept_local.len(),
             "repaired files left behind by an earlier sync"
         );
     }
@@ -101,12 +117,13 @@ fn repair(
     if resets.is_empty() {
         return Ok(outcome);
     }
-    let latest = &resets[0];
-    let changed_since_latest: BTreeSet<String> =
-        changed_paths(git, latest, &head)?.into_iter().collect();
-    // Files the remote deleted were left behind untracked.
+    // Files a reset left behind untracked: the old head had them, HEAD not.
+    let mut changed_since_reset: BTreeSet<String> = BTreeSet::new();
+    for old in &resets {
+        changed_since_reset.extend(changed_paths(git, old, &head)?);
+    }
     for path in untracked_paths(git)? {
-        if changed_since_latest.contains(&path) {
+        if changed_since_reset.contains(&path) {
             dirty.push(path);
         }
     }
@@ -119,39 +136,73 @@ fn repair(
     // What the work tree holds for each dirty path, as git would store it.
     let worktree = worktree_entries(git, &head, &dirty)?;
     let head_entries = git.tree_entries(&head, &dirty)?;
+    // The merge base of each old head and HEAD: the last saved version both
+    // agree on. For a reset onto a newer remote tip it is the old head
+    // itself; for a reset that abandoned a local commit it is that commit's
+    // parent, so the commit's own edits count as local work.
+    let mut old_entries = Vec::with_capacity(resets.len());
+    let mut base_entries = Vec::with_capacity(resets.len());
+    for old in &resets {
+        old_entries.push(git.tree_entries(old, &dirty)?);
+        base_entries.push(match git.merge_base(old, &head)? {
+            Some(base) => git.tree_entries(&base, &dirty)?,
+            None => BTreeMap::new(),
+        });
+    }
 
     let mut restore = Vec::new();
     let mut park = Vec::new();
+    let mut merged: Vec<(String, Vec<u8>)> = Vec::new();
     for path in &dirty {
         let current = worktree.get(path);
-        let mut leftover = false;
-        for old in &resets {
-            let old_entry = git.tree_entries(old, std::slice::from_ref(path))?;
-            if same_entry(old_entry.get(path), current) {
-                leftover = true;
-                break;
-            }
+        let head_entry = head_entries.get(path);
+        let reference = old_entries
+            .iter()
+            .position(|entries| same_entry(entries.get(path), current))
+            .unwrap_or(0);
+        let base_entry = base_entries[reference].get(path);
+        if same_entry(base_entry, head_entry) {
+            // HEAD has the version both agree on: whatever the file holds
+            // is a local edit, possibly from a commit the reset abandoned.
+            continue;
         }
-        if leftover {
-            if !same_entry(head_entries.get(path), current) {
+        if same_entry(base_entry, current) {
+            // A copy of the saved version from before the reset, which HEAD
+            // has since changed. After an older reset, keep a copy anyway.
+            if reference == 0 {
                 restore.push(path.clone());
+            } else {
+                park.push(path.clone());
             }
             continue;
         }
-        if !changed_since_latest.contains(path) {
-            // The remote never touched this path: a genuine local edit.
-            continue;
-        }
-        let old_entry = git.tree_entries(latest, std::slice::from_ref(path))?;
-        match merge_onto_head(git, old_entry.get(path), head_entries.get(path), current)? {
-            Some(merged) => {
-                write_worktree_file(workspace, path, &merged, head_entries.get(path))?;
-                outcome.merged.push(path.clone());
-            }
+        match merge_onto_head(git, base_entry, head_entry, current)? {
+            Some(content) => merged.push((path.clone(), content)),
             None => park.push(path.clone()),
         }
     }
 
+    let mut touched: Vec<String> = restore.clone();
+    touched.extend(park.iter().cloned());
+    touched.extend(merged.iter().map(|(path, _)| path.clone()));
+    if touched.is_empty() {
+        return Ok(outcome);
+    }
+    backup_worktree(git, config, &head, &touched)?;
+
+    // Never replace, and never park, what may not be published.
+    let (park, kept_local) = split_parkable(git, &worktree, park)?;
+    let restore: Vec<String> = restore
+        .into_iter()
+        .filter(|path| !is_unpublishable(path))
+        .collect();
+    outcome.kept_local = kept_local;
+
+    for (path, content) in &merged {
+        write_worktree_file(workspace, path, content, head_entries.get(path))?;
+        outcome.merged.push(path.clone());
+    }
+    let mut restore = restore;
     if !park.is_empty() {
         outcome.parked = park_paths(git, config, &head, &park)?;
         outcome.parked_paths = park.clone();
@@ -210,11 +261,116 @@ fn repair_without_reflog(
     if park.is_empty() {
         return Ok(outcome);
     }
+    backup_worktree(git, config, head, &park)?;
+    let (park, kept_local) = split_parkable(git, &worktree, park)?;
+    outcome.kept_local = kept_local;
+    if park.is_empty() {
+        return Ok(outcome);
+    }
     outcome.parked = park_paths(git, config, head, &park)?;
     restore_from_head(git, workspace, &park)?;
     outcome.parked_paths = park.clone();
     outcome.restored = park;
     Ok(outcome)
+}
+
+/// Split `paths` into those a recovery ref may carry and those that may
+/// never be published (by name, as an unsafe path, or by size), which stay
+/// on disk only.
+fn split_parkable(
+    git: &WorkspaceGit<'_>,
+    worktree: &BTreeMap<String, TreeEntry>,
+    paths: Vec<String>,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let ids: Vec<String> = paths
+        .iter()
+        .filter_map(|path| worktree.get(path))
+        .filter(|entry| entry.kind == "blob")
+        .map(|entry| entry.oid.clone())
+        .collect();
+    let sizes: BTreeMap<String, u64> = ids
+        .iter()
+        .cloned()
+        .zip(git.object_sizes(&ids)?)
+        .filter_map(|(id, size)| size.map(|(_, size)| (id, size)))
+        .collect();
+    let (parkable, local): (Vec<String>, Vec<String>) = paths.into_iter().partition(|path| {
+        if is_unpublishable(path) || is_unsafe_path(path) {
+            return false;
+        }
+        !worktree.get(path).is_some_and(|entry| {
+            entry.kind != "blob"
+                || sizes
+                    .get(&entry.oid)
+                    .is_some_and(|size| *size > MAX_PUBLISH_BLOB_BYTES)
+        })
+    });
+    if !local.is_empty() {
+        warn!(
+            paths = local.len(),
+            "kept files that may not be published on disk only"
+        );
+    }
+    Ok((parkable, local))
+}
+
+/// Keep a local copy of HEAD plus the work tree's version of `paths` on
+/// [`BACKUP_REF`], which nothing pushes, before the repair replaces them.
+fn backup_worktree(
+    git: &WorkspaceGit<'_>,
+    config: &ServerConfig,
+    head: &str,
+    paths: &[String],
+) -> Result<()> {
+    let scratch = temp_index_dir(git)?;
+    let index = scratch.path().join("index");
+    let opts = RunOpts {
+        index_file: Some(&index),
+        ..RunOpts::default()
+    };
+    git.ok_opts(&["read-tree", head], &opts)?;
+    let in_head = git.tree_entries(head, paths)?;
+    let known: Vec<String> = paths
+        .iter()
+        .filter(|path| {
+            in_head.contains_key(*path) || std::fs::symlink_metadata(git.root().join(path)).is_ok()
+        })
+        .cloned()
+        .collect();
+    if !known.is_empty() {
+        let list = nul_list(&known);
+        git.ok_opts(
+            &[
+                "add",
+                "-A",
+                "--ignore-errors",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ],
+            &RunOpts {
+                index_file: Some(&index),
+                stdin: Some(&list),
+                literal_pathspecs: true,
+                ..RunOpts::default()
+            },
+        )?;
+    }
+    let tree = git.stdout_opts(&["write-tree"], &opts)?;
+    let identity = GitIdentity::new(&config.git_author_name, &config.git_author_email);
+    let backup = git.commit_tree(
+        &tree,
+        &[head],
+        &identity,
+        &identity,
+        b"Keep the files a one-time repair replaced\n\nA local copy only; it is never pushed.\n",
+    )?;
+    git.ok(&[
+        "update-ref",
+        "-m",
+        "instafy: keep files the repair replaced",
+        BACKUP_REF,
+        &backup,
+    ])
 }
 
 fn same_entry(a: Option<&TreeEntry>, b: Option<&TreeEntry>) -> bool {

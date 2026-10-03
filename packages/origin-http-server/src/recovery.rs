@@ -3,8 +3,11 @@
 //! A recovery commit Q is built without moving HEAD and stored first as a
 //! local ref, `refs/instafy/local-recovery/<name>`, before any network call.
 //! It is pushed to `refs/instafy/recovery/<origin id>/<name>` only by a holder
-//! of `git.write`. Once the push is confirmed (the push reported success and
-//! the remote ref names the same commit) the local ref moves to
+//! of `git.write`, where the origin id is the one in Q's own `Instafy-Origin`
+//! trailer: a checkout outlives its runtime, and a later runtime (with a new
+//! origin id) pushes and reads the refs an earlier one made under that
+//! earlier id. Once the push is confirmed (the push reported success and the
+//! remote ref names the same commit) the local ref moves to
 //! `refs/instafy/local-recovery-pushed/<name>`. A pushed marker whose
 //! canonical ref later disappears was dismissed (or restored) by a person:
 //! it moves to `refs/instafy/local-recovery-dismissed/<name>` and is never
@@ -12,12 +15,19 @@
 //! retired, except an `unpublished` one whose source commits reached `main`,
 //! because then its content is already canonical.
 //!
+//! Nothing that may not be published (see [`crate::publish_policy`]) is ever
+//! pushed: before a push, a recovery commit whose own change or whose
+//! never-published ancestry adds or changes such a path is rebuilt on a
+//! published parent without it, and the original stays only as a local
+//! backup.
+//!
 //! Names are `<UTC time>-<kind>-<hash>`, where the hash covers the kind and
 //! the exact set of changed entries. The same work therefore always gets the
 //! same name, a second store or push of it is a no-op, and different work
 //! gets a different name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
@@ -201,7 +211,7 @@ pub(crate) fn store(
                 } else {
                     Some(RecoveryRefReport {
                         reference: if pushed {
-                            canonical_ref(spec.origin_id, &name)
+                            canonical_ref(origin_of(git, &rev, spec.origin_id), &name)
                         } else {
                             reference
                         },
@@ -331,7 +341,8 @@ pub(crate) fn pending(git: &WorkspaceGit<'_>) -> Result<Vec<(String, String)>> {
 /// Result of pushing the pending refs.
 #[derive(Debug, Default)]
 pub(crate) struct PushPending {
-    pub pushed: Vec<String>,
+    /// `(name, canonical ref)` of every ref this call pushed.
+    pub pushed: Vec<(String, String)>,
     pub failed: Vec<(String, String)>,
     pub remaining: usize,
 }
@@ -339,108 +350,162 @@ pub(crate) struct PushPending {
 /// Push every pending local recovery ref, and move each one confirmed on
 /// the remote to the pushed markers. Needs a `git.write` token.
 ///
+/// `main` is the fetched canonical `main`; `published` names every commit
+/// known to be on canonical (`main`, and the published frontier of an
+/// unrelated history). Whatever a push would send beyond them is checked
+/// first.
+///
 /// When the repository policy refuses a path in a recovery commit, that path
 /// is left out (a new commit and name; the refused one moves to
 /// `refs/instafy/local-recovery-rejected/`) and the push is retried, so one
-/// refused file never keeps the rest of the work local forever.
+/// refused file never keeps the rest of the work local forever. A ref that
+/// cannot be pushed is reported in `failed` and the others are still pushed.
+/// Pushing stops at `deadline`; whatever is left waits for the next call.
 pub(crate) fn push_pending(
     git: &WorkspaceGit<'_>,
     remote: &str,
     origin_id: Uuid,
+    main: Option<&str>,
+    published: &[String],
+    deadline: Option<Instant>,
 ) -> Result<PushPending> {
     let mut report = PushPending::default();
     for (name, rev) in pending(git)? {
-        let (mut name, mut rev) = (name, rev);
-        let mut outcome = Err("not pushed".to_string());
-        for _ in 0..MAX_POLICY_RETRIES {
-            let destination = canonical_ref(origin_id, &name);
-            let result = push(git, remote, &[format!("{rev}:{destination}")], &[])?;
-            let reported_ok = matches!(result.class, PushClass::Pushed)
-                || result
-                    .refs
-                    .iter()
-                    .any(|pushed| pushed.to == destination && pushed.ok());
-            match result.class {
-                PushClass::PathRejected { path, .. } if !reported_ok => {
-                    match without_path(git, &name, &rev, &path)? {
-                        Some((next_name, next_rev)) => {
-                            name = next_name;
-                            rev = next_rev;
-                            continue;
-                        }
-                        None => {
-                            outcome = Err(format!("only refused paths were left in {name}"));
-                            break;
-                        }
-                    }
-                }
-                class => {
-                    // Confirm on the remote rather than trusting the push's
-                    // own report.
-                    let confirmed = reported_ok
-                        && ls_remote(git, remote, std::slice::from_ref(&destination))
-                            .ok()
-                            .and_then(|found| found.get(&destination).cloned())
-                            .as_deref()
-                            == Some(rev.as_str());
-                    outcome = if confirmed {
-                        Ok(())
-                    } else {
-                        Err(match class {
-                            PushClass::Pushed => {
-                                "the remote does not show the pushed commit".to_string()
-                            }
-                            PushClass::LostRace(text)
-                            | PushClass::Rejected(text)
-                            | PushClass::Ambiguous(text) => text,
-                            PushClass::PathRejected { path, .. } => {
-                                format!("policy refused {path}")
-                            }
-                        })
-                    };
-                    break;
-                }
-            }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            report
+                .failed
+                .push((name, "no time left to push it in this call".to_string()));
+            continue;
         }
-        match outcome {
-            Ok(()) => {
-                let destination = canonical_ref(origin_id, &name);
-                let mut transaction = String::new();
-                transaction.push_str(&format!("update {} {rev}\n", pushed_ref(&name)));
-                transaction.push_str(&format!("delete {} {rev}\n", local_ref(&name)));
-                // Mirror the canonical ref so the agent can read it right
-                // away; the next refresh replaces it with a fetched copy.
-                transaction.push_str(&format!("update {destination} {rev}\n"));
-                git.ok_opts(
-                    &[
-                        "update-ref",
-                        "--stdin",
-                        "-m",
-                        "instafy: recovery work pushed",
-                    ],
-                    &RunOpts {
-                        stdin: Some(transaction.as_bytes()),
-                        ..RunOpts::default()
-                    },
-                )?;
-                report.pushed.push(name);
-            }
-            Err(detail) => report.failed.push((name, detail)),
+        match push_one(git, remote, origin_id, main, published, &name, &rev) {
+            Ok(Ok(pushed)) => report.pushed.push(pushed),
+            Ok(Err(detail)) => report.failed.push((name, detail)),
+            Err(error) => report.failed.push((name, format!("{error:#}"))),
         }
     }
     report.remaining = pending(git)?.len();
     Ok(report)
 }
 
-/// Replace a pending recovery commit by one without `path` (which keeps its
-/// parent's entry). The old commit moves to the rejected backups. Returns
-/// the new `(name, rev)`, or `None` when nothing else was left.
-fn without_path(
+/// Push one pending ref. The outer error is a local git failure, the inner
+/// one a push that did not land.
+fn push_one(
     git: &WorkspaceGit<'_>,
+    remote: &str,
+    origin_id: Uuid,
+    main: Option<&str>,
+    published: &[String],
     name: &str,
     rev: &str,
-    path: &str,
-) -> Result<Option<(String, String)>> {
+) -> Result<Result<(String, String), String>> {
+    let (mut name, mut rev) = (name.to_string(), rev.to_string());
+    match without_unpublishable(git, &name, &rev, main, published)? {
+        Rebuilt::Unchanged => {}
+        Rebuilt::Replaced(next_name, next_rev) => {
+            name = next_name;
+            rev = next_rev;
+        }
+        Rebuilt::Dropped(reason) => return Ok(Err(reason)),
+    }
+    let origin = origin_of(git, &rev, origin_id);
+    let mut outcome = Err("not pushed".to_string());
+    for _ in 0..MAX_POLICY_RETRIES {
+        let destination = canonical_ref(origin, &name);
+        let result = push(git, remote, &[format!("{rev}:{destination}")], &[])?;
+        let reported_ok = matches!(result.class, PushClass::Pushed)
+            || result
+                .refs
+                .iter()
+                .any(|pushed| pushed.to == destination && pushed.ok());
+        match result.class {
+            PushClass::PathRejected { path, .. } if !reported_ok => {
+                match without_path(git, &name, &rev, &path, main)? {
+                    Rebuilt::Replaced(next_name, next_rev) => {
+                        name = next_name;
+                        rev = next_rev;
+                        continue;
+                    }
+                    Rebuilt::Dropped(reason) => {
+                        outcome = Err(reason);
+                        break;
+                    }
+                    Rebuilt::Unchanged => {
+                        outcome = Err(format!("the repository policy refused {path}"));
+                        break;
+                    }
+                }
+            }
+            class => {
+                // Confirm on the remote rather than trusting the push's
+                // own report.
+                let confirmed = reported_ok
+                    && ls_remote(git, remote, std::slice::from_ref(&destination))
+                        .ok()
+                        .and_then(|found| found.get(&destination).cloned())
+                        .as_deref()
+                        == Some(rev.as_str());
+                outcome = if confirmed {
+                    Ok(())
+                } else {
+                    Err(match class {
+                        PushClass::Pushed => {
+                            "the remote does not show the pushed commit".to_string()
+                        }
+                        PushClass::LostRace(text)
+                        | PushClass::Rejected(text)
+                        | PushClass::Ambiguous(text) => text,
+                        PushClass::PathRejected { path, .. } => {
+                            format!("policy refused {path}")
+                        }
+                    })
+                };
+                break;
+            }
+        }
+    }
+    if let Err(detail) = outcome {
+        return Ok(Err(detail));
+    }
+    let destination = canonical_ref(origin, &name);
+    let mut transaction = String::new();
+    transaction.push_str(&format!("update {} {rev}\n", pushed_ref(&name)));
+    transaction.push_str(&format!("delete {} {rev}\n", local_ref(&name)));
+    // Mirror the canonical ref so the agent can read it right away; the next
+    // refresh replaces it with a fetched copy.
+    transaction.push_str(&format!("update {destination} {rev}\n"));
+    git.ok_opts(
+        &[
+            "update-ref",
+            "--stdin",
+            "-m",
+            "instafy: recovery work pushed",
+        ],
+        &RunOpts {
+            stdin: Some(transaction.as_bytes()),
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(Ok((name, destination)))
+}
+
+/// What became of a pending recovery commit that had to change.
+enum Rebuilt {
+    /// Nothing needed to change.
+    Unchanged,
+    /// A new pending commit `(name, rev)` replaced it.
+    Replaced(String, String),
+    /// Nothing that may be pushed was left; it stays only as a backup.
+    Dropped(String),
+}
+
+struct RecoveryCommit {
+    tree: String,
+    parent: Option<String>,
+    committer: GitIdentity,
+    message: String,
+}
+
+fn read_recovery_commit(git: &WorkspaceGit<'_>, rev: &str) -> Result<RecoveryCommit> {
     let object = git
         .read_objects(&[rev.to_string()])?
         .pop()
@@ -453,6 +518,9 @@ fn without_path(
         .unwrap_or(object.data.len());
     let headers = String::from_utf8_lossy(&object.data[..split]).to_string();
     let mut message = String::from_utf8_lossy(&object.data[split..]).to_string();
+    if !message.ends_with('\n') {
+        message.push('\n');
+    }
     let mut tree = None;
     let mut parent = None;
     let mut committer = None;
@@ -462,52 +530,50 @@ fn without_path(
         } else if let Some(value) = line.strip_prefix("parent ") {
             parent.get_or_insert_with(|| value.to_string());
         } else if let Some(value) = line.strip_prefix("committer ") {
-            committer = Some(value.to_string());
+            committer = parse_identity(value);
         }
     }
-    let tree = tree.context("recovery commit has no tree")?;
-    let new_tree = crate::tree_merge::tree_with_entries_from(
-        git,
-        &tree,
-        parent.as_deref(),
-        &[path.to_string()],
-    )?;
+    Ok(RecoveryCommit {
+        tree: tree.context("recovery commit has no tree")?,
+        parent,
+        committer: committer.context("recovery commit has no committer")?,
+        message,
+    })
+}
+
+/// Replace the pending commit `name` (at `rev`) by a commit of `tree` on
+/// `parent` with `left_out` named in its message. The old commit moves to
+/// the rejected backups, which are never pushed.
+fn replace_pending(
+    git: &WorkspaceGit<'_>,
+    name: &str,
+    rev: &str,
+    commit: &RecoveryCommit,
+    tree: &str,
+    parent: Option<&str>,
+    left_out: &[String],
+) -> Result<Rebuilt> {
     let backup = format!("{LOCAL_RECOVERY_REJECTED_ROOT}/{name}");
-    let parent_tree = match parent.as_deref() {
+    let parent_tree = match parent {
         Some(parent) => git.tree_id(parent)?,
         None => git.empty_tree()?,
     };
-    if new_tree == parent_tree {
-        git.ok_opts(
-            &[
-                "update-ref",
-                "--stdin",
-                "-m",
-                "instafy: recovery work refused",
-            ],
-            &RunOpts {
-                stdin: Some(
-                    format!("update {backup} {rev}\ndelete {} {rev}\n", local_ref(name)).as_bytes(),
-                ),
-                ..RunOpts::default()
-            },
-        )?;
-        return Ok(None);
+    if tree == parent_tree {
+        retire_pending(git, name, rev)?;
+        return Ok(Rebuilt::Dropped(format!(
+            "only refused paths were left in {name}"
+        )));
     }
-    if !message.ends_with('\n') {
-        message.push('\n');
+    let mut message = commit.message.clone();
+    for path in left_out.iter().take(MAX_LISTED_PATHS) {
+        message.push_str(&format!("{LEFT_OUT_TRAILER}: {}\n", one_line(path)));
     }
-    message.push_str(&format!("{LEFT_OUT_TRAILER}: {}\n", one_line(path)));
-    let identity = committer
-        .as_deref()
-        .and_then(parse_identity)
-        .context("recovery commit has no committer")?;
-    let parents: Vec<&str> = parent.iter().map(String::as_str).collect();
+    let parents: Vec<&str> = parent.into_iter().collect();
     let next = git.commit_tree(
-        &new_tree,
+        tree,
         &parents,
-        &identity,
-        &identity,
+        &commit.committer,
+        &commit.committer,
         message.as_bytes(),
     )?;
     let changes = git.bytes(&[
@@ -517,11 +583,44 @@ fn without_path(
         "--no-renames",
         "--raw",
         &parent_tree,
-        &new_tree,
+        tree,
     ])?;
     let kind = kind_of_name(name).unwrap_or(RecoveryKind::Unsaved);
     let stamp = name.split('-').next().unwrap_or_default();
     let next_name = format!("{stamp}-{}-{}", kind.as_str(), change_hash(kind, &changes));
+    // The same change on another parent keeps its name (names follow the
+    // change, not the parent): then the ref moves in place, since one
+    // transaction may name a ref only once.
+    let transaction = if next_name == name {
+        format!(
+            "update {backup} {rev}\nupdate {} {next} {rev}\n",
+            local_ref(name)
+        )
+    } else {
+        format!(
+            "update {backup} {rev}\ndelete {} {rev}\nupdate {} {next}\n",
+            local_ref(name),
+            local_ref(&next_name)
+        )
+    };
+    git.ok_opts(
+        &[
+            "update-ref",
+            "--stdin",
+            "-m",
+            "instafy: recovery work refused",
+        ],
+        &RunOpts {
+            stdin: Some(transaction.as_bytes()),
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(Rebuilt::Replaced(next_name, next))
+}
+
+/// Move a pending recovery commit to the rejected backups (never pushed).
+fn retire_pending(git: &WorkspaceGit<'_>, name: &str, rev: &str) -> Result<()> {
+    let backup = format!("{LOCAL_RECOVERY_REJECTED_ROOT}/{name}");
     git.ok_opts(
         &[
             "update-ref",
@@ -531,17 +630,170 @@ fn without_path(
         ],
         &RunOpts {
             stdin: Some(
-                format!(
-                    "update {backup} {rev}\ndelete {} {rev}\ncreate {} {next}\n",
-                    local_ref(name),
-                    local_ref(&next_name)
-                )
-                .as_bytes(),
+                format!("update {backup} {rev}\ndelete {} {rev}\n", local_ref(name)).as_bytes(),
             ),
             ..RunOpts::default()
         },
+    )
+}
+
+/// Replace a pending recovery commit by one without `path`, which the
+/// repository policy refused. The hook compares a new recovery ref with
+/// `main`, so a path the commit itself did not change can be refused too
+/// (main changed it since the commit's parent): then the copy takes `main`'s
+/// entry and agrees with `main` there. When neither changes anything the
+/// commit can never pass the policy as it is, and it moves to the rejected
+/// backups ([`Rebuilt::Dropped`]).
+fn without_path(
+    git: &WorkspaceGit<'_>,
+    name: &str,
+    rev: &str,
+    path: &str,
+    main: Option<&str>,
+) -> Result<Rebuilt> {
+    let commit = read_recovery_commit(git, rev)?;
+    let paths = [path.to_string()];
+    let mut new_tree = crate::tree_merge::tree_with_entries_from(
+        git,
+        &commit.tree,
+        commit.parent.as_deref(),
+        &paths,
     )?;
-    Ok(Some((next_name, next)))
+    if new_tree == commit.tree {
+        if let Some(main) = main {
+            new_tree =
+                crate::tree_merge::tree_with_entries_from(git, &commit.tree, Some(main), &paths)?;
+        }
+    }
+    if new_tree == commit.tree {
+        retire_pending(git, name, rev)?;
+        return Ok(Rebuilt::Dropped(format!(
+            "the repository policy refused {path}, which {name} cannot leave out"
+        )));
+    }
+    replace_pending(
+        git,
+        name,
+        rev,
+        &commit,
+        &new_tree,
+        commit.parent.as_deref(),
+        &paths,
+    )
+}
+
+/// Make sure a pending recovery commit sends nothing that may not be
+/// published: neither its own change nor any never-published commit below
+/// it may add or change such a path. When one does, the commit is rebuilt
+/// on a published parent (its own, or the merge base with `main`) with
+/// those paths keeping the parent's version.
+fn without_unpublishable(
+    git: &WorkspaceGit<'_>,
+    name: &str,
+    rev: &str,
+    main: Option<&str>,
+    published: &[String],
+) -> Result<Rebuilt> {
+    let mut args: Vec<String> = vec!["rev-list".to_string(), rev.to_string()];
+    args.extend(published.iter().map(|tip| format!("^{tip}")));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listing = git.stdout(&arg_refs)?;
+    let commits: Vec<&str> = listing.lines().filter(|line| !line.is_empty()).collect();
+    if commits.is_empty() {
+        return Ok(Rebuilt::Unchanged);
+    }
+    let mut input = String::new();
+    for commit in &commits {
+        input.push_str(commit);
+        input.push('\n');
+    }
+    let raw = git.bytes_opts(
+        &[
+            "diff-tree",
+            "--stdin",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--raw",
+            "-m",
+            "--root",
+        ],
+        &RunOpts {
+            stdin: Some(input.as_bytes()),
+            ..RunOpts::default()
+        },
+    )?;
+    let offending: BTreeSet<String> = crate::publish::parse_stdin_diff_tree(&raw)
+        .into_values()
+        .flatten()
+        .filter(|change| change.status != 'D')
+        .map(|change| change.path)
+        .filter(|path| crate::publish_policy::is_unpublishable(path))
+        .collect();
+    if offending.is_empty() {
+        return Ok(Rebuilt::Unchanged);
+    }
+    let offending: Vec<String> = offending.into_iter().collect();
+    let commit = read_recovery_commit(git, rev)?;
+    let parent_published = match commit.parent.as_deref() {
+        Some(parent) => {
+            let mut on_canonical = false;
+            for tip in published {
+                if git.is_ancestor(parent, tip)? {
+                    on_canonical = true;
+                    break;
+                }
+            }
+            on_canonical
+        }
+        None => main.is_none(),
+    };
+    let (parent, tree) = if parent_published {
+        let tree = crate::tree_merge::tree_with_entries_from(
+            git,
+            &commit.tree,
+            commit.parent.as_deref(),
+            &offending,
+        )?;
+        (commit.parent.clone(), tree)
+    } else {
+        match main {
+            Some(main) => match git.merge_base(rev, main)? {
+                Some(base) => {
+                    let tree = crate::tree_merge::tree_with_entries_from(
+                        git,
+                        &commit.tree,
+                        Some(&base),
+                        &offending,
+                    )?;
+                    (Some(base), tree)
+                }
+                None => {
+                    let tree = crate::tree_merge::overlay(git, main, &commit.tree, &offending)?;
+                    (Some(main.to_string()), tree)
+                }
+            },
+            None => {
+                let tree =
+                    crate::tree_merge::tree_with_entries_from(git, &commit.tree, None, &offending)?;
+                (None, tree)
+            }
+        }
+    };
+    tracing::warn!(
+        %name,
+        paths = offending.len(),
+        "left files that may not be published out of recovery work"
+    );
+    replace_pending(
+        git,
+        name,
+        rev,
+        &commit,
+        &tree,
+        parent.as_deref(),
+        &offending,
+    )
 }
 
 fn parse_identity(value: &str) -> Option<GitIdentity> {
@@ -594,8 +846,9 @@ pub(crate) fn ls_remote(
 }
 
 /// After a fetch that mirrored `refs/instafy/recovery/*` with `--prune`,
-/// retire every pushed marker whose canonical ref is gone. Returns the
-/// dismissed `(name, rev)` pairs.
+/// retire every pushed marker whose canonical ref is gone. A marker's
+/// canonical ref is under the origin that made it (its trailer), not under
+/// the origin running now. Returns the dismissed `(name, rev)` pairs.
 pub(crate) fn retire_dismissed(
     git: &WorkspaceGit<'_>,
     origin_id: Uuid,
@@ -610,7 +863,7 @@ pub(crate) fn retire_dismissed(
         let Some(name) = reference.strip_prefix(&format!("{LOCAL_RECOVERY_PUSHED_ROOT}/")) else {
             continue;
         };
-        if mirrored.contains_key(&canonical_ref(origin_id, name)) {
+        if mirrored.contains_key(&canonical_ref(origin_of(git, &rev, origin_id), name)) {
             continue;
         }
         transaction.push_str(&format!("update {} {rev}\n", dismissed_ref(name)));
@@ -634,19 +887,37 @@ pub(crate) fn retire_dismissed(
     Ok(dismissed)
 }
 
-/// The `Instafy-Recovery-Source` of a recovery commit, if any.
-pub(crate) fn source_of(git: &WorkspaceGit<'_>, rev: &str) -> Result<Option<String>> {
+/// The value of the last `<key>: <value>` line of a commit's message.
+fn trailer(git: &WorkspaceGit<'_>, rev: &str, key: &str) -> Result<Option<String>> {
     let objects = git.read_objects(&[rev.to_string()])?;
-    if objects[0].kind != "commit" {
+    let Some(object) = objects.first() else {
+        return Ok(None);
+    };
+    if object.kind != "commit" {
         return Ok(None);
     }
-    let text = String::from_utf8_lossy(&objects[0].data).to_string();
-    let prefix = format!("{SOURCE_TRAILER}: ");
+    let text = String::from_utf8_lossy(&object.data).to_string();
+    let prefix = format!("{key}: ");
     Ok(text
         .lines()
         .rev()
         .find_map(|line| line.strip_prefix(&prefix))
         .map(|value| value.trim().to_string()))
+}
+
+/// The `Instafy-Recovery-Source` of a recovery commit, if any.
+pub(crate) fn source_of(git: &WorkspaceGit<'_>, rev: &str) -> Result<Option<String>> {
+    trailer(git, rev, SOURCE_TRAILER)
+}
+
+/// The origin that made a recovery commit (its `Instafy-Origin` trailer),
+/// whose id names the commit's canonical ref; `fallback` when it has none.
+pub(crate) fn origin_of(git: &WorkspaceGit<'_>, rev: &str, fallback: Uuid) -> Uuid {
+    trailer(git, rev, ORIGIN_TRAILER)
+        .ok()
+        .flatten()
+        .and_then(|value| Uuid::parse_str(&value).ok())
+        .unwrap_or(fallback)
 }
 
 pub(crate) fn kind_of_name(name: &str) -> Option<RecoveryKind> {
@@ -661,15 +932,18 @@ pub(crate) fn kind_of_name(name: &str) -> Option<RecoveryKind> {
 }
 
 /// Delete this checkout's `unpublished` refs whose source commits are now on
-/// `main`: their content is canonical. Conflict, unsaved and stale refs are
-/// never touched. A pushed copy is deleted on the remote first (with a lease
-/// on the exact commit) and its marker only after that succeeds.
+/// `main`: their content is canonical. `also_published` names local commits
+/// whose sanitised rewrite (the same work without unpublishable paths) is on
+/// `main`. Conflict, unsaved and stale refs are never touched. A pushed copy
+/// is deleted on the remote first (with a lease on the exact commit) and its
+/// marker only after that succeeds.
 pub(crate) fn retire_superseded(
     git: &WorkspaceGit<'_>,
     remote: &str,
     origin_id: Uuid,
     main: &str,
     can_push: bool,
+    also_published: &[String],
 ) -> Result<Vec<String>> {
     let mut retired = Vec::new();
     for (root, pushed) in [
@@ -686,14 +960,16 @@ pub(crate) fn retire_superseded(
             let Some(source) = source_of(git, &rev)? else {
                 continue;
             };
-            if git.commit_id(&source)?.is_none() || !git.is_ancestor(&source, main)? {
+            let superseded = also_published.contains(&source)
+                || (git.commit_id(&source)?.is_some() && git.is_ancestor(&source, main)?);
+            if !superseded {
                 continue;
             }
             if pushed {
                 if !can_push {
                     continue;
                 }
-                let destination = canonical_ref(origin_id, name);
+                let destination = canonical_ref(origin_of(git, &rev, origin_id), name);
                 let lease = format!("--force-with-lease={destination}:{rev}");
                 let delete = format!(":{destination}");
                 let output = git.run(&[

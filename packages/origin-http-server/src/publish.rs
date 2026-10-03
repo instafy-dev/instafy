@@ -32,7 +32,7 @@ use crate::publish_policy::{
 use crate::push::{push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::stale_align;
-use crate::tree_merge::{changed_paths, three_way, tree_with_entries_from};
+use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
 use crate::workspace_fs::WorkspaceDir;
 use crate::workspace_git::{nul_list, temp_index_dir, GitIdentity, RunOpts, WorkspaceGit};
 
@@ -42,7 +42,18 @@ pub const PUBLISHED_FRONTIER_REF: &str = "refs/instafy/published-frontier";
 /// At most this many first-parent commits are replayed onto an unrelated
 /// `main`; a longer history is parked instead.
 const MAX_REPLAYED_COMMITS: usize = 50;
+/// Pushes to `main` that may lose a race before the work is parked.
 const MAX_ATTEMPTS: usize = 4;
+/// Paths the repository's own push policy may refuse in one publish. The
+/// policy names one path per refusal, and each is left out before the next
+/// try; these tries never count as lost races.
+const MAX_POLICY_REFUSALS: usize = 64;
+/// How long a stop's fetch or push may move no data before it gives up.
+/// Everything a stop parks is stored locally first, so giving up early only
+/// leaves the work for the next publish or refresh to push.
+const FLUSH_STALL_SECONDS: u32 = 8;
+/// The time a stop may spend keeping its work, below the controller's wait.
+const FLUSH_BUDGET: Duration = Duration::from_secs(18);
 const MAX_TRAILER_PATHS: usize = 200;
 /// At most this many rejected paths are listed in one report.
 const MAX_REPORTED_PATHS: usize = 1000;
@@ -205,17 +216,25 @@ pub struct FlushReport {
     /// The publish of finished local commits, when one ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish: Option<PublishReport>,
+    /// Why that publish failed; its work stays on the local recovery refs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publish_error: Option<String>,
     /// Local commits of an unfinished turn moved to a recovery ref.
     pub parked_commits: usize,
 }
 
-/// Before a stop: publish only commits that were finished before it (none
-/// when `turn_active`), park everything else on recovery refs, and push the
-/// parked refs when the token allows. Builds every recovery commit before
-/// any network call, so a stop without network still keeps the work locally
-/// for the next publish or refresh to push.
+/// Before a stop: store everything the checkout holds on local recovery
+/// refs first (finished local commits as `unpublished`, the commits of an
+/// unfinished turn and every unsaved edit as `unsaved`), with no network
+/// call. Then, when the token allows, publish the finished commits by merge
+/// (none when `turn_active`), which retires their local copy, and push the
+/// parked refs. Dirty or half-finished work never reaches `main`. A stop
+/// without write access or network, or one cut short, keeps everything on
+/// local refs for the next publish or refresh to push.
 pub fn flush(ctx: &PublishContext<'_>, turn_active: bool) -> Result<FlushReport, OriginError> {
-    let mut publisher = Publisher::new(ctx, Duration::from_secs(20));
+    let mut publisher = Publisher::new(ctx, FLUSH_BUDGET);
+    publisher.git = publisher.git.with_stall_limit(FLUSH_STALL_SECONDS);
+    publisher.push_deadline = Some(publisher.deadline);
     publisher.flush(turn_active).map_err(internal)
 }
 
@@ -263,6 +282,14 @@ struct Publisher<'a> {
     filtered: BTreeMap<String, RejectReason>,
     /// The last fetch reached the remote.
     fetched: bool,
+    /// Local commits whose sanitised rewrite reached `main`: work parked
+    /// from them is on canonical too.
+    published_aliases: Vec<String>,
+    /// Stop pushing parked refs at this time (a stop's budget).
+    push_deadline: Option<Instant>,
+    /// The conflict copy of the attempt in flight, stored before its push so
+    /// no push can land without it.
+    conflict_copy: Option<RecoveryRefReport>,
 }
 
 struct HistoryScan {
@@ -279,9 +306,17 @@ struct ParsedCommit {
 }
 
 enum Attempt {
-    Done { main: String },
+    Done {
+        main: String,
+    },
+    /// Another writer moved `main` first.
     Retry,
-    Park { reason: String, retryable: bool },
+    /// The repository policy refused a path, now frozen; try again without it.
+    PolicyRetry,
+    Park {
+        reason: String,
+        retryable: bool,
+    },
 }
 
 impl<'a> Publisher<'a> {
@@ -302,6 +337,9 @@ impl<'a> Publisher<'a> {
             report: PublishReport::default(),
             filtered: BTreeMap::new(),
             fetched: false,
+            published_aliases: Vec::new(),
+            push_deadline: None,
+            conflict_copy: None,
         }
     }
 
@@ -330,7 +368,11 @@ impl<'a> Publisher<'a> {
         match self.fetch(true) {
             Ok(_) => {
                 self.fetched = true;
-                self.retire_dismissed()?;
+                // Work set aside because it builds on dismissed commits is
+                // pushed right away, like everything else parked.
+                if self.retire_dismissed()? && self.can_write {
+                    self.push_pending();
+                }
             }
             // Without the recovery refs, dismissals wait for the next fetch;
             // publishing only needs main.
@@ -358,29 +400,56 @@ impl<'a> Publisher<'a> {
     }
 
     fn push_pending(&mut self) {
-        match recovery::push_pending(&self.git, &self.remote, self.config.origin_id) {
+        let pushed = self.push_parked();
+        // Report the canonical name of anything this call pushed.
+        for (name, canonical) in pushed {
+            if let Some(entry) = self
+                .report
+                .recovery_refs
+                .iter_mut()
+                .find(|entry| entry.name == name)
+            {
+                if self.report.recovery_ref.as_deref() == Some(entry.reference.as_str()) {
+                    self.report.recovery_ref = Some(canonical.clone());
+                }
+                entry.reference = canonical;
+                entry.pushed = true;
+            }
+        }
+    }
+
+    /// Push every parked ref; returns `(name, canonical ref)` of each one
+    /// pushed. Failures are logged; their refs stay local for the next call.
+    fn push_parked(&mut self) -> Vec<(String, String)> {
+        let main = match self.tracked_main() {
+            Ok(main) => main,
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "could not read canonical main");
+                return Vec::new();
+            }
+        };
+        let mut published: Vec<String> = main.iter().cloned().collect();
+        if let Ok(Some(frontier)) = self.git.commit_id(PUBLISHED_FRONTIER_REF) {
+            published.push(frontier);
+        }
+        match recovery::push_pending(
+            &self.git,
+            &self.remote,
+            self.config.origin_id,
+            main.as_deref(),
+            &published,
+            self.push_deadline,
+        ) {
             Ok(result) => {
                 for (name, detail) in &result.failed {
                     warn!(%name, %detail, "recovery ref not pushed yet");
                 }
-                // Report the canonical name of anything this call pushed.
-                for pushed in result.pushed {
-                    if let Some(entry) = self
-                        .report
-                        .recovery_refs
-                        .iter_mut()
-                        .find(|entry| entry.name == pushed)
-                    {
-                        let canonical = recovery::canonical_ref(self.config.origin_id, &pushed);
-                        if self.report.recovery_ref.as_deref() == Some(entry.reference.as_str()) {
-                            self.report.recovery_ref = Some(canonical.clone());
-                        }
-                        entry.reference = canonical;
-                        entry.pushed = true;
-                    }
-                }
+                result.pushed
             }
-            Err(error) => warn!(error = %format!("{error:#}"), "could not push recovery refs"),
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "could not push recovery refs");
+                Vec::new()
+            }
         }
     }
 
@@ -419,11 +488,12 @@ impl<'a> Publisher<'a> {
         self.git.commit_id(&self.tracking_ref)
     }
 
-    /// Retire pushed markers whose canonical ref was dismissed, and drop a
-    /// dismissed unpublished commit that is still the local branch tip so a
-    /// later publish cannot bring it back.
-    fn retire_dismissed(&mut self) -> Result<()> {
+    /// Retire pushed markers whose canonical ref was dismissed, and take the
+    /// commits of a dismissed `unpublished` ref off the local branch, so no
+    /// later publish (or stop) sends them. Returns whether the branch moved.
+    fn retire_dismissed(&mut self) -> Result<bool> {
         let dismissed = recovery::retire_dismissed(&self.git, self.config.origin_id)?;
+        let mut moved = false;
         for (name, rev) in dismissed {
             info!(%name, "recovery work was dismissed");
             if recovery::kind_of_name(&name) != Some(RecoveryKind::Unpublished) {
@@ -432,19 +502,96 @@ impl<'a> Publisher<'a> {
             let Some(source) = recovery::source_of(&self.git, &rev)? else {
                 continue;
             };
-            let head = self.git.commit_id("HEAD")?;
-            if head.as_deref() != Some(source.as_str()) {
-                continue;
+            moved |= self.drop_dismissed_commits(&name, &rev, &source)?;
+        }
+        Ok(moved)
+    }
+
+    /// Take the dismissed commits (`rev`'s parent up to `source`) off the
+    /// local branch. Later local commits on top of them are replayed onto
+    /// that parent without them. When they cannot be separated, everything
+    /// is set aside on a new `unpublished` ref for a person to decide, and the
+    /// branch steps back. Files with unsaved edits keep them either way.
+    fn drop_dismissed_commits(&mut self, name: &str, rev: &str, source: &str) -> Result<bool> {
+        let Some(head) = self.git.commit_id("HEAD")? else {
+            return Ok(false);
+        };
+        if self.git.commit_id(source)?.is_none() || !self.git.is_ancestor(source, &head)? {
+            return Ok(false);
+        }
+        let main = self.tracked_main()?;
+        if self.is_published(source, main.as_deref())? {
+            return Ok(false);
+        }
+        let Some(base) = self.git.commit_id(&format!("{rev}^"))? else {
+            return Ok(false);
+        };
+        let target = if head == source {
+            Some(base.clone())
+        } else {
+            self.replay_without(source, &head, &base)?
+        };
+        match target {
+            Some(target) => {
+                self.move_keeping_edits(&head, &target)?;
+                info!(%name, "took dismissed local commits off the branch");
             }
-            let parent = self.git.commit_id(&format!("{rev}^"))?;
-            let Some(parent) = parent else { continue };
-            if self.move_checkout(&source, &parent)? {
-                info!(%name, "dropped dismissed local commits from the checkout");
-            } else {
-                warn!(%name, "dismissed local commits overlap unsaved edits; kept them");
+            None => {
+                // Stored only; the caller's next push sends it.
+                let stored = self.store_unpublished(&head, main.as_deref())?;
+                self.report.note_recovery(stored, false);
+                self.move_keeping_edits(&head, &base)?;
+                warn!(
+                    %name,
+                    "later local commits build on dismissed work; set them all aside"
+                );
             }
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Replay the first-parent commits after `dismissed` up to `head` onto
+    /// `onto`, keeping each commit's author, committer and message. `None`
+    /// when one of them conflicts there, or is a merge.
+    fn replay_without(
+        &mut self,
+        dismissed: &str,
+        head: &str,
+        onto: &str,
+    ) -> Result<Option<String>> {
+        let listing = self.git.stdout(&[
+            "rev-list",
+            "--first-parent",
+            "--reverse",
+            "--parents",
+            head,
+            &format!("^{dismissed}"),
+        ])?;
+        let mut current = onto.to_string();
+        for line in listing.lines().filter(|line| !line.is_empty()) {
+            let mut ids = line.split(' ');
+            let Some(commit) = ids.next() else { continue };
+            let parents: Vec<&str> = ids.collect();
+            if parents.len() != 1 {
+                return Ok(None);
+            }
+            let merged = three_way(&self.git, Some(parents[0]), &current, commit)?;
+            if !merged.conflicts.is_empty() {
+                return Ok(None);
+            }
+            if merged.tree == self.git.tree_id(&current)? {
+                continue;
+            }
+            let parsed = self.parse_commit(commit)?;
+            current = self.git.commit_tree(
+                &merged.tree,
+                &[&current],
+                &parsed.author,
+                &parsed.committer,
+                &parsed.message,
+            )?;
+        }
+        Ok(Some(current))
     }
 
     // ------------------------------------------------------------------
@@ -771,7 +918,8 @@ impl<'a> Publisher<'a> {
             if let Some(local) = local.as_deref() {
                 let main = self.tracked_main()?;
                 if !self.is_published(local, main.as_deref())? {
-                    self.park_unpublished(local, main.as_deref())?;
+                    let local = self.sanitize(local, main.as_deref())?;
+                    self.park_unpublished(&local, main.as_deref())?;
                     self.report.git_sync_status = SyncStatus::Unpublished;
                 }
             }
@@ -806,10 +954,13 @@ impl<'a> Publisher<'a> {
             return Ok(());
         }
 
+        // Every version of the local tip before a sanitising rewrite: work
+        // parked from any of them is published once the rewrite lands.
+        let mut rewritten_from = vec![local.clone()];
         local = self.sanitize(&local, main.as_deref())?;
-        let mut attempts = 0usize;
-        let (merged_conflicts, conflict_base, unrelated) = loop {
-            attempts += 1;
+        let mut lost_races = 0usize;
+        let mut policy_refusals = 0usize;
+        let (merged_conflicts, _, unrelated) = loop {
             let (attempt, conflicts, base, is_unrelated) = self.attempt(&local, main.as_deref())?;
             match attempt {
                 Attempt::Done { main: published } => {
@@ -817,7 +968,9 @@ impl<'a> Publisher<'a> {
                     break (conflicts, base, is_unrelated);
                 }
                 Attempt::Retry => {
-                    if attempts >= MAX_ATTEMPTS || Instant::now() >= self.deadline {
+                    lost_races += 1;
+                    if lost_races >= MAX_ATTEMPTS || Instant::now() >= self.deadline {
+                        self.discard_conflict_copy()?;
                         self.report.failure =
                             Some("the saved version kept changing; try again".to_string());
                         self.report.retryable = true;
@@ -825,10 +978,11 @@ impl<'a> Publisher<'a> {
                         self.report.git_sync_status = SyncStatus::Unpublished;
                         return Ok(());
                     }
-                    jitter(attempts);
+                    jitter(lost_races);
                     main = match self.fetch(false) {
                         Ok(main) => main,
                         Err(error) => {
+                            self.discard_conflict_copy()?;
                             self.report.failure =
                                 Some(format!("could not reach the saved history: {error:#}"));
                             self.report.retryable = true;
@@ -840,9 +994,38 @@ impl<'a> Publisher<'a> {
                     };
                     self.report.base_rev = main.clone();
                     // A path the policy refused may have been added since.
+                    rewritten_from.push(local.clone());
+                    local = self.sanitize(&local, main.as_deref())?;
+                }
+                Attempt::PolicyRetry => {
+                    policy_refusals += 1;
+                    if policy_refusals > MAX_POLICY_REFUSALS {
+                        self.discard_conflict_copy()?;
+                        self.report.failure = Some(format!(
+                            "the repository policy refused more than {MAX_POLICY_REFUSALS} files in this save"
+                        ));
+                        self.report.retryable = false;
+                        self.park_unpublished(&local, main.as_deref())?;
+                        self.report.git_sync_status = SyncStatus::Unpublished;
+                        return Ok(());
+                    }
+                    if Instant::now() >= self.deadline {
+                        self.discard_conflict_copy()?;
+                        self.report.failure = Some(
+                            "the repository policy refused files, and leaving them out took too long; try again"
+                                .to_string(),
+                        );
+                        self.report.retryable = true;
+                        self.park_unpublished(&local, main.as_deref())?;
+                        self.report.git_sync_status = SyncStatus::Unpublished;
+                        return Ok(());
+                    }
+                    // The refused path is frozen now: rewrite without it.
+                    rewritten_from.push(local.clone());
                     local = self.sanitize(&local, main.as_deref())?;
                 }
                 Attempt::Park { reason, retryable } => {
+                    self.discard_conflict_copy()?;
                     self.report.failure = Some(reason);
                     self.report.retryable = retryable;
                     self.park_unpublished(&local, main.as_deref())?;
@@ -855,25 +1038,16 @@ impl<'a> Publisher<'a> {
         let main = main.expect("a successful publish leaves main");
         self.git.ok(&["update-ref", &self.tracking_ref, &main])?;
         self.report.rev = Some(main.clone());
+        for earlier in rewritten_from {
+            if earlier != local && !self.published_aliases.contains(&earlier) {
+                self.published_aliases.push(earlier);
+            }
+        }
 
         if !merged_conflicts.is_empty() {
             self.report.conflicted_paths = merged_conflicts.clone();
-            let parent = conflict_base.clone();
-            let tree = self.tree_for_recovery(&local, parent.as_deref())?;
-            let stored = recovery::store(
-                &self.git,
-                RecoverySpec {
-                    kind: RecoveryKind::Conflict,
-                    tree,
-                    parent,
-                    source: Some(local.clone()),
-                    date: self.committer_date(&local)?,
-                    paths: merged_conflicts.clone(),
-                    commits: self.local_commits(&local, &main)?,
-                    identity: self.identity.clone(),
-                    origin_id: self.config.origin_id,
-                },
-            )?;
+            // Stored before the push that just landed.
+            let stored = self.conflict_copy.take();
             self.report.note_recovery(stored, true);
         }
 
@@ -884,7 +1058,7 @@ impl<'a> Publisher<'a> {
         {
             // A Desktop folder belongs to the user: their version of every
             // conflicted file stays on disk as a local edit against `main`.
-            self.restore_local_versions(&local, &merged_conflicts)?;
+            self.write_worktree_versions(&local, &merged_conflicts)?;
         }
         if unrelated {
             self.git
@@ -926,6 +1100,7 @@ impl<'a> Publisher<'a> {
     ) -> Result<(Attempt, Vec<String>, Option<String>, bool)> {
         let Some(main) = main else {
             // (a) main is missing: create it, unless someone else just did.
+            self.discard_conflict_copy()?;
             let spec = format!("{local}:{}", self.main_ref);
             let result = push(
                 &self.git,
@@ -939,6 +1114,7 @@ impl<'a> Publisher<'a> {
 
         if self.git.is_ancestor(main, local)? {
             // (c) a fast-forward of main.
+            self.discard_conflict_copy()?;
             let spec = format!("{local}:{}", self.main_ref);
             let result = push(&self.git, &self.remote, &[spec], &[])?;
             let attempt = self.classify(result.class, local)?;
@@ -949,6 +1125,7 @@ impl<'a> Publisher<'a> {
             Some(base) => {
                 // (d) one merge commit on top of main.
                 let merged = three_way(&self.git, Some(&base), main, local)?;
+                self.stage_conflict_copy(local, &base, main, &merged.conflicts, false)?;
                 let count = self
                     .git
                     .stdout(&["rev-list", "--count", local, &format!("^{main}")])?
@@ -1024,6 +1201,7 @@ impl<'a> Publisher<'a> {
                 &parsed.message,
             )?;
         }
+        self.stage_conflict_copy(local, main, main, &conflicts, true)?;
         if current == main {
             return Ok((Attempt::Done { main: current }, conflicts));
         }
@@ -1031,6 +1209,70 @@ impl<'a> Publisher<'a> {
         let result = push(&self.git, &self.remote, &[spec], &[])?;
         let attempt = self.classify(result.class, &current)?;
         Ok((attempt, conflicts))
+    }
+
+    /// Store the local version of the paths this attempt's merge left at
+    /// `main`'s version, before the push, on a local `conflict` ref with
+    /// parent `base`. A copy an earlier attempt stored for other conflicts
+    /// is dropped first. For an unrelated history the copy is `main` (the
+    /// tip the replay started from) with the local version of only those
+    /// paths, so it never reads as deleting what `main` alone holds.
+    fn stage_conflict_copy(
+        &mut self,
+        local: &str,
+        base: &str,
+        main: &str,
+        conflicts: &[String],
+        unrelated: bool,
+    ) -> Result<()> {
+        if conflicts.is_empty() {
+            return self.discard_conflict_copy();
+        }
+        let tree = if unrelated {
+            let frozen: Vec<String> = self.filtered.keys().cloned().collect();
+            let paths: Vec<String> = conflicts
+                .iter()
+                .filter(|path| !frozen.contains(path))
+                .cloned()
+                .collect();
+            tree_with_entries_from(&self.git, base, Some(local), &paths)?
+        } else {
+            self.tree_for_recovery(local, Some(base))?
+        };
+        let stored = recovery::store(
+            &self.git,
+            RecoverySpec {
+                kind: RecoveryKind::Conflict,
+                tree,
+                parent: Some(base.to_string()),
+                source: Some(local.to_string()),
+                date: self.committer_date(local)?,
+                paths: conflicts.to_vec(),
+                commits: self.local_commits(local, main)?,
+                identity: self.identity.clone(),
+                origin_id: self.config.origin_id,
+            },
+        )?;
+        if self.conflict_copy.as_ref().map(|copy| &copy.name)
+            != stored.as_ref().map(|copy| &copy.name)
+        {
+            self.discard_conflict_copy()?;
+        }
+        self.conflict_copy = stored;
+        Ok(())
+    }
+
+    /// Delete the conflict copy staged for an attempt that did not land,
+    /// when this publish created it and it was never pushed.
+    fn discard_conflict_copy(&mut self) -> Result<()> {
+        if let Some(copy) = self.conflict_copy.take() {
+            let reference = format!("{}/{}", recovery::LOCAL_RECOVERY_ROOT, copy.name);
+            if copy.created && self.git.commit_id(&reference)?.as_deref() == Some(copy.rev.as_str())
+            {
+                self.git.delete_ref(&reference, &copy.rev)?;
+            }
+        }
+        Ok(())
     }
 
     fn classify(&mut self, class: PushClass, pushed: &str) -> Result<Attempt> {
@@ -1047,7 +1289,7 @@ impl<'a> Publisher<'a> {
                     });
                 }
                 self.filtered.insert(path.clone(), reason);
-                Ok(Attempt::Retry)
+                Ok(Attempt::PolicyRetry)
             }
             PushClass::Rejected(text) => Ok(Attempt::Park {
                 reason: format!("the saved history refused the save: {text}"),
@@ -1284,14 +1526,42 @@ impl<'a> Publisher<'a> {
     }
 
     fn park_unpublished(&mut self, local: &str, main: Option<&str>) -> Result<()> {
-        let parent = match main {
-            Some(main) => self
-                .git
-                .merge_base(local, main)?
-                .or_else(|| Some(main.to_string())),
+        let stored = self.store_unpublished(local, main)?;
+        self.report.note_recovery(stored, true);
+        if self.can_write && self.fetched {
+            self.push_pending();
+        }
+        Ok(())
+    }
+
+    /// Store the local commits `local` that are not on `main` as a local
+    /// `unpublished` recovery ref, without any network call. The copy sits on
+    /// a published parent (the merge base, or `main` for an unrelated
+    /// history), and paths that may not be published keep that parent's
+    /// entry, so pushing it never sends them.
+    fn store_unpublished(
+        &mut self,
+        local: &str,
+        main: Option<&str>,
+    ) -> Result<Option<RecoveryRefReport>> {
+        // Freeze every unpublishable path the never-published commits touch,
+        // even when no publish has scanned them yet (an offline stop).
+        self.scan_history(local, main)?;
+        let base = match main {
+            Some(main) => self.git.merge_base(local, main)?,
             None => None,
         };
-        let tree = self.tree_for_recovery(local, parent.as_deref())?;
+        let (parent, tree) = match (base, main) {
+            (Some(base), _) => {
+                let tree = self.tree_for_recovery(local, Some(&base))?;
+                (Some(base), tree)
+            }
+            (None, Some(main)) => (
+                Some(main.to_string()),
+                self.unrelated_tree(main, local, local)?,
+            ),
+            (None, None) => (None, self.tree_for_recovery(local, None)?),
+        };
         let commits = match main {
             Some(main) => self.local_commits(local, main)?,
             None => Vec::new(),
@@ -1300,7 +1570,7 @@ impl<'a> Publisher<'a> {
             Some(parent) => changed_paths(&self.git, parent, &tree)?,
             None => changed_paths(&self.git, &self.git.empty_tree()?, &tree)?,
         };
-        let stored = recovery::store(
+        recovery::store(
             &self.git,
             RecoverySpec {
                 kind: RecoveryKind::Unpublished,
@@ -1313,12 +1583,30 @@ impl<'a> Publisher<'a> {
                 identity: self.identity.clone(),
                 origin_id: self.config.origin_id,
             },
-        )?;
-        self.report.note_recovery(stored, true);
-        if self.can_write && self.fetched {
-            self.push_pending();
+        )
+    }
+
+    /// The tree a recovery commit on `main` holds for `top` (a commit or
+    /// tree built on the local commit `head`) from a history unrelated to
+    /// `main`: `main` with what `top` changed, never removing what only
+    /// `main` holds. After an earlier replay (the published frontier), only
+    /// what changed since then. Frozen paths keep `main`'s entry.
+    fn unrelated_tree(&self, main: &str, head: &str, top: &str) -> Result<String> {
+        let frozen: Vec<String> = self.filtered.keys().cloned().collect();
+        if let Some(frontier) = self.git.commit_id(PUBLISHED_FRONTIER_REF)? {
+            if self.git.is_ancestor(&frontier, head)? {
+                let paths: Vec<String> = changed_paths(&self.git, &frontier, top)?
+                    .into_iter()
+                    .filter(|path| {
+                        !frozen
+                            .iter()
+                            .any(|kept| path == kept || path.starts_with(&format!("{kept}/")))
+                    })
+                    .collect();
+                return tree_with_entries_from(&self.git, main, Some(top), &paths);
+            }
         }
-        Ok(())
+        overlay(&self.git, main, top, &frozen)
     }
 
     fn retire_superseded(&mut self, main: &str) {
@@ -1328,6 +1616,7 @@ impl<'a> Publisher<'a> {
             self.config.origin_id,
             main,
             self.can_write,
+            &self.published_aliases,
         ) {
             Ok(retired) => {
                 for name in retired {
@@ -1421,17 +1710,64 @@ impl<'a> Publisher<'a> {
             .success())
     }
 
-    /// Put L's version of `paths` back in the work tree (only the work tree:
-    /// the index keeps `main`'s version, so they show as local edits).
-    fn restore_local_versions(&self, local: &str, paths: &[String]) -> Result<()> {
-        let entries = self.git.tree_entries(local, paths)?;
+    /// Give the work tree `source`'s version of `paths` (only the work tree:
+    /// the index keeps HEAD's version, so they show as local edits). Paths
+    /// `source` lacks are removed first, except one that is a parent of a
+    /// path `source` has, which restoring that path replaces. A path is
+    /// never written over a file or a non-empty directory that is not
+    /// itself one of `paths`: that is someone's work, and it stays.
+    fn write_worktree_versions(&self, source: &str, paths: &[String]) -> Result<()> {
+        let entries = self.git.tree_entries(source, paths)?;
         let (present, absent): (Vec<String>, Vec<String>) = paths
             .iter()
             .cloned()
             .partition(|path| entries.contains_key(path));
-        if !present.is_empty() {
-            let list = nul_list(&present);
-            let source = format!("--source={local}");
+        let root = self.git.root();
+        let workspace = WorkspaceDir::open(root)?;
+        for path in &absent {
+            if present
+                .iter()
+                .any(|kept| kept.starts_with(&format!("{path}/")))
+            {
+                continue;
+            }
+            if std::fs::symlink_metadata(root.join(path)).is_err() {
+                continue;
+            }
+            match workspace.remove(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut writable = Vec::new();
+        'paths: for path in present {
+            let mut ancestor = path.as_str();
+            while let Some((parent, _)) = ancestor.rsplit_once('/') {
+                ancestor = parent;
+                let in_the_way = std::fs::symlink_metadata(root.join(parent))
+                    .is_ok_and(|metadata| !metadata.is_dir());
+                if in_the_way && !paths.iter().any(|listed| listed == parent) {
+                    warn!(%path, "a file in the way holds other work; kept it");
+                    continue 'paths;
+                }
+            }
+            if let Ok(metadata) = std::fs::symlink_metadata(root.join(&path)) {
+                if metadata.is_dir() {
+                    let empty = std::fs::read_dir(root.join(&path))
+                        .map(|mut entries| entries.next().is_none())
+                        .unwrap_or(false);
+                    if !empty {
+                        warn!(%path, "a folder in the way holds other work; kept it");
+                        continue;
+                    }
+                }
+            }
+            writable.push(path);
+        }
+        if !writable.is_empty() {
+            let list = nul_list(&writable);
+            let source = format!("--source={source}");
             self.git.ok_opts(
                 &[
                     "restore",
@@ -1447,17 +1783,39 @@ impl<'a> Publisher<'a> {
                 },
             )?;
         }
-        if !absent.is_empty() {
-            let workspace = WorkspaceDir::open(self.git.root())?;
-            for path in absent {
-                match workspace.remove(&path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
         Ok(())
+    }
+
+    /// Move the branch from `from` to `to`. Files without unsaved edits
+    /// follow `to`; a file with an unsaved edit keeps it, and shows as a
+    /// local change against `to`. Nothing anyone typed is lost.
+    fn move_keeping_edits(&self, from: &str, to: &str) -> Result<()> {
+        if self.move_checkout(from, to)? {
+            return Ok(());
+        }
+        if self.git.commit_id("HEAD")?.as_deref() != Some(from) {
+            bail!("the local branch moved during the update");
+        }
+        let changed = changed_paths(&self.git, from, to)?;
+        let worktree = stale_align::worktree_entries(&self.git, from, &changed)?;
+        let current = self.git.tree_entries(from, &changed)?;
+        let untouched: Vec<String> = changed
+            .iter()
+            .filter(|path| match (worktree.get(*path), current.get(*path)) {
+                (Some(a), Some(b)) => a.mode == b.mode && a.oid == b.oid,
+                (None, None) => true,
+                _ => false,
+            })
+            .cloned()
+            .collect();
+        self.git.update_ref(
+            "HEAD",
+            to,
+            Some(from),
+            "instafy: move the branch, keeping unsaved edits",
+        )?;
+        self.reset_index_paths(&changed)?;
+        self.write_worktree_versions(to, &untouched)
     }
 
     // ------------------------------------------------------------------
@@ -1466,14 +1824,139 @@ impl<'a> Publisher<'a> {
 
     fn flush(&mut self, turn_active: bool) -> Result<FlushReport> {
         let mut flush = FlushReport::default();
+        // 1. Store everything locally, before any network call.
         let repair = stale_align::repair_once(&self.git, self.config)?;
         if let Some(parked) = repair.parked {
             flush.recovery_refs.push(parked);
         }
-        // Everything parked is stored locally before any network call.
-        if self.can_write {
-            self.fetched = self.fetch(true).is_ok();
+        let parked = self.park_for_stop(turn_active, &mut flush)?;
+
+        // 2. Best effort, with write access: notice dismissed work, publish
+        // finished commits, push what is parked. A failure here leaves the
+        // work on the local refs stored above.
+        if self.can_write && Instant::now() < self.deadline {
+            match self.fetch(true) {
+                Ok(_) => {
+                    self.fetched = true;
+                    match self.retire_dismissed() {
+                        Ok(true) if !turn_active => {
+                            // Dismissed commits left the branch: park again
+                            // from the branch as it is now, then drop the
+                            // copies made from the old one.
+                            let fresh = self.park_for_stop(false, &mut flush)?;
+                            let stale: Vec<RecoveryRefReport> = parked
+                                .into_iter()
+                                .filter(|entry| {
+                                    entry.created
+                                        && !fresh.iter().any(|kept| kept.name == entry.name)
+                                })
+                                .collect();
+                            self.unpark(&stale, &mut flush)?;
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            warn!(error = %format!("{error:#}"), "could not apply dismissed recovery work");
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(error = %format!("{error:#}"), "a stop could not reach canonical; keeping its work locally");
+                }
+            }
         }
+        if self.can_write && self.fetched && !turn_active && Instant::now() < self.deadline {
+            if let Some(head) = self.git.commit_id("HEAD")? {
+                let main = self.tracked_main()?;
+                if !self.is_published(&head, main.as_deref())? {
+                    // The publish reports only on itself, not on what the
+                    // local step above left out of the parked copies.
+                    self.report = PublishReport {
+                        local_rev: Some(head.clone()),
+                        ..PublishReport::default()
+                    };
+                    match self.publish_local(Some(head)) {
+                        Ok(()) => {
+                            self.finish()?;
+                            flush.publish = Some(self.report.clone());
+                        }
+                        Err(error) => {
+                            warn!(error = %format!("{error:#}"), "a stop could not publish finished commits; they stay parked");
+                            flush.publish_error = Some(format!("{error:#}"));
+                        }
+                    }
+                }
+            }
+        }
+        if self.can_write && self.fetched {
+            for (name, canonical) in self.push_parked() {
+                if let Some(entry) = flush
+                    .recovery_refs
+                    .iter_mut()
+                    .find(|entry| entry.name == name)
+                {
+                    entry.reference = canonical;
+                    entry.pushed = true;
+                }
+            }
+        }
+
+        // Report each parked copy as it ends up: pushed (by this call or by
+        // the publish above), still local, or retired because its commits
+        // reached `main` (then it is not kept anywhere and not reported).
+        let pending = recovery::pending(&self.git)?;
+        let pushed: BTreeMap<String, String> = self
+            .git
+            .refs_under(recovery::LOCAL_RECOVERY_PUSHED_ROOT)?
+            .into_iter()
+            .filter_map(|(reference, rev)| {
+                let name = reference
+                    .strip_prefix(&format!("{}/", recovery::LOCAL_RECOVERY_PUSHED_ROOT))?
+                    .to_string();
+                Some((name, rev))
+            })
+            .collect();
+        for entry in &mut flush.recovery_refs {
+            if entry.pushed {
+                continue;
+            }
+            if let Some(rev) = pushed.get(&entry.name) {
+                let origin = recovery::origin_of(&self.git, rev, self.config.origin_id);
+                entry.reference = recovery::canonical_ref(origin, &entry.name);
+                entry.pushed = true;
+            }
+        }
+        flush
+            .recovery_refs
+            .retain(|entry| entry.pushed || pending.iter().any(|(name, _)| name == &entry.name));
+        flush.unpushed_refs = pending.len();
+        flush.unpushed_ref_names = pending.into_iter().map(|(name, _)| name).collect();
+        Ok(flush)
+    }
+
+    /// Store what a stop must keep, without any network call. With a turn
+    /// active, its local commits and every unsaved edit go to one `unsaved`
+    /// recovery commit and leave the branch, so no later publish sends them.
+    /// Otherwise finished local commits are kept on an `unpublished` ref (a
+    /// publish that lands retires it) and unsaved edits on an `unsaved` one.
+    /// Returns every ref this call stored or found already stored.
+    fn park_for_stop(
+        &mut self,
+        turn_active: bool,
+        flush: &mut FlushReport,
+    ) -> Result<Vec<RecoveryRefReport>> {
+        let mut created = Vec::new();
+        let mut keep = |stored: Option<RecoveryRefReport>, flush: &mut FlushReport| {
+            if let Some(stored) = stored {
+                created.push(stored.clone());
+                if !flush
+                    .recovery_refs
+                    .iter()
+                    .any(|entry| entry.name == stored.name)
+                {
+                    flush.recovery_refs.push(stored);
+                }
+            }
+        };
         let main = self.tracked_main()?;
         let head = self.git.commit_id("HEAD")?;
         let unpublished = match head.as_deref() {
@@ -1483,8 +1966,6 @@ impl<'a> Publisher<'a> {
 
         if turn_active && unpublished {
             let head = head.clone().expect("unpublished commits need a HEAD");
-            // The unfinished turn's commits and edits go to one recovery
-            // commit, and leave the branch so no later publish sends them.
             let base = match main.as_deref() {
                 Some(main) => self.git.merge_base(&head, main)?,
                 None => None,
@@ -1493,7 +1974,10 @@ impl<'a> Publisher<'a> {
             let dirty_tree = self.stage(&Selection::AllDirty, Some(&head))?;
             self.scan_history(&head, main.as_deref())?;
             let frozen: Vec<String> = self.filtered.keys().cloned().collect();
-            let tree = tree_with_entries_from(&self.git, &dirty_tree, parent.as_deref(), &frozen)?;
+            let tree = match (base.as_deref(), main.as_deref()) {
+                (None, Some(main)) => self.unrelated_tree(main, &head, &dirty_tree)?,
+                _ => tree_with_entries_from(&self.git, &dirty_tree, parent.as_deref(), &frozen)?,
+            };
             let commits = match main.as_deref() {
                 Some(main) => self.local_commits(&head, main)?,
                 None => Vec::new(),
@@ -1517,9 +2001,7 @@ impl<'a> Publisher<'a> {
                     origin_id: self.config.origin_id,
                 },
             )?;
-            if let Some(stored) = stored {
-                flush.recovery_refs.push(stored);
-            }
+            keep(stored, flush);
             match (base, main.as_deref()) {
                 (Some(base), _) => {
                     // Keep the files; only the branch steps back.
@@ -1542,59 +2024,56 @@ impl<'a> Publisher<'a> {
                     self.git.delete_ref(&branch, &head)?;
                 }
             }
-        } else {
-            if unpublished && self.can_write && self.fetched {
-                let local = head.clone();
-                self.report.local_rev = local.clone();
-                self.publish_local(local)?;
-                self.finish()?;
-                flush.publish = Some(self.report.clone());
-            }
-            let head = self.git.commit_id("HEAD")?;
-            let dirty_tree = self.stage(&Selection::AllDirty, head.as_deref())?;
-            let head_tree = match head.as_deref() {
-                Some(head) => self.git.tree_id(head)?,
-                None => self.git.empty_tree()?,
-            };
-            if dirty_tree != head_tree {
-                let paths = changed_paths(&self.git, &head_tree, &dirty_tree)?;
-                let stored = recovery::store(
-                    &self.git,
-                    RecoverySpec {
-                        kind: RecoveryKind::Unsaved,
-                        tree: dirty_tree,
-                        parent: head.clone(),
-                        source: None,
-                        date: None,
-                        paths: paths.into_iter().take(MAX_TRAILER_PATHS).collect(),
-                        commits: Vec::new(),
-                        identity: self.identity.clone(),
-                        origin_id: self.config.origin_id,
-                    },
-                )?;
-                if let Some(stored) = stored {
-                    flush.recovery_refs.push(stored);
-                }
-            }
+            return Ok(created);
         }
 
-        if self.can_write && self.fetched {
-            let pushed = recovery::push_pending(&self.git, &self.remote, self.config.origin_id)?;
-            for name in &pushed.pushed {
-                if let Some(entry) = flush
-                    .recovery_refs
-                    .iter_mut()
-                    .find(|entry| &entry.name == name)
-                {
-                    entry.reference = recovery::canonical_ref(self.config.origin_id, name);
-                    entry.pushed = true;
-                }
-            }
+        let mut head = head;
+        if unpublished {
+            let local = head.clone().expect("unpublished commits need a HEAD");
+            // Never-published commits lose what may not be published first,
+            // so neither copy below can carry it.
+            let local = self.sanitize(&local, main.as_deref())?;
+            let stored = self.store_unpublished(&local, main.as_deref())?;
+            keep(stored, flush);
+            head = self.git.commit_id("HEAD")?;
         }
-        let pending = recovery::pending(&self.git)?;
-        flush.unpushed_refs = pending.len();
-        flush.unpushed_ref_names = pending.into_iter().map(|(name, _)| name).collect();
-        Ok(flush)
+        let dirty_tree = self.stage(&Selection::AllDirty, head.as_deref())?;
+        let head_tree = match head.as_deref() {
+            Some(head) => self.git.tree_id(head)?,
+            None => self.git.empty_tree()?,
+        };
+        if dirty_tree != head_tree {
+            let paths = changed_paths(&self.git, &head_tree, &dirty_tree)?;
+            let stored = recovery::store(
+                &self.git,
+                RecoverySpec {
+                    kind: RecoveryKind::Unsaved,
+                    tree: dirty_tree,
+                    parent: head.clone(),
+                    source: None,
+                    date: None,
+                    paths: paths.into_iter().take(MAX_TRAILER_PATHS).collect(),
+                    commits: Vec::new(),
+                    identity: self.identity.clone(),
+                    origin_id: self.config.origin_id,
+                },
+            )?;
+            keep(stored, flush);
+        }
+        Ok(created)
+    }
+
+    /// Delete never-pushed refs `park_for_stop` created that no longer match
+    /// the branch.
+    fn unpark(&self, parked: &[RecoveryRefReport], flush: &mut FlushReport) -> Result<()> {
+        for entry in parked {
+            let reference = format!("{}/{}", recovery::LOCAL_RECOVERY_ROOT, entry.name);
+            if self.git.commit_id(&reference)?.as_deref() == Some(entry.rev.as_str()) {
+                self.git.delete_ref(&reference, &entry.rev)?;
+            }
+            flush.recovery_refs.retain(|kept| kept.name != entry.name);
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -1776,14 +2255,14 @@ fn parse_ident(value: &str) -> Option<GitIdentity> {
 
 /// One `--raw` diff entry.
 #[derive(Clone, Debug)]
-struct RawChange {
-    new_mode: String,
-    new_oid: String,
-    status: char,
-    path: String,
+pub(crate) struct RawChange {
+    pub new_mode: String,
+    pub new_oid: String,
+    pub status: char,
+    pub path: String,
 }
 
-fn parse_raw_changes(raw: &[u8]) -> Vec<RawChange> {
+pub(crate) fn parse_raw_changes(raw: &[u8]) -> Vec<RawChange> {
     let mut changes = Vec::new();
     let mut records = raw.split(|byte| *byte == 0).filter(|r| !r.is_empty());
     while let Some(meta) = records.next() {
@@ -1808,7 +2287,7 @@ fn parse_raw_changes(raw: &[u8]) -> Vec<RawChange> {
 
 /// Parse `diff-tree --stdin -z --raw` output: a commit id record, then its
 /// changes (repeated per parent with `-m`).
-fn parse_stdin_diff_tree(raw: &[u8]) -> BTreeMap<String, Vec<RawChange>> {
+pub(crate) fn parse_stdin_diff_tree(raw: &[u8]) -> BTreeMap<String, Vec<RawChange>> {
     let mut out: BTreeMap<String, Vec<RawChange>> = BTreeMap::new();
     let mut current: Option<String> = None;
     let mut records = raw.split(|byte| *byte == 0).filter(|r| !r.is_empty());

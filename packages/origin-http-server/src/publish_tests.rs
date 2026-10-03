@@ -1226,10 +1226,12 @@ fn n13_published_range_covers_only_this_publish() {
     assert_eq!(listed, expected);
 }
 
-/// 14: on Desktop, everything saved with a user token is authored by that
-/// user, and a stop keeps the folder as it is.
+/// 14: on Desktop, a save carries the author its caller gives (the routes
+/// give the origin's identity until the author pseudonym exists, see
+/// `user_saves_never_write_a_user_id_into_history`), and a stop keeps the
+/// folder as it is.
 #[tokio::test]
-async fn n14_desktop_saves_are_authored_by_the_user_and_never_flushed() {
+async fn n14_desktop_saves_keep_their_author_and_are_never_flushed() {
     let sc = Scenario::new(Options {
         desktop: true,
         ..Options::default()
@@ -1663,21 +1665,42 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
 ];
 
 /// Every git process in the publish modules is built by
-/// `server_git_command` (through `WorkspaceGit`), never spawned directly.
+/// `server_git_command` (through `WorkspaceGit`), never spawned directly:
+/// no module names a `Command` type at all (however it is imported or
+/// renamed), and `std::process` is used only for process results.
 #[test]
 fn publish_modules_spawn_git_only_through_server_git_command() {
+    const PROCESS_ITEMS: &[&str] = &["Output", "ExitStatus", "Stdio", "ExitStatusExt"];
     for (name, source) in PUBLISH_MODULES {
         let code = production_source(source);
-        for forbidden in [
-            "Command::new",
-            "process::Command",
-            "std::process::Command",
-            "Command::from",
-        ] {
+        for identifier in code
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| !word.is_empty())
+        {
             assert!(
-                !code.contains(forbidden),
-                "{name} builds a process with {forbidden}"
+                !matches!(identifier, "Command" | "CommandExt"),
+                "{name} names a process type ({identifier})"
             );
+        }
+        for (index, _) in code.match_indices("process::") {
+            let rest = &code[index + "process::".len()..];
+            let items: Vec<&str> = match rest.strip_prefix('{') {
+                Some(group) => group[..group.find('}').unwrap_or(group.len())]
+                    .split(',')
+                    .map(|item| item.trim().split(' ').next().unwrap_or_default())
+                    .filter(|item| !item.is_empty())
+                    .collect(),
+                None => vec![rest
+                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .next()
+                    .unwrap_or_default()],
+            };
+            for item in items {
+                assert!(
+                    PROCESS_ITEMS.contains(&item),
+                    "{name} uses std::process::{item}"
+                );
+            }
         }
     }
     let workspace_git = production_source(include_str!("workspace_git.rs"));
@@ -2306,4 +2329,1066 @@ fn read_only_refresh_follows_main_and_never_pushes() {
     assert_ne!(sc.main(), before);
     assert!(sc.remote_file("notes.md").is_none());
     assert!(sc.remote_refs("refs/instafy/").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Review fixes: a stop keeps everything locally first, dismissals hold
+// whatever the branch did since, refs follow the origin that made them, and
+// nothing that may not be published reaches any canonical ref.
+// ---------------------------------------------------------------------------
+
+/// An update hook on the remote that refuses only `main`, so recovery refs
+/// still push. Returns the hook's path.
+fn close_main(sc: &Scenario) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let hook = sc.remote.join("hooks").join("update");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nif [ \"$1\" = refs/heads/main ]; then echo 'main is closed' >&2; exit 1; fi\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    hook
+}
+
+fn on_main(sc: &Scenario, commit: &str) -> bool {
+    git_output(
+        &sc.remote,
+        &["merge-base", "--is-ancestor", commit, "main"],
+        None,
+    )
+    .status
+    .success()
+}
+
+/// Make the remote unreachable for the length of `body`.
+fn without_remote<T>(sc: &Scenario, body: impl FnOnce() -> T) -> T {
+    let away = sc.root.join("remote-away.git");
+    fs::rename(&sc.remote, &away).unwrap();
+    let result = body();
+    fs::rename(&away, &sc.remote).unwrap();
+    result
+}
+
+/// Saves `x.rs` while `main` refuses every push: its commit L is parked on
+/// an `unpublished` ref that reaches canonical. Returns (L, canonical ref);
+/// `main` accepts pushes again afterwards.
+fn parked_and_pushed(sc: &Scenario) -> (String, String) {
+    let hook = close_main(sc);
+    sc.write("x.rs", b"fn x() {}\n");
+    let refused = sc.publish_paths(&["x.rs"]);
+    assert_eq!(
+        refused.git_sync_status,
+        SyncStatus::Unpublished,
+        "{refused:?}"
+    );
+    let reference = refused.recovery_ref.clone().expect("parked");
+    assert!(
+        reference.starts_with("refs/instafy/recovery/") && reference.contains("-unpublished-"),
+        "{reference}"
+    );
+    fs::remove_file(hook).unwrap();
+    (sc.head(), reference)
+}
+
+/// A stop without write access keeps a finished commit that is not on
+/// `main` on a local ref, before anything else; the next refresh publishes
+/// the commit and retires the copy.
+#[test]
+fn flush_without_a_token_parks_finished_commits_locally() {
+    let sc = Scenario::new(Options::default());
+    sc.write("done.rs", b"fn done() {}\n");
+    let commit = sc.agent_commit(&["done.rs"], "finished work");
+    let report = flush(&sc.ctx(false), false).unwrap();
+    assert_eq!(report.unpushed_refs, 1, "{report:?}");
+    let pending = sc.local_refs(LOCAL_RECOVERY_ROOT);
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert!(pending[0].0.contains("-unpublished-"), "{pending:?}");
+    assert_eq!(sc.head(), commit, "the commit stays on the branch");
+    assert!(sc.remote_refs("refs/instafy/").is_empty());
+
+    let refreshed = refresh(&sc.ctx(true)).unwrap();
+    assert_eq!(
+        refreshed.git_sync_status,
+        SyncStatus::Published,
+        "{refreshed:?}"
+    );
+    assert!(on_main(&sc, &commit));
+    assert_eq!(refreshed.unpushed_refs, 0);
+    assert!(sc.local_refs(LOCAL_RECOVERY_ROOT).is_empty());
+    assert!(
+        sc.remote_refs("refs/instafy/recovery/").is_empty(),
+        "the copy is retired once its commits are on main"
+    );
+}
+
+/// A stop whose remote is unreachable keeps the finished commit and the
+/// unsaved edit on local refs; a later refresh puts both on canonical.
+#[test]
+fn flush_without_network_keeps_finished_commits_and_edits_locally() {
+    let sc = Scenario::new(Options::default());
+    sc.write("done.rs", b"fn done() {}\n");
+    let commit = sc.agent_commit(&["done.rs"], "finished work");
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nunsaved\n");
+    let report = without_remote(&sc, || flush(&sc.ctx(true), false).unwrap());
+    assert_eq!(report.unpushed_refs, 2, "{report:?}");
+    let names: Vec<String> = sc
+        .local_refs(LOCAL_RECOVERY_ROOT)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains("-unpublished-")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.contains("-unsaved-")),
+        "{names:?}"
+    );
+
+    refresh(&sc.ctx(true)).unwrap();
+    assert!(on_main(&sc, &commit));
+    assert_eq!(
+        sc.remote_file("doc.md").as_deref(),
+        Some("alpha\nbeta\ngamma\ndelta\n"),
+        "an unsaved edit reached main"
+    );
+    let unsaved: Vec<(String, String)> = sc
+        .remote_refs("refs/instafy/recovery/")
+        .into_iter()
+        .filter(|(name, _)| name.contains("-unsaved-"))
+        .collect();
+    assert_eq!(unsaved.len(), 1, "{unsaved:?}");
+    assert!(sc
+        .recovery_file(&unsaved[0].0, "doc.md")
+        .unwrap()
+        .contains("unsaved"));
+}
+
+/// The process shutdown flush (no write access) keeps a finished commit on a
+/// local ref, so eviction keeps the checkout, and records the clean stop.
+#[tokio::test]
+async fn hosted_shutdown_parks_finished_commits_and_records_a_clean_stop() {
+    let sc = Scenario::new(Options::default());
+    sc.write("done.rs", b"fn done() {}\n");
+    sc.agent_commit(&["done.rs"], "finished work");
+    let mut server = crate::server::OriginHttpServer::new(sc.config.clone()).unwrap();
+    server.stop_flushing_workspace().await.unwrap();
+    let pending = sc.local_refs(LOCAL_RECOVERY_ROOT);
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert!(pending[0].0.contains("-unpublished-"));
+    assert!(sc.ws.join(crate::server::CLEAN_STOP_MARKER).exists());
+}
+
+/// A shutdown that interrupted a turn sets the turn's commits aside: the
+/// next refresh does not publish them.
+#[tokio::test]
+async fn shutdown_during_a_turn_keeps_its_commits_off_main() {
+    let sc = Scenario::new(Options::default());
+    sc.write("half.rs", b"fn half() {\n");
+    let half = sc.agent_commit(&["half.rs"], "half done");
+    let mut server = crate::server::OriginHttpServer::new(sc.config.clone()).unwrap();
+    server
+        .stop_flushing_workspace_during_turn(true)
+        .await
+        .unwrap();
+    let pending = sc.local_refs(LOCAL_RECOVERY_ROOT);
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert!(pending[0].0.contains("-unsaved-"));
+    assert_ne!(sc.head(), half);
+    assert_eq!(sc.disk("half.rs").as_deref(), Some("fn half() {\n"));
+    refresh(&sc.ctx(true)).unwrap();
+    assert!(!on_main(&sc, &half));
+    assert!(sc.remote_file("half.rs").is_none());
+}
+
+/// When publishing the finished commits fails, the stop still keeps them
+/// and the unsaved edit, and pushes both copies.
+#[test]
+fn flush_keeps_everything_when_publishing_fails() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let sc = Scenario::new(Options::default());
+    sc.write("done.rs", b"fn done() {}\n");
+    let commit = sc.agent_commit(&["done.rs"], "finished work");
+    sc.push_other(&[("notes/plan.md", Some(b"plan\n"))], "remote moved");
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nunsaved\n");
+    // A git whose three-way merge fails, so the publish errors after the
+    // local copies exist.
+    let real_git = git_in(&sc.root, &["--exec-path"]);
+    let real_git = Path::new(&real_git).join("git");
+    let wrapper = sc.root.join("broken-merge-git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = --aggressive ]; then\n    echo 'merge broke' >&2\n    exit 1\n  fi\ndone\nexec '{}' \"$@\"\n",
+            real_git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
+    let report = flush(&sc.ctx(true), false);
+    crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+    let report = report.unwrap();
+    assert!(report.publish_error.is_some(), "{report:?}");
+    assert!(!on_main(&sc, &commit));
+    assert_eq!(report.unpushed_refs, 0, "{report:?}");
+    let names: Vec<String> = sc
+        .remote_refs("refs/instafy/recovery/")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert!(
+        names.iter().any(|name| name.contains("-unpublished-")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.contains("-unsaved-")),
+        "{names:?}"
+    );
+}
+
+/// The shard names one refused path per push; refusing more paths than
+/// there are race retries still publishes the rest and reports every one.
+#[test]
+fn many_paths_the_policy_refuses_never_block_the_rest() {
+    let sc = Scenario::new(Options {
+        hook: true,
+        hook_env: vec![("GIT_DENY_PATHS", "*.zip")],
+        ..Options::default()
+    });
+    for index in 0..6 {
+        sc.write(&format!("bundle-{index}.zip"), b"PK fake archive\n");
+    }
+    sc.write("ok.txt", b"fine\n");
+    let report = sc.publish(Selection::AllDirty);
+    assert_eq!(report.git_sync_status, SyncStatus::Partial, "{report:?}");
+    assert!(!report.retryable, "{report:?}");
+    assert_eq!(sc.remote_file("ok.txt").as_deref(), Some("fine\n"));
+    for index in 0..6 {
+        let path = format!("bundle-{index}.zip");
+        assert!(
+            report
+                .rejected_paths
+                .iter()
+                .any(|entry| entry.path == path && entry.reason == RejectReason::Policy),
+            "{path} not reported: {report:?}"
+        );
+        assert!(!sc.path_anywhere_on_remote(&path));
+        assert!(sc.ws.join(&path).exists());
+    }
+}
+
+/// A dismissed `unpublished` ref whose commit is still the branch tip: the
+/// commit leaves the branch and is never published.
+#[test]
+fn a_dismissed_unpublished_tip_is_never_published() {
+    let sc = Scenario::new(Options::default());
+    let (local, reference) = parked_and_pushed(&sc);
+    git_in(&sc.remote, &["update-ref", "-d", &reference]);
+    refresh(&sc.ctx(true)).unwrap();
+    assert!(!on_main(&sc, &local));
+    assert!(sc.remote_file("x.rs").is_none());
+    assert!(
+        sc.disk("x.rs").is_none(),
+        "the dismissed file left the checkout"
+    );
+    assert!(sc.remote_refs("refs/instafy/").is_empty());
+    sc.write("y.rs", b"fn y() {}\n");
+    sc.publish_paths(&["y.rs"]);
+    assert!(sc.remote_file("x.rs").is_none());
+    assert!(!on_main(&sc, &local));
+}
+
+/// Later commits on top of dismissed ones are published without them.
+#[test]
+fn later_commits_publish_without_the_dismissed_ones_below_them() {
+    let sc = Scenario::new(Options::default());
+    let (local, reference) = parked_and_pushed(&sc);
+    sc.write("later.rs", b"fn later() {}\n");
+    sc.agent_commit(&["later.rs"], "later work");
+    git_in(&sc.remote, &["update-ref", "-d", &reference]);
+    let report = sc.publish(Selection::None);
+    assert_eq!(report.git_sync_status, SyncStatus::Published, "{report:?}");
+    assert_eq!(
+        sc.remote_file("later.rs").as_deref(),
+        Some("fn later() {}\n")
+    );
+    assert!(sc.remote_file("x.rs").is_none());
+    assert!(!on_main(&sc, &local));
+    assert!(!sc.anywhere_on_remote("fn x()"));
+    assert!(sc
+        .remote_log()
+        .contains("Ada Agent <ada@example.com> | later work"));
+}
+
+/// Later commits that cannot be separated from dismissed ones are set aside
+/// with them for a person to decide; neither reaches main.
+#[test]
+fn later_commits_tangled_with_dismissed_ones_are_set_aside() {
+    let sc = Scenario::new(Options::default());
+    let (local, reference) = parked_and_pushed(&sc);
+    sc.write("x.rs", b"fn x() { later(); }\n");
+    let later = sc.agent_commit(&["x.rs"], "later work on x");
+    git_in(&sc.remote, &["update-ref", "-d", &reference]);
+    sc.publish(Selection::None);
+    assert!(!on_main(&sc, &local));
+    assert!(!on_main(&sc, &later));
+    assert!(sc.remote_file("x.rs").is_none());
+    let kept: Vec<(String, String)> = sc
+        .remote_refs("refs/instafy/recovery/")
+        .into_iter()
+        .filter(|(name, _)| name.contains("-unpublished-"))
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        sc.recovery_file(&kept[0].0, "x.rs").as_deref(),
+        Some("fn x() { later(); }\n")
+    );
+}
+
+/// A stop after a dismissal never publishes the dismissed work.
+#[test]
+fn a_stop_never_publishes_dismissed_work() {
+    let sc = Scenario::new(Options::default());
+    let (local, reference) = parked_and_pushed(&sc);
+    git_in(&sc.remote, &["update-ref", "-d", &reference]);
+    let report = flush(&sc.ctx(true), false).unwrap();
+    assert!(!on_main(&sc, &local), "{report:?}");
+    assert!(sc.remote_file("x.rs").is_none());
+    assert!(
+        sc.remote_refs("refs/instafy/").is_empty(),
+        "{:?}",
+        sc.remote_refs("refs/instafy/")
+    );
+}
+
+/// A later runtime on the same checkout runs with a new origin id: the refs
+/// an earlier runtime pushed stay where they are, are not taken for
+/// dismissed, and are retired under that earlier origin once saved.
+#[test]
+fn a_new_runtime_on_the_same_checkout_keeps_earlier_recovery_refs() {
+    let sc = Scenario::new(Options::default());
+    let hook = close_main(&sc);
+    sc.write("x.rs", b"fn x() {}\n");
+    let refused = sc.publish_paths(&["x.rs"]);
+    assert_eq!(refused.git_sync_status, SyncStatus::Unpublished);
+    let local = sc.head();
+    sc.write("notes.md", b"unsaved\n");
+    flush(&sc.ctx(true), false).unwrap();
+    let first = format!("refs/instafy/recovery/{}/", sc.config.origin_id);
+    assert_eq!(
+        sc.remote_refs(&first).len(),
+        2,
+        "{:?}",
+        sc.remote_refs(&first)
+    );
+
+    let mut next = sc.config.clone();
+    next.origin_id = Uuid::new_v4();
+    let ctx = PublishContext {
+        config: &next,
+        workspace_root: &sc.ws,
+        token: None,
+        can_write: true,
+    };
+    let refreshed = refresh(&ctx).unwrap();
+    assert_eq!(refreshed.git_sync_status, SyncStatus::Unpublished);
+    assert!(
+        sc.local_refs(LOCAL_RECOVERY_DISMISSED_ROOT).is_empty(),
+        "{:?}",
+        sc.local_refs(LOCAL_RECOVERY_DISMISSED_ROOT)
+    );
+    assert_eq!(sc.head(), local, "the parked commit stays on the branch");
+    assert_eq!(sc.disk("x.rs").as_deref(), Some("fn x() {}\n"));
+    assert_eq!(sc.remote_refs(&first).len(), 2);
+    assert!(sc
+        .remote_refs(&format!("refs/instafy/recovery/{}/", next.origin_id))
+        .is_empty());
+
+    fs::remove_file(hook).unwrap();
+    let saved = refresh(&ctx).unwrap();
+    assert_eq!(saved.git_sync_status, SyncStatus::Published, "{saved:?}");
+    assert!(on_main(&sc, &local));
+    let left = sc.remote_refs(&first);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(left[0].0.contains("-unsaved-"), "{left:?}");
+}
+
+/// A secret the agent committed never reaches a canonical ref through a stop
+/// without write access followed by a refresh.
+#[test]
+fn committed_secrets_never_reach_canonical_after_an_offline_stop() {
+    let sc = Scenario::new(Options {
+        hook: true,
+        ..Options::default()
+    });
+    sc.write(".env", b"SECRET-ENV=1\n");
+    sc.write("src/app.rs", b"fn app() {}\n");
+    ig(&sc.ws, &["add", "-f", ".env", "src/app.rs"]);
+    ig(&sc.ws, &["commit", "-q", "-m", "agent commits a secret"]);
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nunsaved\n");
+    flush(&sc.ctx(false), false).unwrap();
+    refresh(&sc.ctx(true)).unwrap();
+    assert!(
+        !sc.anywhere_on_remote("SECRET-"),
+        "a secret reached canonical"
+    );
+    assert_eq!(
+        sc.remote_file("src/app.rs").as_deref(),
+        Some("fn app() {}\n")
+    );
+    assert_eq!(sc.disk(".env").as_deref(), Some("SECRET-ENV=1\n"));
+    assert_eq!(sc.remote_refs("refs/instafy/recovery/").len(), 1);
+}
+
+/// The same through a save while the remote is unreachable.
+#[test]
+fn committed_secrets_never_reach_canonical_after_an_offline_save() {
+    let sc = Scenario::new(Options {
+        hook: true,
+        ..Options::default()
+    });
+    sc.write(".env", b"SECRET-ENV=1\n");
+    sc.write("src/b.rs", b"fn b() {}\n");
+    ig(&sc.ws, &["add", "-f", ".env", "src/b.rs"]);
+    ig(&sc.ws, &["commit", "-q", "-m", "agent commits a secret"]);
+    let offline = without_remote(&sc, || sc.publish(Selection::None));
+    assert_eq!(
+        offline.git_sync_status,
+        SyncStatus::Unpublished,
+        "{offline:?}"
+    );
+    refresh(&sc.ctx(true)).unwrap();
+    assert!(
+        !sc.anywhere_on_remote("SECRET-"),
+        "a secret reached canonical"
+    );
+    assert_eq!(sc.remote_file("src/b.rs").as_deref(), Some("fn b() {}\n"));
+    assert!(
+        sc.remote_refs("refs/instafy/recovery/").is_empty(),
+        "the parked copy is retired once saved"
+    );
+}
+
+/// A parked copy that an older version built on top of a committed secret
+/// is rebuilt on a published parent before it is pushed.
+#[test]
+fn a_parked_copy_on_top_of_a_secret_is_rebuilt_before_it_is_pushed() {
+    let sc = Scenario::new(Options {
+        hook: true,
+        ..Options::default()
+    });
+    sc.write(".env", b"SECRET-OLD=1\n");
+    ig(&sc.ws, &["add", "-f", ".env"]);
+    ig(&sc.ws, &["commit", "-q", "-m", "agent commits a secret"]);
+    let head = sc.head();
+    sc.write("notes.md", b"keep me\n");
+    ig(&sc.ws, &["add", "notes.md"]);
+    let tree = ig(&sc.ws, &["write-tree"]);
+    ig(&sc.ws, &["reset", "-q", "notes.md"]);
+    let git = crate::workspace_git::WorkspaceGit::new(&sc.ws, None);
+    crate::recovery::store(
+        &git,
+        crate::recovery::RecoverySpec {
+            kind: crate::recovery::RecoveryKind::Unsaved,
+            tree,
+            parent: Some(head.clone()),
+            source: None,
+            date: None,
+            paths: vec!["notes.md".to_string()],
+            commits: Vec::new(),
+            identity: GitIdentity::new("Instafy Origin", "origin@instafy.dev"),
+            origin_id: sc.config.origin_id,
+        },
+    )
+    .unwrap()
+    .expect("stored");
+    // Take the secret commit off the branch so only the parked copy holds it.
+    ig(&sc.ws, &["reset", "-q", "--keep", "HEAD~1"]);
+    refresh(&sc.ctx(true)).unwrap();
+    assert!(
+        !sc.anywhere_on_remote("SECRET-"),
+        "a secret reached canonical"
+    );
+    let pushed = sc.remote_refs("refs/instafy/recovery/");
+    assert_eq!(pushed.len(), 1, "{pushed:?}");
+    assert_eq!(
+        sc.recovery_file(&pushed[0].0, "notes.md").as_deref(),
+        Some("keep me\n")
+    );
+    assert_eq!(
+        sc.local_refs(crate::recovery::LOCAL_RECOVERY_REJECTED_ROOT)
+            .len(),
+        1,
+        "the original stays only as a local backup"
+    );
+}
+
+/// The old sync's reset left a local commit's files as if they were unsaved
+/// edits: the one-time repair keeps them (and a stop or a Desktop save keeps
+/// or publishes them), whether or not the remote had moved.
+#[test]
+fn the_repair_never_drops_a_local_commit_the_old_reset_abandoned() {
+    for (desktop, remote_moved) in [(false, false), (false, true), (true, false), (true, true)] {
+        let sc = Scenario::new(Options {
+            desktop,
+            ..Options::default()
+        });
+        sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nlocal edit\n");
+        sc.write("feature.md", b"new feature\n");
+        sc.agent_commit(&["doc.md", "feature.md"], "local work");
+        if remote_moved {
+            sc.push_other(&[("README.md", Some(b"remote readme\n"))], "remote");
+        }
+        // The old sync: fetch, then reset --mixed onto the remote tip.
+        ig(&sc.ws, &["fetch", "-q", "origin"]);
+        ig(&sc.ws, &["reset", "-q", "--mixed", "origin/main"]);
+        let case = format!("desktop={desktop} remote_moved={remote_moved}");
+
+        if desktop {
+            let report = sc.publish(Selection::AllDirty);
+            assert_ne!(
+                report.git_sync_status,
+                SyncStatus::Unpublished,
+                "{case}: {report:?}"
+            );
+            assert!(
+                sc.remote_file("doc.md").unwrap().contains("local edit"),
+                "{case}"
+            );
+            assert_eq!(
+                sc.remote_file("feature.md").as_deref(),
+                Some("new feature\n"),
+                "{case}"
+            );
+        } else {
+            let report = flush(&sc.ctx(true), false).unwrap();
+            let unsaved: Vec<_> = report
+                .recovery_refs
+                .iter()
+                .filter(|entry| entry.name.contains("-unsaved-"))
+                .collect();
+            assert_eq!(unsaved.len(), 1, "{case}: {report:?}");
+            assert_eq!(
+                sc.recovery_file(&unsaved[0].reference, "feature.md")
+                    .as_deref(),
+                Some("new feature\n"),
+                "{case}"
+            );
+            assert!(
+                sc.recovery_file(&unsaved[0].reference, "doc.md")
+                    .unwrap()
+                    .contains("local edit"),
+                "{case}"
+            );
+        }
+        assert!(sc.disk("doc.md").unwrap().contains("local edit"), "{case}");
+        assert_eq!(
+            sc.disk("feature.md").as_deref(),
+            Some("new feature\n"),
+            "{case}"
+        );
+        if remote_moved {
+            assert_eq!(
+                sc.disk("README.md").as_deref(),
+                Some("remote readme\n"),
+                "{case}: the leftover README was not repaired"
+            );
+            assert_eq!(
+                sc.remote_file("README.md").as_deref(),
+                Some("remote readme\n"),
+                "{case}"
+            );
+            assert_eq!(
+                sc.local_refs(crate::stale_align::BACKUP_REF).len(),
+                1,
+                "{case}: the replaced copy is kept locally"
+            );
+        }
+        assert!(
+            sc.remote_refs(crate::stale_align::BACKUP_REF).is_empty(),
+            "{case}"
+        );
+    }
+}
+
+/// A tracked secret the repair would park stays on disk only.
+#[test]
+fn the_repair_never_parks_a_secret() {
+    let sc = Scenario::new(Options {
+        seed: vec![(".env", b"A=1\nB=2\nC=3\n".to_vec())],
+        ..Options::default()
+    });
+    sc.push_other(&[(".env", Some(b"A=1\nB=main\nC=3\n"))], "main changes B");
+    ig(&sc.ws, &["fetch", "-q", "origin"]);
+    ig(&sc.ws, &["reset", "-q", "--mixed", "origin/main"]);
+    sc.write(".env", b"A=1\nB=SECRET-XYZ\nC=3\n");
+    flush(&sc.ctx(true), false).unwrap();
+    assert!(
+        !sc.anywhere_on_remote("SECRET-XYZ"),
+        "a secret reached canonical"
+    );
+    assert_eq!(sc.disk(".env").as_deref(), Some("A=1\nB=SECRET-XYZ\nC=3\n"));
+}
+
+/// The hook compares a new recovery ref with `main`: a file `main` deleted
+/// since the copy's parent (here one over the shard's size cap) is refused
+/// although the copy never changed it. The copy takes `main`'s entry and is
+/// pushed, instead of being rebuilt under the same name forever.
+#[test]
+fn a_copy_refused_for_a_path_only_main_changed_is_still_pushed() {
+    let sc = Scenario::new(Options {
+        seed: vec![("big.bin", vec![b'z'; 300])],
+        ..Options::default()
+    });
+    sc.push_other(&[("big.bin", None)], "main drops the big file");
+    install_shard_hook(&sc.remote, &[("GIT_MAX_BLOB_BYTES", "100")]);
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nunsaved\n");
+    let report = flush(&sc.ctx(true), false).unwrap();
+    assert_eq!(report.unpushed_refs, 0, "{report:?}");
+    let pushed = sc.remote_refs("refs/instafy/recovery/");
+    assert_eq!(pushed.len(), 1, "{pushed:?}");
+    assert!(sc
+        .recovery_file(&pushed[0].0, "doc.md")
+        .unwrap()
+        .contains("unsaved"));
+    assert!(sc.recovery_file(&pushed[0].0, "big.bin").is_none());
+    let refreshed = refresh(&sc.ctx(true)).unwrap();
+    assert_eq!(refreshed.unpushed_refs, 0, "{refreshed:?}");
+}
+
+/// For unrelated histories, a conflict copy holds `main` plus the local
+/// version of the conflicted paths: it never reads as deleting what only
+/// `main` holds.
+#[test]
+fn unrelated_conflict_copies_never_delete_what_main_holds() {
+    let sc = Scenario::new(Options {
+        empty: true,
+        ..Options::default()
+    });
+    sc.write("AGENTS.md", b"agents\n");
+    sc.write("README.md", b"agent readme\n");
+    sc.agent_commit(&["AGENTS.md", "README.md"], "agent bootstrap");
+    write(&sc.other, "README.md", b"main readme\n");
+    write(&sc.other, "LICENSE", b"license\n");
+    git_in(&sc.other, &["add", "-A"]);
+    git_in(&sc.other, &["commit", "-q", "-m", "first"]);
+    git_in(&sc.other, &["push", "-q", "origin", "main"]);
+
+    let report = sc.publish(Selection::None);
+    assert_eq!(
+        report.conflicted_paths,
+        vec!["README.md".to_string()],
+        "{report:?}"
+    );
+    let reference = report.recovery_ref.clone().expect("conflict ref");
+    let deleted = git_in(
+        &sc.remote,
+        &[
+            "diff-tree",
+            "-r",
+            "--name-only",
+            "--diff-filter=D",
+            &format!("{reference}^"),
+            &reference,
+        ],
+    );
+    assert!(deleted.is_empty(), "{deleted}");
+    assert_eq!(
+        sc.recovery_file(&reference, "README.md").as_deref(),
+        Some("agent readme\n")
+    );
+    assert_eq!(
+        sc.recovery_file(&reference, "LICENSE").as_deref(),
+        Some("license\n")
+    );
+    assert_eq!(sc.remote_file("AGENTS.md").as_deref(), Some("agents\n"));
+}
+
+/// The same for parked work of an unrelated history.
+#[test]
+fn unrelated_parked_copies_never_delete_what_main_holds() {
+    let sc = Scenario::new(Options {
+        empty: true,
+        ..Options::default()
+    });
+    sc.write("AGENTS.md", b"agents\n");
+    sc.agent_commit(&["AGENTS.md"], "agent bootstrap");
+    write(&sc.other, "LICENSE", b"license\n");
+    git_in(&sc.other, &["add", "-A"]);
+    git_in(&sc.other, &["commit", "-q", "-m", "first"]);
+    git_in(&sc.other, &["push", "-q", "origin", "main"]);
+    let _hook = close_main(&sc);
+    let report = sc.publish(Selection::None);
+    assert_eq!(
+        report.git_sync_status,
+        SyncStatus::Unpublished,
+        "{report:?}"
+    );
+    let reference = report.recovery_ref.clone().expect("parked");
+    let deleted = git_in(
+        &sc.remote,
+        &[
+            "diff-tree",
+            "-r",
+            "--name-only",
+            "--diff-filter=D",
+            &format!("{reference}^"),
+            &reference,
+        ],
+    );
+    assert!(deleted.is_empty(), "{deleted}");
+    assert_eq!(
+        sc.recovery_file(&reference, "AGENTS.md").as_deref(),
+        Some("agents\n")
+    );
+}
+
+/// A Desktop save whose new folder meets a collaborator's file of the same
+/// name keeps the user's file in their folder.
+#[test]
+fn a_desktop_folder_meeting_a_file_keeps_the_users_bytes() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    sc.write("a/b", b"my bytes\n");
+    sc.push_other(
+        &[("a", Some(b"collaborator file\n"))],
+        "collaborator adds a",
+    );
+    let report = sc.publish_paths(&["a/b"]);
+    assert!(
+        report.conflicted_paths.contains(&"a/b".to_string()),
+        "{report:?}"
+    );
+    assert_eq!(sc.disk("a/b").as_deref(), Some("my bytes\n"));
+    assert_eq!(sc.remote_file("a").as_deref(), Some("collaborator file\n"));
+}
+
+/// A push the remote reports as accepted but that did not land (here a
+/// hook removes recovery refs right after accepting them) keeps the ref
+/// local; it is pushed for real once the remote keeps it.
+#[test]
+fn a_recovery_push_counts_only_when_the_remote_shows_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let sc = Scenario::new(Options::default());
+    let hook = sc.remote.join("hooks").join("post-receive");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/instafy/recovery/*) git update-ref -d \"$ref\" ;;\n  esac\ndone\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nleft over\n");
+    let report = flush(&sc.ctx(true), false).unwrap();
+    assert_eq!(report.unpushed_refs, 1, "{report:?}");
+    assert_eq!(sc.local_refs(LOCAL_RECOVERY_ROOT).len(), 1);
+    assert!(sc.local_refs(LOCAL_RECOVERY_PUSHED_ROOT).is_empty());
+
+    fs::remove_file(&hook).unwrap();
+    let refreshed = refresh(&sc.ctx(true)).unwrap();
+    assert_eq!(refreshed.unpushed_refs, 0, "{refreshed:?}");
+    assert_eq!(sc.remote_refs("refs/instafy/recovery/").len(), 1);
+    assert_eq!(sc.local_refs(LOCAL_RECOVERY_PUSHED_ROOT).len(), 1);
+}
+
+/// `/git/sync` with the remote unreachable keeps the work on a local ref
+/// and says where (503 not_saved), instead of failing the request.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_route_without_the_remote_keeps_the_work_and_says_where() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let (base, server) = serve(&sc).await;
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\noffline\n");
+    let away = sc.root.join("remote-away.git");
+    fs::rename(&sc.remote, &away).unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{base}/git/sync"))
+        .json(&serde_json::json!({ "paths": ["doc.md"] }))
+        .send()
+        .await
+        .unwrap();
+    fs::rename(&away, &sc.remote).unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "not_saved", "{body}");
+    assert!(
+        body["recoveryRef"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("-unpublished-"),
+        "{body}"
+    );
+    assert_eq!(
+        sc.disk("doc.md").as_deref(),
+        Some("alpha\nbeta\ngamma\ndelta\noffline\n")
+    );
+    server.abort();
+}
+
+/// After a pre-stop flush, a save is refused until a refresh, so the same
+/// work never lands on main next to its recovery copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn saves_after_a_flush_wait_for_the_next_refresh() {
+    let sc = Scenario::new(Options::default());
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nturn work\n");
+    let flushed = client
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(flushed.status(), reqwest::StatusCode::OK);
+    let refused = client
+        .post(format!("{base}/git/sync"))
+        .json(&serde_json::json!({ "paths": ["doc.md"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        sc.remote_file("doc.md").as_deref(),
+        Some("alpha\nbeta\ngamma\ndelta\n")
+    );
+    let refreshed = client
+        .post(format!("{base}/git/sync"))
+        .json(&serde_json::json!({ "mode": "refresh" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refreshed.status(), reqwest::StatusCode::OK);
+    let saved = client
+        .post(format!("{base}/git/sync"))
+        .json(&serde_json::json!({ "paths": ["doc.md"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), reqwest::StatusCode::OK);
+    assert!(sc.remote_file("doc.md").unwrap().contains("turn work"));
+    server.abort();
+}
+
+fn apply_archive(path: &str, content: &[u8]) -> String {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let mut writer = zip::write::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file(path, zip::write::FileOptions::<()>::default())
+        .unwrap();
+    writer.write_all(content).unwrap();
+    let archive = writer.finish().unwrap().into_inner();
+    base64::engine::general_purpose::STANDARD.encode(archive)
+}
+
+/// A Desktop `/apply` whose `expected` blob id is stale (the agent edited
+/// the file since the client read it) is refused with the path, and the
+/// agent's edit stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_route_refuses_a_stale_expected_blob_and_keeps_the_edit() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let read = crate::workspace_git::blob_oid(README.as_bytes());
+    let edit = "one\ntwo\nthree\nfour\nfive\nagent edit\n";
+    sc.write("README.md", edit.as_bytes());
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": [{ "path": "README.md", "size": 12 }],
+                "deletes": [],
+                "expected": { "README.md": read },
+            },
+            "archiveBase64": apply_archive("README.md", b"from editor\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "head_moved", "{body}");
+    assert_eq!(body["paths"], serde_json::json!(["README.md"]), "{body}");
+    assert_eq!(sc.disk("README.md").as_deref(), Some(edit));
+
+    // With the id the agent's edit has, the same apply goes through.
+    let current = crate::workspace_git::blob_oid(edit.as_bytes());
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": [{ "path": "README.md", "size": 12 }],
+                "deletes": [],
+                "expected": { "README.md": current },
+            },
+            "archiveBase64": apply_archive("README.md", b"from editor\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(sc.disk("README.md").as_deref(), Some("from editor\n"));
+    server.abort();
+}
+
+/// The gateway's conditional writes come later: a multi-tenant origin
+/// ignores `expected`.
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_tenant_apply_ignores_expected() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let project_id = Uuid::new_v4();
+    let workspace = root.join(project_id.to_string());
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(workspace.join("README.md"), b"agent edit\n").unwrap();
+    let config = ServerConfig {
+        project_id,
+        origin_id: Uuid::new_v4(),
+        workspace_root: root.clone(),
+        git_remote_url: None,
+        git_remote_base_url: None,
+        git_branch: "main".to_string(),
+        git_remote_name: "origin".to_string(),
+        git_author_name: "Instafy Origin".to_string(),
+        git_author_email: "origin@instafy.dev".to_string(),
+        bind_host: "127.0.0.1".to_string(),
+        bind_port: 0,
+        controller_base_url: Url::parse("http://127.0.0.1:9").unwrap(),
+        controller_internal_token: None,
+        controller_token_source: None,
+        jwks_url: Url::parse("http://127.0.0.1:9/.well-known/jwks.json").unwrap(),
+        skip_auth: true,
+        enable_presence_heartbeat: false,
+        presence_interval: Duration::from_secs(60),
+        max_archive_bytes: 1024 * 1024,
+        staging_base: None,
+        multi_tenant: true,
+        hosted_checkout: false,
+    };
+    let (base, server) = serve_config(config, root.clone()).await;
+    let stale = crate::workspace_git::blob_oid(b"what the client read\n");
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": project_id,
+                "files": [{ "path": "README.md", "size": 12 }],
+                "deletes": [],
+                "expected": { "README.md": stale },
+            },
+            "archiveBase64": apply_archive("README.md", b"from editor\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        fs::read_to_string(workspace.join("README.md")).unwrap(),
+        "from editor\n"
+    );
+    server.abort();
+}
+
+/// A Desktop "save everything" with a user's token is authored by the
+/// origin's own identity until the per-project author pseudonym exists:
+/// no user id reaches permanent history.
+#[tokio::test(flavor = "multi_thread")]
+async fn user_saves_never_write_a_user_id_into_history() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let lease_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let controller =
+        StubController::start(sc.config.project_id, lease_id, user_id, runtime_id).await;
+    let mut config = sc.config.clone();
+    config.skip_auth = false;
+    config.controller_base_url = Url::parse(&controller.base).unwrap();
+    config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
+    config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
+    let token = controller.origin_token(&config, lease_id, user_id, runtime_id);
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nfrom the user\n");
+    let response = reqwest::Client::new()
+        .post(format!("{base}/git/sync"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "Save version" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(sc.remote_file("doc.md").unwrap().contains("from the user"));
+    let log = git_in(
+        &sc.remote,
+        &["log", "--format=%an <%ae> | %cn <%ce> | %B", "main"],
+    );
+    assert!(!log.contains(&user_id.to_string()), "{log}");
+    assert!(
+        log.starts_with("Instafy Origin <origin@instafy.dev> | Instafy Origin <origin@instafy.dev> | Save version"),
+        "{log}"
+    );
+    server.abort();
+    controller.server.abort();
+}
+
+/// The provider's checkout eviction reads the marker a clean shutdown flush
+/// writes; both name the same file.
+#[test]
+fn the_clean_stop_marker_is_the_one_eviction_reads() {
+    let provider = include_str!("../../runtime-provider-core/src/allocator/checkout_eviction.rs");
+    assert!(
+        provider.contains(&format!(
+            "CLEAN_STOP_MARKER: &str = \"{}\";",
+            crate::server::CLEAN_STOP_MARKER
+        )),
+        "the provider's CLEAN_STOP_MARKER differs from the origin's"
+    );
+}
+
+/// The conflict copy is stored before the merge that keeps `main`'s version
+/// is pushed, so a push never lands without it (a crash right after the
+/// push keeps it on a local ref for the next push).
+#[test]
+fn the_conflict_copy_exists_before_the_merge_is_pushed() {
+    let sc = Scenario::new(Options::default());
+    sc.write("README.md", b"one\nTWO BY AGENT\nthree\nfour\nfive\n");
+    sc.push_other(
+        &[("README.md", Some(b"one\ntwo by user\nthree\nfour\nfive\n"))],
+        "user",
+    );
+    let ws = sc.ws.clone();
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(None::<bool>));
+    let seen_in_hook = seen.clone();
+    let _guard = with_push_hook(move |specs| {
+        if specs.iter().any(|spec| spec.ends_with(":refs/heads/main")) {
+            let refs = ig(
+                &ws,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/instafy/local-recovery/",
+                ],
+            );
+            *seen_in_hook.borrow_mut() = Some(refs.contains("-conflict-"));
+        }
+        PushHookAction::Proceed
+    });
+    let report = sc.publish_paths(&["README.md"]);
+    assert_eq!(*seen.borrow(), Some(true), "{report:?}");
+    assert!(report
+        .recovery_ref
+        .as_deref()
+        .is_some_and(|reference| reference.contains("-conflict-")));
+    assert_eq!(report.unpushed_refs, 0);
 }
