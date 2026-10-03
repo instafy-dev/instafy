@@ -48,6 +48,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 
 import { extractChatAttachments, extractImageAttachments, UserMessageBubble } from "../ChatMessageEntries";
+import { clearChatAttachmentPreviews, seedChatAttachmentPreview } from "../../../../lib/chatAttachmentPreviews";
 
 const PROJECT = "11111111-2222-4333-8444-555555555555";
 const CONVERSATION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -74,6 +75,7 @@ describe("chat message attachments", () => {
     mocks.downloadChatAttachment.mockReset();
     mocks.revokeObjectURL.mockReset();
     mocks.createObjectURL.mockReset().mockReturnValue("blob:chat-attachment-1");
+    clearChatAttachmentPreviews();
     vi.stubGlobal("URL", class extends URL {
       static createObjectURL = mocks.createObjectURL;
       static revokeObjectURL = mocks.revokeObjectURL;
@@ -156,14 +158,117 @@ describe("chat message attachments", () => {
   });
 
   it("shows a plain placeholder when Storage refuses the read", async () => {
-    mocks.downloadChatAttachment.mockResolvedValue({ ok: false });
+    mocks.downloadChatAttachment.mockResolvedValue({ ok: false, reason: "refused" });
     await renderBubble(messageWith([{ kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" }]));
 
     const placeholder = container.querySelector('[data-testid="chat-image-attachment-unavailable"]');
     expect(placeholder?.textContent).toBe("Image unavailable");
     expect(placeholder?.getAttribute("aria-label")).toBe("shot.png is unavailable");
     expect(container.querySelector('[data-testid="chat-image-attachment-thumbnail"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-image-attachment-retry"]')).toBeNull();
     expect(mocks.createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("offers to try again when Storage could not be reached, and shows the image once it loads", async () => {
+    const blob = new Blob(["png"], { type: "image/png" });
+    mocks.downloadChatAttachment
+      .mockResolvedValueOnce({ ok: false, reason: "transient" })
+      .mockResolvedValueOnce({ ok: true, blob });
+    await renderBubble(messageWith([{ kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" }]));
+
+    const retry = container.querySelector<HTMLButtonElement>('[data-testid="chat-image-attachment-retry"]');
+    expect(retry?.tagName).toBe("BUTTON");
+    expect(retry?.getAttribute("aria-label")).toBe("Couldn't load shot.png. Try again");
+    expect(container.querySelector('[data-testid="chat-image-attachment-unavailable"]')).toBeNull();
+
+    await act(async () => retry?.click());
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledTimes(2);
+    expect(container.querySelector<HTMLImageElement>('[data-testid="chat-image-attachment-thumbnail"] img')?.getAttribute("src"))
+      .toBe("blob:chat-attachment-1");
+  });
+
+  it("downloads an image once for every bubble showing it, and not again when it comes back", async () => {
+    const blob = new Blob(["png"], { type: "image/png" });
+    let settle!: (value: { ok: true; blob: Blob }) => void;
+    mocks.downloadChatAttachment.mockImplementation(() => new Promise((resolve) => { settle = resolve; }));
+    let objectUrls = 0;
+    mocks.createObjectURL.mockImplementation(() => `blob:view-${++objectUrls}`);
+    const attachment = { kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" };
+    await act(async () => {
+      root.render(
+        <>
+          <UserMessageBubble message={messageWith([attachment])} projectId={PROJECT} />
+          <UserMessageBubble message={{ ...messageWith([attachment]), id: "copy" }} projectId={PROJECT} />
+        </>,
+      );
+    });
+    await act(async () => settle({ ok: true, blob }));
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledTimes(1);
+    expect([...container.querySelectorAll<HTMLImageElement>('[data-testid="chat-image-attachment-thumbnail"] img')]
+      .map((image) => image.getAttribute("src"))).toEqual(["blob:view-1", "blob:view-2"]);
+
+    // Each bubble revokes its own URL when it goes away.
+    await act(async () => root.unmount());
+    expect(mocks.revokeObjectURL.mock.calls.map(([url]) => url).sort()).toEqual(["blob:view-1", "blob:view-2"]);
+
+    // Scrolled back into view, or the chat opened again: no new download.
+    root = createRoot(container);
+    await renderBubble(messageWith([attachment]));
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledTimes(1);
+    expect(container.querySelector<HTMLImageElement>('[data-testid="chat-image-attachment-thumbnail"] img')?.getAttribute("src"))
+      .toBe("blob:view-3");
+  });
+
+  it("shows the sender's own image from the local copy kept after the upload", async () => {
+    const local = new File(["png"], "shot.png", { type: "image/png" });
+    seedChatAttachmentPreview(STORAGE_PATH, local);
+    await renderBubble(messageWith([{ kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" }]));
+    expect(mocks.downloadChatAttachment).not.toHaveBeenCalled();
+    expect(mocks.createObjectURL).toHaveBeenCalledWith(local);
+  });
+
+  it("waits to download an image until it is near the screen", async () => {
+    const observers: Array<{ callback: IntersectionObserverCallback; targets: Element[] }> = [];
+    vi.stubGlobal("IntersectionObserver", class {
+      private entry: { callback: IntersectionObserverCallback; targets: Element[] };
+      constructor(callback: IntersectionObserverCallback) {
+        this.entry = { callback, targets: [] };
+        observers.push(this.entry);
+      }
+      observe(target: Element) { this.entry.targets.push(target); }
+      disconnect() { this.entry.targets = []; }
+      unobserve() {}
+      takeRecords() { return []; }
+    });
+    mocks.downloadChatAttachment.mockResolvedValue({ ok: true, blob: new Blob(["png"]) });
+    await renderBubble(messageWith([{ kind: "image", storagePath: STORAGE_PATH, fileName: "shot.png" }]));
+
+    expect(mocks.downloadChatAttachment).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="chat-image-attachment-placeholder"]')?.getAttribute("aria-label"))
+      .toBe("Loading shot.png");
+    const observer = observers.find((entry) => entry.targets.length > 0)!;
+    await act(async () => {
+      observer.callback(
+        [{ isIntersecting: true, target: observer.targets[0] } as unknown as IntersectionObserverEntry],
+        {} as IntersectionObserver,
+      );
+    });
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledExactlyOnceWith(STORAGE_PATH);
+    expect(container.querySelector('[data-testid="chat-image-attachment-thumbnail"]')).not.toBeNull();
+  });
+
+  it("never loads a preview URL another member wrote into the metadata", async () => {
+    mocks.downloadChatAttachment.mockResolvedValue({ ok: true, blob: new Blob(["png"]) });
+    const message = messageWith([
+      { kind: "image", storagePath: STORAGE_PATH, previewUrl: "https://tracker.example/pixel.png" },
+      { kind: "image", previewUrl: "https://tracker.example/other.png" },
+    ]);
+    expect(extractChatAttachments(message)).toEqual([
+      expect.objectContaining({ storagePath: STORAGE_PATH, previewUrl: null }),
+    ]);
+    await renderBubble(message);
+    expect(mocks.downloadChatAttachment).toHaveBeenCalledWith(STORAGE_PATH);
+    expect(container.innerHTML).not.toContain("tracker.example");
   });
 
   it("shows a loading tile until the download settles, and nothing leaks after an early unmount", async () => {

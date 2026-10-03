@@ -66,21 +66,46 @@ it goes only with its space or its team, whose purge covers it.
 - The composer takes PNG, JPEG, WebP and GIF images up to 20 MiB, from the picker, a paste
   or a drop, and says why it skips anything else.
 - Sending uploads each attachment with the person's own Supabase session, `upsert` off and the
-  exact content type, into `<projectId>/<conversationId>/`. A new chat is created on the
-  controller first. The message is shown and sent only after every upload succeeds. A failed
-  upload removes the ones that did succeed, shows plain copy (never Storage's own error text),
-  and puts the draft back in the composer with its images still attached.
+  exact content type, into `<projectId>/<conversationId>/`, at most three at a time. A new chat
+  is created on the controller first. While the uploads run, the tray says "Sending your
+  message with 2 images…" and those images can't be removed; an image added meanwhile stays
+  for the next message. The message is shown and sent only after every upload succeeds. A
+  failed upload removes the ones that did succeed, shows plain copy (never Storage's own error
+  text), and puts the draft back in the composer with its images still attached. The draft
+  keeps its reply context and browser target.
 - A message shows a Storage image by downloading it with the session into an object URL that
-  is revoked when the image goes away. It never creates a signed URL. A read Storage refuses
-  (someone who is not a reader of the conversation) or an object that is gone shows a plain
-  "Image unavailable" placeholder. Text attachments are listed by name.
+  is revoked when the image goes away. It never creates a signed URL. Images download once
+  they are near the screen, at most four at a time. The page keeps the downloaded bytes of
+  the most recent images (up to 40 images and 64 MiB) so a message that comes back into view
+  does not download them again, and the sender's own images are shown from the local copy.
+  Everything kept is dropped when the signed-in person changes.
+- A read Storage refuses (someone who is not a reader of the conversation) or an object that
+  is gone shows a plain "Image unavailable" placeholder. A download that could not reach
+  Storage shows "Couldn't load image" with a "Try again" button. Text attachments are listed
+  by name.
 - Older images with a `workspacePath` still load through the workspace's raw file route.
-- When a file someone is editing changes underneath them and both versions are large, the merge
-  request sends the two versions as `kind: "file"` text attachments of that chat instead of
-  writing snapshot files into the workspace.
+- When a file someone is editing changes underneath them and the two versions together are
+  long (over 12,000 characters), the merge request sends them as two `kind: "file"` text
+  attachments of that chat instead of writing snapshot files into the workspace. The prompt
+  names each file by exactly the `fileName` its attachment records. If the snapshots can't be
+  stored and the two versions together are at most 200,000 characters, the request is sent
+  once more with them inline; otherwise the merge notice says why.
+- A `/learn` message's images are stored in the new learn thread's folder. The parent chat's
+  copy of the message points at the same objects, so members of the parent who can't read the
+  learn thread see "Image unavailable" there.
 - When `GET /projects/:projectId` reports `attachments: "none"`, or the app has no Supabase
   configuration, the image button is off with the reason "This server can't store
   attachments.", paste and drop say the same, and merge requests keep both versions inline.
+
+### Compatibility
+
+The web app no longer writes chat images or merge snapshots into the workspace. A runtime sees
+them only when it advertises `attachmentDownloads` (below). A runtime built before that
+capability, such as the one bundled with a Desktop release that predates it or an older
+self-hosted runtime, silently gets no attachments: images are missing from the agent's prompt
+and a large merge request names snapshot files the agent cannot read. Release the runtime
+first, including a Desktop release whose bundled runtime advertises `attachmentDownloads`,
+and only then the web app.
 
 ## Delivery to the runtime
 

@@ -18,6 +18,16 @@ export interface SubmitConversationOptions {
    * folder, before the message is sent.
    */
   textFiles?: File[];
+  /**
+   * Called once every attachment is stored, as the message is shown and
+   * before it is sent, so the composer can take them out of its tray.
+   */
+  onAttachmentsStored?: () => void;
+  /**
+   * The caller shows a failed attachment upload itself (the merge notice), so
+   * the flow only throws the ChatAttachmentUploadError.
+   */
+  callerReportsAttachmentErrors?: boolean;
   editorState?: string | null;
   agentHandles?: string[];
   dispatchInput?: string | null;

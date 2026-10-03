@@ -21,6 +21,7 @@ import {
   ChatAttachmentUploadError,
   chatAttachmentFileProblem,
   chatAttachmentObjectName,
+  chatAttachmentsUnavailableReason,
   describeChatAttachmentUploadError,
   downloadChatAttachment,
   isChatAttachmentStoragePath,
@@ -189,7 +190,7 @@ describe("chat attachment storage", () => {
     expect(storage.upload).not.toHaveBeenCalled();
   });
 
-  it("downloads with the session and reports a refused or failed read as unavailable", async () => {
+  it("downloads with the session and tells a refused read from one that may work later", async () => {
     const path = `${PROJECT}/${CONVERSATION}/${OBJECT}.png`;
     const blob = new Blob(["png"], { type: "image/png" });
     storage.download.mockResolvedValueOnce({ data: blob, error: null });
@@ -197,14 +198,37 @@ describe("chat attachment storage", () => {
     expect(storage.from).toHaveBeenCalledWith("chat-attachments");
     expect(storage.download).toHaveBeenCalledWith(path);
 
+    const refused = { ok: false, reason: "refused" };
+    const transient = { ok: false, reason: "transient" };
+    // storage-js reports a download's HTTP failure with the Response as originalError.
+    for (const status of [400, 403, 404]) {
+      storage.download.mockResolvedValueOnce({ data: null, error: { message: "{}", originalError: { status } } });
+      await expect(downloadChatAttachment(path)).resolves.toEqual(refused);
+    }
     storage.download.mockResolvedValueOnce({ data: null, error: { message: "Object not found" } });
-    await expect(downloadChatAttachment(path)).resolves.toEqual({ ok: false });
+    await expect(downloadChatAttachment(path)).resolves.toEqual(refused);
+    for (const status of [429, 500, 503]) {
+      storage.download.mockResolvedValueOnce({ data: null, error: { message: "{}", originalError: { status } } });
+      await expect(downloadChatAttachment(path)).resolves.toEqual(transient);
+    }
+    storage.download.mockResolvedValueOnce({ data: null, error: { message: "Failed to fetch", originalError: new TypeError("Failed to fetch") } });
+    await expect(downloadChatAttachment(path)).resolves.toEqual(transient);
     storage.download.mockRejectedValueOnce(new TypeError("Failed to fetch"));
-    await expect(downloadChatAttachment(path)).resolves.toEqual({ ok: false });
+    await expect(downloadChatAttachment(path)).resolves.toEqual(transient);
+
+    storage.config.enabled = false;
+    await expect(downloadChatAttachment(path)).resolves.toEqual(refused);
+  });
+
+  it("turns attachments off only when the server says none", () => {
+    expect(chatAttachmentsUnavailableReason("none")).toBe(CHAT_ATTACHMENTS_UNAVAILABLE_REASON);
+    expect(chatAttachmentsUnavailableReason("storage")).toBeNull();
+    expect(chatAttachmentsUnavailableReason(null)).toBeNull();
+    expect(chatAttachmentsUnavailableReason(undefined)).toBeNull();
   });
 
   it("never asks Storage for a name outside the bucket's shape", async () => {
-    await expect(downloadChatAttachment("chat-upload-1-photo.png")).resolves.toEqual({ ok: false });
+    await expect(downloadChatAttachment("chat-upload-1-photo.png")).resolves.toEqual({ ok: false, reason: "refused" });
     await removeChatAttachments(["chat-upload-1-photo.png"]);
     expect(storage.download).not.toHaveBeenCalled();
     expect(storage.remove).not.toHaveBeenCalled();

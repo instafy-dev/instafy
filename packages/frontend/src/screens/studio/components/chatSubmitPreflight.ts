@@ -498,7 +498,9 @@ export async function runChatSubmitPreflight(
 
   if (!params.allowWhileBusy && (params.isAssistantTyping || params.sendingAttachment)) {
     if (params.attachedImageCount > 0) {
-      params.showStatus("Wait for the current reply before sending images.", "info", 4000);
+      // A reply in progress was handled above: here the previous message
+      // (and its images) is still being sent.
+      params.showStatus("Wait for your last message to finish sending.", "info", 4000);
       return { status: "handled", submitted: false };
     }
     if (

@@ -31,6 +31,15 @@ export type ChatAttachmentMimeType = ChatImageMimeType | ChatTextMimeType;
 export const CHAT_IMAGE_ACCEPT = Object.keys(IMAGE_EXTENSIONS).join(",");
 
 export const CHAT_ATTACHMENTS_UNAVAILABLE_REASON = "This server can't store attachments.";
+
+/**
+ * Why the composer takes no attachments in a space, or null when it does.
+ * Only a server that says `none` turns them off; an unknown answer (an older
+ * controller, or a space still loading) leaves them on.
+ */
+export function chatAttachmentsUnavailableReason(mode: "storage" | "none" | null | undefined): string | null {
+  return mode === "none" ? CHAT_ATTACHMENTS_UNAVAILABLE_REASON : null;
+}
 export const CHAT_IMAGE_TYPE_REQUIREMENT = "Only PNG, JPEG, WebP and GIF images can be attached.";
 export const CHAT_ATTACHMENT_SIZE_REQUIREMENT = "Attachments must be 20 MB or smaller.";
 
@@ -246,24 +255,52 @@ export async function removeChatAttachments(storagePaths: string[]): Promise<voi
   }
 }
 
-export type ChatAttachmentDownloadResult = { ok: true; blob: Blob } | { ok: false };
+/**
+ * `refused`: Storage answered and will not hand the object over (not a reader
+ * of the conversation, or the object is gone), so trying again does not help.
+ * `transient`: no answer, or a busy or failing Storage, so it may work later.
+ */
+export type ChatAttachmentDownloadFailure = "refused" | "transient";
+
+export type ChatAttachmentDownloadResult =
+  | { ok: true; blob: Blob }
+  | { ok: false; reason: ChatAttachmentDownloadFailure };
+
+function downloadFailureReason(error: unknown): ChatAttachmentDownloadFailure {
+  if (isChatAttachmentUploadError(error)) {
+    // No Storage on this server at all.
+    return "refused";
+  }
+  const { status, code, message } = readStorageErrorParts(error);
+  if (status === null && !code) {
+    // No HTTP answer to go by: only Storage's own wording says it refused.
+    return /not found|row-level security|unauthorized|forbidden|denied/i.test(message) ? "refused" : "transient";
+  }
+  if (status === 429 || code === "429" || (status !== null && status >= 500) || /^5\d\d$/.test(code)) {
+    return "transient";
+  }
+  return "refused";
+}
 
 /**
- * Downloads one attachment with the person's session. A refused read (not a
- * reader of the conversation), a deleted object and a network failure all
- * come back as `{ ok: false }`.
+ * Downloads one attachment with the person's session. A read Storage refuses
+ * (not a reader of the conversation) or a deleted object comes back as
+ * `refused`; a network failure or a failing Storage as `transient`.
  */
 export async function downloadChatAttachment(storagePath: string): Promise<ChatAttachmentDownloadResult> {
   if (!isChatAttachmentStoragePath(storagePath)) {
-    return { ok: false };
+    return { ok: false, reason: "refused" };
   }
   try {
     const { data, error } = await storageBucket().download(storagePath);
-    if (error || !(data instanceof Blob)) {
-      return { ok: false };
+    if (error) {
+      return { ok: false, reason: downloadFailureReason(error) };
+    }
+    if (!(data instanceof Blob)) {
+      return { ok: false, reason: "refused" };
     }
     return { ok: true, blob: data };
-  } catch {
-    return { ok: false };
+  } catch (error) {
+    return { ok: false, reason: downloadFailureReason(error) };
   }
 }

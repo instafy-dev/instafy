@@ -3,7 +3,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useChatComposerAttachments } from "../useChatComposerAttachments";
+import {
+  describeSendingImages,
+  formatAttachmentSize,
+  useChatComposerAttachments,
+} from "../useChatComposerAttachments";
 
 type Attachments = ReturnType<typeof useChatComposerAttachments>;
 let latest: Attachments;
@@ -168,7 +172,18 @@ describe("useChatComposerAttachments", () => {
       expect(call[0]).toBe(reason);
     }
     expect(paste.preventDefault).toHaveBeenCalled();
-    expect(dragOver.dataTransfer.dropEffect).toBe("none");
+    // The drop has to land for the browser to fire it, so it can say why.
+    expect(dragOver.dataTransfer.dropEffect).toBe("copy");
+    expect(dragOver.preventDefault).toHaveBeenCalled();
+  });
+
+  it("describes sizes and the upload in plain copy", () => {
+    expect(formatAttachmentSize(10)).toBe("1 KB");
+    expect(formatAttachmentSize(640 * 1024)).toBe("640 KB");
+    expect(formatAttachmentSize(20 * 1024 * 1024)).toBe("20.0 MB");
+    expect(formatAttachmentSize(3.44 * 1024 * 1024)).toBe("3.4 MB");
+    expect(describeSendingImages(1)).toBe("Sending your message with 1 image\u2026");
+    expect(describeSendingImages(3)).toBe("Sending your message with 3 images\u2026");
   });
 
   it("leaves a plain text paste to the editor", async () => {

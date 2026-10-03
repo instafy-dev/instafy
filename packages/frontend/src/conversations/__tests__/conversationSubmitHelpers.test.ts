@@ -8,7 +8,9 @@ vi.mock("../../lib/supabaseClient", () => ({
 
 import type { ChatMessage } from "../../screens/studio/types";
 import { ChatAttachmentUploadError } from "../../lib/chatAttachments";
+import { clearChatAttachmentPreviews, loadChatAttachmentPreview } from "../../lib/chatAttachmentPreviews";
 import {
+  CHAT_ATTACHMENT_UPLOAD_CONCURRENCY,
   patchConversationMessageMetadata,
   sanitizeChatUploadFileName,
   uploadConversationAttachments,
@@ -79,6 +81,44 @@ describe("conversationSubmitHelpers", () => {
       await expect(upload).rejects.toBeInstanceOf(ChatAttachmentUploadError);
       await expect(upload).rejects.toThrow("Attachments must be 20 MB or smaller.");
       expect(storage.remove).toHaveBeenCalledWith([storage.upload.mock.calls[0][0]]);
+    });
+
+    it(`uploads at most ${CHAT_ATTACHMENT_UPLOAD_CONCURRENCY} at once and starts nothing after a failure`, async () => {
+      const pending: Array<{ path: string; settle: (value: unknown) => void }> = [];
+      storage.upload.mockImplementation(
+        (path: string) => new Promise((settle) => pending.push({ path, settle })),
+      );
+      const files = Array.from({ length: 6 }, (_, index) => new File([String(index)], `${index}.png`, { type: "image/png" }));
+      const upload = uploadConversationAttachments({ projectId: PROJECT, conversationId: CONVERSATION, files });
+      const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+      await flush();
+      expect(pending).toHaveLength(CHAT_ATTACHMENT_UPLOAD_CONCURRENCY);
+
+      pending[0].settle({ data: {}, error: null });
+      await flush();
+      expect(pending).toHaveLength(CHAT_ATTACHMENT_UPLOAD_CONCURRENCY + 1);
+
+      // One fails: the uploads already running finish, nothing new starts,
+      // and every stored one is removed again.
+      pending[1].settle({ data: null, error: { message: "{}", status: 503 } });
+      pending[2].settle({ data: {}, error: null });
+      pending[3].settle({ data: {}, error: null });
+      await expect(upload).rejects.toThrow("Storage isn't responding right now. Try again in a moment.");
+      expect(pending).toHaveLength(4);
+      expect([...storage.remove.mock.calls[0][0]].sort()).toEqual([pending[0].path, pending[2].path, pending[3].path].sort());
+    });
+
+    it("keeps stored images as local previews for the sender's own message", async () => {
+      clearChatAttachmentPreviews();
+      const image = new File(["png"], "shot.png", { type: "image/png" });
+      const [stored, text] = await uploadConversationAttachments({
+        projectId: PROJECT,
+        conversationId: CONVERSATION,
+        files: [image, new File(["notes"], "notes.txt", { type: "text/plain" })],
+      });
+      await expect(loadChatAttachmentPreview(stored.storagePath)).resolves.toEqual({ ok: true, blob: image });
+      // Text attachments are listed by name, never previewed.
+      await expect(loadChatAttachmentPreview(text.storagePath)).resolves.toMatchObject({ ok: false });
     });
   });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canOpenProjectDeviceHandoff,
+  resolveChatAttachmentsMode,
   resolveProjectCapabilities,
 } from "../projectCapabilities";
 
@@ -79,6 +80,16 @@ describe("resolveProjectCapabilities", () => {
     // An older controller says nothing, and an unknown answer is not "none".
     expect(resolve(undefined)).toBeNull();
     expect(resolve("s3")).toBeNull();
+  });
+
+  it("turns attachments off without a Supabase configuration, whatever the server says", () => {
+    expect(resolveChatAttachmentsMode(false, { chatAttachments: "storage" })).toBe("none");
+    expect(resolveChatAttachmentsMode(false, null)).toBe("none");
+    expect(resolveChatAttachmentsMode(true, { chatAttachments: "storage" })).toBe("storage");
+    expect(resolveChatAttachmentsMode(true, { chatAttachments: "none" })).toBe("none");
+    // Unknown (an older controller, or a space still loading) stays on.
+    expect(resolveChatAttachmentsMode(true, { chatAttachments: null })).toBeNull();
+    expect(resolveChatAttachmentsMode(true, null)).toBeNull();
   });
 
   it("does not guess access from an old response for a non-owner", () => {

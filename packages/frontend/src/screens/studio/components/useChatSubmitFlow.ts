@@ -269,7 +269,7 @@ export function useChatSubmitFlow({
     controllerId: string | null;
     at: number;
   } | null>;
-  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<void>;
+  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<boolean>;
   personalBrowserActive: boolean;
   personalBrowserAgentControlEnabled: boolean;
   personalBrowserAgentError: string | null;
@@ -787,7 +787,7 @@ export function useChatSubmitFlow({
       return false;
     }
 
-    await performSubmit({
+    const sent = await performSubmit({
       message: dispatchedMessage,
       composerMessage: messageToSend,
       editorState,
@@ -797,6 +797,11 @@ export function useChatSubmitFlow({
       expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
       automatic,
     });
+    if (!sent) {
+      // An attachment upload failed and the draft is back in the composer: it
+      // keeps the browser page or new-page launch it was aimed at.
+      return false;
+    }
     consumeBrowserComposerTarget();
     return true;
   }, [

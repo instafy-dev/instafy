@@ -102,7 +102,7 @@ import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { useWorkspaceUi } from "../../../workspace/useWorkspace";
 import { useWorkspaceControls } from "../workspaceControls";
 import { hasSupabaseConfig, supabase } from "../../../lib/supabaseClient";
-import { CHAT_ATTACHMENTS_UNAVAILABLE_REASON } from "../../../lib/chatAttachments";
+import { chatAttachmentsUnavailableReason as resolveChatAttachmentsUnavailableReason } from "../../../lib/chatAttachments";
 import {
   enableMessageNotifications,
   markBrowserNotificationsNudgeSeen,
@@ -247,7 +247,7 @@ import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
 import { useChatVoiceComposerController } from "./useChatVoiceComposerController";
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
 import { mergeMentionableMembers } from "./mentionableMembers";
-import { buildWorkspaceFileStaleMergeRequest } from "./workspaceFileStaleMerge";
+import { sendWorkspaceFileStaleMerge } from "./workspaceFileStaleMerge";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
@@ -583,8 +583,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     canShareProject: serverCanShareProject,
     chatAttachments,
   } = useProject();
-  const chatAttachmentsUnavailableReason =
-    chatAttachments === "none" ? CHAT_ATTACHMENTS_UNAVAILABLE_REASON : null;
+  const chatAttachmentsUnavailableReason = resolveChatAttachmentsUnavailableReason(chatAttachments);
   const projectWriteDisabled =
     projectCapabilitiesResolved === false ||
     (projectCapabilitiesResolved === true && canWriteProject === false);
@@ -1407,19 +1406,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setWorkspaceFileStaleError(null);
 
     try {
-      // Large versions go to the agent as two attached snapshots in this
-      // chat's Storage folder; without attachment storage they stay inline.
-      const { prompt, textFiles } = buildWorkspaceFileStaleMergeRequest(notice, {
-        canAttachFiles: chatAttachments !== "none",
-      });
-
       const preservedDraft = latestInputValueRef.current;
       const preservedEditorState = latestInputEditorStateRef.current;
 
       if (!ensureProjectWriteAccess()) {
         return;
       }
-      await onSubmit(conversationId, prompt, textFiles.length > 0 ? { textFiles } : undefined);
+      // Large versions go to the agent as two attached snapshots in this
+      // chat's Storage folder; without attachment storage they stay inline.
+      await sendWorkspaceFileStaleMerge({
+        notice,
+        chatAttachments,
+        submit: (prompt, options) => onSubmit(conversationId, prompt, options),
+      });
 
       if (preservedDraft.trim().length > 0) {
         onInputChange(activeConversationId ?? conversationId, preservedDraft, preservedEditorState);
@@ -1844,15 +1843,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
 
   const {
-    clearImageAttachments,
     handleComposerDragOver,
     handleComposerDrop,
     handleComposerPaste,
     handleImageInputChange,
     imageAttachments,
     imageInputRef,
+    markImageAttachmentsSending,
     openImagePicker,
     removeImageAttachment,
+    removeSentImageAttachments,
   } = useChatComposerAttachments({
     draftKey: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
     onAttachmentsAdded: keepComposerTabOpen,
@@ -2120,6 +2120,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     const submitted = await submitMessageRef.current(nextOverride, nextOptions);
     if (submitted && !automatic && pendingReplyContextRef.current === pendingReplyContext) {
       pendingReplyContextRef.current = null;
+    }
+    if (
+      !submitted &&
+      !automatic &&
+      pendingReplyContext &&
+      pendingReplyContextRef.current === null &&
+      shouldAttachPendingReplyContext(pendingReplyContext, latestInputValueRef.current ?? "")
+    ) {
+      // Clearing the composer for the send dropped the reply context; a send
+      // that failed put the quoted draft back, so it answers the same message.
+      pendingReplyContextRef.current = pendingReplyContext;
     }
     if (
       restoredStash &&
@@ -3920,7 +3931,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const { clearComposerAfterQueue, clearComposerIfUnchanged, performSubmit } = useChatSubmitDispatch({
     activeConversationId,
     clearInputEditor,
-    clearImageAttachments,
+    markImageAttachmentsSending,
+    removeSentImageAttachments,
     focusInput,
     isChatInputFocused,
     latestInputValueRef,

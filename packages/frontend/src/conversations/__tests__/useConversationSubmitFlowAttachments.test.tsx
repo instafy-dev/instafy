@@ -207,6 +207,43 @@ describe("chat attachments through the real submit flow", () => {
     expect(mocks.recordMessage).not.toHaveBeenCalled();
   });
 
+  it("tells the composer the images are stored as the message is shown, before it is sent", async () => {
+    await render(createInitialConversation({ localId: "conversation-local", controllerId: EXISTING_ID }));
+    const onAttachmentsStored = vi.fn(() => {
+      mocks.calls.push("stored");
+      expect(args.appendMessages).toHaveBeenCalledTimes(1);
+    });
+    await act(async () => {
+      await flow.handleSubmit("conversation-local", "Look", sendOptions({ imageFiles: [image()], onAttachmentsStored }));
+    });
+    expect(onAttachmentsStored).toHaveBeenCalledTimes(1);
+    expect(mocks.calls.slice(-2)).toEqual(["stored", "send"]);
+  });
+
+  it("leaves a failed upload's copy to a caller that shows it itself", async () => {
+    mocks.upload.mockResolvedValue({ data: null, error: { message: "{}", status: 503 } });
+    await render(createInitialConversation({ localId: "conversation-local", controllerId: EXISTING_ID }));
+    const onAttachmentsStored = vi.fn();
+    let failure: unknown = null;
+    await act(async () => {
+      failure = await flow
+        .handleSubmit(
+          "conversation-local",
+          "Merge my edits",
+          sendOptions({
+            textFiles: [new File(["base"], "App.tsx.base.txt", { type: "text/plain" })],
+            callerReportsAttachmentErrors: true,
+            onAttachmentsStored,
+          }),
+        )
+        .catch((error) => error);
+    });
+    expect((failure as Error).message).toBe("Storage isn't responding right now. Try again in a moment.");
+    expect(args.showStatus).not.toHaveBeenCalled();
+    expect(onAttachmentsStored).not.toHaveBeenCalled();
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("uploads nothing when the new chat cannot be created", async () => {
     mocks.createBlank.mockResolvedValue(null);
     await render(createInitialConversation({ localId: "conversation-local", controllerId: null }));

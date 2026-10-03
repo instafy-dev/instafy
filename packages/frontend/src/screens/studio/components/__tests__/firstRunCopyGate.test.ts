@@ -65,6 +65,7 @@ const GATED_FILES = [
   // Chat attachments: the composer's image rules, the copy for a failed or
   // refused upload, and the merge snapshots sent as attached files.
   resolve(frontend, "src/lib/chatAttachments.ts"),
+  resolve(frontend, "src/lib/chatAttachmentPreviews.ts"),
   resolve(components, "useChatComposerAttachments.ts"),
   resolve(components, "workspaceFileStaleMerge.ts"),
   resolve(repo, "docs/Chat-Attachments.md"),

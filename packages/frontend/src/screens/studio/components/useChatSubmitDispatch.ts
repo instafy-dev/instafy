@@ -21,7 +21,16 @@ export type ChatSubmitDispatchPayload = {
 type UseChatSubmitDispatchOptions = {
   activeConversationId: string | null;
   clearInputEditor?: () => void;
-  clearImageAttachments: () => void;
+  /**
+   * Marks the staged images a send carries while they upload, and unmarks
+   * them when the send fails, so the tray shows they are on their way.
+   */
+  markImageAttachmentsSending?: (files: File[], sending: boolean) => void;
+  /**
+   * Takes the images a send carried out of the tray once they are stored.
+   * Images staged after the send began stay for the next message.
+   */
+  removeSentImageAttachments: (files: File[]) => void;
   focusInput: (options?: { force?: boolean }) => void;
   isChatInputFocused: () => boolean;
   latestInputValueRef: MutableRefObject<string>;
@@ -36,7 +45,8 @@ type UseChatSubmitDispatchOptions = {
 export function useChatSubmitDispatch({
   activeConversationId,
   clearInputEditor,
-  clearImageAttachments,
+  markImageAttachmentsSending,
+  removeSentImageAttachments,
   focusInput,
   isChatInputFocused,
   latestInputValueRef,
@@ -101,13 +111,19 @@ export function useChatSubmitDispatch({
     [clearComposerIfUnchanged],
   );
 
+  /**
+   * Sends one message. Resolves true once it went out, and false when an
+   * attachment upload failed: then nothing was sent, the draft is back in its
+   * composer and the staged images are still there.
+   */
   const performSubmit = useCallback(
-    async (payload: ChatSubmitDispatchPayload) => {
+    async (payload: ChatSubmitDispatchPayload): Promise<boolean> => {
       // The person may be writing their next message or reading further up
       // while an automatic send goes out, so it changes none of that.
       const touchComposer = payload.automatic !== true;
       const shouldRefocus = touchComposer && isChatInputFocused();
       const composerMessage = payload.composerMessage ?? payload.message;
+      const carriedImages = touchComposer ? payload.imageFiles : [];
       if (touchComposer) {
         shouldAutoScrollRef.current = true;
         scrollToBottom();
@@ -124,11 +140,14 @@ export function useChatSubmitDispatch({
         }
       }
       setSendingAttachment(true);
+      markImageAttachmentsSending?.(carriedImages, true);
       try {
         try {
           await onSubmit(activeConversationId, composerMessage, {
             dispatchInput: payload.message !== composerMessage ? payload.message : null,
             imageFiles: payload.imageFiles,
+            onAttachmentsStored:
+              carriedImages.length > 0 ? () => removeSentImageAttachments(carriedImages) : undefined,
             editorState: payload.editorState,
             agentHandles: mentionableAgentHandles,
             metadata: payload.metadata ?? null,
@@ -143,30 +162,34 @@ export function useChatSubmitDispatch({
           if (touchComposer && activeConversationId) {
             restoreUnsentDraft(activeConversationId, composerMessage, payload.editorState);
           }
-          return;
+          return false;
         }
         if (touchComposer) {
-          clearImageAttachments();
+          removeSentImageAttachments(carriedImages);
           if (shouldRefocus && !Capacitor.isNativePlatform()) {
             focusInput({ force: true });
           }
           shouldAutoScrollRef.current = true;
           scrollToBottom();
         }
+        return true;
       } finally {
+        // Images still in the tray (a failed send) can be removed again.
+        markImageAttachmentsSending?.(carriedImages, false);
         setSendingAttachment(false);
       }
     },
     [
       activeConversationId,
       clearInputEditor,
-      clearImageAttachments,
       focusInput,
       isChatInputFocused,
       latestInputValueRef,
+      markImageAttachmentsSending,
       mentionableAgentHandles,
       onInputChange,
       onSubmit,
+      removeSentImageAttachments,
       restoreUnsentDraft,
       scrollToBottom,
       setSendingAttachment,

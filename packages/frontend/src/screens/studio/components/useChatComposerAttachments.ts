@@ -20,9 +20,26 @@ export type PendingChatImageAttachment = {
   id: string;
   file: File;
   previewUrl: string;
+  /** Set while a send carrying this image uploads it; it can't be removed then. */
+  sending?: boolean;
 };
 
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
+
+/** A staged attachment's size: "640 KB" below a megabyte, then "3.4 MB". */
+export function formatAttachmentSize(bytes: number): string {
+  const megabyte = 1024 * 1024;
+  if (bytes < megabyte) {
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+  return `${(bytes / megabyte).toFixed(1)} MB`;
+}
+
+/** What the tray says while a send uploads its images. */
+export function describeSendingImages(count: number): string {
+  return count === 1 ? "Sending your message with 1 image…" : `Sending your message with ${count} images…`;
+}
+
 const EMPTY_ATTACHMENTS: PendingChatImageAttachment[] = [];
 
 function revokePreviewUrl(previewUrl: string) {
@@ -69,8 +86,10 @@ export function useChatComposerAttachments({
   const setImageAttachments = useCallback((update: (
     previous: PendingChatImageAttachment[],
   ) => PendingChatImageAttachment[]) => {
+    const current = attachmentDraftsRef.current.get(draftKey) ?? EMPTY_ATTACHMENTS;
+    const next = update(current);
+    if (next === current) return;
     const drafts = new Map(attachmentDraftsRef.current);
-    const next = update(drafts.get(draftKey) ?? EMPTY_ATTACHMENTS);
     if (next.length > 0) drafts.set(draftKey, next);
     else drafts.delete(draftKey);
     attachmentDraftsRef.current = drafts;
@@ -97,12 +116,55 @@ export function useChatComposerAttachments({
   const removeImageAttachment = useCallback((attachmentId: string) => {
     setImageAttachments((previous) => {
       const match = previous.find((attachment) => attachment.id === attachmentId) ?? null;
-      if (match) {
-        revokePreviewUrl(match.previewUrl);
+      if (!match || match.sending) {
+        // An image already uploading goes out with its message.
+        return previous;
       }
+      revokePreviewUrl(match.previewUrl);
       return previous.filter((attachment) => attachment.id !== attachmentId);
     });
   }, [setImageAttachments]);
+
+  // A send carries the files it was given. Marking and removing go by those
+  // files, so an image pasted or dropped while the send uploads stays staged
+  // for the next message.
+  const markImageAttachmentsSending = useCallback((files: File[], sending: boolean) => {
+    if (files.length === 0) {
+      return;
+    }
+    const carried = new Set(files);
+    setImageAttachments((previous) => {
+      if (!previous.some((attachment) => carried.has(attachment.file) && Boolean(attachment.sending) !== sending)) {
+        return previous;
+      }
+      return previous.map((attachment) =>
+        carried.has(attachment.file) ? { ...attachment, sending } : attachment,
+      );
+    });
+  }, [setImageAttachments]);
+
+  const removeSentImageAttachments = useCallback((files: File[]) => {
+    if (files.length === 0) {
+      return;
+    }
+    const sent = new Set(files);
+    setImageAttachments((previous) => {
+      if (!previous.some((attachment) => sent.has(attachment.file))) {
+        return previous;
+      }
+      return previous.filter((attachment) => {
+        if (!sent.has(attachment.file)) {
+          return true;
+        }
+        revokePreviewUrl(attachment.previewUrl);
+        return false;
+      });
+    });
+    const input = imageInputRef.current;
+    if (input && activeDraftKeyRef.current === draftKey) {
+      input.value = "";
+    }
+  }, [draftKey, setImageAttachments]);
 
   const attachImageFiles = useCallback(
     (files: File[]) => {
@@ -185,9 +247,11 @@ export function useChatComposerAttachments({
 
       const items = Array.from(dataTransfer.items ?? []);
       const hasImage = items.some((item) => item.kind === "file" && isImageLike(item.type));
-      dataTransfer.dropEffect = !isInputLocked() && !unavailableReason && hasImage ? "copy" : "none";
+      // A drop on a server without attachment storage still lands, so the
+      // drop handler can say why nothing was added.
+      dataTransfer.dropEffect = !isInputLocked() && hasImage ? "copy" : "none";
     },
-    [isInputLocked, unavailableReason],
+    [isInputLocked],
   );
 
   const handleComposerDrop = useCallback(
@@ -266,7 +330,9 @@ export function useChatComposerAttachments({
     handleImageInputChange,
     imageAttachments,
     imageInputRef,
+    markImageAttachmentsSending,
     openImagePicker,
     removeImageAttachment,
+    removeSentImageAttachments,
   };
 }

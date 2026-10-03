@@ -36,6 +36,7 @@ import {
 import { recordProjectOpened } from "./projectRecency";
 import {
   ownerProjectCapabilities,
+  resolveChatAttachmentsMode,
   resolveProjectCapabilities,
   type ChatAttachmentsMode,
   type EffectiveProjectRole,
@@ -1102,9 +1103,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       canWriteProject: activeCapabilities?.canWrite ?? !hasSupabaseConfig,
       canShareProject: activeCapabilities?.canShare ?? !hasSupabaseConfig,
       canManageProject: activeCapabilities?.canManage ?? !hasSupabaseConfig,
-      // Attachments go to Supabase Storage with the person's session, so an
-      // install without Supabase has nowhere to put them.
-      chatAttachments: hasSupabaseConfig ? activeCapabilities?.chatAttachments ?? null : "none",
+      chatAttachments: resolveChatAttachmentsMode(hasSupabaseConfig, activeCapabilities),
     }),
     [
       activeCapabilities,

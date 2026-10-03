@@ -462,6 +462,33 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector<HTMLInputElement>('[data-testid="chat-image-upload-input"]')?.disabled).toBe(true);
   });
 
+  it("says a send is on its way and keeps its images in place until they are stored", async () => {
+    const uploading = { id: "image-1", file: new File(["image"], "shot.png", { type: "image/png" }), previewUrl: "blob:shot", sending: true };
+    const later = { id: "image-2", file: new File([new Uint8Array(3 * 1024 * 1024)], "later.png", { type: "image/png" }), previewUrl: "blob:later" };
+    const onRemoveImageAttachment = vi.fn();
+    await act(async () => renderLayout({ imageAttachments: [uploading, later], onRemoveImageAttachment, sendingAttachment: true }));
+
+    const tray = container.querySelector('[data-testid="chat-image-upload-preview"]');
+    expect(tray?.getAttribute("aria-busy")).toBe("true");
+    const status = container.querySelector('[data-testid="chat-image-upload-status"]');
+    expect(status?.getAttribute("role")).toBe("status");
+    expect(status?.getAttribute("aria-live")).toBe("polite");
+    expect(status?.textContent).toBe("Sending your message with 1 image\u2026");
+    const [first, second] = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-image-upload-remove"]')];
+    expect(first.disabled).toBe(true);
+    // An image staged after the send began can still be removed.
+    expect(second.disabled).toBe(false);
+    expect(tray?.textContent).toContain("3.0 MB");
+    await act(async () => second.click());
+    expect(onRemoveImageAttachment).toHaveBeenCalledExactlyOnceWith("image-2");
+
+    // The status region stays mounted (and quiet) between sends.
+    await act(async () => renderLayout({ imageAttachments: [later] }));
+    const idle = container.querySelector('[data-testid="chat-image-upload-status"]');
+    expect(idle?.textContent).toBe("");
+    expect(container.querySelector('[data-testid="chat-image-upload-preview"]')?.hasAttribute("aria-busy")).toBe(false);
+  });
+
   it("owns the chat safe area and retains composer controls across keyboard transitions", async () => {
     await act(async () => renderLayout({ compactBrowserViewport: true }));
     const before = layoutNodes();
