@@ -385,6 +385,27 @@ pub(super) async fn call_provider_endpoint<T: serde::Serialize + Debug>(
     body: &T,
     timeout: Duration,
 ) -> anyhow::Result<Option<String>> {
+    Ok(
+        call_provider_endpoint_json(state, provider, path, body, timeout)
+            .await?
+            .and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            }),
+    )
+}
+
+/// [`call_provider_endpoint`], returning the whole JSON answer (`Null` for a
+/// body that is not JSON). `None` when the provider has no endpoint.
+pub(super) async fn call_provider_endpoint_json<T: serde::Serialize + Debug>(
+    state: &AppState,
+    provider: &crate::config::RuntimeProviderConfig,
+    path: &str,
+    body: &T,
+    timeout: Duration,
+) -> anyhow::Result<Option<JsonValue>> {
     match tokio::time::timeout(
         timeout,
         call_provider_endpoint_unbounded(state, provider, path, body),
@@ -404,7 +425,7 @@ async fn call_provider_endpoint_unbounded<T: serde::Serialize + Debug>(
     provider: &crate::config::RuntimeProviderConfig,
     path: &str,
     body: &T,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<JsonValue>> {
     let endpoint = provider
         .endpoint
         .as_ref()
@@ -441,11 +462,7 @@ async fn call_provider_endpoint_unbounded<T: serde::Serialize + Debug>(
         let res = req.send().await?;
         if provider_call_status_is_final_success(res.status()) {
             let value: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
-            let msg = value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            return Ok(msg);
+            return Ok(Some(value));
         }
 
         let status = res.status();

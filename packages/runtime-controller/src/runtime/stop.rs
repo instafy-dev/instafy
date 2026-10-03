@@ -25,6 +25,7 @@ use super::db::{
     fetch_runtime_for_update, fetch_runtime_lease_for_update, mark_runtime_lease_released,
     record_runtime_event, release_origin_instances_for_runtime, RuntimeDetails,
 };
+use super::pre_stop_flush::FlushSummary;
 use super::provider::{
     call_provider_endpoint, lock_and_load_authoritative_provider_config, ProviderReleaseRequest,
     RUNTIME_PROVIDER_RELEASE_TIMEOUT,
@@ -44,6 +45,12 @@ pub(crate) struct RuntimeStopPayload {
     pub(crate) expected_project_id: Option<String>,
     pub(crate) expected_provider: Option<String>,
     pub(crate) expected_display_name: Option<String>,
+    /// The runtime lease generation the caller means to stop. A stop of any
+    /// other generation (one a later start created, perhaps on another node)
+    /// is skipped as `runtime_lease_mismatch` before anything is flushed or
+    /// fenced.
+    #[serde(default)]
+    pub(crate) expected_lease_id: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -54,6 +61,11 @@ pub(crate) struct RuntimeStopResponse {
     pub(crate) provider_release_succeeded: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) skip_reason: Option<String>,
+    /// What the stop did to keep the workspace's work (see
+    /// [`FlushSummary`]). Every stop path of this controller sets it; a
+    /// response without it comes from a controller that predates the flush.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flush: Option<FlushSummary>,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -89,7 +101,13 @@ pub(crate) struct RuntimeIdentityExpectation {
     pub(crate) project_id: Option<Uuid>,
     pub(crate) provider: Option<String>,
     pub(crate) display_name: Option<String>,
+    /// The runtime's active lease generation.
+    pub(crate) lease_id: Option<Uuid>,
 }
+
+/// Where a stop comes from when the pool-retirement drain makes it. Only
+/// these stops run while this controller is fenced for retirement.
+pub(crate) const DRAIN_STOP_SOURCES: [&str; 2] = ["pool_retirement_drain", "pool_retirement_flush"];
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -129,7 +147,13 @@ impl RuntimeStopResponse {
             provider_release_attempted: false,
             provider_release_succeeded: false,
             skip_reason: outcome.skip_reason.clone(),
+            flush: None,
         }
+    }
+
+    pub(crate) fn with_flush(mut self, flush: FlushSummary) -> Self {
+        self.flush = Some(flush);
+        self
     }
 
     fn with_provider_release(
@@ -226,24 +250,40 @@ async fn authorize_runtime_stop_request(
 /// caller's access, a live provider-managed generation, the skip
 /// preconditions), so a refused or skipped stop flushes nothing. Holds no
 /// connection while the origin works, and never fails the stop.
+/// `owner_grant`: the controller stops the runtime on its own, so without a
+/// workspace lease holder the space owner's save-only permission is used.
+/// Never true for a stop a user or a runtime asked for.
 async fn flush_workspace_before_stop(
     state: &AppState,
     runtime_id: &Uuid,
     options: &StopOptions,
     request: Option<(&StopAuth, StopRequestKind)>,
-) {
-    match plan_workspace_flush_before_stop(state, runtime_id, options, request).await {
-        Ok(Some(target)) => {
-            super::pre_stop_flush::flush(state, target).await;
+    owner_grant: bool,
+) -> FlushSummary {
+    match plan_workspace_flush_before_stop(state, runtime_id, options, request, owner_grant).await {
+        Ok(FlushPlan::Flush(target)) => super::pre_stop_flush::flush(state, target).await.summary(),
+        Ok(FlushPlan::Skipped) => FlushSummary::skipped(),
+        Ok(FlushPlan::NotRunning) => FlushSummary::not_running(),
+        Err((status, body)) => {
+            info!(
+                runtime_id = %runtime_id,
+                %status,
+                error = %body.0.message,
+                "no pre-stop workspace flush for this stop"
+            );
+            FlushSummary::failed(body.0.message)
         }
-        Ok(None) => {}
-        Err((status, body)) => info!(
-            runtime_id = %runtime_id,
-            %status,
-            error = %body.0.message,
-            "no pre-stop workspace flush for this stop"
-        ),
     }
+}
+
+/// What the stop's flush planning found.
+enum FlushPlan {
+    Flush(super::pre_stop_flush::PreStopFlushTarget),
+    /// The stop itself is skipped (identity, lease generation or active
+    /// jobs), so nothing is flushed.
+    Skipped,
+    /// No live provider-managed generation with an online hosted origin.
+    NotRunning,
 }
 
 async fn plan_workspace_flush_before_stop(
@@ -251,7 +291,8 @@ async fn plan_workspace_flush_before_stop(
     runtime_id: &Uuid,
     options: &StopOptions,
     request: Option<(&StopAuth, StopRequestKind)>,
-) -> Result<Option<super::pre_stop_flush::PreStopFlushTarget>, (StatusCode, Json<ApiError>)> {
+    owner_grant: bool,
+) -> Result<FlushPlan, (StatusCode, Json<ApiError>)> {
     let mut connection = state.pool.get().await.map_err(|error| {
         internal_error(format!("failed to get flush planning connection: {error}"))
     })?;
@@ -265,32 +306,42 @@ async fn plan_workspace_flush_before_stop(
         authorize_runtime_stop_request(state, &transaction, auth, &runtime, kind).await?;
     }
     let live = matches!(runtime.status.as_str(), "ready" | "running" | "draining");
-    let target = match runtime.active_lease_id {
-        Some(lease_id) if live && runtime_requires_provider_release(state, &runtime) => {
-            let lease = fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
-            if lease.status != "active"
-                || lease.released_at.is_some()
-                || preflight_runtime_stop(&transaction, &runtime, options)
+    let plan = if preflight_runtime_stop(&transaction, &runtime, options)
+        .await?
+        .is_some()
+    {
+        FlushPlan::Skipped
+    } else {
+        match runtime.active_lease_id {
+            Some(lease_id) if live && runtime_requires_provider_release(state, &runtime) => {
+                let lease = fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
+                if lease.status != "active" || lease.released_at.is_some() {
+                    FlushPlan::NotRunning
+                } else {
+                    super::pre_stop_flush::find_target(
+                        &transaction,
+                        &runtime,
+                        &lease_id,
+                        owner_grant,
+                    )
                     .await?
-                    .is_some()
-            {
-                None
-            } else {
-                super::pre_stop_flush::find_target(&transaction, &runtime, &lease_id).await?
+                    .map_or(FlushPlan::NotRunning, FlushPlan::Flush)
+                }
             }
+            _ => FlushPlan::NotRunning,
         }
-        _ => None,
     };
     transaction.rollback().await.map_err(|error| {
         internal_error(format!("failed to end flush planning transaction: {error}"))
     })?;
-    Ok(target)
+    Ok(plan)
 }
 
 #[derive(Debug)]
 pub(super) struct SafeRuntimeStop {
     pub(super) runtime: RuntimeDetails,
     pub(super) outcome: StopOutcome,
+    pub(super) flush: FlushSummary,
 }
 
 async fn runtime_has_active_hosted_jobs(
@@ -422,15 +473,12 @@ async fn preflight_runtime_stop(
     runtime: &RuntimeDetails,
     options: &StopOptions,
 ) -> Result<Option<StopOutcome>, (StatusCode, Json<ApiError>)> {
-    if options
+    if let Some(reason) = options
         .expected_identity
         .as_ref()
-        .is_some_and(|expected| !runtime_matches_expected_identity(runtime, expected))
+        .and_then(|expected| expected_identity_skip_reason(runtime, expected))
     {
-        return Ok(Some(StopOutcome::skipped(
-            runtime,
-            "runtime_identity_mismatch",
-        )));
+        return Ok(Some(StopOutcome::skipped(runtime, reason)));
     }
 
     if options.require_idle_timeout {
@@ -464,9 +512,37 @@ pub(super) async fn stop_runtime_safely(
     runtime_id: &Uuid,
     options: StopOptions,
 ) -> Result<SafeRuntimeStop, (StatusCode, Json<ApiError>)> {
+    // A controller fenced for pool retirement acts only for the drain: its
+    // own sweeps would act through this node's provider on runtimes that may
+    // now live on another node.
+    if state.runtime_drain.is_fenced() && !DRAIN_STOP_SOURCES.contains(&options.source) {
+        let mut connection =
+            state.pool.get().await.map_err(|error| {
+                internal_error(format!("failed to get stop connection: {error}"))
+            })?;
+        let transaction = connection.transaction().await.map_err(|error| {
+            internal_error(format!("failed to start stop transaction: {error}"))
+        })?;
+        let runtime = fetch_runtime_for_update(&transaction, runtime_id).await?;
+        transaction.rollback().await.ok();
+        info!(
+            runtime_id = %runtime_id,
+            source = options.source,
+            "this controller is retiring; leaving the stop to the serving controller"
+        );
+        let outcome = StopOutcome::skipped(&runtime, "controller_retiring");
+        return Ok(SafeRuntimeStop {
+            runtime,
+            outcome,
+            flush: FlushSummary::skipped(),
+        });
+    }
+
     // Before the quarantine below fences the runtime: after it, the origin
-    // can no longer save anything to canonical.
-    flush_workspace_before_stop(state, runtime_id, &options, None).await;
+    // can no longer save anything to canonical. This is the controller's own
+    // stop path, so the space owner's save-only permission covers a stop
+    // nobody holds a workspace lease for.
+    let flush = flush_workspace_before_stop(state, runtime_id, &options, None, true).await;
 
     let mut connection = state
         .pool
@@ -505,6 +581,7 @@ pub(super) async fn stop_runtime_safely(
                 return Ok(SafeRuntimeStop {
                     runtime: runtime_snapshot,
                     outcome,
+                    flush,
                 });
             }
         }
@@ -596,6 +673,7 @@ pub(super) async fn stop_runtime_safely(
         return Ok(SafeRuntimeStop {
             runtime: runtime_snapshot,
             outcome,
+            flush,
         });
     }
 
@@ -618,6 +696,7 @@ pub(super) async fn stop_runtime_safely(
     Ok(SafeRuntimeStop {
         runtime: runtime_snapshot,
         outcome,
+        flush,
     })
 }
 
@@ -626,6 +705,7 @@ fn expected_runtime_identity(
     expected_project_id: Option<&str>,
     expected_provider: Option<&str>,
     expected_display_name: Option<&str>,
+    expected_lease_id: Option<&str>,
 ) -> Result<Option<RuntimeIdentityExpectation>, (StatusCode, Json<ApiError>)> {
     let expected_project_id = expected_project_id
         .map(|value| {
@@ -633,9 +713,16 @@ fn expected_runtime_identity(
                 .map_err(|_| bad_request("expected_project_id must be a valid UUID"))
         })
         .transpose()?;
+    let expected_lease_id = expected_lease_id
+        .map(|value| {
+            Uuid::from_str(value.trim())
+                .map_err(|_| bad_request("expected_lease_id must be a valid UUID"))
+        })
+        .transpose()?;
     if expected_project_id.is_none()
         && expected_provider.is_none()
         && expected_display_name.is_none()
+        && expected_lease_id.is_none()
     {
         return Ok(None);
     }
@@ -643,6 +730,7 @@ fn expected_runtime_identity(
         project_id: expected_project_id,
         provider: expected_provider.map(str::to_string),
         display_name: expected_display_name.map(str::to_string),
+        lease_id: expected_lease_id,
     }))
 }
 
@@ -659,6 +747,7 @@ pub(crate) async fn runtime_stop(
         expected_project_id,
         expected_provider,
         expected_display_name,
+        expected_lease_id,
     } = payload;
     let runtime_id =
         Uuid::from_str(&runtime_id).map_err(|_| bad_request("runtime_id must be a valid UUID"))?;
@@ -686,28 +775,35 @@ pub(crate) async fn runtime_stop(
         };
 
     // Before this stop fences the runtime, let a hosted origin keep its
-    // workspace's work. A stop the checks below refuse flushes nothing.
-    if let Ok(expected_identity) = expected_runtime_identity(
+    // workspace's work. A stop the checks below refuse flushes nothing. A
+    // user or a runtime asked for this stop, so it saves only under a
+    // workspace lease holder, never under the owner's save-only permission.
+    let flush = match expected_runtime_identity(
         expected_project_id.as_deref(),
         expected_provider.as_deref(),
         expected_display_name.as_deref(),
+        expected_lease_id.as_deref(),
     ) {
-        let flush_options = StopOptions {
-            source: "runtime_stop",
-            reason: reason.clone(),
-            skip_if_active_jobs,
-            require_idle_timeout: false,
-            allow_cleanup_pending_release: false,
-            expected_identity,
-        };
-        flush_workspace_before_stop(
-            &state,
-            &runtime_id,
-            &flush_options,
-            Some((&auth_context, StopRequestKind::Stop)),
-        )
-        .await;
-    }
+        Ok(expected_identity) => {
+            let flush_options = StopOptions {
+                source: "runtime_stop",
+                reason: reason.clone(),
+                skip_if_active_jobs,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity,
+            };
+            flush_workspace_before_stop(
+                &state,
+                &runtime_id,
+                &flush_options,
+                Some((&auth_context, StopRequestKind::Stop)),
+                false,
+            )
+            .await
+        }
+        Err(_) => FlushSummary::skipped(),
+    };
 
     let mut connection = state
         .pool
@@ -734,6 +830,7 @@ pub(crate) async fn runtime_stop(
         expected_project_id.as_deref(),
         expected_provider.as_deref(),
         expected_display_name.as_deref(),
+        expected_lease_id.as_deref(),
     )?;
     let strict_terminal_release_retry = require_provider_release
         && should_skip_stop_for_terminal_runtime(&runtime)
@@ -818,7 +915,7 @@ pub(crate) async fn runtime_stop(
     let preflight_skip = stop_options
         .expected_identity
         .as_ref()
-        .is_some_and(|expected| !runtime_matches_expected_identity(&runtime, expected))
+        .is_some_and(|expected| expected_identity_skip_reason(&runtime, expected).is_some())
         || (stop_options.skip_if_active_jobs
             && !matches!(runtime.status.as_str(), "stopped" | "offline" | "removed")
             && runtime_has_active_hosted_jobs(&transaction, &runtime.id).await?);
@@ -856,6 +953,7 @@ pub(crate) async fn runtime_stop(
                         provider_release_attempted: provider_release.attempted,
                         provider_release_succeeded: false,
                         skip_reason: Some("provider_cleanup_pending".to_string()),
+                        flush: Some(flush),
                     }),
                 ));
             }
@@ -973,7 +1071,7 @@ pub(crate) async fn runtime_stop(
     let (status, response) =
         build_runtime_stop_response(&outcome, &provider_release, require_provider_release);
 
-    Ok((status, Json(response)))
+    Ok((status, Json(response.with_flush(flush))))
 }
 
 pub(crate) async fn stop_runtime_for_project(
@@ -984,8 +1082,10 @@ pub(crate) async fn stop_runtime_for_project(
     source: &'static str,
 ) -> Result<RuntimeStopResponse, (StatusCode, Json<ApiError>)> {
     // Before the quarantine below fences the runtime. Only a runtime of this
-    // project, which is all this stop accepts, is flushed.
-    flush_workspace_before_stop(
+    // project, which is all this stop accepts, is flushed. Operators, users
+    // and dispatch handoffs ask for this stop, so it saves only under a
+    // workspace lease holder.
+    let flush = flush_workspace_before_stop(
         state,
         runtime_id,
         &StopOptions {
@@ -998,9 +1098,11 @@ pub(crate) async fn stop_runtime_for_project(
                 project_id: Some(*project_id),
                 provider: None,
                 display_name: None,
+                lease_id: None,
             }),
         },
         None,
+        false,
     )
     .await;
 
@@ -1161,7 +1263,9 @@ pub(crate) async fn stop_runtime_for_project(
         info!(runtime_id = %runtime_id, %reason, "runtime stop skipped state change");
     }
 
-    Ok(RuntimeStopResponse::from_outcome(&outcome).with_provider_release(&provider_release, false))
+    Ok(RuntimeStopResponse::from_outcome(&outcome)
+        .with_provider_release(&provider_release, false)
+        .with_flush(flush))
 }
 
 fn build_runtime_stop_response(
@@ -1372,6 +1476,7 @@ pub(crate) async fn runtime_remove(
             expected_identity: None,
         },
         Some((&auth_context, StopRequestKind::Remove)),
+        false,
     )
     .await;
 
@@ -1666,15 +1771,16 @@ pub(crate) async fn runtime_idle_reaper(
             .clone()
             .unwrap_or_else(|| stop_options.source.to_string());
 
-        let SafeRuntimeStop { runtime, outcome } =
-            match stop_runtime_safely(&state, &runtime_id, stop_options).await {
-                Ok(value) => value,
-                Err((status, _body)) if status == StatusCode::NOT_FOUND => {
-                    info!(runtime_id = %runtime_id, "idle reaper candidate no longer exists");
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+        let SafeRuntimeStop {
+            runtime, outcome, ..
+        } = match stop_runtime_safely(&state, &runtime_id, stop_options).await {
+            Ok(value) => value,
+            Err((status, _body)) if status == StatusCode::NOT_FOUND => {
+                info!(runtime_id = %runtime_id, "idle reaper candidate no longer exists");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
 
         if outcome.status_changed {
             if let Err((status, payload)) = revoke_tunnels_for_scope(
@@ -1925,12 +2031,12 @@ pub(crate) async fn perform_runtime_stop(
 ) -> Result<StopOutcome, (StatusCode, Json<ApiError>)> {
     let now = Utc::now();
 
-    if options
+    if let Some(reason) = options
         .expected_identity
         .as_ref()
-        .is_some_and(|expected| !runtime_matches_expected_identity(runtime, expected))
+        .and_then(|expected| expected_identity_skip_reason(runtime, expected))
     {
-        return Ok(StopOutcome::skipped(runtime, "runtime_identity_mismatch"));
+        return Ok(StopOutcome::skipped(runtime, reason));
     }
 
     if options.require_idle_timeout {
@@ -2114,6 +2220,23 @@ pub(crate) async fn perform_runtime_stop(
     })
 }
 
+/// Why a stop that expects `expected` must skip `runtime`, if it must.
+fn expected_identity_skip_reason(
+    runtime: &RuntimeDetails,
+    expected: &RuntimeIdentityExpectation,
+) -> Option<&'static str> {
+    if !runtime_matches_expected_identity(runtime, expected) {
+        return Some("runtime_identity_mismatch");
+    }
+    if expected
+        .lease_id
+        .is_some_and(|lease_id| runtime.active_lease_id != Some(lease_id))
+    {
+        return Some("runtime_lease_mismatch");
+    }
+    None
+}
+
 fn runtime_matches_expected_identity(
     runtime: &RuntimeDetails,
     expected: &RuntimeIdentityExpectation,
@@ -2226,11 +2349,11 @@ fn runtime_requires_provider_release(state: &AppState, runtime: &RuntimeDetails)
 #[cfg(test)]
 mod tests {
     use super::{
-        build_runtime_stop_response, provider_runtime_missing_release_generation,
-        release_runtime_via_provider, release_runtime_via_resolved_provider,
-        runtime_matches_expected_identity, should_skip_stop_for_terminal_runtime,
-        ProviderReleaseOutcome, RuntimeIdentityExpectation, RuntimeStopPayload,
-        RuntimeStopResponse, StopOutcome,
+        build_runtime_stop_response, expected_identity_skip_reason,
+        provider_runtime_missing_release_generation, release_runtime_via_provider,
+        release_runtime_via_resolved_provider, runtime_matches_expected_identity,
+        should_skip_stop_for_terminal_runtime, ProviderReleaseOutcome, RuntimeIdentityExpectation,
+        RuntimeStopPayload, RuntimeStopResponse, StopOutcome,
     };
     use crate::config::RuntimeProviderConfig;
     use crate::runtime::db::RuntimeDetails;
@@ -2389,12 +2512,48 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_for_another_lease_generation_is_skipped_as_a_lease_mismatch() {
+        let lease = Uuid::new_v4();
+        let runtime = runtime_details("ready", Some(lease));
+        let expect = |lease_id| RuntimeIdentityExpectation {
+            project_id: Some(runtime.project_id),
+            provider: None,
+            display_name: None,
+            lease_id,
+        };
+        assert_eq!(
+            expected_identity_skip_reason(&runtime, &expect(Some(lease))),
+            None
+        );
+        assert_eq!(expected_identity_skip_reason(&runtime, &expect(None)), None);
+        assert_eq!(
+            expected_identity_skip_reason(&runtime, &expect(Some(Uuid::new_v4()))),
+            Some("runtime_lease_mismatch")
+        );
+        assert_eq!(
+            expected_identity_skip_reason(&runtime_details("stopped", None), &expect(Some(lease))),
+            Some("runtime_identity_mismatch"),
+            "another project's runtime is an identity mismatch first"
+        );
+        let stopped = RuntimeDetails {
+            project_id: runtime.project_id,
+            ..runtime_details("stopped", None)
+        };
+        assert_eq!(
+            expected_identity_skip_reason(&stopped, &expect(Some(lease))),
+            Some("runtime_lease_mismatch"),
+            "a runtime without that generation is skipped"
+        );
+    }
+
+    #[test]
     fn expected_runtime_identity_matches_all_supplied_fields() {
         let runtime = runtime_details("ready", None);
         let matching = RuntimeIdentityExpectation {
             project_id: Some(runtime.project_id),
             provider: Some("instafy-cloud".to_string()),
             display_name: Some("Hosted Runtime".to_string()),
+            lease_id: None,
         };
         assert!(runtime_matches_expected_identity(&runtime, &matching));
 
@@ -2403,16 +2562,19 @@ mod tests {
                 project_id: Some(Uuid::new_v4()),
                 provider: None,
                 display_name: None,
+                lease_id: None,
             },
             RuntimeIdentityExpectation {
                 project_id: None,
                 provider: Some("docker".to_string()),
                 display_name: None,
+                lease_id: None,
             },
             RuntimeIdentityExpectation {
                 project_id: None,
                 provider: None,
                 display_name: Some("Browser session".to_string()),
+                lease_id: None,
             },
         ] {
             assert!(!runtime_matches_expected_identity(&runtime, &mismatched));
@@ -2441,6 +2603,7 @@ mod tests {
                 provider_release_attempted: false,
                 provider_release_succeeded: false,
                 skip_reason: Some("active_jobs".to_string()),
+                flush: None,
             }
         );
         assert_eq!(

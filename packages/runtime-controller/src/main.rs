@@ -254,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         ota_registry: ota::OtaRegistry::new_postgres(pool.clone()),
         desktop_update_registry: desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone()),
         credential_refresh_locks: CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     if let Err(error) =

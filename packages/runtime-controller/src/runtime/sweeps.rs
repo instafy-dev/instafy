@@ -1211,7 +1211,9 @@ async fn auto_stop_idle_hosted_runtimes(state: &AppState) -> AnyResult<()> {
             .unwrap_or_else(|| stop_options.source.to_string());
 
         match stop_runtime_safely(state, &runtime_id, stop_options).await {
-            Ok(SafeRuntimeStop { runtime, outcome }) => {
+            Ok(SafeRuntimeStop {
+                runtime, outcome, ..
+            }) => {
                 if outcome.status_changed {
                     info!(
                         runtime_id = %runtime.id,
@@ -1378,7 +1380,25 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
                  replace(lower(r.provider), '-', '_') = 'instafy_cloud'
                  or replace(lower(r.provider), '-', '_') like 'instafy\\_cloud\\_%'
                )
-               and r.status not in ('stopped','offline','removed')",
+               and r.status not in ('stopped','offline','removed')
+               -- A generation a pool-retirement drain started only to flush
+               -- its checkout runs no turn and is never billed: the drain
+               -- marks it `starting` before its launch and `started` with
+               -- its lease once it exists.
+               and not exists (
+                 select 1
+                 from runtime_events wake
+                 where wake.runtime_id = r.id
+                   and wake.kind = 'pool_retirement_flush_wake'
+                   and (
+                     wake.data ->> 'runtimeLeaseId' = r.active_lease_id::text
+                     or (
+                       wake.data ->> 'phase' = 'starting'
+                       and wake.created_at > now() - interval '3 minutes'
+                       and rl.requested_at >= wake.created_at
+                     )
+                   )
+               )",
             &[],
         )
         .await
@@ -1543,19 +1563,20 @@ async fn stop_runtime_for_credit_exhaustion(state: &AppState, runtime_id: Uuid) 
         .clone()
         .unwrap_or_else(|| stop_options.source.to_string());
 
-    let SafeRuntimeStop { runtime, outcome } =
-        match stop_runtime_safely(state, &runtime_id, stop_options).await {
-            Ok(result) => result,
-            Err((status, body)) => {
-                warn!(
-                    runtime_id = %runtime_id,
-                    %status,
-                    error = body.0.message,
-                    "failed to stop runtime after credit exhaustion"
-                );
-                return Ok(());
-            }
-        };
+    let SafeRuntimeStop {
+        runtime, outcome, ..
+    } = match stop_runtime_safely(state, &runtime_id, stop_options).await {
+        Ok(result) => result,
+        Err((status, body)) => {
+            warn!(
+                runtime_id = %runtime_id,
+                %status,
+                error = body.0.message,
+                "failed to stop runtime after credit exhaustion"
+            );
+            return Ok(());
+        }
+    };
 
     if outcome.status_changed {
         if let Err((status, payload)) = revoke_tunnels_for_scope(
@@ -1630,7 +1651,9 @@ async fn auto_stop_stale_runtimes(state: &AppState) -> AnyResult<()> {
             .unwrap_or_else(|| stop_options.source.to_string());
 
         match stop_runtime_safely(state, &runtime_id, stop_options).await {
-            Ok(SafeRuntimeStop { runtime, outcome }) => {
+            Ok(SafeRuntimeStop {
+                runtime, outcome, ..
+            }) => {
                 if outcome.status_changed {
                     if let Err((status, payload)) = revoke_tunnels_for_scope(
                         state,
@@ -1797,7 +1820,9 @@ async fn auto_recover_stuck_queued_runtimes(state: &AppState) -> AnyResult<()> {
             .unwrap_or_else(|| stop_options.source.to_string());
 
         match stop_runtime_safely(state, &runtime_id, stop_options).await {
-            Ok(SafeRuntimeStop { runtime, outcome }) => {
+            Ok(SafeRuntimeStop {
+                runtime, outcome, ..
+            }) => {
                 if outcome.status_changed {
                     if let Err((status, payload)) = revoke_tunnels_for_scope(
                         state,
@@ -1915,7 +1940,9 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
             .unwrap_or_else(|| stop_options.source.to_string());
 
         match stop_runtime_safely(state, &runtime_id, stop_options).await {
-            Ok(SafeRuntimeStop { runtime, outcome }) => {
+            Ok(SafeRuntimeStop {
+                runtime, outcome, ..
+            }) => {
                 if outcome.status_changed {
                     if let Err((status, payload)) = revoke_tunnels_for_scope(
                         state,
@@ -2050,7 +2077,9 @@ async fn auto_stop_orphan_requested_runtimes(state: &AppState) -> AnyResult<()> 
             .unwrap_or_else(|| stop_options.source.to_string());
 
         match stop_runtime_safely(state, &runtime_id, stop_options).await {
-            Ok(SafeRuntimeStop { runtime, outcome }) => {
+            Ok(SafeRuntimeStop {
+                runtime, outcome, ..
+            }) => {
                 if outcome.status_changed {
                     if let Err((status, payload)) = revoke_tunnels_for_scope(
                         state,

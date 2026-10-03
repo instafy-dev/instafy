@@ -5,6 +5,7 @@ use crate::AppState;
 
 mod access;
 mod db;
+mod drain;
 mod ensure;
 mod lease;
 mod limit_waits;
@@ -33,12 +34,14 @@ pub(crate) use db::{
     ensure_runtime_record, mark_runtime_ready, record_runtime_event,
     record_runtime_event_with_conversation, touch_runtime_last_seen, RuntimeRecord,
 };
+pub(crate) use drain::RuntimeDrainState;
 pub(crate) use ensure::{
     ensure_error_committed_lease_id, ensure_runtime_for_automation,
     ensure_runtime_for_dispatch_reconnect,
 };
 pub(crate) use limit_waits::{spawn_hosted_runtime_limit_wait_sweep, RUNTIME_LIMIT_REACHED_CODE};
 pub(crate) use managed::runtime_supports_shared_browser_agent_consent;
+pub(crate) use pre_stop_flush::{authorize_pre_stop_save_grant, PRE_STOP_SAVE_SCOPE};
 pub(crate) use provider::provider_is_self_hosted;
 pub(crate) use register::RuntimeRegisterResponse;
 pub(crate) use status::{
@@ -119,5 +122,12 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/projects/:project_id/runtime/request",
             post(ensure::request_runtime),
+        )
+        .route("/operator/runtime-drain/census", get(drain::drain_census))
+        .route("/operator/runtime-drain/fence", post(drain::drain_fence))
+        .route("/operator/runtime-drain/stop", post(drain::drain_stop))
+        .route(
+            "/operator/runtime-drain/flush-checkout",
+            post(drain::drain_flush_checkout),
         )
 }
