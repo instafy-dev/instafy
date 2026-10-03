@@ -48,6 +48,10 @@ What each caller may do:
 - Nobody updates an object in place, and an upload that would overwrite one is refused. After
   an uploader deletes an object, a writer can upload new content under the same name.
 - Anonymous requests have no access, and nobody can reach another space's prefix.
+- A reader can also create a signed URL for an object with their own session. Storage lets
+  them choose its lifetime, and the URL keeps working until it expires, even after they leave
+  the conversation or the space. Only deleting the object ends it sooner. Clients should
+  therefore download with the user's session rather than create signed URLs.
 
 Deleting a space ends every session's access to its attachments at once. The controller then
 deletes the space's prefix in the background with the service role. Storage lists one level of a
@@ -65,16 +69,18 @@ A runtime that downloads attachments advertises the `attachmentDownloads` capabi
    turn's message and of the conversation's last 10 user messages.
 2. It keeps only names under the leased job's own conversation, `<projectId>/<conversationId>/`.
    The controller never signs a name from another space or another conversation, or any name for
-   a job without a conversation. It logs each refused name, and the prompt reports it as
-   unavailable.
+   a job without a conversation. It logs how many names it refused for each job, never the names
+   themselves, and the prompt reports those attachments as unavailable.
 3. It signs the rest in one request with the service-role key, for 10 minutes, and adds
    `attachment_downloads: [{ name, url, sizeBytes }]` to the leased payload. It signs only
    after the lease has committed and returned its database connection, so a slow Storage
    holds neither a row lock nor a pool slot.
-4. Before the turn, the runtime downloads each entry to `.instafy/attachments/<name>`. Every
-   lane that builds a turn prompt does this, parallel write-scoped workers included.
+4. Before the turn, the runtime downloads each entry to
+   `.instafy/attachments/<conversationId>/<name>`, a folder of the turn's own conversation.
+   Every lane that builds a turn prompt does this, parallel write-scoped workers included.
    - The name must be `<uuid>.<ext>`, the object name's last segment.
-   - A file already there is kept.
+   - A file already in the conversation's folder is kept. It can only come from a turn of the
+     same conversation that is still running.
    - Each download is capped at 20 MiB and 30 seconds, and at most 4 run at once.
    - All of a turn's downloads share a budget of 60 seconds. A download still waiting or running
      when it runs out fails as timed out, so a stalled Storage delays a turn by at most a
@@ -85,18 +91,31 @@ A runtime that downloads attachments advertises the `attachmentDownloads` capabi
    - A failure is logged by name and the turn continues.
 5. The prompt lists an attachment only when it belongs to the job's own conversation, this
    lease signed it and its file is present, with `view_image` for images. It names the rest as
-   unavailable. A copy an earlier turn left on disk is not listed once the controller stops
-   signing it, for example after its uploader deleted it. Storage attachments older than the
-   last 10 user messages are not offered at all.
+   unavailable. Storage attachments older than the last 10 user messages are not offered at
+   all.
+6. The downloads last as long as the turn. When the last running turn of a conversation ends,
+   the runtime removes that conversation's folder. A leased batch, which the controller fills
+   only with one conversation's jobs, keeps the folder until its last job is done, so a later
+   job of the batch reuses what an earlier one downloaded. A turn that starts also removes
+   everything under `.instafy/attachments/` that nothing holds, such as the leftovers of a
+   runtime that stopped mid-turn. The next turn downloads again whatever its lease signs, so an
+   object its uploader deleted is gone from the next turn on.
 
 `.instafy/` is reserved: nothing under it is published. A `.gitignore` in
 `.instafy/attachments/` also keeps the downloads out of every git status.
 
-The downloads are a working copy in the space's workspace, which every conversation of the
-space shares. Storage and the controller keep a private conversation's attachments to its own
-readers and its own turns. But a file that a turn downloaded stays in `.instafy/attachments/`.
-A later turn of another conversation on the same runtime could open it there if it looked for
-it, although no prompt points it there.
+Storage and the controller keep a private conversation's attachments to its own readers and
+its own turns. On the runtime, a turn sees only its own conversation's downloads, under their
+own folder, and never another conversation's file of the same name. A turn of another
+conversation finds none of them once the turn, or the batch, that downloaded them is done.
+
+The runtime does not isolate conversations from each other beyond that. Every conversation of
+a space runs on the same runtime, in the same workspace, and the agent can read the runtime's
+files, the saved threads of other conversations included. A writer's turn in one conversation
+can therefore read what a private conversation's turns left behind, such as a file that
+conversation's agent copied out of `.instafy/attachments/`, or its saved thread, which records
+what it read and viewed. Viewers never run turns, and the workspace file routes hide
+`.instafy/`.
 
 A signed URL lets anyone fetch that object until it expires. It goes only into the leased
 payload, never into conversation history, events or logs. A runtime without the capability gets
@@ -141,15 +160,21 @@ wherever that file exists.
 - `pnpm test:controller chat_attachment` adds the database tests. They cover:
   - the lease route and its capability gate, with nothing signed outside the leased conversation;
   - that the lease returns its pool slot before Storage signs;
-  - the purge after `DELETE /projects/:projectId` and `DELETE /orgs/:orgId`;
+  - the purge after `DELETE /projects/:projectId` and `DELETE /orgs/:orgId`, and that a refused
+    delete, or one that finds no space or team, purges nothing;
   - the policy fixture above. They
   need the local stack, or a `TEST_DATABASE_URL` whose database has Supabase Storage's own
   migrations applied. The policy fixture fails on purpose against a database without them, such
   as plain PostgreSQL or the one `scripts/test-durable-notifications.py --controller-test`
   prepares.
-- `cargo test chat_attachments` in `packages/runtime-agent` covers:
-  - the download path, and the name and URL checks, other conversations' paths included;
+- `cargo test attachment` in `packages/runtime-agent` covers:
+  - the download path in the conversation's folder, and the name and URL checks, other
+    conversations' paths included;
   - the size cap and timeout, including a body that stalls, and the per-turn budget;
   - streaming, the concurrency limit, and that no partial file is left;
+  - that a turn's downloads are removed when its conversation's last running turn ends, or its
+    batch is done, that a turn's start removes what nothing holds, and that a file of the same
+    name in another conversation's folder is never used;
   - existing files and symlinks;
-  - the prompt section.
+  - the prompt section, and the prompt of both turn lanes: the main lane and the parallel
+    write-scoped worker.
