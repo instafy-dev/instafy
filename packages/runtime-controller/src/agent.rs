@@ -1058,6 +1058,7 @@ pub(crate) async fn agent_lease(
                 .map(|job| crate::chat_attachments::LeasedPayload {
                     job_id: job.id,
                     project_id: job.project_id,
+                    conversation_id: job.conversation_id,
                     payload: &mut job.payload,
                 })
                 .collect();

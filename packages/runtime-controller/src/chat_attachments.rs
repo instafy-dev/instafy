@@ -1,16 +1,17 @@
 //! Chat attachments: images and text files sent with a message. They live in
 //! the private `chat-attachments` Supabase Storage bucket as
-//! `<projectId>/<uuid>.<ext>` (supabase/migrations/20261003120000_chat_attachments.sql)
-//! and never in a space's git history.
+//! `<projectId>/<conversationId>/<uuid>.<ext>`
+//! (supabase/migrations/20261003120000_chat_attachments.sql) and never in a
+//! space's git history.
 //!
-//! Browsers upload and read them with the user's own session: every member
-//! reads, and only members who may write to the space upload. The controller
-//! holds the service role, so it signs short-lived downloads for the runtime
-//! that leases a turn and purges the prefix of a deleted space, or of every
-//! space of a deleted team. A signed URL is a
-//! bearer credential for one object: it goes only into the leased payload of a
-//! runtime that advertises `attachmentDownloads`, and never into history text,
-//! events or logs.
+//! Browsers upload and read them with the user's own session: whoever may read
+//! the conversation's messages reads them, and only those of them who may write
+//! to the space upload. The controller holds the service role, so it signs
+//! short-lived downloads of the leased conversation's attachments for the
+//! runtime that leases a turn, and purges the prefix of a deleted space, or of
+//! every space of a deleted team. A signed URL is a bearer credential for one
+//! object: it goes only into the leased payload of a runtime that advertises
+//! `attachmentDownloads`, and never into history text, events or logs.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -50,38 +51,51 @@ const PURGE_PAGE_SIZE: usize = 1000;
 const PURGE_MAX_PAGES: usize = 100;
 const MAX_DESCRIBED_NAME_CHARS: usize = 120;
 
-/// `<uuid>.<ext>`: 36 characters of lowercase hex and hyphens, then one of the
-/// bucket's extensions. The object name's second segment and the runtime's
-/// file name under `.instafy/attachments/`.
+/// `<uuid>.<ext>`: a canonical uuid, then one of the bucket's extensions. The
+/// object name's last segment and the runtime's file name under
+/// `.instafy/attachments/`.
 pub(crate) fn file_name_is_valid(name: &str) -> bool {
     let Some((stem, extension)) = name.split_once('.') else {
         return false;
     };
-    is_uuid_shaped(stem) && EXTENSIONS.contains(&extension)
+    is_canonical_uuid(stem) && EXTENSIONS.contains(&extension)
 }
 
-/// `^[0-9a-f-]{36}/[0-9a-f-]{36}\.(png|jpg|webp|gif|txt|md)$`, the shape the
-/// Storage policies accept.
+/// `<projectId>/<conversationId>/<uuid>.<ext>` with every id a canonical
+/// uuid, the shape the Storage policies accept.
 pub(crate) fn object_name_is_valid(name: &str) -> bool {
-    name.split_once('/')
-        .is_some_and(|(space, file)| is_uuid_shaped(space) && file_name_is_valid(file))
+    object_name_parts(name).is_some()
 }
 
-/// The file name of an object in `project_id`'s prefix, or `None` for a name
-/// of another shape or space.
-pub(crate) fn object_file_name<'a>(object_name: &'a str, project_id: &Uuid) -> Option<&'a str> {
-    if !object_name_is_valid(object_name) {
-        return None;
-    }
-    let (space, file) = object_name.split_once('/')?;
-    (space == project_id.to_string()).then_some(file)
+/// The space, conversation and file name segments of a valid object name.
+fn object_name_parts(name: &str) -> Option<(&str, &str, &str)> {
+    let mut segments = name.splitn(3, '/');
+    let (space, conversation, file) = (segments.next()?, segments.next()?, segments.next()?);
+    (is_canonical_uuid(space) && is_canonical_uuid(conversation) && file_name_is_valid(file))
+        .then_some((space, conversation, file))
 }
 
-fn is_uuid_shaped(value: &str) -> bool {
+/// The file name of an object in the conversation's own prefix,
+/// `<projectId>/<conversationId>/`, or `None` for a name of another shape,
+/// space or conversation, or a job without a conversation.
+pub(crate) fn object_file_name<'a>(
+    object_name: &'a str,
+    project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
+) -> Option<&'a str> {
+    let (space, conversation, file) = object_name_parts(object_name)?;
+    let conversation_id = conversation_id?;
+    (space == project_id.to_string() && conversation == conversation_id.to_string()).then_some(file)
+}
+
+/// The lower-case, hyphenated spelling a uuid is printed in, and the only one
+/// the Storage policies accept.
+fn is_canonical_uuid(value: &str) -> bool {
     value.len() == 36
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || byte == b'-')
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
 }
 
 /// One Storage attachment of a message.
@@ -216,10 +230,10 @@ fn one_line(value: &str) -> String {
 /// What the lease route may sign for one job.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct JobAttachmentPlan {
-    /// Objects in the leased job's space, current message first.
+    /// Objects in the leased job's conversation, current message first.
     pub(crate) signable: Vec<StoredAttachment>,
-    /// Names of another space's prefix. They are never signed, and the
-    /// runtime reports them as unavailable.
+    /// Names of another space's or another conversation's prefix. They are
+    /// never signed, and the runtime reports them as unavailable.
     pub(crate) foreign: usize,
     /// Names the Storage policies would refuse.
     pub(crate) invalid: usize,
@@ -227,9 +241,15 @@ pub(crate) struct JobAttachmentPlan {
 
 /// The Storage attachments of a leased job: its own message's metadata, then
 /// the last `HISTORY_USER_MESSAGES` user messages of its conversation history,
-/// newest first. Only names in `project_id`'s prefix are signable, so a
-/// message cannot reach another space's objects by naming them.
-pub(crate) fn plan_job_attachments(payload: &JsonValue, project_id: &Uuid) -> JobAttachmentPlan {
+/// newest first. Only names in the job's own `<projectId>/<conversationId>/`
+/// prefix are signable, so a message cannot reach another space's or another
+/// conversation's objects by naming them. A job without a conversation signs
+/// nothing.
+pub(crate) fn plan_job_attachments(
+    payload: &JsonValue,
+    project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
+) -> JobAttachmentPlan {
     let mut candidates = payload
         .get("metadata")
         .map(stored_attachments)
@@ -263,7 +283,8 @@ pub(crate) fn plan_job_attachments(payload: &JsonValue, project_id: &Uuid) -> Jo
         }
         if !object_name_is_valid(&attachment.storage_path) {
             plan.invalid += 1;
-        } else if object_file_name(&attachment.storage_path, project_id).is_none() {
+        } else if object_file_name(&attachment.storage_path, project_id, conversation_id).is_none()
+        {
             plan.foreign += 1;
         } else if plan.signable.len() < MAX_DOWNLOADS_PER_JOB {
             plan.signable.push(attachment);
@@ -369,11 +390,12 @@ pub(crate) async fn sign_object_urls(
 pub(crate) struct LeasedPayload<'a> {
     pub(crate) job_id: Uuid,
     pub(crate) project_id: Uuid,
+    pub(crate) conversation_id: Option<Uuid>,
     pub(crate) payload: &'a mut JsonValue,
 }
 
 /// Adds `attachment_downloads: [{name, url, sizeBytes}]` to each leased
-/// payload, for the job's own space only, with every name signed in one
+/// payload, for the job's own conversation only, with every name signed in one
 /// request. Call it only for a runtime that advertises `attachmentDownloads`.
 /// Without `access`, or when signing fails, nothing is added and the runtime
 /// reports the attachments as unavailable.
@@ -383,16 +405,17 @@ pub(crate) async fn add_attachment_downloads(
 ) {
     let plans: Vec<JobAttachmentPlan> = jobs
         .iter()
-        .map(|job| plan_job_attachments(job.payload, &job.project_id))
+        .map(|job| plan_job_attachments(job.payload, &job.project_id, job.conversation_id.as_ref()))
         .collect();
     for (job, plan) in jobs.iter().zip(&plans) {
         if plan.foreign > 0 || plan.invalid > 0 {
             warn!(
                 job_id = %job.job_id,
                 project_id = %job.project_id,
+                conversation_id = ?job.conversation_id,
                 foreign = plan.foreign,
                 invalid = plan.invalid,
-                "chat attachments outside the leased space were not signed"
+                "chat attachments outside the leased conversation were not signed"
             );
         }
     }
@@ -426,7 +449,11 @@ pub(crate) async fn add_attachment_downloads(
             .iter()
             .filter_map(|attachment| {
                 let url = signed.get(&attachment.storage_path)?;
-                let name = object_file_name(&attachment.storage_path, &job.project_id)?;
+                let name = object_file_name(
+                    &attachment.storage_path,
+                    &job.project_id,
+                    job.conversation_id.as_ref(),
+                )?;
                 let mut download = json!({ "name": name, "url": url });
                 if let Some(size) = attachment.size_bytes {
                     download["sizeBytes"] = json!(size);
@@ -468,8 +495,10 @@ pub(crate) fn runtime_accepts_attachment_downloads(capabilities: &JsonValue) -> 
         == Some(true)
 }
 
-/// Deletes every object under `<projectId>/`, a page at a time, and returns
-/// how many Storage removed.
+/// Deletes every object under `<projectId>/` and returns how many Storage
+/// removed. Storage lists one level of a prefix at a time, so a list of the
+/// space shows each conversation as a folder, and each folder is emptied a page
+/// at a time. A folder disappears from the space's list once it is empty.
 pub(crate) async fn purge_project_attachments(
     access: &StorageAccess,
     project_id: &Uuid,
@@ -477,58 +506,124 @@ pub(crate) async fn purge_project_attachments(
     let prefix = format!("{project_id}/");
     let mut removed = 0;
     for _ in 0..PURGE_MAX_PAGES {
-        let response = access
-            .request(reqwest::Method::POST, &format!("/object/list/{BUCKET}"))
-            .json(&json!({
-                "prefix": prefix,
-                "limit": PURGE_PAGE_SIZE,
-                "offset": 0,
-                "sortBy": { "column": "name", "order": "asc" },
-            }))
-            .send()
-            .await
-            .map_err(|error| format!("list request failed: {}", error.without_url()))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("list request returned {status}"));
-        }
-        let entries: Vec<JsonValue> = response
-            .json()
-            .await
-            .map_err(|_| "list response was not a JSON array".to_string())?;
-        let names: Vec<String> = entries
-            .iter()
-            .filter_map(|entry| entry.get("name").and_then(JsonValue::as_str))
-            .filter(|name| !name.is_empty() && !name.contains('/'))
-            .map(|name| format!("{prefix}{name}"))
-            .collect();
-        if names.is_empty() {
+        let page = list_prefix(access, &prefix).await?;
+        if page.is_empty() {
             return Ok(removed);
         }
-        let response = access
-            .request(reqwest::Method::DELETE, &format!("/object/{BUCKET}"))
-            .json(&json!({ "prefixes": names }))
-            .send()
-            .await
-            .map_err(|error| format!("delete request failed: {}", error.without_url()))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("delete request returned {status}"));
+        let mut removed_from_page = 0;
+        let mut files = Vec::new();
+        for entry in page {
+            match entry {
+                ListedEntry::Folder(folder) => {
+                    removed_from_page +=
+                        purge_prefix_files(access, &format!("{prefix}{folder}/")).await?;
+                }
+                ListedEntry::File(name) => files.push(format!("{prefix}{name}")),
+            }
         }
-        let deleted = response
-            .json::<Vec<JsonValue>>()
-            .await
-            .map(|entries| entries.len())
-            .unwrap_or(0);
-        if deleted == 0 {
+        if !files.is_empty() {
+            removed_from_page += delete_objects(access, &files).await?;
+        }
+        if removed_from_page == 0 {
             // The same page would come back again.
-            return Err(format!("{} listed objects were not deleted", names.len()));
+            return Err("listed objects were not deleted".to_string());
         }
-        removed += deleted;
+        removed += removed_from_page;
     }
     Err(format!(
         "stopped after {PURGE_MAX_PAGES} pages; {removed} objects removed"
     ))
+}
+
+/// Deletes the objects directly under `prefix`, a page at a time.
+async fn purge_prefix_files(access: &StorageAccess, prefix: &str) -> Result<usize, String> {
+    let mut removed = 0;
+    for _ in 0..PURGE_MAX_PAGES {
+        let names: Vec<String> = list_prefix(access, prefix)
+            .await?
+            .into_iter()
+            .filter_map(|entry| match entry {
+                ListedEntry::File(name) => Some(format!("{prefix}{name}")),
+                // Deeper than any name the policies accept.
+                ListedEntry::Folder(_) => None,
+            })
+            .collect();
+        if names.is_empty() {
+            return Ok(removed);
+        }
+        removed += delete_objects(access, &names).await?;
+    }
+    Err(format!(
+        "stopped after {PURGE_MAX_PAGES} pages; {removed} objects removed"
+    ))
+}
+
+/// One entry of a Storage list: an object directly under the prefix, or a
+/// folder that holds more of them. Storage gives a folder no id.
+enum ListedEntry {
+    File(String),
+    Folder(String),
+}
+
+/// The first page of entries directly under `prefix`.
+async fn list_prefix(access: &StorageAccess, prefix: &str) -> Result<Vec<ListedEntry>, String> {
+    let response = access
+        .request(reqwest::Method::POST, &format!("/object/list/{BUCKET}"))
+        .json(&json!({
+            "prefix": prefix,
+            "limit": PURGE_PAGE_SIZE,
+            "offset": 0,
+            "sortBy": { "column": "name", "order": "asc" },
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("list request failed: {}", error.without_url()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("list request returned {status}"));
+    }
+    let entries: Vec<JsonValue> = response
+        .json()
+        .await
+        .map_err(|_| "list response was not a JSON array".to_string())?;
+    Ok(entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name").and_then(JsonValue::as_str)?;
+            if name.is_empty() || name.contains('/') {
+                return None;
+            }
+            Some(if entry.get("id").is_none_or(JsonValue::is_null) {
+                ListedEntry::Folder(name.to_string())
+            } else {
+                ListedEntry::File(name.to_string())
+            })
+        })
+        .collect())
+}
+
+/// Deletes the named objects and returns how many Storage removed. Removing
+/// none of them is an error: the same names would be listed again.
+async fn delete_objects(access: &StorageAccess, names: &[String]) -> Result<usize, String> {
+    let response = access
+        .request(reqwest::Method::DELETE, &format!("/object/{BUCKET}"))
+        .json(&json!({ "prefixes": names }))
+        .send()
+        .await
+        .map_err(|error| format!("delete request failed: {}", error.without_url()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("delete request returned {status}"));
+    }
+    let deleted = response
+        .json::<Vec<JsonValue>>()
+        .await
+        .map(|entries| entries.len())
+        .unwrap_or(0);
+    if deleted == 0 {
+        return Err(format!("{} listed objects were not deleted", names.len()));
+    }
+    Ok(deleted)
 }
 
 /// Purges deleted spaces' attachments in the background, one space at a time
@@ -727,8 +822,10 @@ pub(crate) mod fake_storage {
     use axum::response::{IntoResponse, Response};
     use serde_json::{json, Value as JsonValue};
 
-    /// Lists at most two names per page, whatever the limit asked for, and
-    /// deletes what it is told to. Requests without the service-role key in
+    /// Lists one level of a prefix as Storage does: an object directly under
+    /// it by its name and id, and a deeper one as its folder, once and without
+    /// an id. A page holds at most two entries, whatever the limit asked for.
+    /// It deletes what it is told to. Requests without the service-role key in
     /// both headers are refused.
     #[derive(Clone)]
     pub(crate) struct FakeBucket {
@@ -750,11 +847,6 @@ pub(crate) mod fake_storage {
 
         pub(crate) fn objects(&self) -> Vec<String> {
             self.objects.lock().unwrap().clone()
-        }
-
-        /// How many list requests arrived.
-        pub(crate) fn lists(&self) -> usize {
-            self.lists.lock().unwrap().len()
         }
 
         /// The prefixes the list requests asked for, in order.
@@ -803,15 +895,20 @@ pub(crate) mod fake_storage {
         }
         let prefix = body["prefix"].as_str().unwrap_or_default().to_string();
         bucket.lists.lock().unwrap().push(prefix.clone());
-        let page: Vec<JsonValue> = bucket
-            .objects
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|name| name.strip_prefix(&prefix))
-            .take(2)
-            .map(|name| json!({ "name": name, "id": name }))
-            .collect();
+        let objects = bucket.objects.lock().unwrap().clone();
+        let mut page: Vec<JsonValue> = Vec::new();
+        for rest in objects.iter().filter_map(|name| name.strip_prefix(&prefix)) {
+            let entry = match rest.split_once('/') {
+                Some((folder, _)) => json!({ "name": folder, "id": null }),
+                None => json!({ "name": rest, "id": rest }),
+            };
+            if !page.contains(&entry) {
+                page.push(entry);
+            }
+            if page.len() == 2 {
+                break;
+            }
+        }
         axum::Json(JsonValue::Array(page)).into_response()
     }
 
@@ -845,14 +942,25 @@ mod tests {
 
     const PROJECT: &str = "11111111-1111-4111-8111-111111111111";
     const OTHER_PROJECT: &str = "22222222-2222-4222-8222-222222222222";
+    const CONVERSATION: &str = "c0c0c0c0-3333-4333-8333-333333333333";
+    const OTHER_CONVERSATION: &str = "44444444-4444-4444-8444-444444444444";
     const KEY: &str = "test-service-role-key";
 
     fn project() -> Uuid {
         Uuid::parse_str(PROJECT).unwrap()
     }
 
+    fn conversation() -> Uuid {
+        Uuid::parse_str(CONVERSATION).unwrap()
+    }
+
+    /// An object of `space`'s copy of the leased conversation.
     fn object(space: &str, stem: &str, extension: &str) -> String {
-        format!("{space}/{stem}.{extension}")
+        object_in(space, CONVERSATION, stem, extension)
+    }
+
+    fn object_in(space: &str, conversation: &str, stem: &str, extension: &str) -> String {
+        format!("{space}/{conversation}/{stem}.{extension}")
     }
 
     fn image(path: &str) -> JsonValue {
@@ -882,21 +990,42 @@ mod tests {
             object(PROJECT, stem, "PNG"),
             object(PROJECT, "6A000000-0000-4000-8000-000000000001", "png"),
             object(PROJECT, "screenshot", "png"),
-            format!("{PROJECT}/../{stem}.png"),
-            format!("{PROJECT}/x/{stem}.png"),
+            // 36 characters that parse as the same uuid, but are not its
+            // canonical spelling.
+            object(PROJECT, "6a00-0000-0000-4000-8000000000000001", "png"),
+            object_in(PROJECT, &CONVERSATION.to_uppercase(), stem, "png"),
+            object_in(PROJECT, "c0c0-c0c0-3333-4333-8333333333333333", stem, "png"),
+            object_in(
+                "1111-1111-1111-4111-8111111111111111",
+                CONVERSATION,
+                stem,
+                "png",
+            ),
+            format!("{PROJECT}/{CONVERSATION}/../{stem}.png"),
+            format!("{PROJECT}/{CONVERSATION}/x/{stem}.png"),
+            // A name without a conversation.
+            format!("{PROJECT}/{stem}.png"),
             format!("{stem}.png"),
-            format!("{PROJECT}/{stem}.png.txt"),
-            format!("{PROJECT}/{stem}.png "),
+            format!("{PROJECT}/{CONVERSATION}/{stem}.png.txt"),
+            format!("{PROJECT}/{CONVERSATION}/{stem}.png "),
             String::new(),
         ] {
             assert!(!object_name_is_valid(&bad), "{bad:?} must be refused");
         }
+        fn leased(name: &str) -> Option<&str> {
+            object_file_name(name, &project(), Some(&conversation()))
+        }
         assert_eq!(
-            object_file_name(&object(PROJECT, stem, "md"), &project()),
+            leased(&object(PROJECT, stem, "md")),
             Some(format!("{stem}.md").as_str())
         );
+        assert_eq!(leased(&object(OTHER_PROJECT, stem, "md")), None);
         assert_eq!(
-            object_file_name(&object(OTHER_PROJECT, stem, "md"), &project()),
+            leased(&object_in(PROJECT, OTHER_CONVERSATION, stem, "md")),
+            None
+        );
+        assert_eq!(
+            object_file_name(&object(PROJECT, stem, "md"), &project(), None),
             None
         );
         assert!(file_name_is_valid(&format!("{stem}.gif")));
@@ -905,7 +1034,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_keeps_only_the_leased_space_and_recent_user_messages() {
+    fn plan_keeps_only_the_leased_conversation_and_recent_user_messages() {
         let own = |n: u32| object(PROJECT, &format!("6a000000-0000-4000-8000-{n:012}"), "png");
         let mut history = Vec::new();
         // Twelve user messages with one attachment each, oldest first, plus
@@ -917,10 +1046,17 @@ mod tests {
         history
             .push(json!({ "role": "assistant", "metadata": { "attachments": [image(&own(99))] } }));
         let foreign = object(OTHER_PROJECT, "6a000000-0000-4000-8000-000000000050", "png");
+        let other_conversation = object_in(
+            PROJECT,
+            OTHER_CONVERSATION,
+            "6a000000-0000-4000-8000-000000000051",
+            "png",
+        );
         let payload = json!({
             "metadata": { "attachments": [
                 image(&own(12)),
                 image(&foreign),
+                image(&other_conversation),
                 { "kind": "file", "storagePath": object(PROJECT, "6a000000-0000-4000-8000-000000000060", "md") },
                 { "kind": "image", "storagePath": "screenshot.png" },
                 { "kind": "image", "workspacePath": "chat-upload-1.png" },
@@ -929,7 +1065,7 @@ mod tests {
             "conversation_history": history,
         });
 
-        let plan = plan_job_attachments(&payload, &project());
+        let plan = plan_job_attachments(&payload, &project(), Some(&conversation()));
         let paths: Vec<&str> = plan
             .signable
             .iter()
@@ -944,10 +1080,16 @@ mod tests {
             paths,
             expected.iter().map(String::as_str).collect::<Vec<_>>()
         );
-        assert_eq!(plan.foreign, 1);
+        assert_eq!(plan.foreign, 2);
         assert_eq!(plan.invalid, 1);
         assert!(plan.signable[0].is_image);
         assert!(!plan.signable[1].is_image);
+
+        // A job without a conversation has no prefix to sign from.
+        let plan = plan_job_attachments(&payload, &project(), None);
+        assert!(plan.signable.is_empty());
+        assert_eq!(plan.foreign, 13);
+        assert_eq!(plan.invalid, 1);
     }
 
     #[test]
@@ -1007,11 +1149,13 @@ mod tests {
             LeasedPayload {
                 job_id: Uuid::new_v4(),
                 project_id: project(),
+                conversation_id: Some(conversation()),
                 payload: &mut lead,
             },
             LeasedPayload {
                 job_id: Uuid::new_v4(),
                 project_id: project(),
+                conversation_id: Some(conversation()),
                 payload: &mut worker,
             },
         ];
@@ -1039,10 +1183,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn another_spaces_object_is_never_signed() {
+    async fn another_spaces_or_conversations_object_is_never_signed() {
         let server = MockServer::start_async().await;
         let own = object(PROJECT, "6a000000-0000-4000-8000-000000000001", "png");
         let foreign = object(OTHER_PROJECT, "6a000000-0000-4000-8000-000000000002", "png");
+        let other_conversation = object_in(
+            PROJECT,
+            OTHER_CONVERSATION,
+            "6a000000-0000-4000-8000-000000000003",
+            "png",
+        );
         let sign = server
             .mock_async(|when, then| {
                 when.method(POST)
@@ -1054,10 +1204,13 @@ mod tests {
                 ]));
             })
             .await;
-        let mut payload = json!({ "metadata": { "attachments": [image(&foreign), image(&own)] } });
+        let mut payload = json!({ "metadata": { "attachments": [
+            image(&foreign), image(&own), image(&other_conversation),
+        ] } });
         let mut jobs = [LeasedPayload {
             job_id: Uuid::new_v4(),
             project_id: project(),
+            conversation_id: Some(conversation()),
             payload: &mut payload,
         }];
         add_attachment_downloads(Some(&access(&server)), &mut jobs).await;
@@ -1072,12 +1225,18 @@ mod tests {
         assert!(!payload[DOWNLOADS_PAYLOAD_KEY]
             .to_string()
             .contains(OTHER_PROJECT));
+        assert!(!payload[DOWNLOADS_PAYLOAD_KEY]
+            .to_string()
+            .contains("000000000003"));
 
-        // A space with only foreign names makes no request at all.
-        let mut only_foreign = json!({ "metadata": { "attachments": [image(&foreign)] } });
+        // A job with only foreign names makes no request at all.
+        let mut only_foreign = json!({ "metadata": { "attachments": [
+            image(&foreign), image(&other_conversation),
+        ] } });
         let mut jobs = [LeasedPayload {
             job_id: Uuid::new_v4(),
             project_id: project(),
+            conversation_id: Some(conversation()),
             payload: &mut only_foreign,
         }];
         add_attachment_downloads(Some(&access(&server)), &mut jobs).await;
@@ -1095,7 +1254,7 @@ mod tests {
                 when.method(POST).path("/storage/v1/object/sign/chat-attachments");
                 then.status(200).json_body(json!([
                     { "error": null, "path": first,
-                      "signedURL": format!("/object/sign/chat-attachments/{OTHER_PROJECT}/x.png?token=one") },
+                      "signedURL": format!("/object/sign/chat-attachments/{OTHER_PROJECT}/{CONVERSATION}/x.png?token=one") },
                     { "error": "Object not found", "path": second, "signedURL": null },
                 ]));
             })
@@ -1104,6 +1263,7 @@ mod tests {
         let mut jobs = [LeasedPayload {
             job_id: Uuid::new_v4(),
             project_id: project(),
+            conversation_id: Some(conversation()),
             payload: &mut payload,
         }];
         add_attachment_downloads(Some(&access(&server)), &mut jobs).await;
@@ -1117,6 +1277,7 @@ mod tests {
         let mut jobs = [LeasedPayload {
             job_id: Uuid::new_v4(),
             project_id: project(),
+            conversation_id: Some(conversation()),
             payload: &mut payload,
         }];
         add_attachment_downloads(None, &mut jobs).await;
@@ -1144,21 +1305,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn purge_lists_and_deletes_the_space_prefix_page_by_page() {
-        let mut objects: Vec<String> = (1..=5)
-            .map(|n| object(PROJECT, &format!("6a000000-0000-4000-8000-{n:012}"), "png"))
-            .collect();
-        let other = object(OTHER_PROJECT, "6a000000-0000-4000-8000-000000000009", "png");
-        objects.insert(2, other.clone());
-        let bucket = fake_storage::FakeBucket::new(KEY, objects);
+    async fn purge_empties_every_conversation_folder_of_the_space_page_by_page() {
+        let stem = |n: u32| format!("6a000000-0000-4000-8000-{n:012}");
+        let [first, second, third] = [
+            CONVERSATION,
+            OTHER_CONVERSATION,
+            "55555555-5555-4555-8555-555555555555",
+        ];
+        let other = object_in(OTHER_PROJECT, first, &stem(9), "png");
+        let bucket = fake_storage::FakeBucket::new(
+            KEY,
+            vec![
+                object_in(PROJECT, first, &stem(1), "png"),
+                other.clone(),
+                object_in(PROJECT, first, &stem(2), "png"),
+                // Directly under the space: no name the policies accept, but
+                // the purge leaves nothing behind.
+                format!("{PROJECT}/stray.png"),
+                object_in(PROJECT, first, &stem(3), "png"),
+                object_in(PROJECT, second, &stem(4), "png"),
+                object_in(PROJECT, third, &stem(5), "png"),
+            ],
+        );
         let (base_url, server) = bucket.serve().await;
 
         let storage = StorageAccess::new(reqwest::Client::new(), &base_url, KEY);
-        assert_eq!(purge_project_attachments(&storage, &project()).await, Ok(5));
+        assert_eq!(purge_project_attachments(&storage, &project()).await, Ok(6));
         assert_eq!(bucket.objects(), vec![other]);
-        // Pages of two, two and one, then the empty page that ends the purge.
-        assert_eq!(bucket.lists(), 4);
-        assert_eq!(bucket.deletes(), 3);
+        // The space lists two entries a page: the first conversation and the
+        // stray object, then the other two conversations, then nothing. Each
+        // conversation is emptied a page of two at a time.
+        let space = format!("{PROJECT}/");
+        let folder = |conversation: &str| format!("{PROJECT}/{conversation}/");
+        assert_eq!(
+            bucket.listed_prefixes(),
+            vec![
+                space.clone(),
+                folder(first),
+                folder(first),
+                folder(first),
+                space.clone(),
+                folder(second),
+                folder(second),
+                folder(third),
+                folder(third),
+                space,
+            ]
+        );
+        assert_eq!(bucket.deletes(), 5);
         server.abort();
     }
 
@@ -1170,7 +1364,8 @@ mod tests {
                 when.method(POST)
                     .path("/storage/v1/object/list/chat-attachments");
                 then.status(200).json_body(json!([
-                    { "name": "6a000000-0000-4000-8000-000000000001.png" },
+                    { "name": "6a000000-0000-4000-8000-000000000001.png",
+                      "id": "6f000000-0000-4000-8000-000000000001" },
                 ]));
             })
             .await;

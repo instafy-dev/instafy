@@ -1,8 +1,9 @@
 //! Chat attachments through the controller's routes, on the migrated
 //! database: which runtimes the agent lease route gives signed URLs, for which
-//! objects, that a job row cannot supply URLs of its own, that the route
-//! returns its pool slot before it waits on Storage, and that deleting a
-//! space, or the team with all its spaces, purges their prefixes.
+//! objects (only the leased conversation's), that a job row cannot supply URLs
+//! of its own, that the route returns its pool slot before it waits on Storage,
+//! and that deleting a space, or the team with all its spaces, purges their
+//! prefixes, every conversation's folder included.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -192,10 +193,11 @@ async fn lease(state: &AppState, space: &Space, runtime_id: &Uuid) -> anyhow::Re
 }
 
 #[tokio::test]
-async fn lease_signs_own_space_attachments_only_for_runtimes_that_download_them(
+async fn lease_signs_own_conversation_attachments_only_for_runtimes_that_download_them(
 ) -> anyhow::Result<()> {
     let pool =
-        require_origin_test_pool("lease_signs_own_space_attachments_only_for_runtimes").await?;
+        require_origin_test_pool("lease_signs_own_conversation_attachments_only_for_runtimes")
+            .await?;
     let space = Space {
         org_id: Uuid::new_v4(),
         project_id: Uuid::new_v4(),
@@ -203,17 +205,26 @@ async fn lease_signs_own_space_attachments_only_for_runtimes_that_download_them(
         conversation_id: Uuid::new_v4(),
     };
     let own = format!(
-        "{}/6a000000-0000-4000-8000-000000000001.png",
-        space.project_id
+        "{}/{}/6a000000-0000-4000-8000-000000000001.png",
+        space.project_id, space.conversation_id
     );
     let foreign = format!(
-        "{}/6a000000-0000-4000-8000-000000000002.png",
+        "{}/{}/6a000000-0000-4000-8000-000000000002.png",
+        Uuid::new_v4(),
+        space.conversation_id
+    );
+    // The same space, but a conversation the job does not belong to: its
+    // participants may differ, so it is never signed for this one.
+    let other_conversation = format!(
+        "{}/{}/6a000000-0000-4000-8000-000000000003.png",
+        space.project_id,
         Uuid::new_v4()
     );
     let attachments = json!([
         { "kind": "image", "storagePath": own, "fileName": "photo.png",
           "mimeType": "image/png", "sizeBytes": 2048 },
         { "kind": "image", "storagePath": foreign, "fileName": "elsewhere.png" },
+        { "kind": "image", "storagePath": other_conversation, "fileName": "aside.png" },
     ]);
 
     let storage = MockServer::start_async().await;
@@ -255,8 +266,9 @@ async fn lease_signs_own_space_attachments_only_for_runtimes_that_download_them(
             ],
         });
 
-        // A runtime that downloads attachments gets a URL for its own space's
-        // object, signed in one request, and nothing for the other space.
+        // A runtime that downloads attachments gets a URL for its own
+        // conversation's object, signed in one request, and nothing for the
+        // other space or the other conversation.
         let downloader = add_runtime(
             &pool,
             &space,
@@ -326,8 +338,8 @@ async fn lease_returns_its_pool_slot_before_storage_signs() -> anyhow::Result<()
         conversation_id: Uuid::new_v4(),
     };
     let own = format!(
-        "{}/6a000000-0000-4000-8000-000000000001.png",
-        space.project_id
+        "{}/{}/6a000000-0000-4000-8000-000000000001.png",
+        space.project_id, space.conversation_id
     );
     let attachments = json!([
         { "kind": "image", "storagePath": own, "fileName": "photo.png",
@@ -454,14 +466,27 @@ async fn delete_project_purges_the_space_prefix_after_the_delete_commits() -> an
         owner_user_id: Uuid::new_v4(),
         conversation_id: Uuid::new_v4(),
     };
-    let own = |n: u32| format!("{}/6a000000-0000-4000-8000-{n:012}.png", space.project_id);
+    let second_conversation = Uuid::new_v4();
+    let object = |conversation_id: &Uuid, n: u32| {
+        format!(
+            "{}/{conversation_id}/6a000000-0000-4000-8000-{n:012}.png",
+            space.project_id
+        )
+    };
     let other_space = format!(
-        "{}/6a000000-0000-4000-8000-000000000009.png",
-        Uuid::new_v4()
+        "{}/{}/6a000000-0000-4000-8000-000000000009.png",
+        Uuid::new_v4(),
+        space.conversation_id
     );
     let bucket = FakeBucket::new(
         SERVICE_ROLE_KEY,
-        vec![own(1), other_space.clone(), own(2), own(3)],
+        vec![
+            object(&space.conversation_id, 1),
+            other_space.clone(),
+            object(&space.conversation_id, 2),
+            object(&second_conversation, 4),
+            object(&space.conversation_id, 3),
+        ],
     );
     let (storage_url, storage_server) = bucket.serve().await;
 
@@ -521,16 +546,25 @@ async fn delete_project_purges_the_space_prefix_after_the_delete_commits() -> an
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let prefix = format!("{}/", space.project_id);
+        // The space's list shows both conversations as folders, and each is
+        // emptied a page of two at a time.
+        let space_prefix = format!("{}/", space.project_id);
+        let folder = |conversation_id: &Uuid| format!("{space_prefix}{conversation_id}/");
+        let expected = vec![
+            space_prefix.clone(),
+            folder(&space.conversation_id),
+            folder(&space.conversation_id),
+            folder(&space.conversation_id),
+            folder(&second_conversation),
+            folder(&second_conversation),
+            space_prefix.clone(),
+        ];
         anyhow::ensure!(
-            bucket
-                .listed_prefixes()
-                .iter()
-                .all(|listed| *listed == prefix),
-            "listed another prefix: {:?}",
+            bucket.listed_prefixes() == expected,
+            "listed prefixes: {:?}",
             bucket.listed_prefixes()
         );
-        anyhow::ensure!(bucket.deletes() == 2, "deletes: {}", bucket.deletes());
+        anyhow::ensure!(bucket.deletes() == 3, "deletes: {}", bucket.deletes());
         Ok(())
     })
     .await;
@@ -559,8 +593,12 @@ async fn delete_organization_purges_every_space_prefix_after_the_delete_commits(
         conversation_id: Uuid::new_v4(),
     };
     let second_project_id = Uuid::new_v4();
-    let object =
-        |project_id: &Uuid, n: u32| format!("{project_id}/6a000000-0000-4000-8000-{n:012}.png");
+    let object = |project_id: &Uuid, n: u32| {
+        format!(
+            "{project_id}/{}/6a000000-0000-4000-8000-{n:012}.png",
+            space.conversation_id
+        )
+    };
     let other_space = object(&Uuid::new_v4(), 9);
     let bucket = FakeBucket::new(
         SERVICE_ROLE_KEY,
@@ -643,7 +681,9 @@ async fn delete_organization_purges_every_space_prefix_after_the_delete_commits(
         listed.dedup();
         let mut expected = vec![
             format!("{}/", space.project_id),
+            format!("{}/{}/", space.project_id, space.conversation_id),
             format!("{second_project_id}/"),
+            format!("{second_project_id}/{}/", space.conversation_id),
         ];
         expected.sort();
         anyhow::ensure!(listed == expected, "listed prefixes: {listed:?}");
