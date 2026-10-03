@@ -1202,6 +1202,9 @@ impl RuntimeAgent {
             return Ok(());
         }
 
+        // A stop while this job runs, or within a minute of it losing its
+        // lease, interrupts its turn (see AgentExecutor::turn_interrupted).
+        let turn = executor.begin_turn(job.id);
         let mut periodic_heartbeat: Option<HeartbeatTask> = None;
         let mut periodic_secrets_refresh: Option<SecretsRefreshTask> = None;
         let lease_lost_signal = JobCancelSignal::new();
@@ -1245,6 +1248,7 @@ impl RuntimeAgent {
                 job_id = %job.id,
                 "job lease was lost before env-sensitive execution; skipping job"
             );
+            turn.end(true);
             if let Some(task) = periodic_heartbeat.take() {
                 task.shutdown().await;
             }
@@ -1363,7 +1367,6 @@ impl RuntimeAgent {
                     }
                     match execution_result {
                         Ok(execution) => {
-                            executor.note_job_ended(false);
                             Self::complete_job(&client, registration, &job, execution).await;
                         }
                         Err(error) => {
@@ -1375,7 +1378,7 @@ impl RuntimeAgent {
                             });
                             if lease_lost {
                                 info!(job_id = %job.id, "job cancelled; skipping completion");
-                                executor.note_job_ended(true);
+                                turn.end(true);
                                 executor.processor().cleanup_after_lease_lost(&job).await;
                                 if let Some(task) = periodic_heartbeat.take() {
                                     task.shutdown().await;
@@ -1491,6 +1494,8 @@ impl RuntimeAgent {
             apply_job_secrets(&secret_env_keys, &empty);
         }
 
+        // Done, failed or refused: the turn ended without losing its lease.
+        turn.end(false);
         Ok(())
     }
 

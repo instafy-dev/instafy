@@ -182,6 +182,11 @@ pub(crate) enum GitSyncOutcome {
     Conflict {
         message: String,
     },
+    /// The workspace is stopping: a stop already kept its work on recovery
+    /// refs, and saves wait for the next start. Nothing needs resolving.
+    Stopping {
+        message: String,
+    },
     Failed {
         message: String,
     },
@@ -898,6 +903,15 @@ async fn git_sync_with_lease(
         });
     }
 
+    if parsed.is_workspace_stopping() {
+        return Ok(GitSyncOutcome::Stopping {
+            message: parsed
+                .error
+                .clone()
+                .unwrap_or_else(|| "the workspace is stopping".to_string()),
+        });
+    }
+
     if status == StatusCode::CONFLICT {
         return Ok(GitSyncOutcome::Conflict { message: text });
     }
@@ -1379,6 +1393,13 @@ async fn try_git_sync(
     if !status.is_success() {
         if parsed.is_not_saved() {
             return Ok(parsed);
+        }
+        if parsed.is_workspace_stopping() {
+            // Not a conflict: a stop has already kept this work on recovery
+            // refs, and the save waits for the next start.
+            bail!(
+                "not saved now: the workspace is stopping and its work is kept on recovery refs until it restarts"
+            );
         }
         let details = text.trim();
         if details.is_empty() {
@@ -2493,6 +2514,87 @@ mod tests {
                 ],
             "{not_saved:?}"
         );
+        Ok(())
+    }
+
+    const STOPPING_BODY: &str = r#"{"error":"the workspace is stopping and its work is kept on recovery refs; save again after it restarts",
+        "code":"workspace_stopping","retryable":true}"#;
+
+    /// The `/sync` lane during a stop: the origin's `workspace_stopping`
+    /// answer is not a merge conflict.
+    #[tokio::test]
+    async fn a_sync_during_a_stop_is_not_reported_as_a_conflict() -> Result<()> {
+        let origin_id = Uuid::new_v4();
+        let (origin_address, _) =
+            spawn_reporting_origin(AxumStatusCode::SERVICE_UNAVAILABLE, STOPPING_BODY).await;
+        let (controller_address, _) =
+            spawn_stub_controller(origin_id, format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let outcome = super::git_sync_with_lease(
+            &reqwest::Client::new(),
+            &controller,
+            "controller-token",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "instafy: sync",
+            None,
+        )
+        .await?;
+        match outcome {
+            super::GitSyncOutcome::Stopping { message } => {
+                ensure!(message.contains("stopping"), "{message}")
+            }
+            other => anyhow::bail!("expected Stopping, got {other:?}"),
+        }
+
+        // A 409 with the same code is the same answer, whatever the status.
+        let (origin_address, _) =
+            spawn_reporting_origin(AxumStatusCode::CONFLICT, STOPPING_BODY).await;
+        let (controller_address, _) =
+            spawn_stub_controller(origin_id, format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let outcome = super::git_sync_with_lease(
+            &reqwest::Client::new(),
+            &controller,
+            "controller-token",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "instafy: sync",
+            None,
+        )
+        .await?;
+        ensure!(
+            matches!(outcome, super::GitSyncOutcome::Stopping { .. }),
+            "{outcome:?}"
+        );
+        Ok(())
+    }
+
+    /// A checkpoint during a stop says the workspace is stopping, not that
+    /// the save conflicted.
+    #[tokio::test]
+    async fn a_checkpoint_during_a_stop_says_the_workspace_is_stopping() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("notes.md"), "hello\n")?;
+        let (origin_address, _) =
+            spawn_reporting_origin(AxumStatusCode::SERVICE_UNAVAILABLE, STOPPING_BODY).await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let (artifacts, _) = checkpoint_lane_files_with_report(
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+            &[changed_file_descriptor("notes.md")],
+        )
+        .await;
+        let error = artifacts[0]["metadata"]["gitSyncError"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        ensure!(error.contains("the workspace is stopping"), "{error}");
+        ensure!(!error.to_ascii_lowercase().contains("conflict"), "{error}");
         Ok(())
     }
 

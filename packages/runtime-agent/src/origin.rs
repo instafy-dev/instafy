@@ -283,9 +283,10 @@ impl OriginService {
     }
 
     /// Stop the origin, keeping the workspace's work on local recovery refs
-    /// first. `turn_interrupted`: the last job lost its lease before its turn
-    /// finished, so the turn's local commits are set aside too instead of
-    /// being left for the next publish.
+    /// first. `turn_interrupted`: a turn is still running or lost its lease
+    /// within the last minute (`AgentExecutor::turn_interrupted`), so its
+    /// local commits are set aside too instead of being left for the next
+    /// publish.
     pub async fn shutdown_after_turn(&mut self, turn_interrupted: bool) {
         if let Some(server) = self.server.as_mut() {
             // Graceful machine shutdown: keep uncommitted workspace changes on

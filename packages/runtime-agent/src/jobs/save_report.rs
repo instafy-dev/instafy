@@ -71,6 +71,13 @@ impl OriginSaveResponse {
         self.code.as_deref() == Some("not_saved")
     }
 
+    /// The origin refused the save because its workspace is stopping (the
+    /// origin's `workspace_stopping`): a stop already kept the work on
+    /// recovery refs, and saves wait for the next start.
+    pub(crate) fn is_workspace_stopping(&self) -> bool {
+        self.code.as_deref() == Some("workspace_stopping")
+    }
+
     pub(crate) fn save_report(&self) -> SaveReport {
         SaveReport {
             status: self.git_sync_status.clone(),

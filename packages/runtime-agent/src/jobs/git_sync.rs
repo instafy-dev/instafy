@@ -220,6 +220,17 @@ fn build_messages_from_outcome(outcome: &GitSyncOutcome) -> (String, Vec<JobMess
                 },
             ],
         ),
+        GitSyncOutcome::Stopping { message } => (
+            "Git sync waits: the workspace is stopping.".to_string(),
+            vec![JobMessage {
+                content: format!(
+                    "Nothing was saved now: this workspace is stopping, and its unsaved work is already kept on recovery refs (it shows under Unsaved work). Run `/sync` again after it restarts.\n\nDetails:\n{}",
+                    message.trim()
+                ),
+                message_type: Some("error".to_string()),
+                metadata: Some(json!({ "messageType": "error" })),
+            }],
+        ),
         GitSyncOutcome::Failed { message } => (
             "Git sync failed.".to_string(),
             vec![
@@ -287,6 +298,19 @@ mod tests {
         });
         assert_eq!(summary, "Git sync completed.");
         assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn a_sync_during_a_stop_waits_and_never_points_at_conflicts() {
+        let (summary, messages) = build_messages_from_outcome(&GitSyncOutcome::Stopping {
+            message: "the workspace is stopping and its work is kept on recovery refs".to_string(),
+        });
+        assert_eq!(summary, "Git sync waits: the workspace is stopping.");
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].content.contains("Unsaved work"));
+        assert!(messages[0].content.contains("after it restarts"));
+        assert!(!messages[0].content.contains("conflict"));
+        assert!(!messages[0].content.contains("SKILL.md"));
     }
 
     #[test]
