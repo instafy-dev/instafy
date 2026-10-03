@@ -884,7 +884,10 @@ impl RuntimeAgent {
         }
 
         if let Some(service) = origin_service.as_mut() {
-            service.shutdown().await;
+            // A turn its stop interrupted keeps its local commits off `main`.
+            service
+                .shutdown_after_turn(executor.turn_interrupted())
+                .await;
         }
 
         if shutdown_triggered {
@@ -1360,6 +1363,7 @@ impl RuntimeAgent {
                     }
                     match execution_result {
                         Ok(execution) => {
+                            executor.note_job_ended(false);
                             Self::complete_job(&client, registration, &job, execution).await;
                         }
                         Err(error) => {
@@ -1371,6 +1375,7 @@ impl RuntimeAgent {
                             });
                             if lease_lost {
                                 info!(job_id = %job.id, "job cancelled; skipping completion");
+                                executor.note_job_ended(true);
                                 executor.processor().cleanup_after_lease_lost(&job).await;
                                 if let Some(task) = periodic_heartbeat.take() {
                                     task.shutdown().await;

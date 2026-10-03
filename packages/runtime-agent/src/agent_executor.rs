@@ -18,13 +18,29 @@ use crate::origin::LocalOriginSync;
 #[derive(Clone)]
 pub struct AgentExecutor {
     processor: Arc<JobProcessor>,
+    /// The last job ended because its lease was lost (a cancel, or a stop
+    /// that requeued it) rather than by finishing.
+    turn_interrupted: Arc<AtomicBool>,
 }
 
 impl AgentExecutor {
     pub fn new(config: Arc<Config>) -> Self {
         Self {
             processor: Arc::new(JobProcessor::new(config)),
+            turn_interrupted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Record how the last job ended. A job that lost its lease left its
+    /// turn unfinished: a shutdown flush then sets the turn's local commits
+    /// aside instead of leaving them for the next publish.
+    pub fn note_job_ended(&self, interrupted: bool) {
+        self.turn_interrupted.store(interrupted, Ordering::SeqCst);
+    }
+
+    /// Whether the last job ended without finishing its turn.
+    pub fn turn_interrupted(&self) -> bool {
+        self.turn_interrupted.load(Ordering::SeqCst)
     }
 
     pub fn processor(&self) -> Arc<JobProcessor> {

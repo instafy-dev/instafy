@@ -279,13 +279,24 @@ impl OriginService {
     }
 
     pub async fn shutdown(&mut self) {
+        self.shutdown_after_turn(false).await;
+    }
+
+    /// Stop the origin, keeping the workspace's work on local recovery refs
+    /// first. `turn_interrupted`: the last job lost its lease before its turn
+    /// finished, so the turn's local commits are set aside too instead of
+    /// being left for the next publish.
+    pub async fn shutdown_after_turn(&mut self, turn_interrupted: bool) {
         if let Some(server) = self.server.as_mut() {
-            // Graceful machine shutdown: checkpoint uncommitted workspace
-            // changes to the git remote before the container dies. The
+            // Graceful machine shutdown: keep uncommitted workspace changes on
+            // local recovery refs before the container dies. The
             // registration-failure cleanup above deliberately uses the
             // non-flushing stop() — the controller is unreachable there and
             // no user work is at stake.
-            if let Err(error) = server.stop_flushing_workspace().await {
+            if let Err(error) = server
+                .stop_flushing_workspace_during_turn(turn_interrupted)
+                .await
+            {
                 warn!(?error, "failed to stop origin HTTP server");
             } else {
                 info!("origin HTTP server stopped");
