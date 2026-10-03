@@ -239,8 +239,7 @@ impl<'a> WorkspaceGit<'a> {
                         break status;
                     }
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate(&mut child);
                         // A helper the command started can hold the pipes
                         // open, so the readers are left to finish on their own.
                         bail!("git {} ran out of time", describe(args));
@@ -583,6 +582,31 @@ fn size_or_missing(kind: &str) -> bool {
 /// The all-zero id in the same object format as `like`.
 pub(crate) fn zero_oid(like: &str) -> String {
     "0".repeat(if like.len() == 64 { 64 } else { 40 })
+}
+
+/// How long a command that ran out of time has to exit after SIGTERM.
+const TERMINATE_GRACE: Duration = Duration::from_secs(2);
+
+/// Stop a command that ran out of time: SIGTERM first, so git removes the
+/// lock files it holds (a ref update killed outright leaves `*.lock` files
+/// behind that make every later fetch and save of the checkout fail), and
+/// SIGKILL only when it is still running after [`TERMINATE_GRACE`].
+fn terminate(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = rustix::process::Pid::from_child(child);
+        if rustix::process::kill_process(pid, rustix::process::Signal::TERM).is_ok() {
+            let grace = Instant::now() + TERMINATE_GRACE;
+            while Instant::now() < grace {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Read all of `pipe` on a thread of its own.

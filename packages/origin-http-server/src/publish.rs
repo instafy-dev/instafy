@@ -173,8 +173,36 @@ impl PublishReport {
 }
 
 fn internal(error: anyhow::Error) -> OriginError {
+    if error.downcast_ref::<DismissalNotApplied>().is_some() {
+        // Not a merge conflict (409): nothing for the agent to resolve.
+        return OriginError::with_report(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            DISMISSAL_NOT_APPLIED_CODE,
+            format!("{error:#}"),
+            serde_json::json!({ "retryable": false }),
+        );
+    }
     OriginError::internal(format!("{error:#}"))
 }
+
+/// The code of a save refused because dismissed work could not be taken off
+/// the workspace's branch: nothing is published until it can be, since the
+/// branch still carries the dismissed commits.
+pub const DISMISSAL_NOT_APPLIED_CODE: &str = "dismissal_not_applied";
+
+/// Dismissed work is still on the branch (see [`DISMISSAL_NOT_APPLIED_CODE`]).
+#[derive(Debug)]
+struct DismissalNotApplied;
+
+impl std::fmt::Display for DismissalNotApplied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "dismissed recovery work could not be taken off this workspace's branch, so nothing was saved",
+        )
+    }
+}
+
+impl std::error::Error for DismissalNotApplied {}
 
 /// Commit the selection and publish the local branch onto canonical `main`.
 pub fn publish(
@@ -304,6 +332,8 @@ struct Publisher<'a> {
     /// The conflict copy of the attempt in flight, stored before its push so
     /// no push can land without it.
     conflict_copy: Option<RecoveryRefReport>,
+    /// Copies stored in place of pending refs that built on dismissed work.
+    separated: Vec<RecoveryRefReport>,
 }
 
 struct HistoryScan {
@@ -354,6 +384,7 @@ impl<'a> Publisher<'a> {
             published_aliases: Vec::new(),
             push_deadline: None,
             conflict_copy: None,
+            separated: Vec::new(),
         }
     }
 
@@ -372,21 +403,16 @@ impl<'a> Publisher<'a> {
         self.finish()
     }
 
-    /// Repair, push parked work, fetch, and retire dismissed work.
+    /// Repair, fetch, retire dismissed work, and push parked work. The fetch
+    /// comes first: what was dismissed decides what may be pushed.
     fn prepare(&mut self) -> Result<()> {
         let repair = stale_align::repair_once(&self.git, self.config)?;
         self.report.note_recovery(repair.parked, false);
-        if self.can_write {
-            self.push_pending();
-        }
+        let mut dismissal = Ok(false);
         match self.fetch(true) {
             Ok(_) => {
                 self.fetched = true;
-                // Work set aside because it builds on dismissed commits is
-                // pushed right away, like everything else parked.
-                if self.retire_dismissed()? && self.can_write {
-                    self.push_pending();
-                }
+                dismissal = self.retire_dismissed();
             }
             // Without the recovery refs, dismissals wait for the next fetch;
             // publishing only needs main.
@@ -402,6 +428,15 @@ impl<'a> Publisher<'a> {
                     self.report.retryable = true;
                 }
             },
+        }
+        // Parked work goes out even when a dismissal could not be applied:
+        // whatever builds on dismissed work is separated from it first.
+        if self.can_write {
+            self.push_pending();
+        }
+        if let Err(error) = dismissal {
+            warn!(error = %format!("{error:#}"), "could not apply dismissed recovery work; nothing is published");
+            return Err(error.context(DismissalNotApplied));
         }
         Ok(())
     }
@@ -434,7 +469,13 @@ impl<'a> Publisher<'a> {
 
     /// Push every parked ref; returns `(name, canonical ref)` of each one
     /// pushed. Failures are logged; their refs stay local for the next call.
+    /// A pending ref that builds on dismissed work is separated from it
+    /// first and never pushed as it is.
     fn push_parked(&mut self) -> Vec<(String, String)> {
+        if let Err(error) = self.separate_dismissed_work() {
+            warn!(error = %format!("{error:#}"), "could not separate parked work from dismissed work; pushing nothing");
+            return Vec::new();
+        }
         let main = match self.tracked_main() {
             Ok(main) => main,
             Err(error) => {
@@ -465,6 +506,118 @@ impl<'a> Publisher<'a> {
                 Vec::new()
             }
         }
+    }
+
+    /// Replace every pending ref that builds on dismissed commits (parked
+    /// before the dismissal was seen: on a stop, offline, or in a run whose
+    /// dismissal could not be applied) by what is left without them, so no
+    /// push ever sends dismissed work again:
+    ///
+    /// - an `unpublished` copy of commits a dismissal already replayed onto
+    ///   the branch without the dismissed ones is retired: the branch holds
+    ///   that rest;
+    /// - any other copy is rebuilt on the replay of its parent when there is
+    ///   one (an unsaved copy of a branch the dismissal moved), else on the
+    ///   published commit below the dismissed work, with the dismissed
+    ///   changes taken out by a three-way merge;
+    /// - work that cannot be separated (a conflict) is left whole for a
+    ///   person to decide, like the commits a dismissal sets aside.
+    ///
+    /// Replaced copies stay in the rejected backups, which are never pushed.
+    fn separate_dismissed_work(&mut self) -> Result<()> {
+        let pending = recovery::pending(&self.git)?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let main = self.tracked_main()?;
+        let mut dismissed = Vec::new();
+        for (source, base) in recovery::dismissed_ranges(&self.git, self.config.origin_id)? {
+            if self.is_published(&source, main.as_deref())? {
+                continue;
+            }
+            let depth = self
+                .git
+                .stdout(&["rev-list", "--count", &source])?
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0);
+            dismissed.push((depth, source, base));
+        }
+        if dismissed.is_empty() {
+            return Ok(());
+        }
+        // Deepest first: on one chain it covers the shallower ones.
+        dismissed.sort_by(|a, b| b.0.cmp(&a.0));
+        for (name, rev) in pending {
+            let parents: Vec<String> = self
+                .git
+                .stdout(&["rev-list", "--parents", "-n", "1", &rev])?
+                .split_whitespace()
+                .skip(1)
+                .map(str::to_string)
+                .collect();
+            let source = match recovery::source_of(&self.git, &rev)? {
+                Some(source) if self.git.commit_id(&source)?.is_some() => Some(source),
+                _ => None,
+            };
+            let mut found = None;
+            'ranges: for (_, dismissed_source, base) in &dismissed {
+                for anchor in parents.iter().chain(source.iter()) {
+                    if self.git.is_ancestor(dismissed_source, anchor)? {
+                        found = Some((dismissed_source.clone(), base.clone()));
+                        break 'ranges;
+                    }
+                }
+            }
+            let Some((dismissed_source, base)) = found else {
+                continue;
+            };
+            let kind = recovery::kind_of_name(&name).unwrap_or(RecoveryKind::Unsaved);
+            if kind == RecoveryKind::Unpublished {
+                if let Some(source) = source.as_deref() {
+                    if recovery::replayed(&self.git, source)?.is_some() {
+                        recovery::retire_pending(&self.git, &name, &rev)?;
+                        info!(%name, "retired a parked copy of commits a dismissal replayed onto the branch");
+                        continue;
+                    }
+                }
+            }
+            let replayed_parent = match parents.first() {
+                Some(parent) => {
+                    recovery::replayed(&self.git, parent)?.map(|replay| (parent.clone(), replay))
+                }
+                None => None,
+            };
+            let (merge_base, onto) = replayed_parent.unwrap_or((dismissed_source, base));
+            let merged = three_way(&self.git, Some(&merge_base), &onto, &rev)?;
+            if !merged.conflicts.is_empty() {
+                warn!(%name, "parked work is tangled with dismissed work; it is kept whole for a person to decide");
+                continue;
+            }
+            let paths = changed_paths(&self.git, &onto, &merged.tree)?;
+            let stored = recovery::replace_pending(
+                &self.git,
+                &name,
+                &rev,
+                RecoverySpec {
+                    kind,
+                    tree: merged.tree,
+                    parent: Some(onto),
+                    source,
+                    date: None,
+                    paths: paths.into_iter().take(MAX_TRAILER_PATHS).collect(),
+                    commits: Vec::new(),
+                    identity: self.identity.clone(),
+                    origin_id: self.config.origin_id,
+                },
+            )?;
+            info!(%name, kept = stored.as_ref().map(|stored| stored.name.as_str()).unwrap_or("nothing"), "separated parked work from dismissed work");
+            if let Some(stored) = stored.filter(|stored| stored.created) {
+                self.report.note_recovery(Some(stored.clone()), false);
+                self.separated.push(stored);
+            }
+        }
+        Ok(())
     }
 
     /// Fetch canonical `main` (and, with `recovery`, mirror this project's
@@ -580,7 +733,7 @@ impl<'a> Publisher<'a> {
             return Ok(false);
         };
         let target = if head == source {
-            Some(base.clone())
+            Some((base.clone(), Vec::new()))
         } else {
             match self.replay_without(source, &head, &base) {
                 Ok(target) => target,
@@ -593,8 +746,11 @@ impl<'a> Publisher<'a> {
             }
         };
         match target {
-            Some(target) => {
+            Some((target, replayed)) => {
                 self.move_keeping_edits(&head, &target)?;
+                // Copies parked from the old commits are separated from the
+                // dismissed work against these before any push.
+                recovery::record_replayed(&self.git, &replayed)?;
                 info!(%name, "took dismissed local commits off the branch");
             }
             None => {
@@ -612,14 +768,15 @@ impl<'a> Publisher<'a> {
     }
 
     /// Replay the first-parent commits after `dismissed` up to `head` onto
-    /// `onto`, keeping each commit's author, committer and message. `None`
+    /// `onto`, keeping each commit's author, committer and message. Returns
+    /// the new tip and each old commit with the commit it became; `None`
     /// when one of them conflicts there, or is a merge.
     fn replay_without(
         &mut self,
         dismissed: &str,
         head: &str,
         onto: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<(String, Vec<(String, String)>)>> {
         let listing = self.git.stdout(&[
             "rev-list",
             "--first-parent",
@@ -629,6 +786,7 @@ impl<'a> Publisher<'a> {
             &format!("^{dismissed}"),
         ])?;
         let mut current = onto.to_string();
+        let mut replayed = Vec::new();
         for line in listing.lines().filter(|line| !line.is_empty()) {
             let mut ids = line.split(' ');
             let Some(commit) = ids.next() else { continue };
@@ -640,19 +798,19 @@ impl<'a> Publisher<'a> {
             if !merged.conflicts.is_empty() {
                 return Ok(None);
             }
-            if merged.tree == self.git.tree_id(&current)? {
-                continue;
+            if merged.tree != self.git.tree_id(&current)? {
+                let parsed = self.parse_commit(commit)?;
+                current = self.git.commit_tree(
+                    &merged.tree,
+                    &[&current],
+                    &parsed.author,
+                    &parsed.committer,
+                    &parsed.message,
+                )?;
             }
-            let parsed = self.parse_commit(commit)?;
-            current = self.git.commit_tree(
-                &merged.tree,
-                &[&current],
-                &parsed.author,
-                &parsed.committer,
-                &parsed.message,
-            )?;
+            replayed.push((commit.to_string(), current.clone()));
         }
-        Ok(Some(current))
+        Ok(Some((current, replayed)))
     }
 
     // ------------------------------------------------------------------
@@ -1970,10 +2128,36 @@ impl<'a> Publisher<'a> {
             }
         }
 
+        // Copies that replaced parked work built on dismissed work (under a
+        // new name, or the same one when only the parent changed).
+        for stored in std::mem::take(&mut self.separated) {
+            match flush
+                .recovery_refs
+                .iter_mut()
+                .find(|entry| entry.name == stored.name)
+            {
+                Some(entry) => *entry = stored,
+                None => flush.recovery_refs.push(stored),
+            }
+        }
         // Report each parked copy as it ends up: pushed (by this call or by
         // the publish above), still local, or retired because its commits
-        // reached `main` (then it is not kept anywhere and not reported).
+        // reached `main` or it was dismissed (then it is not kept anywhere
+        // and not reported).
         let pending = recovery::pending(&self.git)?;
+        let dismissed: BTreeSet<String> = self
+            .git
+            .refs_under(recovery::LOCAL_RECOVERY_DISMISSED_ROOT)?
+            .into_iter()
+            .filter_map(|(reference, _)| {
+                reference
+                    .strip_prefix(&format!("{}/", recovery::LOCAL_RECOVERY_DISMISSED_ROOT))
+                    .map(str::to_string)
+            })
+            .collect();
+        flush
+            .recovery_refs
+            .retain(|entry| !dismissed.contains(&entry.name));
         let pushed: BTreeMap<String, String> = self
             .git
             .refs_under(recovery::LOCAL_RECOVERY_PUSHED_ROOT)?

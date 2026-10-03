@@ -1667,10 +1667,22 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
 /// Every git process in the publish modules is built by
 /// `server_git_command` (through `WorkspaceGit`), never spawned directly:
 /// no module names a `Command` type at all (however it is imported or
-/// renamed), and `std::process` is used only for process results.
+/// renamed), and `process::` items are only process results, the spawned
+/// git's handle and the signals that stop it at a deadline.
 #[test]
 fn publish_modules_spawn_git_only_through_server_git_command() {
-    const PROCESS_ITEMS: &[&str] = &["Output", "ExitStatus", "Stdio", "ExitStatusExt"];
+    // Results of a git that was spawned, its handle, and the signals that stop
+    // it at a deadline (`rustix::process`); none of them can start a process.
+    const PROCESS_ITEMS: &[&str] = &[
+        "Output",
+        "ExitStatus",
+        "Stdio",
+        "ExitStatusExt",
+        "Child",
+        "kill_process",
+        "Pid",
+        "Signal",
+    ];
     for (name, source) in PUBLISH_MODULES {
         let code = production_source(source);
         for identifier in code
@@ -3542,7 +3554,13 @@ fn a_dismissal_that_cannot_be_applied_is_retried_and_never_published() {
             },
         )
     });
-    assert!(failed.is_err(), "{failed:?}");
+    match failed {
+        Err(crate::error::OriginError::WithReport { status, code, .. }) => {
+            assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(code, crate::publish::DISMISSAL_NOT_APPLIED_CODE);
+        }
+        other => panic!("expected the dismissal's own error, got {other:?}"),
+    }
     assert!(!on_main(&sc, &local));
 
     let refreshed = refresh(&sc.ctx(true)).unwrap();
@@ -3583,8 +3601,8 @@ fn a_hanging_remote_never_holds_a_flush_past_its_budget() {
 }
 
 /// The controller's save-only permission (no workspace lease) opens
-/// `/git/flush` and nothing else, and is the credential the origin
-/// exchanges for git.write.
+/// `/git/flush` (and its resume) and nothing else, and is the credential the
+/// origin exchanges for git.write.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_save_only_permission_opens_the_flush_and_nothing_else() {
     let sc = Scenario::new(Options::default());
@@ -3683,6 +3701,253 @@ async fn a_save_only_permission_opens_the_flush_and_nothing_else() {
             .collect();
         assert_eq!(writes, vec![&grant]);
     }
+    let resumed = client
+        .post(format!("{base}/git/flush/resume"))
+        .bearer_auth(&grant)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resumed.status(), reqwest::StatusCode::OK);
+    let resumed: serde_json::Value = resumed.json().await.unwrap();
+    assert_eq!(resumed["resumed"], true, "{resumed}");
     server.abort();
     controller.server.abort();
+}
+
+/// Whether `commit` is an ancestor of any recovery ref on the remote.
+fn under_a_remote_recovery_ref(sc: &Scenario, commit: &str) -> bool {
+    sc.remote_refs("refs/instafy/").iter().any(|(_, rev)| {
+        git_output(
+            &sc.remote,
+            &["merge-base", "--is-ancestor", commit, rev],
+            None,
+        )
+        .status
+        .success()
+    })
+}
+
+/// A stop that applies a dismissal also parks the unsaved edits it found.
+/// The copy parked before the dismissal was seen sits on the dismissed
+/// commit; it is never pushed as it is. Whatever reaches canonical holds
+/// the edits without the dismissed files or commits, with one dismissal or
+/// two on one chain under a later commit.
+#[test]
+fn a_stop_that_applies_a_dismissal_pushes_no_copy_of_it() {
+    for dismissals in [1, 2] {
+        let sc = Scenario::new(Options::default());
+        let hook = close_main(&sc);
+        sc.write("x.rs", b"fn x() {}\n");
+        let first = sc.publish_paths(&["x.rs"]);
+        let mut dismissed = vec![(sc.head(), first.recovery_ref.clone().expect("parked"))];
+        if dismissals == 2 {
+            sc.write("later.rs", b"fn later() {}\n");
+            let second = sc.publish_paths(&["later.rs"]);
+            dismissed.push((sc.head(), second.recovery_ref.clone().expect("parked")));
+        }
+        fs::remove_file(hook).unwrap();
+        if dismissals == 2 {
+            sc.write("z.rs", b"fn z() {}\n");
+            sc.agent_commit(&["z.rs"], "work after the dismissed commits");
+        }
+        sc.write("dirty.md", b"unsaved edit\n");
+        for (_, reference) in &dismissed {
+            git_in(&sc.remote, &["update-ref", "-d", reference]);
+        }
+
+        let report = flush(&sc.ctx(true), false).unwrap();
+        assert_eq!(report.unpushed_refs, 0, "{dismissals}: {report:?}");
+        assert!(!sc.path_anywhere_on_remote("x.rs"), "{dismissals}");
+        assert!(!sc.path_anywhere_on_remote("later.rs"), "{dismissals}");
+        for (commit, _) in &dismissed {
+            assert!(!on_main(&sc, commit), "{dismissals}");
+            assert!(
+                !under_a_remote_recovery_ref(&sc, commit),
+                "{dismissals}: a pushed recovery ref builds on a dismissed commit"
+            );
+        }
+        let unsaved: Vec<(String, String)> = sc
+            .remote_refs("refs/instafy/recovery/")
+            .into_iter()
+            .filter(|(name, _)| name.contains("-unsaved-"))
+            .collect();
+        assert_eq!(unsaved.len(), 1, "{dismissals}: {unsaved:?}");
+        assert_eq!(
+            sc.recovery_file(&unsaved[0].0, "dirty.md").as_deref(),
+            Some("unsaved edit\n"),
+            "{dismissals}"
+        );
+        if dismissals == 2 {
+            assert_eq!(sc.remote_file("z.rs").as_deref(), Some("fn z() {}\n"));
+        }
+        // The report names no dismissed ref as kept.
+        for (_, reference) in &dismissed {
+            let name = reference.rsplit('/').next().unwrap();
+            assert!(
+                report.recovery_refs.iter().all(|entry| entry.name != name),
+                "{dismissals}: {report:?}"
+            );
+        }
+        assert_eq!(sc.disk("dirty.md").as_deref(), Some("unsaved edit\n"));
+    }
+}
+
+/// Copies parked before a dismissal is applied (a stop whose dismissal
+/// cannot be applied, or a stop without write access that never saw it)
+/// carry the dismissed commit under a later one. They are never pushed as
+/// they are: what is pushed is the later work without the dismissed file,
+/// and once the later commit is saved nothing of it is left on a recovery
+/// ref.
+#[test]
+fn copies_parked_before_a_dismissal_never_push_the_dismissed_work() {
+    for case in ["dismissal_fails_in_the_stop", "stop_without_write_access"] {
+        let sc = Scenario::new(Options::default());
+        let (local, reference) = parked_and_pushed(&sc);
+        sc.write("later.rs", b"fn later() {}\n");
+        let later = sc.agent_commit(&["later.rs"], "later work");
+        sc.write("dirty.md", b"unsaved edit\n");
+        git_in(&sc.remote, &["update-ref", "-d", &reference]);
+
+        if case == "dismissal_fails_in_the_stop" {
+            let report = with_branch_moves_failing(&sc, || flush(&sc.ctx(true), false)).unwrap();
+            assert!(report.publish.is_none(), "{case}: {report:?}");
+            assert_eq!(report.unpushed_refs, 0, "{case}: {report:?}");
+            assert!(!sc.path_anywhere_on_remote("x.rs"), "{case}");
+            assert!(!under_a_remote_recovery_ref(&sc, &local), "{case}");
+            let kept: Vec<(String, String)> = sc.remote_refs("refs/instafy/recovery/");
+            assert!(
+                kept.iter()
+                    .any(|(name, _)| sc.recovery_file(name, "later.rs").as_deref()
+                        == Some("fn later() {}\n")),
+                "{case}: the later work is kept: {kept:?}"
+            );
+            assert!(
+                kept.iter()
+                    .any(|(name, _)| sc.recovery_file(name, "dirty.md").as_deref()
+                        == Some("unsaved edit\n")),
+                "{case}: the unsaved edit is kept: {kept:?}"
+            );
+        } else {
+            let report = flush(&sc.ctx(false), false).unwrap();
+            assert!(report.unpushed_refs >= 1, "{case}: {report:?}");
+            assert!(sc.remote_refs("refs/instafy/").is_empty(), "{case}");
+        }
+
+        // The next start applies the dismissal and saves the later commit.
+        let refreshed = refresh(&sc.ctx(true)).unwrap();
+        assert_eq!(refreshed.unpushed_refs, 0, "{case}: {refreshed:?}");
+        assert_eq!(
+            sc.remote_file("later.rs").as_deref(),
+            Some("fn later() {}\n"),
+            "{case}"
+        );
+        assert!(sc.remote_file("x.rs").is_none(), "{case}");
+        assert!(!on_main(&sc, &local), "{case}");
+        assert!(!on_main(&sc, &later), "{case}: replayed, not the original");
+        assert!(!sc.path_anywhere_on_remote("x.rs"), "{case}");
+        assert!(!under_a_remote_recovery_ref(&sc, &local), "{case}");
+        let left: Vec<(String, String)> = sc
+            .remote_refs("refs/instafy/recovery/")
+            .into_iter()
+            .filter(|(name, _)| {
+                sc.recovery_file(name, "later.rs").is_some() && !name.contains("-unsaved-")
+            })
+            .collect();
+        assert!(
+            left.is_empty(),
+            "{case}: saved later work stays on a recovery ref: {left:?}"
+        );
+        assert_eq!(sc.disk("dirty.md").as_deref(), Some("unsaved edit\n"));
+    }
+}
+
+/// A stop that did not happen (the controller skipped it after the flush)
+/// lifts the save fence with the flush's own credential; saves go through
+/// again without waiting for the next turn's refresh.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_after_a_skipped_stop_lets_saves_through() {
+    let sc = Scenario::new(Options::default());
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nkept\n");
+    let flushed = client
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(flushed.status(), reqwest::StatusCode::OK);
+    let refused = client
+        .post(format!("{base}/git/sync"))
+        .json(&serde_json::json!({ "paths": ["doc.md"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let resumed = client
+        .post(format!("{base}/git/flush/resume"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resumed.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resumed.json().await.unwrap();
+    assert_eq!(body["resumed"], true, "{body}");
+    let saved = client
+        .post(format!("{base}/git/sync"))
+        .json(&serde_json::json!({ "paths": ["doc.md"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), reqwest::StatusCode::OK);
+    assert!(sc.remote_file("doc.md").unwrap().contains("kept"));
+    // A second resume finds no fence.
+    let again: serde_json::Value = client
+        .post(format!("{base}/git/flush/resume"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["resumed"], false, "{again}");
+    server.abort();
+}
+
+/// A stop's network call that runs out of time gets SIGTERM first, so git
+/// can remove the lock files it holds before it exits.
+#[test]
+fn a_network_call_out_of_time_is_asked_to_stop_first() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let sc = Scenario::new(Options::default());
+    sc.write("done.rs", b"fn done() {}\n");
+    sc.agent_commit(&["done.rs"], "finished work");
+    let real_git = git_in(&sc.root, &["--exec-path"]);
+    let real_git = Path::new(&real_git).join("git");
+    let marker = sc.root.join("asked-to-stop");
+    let wrapper = sc.root.join("slow-fetch-git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = fetch ]; then\n    sleep 30 &\n    pid=$!\n    trap 'touch \"{}\"; kill $pid; exit 143' TERM\n    wait $pid\n    exit 1\n  fi\ndone\nexec '{}' \"$@\"\n",
+            marker.display(),
+            real_git.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
+    let started = Instant::now();
+    let report = crate::publish::flush_within(&sc.ctx(true), false, Duration::from_secs(3));
+    crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+    let report = report.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(marker.exists(), "the fetch was killed without SIGTERM");
+    assert_eq!(report.unpushed_refs, 1, "{report:?}");
 }

@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::apply::{
@@ -79,10 +79,57 @@ pub struct AppState {
     pub apply_locks: Arc<Mutex<std::collections::HashMap<Uuid, Arc<Mutex<()>>>>>,
     pub git_last_sync: Arc<Mutex<std::collections::HashMap<Uuid, Instant>>>,
     pub apply_slots: Arc<Semaphore>,
-    /// A pre-stop flush kept this workspace's work on recovery refs: until a
-    /// refresh, a later save would publish the same work to `main` and leave
-    /// its recovery copy behind, so saves are refused.
-    pub stopping: Arc<std::sync::atomic::AtomicBool>,
+    /// A pre-stop flush kept this workspace's work on recovery refs: a
+    /// later save would publish the same work (or an interrupted turn's
+    /// files) to `main` and leave its recovery copy behind, so saves are
+    /// refused until the stop happens, or a refresh or the controller's
+    /// resume lifts the fence.
+    pub stopping: StopFence,
+}
+
+/// How long the fence a pre-stop flush raises holds without a refresh or a
+/// resume: longer than the controller's flush and provider release, so it
+/// lasts until the runtime is gone, yet a stop that never comes (the
+/// controller died between its flush and its quarantine) does not refuse
+/// saves forever.
+pub const STOP_FENCE_TTL: Duration = Duration::from_secs(600);
+
+/// The save fence a pre-stop flush raises (see [`AppState::stopping`]).
+#[derive(Clone, Default)]
+pub struct StopFence(Arc<std::sync::Mutex<Option<Instant>>>);
+
+impl StopFence {
+    #[cfg(test)]
+    fn raised_at(at: Instant) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(at))))
+    }
+
+    fn guard(&self) -> std::sync::MutexGuard<'_, Option<Instant>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn raise(&self) {
+        *self.guard() = Some(Instant::now());
+    }
+
+    /// Lift the fence; whether it was up.
+    pub fn lift(&self) -> bool {
+        self.guard().take().is_some()
+    }
+
+    pub fn is_up(&self) -> bool {
+        let mut raised = self.guard();
+        match *raised {
+            Some(at) if at.elapsed() < STOP_FENCE_TTL => true,
+            Some(_) => {
+                *raised = None;
+                false
+            }
+            None => false,
+        }
+    }
 }
 
 impl AppState {
@@ -108,7 +155,7 @@ impl AppState {
             // single bounded admission point across all projects served by a
             // multi-tenant origin process.
             apply_slots: Arc::new(Semaphore::new(1)),
-            stopping: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stopping: StopFence::default(),
         })
     }
 }
@@ -200,6 +247,7 @@ pub fn router(state: AppState) -> Router {
 
     let flush_routes = Router::new()
         .route("/git/flush", post(handle_git_flush))
+        .route("/git/flush/resume", post(handle_git_flush_resume))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_flush,
@@ -2197,10 +2245,8 @@ async fn handle_git_sync(
             }
         };
         if refresh {
-            state
-                .stopping
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-        } else if state.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            state.stopping.lift();
+        } else if state.stopping.is_up() {
             // Not a merge conflict: nothing needs resolving, the save just
             // waits for the next start (whose refresh lifts this).
             return Err(OriginError::with_report(
@@ -2481,7 +2527,7 @@ async fn handle_git_flush(
             turn_active,
         )?;
         // Set before the locks are released, so no save slips in between.
-        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        stopping.raise();
         Ok::<_, OriginError>(report)
     })
     .await
@@ -2489,6 +2535,27 @@ async fn handle_git_flush(
     serde_json::to_value(&report)
         .map(Json)
         .map_err(|error| OriginError::internal(format!("failed to encode the report: {error}")))
+}
+
+/// The stop a flush prepared for did not happen (it was skipped, or someone
+/// opened the space meanwhile): accept saves again. Takes the same
+/// credential as the flush, changes nothing on disk, and is a no-op when no
+/// fence is up.
+async fn handle_git_flush_resume(
+    State(state): State<AppState>,
+    Extension(claims): Extension<OriginClaims>,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    if state.config.multi_tenant || !state.config.hosted_checkout {
+        return Err(OriginError::bad_request(
+            "flush is only available on a hosted workspace runtime",
+        ));
+    }
+    project_id_for_request(&state, &claims)?;
+    let resumed = state.stopping.lift();
+    if resumed {
+        info!("the stop did not happen; saves are accepted again");
+    }
+    Ok(Json(serde_json::json!({ "ok": true, "resumed": resumed })))
 }
 
 /// Bring a single-tenant checkout up to date without write access: fetch
@@ -2525,9 +2592,7 @@ pub(crate) async fn refresh_checkout_read_only(
     config.workspace_root = workspace_root.clone();
     config.git_remote_url = Some(remote_url);
     // A new turn: the workspace is not stopping after all.
-    state
-        .stopping
-        .store(false, std::sync::atomic::Ordering::SeqCst);
+    state.stopping.lift();
     tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = try_acquire_workspace_apply_lock(&workspace_root)?
@@ -4308,5 +4373,24 @@ mod tests {
 
         origin_server.abort();
         jwks_server.abort();
+    }
+
+    #[test]
+    fn the_stop_fence_holds_until_lifted_or_lapsed() {
+        let fence = super::StopFence::default();
+        assert!(!fence.is_up());
+        fence.raise();
+        assert!(fence.is_up());
+        assert!(fence.lift());
+        assert!(!fence.is_up());
+        assert!(!fence.lift(), "nothing to lift");
+
+        let old = std::time::Instant::now()
+            .checked_sub(super::STOP_FENCE_TTL + std::time::Duration::from_secs(1));
+        if let Some(old) = old {
+            let lapsed = super::StopFence::raised_at(old);
+            assert!(!lapsed.is_up(), "a fence lapses on its own");
+            assert!(!lapsed.lift());
+        }
     }
 }

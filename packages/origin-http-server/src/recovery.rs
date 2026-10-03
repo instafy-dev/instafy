@@ -21,6 +21,14 @@
 //! published parent without it, and the original stays only as a local
 //! backup.
 //!
+//! Dismissed work is never pushed again either. A pending ref that builds on
+//! commits of a dismissed `unpublished` ref (a copy parked before the
+//! dismissal was seen, on a stop or offline) is replaced before its push by
+//! a copy of what is left without them ([`replace_pending`]), or retired
+//! when the branch already carries that rest: when a dismissal is applied,
+//! later commits replayed without the dismissed ones are recorded under
+//! `refs/instafy/local-replayed/<old commit>`.
+//!
 //! Names are `<UTC time>-<kind>-<hash>`, where the hash covers the kind and
 //! the exact set of changed entries. The same work therefore always gets the
 //! same name, a second store or push of it is a no-op, and different work
@@ -41,9 +49,12 @@ use crate::workspace_git::{GitIdentity, RunOpts, WorkspaceGit};
 pub const LOCAL_RECOVERY_ROOT: &str = "refs/instafy/local-recovery";
 pub const LOCAL_RECOVERY_PUSHED_ROOT: &str = "refs/instafy/local-recovery-pushed";
 pub const LOCAL_RECOVERY_DISMISSED_ROOT: &str = "refs/instafy/local-recovery-dismissed";
-/// Recovery commits the repository policy refused, kept only locally after
-/// a copy without the refused path replaced them.
+/// Recovery commits the repository policy refused, or that built on
+/// dismissed work, kept only locally after a copy without the refused path
+/// (or the dismissed work) replaced them.
 pub const LOCAL_RECOVERY_REJECTED_ROOT: &str = "refs/instafy/local-recovery-rejected";
+/// `<root>/<old commit>` names the commit a dismissal replayed it as.
+pub const LOCAL_REPLAYED_ROOT: &str = "refs/instafy/local-replayed";
 
 /// Trailer naming the local commit a recovery commit was made from.
 pub const SOURCE_TRAILER: &str = "Instafy-Recovery-Source";
@@ -194,37 +205,8 @@ pub(crate) fn store(
     let suffix = format!("-{}-{hash}", spec.kind.as_str());
 
     // The same work is stored once, whatever state its earlier copy is in.
-    for (root, pushed) in [
-        (LOCAL_RECOVERY_ROOT, false),
-        (LOCAL_RECOVERY_PUSHED_ROOT, true),
-        (LOCAL_RECOVERY_DISMISSED_ROOT, false),
-    ] {
-        for (reference, rev) in git.refs_under(root)? {
-            let name = reference
-                .strip_prefix(&format!("{root}/"))
-                .unwrap_or_default()
-                .to_string();
-            if name.ends_with(&suffix) {
-                let dismissed = root == LOCAL_RECOVERY_DISMISSED_ROOT;
-                return Ok(if dismissed {
-                    None
-                } else {
-                    Some(RecoveryRefReport {
-                        reference: if pushed {
-                            canonical_ref(origin_of(git, &rev, spec.origin_id), &name)
-                        } else {
-                            reference
-                        },
-                        name,
-                        kind: spec.kind,
-                        rev,
-                        pushed,
-                        created: false,
-                        paths: spec.paths,
-                    })
-                });
-            }
-        }
+    if let Some(found) = stored_with_suffix(git, &suffix, None)? {
+        return Ok(found.into_report(git, &spec));
     }
 
     let epoch = spec
@@ -262,6 +244,226 @@ pub(crate) fn store(
         created: true,
         paths: spec.paths,
     }))
+}
+
+/// An earlier copy of the same work (by name suffix).
+struct Stored {
+    root: &'static str,
+    name: String,
+    rev: String,
+}
+
+impl Stored {
+    /// What a store of the same work reports: the earlier copy, or nothing
+    /// when that copy was dismissed.
+    fn into_report(self, git: &WorkspaceGit<'_>, spec: &RecoverySpec) -> Option<RecoveryRefReport> {
+        match self.root {
+            LOCAL_RECOVERY_DISMISSED_ROOT => None,
+            root => {
+                let pushed = root == LOCAL_RECOVERY_PUSHED_ROOT;
+                Some(RecoveryRefReport {
+                    reference: if pushed {
+                        canonical_ref(origin_of(git, &self.rev, spec.origin_id), &self.name)
+                    } else {
+                        local_ref(&self.name)
+                    },
+                    name: self.name,
+                    kind: spec.kind,
+                    rev: self.rev,
+                    pushed,
+                    created: false,
+                    paths: spec.paths.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// The stored copy whose name ends with `suffix`, in any state, except the
+/// pending ref `skip`.
+fn stored_with_suffix(
+    git: &WorkspaceGit<'_>,
+    suffix: &str,
+    skip: Option<&str>,
+) -> Result<Option<Stored>> {
+    for root in [
+        LOCAL_RECOVERY_ROOT,
+        LOCAL_RECOVERY_PUSHED_ROOT,
+        LOCAL_RECOVERY_DISMISSED_ROOT,
+    ] {
+        for (reference, rev) in git.refs_under(root)? {
+            let name = reference
+                .strip_prefix(&format!("{root}/"))
+                .unwrap_or_default()
+                .to_string();
+            if root == LOCAL_RECOVERY_ROOT && skip == Some(name.as_str()) {
+                continue;
+            }
+            if name.ends_with(suffix) {
+                return Ok(Some(Stored { root, name, rev }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Replace the pending ref `name` (at `rev`), which builds on dismissed
+/// work, by a commit of what is left without it (`spec`). The old commit
+/// moves to the rejected backups in the same transaction, so the work is
+/// pending under one name or the other at every moment. When nothing is
+/// left, or the same rest is already stored (or was dismissed), only the
+/// old commit moves. Returns the copy that now holds the rest, if any.
+pub(crate) fn replace_pending(
+    git: &WorkspaceGit<'_>,
+    name: &str,
+    rev: &str,
+    spec: RecoverySpec,
+) -> Result<Option<RecoveryRefReport>> {
+    let parent_tree = match spec.parent.as_deref() {
+        Some(parent) => git.tree_id(parent)?,
+        None => git.empty_tree()?,
+    };
+    if parent_tree == spec.tree {
+        retire_pending(git, name, rev)?;
+        return Ok(None);
+    }
+    let changes = git.bytes(&[
+        "diff-tree",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--raw",
+        &parent_tree,
+        &spec.tree,
+    ])?;
+    let suffix = format!(
+        "-{}-{}",
+        spec.kind.as_str(),
+        change_hash(spec.kind, &changes)
+    );
+    if let Some(found) = stored_with_suffix(git, &suffix, Some(name))? {
+        retire_pending(git, name, rev)?;
+        return Ok(found.into_report(git, &spec));
+    }
+    let identity = spec.identity.clone().at(None);
+    let parents: Vec<&str> = spec.parent.iter().map(String::as_str).collect();
+    let next = git.commit_tree(
+        &spec.tree,
+        &parents,
+        &identity,
+        &identity,
+        message(&spec).as_bytes(),
+    )?;
+    let stamp = name.split('-').next().unwrap_or_default();
+    let next_name = format!("{stamp}{suffix}");
+    let backup = format!("{LOCAL_RECOVERY_REJECTED_ROOT}/{name}");
+    let transaction = if next_name == name {
+        format!(
+            "update {backup} {rev}\nupdate {} {next} {rev}\n",
+            local_ref(name)
+        )
+    } else {
+        format!(
+            "update {backup} {rev}\ndelete {} {rev}\nupdate {} {next}\n",
+            local_ref(name),
+            local_ref(&next_name)
+        )
+    };
+    git.ok_opts(
+        &[
+            "update-ref",
+            "--stdin",
+            "-m",
+            "instafy: recovery work without dismissed work",
+        ],
+        &RunOpts {
+            stdin: Some(transaction.as_bytes()),
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(Some(RecoveryRefReport {
+        reference: local_ref(&next_name),
+        name: next_name,
+        kind: spec.kind,
+        rev: next,
+        pushed: false,
+        created: true,
+        paths: spec.paths,
+    }))
+}
+
+/// Record that a dismissal replayed `old` as `new`.
+pub(crate) fn record_replayed(git: &WorkspaceGit<'_>, pairs: &[(String, String)]) -> Result<()> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = String::new();
+    for (old, new) in pairs {
+        transaction.push_str(&format!("update {LOCAL_REPLAYED_ROOT}/{old} {new}\n"));
+    }
+    git.ok_opts(
+        &[
+            "update-ref",
+            "--stdin",
+            "-m",
+            "instafy: commits replayed without dismissed work",
+        ],
+        &RunOpts {
+            stdin: Some(transaction.as_bytes()),
+            ..RunOpts::default()
+        },
+    )
+}
+
+/// The commit a dismissal replayed `commit` as (following later replays),
+/// if it was.
+pub(crate) fn replayed(git: &WorkspaceGit<'_>, commit: &str) -> Result<Option<String>> {
+    let mut current = commit.to_string();
+    let mut found = None;
+    for _ in 0..16 {
+        match git.commit_id(&format!("{LOCAL_REPLAYED_ROOT}/{current}"))? {
+            Some(next) if next != current => {
+                found = Some(next.clone());
+                current = next;
+            }
+            _ => break,
+        }
+    }
+    Ok(found)
+}
+
+/// The commits dismissed `unpublished` work put on the branch, as
+/// `(source, base)` (its tip and the published commit below it): from the
+/// markers already retired as dismissed and from pushed markers whose
+/// canonical ref the last fetch found gone.
+pub(crate) fn dismissed_ranges(
+    git: &WorkspaceGit<'_>,
+    origin_id: Uuid,
+) -> Result<Vec<(String, String)>> {
+    let mut markers: Vec<(String, String)> = git
+        .refs_under(LOCAL_RECOVERY_DISMISSED_ROOT)?
+        .into_iter()
+        .filter_map(|(reference, rev)| {
+            let name = reference.strip_prefix(&format!("{LOCAL_RECOVERY_DISMISSED_ROOT}/"))?;
+            Some((name.to_string(), rev))
+        })
+        .collect();
+    markers.extend(dismissed_markers(git, origin_id)?);
+    let mut ranges = Vec::new();
+    for (name, rev) in markers {
+        if kind_of_name(&name) != Some(RecoveryKind::Unpublished) {
+            continue;
+        }
+        let (Some(source), Some(base)) =
+            (source_of(git, &rev)?, git.commit_id(&format!("{rev}^"))?)
+        else {
+            continue;
+        };
+        if git.commit_id(&source)?.is_some() && !ranges.contains(&(source.clone(), base.clone())) {
+            ranges.push((source, base));
+        }
+    }
+    Ok(ranges)
 }
 
 fn message(spec: &RecoverySpec) -> String {
@@ -544,7 +746,7 @@ fn read_recovery_commit(git: &WorkspaceGit<'_>, rev: &str) -> Result<RecoveryCom
 /// Replace the pending commit `name` (at `rev`) by a commit of `tree` on
 /// `parent` with `left_out` named in its message. The old commit moves to
 /// the rejected backups, which are never pushed.
-fn replace_pending(
+fn replace_refused(
     git: &WorkspaceGit<'_>,
     name: &str,
     rev: &str,
@@ -619,7 +821,7 @@ fn replace_pending(
 }
 
 /// Move a pending recovery commit to the rejected backups (never pushed).
-fn retire_pending(git: &WorkspaceGit<'_>, name: &str, rev: &str) -> Result<()> {
+pub(crate) fn retire_pending(git: &WorkspaceGit<'_>, name: &str, rev: &str) -> Result<()> {
     let backup = format!("{LOCAL_RECOVERY_REJECTED_ROOT}/{name}");
     git.ok_opts(
         &[
@@ -671,7 +873,7 @@ fn without_path(
             "the repository policy refused {path}, which {name} cannot leave out"
         )));
     }
-    replace_pending(
+    replace_refused(
         git,
         name,
         rev,
@@ -785,7 +987,7 @@ fn without_unpublishable(
         paths = offending.len(),
         "left files that may not be published out of recovery work"
     );
-    replace_pending(
+    replace_refused(
         git,
         name,
         rev,
@@ -943,7 +1145,8 @@ pub(crate) fn kind_of_name(name: &str) -> Option<RecoveryKind> {
 }
 
 /// Delete this checkout's `unpublished` refs whose source commits are now on
-/// `main`: their content is canonical. `also_published` names local commits
+/// `main` (or were replayed without dismissed work onto commits that are):
+/// their content is canonical. `also_published` names local commits
 /// whose sanitised rewrite (the same work without unpublishable paths) is on
 /// `main`. Conflict, unsaved and stale refs are never touched. A pushed copy
 /// is deleted on the remote first (with a lease on the exact commit) and its
@@ -971,8 +1174,14 @@ pub(crate) fn retire_superseded(
             let Some(source) = source_of(git, &rev)? else {
                 continue;
             };
+            // On `main` itself, as its sanitised rewrite, or as the commit a
+            // dismissal replayed it as.
             let superseded = also_published.contains(&source)
-                || (git.commit_id(&source)?.is_some() && git.is_ancestor(&source, main)?);
+                || (git.commit_id(&source)?.is_some() && git.is_ancestor(&source, main)?)
+                || match replayed(git, &source)? {
+                    Some(replay) => git.is_ancestor(&replay, main)?,
+                    None => false,
+                };
             if !superseded {
                 continue;
             }
