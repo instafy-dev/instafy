@@ -912,6 +912,15 @@ async fn git_sync_with_lease(
         });
     }
 
+    if parsed.is_dismissal_not_applied() {
+        // Not a merge conflict: nothing for the agent to resolve here.
+        return Ok(GitSyncOutcome::Failed {
+            message: parsed.error.clone().unwrap_or_else(|| {
+                "dismissed recovery work could not be taken off this workspace's branch, so nothing was saved".to_string()
+            }),
+        });
+    }
+
     if status == StatusCode::CONFLICT {
         return Ok(GitSyncOutcome::Conflict { message: text });
     }
@@ -1399,6 +1408,11 @@ async fn try_git_sync(
             // refs, and the save waits for the next start.
             bail!(
                 "not saved now: the workspace is stopping and its work is kept on recovery refs until it restarts"
+            );
+        }
+        if parsed.is_dismissal_not_applied() {
+            bail!(
+                "not saved: dismissed recovery work could not be taken off this workspace's branch"
             );
         }
         let details = text.trim();
@@ -2569,6 +2583,52 @@ mod tests {
             matches!(outcome, super::GitSyncOutcome::Stopping { .. }),
             "{outcome:?}"
         );
+        Ok(())
+    }
+
+    /// A save the origin refuses because dismissed work is still on the
+    /// branch (its `dismissal_not_applied`, a 422) is a failure with the
+    /// origin's reason, never a merge conflict, on either lane.
+    #[tokio::test]
+    async fn a_dismissal_that_could_not_be_applied_is_not_reported_as_a_conflict() -> Result<()> {
+        const BODY: &str = r#"{"error":"dismissed recovery work could not be taken off this workspace's branch, so nothing was saved: branch move broke",
+            "code":"dismissal_not_applied","retryable":false}"#;
+        let (origin_address, _) =
+            spawn_reporting_origin(AxumStatusCode::UNPROCESSABLE_ENTITY, BODY).await;
+        let (controller_address, _) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{origin_address}")).await;
+        let controller = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+        let outcome = super::git_sync_with_lease(
+            &reqwest::Client::new(),
+            &controller,
+            "controller-token",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "instafy: sync",
+            None,
+        )
+        .await?;
+        match outcome {
+            super::GitSyncOutcome::Failed { message } => {
+                ensure!(message.contains("dismissed recovery work"), "{message}")
+            }
+            other => anyhow::bail!("expected Failed, got {other:?}"),
+        }
+
+        let temp = tempfile::tempdir()?;
+        std::fs::write(temp.path().join("notes.md"), "hello\n")?;
+        let (artifacts, _) = checkpoint_lane_files_with_report(
+            lane_checkpoint(&controller, Some("workspace-token"), temp.path()),
+            &[changed_file_descriptor("notes.md")],
+        )
+        .await;
+        let error = artifacts[0]["metadata"]["gitSyncError"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        ensure!(error.contains("dismissed recovery work"), "{error}");
+        ensure!(!error.to_ascii_lowercase().contains("conflict"), "{error}");
         Ok(())
     }
 

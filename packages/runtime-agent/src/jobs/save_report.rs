@@ -78,6 +78,14 @@ impl OriginSaveResponse {
         self.code.as_deref() == Some("workspace_stopping")
     }
 
+    /// The origin refused the save because dismissed recovery work could not
+    /// be taken off the workspace's branch (the origin's
+    /// `dismissal_not_applied`): nothing was published, and it is not a merge
+    /// conflict.
+    pub(crate) fn is_dismissal_not_applied(&self) -> bool {
+        self.code.as_deref() == Some("dismissal_not_applied")
+    }
+
     pub(crate) fn save_report(&self) -> SaveReport {
         SaveReport {
             status: self.git_sync_status.clone(),

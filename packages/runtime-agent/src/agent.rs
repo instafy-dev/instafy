@@ -20,7 +20,7 @@ use crate::active_turn_input::{
     ActiveTurnInputCancellation, ActiveTurnInputOutcome, ActiveTurnInputReceiver,
     ActiveTurnInputSender, active_turn_input_channel,
 };
-use crate::agent_executor::AgentExecutor;
+use crate::agent_executor::{AgentExecutor, TurnEnd};
 use crate::config::Config;
 use crate::controller::{
     AgentSecretInventoryItem, ControllerClient, JobSecrets, LeaseError, LeaseJob, Registration,
@@ -162,6 +162,10 @@ struct SecretsRefreshTask {
 #[cfg(test)]
 #[path = "agent_task_shutdown_tests.rs"]
 mod task_shutdown_tests;
+
+#[cfg(test)]
+#[path = "agent_turn_tests.rs"]
+mod turn_tests;
 
 struct JobInputTask {
     stop_signal: ShutdownSignal,
@@ -1243,12 +1247,12 @@ impl RuntimeAgent {
         } else {
             Some(JOB_PROCESS_ENV_LOCK.lock().await)
         };
-        if lease_lost_signal.is_canceled() {
+        if let Some(end) = TurnEnd::before_run(&lease_lost_signal) {
             info!(
                 job_id = %job.id,
                 "job lease was lost before env-sensitive execution; skipping job"
             );
-            turn.end(true);
+            turn.end(end);
             if let Some(task) = periodic_heartbeat.take() {
                 task.shutdown().await;
             }
@@ -1311,6 +1315,8 @@ impl RuntimeAgent {
             (None, None)
         };
 
+        // Done, failed or refused unless the turn below loses its lease.
+        let mut end = TurnEnd::Finished;
         match mode {
             ExecutionMode::Apply => {
                 if let Some(message) = write_scope_coordination_required_message(&job) {
@@ -1365,20 +1371,15 @@ impl RuntimeAgent {
                     if let Some(task) = job_input_task.take() {
                         task.shutdown().await;
                     }
+                    end = TurnEnd::after_run(&execution_result);
                     match execution_result {
                         Ok(execution) => {
                             Self::complete_job(&client, registration, &job, execution).await;
                         }
                         Err(error) => {
-                            let lease_lost = error.chain().any(|cause| {
-                                cause
-                                    .to_string()
-                                    .to_ascii_lowercase()
-                                    .contains("lease lost")
-                            });
-                            if lease_lost {
+                            if end == TurnEnd::LeaseLost {
                                 info!(job_id = %job.id, "job cancelled; skipping completion");
-                                turn.end(true);
+                                turn.end(end);
                                 executor.processor().cleanup_after_lease_lost(&job).await;
                                 if let Some(task) = periodic_heartbeat.take() {
                                     task.shutdown().await;
@@ -1494,8 +1495,7 @@ impl RuntimeAgent {
             apply_job_secrets(&secret_env_keys, &empty);
         }
 
-        // Done, failed or refused: the turn ended without losing its lease.
-        turn.end(false);
+        turn.end(end);
         Ok(())
     }
 
