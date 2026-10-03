@@ -11,17 +11,25 @@
 //!   it has been idle for at least an hour, oldest first;
 //! - no runtime container of the project exists on this node, running or
 //!   stopped, and no start is in progress for it;
+//! - the runtime that last used it stopped cleanly: its shutdown flush kept
+//!   every local commit and unsaved edit on `main` or on a recovery ref and
+//!   then wrote [`CLEAN_STOP_MARKER`], which every origin start removes. A
+//!   checkout without it (a crash, a kill, a stop that could not keep its
+//!   work, or a checkout from before the marker existed) can hold work that
+//!   exists nowhere else, and is kept until a later start and clean stop;
 //! - it is a canonical checkout (`.instafy/.git` with a remote) holding no
 //!   `refs/instafy/local-recovery/*` ref: that is work no publish has pushed
 //!   yet, which the next start pushes. Such a checkout is kept and logged,
 //!   and a later sweep evicts it once the refs are gone.
 //!
 //! Stopping a runtime never evicts anything; it only marks the checkout as
-//! used. Refs are read from the files git keeps them in (loose refs and
-//! `packed-refs`), without running git: the provider image has no git, and
-//! the repository's config is written by the workspace. Anything this code
-//! cannot read with certainty (another ref storage, a linked git dir, no
-//! remote) keeps the checkout.
+//! used, under the same per-project lock as a start, and the sweep reads the
+//! last use again once it holds that lock. Refs and the marker are read from
+//! the files git keeps them in (loose refs and `packed-refs`), without
+//! running git: the provider image has no git, and the repository's config
+//! is written by the workspace. Anything this code cannot read with
+//! certainty (another ref storage, a linked git dir, no remote) keeps the
+//! checkout.
 
 use std::collections::HashMap;
 use std::fs;
@@ -38,6 +46,9 @@ pub(crate) const STAMP_DIR: &str = ".instafy-checkout-stamps";
 /// Where an evicted checkout is moved before it is deleted, so a half-deleted
 /// tree is never mistaken for a checkout.
 pub(crate) const TRASH_DIR: &str = ".instafy-evicted";
+/// Written by the origin's shutdown flush after it kept everything, removed
+/// by every origin start (the origin server's `CLEAN_STOP_MARKER`).
+pub(crate) const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
 /// The local recovery refs that have not been pushed yet.
 const LOCAL_RECOVERY_DIR: &str = "refs/instafy/local-recovery";
 const LOCAL_RECOVERY_PREFIX: &str = "refs/instafy/local-recovery/";
@@ -81,7 +92,8 @@ impl CheckoutEvictionPolicy {
 pub struct CheckoutSweepReport {
     /// Evicted checkouts and why (`idle` or `disk_budget`).
     pub evicted: Vec<(Uuid, &'static str)>,
-    /// Checkouts kept because they hold work that is not pushed yet.
+    /// Checkouts kept because they hold work that is not pushed yet, or whose
+    /// last runtime did not stop cleanly.
     pub kept_unpushed: Vec<Uuid>,
     /// Checkouts kept for another reason that blocks eviction.
     pub kept: Vec<(Uuid, String)>,
@@ -96,6 +108,17 @@ pub(crate) trait CheckoutHost {
     /// Whether any runtime container of the project exists on this node,
     /// running or stopped.
     fn runtime_present(&self, project_id: Uuid) -> anyhow::Result<bool>;
+}
+
+/// Whether the runtime that last used `checkout` stopped cleanly.
+pub(crate) fn stopped_cleanly(checkout: &Path) -> bool {
+    fs::symlink_metadata(checkout.join(CLEAN_STOP_MARKER)).is_ok_and(|metadata| metadata.is_file())
+}
+
+fn last_used(repo_base: &Path, project_id: Uuid) -> Option<SystemTime> {
+    fs::metadata(repo_base.join(STAMP_DIR).join(project_id.to_string()))
+        .and_then(|metadata| metadata.modified())
+        .ok()
 }
 
 /// Record that `project_id`'s checkout was just used (a start or a stop).
@@ -302,14 +325,13 @@ pub(crate) fn sweep_checkouts<H: CheckoutHost>(
         if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
-        let stamp = stamps.join(project_id.to_string());
-        match fs::metadata(&stamp).and_then(|metadata| metadata.modified()) {
-            Ok(last_used) => candidates.push(Candidate {
+        match last_used(repo_base, project_id) {
+            Some(last_used) => candidates.push(Candidate {
                 project_id,
                 path: entry.path(),
                 last_used,
             }),
-            Err(_) => {
+            None => {
                 // First sight of a checkout made before stamps existed:
                 // start its clock now rather than evicting it at once.
                 touch_checkout(repo_base, project_id);
@@ -328,26 +350,39 @@ pub(crate) fn sweep_checkouts<H: CheckoutHost>(
     };
     let mut total: u64 = sizes.values().sum();
 
-    for candidate in candidates {
-        let idle = now
-            .duration_since(candidate.last_used)
-            .unwrap_or(Duration::ZERO);
-        let reason = if policy.idle_ttl.is_some_and(|ttl| idle >= ttl) {
-            "idle"
+    let eligible = |idle: Duration, total: u64| -> Option<&'static str> {
+        if policy.idle_ttl.is_some_and(|ttl| idle >= ttl) {
+            Some("idle")
         } else if policy
             .disk_budget_bytes
             .is_some_and(|budget| total > budget)
             && idle >= policy.min_idle_for_budget
         {
-            "disk_budget"
+            Some("disk_budget")
         } else {
+            None
+        }
+    };
+    for candidate in candidates {
+        let idle = now
+            .duration_since(candidate.last_used)
+            .unwrap_or(Duration::ZERO);
+        if eligible(idle, total).is_none() {
             continue;
-        };
+        }
         let project_id = candidate.project_id;
         let Some(_claim) = host.claim(project_id) else {
             report
                 .kept
-                .push((project_id, "a start is in progress".into()));
+                .push((project_id, "a start or stop is in progress".into()));
+            continue;
+        };
+        // A start or stop may have used the checkout since the scan; it
+        // records that under the lock this sweep now holds.
+        let idle = last_used(repo_base, project_id)
+            .map(|used| now.duration_since(used).unwrap_or(Duration::ZERO))
+            .unwrap_or(Duration::ZERO);
+        let Some(reason) = eligible(idle, total) else {
             continue;
         };
         match host.runtime_present(project_id) {
@@ -382,6 +417,14 @@ pub(crate) fn sweep_checkouts<H: CheckoutHost>(
                 report.kept.push((project_id, why));
                 continue;
             }
+        }
+        if !stopped_cleanly(&candidate.path) {
+            warn!(
+                %project_id,
+                "keeping a stopped checkout: its last runtime did not stop cleanly, so it may hold work that is nowhere else"
+            );
+            report.kept_unpushed.push(project_id);
+            continue;
         }
 
         if let Err(error) = fs::create_dir_all(&trash) {
@@ -444,12 +487,20 @@ mod tests {
         present: HashSet<Uuid>,
         busy: HashSet<Uuid>,
         claims: RefCell<Vec<Uuid>>,
+        /// A stop that finishes (and stamps the checkout) right before the
+        /// sweep gets the lock.
+        stopped_meanwhile: Option<(PathBuf, Uuid)>,
     }
 
     impl CheckoutHost for FakeHost {
         type Claim = ();
         fn claim(&self, project_id: Uuid) -> Option<()> {
             self.claims.borrow_mut().push(project_id);
+            if let Some((base, stopped)) = &self.stopped_meanwhile {
+                if *stopped == project_id {
+                    touch_checkout(base, project_id);
+                }
+            }
             (!self.busy.contains(&project_id)).then_some(())
         }
         fn runtime_present(&self, project_id: Uuid) -> anyhow::Result<bool> {
@@ -472,6 +523,7 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("file.bin"), vec![7u8; bytes]).unwrap();
+        fs::write(root.join(CLEAN_STOP_MARKER), b"stopped\n").unwrap();
         touch_checkout(base, project_id);
         let stamp = fs::File::options()
             .write(true)
@@ -666,5 +718,41 @@ mod tests {
         )
         .evicted
         .is_empty());
+    }
+
+    #[test]
+    fn checkouts_whose_runtime_did_not_stop_cleanly_are_kept() {
+        let base = TempDir::new();
+        let now = SystemTime::now();
+        // A crash: no shutdown flush wrote the marker. Dirty files or
+        // commits that are not on canonical may be the only copy.
+        let crashed = checkout(&base.0, now, 30 * DAY, 10);
+        fs::remove_file(base.0.join(crashed.to_string()).join(CLEAN_STOP_MARKER)).unwrap();
+        // A branch ahead of canonical, after a clean stop that parked it,
+        // pushed or not, is decided by its recovery refs alone.
+        let clean = checkout(&base.0, now, 30 * DAY, 10);
+        let report = sweep_checkouts(
+            &base.0,
+            &CheckoutEvictionPolicy::default(),
+            now,
+            &FakeHost::default(),
+        );
+        assert_eq!(report.kept_unpushed, vec![crashed]);
+        assert_eq!(report.evicted, vec![(clean, "idle")]);
+        assert!(exists(&base.0, crashed));
+    }
+
+    #[test]
+    fn a_stop_that_finishes_before_the_sweep_gets_the_lock_keeps_the_checkout() {
+        let base = TempDir::new();
+        let now = SystemTime::now();
+        let project_id = checkout(&base.0, now, 30 * DAY, 10);
+        let host = FakeHost {
+            stopped_meanwhile: Some((base.0.clone(), project_id)),
+            ..FakeHost::default()
+        };
+        let report = sweep_checkouts(&base.0, &CheckoutEvictionPolicy::default(), now, &host);
+        assert!(report.evicted.is_empty(), "{report:?}");
+        assert!(exists(&base.0, project_id));
     }
 }

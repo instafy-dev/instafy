@@ -240,11 +240,17 @@ impl DockerRuntimeAllocator {
             }
         }
 
-        let compose_down_result = self.run_compose_down(&project_name).await;
         // A stop never evicts the checkout; it only starts its idle clock.
+        // It holds the checkout's lock like a start, so an eviction sweep
+        // that read the old clock cannot remove it as the stop finishes.
+        let checkout_guard = checkout_lock(&self.checkout_locks, project_id)
+            .lock_owned()
+            .await;
+        let compose_down_result = self.run_compose_down(&project_name).await;
         if let Some(repo_base) = &self.repo_base {
             touch_checkout(repo_base, project_id);
         }
+        drop(checkout_guard);
         if let Err(error) = &compose_down_result {
             warn!(
                 %project_id,
