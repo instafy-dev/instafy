@@ -80,9 +80,10 @@ row-level security policies, and checks these rules:
 - Only those readers who also write to the space upload: its owner, and owners, admins and
   builders of the space or its team.
 - Non-members, a deleted space and anon are refused.
-- These names are refused: a free-form name, another extension, a name without a conversation,
-  a malformed id, any spelling of an id other than the canonical one, and a conversation that
-  is missing or belongs to another space.
+- These names are refused: a free-form name, another extension, anything after the extension,
+  a name without a conversation, a malformed id, any spelling of an id other than the canonical
+  one (upper case and moved hyphens included, for ids of a real space and conversation), and a
+  conversation that is missing or belongs to another space.
 - Nobody updates or upserts an object.
 - An uploader deletes only their own objects, and only while they can still write to the space
   and read the conversation.
