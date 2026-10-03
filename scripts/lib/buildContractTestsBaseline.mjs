@@ -10,6 +10,7 @@ export const ADDED_BUILD_CONTRACT_TESTS = [
   "scripts/mirror-supabase-images.test.mjs",
   "scripts/lib/supabaseStartMode.test.mjs",
   "scripts/lib/supabaseSerialPull.test.mjs",
+  "scripts/check-origin-git-compat-ci.test.mjs",
 ];
 
 export const addedBuildContractTestLine = (file) => `            ${file} \\\n`;

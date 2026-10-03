@@ -148,9 +148,9 @@ services:
       proxy:
         condition: service_healthy
     working_dir: /workspace
-    # Reserved for the origin server's shutdown flush (a final workspace
-    # checkpoint before SIGKILL). The flush cannot push yet: see the known gap
-    # in docs/Runtime-Machines.md, "Workspace durability".
+    # Reserved for the origin server's shutdown flush, which parks unsaved
+    # work on local recovery refs before SIGKILL; the next start pushes them.
+    # See docs/Runtime-Machines.md, "Workspace durability".
     stop_grace_period: 45s
     tty: true
     stdin_open: true

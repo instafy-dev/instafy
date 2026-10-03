@@ -1,80 +1,54 @@
 ---
 name: instafy-git-canonical-conflicts
-description: Playbook for resolving git-canonical conflict and rebase states safely.
+description: How to merge work a save kept aside because a file also changed in the saved version, and what the "Not saved" lines mean.
 ---
 
-# Git-canonical conflict resolution (core skill)
+# Merging work a save kept aside (core skill)
 
 Never prune: yes
 
-Goal: resolve `origin/main` vs local conflicts in **Instafy git-canonical** workspaces and finish a clean push to `main` (never force-push).
+Goal: when a save could not take some of this workspace's changes, merge them into the saved version (canonical `main`) on purpose, without losing either side.
 
-## When to auto-resolve vs ask
+## How saving works
 
-- If the User gives an explicit decision (keep local vs keep remote) or gives the exact final file content, **resolve automatically**.
-- If a conflict is “binary-like” (images, large/minified blobs) and the User did not specify what to keep, **ask** (don’t guess).
+- After every turn, the runtime saves the files the turn changed by merging them onto the saved version and pushing the result. Nothing is rebased, reset or force-pushed, and you never commit, rebase or push to save.
+- Before every turn, the runtime brings the workspace up to the saved version and fetches this space's kept work (`refs/instafy/recovery/*`).
+- When a file changed both here and in the saved version since the workspace last caught up, the saved version keeps its own copy. This workspace's copy is kept on a recovery ref, and the save reports:
+  - `conflictedPaths`: the files the saved version kept its own copy of;
+  - `recoveryRef`: the ref holding this workspace's version of them (`refs/instafy/recovery/<origin>/<name>`, or `refs/instafy/local-recovery/<name>` until it is pushed);
+  - `rejectedPaths`: files that are never saved, each with a `reason` (see below).
+- The reply then ends with a line like `Not saved: src/app.ts (kept at refs/instafy/recovery/<origin>/<name>)`, and `instafy git sync` prints the same line and exits 1.
 
-## Quick diagnosis (always)
+## When to merge
 
-- `instafy git status -sb`
-- `instafy git status --porcelain=v1`
+- When the User asks you to merge, or asks what happened to a file named on a "Not saved" line.
+- If the User says which version wins, or gives the exact final content, do exactly that.
+- If a conflicted file is binary-like (images, archives, minified bundles) and the User did not say which to keep, ask. Do not guess.
 
-If `git status` says “not a git repository”, you are in `.instafy/.git` land — use `instafy git …` (or `git --git-dir .instafy/.git --work-tree . …`).
+## Merge procedure
 
-## If `instafy git sync` returns `409 Conflict`
+1. Find the ref and the paths. They are on the "Not saved" line. To list all kept work: `instafy git for-each-ref refs/instafy/recovery refs/instafy/local-recovery`.
+2. Read the versions:
+   - the saved version is the file in the workspace (the workspace follows the saved version), or `instafy git show origin/main:<path>`;
+   - this workspace's version: `instafy git show <ref>:<path>`;
+   - the version both started from, when it helps: `instafy git show <ref>^:<path>`.
+3. Write the merged file into the workspace, keeping what each side meant to change. If the User gave the final content, write it exactly (newlines matter).
+4. Check the result as for any change (build, tests).
+5. Report the merged files as changed in your final answer. The runtime's checkpoint after the turn saves them like any other change.
 
-`instafy git sync` is a great default, but it can’t resolve conflicts for you. When it returns `409 Conflict`, switch to manual conflict handling:
+Never run `instafy git rebase`, `instafy git rebase --continue`, `instafy git push` or any `--force` command to resolve a conflict, and never delete recovery refs. Kept work stays until someone restores or dismisses it.
 
-Important: Origin aborts the rebase when it reports `409 Conflict`, so there is usually **no rebase to continue** afterwards. Don’t start with `instafy git rebase --continue`; start a fresh manual rebase.
+## Verify
 
-If the User message explicitly mentions merge conflicts (or includes the desired merged content), **skip `instafy git sync`** and run the manual procedure below — it is more deterministic and avoids false “sync succeeded” claims.
+- After the turn, the reply has no "Not saved" line for the merged files.
+- In a later turn: `instafy git show origin/main:<path>` matches what the User asked for.
 
-If `instafy git status` says your branch and `origin/main` have diverged, you must rebase `origin/main` (manual procedure) and resolve conflicts before pushing.
+## Files that are never saved (`rejectedPaths`)
 
-## Deterministic manual sync procedure (git-canonical)
+The saved version keeps its earlier copy of these paths (`keptSavedVersion: true` when it has one); the files stay in this workspace only.
 
-1) **Checkpoint local intent (commit what you meant to change).**
-- `instafy git add -A`
-- `instafy git commit -m "instafy: checkpoint"` (ok if it prints “nothing to commit”)
-
-2) **Fetch + rebase onto canonical main.**
-- `instafy git fetch origin main`
-- `instafy git rebase origin/main`
-
-If the rebase refuses with “Your local changes would be overwritten by merge”, you still have uncommitted changes — go back to step 1.
-
-3) **Resolve conflicts (repeat until rebase completes).**
-
-For each conflicted path:
-- If the User gave the exact final content, overwrite the file with that content **exactly** (newlines matter).
-- If the User said keep local: `instafy git checkout --ours -- <path>`
-- If the User said keep remote: `instafy git checkout --theirs -- <path>`
-- Stage: `instafy git add -- <path>`
-- Continue: `instafy git rebase --continue`
-
-If `instafy git rebase --continue` complains about staged changes and suggests `git commit --amend`, you are at an “edit” stop:
-- `instafy git commit --amend --no-edit`
-- `instafy git rebase --continue`
-
-If the rebase state is confusing or stuck:
-- `instafy git rebase --abort`
-- Restart from step 1 (checkpoint → fetch → rebase).
-
-4) **Mark the resolution as assistant-made (auditability).**
-
-Once the rebase completes and before pushing, append a trailer to the tip commit so the resolution is visible in history:
-- `instafy git commit --amend --no-edit --trailer "Instafy-Resolved-By: assistant"`
-
-The commit is still local at this point, so amending is safe. Do this for every conflict resolution you performed, even when the User told you exactly what to keep.
-
-5) **Push (fast-forward only).**
-- `instafy git push origin HEAD:main`
-
-If push is rejected (non-fast-forward), retry once:
-- `instafy git fetch origin main`
-- `instafy git rebase origin/main`
-- `instafy git push origin HEAD:main`
-
-## Verify the canonical remote
-
-- Always verify before claiming success: `instafy git show origin/main:<path>` must match what the User asked for.
+- `ignored`: matched by `.gitignore`. Change `.gitignore` only when the User wants the file saved.
+- `secret`: `.env*` (except `.env.example`, `.env.sample` and `.env.template`), `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `.npmrc`, `.pypirc`, `.netrc`. Never save these; suggest Instafy secrets instead.
+- `excluded`: dependencies, build output, caches and Instafy metadata (`node_modules/`, `.instafy/` and similar).
+- `too_large`: files over 20 MiB.
+- `attachment`, `policy`, `unsupported`: older chat uploads, paths the repository refuses, and entries git cannot store safely.

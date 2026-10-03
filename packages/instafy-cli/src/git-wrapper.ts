@@ -436,6 +436,10 @@ function printGitSyncHelp() {
   );
   console.log("  --json                    Output JSON");
   console.log("");
+  console.log("Paths the saved history could not take are named on \"Not saved: <paths> (kept at <ref>)\"");
+  console.log("lines, and the command then exits 1. Read a kept version with");
+  console.log("\"instafy git show <ref>:<path>\".");
+  console.log("");
   console.log("Env fallback:");
   console.log(
     "  ORIGIN_ENDPOINT, ORIGIN_BIND_PORT, ORIGIN_ACCESS_TOKEN, ORIGIN_INTERNAL_TOKEN",
@@ -529,6 +533,10 @@ type MintedOriginAccessToken = {
   token: string;
 };
 
+function resolveRuntimeId(): string | null {
+  return normalizeToken(process.env["RUNTIME_ID"]);
+}
+
 function resolveLeaseId(): string | null {
   return (
     normalizeToken(process.env["RUNTIME_LEASE_ID"]) ??
@@ -558,6 +566,9 @@ async function mintOriginAccessTokenForCli(): Promise<MintedOriginAccessToken | 
       protocol: "http",
       scopes: ["fs.write"],
       leaseId,
+      // Inside a runtime, save through that runtime's own origin (its
+      // checkout), not whichever origin the controller would pick.
+      ...(resolveRuntimeId() ? { preferRuntime: resolveRuntimeId() } : {}),
     }),
     redirect: "error",
     signal: AbortSignal.timeout(60_000),
@@ -781,23 +792,188 @@ export async function runInstafyGitSync(args: string[], options?: { cwd?: string
     }
   }
 
+  const report = parseSaveReport(text);
+
   if (!response.ok) {
+    if (report.code === "not_saved") {
+      // Nothing reached the saved history; the report says where it is kept.
+      const notSaved = notSavedSentences(report, { failedWhole: true });
+      if (parsed.json) {
+        console.log(JSON.stringify(saveReportJson(report, notSaved), null, 2));
+      } else {
+        for (const sentence of notSaved) {
+          console.error(kleur.red(`${sentence}.`));
+        }
+      }
+      return 1;
+    }
     const suffix = text.trim() ? `: ${text.trim()}` : "";
     console.error(kleur.red(`Origin git sync failed (${response.status} ${response.statusText})${suffix}`));
     return 1;
   }
 
-  const payload = text.trim() ? (JSON.parse(text) as { rev?: string } | null) : null;
-  const rev = typeof payload?.rev === "string" ? payload.rev.trim() : "";
+  const rev = report.rev ?? "";
   if (!rev) {
     console.error(kleur.red("Origin git sync response missing rev field."));
     return 1;
   }
 
+  const notSaved = notSavedSentences(report, { failedWhole: false });
   if (parsed.json) {
-    console.log(JSON.stringify({ rev }, null, 2));
+    console.log(JSON.stringify(saveReportJson(report, notSaved), null, 2));
   } else {
     console.log(rev);
+    for (const sentence of notSaved) {
+      console.error(kleur.yellow(`${sentence}.`));
+    }
   }
-  return 0;
+  // Anything left out of the saved history is a failed save for the caller.
+  return notSaved.length > 0 ? 1 : 0;
+}
+
+type RejectedPath = {
+  path: string;
+  reason: string;
+  keptSavedVersion: boolean;
+};
+
+type SaveReport = {
+  rev: string | null;
+  baseRev: string | null;
+  gitSyncStatus: string | null;
+  recoveryRef: string | null;
+  conflictedPaths: string[];
+  rejectedPaths: RejectedPath[];
+  unpushedRefs: number | null;
+  error: string | null;
+  failure: string | null;
+  code: string | null;
+};
+
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Read an Origin `/git/sync` body: the publish report on success, or the
+ * same report next to `error` and `code: "not_saved"` when nothing was saved.
+ * Unknown or malformed fields are ignored.
+ */
+export function parseSaveReport(text: string): SaveReport {
+  let payload: Record<string, unknown> = {};
+  try {
+    const value: unknown = text.trim() ? JSON.parse(text) : null;
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      payload = value as Record<string, unknown>;
+    }
+  } catch {
+    payload = {};
+  }
+  const conflictedPaths = Array.isArray(payload["conflictedPaths"])
+    ? (payload["conflictedPaths"] as unknown[]).flatMap((entry) => {
+        const path = optionalString(entry);
+        return path ? [path] : [];
+      })
+    : [];
+  const rejectedPaths = Array.isArray(payload["rejectedPaths"])
+    ? (payload["rejectedPaths"] as unknown[]).flatMap((entry): RejectedPath[] => {
+        if (typeof entry === "string") {
+          const path = optionalString(entry);
+          return path ? [{ path, reason: "", keptSavedVersion: false }] : [];
+        }
+        if (!entry || typeof entry !== "object") return [];
+        const record = entry as Record<string, unknown>;
+        const path = optionalString(record["path"]);
+        if (!path) return [];
+        return [
+          {
+            path,
+            reason: optionalString(record["reason"]) ?? "",
+            keptSavedVersion: record["keptSavedVersion"] === true,
+          },
+        ];
+      })
+    : [];
+  const unpushed = payload["unpushedRefs"];
+  return {
+    rev: optionalString(payload["rev"]),
+    baseRev: optionalString(payload["baseRev"]),
+    gitSyncStatus: optionalString(payload["gitSyncStatus"]),
+    recoveryRef: optionalString(payload["recoveryRef"]),
+    conflictedPaths,
+    rejectedPaths,
+    unpushedRefs: typeof unpushed === "number" && Number.isFinite(unpushed) ? unpushed : null,
+    error: optionalString(payload["error"]),
+    failure: optionalString(payload["failure"]),
+    code: optionalString(payload["code"]),
+  };
+}
+
+const MAX_NAMED_PATHS = 5;
+
+function describePaths(paths: string[]): string {
+  const unique = Array.from(new Set(paths)).sort();
+  if (unique.length <= MAX_NAMED_PATHS) return unique.join(", ");
+  return `${unique.slice(0, MAX_NAMED_PATHS).join(", ")} and ${unique.length - MAX_NAMED_PATHS} more`;
+}
+
+function rejectionLabel(reason: string): string {
+  switch (reason) {
+    case "ignored":
+      return "ignored by .gitignore";
+    case "secret":
+      return "secret files are never saved";
+    case "too_large":
+      return "larger than 20 MiB";
+    case "unsupported":
+      return "not a file that can be saved";
+    default:
+      return "excluded from saved versions";
+  }
+}
+
+/**
+ * One "Not saved: <paths> (kept at <ref>)" sentence per group of paths that
+ * did not reach the saved history, matching the runtime's chat sentence.
+ */
+export function notSavedSentences(report: SaveReport, options: { failedWhole: boolean }): string[] {
+  const sentences: string[] = [];
+  if (report.conflictedPaths.length > 0) {
+    const paths = describePaths(report.conflictedPaths);
+    sentences.push(
+      report.recoveryRef ? `Not saved: ${paths} (kept at ${report.recoveryRef})` : `Not saved: ${paths}`,
+    );
+  }
+  const groups = new Map<string, string[]>();
+  for (const rejected of report.rejectedPaths) {
+    const label = rejectionLabel(rejected.reason);
+    groups.set(label, [...(groups.get(label) ?? []), rejected.path]);
+  }
+  for (const [label, paths] of groups) {
+    sentences.push(`Not saved: ${describePaths(paths)} (${label})`);
+  }
+  if (options.failedWhole && sentences.length === 0) {
+    // The origin's own message already reads "Not saved: <why> (kept at <ref>)".
+    const message = report.error ?? report.failure ?? "Not saved";
+    const trimmed = message.replace(/\.+$/, "");
+    if (trimmed.startsWith("Not saved")) {
+      sentences.push(trimmed);
+    } else {
+      sentences.push(report.recoveryRef ? `Not saved: ${trimmed} (kept at ${report.recoveryRef})` : `Not saved: ${trimmed}`);
+    }
+  }
+  return sentences;
+}
+
+function saveReportJson(report: SaveReport, notSaved: string[]) {
+  return {
+    rev: report.rev,
+    baseRev: report.baseRev,
+    gitSyncStatus: report.gitSyncStatus,
+    recoveryRef: report.recoveryRef,
+    conflictedPaths: report.conflictedPaths,
+    rejectedPaths: report.rejectedPaths,
+    unpushedRefs: report.unpushedRefs,
+    notSaved,
+  };
 }

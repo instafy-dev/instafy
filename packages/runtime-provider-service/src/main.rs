@@ -9,7 +9,7 @@ use axum::{
 };
 use runtime_provider_core::allocator::{
     build_runtime_allocator_for_kind, DynRuntimeAllocator, EnsureRuntimeRequest,
-    RuntimeAllocatorKind,
+    RuntimeAllocatorKind, RuntimeCensus,
 };
 use runtime_provider_core::config::{ProviderConfig, RuntimeProviderConfig};
 use serde::Deserialize;
@@ -255,6 +255,57 @@ async fn inspect_runtime(
             None
         });
     Ok(Json(InspectResponse { oom_killed }))
+}
+
+/// Read-only: the runtimes and workspace checkouts on this node, for the
+/// controller's drain before the node is retired. No identity beyond the
+/// runtime, project and lease ids leaves the node, and no credential.
+async fn census_runtimes(
+    State(state): State<ProviderState>,
+) -> Result<Json<RuntimeCensus>, (StatusCode, String)> {
+    state.allocator.census().await.map(Json).map_err(|error| {
+        error!(%error, "runtime census failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "runtime census failed".to_string(),
+        )
+    })
+}
+
+/// Evicts stopped workspace checkouts from this node's disk on a schedule:
+/// after `RUNTIME_CHECKOUT_TTL_DAYS` (default 7) idle, or oldest first while
+/// they exceed `RUNTIME_CHECKOUT_DISK_BUDGET_GIB`. The allocator never evicts
+/// a checkout with a runtime container, a start in progress, or unpushed
+/// local recovery refs, and a stop never evicts. Canonical `main` and the
+/// space's recovery refs are the durable copy; the next start clones again.
+fn spawn_checkout_eviction(allocator: runtime_provider_core::allocator::DynRuntimeAllocator) {
+    let interval = env::var("RUNTIME_CHECKOUT_SWEEP_INTERVAL_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(6 * 60 * 60);
+    if interval == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        // Let runtimes that were running before a restart be ensured again
+        // before the first sweep looks at their checkouts.
+        time::sleep(Duration::from_secs(10 * 60)).await;
+        loop {
+            match allocator.evict_idle_checkouts().await {
+                Ok(report) => {
+                    if !report.evicted.is_empty() || !report.kept_unpushed.is_empty() {
+                        info!(
+                            evicted = ?report.evicted,
+                            kept_unpushed = ?report.kept_unpushed,
+                            "workspace checkout sweep finished"
+                        );
+                    }
+                }
+                Err(error) => error!(%error, "workspace checkout sweep failed"),
+            }
+            time::sleep(Duration::from_secs(interval)).await;
+        }
+    });
 }
 
 /// Bounds the per-project toolchain caches (/workspace/.cache mounts): they
@@ -613,8 +664,8 @@ async fn try_register_with_controller(state: &ProviderState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_runtime, release_runtime, resolve_auth_tokens, EnsurePayload, ProviderState,
-        ReleasePayload, RuntimeOperationLocks,
+        census_runtimes, ensure_runtime, release_runtime, resolve_auth_tokens, EnsurePayload,
+        ProviderState, ReleasePayload, RuntimeOperationLocks,
     };
     use async_trait::async_trait;
     use axum::{extract::State, http::StatusCode, Json};
@@ -747,6 +798,26 @@ mod tests {
         .await
         .expect("different runtimes should have independent operation locks");
         drop(different_runtime);
+    }
+
+    /// The census of an allocator that cannot list its node says so, rather
+    /// than reporting an empty node.
+    #[tokio::test]
+    async fn census_of_an_allocator_without_node_listing_is_unsupported() {
+        let Json(census) =
+            census_runtimes(State(provider_state(false, Arc::new(AtomicUsize::new(0)))))
+                .await
+                .expect("census");
+        let body = serde_json::to_value(&census).expect("census body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "supported": false,
+                "containers": [],
+                "checkouts": [],
+                "truncated": false,
+            })
+        );
     }
 
     #[tokio::test]
@@ -1025,11 +1096,13 @@ async fn main() -> anyhow::Result<()> {
     });
 
     spawn_workspace_cache_cleanup();
+    spawn_checkout_eviction(state.allocator.clone());
 
     let app = Router::new()
         .route("/runtime/ensure", post(ensure_runtime))
         .route("/runtime/release", post(release_runtime))
         .route("/runtime/inspect", post(inspect_runtime))
+        .route("/runtime/census", post(census_runtimes))
         .route("/healthz", axum::routing::get(|| async { StatusCode::OK }))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state, auth_layer));

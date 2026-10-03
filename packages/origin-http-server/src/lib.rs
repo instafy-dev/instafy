@@ -12,9 +12,20 @@ pub mod git;
 pub mod git_tokens;
 pub mod jwks;
 pub mod paths;
+pub mod publish;
+pub mod publish_policy;
+#[cfg(test)]
+mod publish_tests;
+mod push;
+pub mod recovery;
 pub mod routes;
 mod safe_fs;
 pub mod server;
+mod stale_align;
+#[cfg(test)]
+mod test_support;
+mod tree_merge;
 pub mod untrusted_git;
 pub mod workspace_fs;
+pub mod workspace_git;
 mod workspace_lock;

@@ -121,6 +121,7 @@ RUN mkdir -p packages/runtime-agent/src \
     && printf 'fn main() {}\n' > packages/runtime-agent/src/main.rs
 COPY packages/runtime-contracts/ packages/runtime-contracts/
 COPY packages/openai-proxy-server/ packages/openai-proxy-server/
+COPY packages/git-service/ packages/git-service/
 COPY packages/origin-http-server/ packages/origin-http-server/
 COPY codex/codex-rs/ codex/codex-rs/
 # Checksums Codex pins for its sandboxed rusty_v8 builds (see scripts/fetch-rusty-v8.sh).
@@ -133,11 +134,11 @@ RUN cargo chef prepare --recipe-path /src/recipe.json
 # Dependencies builder
 ########################
 # The recipe stubs only runtime-agent itself: cargo-chef keeps the out-of-tree
-# path crates (runtime-contracts, origin-http-server, codex-rs) as real sources,
-# so this layer is keyed on them too. target/ is deliberately NOT a cache mount
-# here: exported layer caches (the publisher's registry cache, mode=max) keep
-# image layers but never cache mounts, so only a layer carries the compiled
-# dependencies to a fresh runner.
+# path crates (runtime-contracts, git-service, origin-http-server, codex-rs) as
+# real sources, so this layer is keyed on them too. target/ is deliberately NOT
+# a cache mount here: exported layer caches (the publisher's registry cache,
+# mode=max) keep image layers but never cache mounts, so only a layer carries
+# the compiled dependencies to a fresh runner.
 FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -151,6 +152,7 @@ COPY --from=chef /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
 COPY --from=chef /src/packages/runtime-agent /src/packages/runtime-agent
 COPY --from=chef /src/packages/runtime-contracts /src/packages/runtime-contracts
 COPY --from=chef /src/packages/openai-proxy-server /src/packages/openai-proxy-server
+COPY --from=chef /src/packages/git-service /src/packages/git-service
 COPY --from=chef /src/packages/origin-http-server /src/packages/origin-http-server
 COPY --from=chef /src/codex /src/codex
 COPY --from=chef /src/proto /src/proto

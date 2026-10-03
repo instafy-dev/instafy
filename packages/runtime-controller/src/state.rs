@@ -32,6 +32,8 @@ pub(crate) struct AppState {
     pub(crate) ota_registry: crate::ota::OtaRegistry,
     pub(crate) desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry,
     pub(crate) credential_refresh_locks: CredentialRefreshLocks,
+    /// Process-local: the pool-retirement drain's fence and wakes.
+    pub(crate) runtime_drain: crate::runtime::RuntimeDrainState,
 }
 
 /// Serializes OAuth token refreshes per credential. ChatGPT refresh tokens

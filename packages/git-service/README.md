@@ -30,6 +30,10 @@ See `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_MAX_PUSH_BYTES` and `GIT_POLICY
 `docs/Git-Service.md`. `tests/shard_push_policy.rs` runs the real `git-shard` binary against a git
 client to cover the policy end to end.
 
+The policy module is the one copy of these rules. `origin-http-server` depends on this crate with
+`default-features = false`, which builds only `policy`; the `server` feature (on by default) adds
+the edge and shard and their dependencies.
+
 Trusted backend cleanup may mint a 60-second, service-only `git.delete` token and send exact
 `DELETE /<uuid>.git` through Git Edge. Shards must remain private; the full fail-closed contract is
 documented in `docs/Git-Service.md`. Both edge and shard validate delete credentials with the

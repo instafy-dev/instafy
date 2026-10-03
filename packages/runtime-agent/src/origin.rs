@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -45,7 +47,47 @@ pub struct OriginLaunchOverrides {
 pub struct LocalOriginSync {
     pub origin_id: Uuid,
     pub endpoint: String,
+    /// Brings this origin's checkout up to date without a write credential,
+    /// for a turn that could not get a workspace lease.
+    pub read_only_refresh: Option<ReadOnlyRefresh>,
 }
+
+type ReadOnlyRefreshFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
+
+/// The read-only refresh of the origin hosted by this process: fetch
+/// canonical `main` with the origin's own read credential and move the
+/// checkout only when it holds nothing unpublished. Resolves to the origin's
+/// refresh report.
+#[derive(Clone)]
+pub struct ReadOnlyRefresh(Arc<dyn Fn() -> ReadOnlyRefreshFuture + Send + Sync>);
+
+impl ReadOnlyRefresh {
+    pub fn new<F, Fut>(refresh: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value>> + Send + 'static,
+    {
+        Self(Arc::new(move || Box::pin(refresh())))
+    }
+
+    pub async fn run(&self) -> Result<Value> {
+        (self.0)().await
+    }
+}
+
+impl std::fmt::Debug for ReadOnlyRefresh {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReadOnlyRefresh")
+    }
+}
+
+impl PartialEq for ReadOnlyRefresh {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ReadOnlyRefresh {}
 
 pub struct OriginService {
     server: Option<OriginHttpServer>,
@@ -116,6 +158,10 @@ impl OriginService {
             max_archive_bytes: settings.max_archive_bytes,
             staging_base: settings.staging_root.clone(),
             multi_tenant: false,
+            // A desktop origin serves a folder the user owns. Only the modes
+            // registered as service-owned below count as hosted; anything
+            // unrecognised falls back to desktop there too.
+            hosted_checkout: matches!(settings.mode.as_str(), "efs" | "hosted"),
         };
 
         let register_token_source = server_config.controller_token_source.clone();
@@ -133,6 +179,18 @@ impl OriginService {
             origin_id = %settings.origin_id,
             "origin HTTP server listening"
         );
+        let read_only_refresh = server.checkout_refresher().map(|refresher| {
+            ReadOnlyRefresh::new(move || {
+                let refresher = refresher.clone();
+                async move {
+                    let report = refresher
+                        .refresh_read_only()
+                        .await
+                        .map_err(|error| anyhow!("read-only refresh failed: {error}"))?;
+                    serde_json::to_value(report).context("failed to encode the refresh report")
+                }
+            })
+        });
 
         let endpoint = settings
             .tunnel_url
@@ -209,6 +267,7 @@ impl OriginService {
             local_sync: Some(LocalOriginSync {
                 origin_id: settings.origin_id,
                 endpoint: Self::derive_endpoint(start.address),
+                read_only_refresh,
             }),
         }))
     }
@@ -220,13 +279,25 @@ impl OriginService {
     }
 
     pub async fn shutdown(&mut self) {
+        self.shutdown_after_turn(false).await;
+    }
+
+    /// Stop the origin, keeping the workspace's work on local recovery refs
+    /// first. `turn_interrupted`: a turn is still running or lost its lease
+    /// within the last minute (`AgentExecutor::turn_interrupted`), so its
+    /// local commits are set aside too instead of being left for the next
+    /// publish.
+    pub async fn shutdown_after_turn(&mut self, turn_interrupted: bool) {
         if let Some(server) = self.server.as_mut() {
-            // Graceful machine shutdown: checkpoint uncommitted workspace
-            // changes to the git remote before the container dies. The
+            // Graceful machine shutdown: keep uncommitted workspace changes on
+            // local recovery refs before the container dies. The
             // registration-failure cleanup above deliberately uses the
             // non-flushing stop() — the controller is unreachable there and
             // no user work is at stake.
-            if let Err(error) = server.stop_flushing_workspace().await {
+            if let Err(error) = server
+                .stop_flushing_workspace_during_turn(turn_interrupted)
+                .await
+            {
                 warn!(?error, "failed to stop origin HTTP server");
             } else {
                 info!("origin HTTP server stopped");

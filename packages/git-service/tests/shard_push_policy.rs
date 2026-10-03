@@ -63,6 +63,38 @@ fn free_port() -> u16 {
         .expect("reserve a local port")
 }
 
+/// Waits until this shard process answers its own `/healthz`. Any listener
+/// accepts a TCP connect, so only the shard's `ok` body proves the port is its.
+fn wait_until_serving(child: &mut Child, port: u16) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Err(format!("git-shard exited early with {status}"));
+        }
+        if shard_answers_health(port) && child.try_wait().unwrap().is_none() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err("git-shard did not answer /healthz".to_string())
+}
+
+fn shard_answers_health(port: u16) -> bool {
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    if stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    response.starts_with("HTTP/1.1 200") && response.ends_with("ok")
+}
+
 fn write_executable(path: &Path, contents: &str) {
     std::fs::write(path, contents).expect("write script");
     #[cfg(unix)]
@@ -106,70 +138,68 @@ impl Shard {
         // test process start one at a time.
         static STARTING: Mutex<()> = Mutex::new(());
         let _starting = STARTING.lock().unwrap_or_else(|error| error.into_inner());
-        let port = free_port();
-        let log = std::fs::File::create(root.path().join("shard.log")).unwrap();
-        let mut command = Command::new(SHARD_BIN);
-        command
-            .env_clear()
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    bin_dir.display(),
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .env("HOME", &home)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("RUST_LOG", "warn")
-            .env("GIT_SHARD_BIND_HOST", "127.0.0.1")
-            .env("GIT_SHARD_BIND_PORT", port.to_string())
-            .env("GIT_REPO_ROOT", root.path().join("repos"))
-            .env("GIT_AUTO_INIT", "1")
-            .env("GIT_DEFAULT_BRANCH", "main")
-            .env("GIT_JWKS_URL", "http://127.0.0.1:9/jwks")
-            // Neither may reach a hook: the first would replace the shared
-            // hooks directory, the second would unlock salvage refs.
-            .env("GIT_CONFIG_PARAMETERS", "'core.hookspath'='/nonexistent'")
-            .env("INSTAFY_GIT_SALVAGE_PUSH", "1");
-        for (key, value) in extra_env {
-            command.env(key, value);
-        }
-        let child = command
-            .stdin(Stdio::null())
-            .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .expect("start git-shard");
-
-        let mut shard = Self {
-            child,
-            port,
-            project_id: uuid::Uuid::new_v4().to_string(),
-            spawn_log,
-            root,
-        };
-        shard.wait_until_listening();
-        shard
-    }
-
-    fn wait_until_listening(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if let Some(status) = self.child.try_wait().unwrap() {
-                panic!("git-shard exited early with {status}: {}", self.log());
+        // Another listener in this test process can take the reserved port before
+        // the shard binds it, so a start only counts once the shard itself answers
+        // /healthz while still running, and a lost race starts again on a new port.
+        let mut last_failure = String::new();
+        for _ in 0..5 {
+            let port = free_port();
+            let log = std::fs::File::create(root.path().join("shard.log")).unwrap();
+            let mut command = Command::new(SHARD_BIN);
+            command
+                .env_clear()
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin_dir.display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .env("HOME", &home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("RUST_LOG", "warn")
+                .env("GIT_SHARD_BIND_HOST", "127.0.0.1")
+                .env("GIT_SHARD_BIND_PORT", port.to_string())
+                .env("GIT_REPO_ROOT", root.path().join("repos"))
+                .env("GIT_AUTO_INIT", "1")
+                .env("GIT_DEFAULT_BRANCH", "main")
+                .env("GIT_JWKS_URL", "http://127.0.0.1:9/jwks")
+                // Neither may reach a hook: the first would replace the shared
+                // hooks directory, the second would unlock salvage refs.
+                .env("GIT_CONFIG_PARAMETERS", "'core.hookspath'='/nonexistent'")
+                .env("INSTAFY_GIT_SALVAGE_PUSH", "1");
+            for (key, value) in extra_env {
+                command.env(key, value);
             }
-            if TcpStream::connect(("127.0.0.1", self.port)).is_ok() {
-                return;
+            let mut child = command
+                .stdin(Stdio::null())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .expect("start git-shard");
+            match wait_until_serving(&mut child, port) {
+                Ok(()) => {
+                    return Self {
+                        child,
+                        port,
+                        project_id: uuid::Uuid::new_v4().to_string(),
+                        spawn_log,
+                        root,
+                    };
+                }
+                Err(failure) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    last_failure = format!(
+                        "{failure}: {}",
+                        std::fs::read_to_string(root.path().join("shard.log")).unwrap_or_default()
+                    );
+                }
             }
-            std::thread::sleep(Duration::from_millis(50));
         }
-        panic!("git-shard did not start listening: {}", self.log());
-    }
-
-    fn log(&self) -> String {
-        std::fs::read_to_string(self.root.path().join("shard.log")).unwrap_or_default()
+        panic!("git-shard did not start serving: {last_failure}");
     }
 
     fn url(&self) -> String {
@@ -951,4 +981,27 @@ fn push_size_is_bounded() {
     let accepted = client.commit_file("small.txt", b"small\n", "small");
     client.push_ok("main");
     assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), accepted);
+}
+
+#[test]
+fn a_foreign_listener_on_the_port_is_never_taken_for_the_shard() {
+    // Another test's webhook sink can hold a reserved port; answering a connect
+    // (or even HTTP 200) must not make a start look ready.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request = [0u8; 512];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+            );
+        }
+    });
+    assert!(!shard_answers_health(port));
+    server.join().unwrap();
+    assert!(
+        !shard_answers_health(port),
+        "a closed port is not a shard either"
+    );
 }

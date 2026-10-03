@@ -11,10 +11,9 @@ Goal: keep **git-canonical** workspaces safely synced to their **canonical remot
 
 ## Policy (important)
 
-- **Default behavior:** assistant file changes auto-sync after apply in git-canonical workspaces.
-- Users can disable auto-sync in Profile preferences; in that mode, treat sync as an **agent-driven step** and surface that manual save is required.
-- If auto-sync fails, do not drop the workspace edits. Clearly tell the user to open Changes and save/sync manually.
-- The goal is high-quality commits and predictable conflict handling: if a sync hits conflicts, resolve them intentionally or ask the user.
+- **Default behavior:** every turn's file changes are saved after the turn in git-canonical workspaces: the files you report plus every file whose `git status` changed during the turn. There is no manual-save mode.
+- A save merges onto the saved version; it never rebases. Files it could not take are named at the end of the reply as `Not saved: <paths> (kept at <ref>)`. To merge them, follow `.agents/skills/instafy-git-canonical-conflicts/SKILL.md`.
+- If a save fails, do not drop the workspace edits. Clearly tell the user what was not saved and that `/sync` retries safely.
 
 ## How to run git commands (important)
 
@@ -72,12 +71,12 @@ Rule: if it’s not clearly git-canonical, do **not** push anywhere without aski
 
 ## Before starting work (read-only preflight, git-canonical only)
 
-Goal: avoid conflicts by inspecting local/remote divergence and letting the controlled `/sync` path own any rebase.
+Goal: avoid conflicts by inspecting local/remote divergence and letting the controlled `/sync` path own any merge.
 
 Recommended (fast + consistent):
 - If a preflight sync is still needed, ask the user to send `/sync` as a top-level message.
 
-The runtime-owned sync path fetches/rebases/checkpoints without exposing a write credential to the model shell.
+The runtime-owned sync path fetches, merges and checkpoints without exposing a write credential to the model shell.
 
 1) Inspect local changes:
 - `git --git-dir .instafy/.git --work-tree . status --porcelain=v1`
@@ -101,7 +100,7 @@ Do not rebase or push from the model shell. The controlled checkpoint or explici
 
 ## Main-only policy (git-canonical only)
 
-- Sync by rebasing and pushing **to `main` only**.
+- Saves reach **`main` only**, as a merge onto the saved version (never a rebase).
 - Do not create/push branches or open PRs in v0 (unless a future learning says otherwise).
 - Never `--force` push to the canonical remote.
 
@@ -110,7 +109,7 @@ Do not rebase or push from the model shell. The controlled checkpoint or explici
 Recommended (preferred):
 - Explain what will be synced, then ask the user to send `/sync` as a top-level message.
 
-The runtime performs the controlled checkpoint and canonical push before model execution. If it reports `409 Conflict`, resolve the workspace files, then ask the user to send `/sync` again.
+The runtime performs the controlled checkpoint and canonical push before model execution. If it reports files as "Not saved", follow `.agents/skills/instafy-git-canonical-conflicts/SKILL.md`.
 
 Before returning the intent, inspect what changed:
 - `git --git-dir .instafy/.git --work-tree . status --porcelain=v1`
@@ -128,17 +127,17 @@ It can still be useful to save progress as **local commits**, as long as we don�
 
 ## Conflict handling (git-canonical only)
 
-If rebase reports conflicts:
-- Try to resolve by intent (preserve the user’s requested behavior) and keep history linear.
-- Leave resolved files in the worktree for the runtime-owned checkpoint; it records an auditable resolution without a model-held Git write credential.
+If a save names files as "Not saved" because the saved version also changed them:
+- Merge them by intent (preserve the user’s requested behavior) with `.agents/skills/instafy-git-canonical-conflicts/SKILL.md`.
+- Leave merged files in the worktree for the runtime-owned checkpoint; it records an auditable resolution without a model-held Git write credential.
 - If it’s unclear or risky, stop and ask the user:
   - What you were trying to save (commit summary)
   - Which files conflict (list them)
   - Offer options: keep local, keep remote, or manual merge guidance
 - Never `--force` push to the canonical remote.
 
-If you started a rebase you can’t finish:
-- `git rebase --abort` (then ask the user what to do next).
+If a rebase or merge was started by hand and you can’t finish it:
+- `git rebase --abort` or `git merge --abort` (then ask the user what to do next).
 
 ## When you don’t know what to do
 

@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+# origin-http-server shares the repository push policy from git-service.
+COPY packages/git-service/ packages/git-service/
 COPY packages/origin-http-server/ packages/origin-http-server/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
