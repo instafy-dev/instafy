@@ -1,5 +1,24 @@
 # @instafy/cli
 
+## 0.2.3
+
+### Patch Changes
+
+- 7e3b932: Add customer commands for reading paginated support case timelines and posting idempotent follow-up replies.
+- 24052bd: `instafy git sync` now names every path the saved history did not take, as "Not saved: <paths> (kept at <ref>)", and exits 1 when anything was not saved. `--json` carries `gitSyncStatus`, `conflictedPaths`, `rejectedPaths`, `recoveryRef` and `unpushedRefs`. Inside a runtime, the sync goes through that runtime's own origin.
+- c9705e8: `instafy conversation show` without a target now shows the current conversation from `INSTAFY_CONVERSATION_ID` (or `CONVERSATION_ID`), which runtime jobs set, instead of failing with a missing argument. With neither set it explains how to name one. A value in either variable that is not a conversation UUID is now rejected with a clear error before any request, by `conversation show`, by `history messages` and `history runs` without `--conversation`, and by `agents context put` without `--scope-id`, instead of being sent to the controller as part of the request path or as a context card's scope.
+- 82caf54: Remove `CREDENTIAL_ENCRYPTION_PREVIOUS_KEYS`, the controller's decrypt-only credential keys during a key rotation, from the environment of runtime child processes, as `CREDENTIAL_ENCRYPTION_KEY` already is.
+- b5eecb1: Allow recommendation submissions to include a concise message for a private Octo conversation, and expose delivery state without starting the suggested work. Submissions without a message keep the existing proposal-only behavior.
+  
+  Add explicit `automations create --mode space_review` for an opted-in, private and quiet review schedule using the bundled instructions. Existing prompt automations keep their defaults.
+- 43879b5: Add commands to list space recommendations and submit evidence-backed next actions, preserving accepted and dismissed outcomes.
+- 1fc904c: Add `conversation grep` to search persisted conversation messages with scope filters, newest-first pagination, and JSON output. Add `conversation context` to retrieve surrounding messages for a search match.
+- 3c43559: Rebuild the published bundle with tsup 8. The emitted JavaScript is formatted
+  differently because tsup's esbuild moves from 0.19 to 0.27, and `node:` prefixes
+  are now kept in the output, which the config states explicitly rather than
+  inheriting. No CLI behaviour changes; the test suite and the packed file list
+  are unchanged.
+
 ## 0.2.2
 
 ### Patch Changes
