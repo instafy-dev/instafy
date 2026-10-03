@@ -67,6 +67,7 @@ import {
   type ConversationGoalHealth,
 } from "../../../conversations/conversationGoals";
 import type { PendingChatImageAttachment } from "./useChatComposerAttachments";
+import { CHAT_IMAGE_ACCEPT } from "../../../lib/chatAttachments";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { useTouchSendModePicker } from "./useTouchSendModePicker";
 import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
@@ -115,6 +116,8 @@ type ChatComposerSurfaceProps = {
     "triggerClassName" | "triggerIconClassName"
   >;
   onOpenImagePicker: () => void;
+  /** Why images can't be attached here (no attachment storage), or null. */
+  imageUploadUnavailableReason?: string | null;
   sendingAttachment: boolean;
   showMobileGhostSuggestionAcceptButton: boolean;
   onAcceptGhostSuggestion: () => void;
@@ -246,6 +249,7 @@ export function ChatComposerSurface({
   homeAttentionBadge,
   composerActionMenuProps,
   onOpenImagePicker,
+  imageUploadUnavailableReason = null,
   sendingAttachment,
   showMobileGhostSuggestionAcceptButton,
   onAcceptGhostSuggestion,
@@ -468,7 +472,8 @@ export function ChatComposerSurface({
   const composerInlineControlsInTextRow = !showVoiceActiveStrip;
   const mobileChatsNavigation = showComposerNavigationButton && composerNavigationDestination === "chats";
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
-  const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
+  const imageUploadDisabled =
+    mutationDisabled || sendingAttachment || onboardingInputLocked || Boolean(imageUploadUnavailableReason);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -857,6 +862,7 @@ export function ChatComposerSurface({
       mutationDisabled={mutationDisabled}
       onUploadImage={onOpenImagePicker}
       uploadImageDisabled={imageUploadDisabled}
+      uploadImageUnavailableReason={imageUploadUnavailableReason}
       onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
       onStartVoiceInput={
         voiceInputAvailable && !showInlineVoiceAction && voiceConversationActionStripProps.onVoiceTap
@@ -1407,8 +1413,9 @@ export function ChatComposerSurface({
               <input
                 ref={imageInputRef}
                 type="file"
-                accept="image/*"
+                accept={CHAT_IMAGE_ACCEPT}
                 multiple
+                disabled={Boolean(imageUploadUnavailableReason)}
                 onChange={onImageInputChange}
                 className="hidden"
                 data-testid="chat-image-upload-input"

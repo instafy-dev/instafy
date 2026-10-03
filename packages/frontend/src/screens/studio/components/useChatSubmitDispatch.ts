@@ -1,6 +1,7 @@
 import { Capacitor } from "@capacitor/core";
-import { useCallback, type MutableRefObject } from "react";
+import { useCallback, useRef, type MutableRefObject } from "react";
 import type { SubmitConversationOptions } from "../../../conversations/useConversation";
+import { isChatAttachmentUploadError } from "../../../lib/chatAttachments";
 
 export type ChatSubmitDispatchPayload = {
   message: string;
@@ -46,6 +47,31 @@ export function useChatSubmitDispatch({
   setSendingAttachment,
   shouldAutoScrollRef,
 }: UseChatSubmitDispatchOptions) {
+  // The chat the composer shows now, which may differ from the one a slow
+  // attachment upload started in.
+  const activeConversationIdRef = useRef(activeConversationId);
+  activeConversationIdRef.current = activeConversationId;
+
+  // An attachment upload failed, so nothing was sent: the draft goes back
+  // into the composer it came from. Text the person has typed since is kept
+  // below it, and the staged attachments were never cleared.
+  const restoreUnsentDraft = useCallback(
+    (conversationId: string, draft: string, editorState: string | null) => {
+      if (activeConversationIdRef.current !== conversationId) {
+        onInputChange(conversationId, draft, editorState);
+        return;
+      }
+      const current = latestInputValueRef.current ?? "";
+      if (current.trim() === draft.trim()) {
+        return;
+      }
+      const restored = current.trim() ? `${draft}\n\n${current}` : draft;
+      latestInputValueRef.current = restored;
+      onInputChange(conversationId, restored, current.trim() ? null : editorState);
+    },
+    [latestInputValueRef, onInputChange],
+  );
+
   const clearComposerIfUnchanged = useCallback(
     (conversationId: string, expectedDraft: string) => {
       if (activeConversationId !== conversationId) {
@@ -99,15 +125,26 @@ export function useChatSubmitDispatch({
       }
       setSendingAttachment(true);
       try {
-        await onSubmit(activeConversationId, composerMessage, {
-          dispatchInput: payload.message !== composerMessage ? payload.message : null,
-          imageFiles: payload.imageFiles,
-          editorState: payload.editorState,
-          agentHandles: mentionableAgentHandles,
-          metadata: payload.metadata ?? null,
-          runtimeOverride: payload.runtimeOverride ?? null,
-          expectedLaneIdle: payload.expectedLaneIdle,
-        });
+        try {
+          await onSubmit(activeConversationId, composerMessage, {
+            dispatchInput: payload.message !== composerMessage ? payload.message : null,
+            imageFiles: payload.imageFiles,
+            editorState: payload.editorState,
+            agentHandles: mentionableAgentHandles,
+            metadata: payload.metadata ?? null,
+            runtimeOverride: payload.runtimeOverride ?? null,
+            expectedLaneIdle: payload.expectedLaneIdle,
+          });
+        } catch (error) {
+          // The submit flow has already said why in plain copy.
+          if (!isChatAttachmentUploadError(error)) {
+            throw error;
+          }
+          if (touchComposer && activeConversationId) {
+            restoreUnsentDraft(activeConversationId, composerMessage, payload.editorState);
+          }
+          return;
+        }
         if (touchComposer) {
           clearImageAttachments();
           if (shouldRefocus && !Capacitor.isNativePlatform()) {
@@ -130,6 +167,7 @@ export function useChatSubmitDispatch({
       mentionableAgentHandles,
       onInputChange,
       onSubmit,
+      restoreUnsentDraft,
       scrollToBottom,
       setSendingAttachment,
       shouldAutoScrollRef,

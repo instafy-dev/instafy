@@ -61,6 +61,27 @@ unreadable through a session. A signed URL that a member created before the dele
 until it expires or the purge removes its object. A conversation is never deleted on its own:
 it goes only with its space or its team, whose purge covers it.
 
+## The web app
+
+- The composer takes PNG, JPEG, WebP and GIF images up to 20 MiB, from the picker, a paste
+  or a drop, and says why it skips anything else.
+- Sending uploads each attachment with the person's own Supabase session, `upsert` off and the
+  exact content type, into `<projectId>/<conversationId>/`. A new chat is created on the
+  controller first. The message is shown and sent only after every upload succeeds. A failed
+  upload removes the ones that did succeed, shows plain copy (never Storage's own error text),
+  and puts the draft back in the composer with its images still attached.
+- A message shows a Storage image by downloading it with the session into an object URL that
+  is revoked when the image goes away. It never creates a signed URL. A read Storage refuses
+  (someone who is not a reader of the conversation) or an object that is gone shows a plain
+  "Image unavailable" placeholder. Text attachments are listed by name.
+- Older images with a `workspacePath` still load through the workspace's raw file route.
+- When a file someone is editing changes underneath them and both versions are large, the merge
+  request sends the two versions as `kind: "file"` text attachments of that chat instead of
+  writing snapshot files into the workspace.
+- When `GET /projects/:projectId` reports `attachments: "none"`, or the app has no Supabase
+  configuration, the image button is off with the reason "This server can't store
+  attachments.", paste and drop say the same, and merge requests keep both versions inline.
+
 ## Delivery to the runtime
 
 A runtime that downloads attachments advertises the `attachmentDownloads` capability.

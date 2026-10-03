@@ -12,6 +12,12 @@ export interface SubmitConversationRuntimeOverride {
 export interface SubmitConversationOptions {
   imageFile?: File | null;
   imageFiles?: File[];
+  /**
+   * Plain text or Markdown files sent with the message as `kind: "file"`
+   * attachments. They are stored like images, in the conversation's Storage
+   * folder, before the message is sent.
+   */
+  textFiles?: File[];
   editorState?: string | null;
   agentHandles?: string[];
   dispatchInput?: string | null;

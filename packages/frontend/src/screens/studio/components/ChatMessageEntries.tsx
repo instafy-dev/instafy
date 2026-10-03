@@ -15,6 +15,7 @@ import { MoreHoriz, WarningTriangle } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { useConversations } from "../../../conversations/ConversationsProvider";
+import { downloadChatAttachment, isChatAttachmentStoragePath } from "../../../lib/chatAttachments";
 import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
@@ -139,63 +140,78 @@ export function NotchedMessageShell({
   );
 }
 
-type ChatImageAttachmentDescriptor = {
-  kind: "image";
-  workspacePath?: string | null;
-  fileName?: string | null;
-  mimeType?: string | null;
-  sizeBytes?: number | null;
-  previewUrl?: string | null;
+type ChatAttachmentDetails = {
+  fileName: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
 };
 
-function parseImageAttachment(value: unknown): ChatImageAttachmentDescriptor | null {
+/**
+ * An image a message carries: in Storage (`storagePath`), or an older one
+ * uploaded into the workspace (`workspacePath`, read through /raw).
+ */
+type ChatImageAttachmentDescriptor = ChatAttachmentDetails & {
+  kind: "image";
+  storagePath: string | null;
+  workspacePath: string | null;
+  previewUrl: string | null;
+};
+
+/** A text file a message carries in Storage, such as a merge snapshot. */
+type ChatFileAttachmentDescriptor = ChatAttachmentDetails & {
+  kind: "file";
+  storagePath: string;
+};
+
+type ChatAttachmentDescriptor = ChatImageAttachmentDescriptor | ChatFileAttachmentDescriptor;
+
+function readTrimmedString(value: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+function parseAttachment(value: unknown): ChatAttachmentDescriptor | null {
   if (!isRecord(value)) {
     return null;
   }
   const kind = typeof value.kind === "string" ? value.kind.trim().toLowerCase() : "";
-  if (kind !== "image") {
+  if (kind !== "image" && kind !== "file") {
     return null;
   }
-  const workspacePathRaw =
-    typeof value.workspacePath === "string"
-      ? value.workspacePath
-      : typeof value.workspace_path === "string"
-        ? value.workspace_path
-        : null;
-  const workspacePath = workspacePathRaw?.trim() ? workspacePathRaw.trim() : null;
-  const fileNameRaw =
-    typeof value.fileName === "string"
-      ? value.fileName
-      : typeof value.file_name === "string"
-        ? value.file_name
-        : null;
-  const fileName = fileNameRaw?.trim() ? fileNameRaw.trim() : null;
-  const mimeTypeRaw =
-    typeof value.mimeType === "string"
-      ? value.mimeType
-      : typeof value.mime_type === "string"
-        ? value.mime_type
-        : null;
-  const mimeType = mimeTypeRaw?.trim() ? mimeTypeRaw.trim() : null;
+  const storagePathRaw = readTrimmedString(value, "storagePath", "storage_path");
+  // Only a name of the bucket's own shape is ever downloaded.
+  const storagePath = isChatAttachmentStoragePath(storagePathRaw) ? storagePathRaw : null;
   const sizeBytesValue =
     typeof value.sizeBytes === "number"
       ? value.sizeBytes
       : typeof value.size_bytes === "number"
         ? value.size_bytes
         : null;
-  const sizeBytes =
-    typeof sizeBytesValue === "number" && Number.isFinite(sizeBytesValue) && sizeBytesValue >= 0
-      ? sizeBytesValue
-      : null;
-  const previewUrlRaw = typeof value.previewUrl === "string" ? value.previewUrl : null;
-  const previewUrl = previewUrlRaw?.trim() ? previewUrlRaw.trim() : null;
-  if (!workspacePath && !previewUrl) {
+  const details: ChatAttachmentDetails = {
+    fileName: readTrimmedString(value, "fileName", "file_name"),
+    mimeType: readTrimmedString(value, "mimeType", "mime_type"),
+    sizeBytes:
+      typeof sizeBytesValue === "number" && Number.isFinite(sizeBytesValue) && sizeBytesValue >= 0
+        ? sizeBytesValue
+        : null,
+  };
+  if (kind === "file") {
+    return storagePath ? { kind: "file", storagePath, ...details } : null;
+  }
+  const workspacePath = readTrimmedString(value, "workspacePath", "workspace_path");
+  const previewUrl = readTrimmedString(value, "previewUrl");
+  if (!storagePath && !workspacePath && !previewUrl) {
     return null;
   }
-  return { kind: "image", workspacePath, fileName, mimeType, sizeBytes, previewUrl };
+  return { kind: "image", storagePath, workspacePath, previewUrl, ...details };
 }
 
-export function extractImageAttachments(message: ChatMessage): ChatImageAttachmentDescriptor[] {
+export function extractChatAttachments(message: ChatMessage): ChatAttachmentDescriptor[] {
   if (!message.metadata || !isRecord(message.metadata)) {
     return [];
   }
@@ -220,17 +236,132 @@ export function extractImageAttachments(message: ChatMessage): ChatImageAttachme
   }
 
   return attachments
-    .map((entry) => parseImageAttachment(entry))
-    .filter((entry): entry is ChatImageAttachmentDescriptor => entry !== null);
+    .map((entry) => parseAttachment(entry))
+    .filter((entry): entry is ChatAttachmentDescriptor => entry !== null);
 }
 
-function ChatMessageImageAttachment({
+export function extractImageAttachments(message: ChatMessage): ChatImageAttachmentDescriptor[] {
+  return extractChatAttachments(message).filter(
+    (entry): entry is ChatImageAttachmentDescriptor => entry.kind === "image",
+  );
+}
+
+const ATTACHMENT_TILE_CLASS =
+  "h-24 w-24 rounded-xl border border-slate-200 bg-slate-50 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]";
+
+type StorageImageState =
+  | { storagePath: string; status: "loading" }
+  | { storagePath: string; status: "ready"; url: string }
+  | { storagePath: string; status: "unavailable" };
+
+/**
+ * Downloads a Storage image with the person's own session and shows it from
+ * an object URL that is revoked when the image goes away. A read Storage
+ * refuses (someone who is not a reader of the conversation) or an object
+ * that is gone shows a plain placeholder.
+ */
+function useChatStorageImageUrl(storagePath: string): StorageImageState {
+  const [state, setState] = useState<StorageImageState>({ storagePath, status: "loading" });
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    void downloadChatAttachment(storagePath).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      if (!result.ok) {
+        setState({ storagePath, status: "unavailable" });
+        return;
+      }
+      objectUrl = URL.createObjectURL(result.blob);
+      setState({ storagePath, status: "ready", url: objectUrl });
+    });
+    return () => {
+      cancelled = true;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [storagePath]);
+
+  // A new path shows as loading until its own download settles.
+  return state.storagePath === storagePath ? state : { storagePath, status: "loading" };
+}
+
+function ChatAttachmentImageTile({
+  imageUrl,
+  alt,
+  onOpenImage,
+}: {
+  imageUrl: string | null;
+  alt: string;
+  onOpenImage?: (src: string, alt: string) => void;
+}) {
+  if (!imageUrl) {
+    return (
+      <div
+        className={ATTACHMENT_TILE_CLASS}
+        aria-label={alt}
+        data-testid="chat-image-attachment-placeholder"
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className="h-24 w-24 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 shadow-sm transition hover:bg-slate-100/60 hover:opacity-95 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:hover:bg-[var(--color-studio-dark-control-hover)]"
+      onClick={() => onOpenImage?.(imageUrl, alt)}
+      aria-label={`Open ${alt}`}
+      data-testid="chat-image-attachment-thumbnail"
+    >
+      <img src={imageUrl} alt={alt} className="h-full w-full object-cover" />
+    </button>
+  );
+}
+
+function ChatMessageStorageImage({
+  storagePath,
+  alt,
+  onOpenImage,
+}: {
+  storagePath: string;
+  alt: string;
+  onOpenImage?: (src: string, alt: string) => void;
+}) {
+  const state = useChatStorageImageUrl(storagePath);
+  if (state.status === "unavailable") {
+    return (
+      <div
+        role="img"
+        aria-label={`${alt} is unavailable`}
+        title={alt}
+        className={`${ATTACHMENT_TILE_CLASS} flex items-center justify-center p-2 text-center text-xs text-slate-500 dark:text-slate-400`}
+        data-testid="chat-image-attachment-unavailable"
+      >
+        Image unavailable
+      </div>
+    );
+  }
+  return (
+    <ChatAttachmentImageTile
+      imageUrl={state.status === "ready" ? state.url : null}
+      alt={alt}
+      onOpenImage={onOpenImage}
+    />
+  );
+}
+
+function ChatMessageWorkspaceImage({
   attachment,
+  alt,
   projectId,
   runtimeId,
   onOpenImage,
 }: {
   attachment: ChatImageAttachmentDescriptor;
+  alt: string;
   projectId: string | null | undefined;
   runtimeId: string | null | undefined;
   onOpenImage?: (src: string, alt: string) => void;
@@ -263,28 +394,51 @@ function ChatMessageImageAttachment({
     };
   }, [attachment.previewUrl, attachment.workspacePath, projectId, runtimeId]);
 
-  const alt = attachment.fileName ?? "Image attachment";
+  return <ChatAttachmentImageTile imageUrl={imageUrl} alt={alt} onOpenImage={onOpenImage} />;
+}
 
-  if (!imageUrl) {
+function ChatMessageImageAttachment({
+  attachment,
+  projectId,
+  runtimeId,
+  onOpenImage,
+}: {
+  attachment: ChatImageAttachmentDescriptor;
+  projectId: string | null | undefined;
+  runtimeId: string | null | undefined;
+  onOpenImage?: (src: string, alt: string) => void;
+}) {
+  const alt = attachment.fileName ?? "Image attachment";
+  if (attachment.storagePath && !attachment.previewUrl) {
     return (
-      <div
-        className="h-24 w-24 rounded-xl border border-slate-200 bg-slate-50 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]"
-        aria-label={alt}
-        data-testid="chat-image-attachment-placeholder"
+      <ChatMessageStorageImage
+        storagePath={attachment.storagePath}
+        alt={alt}
+        onOpenImage={onOpenImage}
       />
     );
   }
-
   return (
-    <button
-      type="button"
-      className="h-24 w-24 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 shadow-sm transition hover:bg-slate-100/60 hover:opacity-95 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:hover:bg-[var(--color-studio-dark-control-hover)]"
-      onClick={() => onOpenImage?.(imageUrl, alt)}
-      aria-label={`Open ${alt}`}
-      data-testid="chat-image-attachment-thumbnail"
+    <ChatMessageWorkspaceImage
+      attachment={attachment}
+      alt={alt}
+      projectId={projectId}
+      runtimeId={runtimeId}
+      onOpenImage={onOpenImage}
+    />
+  );
+}
+
+function ChatMessageFileAttachment({ attachment }: { attachment: ChatFileAttachmentDescriptor }) {
+  const label = attachment.fileName ?? "Attached file";
+  return (
+    <span
+      className="inline-flex max-w-full items-center rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-600 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300"
+      title={label}
+      data-testid="chat-file-attachment"
     >
-      <img src={imageUrl} alt={alt} className="h-full w-full object-cover" />
-    </button>
+      <span className="truncate">{label}</span>
+    </span>
   );
 }
 
@@ -309,7 +463,7 @@ export function UserMessageBubble({
   onOpenImage,
   mentionableAgentHandles,
 }: UserMessageBubbleProps) {
-  const attachments = useMemo(() => extractImageAttachments(message), [message]);
+  const attachments = useMemo(() => extractChatAttachments(message), [message]);
   const hasText = message.content.trim().length > 0;
   const isOwnMessage = align === "right";
   const fileChanges = Array.isArray(message.files) ? message.files : [];
@@ -331,15 +485,24 @@ export function UserMessageBubble({
     >
       {attachments.length > 0 ? (
         <div className="mb-2 mt-0.5 flex flex-wrap gap-2">
-          {attachments.map((attachment, index) => (
-            <ChatMessageImageAttachment
-              key={attachment.workspacePath ?? attachment.previewUrl ?? attachment.fileName ?? `attachment-${index}`}
-              attachment={attachment}
-              projectId={projectId ?? null}
-              runtimeId={runtimeId ?? null}
-              onOpenImage={onOpenImage}
-            />
-          ))}
+          {attachments.map((attachment, index) => {
+            const key =
+              attachment.storagePath ??
+              (attachment.kind === "image" ? attachment.workspacePath ?? attachment.previewUrl : null) ??
+              attachment.fileName ??
+              `attachment-${index}`;
+            return attachment.kind === "image" ? (
+              <ChatMessageImageAttachment
+                key={key}
+                attachment={attachment}
+                projectId={projectId ?? null}
+                runtimeId={runtimeId ?? null}
+                onOpenImage={onOpenImage}
+              />
+            ) : (
+              <ChatMessageFileAttachment key={key} attachment={attachment} />
+            );
+          })}
         </div>
       ) : null}
       {hasText ? (

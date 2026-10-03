@@ -2,11 +2,20 @@ import type { ControllerProjectSummary } from "../services/runtimeController/pro
 
 export type EffectiveProjectRole = "viewer" | "builder" | "admin" | "owner";
 
+export type ChatAttachmentsMode = "storage" | "none";
+
 export interface ProjectCapabilities {
   effectiveRole: EffectiveProjectRole | null;
   canWrite: boolean;
   canShare: boolean;
   canManage: boolean;
+  /** Null until a single-space summary has said; only `none` turns uploads off. */
+  chatAttachments: ChatAttachmentsMode | null;
+}
+
+function normalizeChatAttachmentsMode(value: unknown): ChatAttachmentsMode | null {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return normalized === "storage" || normalized === "none" ? normalized : null;
 }
 
 function normalizeEffectiveRole(value: string | null | undefined): EffectiveProjectRole | null {
@@ -51,6 +60,7 @@ export function resolveProjectCapabilities(
       summary.canShare ?? (effectiveRole === "admin" || effectiveRole === "owner"),
     canManage:
       summary.canManage ?? (effectiveRole === "admin" || effectiveRole === "owner"),
+    chatAttachments: normalizeChatAttachmentsMode(summary.attachments),
   };
 }
 
@@ -60,6 +70,7 @@ export function ownerProjectCapabilities(): ProjectCapabilities {
     canWrite: true,
     canShare: true,
     canManage: true,
+    chatAttachments: null,
   };
 }
 
