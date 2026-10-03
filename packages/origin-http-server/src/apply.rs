@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::fs::{self, File};
+use std::io::{self, Cursor, Read, Seek, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -13,7 +13,6 @@ use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use tempfile::Builder as TempDirBuilder;
 use tracing::warn;
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
@@ -26,7 +25,6 @@ use crate::safe_fs::{
     create_new_content_options, open_dir_path, open_or_create_child, open_workspace_root,
     read_nofollow_options, remove_child_entry, sync_dir, ScopedTempDir,
 };
-use crate::workspace_fs::WorkspaceDir;
 
 const MAX_APPLY_ENTRY_COUNT: usize = 50_000;
 const MAX_APPLY_PATH_BYTES: usize = 4096;
@@ -116,6 +114,11 @@ pub struct ApplyManifest {
     pub idempotency_key: Option<String>,
     #[serde(default, rename = "requestFingerprint")]
     pub request_fingerprint: Option<String>,
+    /// Single-tenant origins: the git blob id each path must hold before
+    /// this apply, as served in `X-Instafy-Blob` or `/entries`; `null` means
+    /// the path must not exist. Any mismatch fails the whole apply with 409.
+    #[serde(default)]
+    pub expected: Option<std::collections::BTreeMap<String, Option<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,188 +129,6 @@ pub struct ApplySummary {
     pub lease_id: Option<String>,
     pub applied_paths: Vec<String>,
     pub deleted_paths: Vec<String>,
-}
-
-/// Apply a manifest through the hardened, transactional pipeline and discard
-/// the rollback handle on success.
-///
-/// Two apply pipelines coexist in this module:
-/// - [`apply_changes_in`] operates against an already-opened [`WorkspaceDir`]
-///   capability and keeps the lenient warn-and-skip semantics used by the
-///   collaboration sync routes (blocked deletes are contained no-ops).
-/// - [`apply_changes_transactional`] / [`apply_changes_transactional_file`]
-///   validate the entire destination set up front, reject invalid manifests
-///   outright, and return an [`ApplyTransaction`] so downstream failures (Git
-///   commit, idempotency receipt) can restore the exact pre-apply workspace.
-pub fn apply_changes(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    manifest: ApplyManifest,
-    archive_bytes: &[u8],
-) -> Result<ApplySummary, OriginError> {
-    let (summary, transaction) =
-        apply_changes_transactional(config, workspace_root, manifest, archive_bytes)?;
-    transaction.finish();
-    Ok(summary)
-}
-
-pub fn apply_changes_in(
-    config: &ServerConfig,
-    workspace: &WorkspaceDir,
-    manifest: ApplyManifest,
-    archive_bytes: &[u8],
-) -> Result<ApplySummary, OriginError> {
-    if let Some(project_id) = manifest.project_id.as_deref() {
-        if !config.multi_tenant && project_id != config.project_id.to_string() {
-            return Err(OriginError::bad_request("manifest project mismatch"));
-        }
-    }
-
-    if archive_bytes.len() as u64 > config.max_archive_bytes {
-        return Err(OriginError::bad_request("archive exceeds size limit"));
-    }
-
-    // The old default staged below `.instafy` by ambient path, which could
-    // itself be redirected through a symlink. Use the OS temp root unless an
-    // administrator supplied a trusted staging base. Destination writes are
-    // copied into same-directory temporary leaves and atomically renamed by
-    // WorkspaceDir, so staging need not share the workspace filesystem.
-    let temp_dir = if let Some(staging_root) = config.staging_base.as_deref() {
-        fs::create_dir_all(staging_root)
-            .with_context(|| format!("failed to create staging root {:?}", staging_root))
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-        TempDirBuilder::new()
-            .prefix("apply-")
-            .tempdir_in(staging_root)
-    } else {
-        TempDirBuilder::new().prefix("instafy-apply-").tempdir()
-    }
-    .map_err(|error| {
-        OriginError::internal(format!("failed to create apply staging dir: {error}"))
-    })?;
-
-    let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
-        .map_err(|error| OriginError::bad_request(format!("invalid workspace archive: {error}")))?;
-
-    // Stage each file under a synthetic filename so case-only path differences
-    // in upstream repos do not collide on case-insensitive workspace mounts.
-    let mut staged_files: Vec<(String, File, bool)> = Vec::new();
-    let mut dedupe: HashSet<String> = HashSet::new();
-    let mut delete_paths: Vec<String> = Vec::new();
-    let mut delete_dedupe: HashSet<String> = HashSet::new();
-    let mut bytes_written: u64 = 0;
-    let mut file_count: usize = 0;
-
-    for entry in manifest.files {
-        let normalized = match normalize_relative_path(&entry.path) {
-            Some(value) => value,
-            None => {
-                warn!(path = %entry.path, "skipping manifest entry with invalid path");
-                continue;
-            }
-        };
-
-        if normalized.eq_ignore_ascii_case(".instafy") || is_reserved_path(&normalized) {
-            warn!(path = %normalized, "skipping manifest entry with reserved path");
-            continue;
-        }
-
-        if !dedupe.insert(normalized.clone()) {
-            warn!(path = %normalized, "duplicate manifest path detected");
-            continue;
-        }
-
-        let mut zip_file = match archive.by_name(&normalized) {
-            Ok(file) => file,
-            Err(error) => {
-                warn!(path = %normalized, ?error, "archive missing manifest file");
-                continue;
-            }
-        };
-        let archive_mode = zip_file.unix_mode();
-
-        let staged_index = staged_files.len();
-        let staging_path = temp_dir.path().join(format!("entry-{staged_index:08}"));
-
-        let mut staging_file = OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(&staging_path)
-            .with_context(|| format!("failed to open staging file {:?}", staging_path))
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        let remaining = config.max_archive_bytes.saturating_sub(bytes_written);
-        let written =
-            copy_archive_entry(&mut zip_file, &mut staging_file, remaining).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::InvalidData {
-                    OriginError::bad_request("expanded archive exceeds size limit")
-                } else {
-                    OriginError::internal(error.to_string())
-                }
-            })?;
-        bytes_written += written;
-        file_count += 1;
-
-        staging_file
-            .sync_all()
-            .with_context(|| format!("failed to flush staging file {:?}", staging_path))
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        staged_files.push((
-            normalized,
-            staging_file,
-            archive_mode.is_some_and(|mode| mode & 0o111 != 0),
-        ));
-    }
-
-    // Apply files by renaming from staging into workspace.
-    for (relative, staging_file, executable) in &mut staged_files {
-        staging_file
-            .seek(SeekFrom::Start(0))
-            .with_context(|| format!("failed to rewind staging file for {relative:?}"))
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-        workspace
-            .replace_file(relative, staging_file, *executable)
-            .with_context(|| format!("failed to replace workspace file {relative:?}"))
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-
-    // Handle deletes.
-    for entry in &manifest.deletes {
-        let normalized = match normalize_relative_path(entry) {
-            Some(value) => value,
-            None => continue,
-        };
-
-        if normalized.eq_ignore_ascii_case(".instafy") || is_reserved_path(&normalized) {
-            warn!(path = %normalized, "skipping delete for reserved path");
-            continue;
-        }
-
-        if !delete_dedupe.insert(normalized.clone()) {
-            continue;
-        }
-        delete_paths.push(normalized.clone());
-
-        if let Err(error) = workspace.remove(&normalized) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(?error, path = %normalized, "failed to delete workspace entry");
-            }
-        }
-    }
-
-    let rev = DateTime::<Utc>::from(SystemTime::now())
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-
-    Ok(ApplySummary {
-        rev,
-        bytes_written,
-        file_count,
-        lease_id: manifest.lease_id,
-        applied_paths: staged_files.into_iter().map(|(path, _, _)| path).collect(),
-        deleted_paths: delete_paths,
-    })
 }
 
 pub fn apply_changes_transactional(
@@ -1313,7 +1134,7 @@ fn apply_executable_archive_mode(_file: &File, _unix_mode: Option<u32>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_changes, apply_changes_in, apply_rollback_dir_capability_limit,
+        apply_changes_transactional, apply_rollback_dir_capability_limit,
         apply_rollback_dir_capability_limit_for_nofile, install_staged_file_at_parent,
         install_staged_files, install_staged_files_with_hook, normalize_relative_path,
         validate_install_parent_capability_limit,
@@ -1324,7 +1145,6 @@ mod tests {
     use crate::config::ServerConfig;
     use crate::error::OriginError;
     use crate::safe_fs::{create_new_content_options, open_workspace_root};
-    use crate::workspace_fs::WorkspaceDir;
     use cap_fs_ext::DirExt;
     use cap_std::ambient_authority;
     use cap_std::fs::Dir;
@@ -1368,6 +1188,7 @@ mod tests {
             max_archive_bytes,
             staging_base: staging.map(|dir| dir.path().to_path_buf()),
             multi_tenant: false,
+            hosted_checkout: false,
         }
     }
 
@@ -1390,6 +1211,7 @@ mod tests {
             commit_message: None,
             idempotency_key: None,
             request_fingerprint: None,
+            expected: None,
         }
     }
 
@@ -1412,6 +1234,7 @@ mod tests {
             commit_message: None,
             idempotency_key: None,
             request_fingerprint: None,
+            expected: None,
         }
     }
 
@@ -1426,22 +1249,17 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
-    #[cfg(unix)]
-    fn archive_with(path: &str, contents: &[u8]) -> Vec<u8> {
-        zip_archive(&[(path, contents)])
-    }
-
-    /// Drive the lenient `WorkspaceDir`-backed pipeline the collaboration
-    /// routes use, mirroring how `apply_changes` behaved before the
-    /// transactional import pipeline became the path-based default.
-    fn apply_changes_via_workspace_dir(
+    /// Apply through the transactional pipeline and keep the result.
+    fn apply_changes(
         config: &ServerConfig,
         workspace_root: &std::path::Path,
         manifest: ApplyManifest,
         archive_bytes: &[u8],
     ) -> Result<ApplySummary, OriginError> {
-        let workspace = WorkspaceDir::open(workspace_root).expect("open workspace dir");
-        apply_changes_in(config, &workspace, manifest, archive_bytes)
+        let (summary, transaction) =
+            apply_changes_transactional(config, workspace_root, manifest, archive_bytes)?;
+        transaction.finish();
+        Ok(summary)
     }
 
     #[test]
@@ -2204,6 +2022,7 @@ mod tests {
                 commit_message: None,
                 idempotency_key: None,
                 request_fingerprint: None,
+                expected: None,
             },
             &archive,
         )
@@ -2214,97 +2033,6 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o111, 0o111);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn apply_changes_in_restores_executable_archive_mode() {
-        let workspace = TempDir::new().unwrap();
-        let config = test_config(&workspace, None, 1024 * 1024);
-
-        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-        writer
-            .start_file(
-                "tools/run",
-                FileOptions::<()>::default().unix_permissions(0o100755),
-            )
-            .unwrap();
-        writer.write_all(b"#!/usr/bin/env bash\ntrue\n").unwrap();
-        let archive = writer.finish().unwrap().into_inner();
-
-        apply_changes_via_workspace_dir(
-            &config,
-            workspace.path(),
-            manifest_with(&["tools/run"], &[]),
-            &archive,
-        )
-        .unwrap();
-
-        let mode = std::fs::metadata(workspace.path().join("tools/run"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o111, 0o111);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn apply_never_writes_or_deletes_through_an_outbound_symlink_parent() {
-        let workspace = TempDir::new().expect("workspace");
-        let outside = TempDir::new().expect("outside");
-        let outside_file = outside.path().join("secret.txt");
-        std::fs::write(&outside_file, b"outside").expect("outside file");
-        symlink(outside.path(), workspace.path().join("escape")).expect("outbound link");
-        let config = test_config(&workspace, None, 1024 * 1024);
-
-        let archive = archive_with("escape/secret.txt", b"overwritten");
-        assert!(apply_changes_via_workspace_dir(
-            &config,
-            workspace.path(),
-            manifest_with(&["escape/secret.txt"], &[]),
-            &archive,
-        )
-        .is_err());
-        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside");
-
-        let empty = ZipWriter::new(Cursor::new(Vec::new()))
-            .finish()
-            .unwrap()
-            .into_inner();
-        apply_changes_via_workspace_dir(
-            &config,
-            workspace.path(),
-            manifest_with(&[], &["escape/secret.txt"]),
-            &empty,
-        )
-        .expect("blocked delete remains a contained no-op");
-        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn apply_replaces_a_final_symlink_without_touching_its_target() {
-        let workspace = TempDir::new().expect("workspace");
-        let outside = TempDir::new().expect("outside");
-        let outside_file = outside.path().join("secret.txt");
-        std::fs::write(&outside_file, b"outside").expect("outside file");
-        symlink(&outside_file, workspace.path().join("replace-me")).expect("final link");
-        let config = test_config(&workspace, None, 1024 * 1024);
-        let archive = archive_with("replace-me", b"inside");
-
-        apply_changes_via_workspace_dir(
-            &config,
-            workspace.path(),
-            manifest_with(&["replace-me"], &[]),
-            &archive,
-        )
-        .expect("replace final link");
-
-        assert_eq!(
-            std::fs::read(workspace.path().join("replace-me")).unwrap(),
-            b"inside"
-        );
-        assert_eq!(std::fs::read(&outside_file).unwrap(), b"outside");
     }
 
     #[test]
@@ -2324,16 +2052,17 @@ mod tests {
         let archive = writer.finish().unwrap().into_inner();
         assert!(archive.len() < max_archive_bytes as usize);
 
-        let error = apply_changes_via_workspace_dir(
+        let error = apply_changes(
             &config,
             workspace.path(),
             manifest_with(&["large.txt"], &[]),
             &archive,
         )
         .expect_err("expanded payload must be rejected");
-        assert!(error
-            .to_string()
-            .contains("expanded archive exceeds size limit"));
+        assert!(
+            error.to_string().contains("size limit"),
+            "unexpected error: {error}"
+        );
         assert!(!workspace.path().join("large.txt").exists());
     }
 }

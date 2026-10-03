@@ -92,6 +92,7 @@ export type ConversationsAction =
   | { type: "SELECT"; id: string }
   | { type: "CLOSE"; id: string }
   | { type: "SET_LIFECYCLE"; id: string; status: ConversationLifecycleStatus }
+  | { type: "RETIRE_INTERNAL"; id: string }
   | { type: "SET_DRAFT"; id: string; draft: string; editorState: string | null }
   | { type: "SET_ASSISTANT_ENABLED"; id: string; enabled: boolean }
   | {
@@ -469,6 +470,18 @@ export function conversationsReducer(
             ? { ...conversation, lifecycleStatus: action.status }
             : conversation,
         ),
+      };
+    }
+    case "RETIRE_INTERNAL": {
+      // Preserve history and an explicitly opened audit tab, but never treat
+      // a controller-internal conversation as normal unread/pending work.
+      return {
+        ...state,
+        conversations: state.conversations.map((conversation) => conversation.localId === action.id
+          ? { ...conversation, lifecycleStatus: "hidden", unreadCount: 0,
+            pendingRunIds: [], awaitingLeaseRunIds: [], pendingRunSubmittedAt: {} }
+          : conversation),
+        runMap: Object.fromEntries(Object.entries(state.runMap).filter(([, id]) => id !== action.id)),
       };
     }
     case "SET_DRAFT": {

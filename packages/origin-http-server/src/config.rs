@@ -140,6 +140,11 @@ pub struct ServerConfig {
     pub max_archive_bytes: u64,
     pub staging_base: Option<PathBuf>,
     pub multi_tenant: bool,
+    /// The workspace is a checkout the service owns (a hosted runtime,
+    /// `ORIGIN_MODE` other than `desktop`) rather than a folder on the user's
+    /// own machine. Only service-owned checkouts park leftovers on a stop, and
+    /// only user-owned folders keep their own bytes after a conflicting save.
+    pub hosted_checkout: bool,
 }
 
 impl ServerConfig {
@@ -402,6 +407,7 @@ mod controller_token_store_tests {
             max_archive_bytes: 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         }
     }
 }

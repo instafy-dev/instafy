@@ -13,6 +13,13 @@ use tokio::task;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use super::census::{
+    census_checkouts, group_containers, projects_present, ContainerFacts, RuntimeCensus,
+    MAX_CENSUS_CONTAINERS,
+};
+use super::checkout_eviction::{
+    sweep_checkouts, touch_checkout, CheckoutEvictionPolicy, CheckoutHost, CheckoutSweepReport,
+};
 use super::{
     canonical_managed_runtime_env_value, is_allowed_managed_runtime_env_key,
     is_exact_managed_provider, managed_webdev_generation_matches, runtime_metadata_for_process,
@@ -37,6 +44,58 @@ pub struct DockerRuntimeAllocator {
     assigned_ports: Mutex<HashMap<Uuid, u16>>,
     runtime_operation_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
     built_images: Mutex<HashSet<String>>,
+    checkout_eviction: CheckoutEvictionPolicy,
+    /// Held by a start for its project's checkout, and by the eviction sweep
+    /// while it decides about and removes a checkout.
+    checkout_locks: CheckoutLocks,
+}
+
+type CheckoutLocks = Arc<std::sync::Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>;
+
+fn checkout_lock(locks: &CheckoutLocks, project_id: Uuid) -> Arc<Mutex<()>> {
+    locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(project_id)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// The node as the checkout eviction sweep sees it: per-project start locks
+/// and the Docker containers of each project.
+struct DockerCheckoutHost {
+    project_prefix: String,
+    locks: CheckoutLocks,
+}
+
+impl CheckoutHost for DockerCheckoutHost {
+    type Claim = tokio::sync::OwnedMutexGuard<()>;
+
+    fn claim(&self, project_id: Uuid) -> Option<Self::Claim> {
+        checkout_lock(&self.locks, project_id).try_lock_owned().ok()
+    }
+
+    fn runtime_present(&self, project_id: Uuid) -> anyhow::Result<bool> {
+        // Compose project names are `<prefix><project id, simple>-<runtime>`,
+        // and their containers are named after the project.
+        let prefix = format!("{}{}-", self.project_prefix, project_id.simple());
+        let output = Command::new("docker")
+            .arg("ps")
+            .arg("-a")
+            .arg("--filter")
+            .arg(format!("name={prefix}"))
+            .arg("--format")
+            .arg("{{.Names}}")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "docker ps failed: {}",
+            summarize_command_output(&output)
+        );
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|name| name.trim().trim_start_matches('/').starts_with(&prefix)))
+    }
 }
 
 impl DockerRuntimeAllocator {
@@ -89,6 +148,8 @@ impl DockerRuntimeAllocator {
             assigned_ports: Mutex::new(HashMap::new()),
             runtime_operation_locks: Mutex::new(HashMap::new()),
             built_images: Mutex::new(HashSet::new()),
+            checkout_eviction: config.runtime_checkout_eviction.clone(),
+            checkout_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -183,7 +244,17 @@ impl DockerRuntimeAllocator {
             }
         }
 
+        // A stop never evicts the checkout; it only starts its idle clock.
+        // It holds the checkout's lock like a start, so an eviction sweep
+        // that read the old clock cannot remove it as the stop finishes.
+        let checkout_guard = checkout_lock(&self.checkout_locks, project_id)
+            .lock_owned()
+            .await;
         let compose_down_result = self.run_compose_down(&project_name).await;
+        if let Some(repo_base) = &self.repo_base {
+            touch_checkout(repo_base, project_id);
+        }
+        drop(checkout_guard);
         if let Err(error) = &compose_down_result {
             warn!(
                 %project_id,
@@ -767,6 +838,7 @@ impl DockerRuntimeAllocator {
             if let Some(repo_base) = &self.repo_base {
                 let project_repo = repo_base.join(request.project_id.to_string());
                 std::fs::create_dir_all(&project_repo)?;
+                touch_checkout(repo_base, request.project_id);
                 envs.push((
                     "RUNTIME_REPO_HOST".to_string(),
                     project_repo.to_string_lossy().to_string(),
@@ -975,6 +1047,72 @@ fn normalize_runtime_agent_image(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Every compose container under `prefix`, running or stopped, with its
+/// environment. Returns them and whether the list reached its bound.
+fn list_runtime_containers(prefix: &str) -> anyhow::Result<(Vec<ContainerFacts>, bool)> {
+    let output = Command::new("docker")
+        .arg("ps")
+        .arg("-a")
+        .arg("--filter")
+        .arg("label=com.docker.compose.project")
+        .arg("--format")
+        .arg("{{.ID}}\t{{.Label \"com.docker.compose.project\"}}\t{{.State}}")
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "docker ps failed: {}",
+        summarize_command_output(&output)
+    );
+    let mut facts = Vec::new();
+    let mut truncated = false;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split('\t');
+        let (Some(id), Some(project), Some(state)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if !project.starts_with(prefix) {
+            continue;
+        }
+        if facts.len() >= MAX_CENSUS_CONTAINERS {
+            truncated = true;
+            break;
+        }
+        let inspect = Command::new("docker")
+            .arg("inspect")
+            .arg("--format")
+            .arg("{{range .Config.Env}}{{println .}}{{end}}")
+            .arg(id.trim())
+            .output()?;
+        // A container removed since the listing has nothing left to report.
+        let env = if inspect.status.success() {
+            String::from_utf8_lossy(&inspect.stdout)
+                .lines()
+                .filter(|line| {
+                    [
+                        "SPACE_ID=",
+                        "PROJECT_ID=",
+                        "RUNTIME_ID=",
+                        "RUNTIME_LEASE_ID=",
+                        "ORIGIN_LEASE_ID=",
+                    ]
+                    .iter()
+                    .any(|key| line.trim().starts_with(key))
+                })
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        facts.push(ContainerFacts {
+            compose_project: project.trim().to_string(),
+            running: state.trim().eq_ignore_ascii_case("running"),
+            env,
+        });
+    }
+    Ok((facts, truncated))
+}
+
 fn summarize_command_output(output: &Output) -> String {
     let code = output
         .status
@@ -1020,6 +1158,10 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
     ) -> anyhow::Result<EnsureRuntimeOutcome> {
         let runtime_lock = self.runtime_operation_lock(request.runtime_id).await;
         let _operation_guard = runtime_lock.lock().await;
+        // The eviction sweep never removes a checkout a start holds.
+        let _checkout_guard = checkout_lock(&self.checkout_locks, request.project_id)
+            .lock_owned()
+            .await;
         let project_name = self.sanitize_project_name(request.project_id, request.runtime_id);
 
         let existing_containers = self.service_container_ids(&project_name).await?;
@@ -1158,6 +1300,44 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
     ) -> anyhow::Result<()> {
         self.stop_runtime_generation(project_id, runtime_id, lease_id)
             .await
+    }
+
+    async fn census(&self) -> anyhow::Result<RuntimeCensus> {
+        let prefix = self.project_prefix.clone();
+        let (facts, truncated) =
+            task::spawn_blocking(move || list_runtime_containers(&prefix)).await??;
+        let containers = group_containers(&self.project_prefix, facts);
+        let present = projects_present(&containers);
+        let (checkouts, checkouts_truncated) = match self.repo_base.clone() {
+            Some(repo_base) => {
+                task::spawn_blocking(move || census_checkouts(&repo_base, &present)).await?
+            }
+            None => (Vec::new(), false),
+        };
+        Ok(RuntimeCensus {
+            supported: true,
+            containers,
+            checkouts,
+            truncated: truncated || checkouts_truncated,
+        })
+    }
+
+    async fn evict_idle_checkouts(&self) -> anyhow::Result<CheckoutSweepReport> {
+        let Some(repo_base) = self.repo_base.clone() else {
+            return Ok(CheckoutSweepReport::default());
+        };
+        if !self.checkout_eviction.is_enabled() {
+            return Ok(CheckoutSweepReport::default());
+        }
+        let policy = self.checkout_eviction.clone();
+        let host = DockerCheckoutHost {
+            project_prefix: self.project_prefix.clone(),
+            locks: self.checkout_locks.clone(),
+        };
+        Ok(task::spawn_blocking(move || {
+            sweep_checkouts(&repo_base, &policy, std::time::SystemTime::now(), &host)
+        })
+        .await?)
     }
 
     async fn runtime_oom_killed(

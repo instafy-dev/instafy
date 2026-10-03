@@ -61,6 +61,15 @@ describe("bounded project conversation discovery", () => {
     vi.restoreAllMocks();
   });
 
+  it("requests internal roots separately and preserves the controller-derived purpose", async () => {
+    const record = { id: "anchor", internalPurpose: "space_review", metadata: {} };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify([record])));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchProjectConversationsFromController({ projectId: "project-1", internalOnly: true, rootsOnly: true, limit: 200 }))
+      .resolves.toEqual([record]);
+    expect(fetchMock.mock.calls[0][0]).toBe("http://controller.test/projects/project-1/conversations?limit=200&internalOnly=true&rootsOnly=true");
+  });
+
   it.each(["credentials", "headers", "body"])("bounds stalled %s to ten seconds", async (stage) => {
     if (stage === "credentials") resolveControllerAccessTokenMock.mockReturnValue(new Promise(() => undefined));
     const fetchMock = vi.fn().mockImplementation(() => stage === "headers"

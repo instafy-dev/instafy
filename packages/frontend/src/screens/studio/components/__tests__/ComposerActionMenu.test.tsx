@@ -76,7 +76,6 @@ describe("ComposerActionMenu", () => {
       onUploadImage?: () => void;
       uploadImageDisabled?: boolean;
       onInsertSuggestion?: () => void;
-      onOpenSpaceReview?: () => void;
       onStartVoiceInput?: () => void;
       voiceInputDisabled?: boolean;
       onToggleVoiceReplies?: () => void;
@@ -116,14 +115,21 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector('[data-testid="composer-action-menu-voice-replies"]')).toBeNull();
   });
 
-  it("opens space review without starting a prompt or requiring write access", async () => {
-    const onOpenSpaceReview = vi.fn();
-    await renderMenu(true, true, { onOpenSpaceReview, mutationDisabled: true });
-    const button = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-space-review"]');
-    expect(button).not.toBeNull();
-    expect(button?.disabled).toBe(false);
-    await act(async () => button?.click());
-    expect(onOpenSpaceReview).toHaveBeenCalledOnce();
+  it.each([false, true])("keeps ordinary draft actions without a dedicated review action (read-only: %s)", async (mutationDisabled) => {
+    // A stale caller forwarding the removed optional action cannot bring the
+    // dedicated review surface back into the composer.
+    const actions = { onOpenSpaceReview: vi.fn(), onExpandDraft: vi.fn(), mutationDisabled };
+    await renderMenu(true, true, actions);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mock-dialog-trigger-open"]')!.click());
+
+    expect(container.querySelector('[data-testid="composer-action-menu-space-review"]')).toBeNull();
+    expect(container.textContent).not.toContain("Space review");
+    expect(container.querySelector('[data-testid="composer-action-menu-open-browser"]') !== null).toBe(!mutationDisabled);
+    expect(container.querySelector('[data-testid="composer-action-menu-invite"]')).not.toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-expand-draft"]')!.click());
+    expect(actions.onExpandDraft).toHaveBeenCalledOnce();
+    expect(actions.onOpenSpaceReview).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="mock-dialog-trigger"]')?.getAttribute("data-open")).toBe("false");
   });
 
   it("closes the menu before expanding the draft", async () => {

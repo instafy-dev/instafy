@@ -56,6 +56,23 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Replaces the `git` executable for commands built on the current thread,
+    /// so a test can run the server against a wrapper that emulates an older
+    /// or misbehaving git.
+    pub(crate) static GIT_PROGRAM_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn git_program() -> std::ffi::OsString {
+    #[cfg(test)]
+    if let Some(program) = GIT_PROGRAM_OVERRIDE.with(|program| program.borrow().clone()) {
+        return program.into_os_string();
+    }
+    std::ffi::OsString::from("git")
+}
+
 fn http_low_speed_time_seconds() -> u32 {
     #[cfg(test)]
     if let Some(seconds) = HTTP_LOW_SPEED_TIME_OVERRIDE.with(std::cell::Cell::get) {
@@ -68,8 +85,8 @@ fn http_low_speed_time_seconds() -> u32 {
 /// hooks disabled. Workspaces are user-controlled, while these commands can
 /// run with server credentials (including bearer tokens), so repository hook
 /// configuration must never be allowed to execute workspace code.
-fn server_git_command() -> Command {
-    let mut command = Command::new("git");
+pub(crate) fn server_git_command() -> Command {
+    let mut command = Command::new(git_program());
     // Do not inherit config injection or helper-program variables from the
     // origin process. Explicit gitdir/worktree arguments are supplied by the
     // caller, and the only authentication material is the scoped HTTP header
@@ -180,7 +197,7 @@ fn workspace_git_lock(workspace_root: &Path) -> Arc<Mutex<()>> {
 }
 
 #[cfg(unix)]
-fn pin_command_cwd(command: &mut Command, directory: &WorkspaceDir) -> Result<()> {
+pub(crate) fn pin_command_cwd(command: &mut Command, directory: &WorkspaceDir) -> Result<()> {
     let directory_fd = directory
         .duplicate_fd()
         .context("failed to pin command working directory")?;
@@ -197,7 +214,7 @@ fn pin_command_cwd(command: &mut Command, directory: &WorkspaceDir) -> Result<()
 }
 
 #[cfg(windows)]
-fn pin_command_cwd(command: &mut Command, directory: &WorkspaceDir) -> Result<()> {
+pub(crate) fn pin_command_cwd(command: &mut Command, directory: &WorkspaceDir) -> Result<()> {
     // Windows process spawning exposes only an ambient pathname for cwd, not
     // an inherited directory-handle-relative chdir operation. The surrounding
     // Git layout checks and every HTTP/apply filesystem operation remain
@@ -209,7 +226,7 @@ fn pin_command_cwd(command: &mut Command, directory: &WorkspaceDir) -> Result<()
     Ok(())
 }
 
-fn instafy_git_dir(workspace_root: &Path) -> PathBuf {
+pub(crate) fn instafy_git_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".instafy").join(".git")
 }
 
@@ -219,7 +236,7 @@ fn instafy_git_dir_has_config(workspace_root: &Path) -> bool {
         .is_ok()
 }
 
-fn validate_instafy_git_layout(workspace_root: &Path) -> Result<()> {
+pub(crate) fn validate_instafy_git_layout(workspace_root: &Path) -> Result<()> {
     let workspace = WorkspaceDir::open(workspace_root)
         .with_context(|| format!("failed to open workspace {:?}", workspace_root))?;
     for relative in [".instafy", ".instafy/.git"] {
@@ -397,7 +414,7 @@ fn render_trusted_git_config(mut entries: Vec<TrustedGitConfigEntry>) -> String 
     output
 }
 
-fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Result<()> {
+pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Result<()> {
     let config_path = instafy_git_dir(workspace_root).join("config");
     let workspace = WorkspaceDir::open(workspace_root)
         .with_context(|| format!("failed to open workspace {:?}", workspace_root))?;
@@ -649,7 +666,7 @@ fn has_tracked_worktree_changes(workspace_root: &Path, bearer_token: Option<&str
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
-fn is_network_git_command(args: &[&str]) -> bool {
+pub(crate) fn is_network_git_command(args: &[&str]) -> bool {
     matches!(
         args.first().copied().unwrap_or_default(),
         "fetch" | "pull" | "push" | "ls-remote" | "remote"
@@ -742,7 +759,7 @@ fn unstage_sync_reserved_paths(
     .map_err(|error| OriginError::internal(error.to_string()))
 }
 
-fn looks_like_transient_http_error(stderr: &str) -> bool {
+pub(crate) fn looks_like_transient_http_error(stderr: &str) -> bool {
     let lower = stderr.to_ascii_lowercase();
     for code in ["500", "502", "503", "504"] {
         if lower.contains(&format!("http {code}")) {
@@ -854,13 +871,13 @@ fn discard_local_sync_commit_preserving_worktree(
     );
 }
 
-struct EmbeddedGitDirGuard {
+pub(crate) struct EmbeddedGitDirGuard {
     workspace: WorkspaceDir,
     renames: Vec<(String, String)>,
 }
 
 impl EmbeddedGitDirGuard {
-    fn hide(workspace_root: &Path, paths: &[&str]) -> Result<Self> {
+    pub(crate) fn hide(workspace_root: &Path, paths: &[&str]) -> Result<Self> {
         let workspace = WorkspaceDir::open(workspace_root)
             .with_context(|| format!("failed to open workspace {:?}", workspace_root))?;
         let staging_base = ".instafy/origin-staging/embedded-git";
@@ -1325,152 +1342,6 @@ fn maybe_migrate_legacy_git_dir(
     Ok(())
 }
 
-pub fn commit_and_push_apply(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    applied_paths: &[String],
-    deleted_paths: &[String],
-    message: &str,
-    bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    let Some(_remote_url) = config.git_remote_url.as_deref() else {
-        return Err(OriginError::internal(
-            "commit_and_push_apply called without git remote configured",
-        ));
-    };
-
-    let mut touched = Vec::with_capacity(applied_paths.len() + deleted_paths.len());
-    for path in applied_paths {
-        touched.push(path.as_str());
-    }
-    for path in deleted_paths {
-        touched.push(path.as_str());
-    }
-    let _embedded_guard = EmbeddedGitDirGuard::hide(workspace_root, &touched)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    stage_applied_paths(workspace_root, applied_paths, bearer_token)?;
-    stage_deleted_paths(workspace_root, deleted_paths, bearer_token)?;
-
-    let staged = unstage_sync_reserved_paths(workspace_root, bearer_token)?;
-    if staged.trim().is_empty() {
-        let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Ok(head);
-    }
-
-    run_git_ok(
-        workspace_root,
-        &["commit", "--no-gpg-sign", "-m", message],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    // Human-like loop: fetch → rebase if needed → fast-forward push, retry once on race.
-    let remote_branch = format!("{}/{}", config.git_remote_name, config.git_branch);
-    for attempt in 0..2 {
-        run_git_ok(
-            workspace_root,
-            &[
-                "fetch",
-                "--prune",
-                &config.git_remote_name,
-                &config.git_branch,
-            ],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        let has_remote_branch = git_status_success(
-            workspace_root,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/{}", remote_branch),
-            ],
-        )
-        .unwrap_or(false);
-
-        if has_remote_branch {
-            let has_head = git_status_success(workspace_root, &["rev-parse", "--verify", "HEAD"])
-                .unwrap_or(false);
-            if !has_head {
-                // If the local branch is "unborn" but the remote branch exists, fast-forward the
-                // local checkout to the remote tip before attempting merge-base/rebase checks.
-                run_git_ok(
-                    workspace_root,
-                    &["checkout", "-B", &config.git_branch, &remote_branch],
-                    bearer_token,
-                )
-                .map_err(|error| OriginError::internal(error.to_string()))?;
-            }
-
-            let is_fast_forward_ok = git_status_success(
-                workspace_root,
-                &["merge-base", "--is-ancestor", &remote_branch, "HEAD"],
-            )
-            .unwrap_or(false);
-
-            if !is_fast_forward_ok {
-                let output = run_git(workspace_root, &["rebase", &remote_branch], bearer_token)
-                    .map_err(|error| OriginError::internal(error.to_string()))?;
-                if !output.status.success() {
-                    let _ = run_git(workspace_root, &["rebase", "--abort"], bearer_token);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(OriginError::conflict(format!(
-                        "git rebase onto {remote_branch} failed: {}",
-                        stderr.trim()
-                    )));
-                }
-            }
-        }
-
-        let dest_ref = format!("HEAD:refs/heads/{}", config.git_branch);
-        let push = run_git(
-            workspace_root,
-            &["push", &config.git_remote_name, &dest_ref],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        if push.status.success() {
-            break;
-        }
-
-        let stderr = String::from_utf8_lossy(&push.stderr);
-        let looks_like_non_ff = stderr.contains("non-fast-forward")
-            || stderr.contains("fetch first")
-            || stderr.contains("[rejected]");
-
-        if looks_like_non_ff && attempt == 0 {
-            continue;
-        }
-
-        if looks_like_non_ff {
-            discard_local_sync_commit_preserving_worktree(
-                workspace_root,
-                &remote_branch,
-                bearer_token,
-            );
-            return Err(OriginError::conflict(format!(
-                "git push rejected (non-fast-forward): {}",
-                stderr.trim()
-            )));
-        }
-
-        discard_local_sync_commit_preserving_worktree(workspace_root, &remote_branch, bearer_token);
-        return Err(OriginError::internal(format!(
-            "git push failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-    Ok(head)
-}
-
 pub fn commit_apply_locally(
     workspace_root: &Path,
     applied_paths: &[String],
@@ -1808,7 +1679,7 @@ fn is_repo_hygiene_blocked_path(path: &str) -> bool {
         .any(|segment| segment == "tmp")
 }
 
-fn is_sync_reserved_path(path: &str) -> bool {
+pub(crate) fn is_sync_reserved_path(path: &str) -> bool {
     let normalized = path.trim().trim_start_matches('/').to_ascii_lowercase();
     let trimmed = normalized.as_str();
     trimmed == ".instafy"
@@ -2425,7 +2296,7 @@ pub fn diff_for_path(
 /// shas). Anything else — names, ranges, and especially values starting with
 /// `-` — is rejected so query params can never be parsed as git options
 /// (e.g. `--output=<path>` would write outside the workspace).
-fn is_safe_git_rev(rev: &str) -> bool {
+pub(crate) fn is_safe_git_rev(rev: &str) -> bool {
     !rev.is_empty() && rev.len() <= 64 && rev.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
@@ -2834,35 +2705,14 @@ pub fn push_existing_head(
     )))
 }
 
+/// Multi-tenant gateway save of every dirty path. Single-tenant origins
+/// publish through [`crate::publish`] instead; this goes away with the
+/// gateway's working copies.
 pub fn commit_and_push_dirty(
     config: &ServerConfig,
     workspace_root: &Path,
     message: &str,
     bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    commit_and_push_dirty_inner(config, workspace_root, message, bearer_token, true)
-}
-
-/// Variant WITHOUT the pre-commit remote alignment, for callers that must not
-/// risk `reset --mixed` onto a newer remote tip (which would make externally
-/// pushed changes reappear as local "dirty" reversions). Local WIP is
-/// committed on top of the local HEAD; the push loop below already fetches
-/// and rebases onto the remote tip on rejection, preserving both sides.
-pub fn commit_and_push_dirty_without_align(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    message: &str,
-    bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    commit_and_push_dirty_inner(config, workspace_root, message, bearer_token, false)
-}
-
-fn commit_and_push_dirty_inner(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    message: &str,
-    bearer_token: Option<&str>,
-    align_first: bool,
 ) -> Result<String, OriginError> {
     let Some(_remote_url) = config.git_remote_url.as_deref() else {
         return Err(OriginError::internal(
@@ -2870,9 +2720,7 @@ fn commit_and_push_dirty_inner(
         ));
     };
 
-    if align_first {
-        align_local_branch_to_remote_tip_preserving_worktree(config, workspace_root, bearer_token)?;
-    }
+    align_local_branch_to_remote_tip_preserving_worktree(config, workspace_root, bearer_token)?;
 
     let dirty = list_dirty_files(workspace_root, bearer_token)?;
     let touched = dirty
@@ -3019,7 +2867,8 @@ fn commit_and_push_dirty_inner(
 /// Create a forward revert of `commit` on top of the remote tip and push it.
 /// Requires a clean tracked worktree so user edits are never entangled with
 /// the revert; conflicts abort cleanly and surface as HTTP 409. History is
-/// never rewritten — the revert is a new commit.
+/// never rewritten — the revert is a new commit. Multi-tenant gateway only;
+/// single-tenant origins revert through [`crate::publish::revert_commit`].
 pub fn revert_commit_and_push(
     config: &ServerConfig,
     workspace_root: &Path,
@@ -3161,6 +3010,8 @@ pub fn revert_commit_and_push(
     ))
 }
 
+/// Multi-tenant gateway save of the given paths. Single-tenant origins
+/// publish through [`crate::publish`] instead.
 pub fn commit_and_push_paths(
     config: &ServerConfig,
     workspace_root: &Path,
@@ -4410,6 +4261,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -4470,118 +4322,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
     }
 
     #[test]
-    fn commit_and_push_apply_persists_files_inside_embedded_git_repos() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().to_string()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: "Instafy Test".to_string(),
-            git_author_email: "playwright@instafy.dev".to_string(),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-        };
-
-        ensure_git_checkout(&config, None)?;
-        assert!(
-            workspace_dir.join(".instafy").join(".git").exists(),
-            "expected instafy git dir to exist after checkout"
-        );
-        assert!(
-            !workspace_dir.join(".git").exists(),
-            "expected no workspace root .git after checkout"
-        );
-
-        // Simulate a user cloning/creating a nested git repo inside the workspace.
-        let embedded_dir = workspace_dir.join("nested");
-        fs::create_dir_all(&embedded_dir)?;
-        init_repo(&embedded_dir, "main")?;
-        run_git(&embedded_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &embedded_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(embedded_dir.join("inner.txt"), "inner\n")?;
-        run_git(&embedded_dir, &["add", "inner.txt"])?;
-        run_git(&embedded_dir, &["commit", "-m", "inner"])?;
-
-        // Create a new file under the embedded repo root that should still be committed to the
-        // outer (git-canonical) repository.
-        fs::write(embedded_dir.join("hello.txt"), "embedded-hello\n")?;
-
-        let commit = commit_and_push_apply(
-            &config,
-            workspace_dir.as_path(),
-            &[String::from("nested/hello.txt")],
-            &[],
-            "test: persist embedded",
-            None,
-        )?;
-
-        // Confirm the embedded git dir was restored after staging/commit.
-        assert!(
-            embedded_dir.join(".git").exists(),
-            "embedded repo .git should be present after commit, got commit {commit}"
-        );
-
-        let verify_dir = root.join("verify");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                verify_dir.to_str().unwrap(),
-            ],
-        )?;
-
-        let persisted = fs::read_to_string(verify_dir.join("nested/hello.txt"))?;
-        assert_eq!(persisted, "embedded-hello\n");
-
-        Ok(())
-    }
-
-    #[test]
     fn commit_and_push_dirty_persists_non_reserved_workspace_changes() -> anyhow::Result<()> {
         let sandbox = tempdir()?;
         let root = sandbox.path();
@@ -4631,6 +4371,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -4721,6 +4462,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -4835,6 +4577,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -5237,6 +4980,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -5342,6 +5086,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         // Simulate a broken/unborn local branch state even though the remote branch exists.
@@ -5441,6 +5186,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -5510,6 +5256,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -5601,6 +5348,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -5696,6 +5444,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         };
 
         ensure_git_checkout(&config, None)?;
@@ -5801,6 +5550,7 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             max_archive_bytes: 1024 * 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         })
     }
 
@@ -6097,10 +5847,14 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
                     // Never send anything more.
                 }
                 Ok(_) => {}
+                // A read interrupted by a signal (frequent on a loaded or
+                // emulated host) is not the client going away.
                 Err(error)
                     if matches!(
                         error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
                     ) => {}
                 Err(_) => return,
             }

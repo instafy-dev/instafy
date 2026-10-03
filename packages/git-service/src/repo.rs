@@ -92,10 +92,11 @@ pub fn ensure_repo_exists(
     config: &GitShardConfig,
     repo_dir: &str,
 ) -> Result<PathBuf, ServiceError> {
+    // Push policy and `http.receivepack` come from the shard's shared hooks
+    // directory and the `git http-backend` environment, so an existing
+    // repository needs no per-request file writes or `git config` spawns.
     let repo_path = config.repo_root.join(repo_dir);
     if repo_path.exists() {
-        ensure_repo_policy(&repo_path, &config.default_branch)
-            .map_err(|error| ServiceError::internal(error.to_string()))?;
         return Ok(repo_path);
     }
 
@@ -113,8 +114,6 @@ pub fn ensure_repo_exists(
     init_bare_repo(&repo_path, &config.default_branch)
         .map_err(|error| ServiceError::internal(error.to_string()))?;
     seed_initial_commit(&repo_path, &config.default_branch)
-        .map_err(|error| ServiceError::internal(error.to_string()))?;
-    ensure_repo_policy(&repo_path, &config.default_branch)
         .map_err(|error| ServiceError::internal(error.to_string()))?;
 
     Ok(repo_path)
@@ -309,12 +308,6 @@ fn ensure_bare_repo_marker(path: &Path, directory: bool) -> Result<(), ServiceEr
     Ok(())
 }
 
-fn ensure_repo_policy(repo_path: &Path, default_branch: &str) -> Result<()> {
-    install_update_hook(repo_path, default_branch)?;
-    enable_http_receive_pack(repo_path)?;
-    Ok(())
-}
-
 fn write_git_object(
     repo_str: &str,
     args: &[&str],
@@ -397,26 +390,6 @@ fn init_bare_repo(repo_path: &Path, default_branch: &str) -> Result<()> {
     if !output.status.success() {
         anyhow::bail!(
             "git init failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    Ok(())
-}
-
-fn enable_http_receive_pack(repo_path: &Path) -> Result<()> {
-    let repo_str = repo_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("repo path is not valid utf-8"))?;
-
-    let output = Command::new("git")
-        .args(["-C", repo_str, "config", "http.receivepack", "true"])
-        .output()
-        .with_context(|| "git config http.receivepack failed")?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "git config http.receivepack failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -655,168 +628,6 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn install_update_hook(repo_path: &Path, default_branch: &str) -> Result<()> {
-    let hooks_dir = repo_path.join("hooks");
-    std::fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("failed to create hooks dir {:?}", hooks_dir))?;
-    let hook_path = hooks_dir.join("update");
-
-    let script = format!(
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-
-refname="$1"
-oldrev="$2"
-newrev="$3"
-
-main_ref="refs/heads/{default_branch}"
-
-if [[ "${{GIT_POLICY_DISABLED:-0}}" == "1" ]]; then
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Protect the default branch (fast-forward only, no delete).
-# ---------------------------------------------------------------------------
-if [[ "$refname" == "$main_ref" ]]; then
-  # Disallow deleting main.
-  if [[ "$newrev" =~ ^0{{40}}$ ]]; then
-    echo "instafy: deleting {default_branch} is not allowed" >&2
-    exit 1
-  fi
-
-  # Allow creating main from scratch (should be rare; repos are seeded).
-  if [[ "$oldrev" =~ ^0{{40}}$ ]]; then
-    true
-  else
-    # Enforce fast-forward only.
-    if ! git merge-base --is-ancestor "$oldrev" "$newrev"; then
-      echo "instafy: non-fast-forward updates to {default_branch} are not allowed" >&2
-      exit 1
-    fi
-  fi
-fi
-
-# Deleting a ref is always allowed (handled above for default branch).
-if [[ "$newrev" =~ ^0{{40}}$ ]]; then
-  exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Repo hygiene policy (deny paths + blob size).
-# ---------------------------------------------------------------------------
-
-max_blob_bytes="${{GIT_MAX_BLOB_BYTES:-20971520}}" # 20 MiB default
-deny_extra="${{GIT_DENY_PATHS:-}}"
-
-trim() {{
-  local s="$1"
-  s="${{s#"${{s%%[![:space:]]*}}"}}"
-  s="${{s%"${{s##*[![:space:]]}}"}}"
-  printf '%s' "$s"
-}}
-
-is_denied_path() {{
-  local p="$1"
-  case "$p" in
-    node_modules/*|*/node_modules/*) return 0 ;;
-    .next/*|*/.next/*) return 0 ;;
-    dist/*|*/dist/*) return 0 ;;
-    build/*|*/build/*) return 0 ;;
-    target/*|*/target/*) return 0 ;;
-    .turbo/*|*/.turbo/*) return 0 ;;
-    .vercel/*|*/.vercel/*) return 0 ;;
-    .cache/*|*/.cache/*) return 0 ;;
-    .vite/*|*/.vite/*) return 0 ;;
-    coverage/*|*/coverage/*) return 0 ;;
-    playwright-report/*|*/playwright-report/*) return 0 ;;
-    test-results/*|*/test-results/*) return 0 ;;
-    tmp/*|*/tmp/*) return 0 ;;
-    .supabase/*|*/.supabase/*) return 0 ;;
-    .instafy/origin-staging/*|*/.instafy/origin-staging/*) return 0 ;;
-  esac
-
-  if [[ -n "$deny_extra" ]]; then
-    local IFS=','; read -ra parts <<< "$deny_extra"
-    for raw in "${{parts[@]}}"; do
-      local pat; pat="$(trim "$raw")"
-      [[ -z "$pat" ]] && continue
-      # Treat pattern as a shell glob (e.g. "**/vendor/**" isn't supported; use "*/vendor/*").
-      if [[ "$p" == $pat ]]; then
-        return 0
-      fi
-    done
-  fi
-
-  return 1
-}}
-
-diff_args=()
-if [[ "$oldrev" =~ ^0{{40}}$ ]]; then
-  diff_args=(--root "$newrev")
-else
-  diff_args=("$oldrev" "$newrev")
-fi
-
-while IFS=$'\t' read -r status path1 path2; do
-  [[ -z "$status" ]] && continue
-
-  local_path="$path1"
-  case "$status" in
-    R*|C*)
-      local_path="$path2"
-      ;;
-  esac
-
-  if [[ -n "$local_path" ]] && is_denied_path "$local_path"; then
-    echo "instafy: blocked path '$local_path' (repo hygiene policy)" >&2
-    exit 1
-  fi
-
-  case "$status" in
-    D*)
-      continue
-      ;;
-  esac
-
-  # Enforce per-blob size limit for new/updated paths.
-  if [[ -n "$local_path" ]]; then
-    oid=""
-    if read -r _mode _kind oid _tree_path < <(git ls-tree -r "$newrev" -- "$local_path" 2>/dev/null); then
-      true
-    fi
-    [[ -z "$oid" ]] && continue
-    obj_type="$(git cat-file -t "$oid" 2>/dev/null || true)"
-    if [[ "$obj_type" != "blob" ]]; then
-      echo "instafy: blocked non-blob object for '$local_path' (type=$obj_type)" >&2
-      exit 1
-    fi
-    size="$(git cat-file -s "$oid" 2>/dev/null || echo 0)"
-    if [[ "$size" -gt "$max_blob_bytes" ]]; then
-      echo "instafy: file too large '$local_path' ($size bytes > $max_blob_bytes)" >&2
-      exit 1
-    fi
-  fi
-done < <(git diff-tree --no-commit-id --name-status -r "${{diff_args[@]}}")
-
-exit 0
-"#
-    );
-
-    std::fs::write(&hook_path, script.as_bytes())
-        .with_context(|| format!("failed to write update hook {:?}", hook_path))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&hook_path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&hook_path, perms)?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,6 +668,7 @@ mod tests {
             repo_root,
             auto_init,
             default_branch: "main".to_string(),
+            max_push_bytes: crate::config::DEFAULT_GIT_MAX_PUSH_BYTES,
             jwks_url: reqwest::Url::parse("http://127.0.0.1/jwks").unwrap(),
             audience: "git".to_string(),
             events_webhook: None,

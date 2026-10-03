@@ -267,6 +267,7 @@ async fn list_my_notification_inbox(
                    on cp.conversation_id = c.id and cp.user_id = $1
                  join conversation_messages m on m.id = c.last_message_id
                  where c.last_message_id is not null
+                   and not public.is_internal_conversation(c.id)
                    and lower(m.role) = 'assistant'
                    and p.status <> 'deleted'
                    and (cp.last_seen_message_id is null or cp.last_seen_message_id <> c.last_message_id)

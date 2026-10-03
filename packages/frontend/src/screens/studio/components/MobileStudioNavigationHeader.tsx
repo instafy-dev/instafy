@@ -83,7 +83,7 @@ export function MobileStudioNavigationHeader({
       </Button>
       {!historyInOverflow ? <MobileStudioHistoryControls history={history} /> : null}
       <div className="flex min-w-0 flex-1 items-center gap-2 px-1" data-testid="mobile-header-location">
-        {titleIcon ? <span className="shrink-0 text-slate-500 dark:text-slate-400 [&_svg]:h-[18px] [&_svg]:w-[18px]" aria-hidden="true" data-testid="mobile-header-location-icon">{titleIcon}</span> : null}
+        {titleIcon ? <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center text-slate-500 dark:text-slate-400 [&_svg]:h-[18px] [&_svg]:w-[18px]" aria-hidden="true" data-testid="mobile-header-location-icon">{titleIcon}</span> : null}
         {conversationSwitcher ? (
           <MobileConversationSwitcher {...conversationSwitcher} title={title} contextCaption={contextCaption} spaceName={spaceName} />
         ) : (

@@ -1,10 +1,47 @@
 # Automations
 
 Automations run project prompts in the background on a schedule. Each automation belongs to one
-user and project and writes its visible results to a private automation conversation.
+user and project. The default `prompt` mode writes visible results to its automation conversation.
+The explicitly opted-in `space_review` mode starts a normal private Octo chat only when it finds a
+useful new topic; see [Space review](Space-Review.md).
 
-For an on-demand review that saves sourced next-step recommendations and remembers user choices,
-see [Space review](Space-Review.md). It uses a normal chat turn and does not create a schedule.
+## Space review mode
+
+Create a review schedule explicitly; no schedule is enabled automatically:
+
+```bash
+instafy automations create \
+  --space "<Project ID>" \
+  --name "Octo check-in" \
+  --mode space_review \
+  --schedule-kind hourly \
+  --interval-hours 24
+```
+
+The controller uses fixed instructions for the bundled review skill, with private results and
+quiet runs. The CLI rejects a custom `--prompt` or team visibility in this mode. The API ignores
+a custom create prompt in favor of the fixed instructions. `mode` is returned in the record and
+cannot change after creation; omitting it creates a normal `prompt` automation as before.
+
+There can be one review automation per owner and project. It supports the existing once, hourly
+and weekly schedules, pause/resume and manual run. A manual run returns a conflict while a review
+is already pending. Schedule, name and runtime settings can be updated, but the managed prompt,
+private visibility and quiet setting cannot be changed. Deleting and recreating the schedule
+reuses its private execution anchor so prior delivery memory remains accessible.
+
+The private execution anchor is internal audit history and is excluded from ordinary chat lists,
+search, unread activity and result notifications. A useful finding is delivered separately as one
+normal private Octo chat with a grounded opener, source links and a natural next step. This does
+not dispatch suggested work; the person can reply normally. A successful run with no new finding
+creates no chat. Delivered topics and legacy accepted/dismissed choices are retained to prevent
+repetition, including when a delivered chat is archived or deleted. Runs and errors remain
+observable in Automations. This mode does not widen the runtime's private conversation access.
+
+Apply `20261002122000_quiet_space_review_automations.sql`, then
+`20261002181040_quiet_space_review_conversations.sql`, after the preceding recommendation
+delivery migration and before deploying the matching controller, runtime skill and CLI. The
+separate transactions release automation locks before altering conversations. Existing prompt
+automations retain their mode and defaults.
 
 ## Schedules and threads
 
@@ -14,13 +51,13 @@ The controller supports three schedule kinds:
 - `hourly` runs every configured number of hours.
 - `weekly` runs on selected weekdays at a local hour and minute in an IANA timezone.
 
-Creating an automation also creates its result conversation and adds the owner as a participant.
+Creating a prompt automation also creates its result conversation and adds the owner as a participant.
 Later runs reuse that thread, so results stay together without appearing in an unrelated chat.
 Pausing an automation stops scheduled runs without deleting its configuration or thread.
 
 The owner can update an automation in place through the same controller route that pauses and
-resumes it (`PATCH /automations/{id}`) or with `instafy automations update`. Any subset of the
-name, prompt, schedule (kind, `runAt`, `intervalHours`, `byDay`, `byHour`, `byMinute`,
+resumes it (`PATCH /automations/{id}`) or with `instafy automations update`. In prompt mode, any
+subset of the name, prompt, schedule (kind, `runAt`, `intervalHours`, `byDay`, `byHour`, `byMinute`,
 `timezone`), runtime mode and provider, and quiet-run setting can change; validation matches
 creation. The automation keeps its id and conversation thread, so run history stays attached. The
 controller recomputes `nextRunAt` only when the effective schedule or the status changes; editing
@@ -44,8 +81,8 @@ private result conversations remain private.
 
 ## Share results with your team
 
-By default an automation's result conversation is private to its owner. Other members can see the
-automation record (status, next run, last error) but not the result threads. An automation can opt
+For prompt mode, an automation's result conversation is private to its owner by default. Other
+members can see the automation record (status, next run, last error) but not the result threads. An automation can opt
 in to sharing so its result conversation becomes visible to anyone with access to the space.
 
 The choice is stored as `resultVisibility` in the controller API, backed by the
@@ -68,7 +105,7 @@ visibility so past and future runs follow the current setting. The CLI exposes t
 
 ## Quiet runs
 
-Quiet runs are opt-in through `silentWhenNothingToReport` in the controller API, backed by the
+For prompt mode, quiet runs are opt-in through `silentWhenNothingToReport` in the controller API, backed by the
 `automations.silent_when_nothing_to_report` column. The option defaults to `false`, including for
 automations created before the option existed.
 

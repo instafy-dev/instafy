@@ -354,6 +354,7 @@ pub(crate) fn build_test_state(pool: PgPool, config: AppConfig) -> AppState {
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     }
 }
 
@@ -10102,6 +10103,7 @@ async fn tunnel_routes_issue_list_revoke() -> anyhow::Result<()> {
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
     let mut events_rx = state.events.subscribe();
 
@@ -11086,6 +11088,7 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let (burn_amount, _) = crate::credits::resolve_hosted_runtime_credit_burn_config_for_provider(
@@ -11261,6 +11264,7 @@ async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let app = tunnels::router().with_state(state.clone());
@@ -11483,6 +11487,7 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let request_body = json!({
@@ -11623,6 +11628,7 @@ async fn tunnel_request_rejects_insufficient_credits_without_reporting_a_burn_fa
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let request_body = json!({
@@ -11781,6 +11787,7 @@ async fn post_commit_receipt_emits_workspace_commit_event() -> anyhow::Result<()
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let mut events_rx = state.events.subscribe();
@@ -14577,6 +14584,7 @@ async fn post_origin_register_upserts_origin() -> anyhow::Result<()> {
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let request = OriginRegisterBody {
@@ -14946,6 +14954,7 @@ async fn post_origin_register_updates_origin_instance_state() -> anyhow::Result<
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let token = mint_scoped_token(
@@ -15136,6 +15145,7 @@ async fn post_origin_register_claims_unassigned_desktop_instance_once() -> anyho
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let token = mint_scoped_token(
@@ -17090,6 +17100,7 @@ async fn post_access_token_mints_signed_token_and_publishes_event() -> anyhow::R
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -17374,6 +17385,7 @@ async fn post_access_token_recovers_stale_service_runtime_user_id() -> anyhow::R
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -17550,6 +17562,7 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -17851,6 +17864,7 @@ async fn post_access_token_prefers_hosted_origin_when_prefer_hosted_is_set() -> 
         ota_registry,
         desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
         credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     let mut headers = HeaderMap::new();
@@ -26471,6 +26485,7 @@ async fn runtime_safe_stop_skips_when_locked_identity_no_longer_matches() -> any
                 project_id: Some(project_id),
                 provider: Some("instafy-cloud".to_string()),
                 display_name: Some("Hosted Runtime".to_string()),
+                lease_id: None,
             }),
         },
     )
@@ -30662,6 +30677,7 @@ mod billing_service_tests {
             ota_registry,
             desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
             credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+            runtime_drain: crate::runtime::RuntimeDrainState::default(),
         };
 
         let app = runtime::router().with_state(state.clone());
@@ -30790,6 +30806,7 @@ mod billing_service_tests {
             ota_registry,
             desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
             credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+            runtime_drain: crate::runtime::RuntimeDrainState::default(),
         };
 
         let app = runtime::router().with_state(state.clone());

@@ -88,9 +88,9 @@ jobs:
 
           skill_path="packages/runtime-agent/assets/instafy/.agents/skills/instafy-git-canonical-conflicts/SKILL.md"
           test -s "$skill_path"
-          grep -Fq "git rebase" "$skill_path"
-          grep -Fq "git rebase --continue" "$skill_path"
-          grep -Fq "git push" "$skill_path"
+          grep -Fq "conflictedPaths" "$skill_path"
+          grep -Fq "recoveryRef" "$skill_path"
+          grep -Fq 'instafy git show <ref>:<path>' "$skill_path"
 
           fixture_root="$(mktemp -d)"
           trap 'rm -rf "$fixture_root"' EXIT
@@ -117,20 +117,26 @@ jobs:
           git -C "$fixture_root/remote-writer" commit -m "fixture: remote"
           git -C "$fixture_root/remote-writer" push origin main
 
+          # A save: main keeps its copy of the file both sides changed, the
+          # local version goes to a recovery ref, and the merge reaches main
+          # with a plain push.
           git -C "$fixture_root/local" fetch origin main
-          if git -C "$fixture_root/local" rebase origin/main; then
-            echo "expected the deterministic fixture to conflict" >&2
-            exit 1
-          fi
-
-          test -f "$fixture_root/local/.git/rebase-merge/git-rebase-todo" ||
-            test -f "$fixture_root/local/.git/rebase-apply/applying"
-          grep -Fq "<<<<<<<" "$fixture_root/local/todo.txt"
-
-          printf '%s\n' "TODO: milk + bread + eggs" > "$fixture_root/local/todo.txt"
-          git -C "$fixture_root/local" add todo.txt
-          GIT_EDITOR=true git -C "$fixture_root/local" rebase --continue
+          recovery_ref="refs/instafy/recovery/fixture/conflict"
+          git -C "$fixture_root/local" push origin "HEAD:$recovery_ref"
+          git -C "$fixture_root/local" merge --no-edit -X theirs origin/main
           git -C "$fixture_root/local" push origin HEAD:main
+          test "$(git --git-dir="$fixture_root/remote.git" show main:todo.txt)" = "TODO: milk + bread"
+
+          # The skill's merge procedure: read the kept version, write the
+          # merged file, and save it with a plain push.
+          git -C "$fixture_root/local" fetch origin "+refs/instafy/recovery/*:refs/instafy/recovery/*"
+          kept="$(git -C "$fixture_root/local" show "$recovery_ref:todo.txt")"
+          test "$kept" = "TODO: milk + eggs"
+          printf '%s\n' "TODO: milk + bread + eggs" > "$fixture_root/local/todo.txt"
+          git -C "$fixture_root/local" commit -am "fixture: merge kept work"
+          before="$(git --git-dir="$fixture_root/remote.git" rev-parse main)"
+          git -C "$fixture_root/local" push origin HEAD:main
+          git --git-dir="$fixture_root/remote.git" merge-base --is-ancestor "$before" main
 
           resolved="$(git --git-dir="$fixture_root/remote.git" show main:todo.txt)"
           test "$resolved" = "TODO: milk + bread + eggs"

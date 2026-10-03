@@ -150,7 +150,6 @@ export function ComposerActionMenu({
   onUploadImage,
   uploadImageDisabled = false,
   onInsertSuggestion,
-  onOpenSpaceReview,
   onStartVoiceInput,
   voiceInputDisabled = false,
   onToggleVoiceReplies,
@@ -191,7 +190,6 @@ export function ComposerActionMenu({
   onUploadImage?: () => void;
   uploadImageDisabled?: boolean;
   onInsertSuggestion?: () => void;
-  onOpenSpaceReview?: () => void;
   onStartVoiceInput?: () => void;
   voiceInputDisabled?: boolean;
   onToggleVoiceReplies?: () => void;
@@ -331,14 +329,6 @@ export function ComposerActionMenu({
           </div>
         ) : (
           <div className="space-y-1" onKeyDown={moveRowFocus}>
-            {onOpenSpaceReview ? (
-              <ActionRow
-                icon={<Search className="h-4 w-4" aria-hidden="true" />}
-                title="Space review"
-                onPress={() => { closeMenu(); onOpenSpaceReview(); }}
-                testId="composer-action-menu-space-review"
-              />
-            ) : null}
             {onExpandDraft ? (
               <ActionRow
                 icon={<Expand className="h-4 w-4" aria-hidden="true" />}

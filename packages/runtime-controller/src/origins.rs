@@ -1767,7 +1767,7 @@ async fn register_runtime_bound_origin(
     Ok(origin)
 }
 
-fn lease_from_row(row: &Row) -> WorkspaceLeaseRecord {
+pub(crate) fn lease_from_row(row: &Row) -> WorkspaceLeaseRecord {
     WorkspaceLeaseRecord {
         id: row.get("id"),
         project_id: row.get("project_id"),
@@ -3397,7 +3397,7 @@ fn origin_endpoint_is_proxyable(endpoint: &str) -> bool {
         || is_private_or_local_ip_host(host)
 }
 
-fn is_private_or_local_ip_host(host: &str) -> bool {
+pub(crate) fn is_private_or_local_ip_host(host: &str) -> bool {
     let ip = match host.parse::<IpAddr>() {
         Ok(value) => value,
         Err(_) => return false,
@@ -6812,7 +6812,27 @@ async fn post_git_access_token(
         let workspace_origin_capability = claims.scopes.iter().any(|scope| scope == "fs.write")
             && claims.origin_id.is_some()
             && matches!(claims.protocol.as_deref(), Some("http" | "webdav"));
-        if workspace_origin_capability {
+        let pre_stop_save_grant = claims
+            .scopes
+            .iter()
+            .any(|scope| scope == crate::runtime::PRE_STOP_SAVE_SCOPE);
+        if pre_stop_save_grant {
+            // The space owner's save-only permission, which only the
+            // controller's own stop path issues, to the stopping runtime's
+            // origin. Valid only while that exact runtime generation is
+            // active and the owner may write; the git token never outlives
+            // it.
+            let grant =
+                crate::runtime::authorize_pre_stop_save_grant(&state, &context, &project_id)
+                    .await?;
+            Some(ScopedGitMintContext {
+                subject: grant.owner_user_id.to_string(),
+                runtime_id: Some(grant.runtime_id),
+                lease_id: None,
+                run_id: None,
+                latest_expires_at: Some(grant.expires_at),
+            })
+        } else if workspace_origin_capability {
             // Origin servers use their request's fs.write credential to push
             // the exact files they just applied. Validate the workspace lease
             // independently here because callers can reach this endpoint

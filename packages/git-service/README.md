@@ -14,11 +14,25 @@ local-only `git-services:local` image so their overlapping Rust dependencies
 compile once. Production continues to build and deploy three separate minimal
 images from their dedicated Dockerfiles.
 
-## Repo hygiene (git-shard)
-`git-shard` installs a server-side `hooks/update` policy for:
-- Fast-forward-only `main`
-- Deny common churn paths (like `node_modules/`)
-- Per-blob size caps (see `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_POLICY_DISABLED` in `docs/Git-Service.md`)
+## Repository policy (git-shard)
+`git-shard` writes shared `update` and `post-receive` hooks to `<GIT_REPO_ROOT>/.instafy-hooks/` at
+startup and runs every `git http-backend` with `core.hooksPath` pointing there, so requests never
+write hook files or repository config, and hooks inside a repository are ignored. It refuses to
+start if the hooks cannot run or git ignores the command-scope configuration. The policy covers:
+- Fast-forward-only `main`, with letter-case variants of its name refused
+- Deny common churn paths (like `node_modules/`, from `REPO_POLICY_DENY_PATTERNS` in `src/policy.rs`)
+- Per-blob size caps, checked on the net change between the old and new tip, merges included
+- Object checks (`receive.fsckObjects`) and a push size bound (`GIT_MAX_PUSH_BYTES`)
+- Salvage refs (`refs/instafy/salvage/**`, any letter case) that no push can change
+- Only recovery refs (`refs/instafy/recovery/<origin id>/<name>`) may be created under `refs/instafy/`
+
+See `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_MAX_PUSH_BYTES` and `GIT_POLICY_DISABLED` in
+`docs/Git-Service.md`. `tests/shard_push_policy.rs` runs the real `git-shard` binary against a git
+client to cover the policy end to end.
+
+The policy module is the one copy of these rules. `origin-http-server` depends on this crate with
+`default-features = false`, which builds only `policy`; the `server` feature (on by default) adds
+the edge and shard and their dependencies.
 
 Trusted backend cleanup may mint a 60-second, service-only `git.delete` token and send exact
 `DELETE /<uuid>.git` through Git Edge. Shards must remain private; the full fail-closed contract is

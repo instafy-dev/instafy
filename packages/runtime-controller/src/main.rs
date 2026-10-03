@@ -25,6 +25,7 @@ mod browser_profile;
 mod browser_shares;
 mod browser_turn;
 mod bug_reports;
+mod chat_attachments;
 mod config;
 mod connection_limit;
 mod conversations;
@@ -79,6 +80,10 @@ mod telemetry;
 mod tests;
 #[cfg(test)]
 mod tests_ai_metering_schema;
+#[cfg(test)]
+mod tests_chat_attachment_lease;
+#[cfg(test)]
+mod tests_chat_attachment_policies;
 #[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]
@@ -249,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         ota_registry: ota::OtaRegistry::new_postgres(pool.clone()),
         desktop_update_registry: desktop_updates::DesktopUpdateRegistry::new_postgres(pool.clone()),
         credential_refresh_locks: CredentialRefreshLocks::new(),
+        runtime_drain: crate::runtime::RuntimeDrainState::default(),
     };
 
     if let Err(error) =
@@ -420,6 +426,9 @@ async fn main() -> anyhow::Result<()> {
                         HeaderValue::from_static("1"),
                     );
                 }
+                // Release tooling tells a controller that serves the node drain
+                // routes apart from one that predates them by this header.
+                headers.insert("x-instafy-runtime-drain", HeaderValue::from_static("1"));
                 if let Ok(value) =
                     HeaderValue::from_str(&state.config.database_pool_size.to_string())
                 {

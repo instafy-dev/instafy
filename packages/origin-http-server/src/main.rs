@@ -139,6 +139,12 @@ fn load_config() -> Result<ServerConfig> {
 
     let staging_base = read_env("ORIGIN_STAGING_ROOT").map(PathBuf::from);
 
+    // Same values the runtime agent accepts: `efs` and `hosted` are checkouts
+    // the service owns; `desktop` and anything unrecognised are not.
+    let hosted_checkout = read_env("ORIGIN_MODE")
+        .map(|mode| matches!(mode.to_ascii_lowercase().as_str(), "efs" | "hosted"))
+        .unwrap_or(false);
+
     Ok(ServerConfig {
         project_id,
         origin_id,
@@ -161,6 +167,7 @@ fn load_config() -> Result<ServerConfig> {
         max_archive_bytes,
         staging_base,
         multi_tenant,
+        hosted_checkout,
         git_remote_base_url,
     })
 }

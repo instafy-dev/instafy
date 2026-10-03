@@ -3,7 +3,7 @@ use std::str::FromStr;
 use axum::extract::Path;
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use tokio_postgres::Transaction;
@@ -25,6 +25,7 @@ use super::db::{
     fetch_runtime_for_update, fetch_runtime_lease_for_update, mark_runtime_lease_released,
     record_runtime_event, release_origin_instances_for_runtime, RuntimeDetails,
 };
+use super::pre_stop_flush::{FlushPolicy, FlushResume, FlushSummary};
 use super::provider::{
     call_provider_endpoint, lock_and_load_authoritative_provider_config, ProviderReleaseRequest,
     RUNTIME_PROVIDER_RELEASE_TIMEOUT,
@@ -44,6 +45,12 @@ pub(crate) struct RuntimeStopPayload {
     pub(crate) expected_project_id: Option<String>,
     pub(crate) expected_provider: Option<String>,
     pub(crate) expected_display_name: Option<String>,
+    /// The runtime lease generation the caller means to stop. A stop of any
+    /// other generation (one a later start created, perhaps on another node)
+    /// is skipped as `runtime_lease_mismatch` before anything is flushed or
+    /// fenced.
+    #[serde(default)]
+    pub(crate) expected_lease_id: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq, Serialize)]
@@ -54,6 +61,11 @@ pub(crate) struct RuntimeStopResponse {
     pub(crate) provider_release_succeeded: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) skip_reason: Option<String>,
+    /// What the stop did to keep the workspace's work (see
+    /// [`FlushSummary`]). Every stop path of this controller sets it; a
+    /// response without it comes from a controller that predates the flush.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flush: Option<FlushSummary>,
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -89,7 +101,24 @@ pub(crate) struct RuntimeIdentityExpectation {
     pub(crate) project_id: Option<Uuid>,
     pub(crate) provider: Option<String>,
     pub(crate) display_name: Option<String>,
+    /// The runtime's active lease generation.
+    pub(crate) lease_id: Option<Uuid>,
 }
+
+/// Where a stop comes from when the pool-retirement drain makes it. Only
+/// these stops run while this controller is fenced for retirement.
+pub(crate) const DRAIN_STOP_SOURCES: [&str; 2] = ["pool_retirement_drain", "pool_retirement_flush"];
+
+/// The controller's stops of a runtime nobody seemed to use. A pre-stop
+/// flush can take up to its timeout; when someone opens the space or takes
+/// its workspace lease meanwhile, these stops give way to them
+/// (`workspace_reopened`). A drain never does: releases never wait on a
+/// space.
+const STOPS_THAT_YIELD_TO_A_RETURNING_USER: [&str; 3] = [
+    "idle_stop",
+    "idle_reaper",
+    super::ensure::RUNTIME_LIMIT_RECLAIM_STOP_REASON,
+];
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -129,7 +158,13 @@ impl RuntimeStopResponse {
             provider_release_attempted: false,
             provider_release_succeeded: false,
             skip_reason: outcome.skip_reason.clone(),
+            flush: None,
         }
+    }
+
+    pub(crate) fn with_flush(mut self, flush: FlushSummary) -> Self {
+        self.flush = Some(flush);
+        self
     }
 
     fn with_provider_release(
@@ -164,10 +199,286 @@ enum StopAuth {
     User(RequestContext),
 }
 
+/// The request that asked for a stop: `/runtime/stop` or `/runtime/remove`.
+#[derive(Clone, Copy)]
+enum StopRequestKind {
+    Stop,
+    Remove,
+}
+
+/// The access check `/runtime/stop` and `/runtime/remove` make on the locked
+/// runtime row. The pre-stop flush makes it too, so nobody can make the
+/// origin of a runtime they may not stop flush its workspace.
+async fn authorize_runtime_stop_request(
+    state: &AppState,
+    transaction: &Transaction<'_>,
+    auth: &StopAuth,
+    runtime: &RuntimeDetails,
+    kind: StopRequestKind,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    match auth {
+        StopAuth::Agent(context) => {
+            if runtime.project_id != context.project_id {
+                return Err(unauthorized(match kind {
+                    StopRequestKind::Stop => "agent cannot stop runtime from different project",
+                    StopRequestKind::Remove => "agent cannot remove runtime from different project",
+                }));
+            }
+            ensure_agent_token_matches_runtime_lease_for_stop(
+                state,
+                transaction,
+                context,
+                &runtime.id,
+            )
+            .await?;
+        }
+        StopAuth::User(context) => {
+            // `/runtime/stop` is also the narrow provider-cleanup control
+            // plane used after DELETE /projects/:id has made the project
+            // inaccessible to normal users. A directly authenticated service
+            // role may finish releasing that exact runtime without reopening
+            // generic access to tombstoned projects. User requests retain the
+            // usual project write check, and a removal always checks it.
+            if matches!(kind, StopRequestKind::Remove) || !context.is_service_role {
+                let project = load_project_record(transaction, &runtime.project_id).await?;
+                ensure_project_write_access(transaction, &project, context, None).await?;
+            }
+            super::access::ensure_self_hosted_runtime_access(
+                state,
+                &runtime.provider,
+                &runtime.capabilities,
+                context.user_id,
+                context.is_service_role,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Before a stop fences a hosted runtime, ask its origin to keep the
+/// workspace's work (see [`super::pre_stop_flush`]). Planned in a short
+/// transaction of its own that checks what the stop itself checks first (the
+/// caller's access, a live provider-managed generation, the skip
+/// preconditions), so a refused or skipped stop flushes nothing. Holds no
+/// connection while the origin works, and never fails the stop.
+/// `policy.owner_grant`: the controller stops the runtime on its own, so
+/// without a workspace lease holder the space owner's save-only permission
+/// is used. Never set for a stop a user or a runtime asked for.
+async fn flush_workspace_before_stop(
+    state: &AppState,
+    runtime_id: &Uuid,
+    options: &StopOptions,
+    request: Option<(&StopAuth, StopRequestKind)>,
+    policy: FlushPolicy,
+) -> StopFlush {
+    match plan_workspace_flush_before_stop(state, runtime_id, options, request, policy).await {
+        Ok((FlushPlan::Flush(target), planned_at)) => {
+            let called_origin = target.calls_origin();
+            let flushed = super::pre_stop_flush::flush(state, target).await;
+            StopFlush {
+                summary: flushed.outcome.summary(),
+                resume: flushed.resume,
+                called_origin_since: called_origin.then_some(planned_at),
+            }
+        }
+        Ok((FlushPlan::Skipped, _)) => StopFlush::from(FlushSummary::skipped()),
+        Ok((FlushPlan::NotRunning, _)) => StopFlush::from(FlushSummary::not_running()),
+        Err((status, body)) => {
+            info!(
+                runtime_id = %runtime_id,
+                %status,
+                error = %body.0.message,
+                "no pre-stop workspace flush for this stop"
+            );
+            StopFlush::from(FlushSummary::failed("flush_planning_failed"))
+        }
+    }
+}
+
+/// What a stop's pre-stop flush did, and what undoes its save fence when the
+/// stop does not happen after all.
+struct StopFlush {
+    summary: FlushSummary,
+    resume: Option<FlushResume>,
+    /// The flush asked the origin (it may have taken a while); when it was
+    /// planned, by the database clock.
+    called_origin_since: Option<DateTime<Utc>>,
+}
+
+impl From<FlushSummary> for StopFlush {
+    fn from(summary: FlushSummary) -> Self {
+        Self {
+            summary,
+            resume: None,
+            called_origin_since: None,
+        }
+    }
+}
+
+impl StopFlush {
+    /// The stop will not fence the runtime: let the origin take saves again.
+    async fn resume_if_flushed(self, state: &AppState) -> FlushSummary {
+        if let Some(resume) = self.resume {
+            super::pre_stop_flush::resume(state, resume).await;
+        }
+        self.summary
+    }
+
+    /// After a requested stop, whatever it returned: when the runtime still
+    /// runs the generation it ran (the stop was refused, skipped or failed
+    /// before its quarantine), let the origin take saves again.
+    async fn resume_unless_fenced(self, state: &AppState, runtime_id: &Uuid) -> FlushSummary {
+        if self.resume.is_none() {
+            return self.summary;
+        }
+        let still_running = async {
+            let connection = state.pool.get().await.ok()?;
+            let row = connection
+                .query_opt(
+                    "select r.status, l.status as lease_status
+                     from runtimes r
+                     join runtime_leases l on l.id = r.active_lease_id
+                     where r.id = $1",
+                    &[runtime_id],
+                )
+                .await
+                .ok()??;
+            Some(
+                matches!(
+                    row.get::<_, String>("status").as_str(),
+                    "ready" | "running" | "draining"
+                ) && row.get::<_, String>("lease_status") == "active",
+            )
+        }
+        .await
+        .unwrap_or(false);
+        if still_running {
+            self.resume_if_flushed(state).await
+        } else {
+            self.summary
+        }
+    }
+}
+
+/// Someone came back to the space after `since`: a new workspace lease this
+/// runtime serves, or a user's activity ping.
+async fn workspace_reopened_since(
+    transaction: &Transaction<'_>,
+    runtime: &RuntimeDetails,
+    since: DateTime<Utc>,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let leased: bool = transaction
+        .query_one(
+            "select exists(
+                select 1
+                from workspace_leases
+                where project_id = $1
+                  and status = 'active'
+                  and expires_at > now()
+                  and acquired_at > $2
+                  and (runtime_id is null or runtime_id = $3)
+             )",
+            &[&runtime.project_id, &since, &runtime.id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check workspace leases: {error}")))?
+        .get(0);
+    if leased {
+        return Ok(true);
+    }
+    // A missing activity table (schema lag) counts as no activity.
+    let active: bool = transaction
+        .query_one(
+            "select to_regclass('public.project_user_activity') is not null",
+            &[],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to check user activity: {error}")))?
+        .get(0);
+    if !active {
+        return Ok(false);
+    }
+    transaction
+        .query_one(
+            "select exists(
+                select 1
+                from project_user_activity
+                where project_id = $1
+                  and last_active_at > $2
+             )",
+            &[&runtime.project_id, &since],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| internal_error(format!("failed to check user activity: {error}")))
+}
+
+/// What the stop's flush planning found.
+enum FlushPlan {
+    Flush(super::pre_stop_flush::PreStopFlushTarget),
+    /// The stop itself is skipped (identity, lease generation or active
+    /// jobs), so nothing is flushed.
+    Skipped,
+    /// No live provider-managed generation with an online hosted origin.
+    NotRunning,
+}
+
+async fn plan_workspace_flush_before_stop(
+    state: &AppState,
+    runtime_id: &Uuid,
+    options: &StopOptions,
+    request: Option<(&StopAuth, StopRequestKind)>,
+    policy: FlushPolicy,
+) -> Result<(FlushPlan, DateTime<Utc>), (StatusCode, Json<ApiError>)> {
+    let mut connection = state.pool.get().await.map_err(|error| {
+        internal_error(format!("failed to get flush planning connection: {error}"))
+    })?;
+    let transaction = connection.transaction().await.map_err(|error| {
+        internal_error(format!(
+            "failed to start flush planning transaction: {error}"
+        ))
+    })?;
+    let runtime = fetch_runtime_for_update(&transaction, runtime_id).await?;
+    if let Some((auth, kind)) = request {
+        authorize_runtime_stop_request(state, &transaction, auth, &runtime, kind).await?;
+    }
+    let planned_at: DateTime<Utc> = transaction
+        .query_one("select clock_timestamp()", &[])
+        .await
+        .map_err(|error| internal_error(format!("failed to read the clock: {error}")))?
+        .get(0);
+    let live = matches!(runtime.status.as_str(), "ready" | "running" | "draining");
+    let plan = if preflight_runtime_stop(&transaction, &runtime, options)
+        .await?
+        .is_some()
+    {
+        FlushPlan::Skipped
+    } else {
+        match runtime.active_lease_id {
+            Some(lease_id) if live && runtime_requires_provider_release(state, &runtime) => {
+                let lease = fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
+                if lease.status != "active" || lease.released_at.is_some() {
+                    FlushPlan::NotRunning
+                } else {
+                    super::pre_stop_flush::find_target(&transaction, &runtime, &lease_id, policy)
+                        .await?
+                        .map_or(FlushPlan::NotRunning, FlushPlan::Flush)
+                }
+            }
+            _ => FlushPlan::NotRunning,
+        }
+    };
+    transaction.rollback().await.map_err(|error| {
+        internal_error(format!("failed to end flush planning transaction: {error}"))
+    })?;
+    Ok((plan, planned_at))
+}
+
 #[derive(Debug)]
 pub(super) struct SafeRuntimeStop {
     pub(super) runtime: RuntimeDetails,
     pub(super) outcome: StopOutcome,
+    pub(super) flush: FlushSummary,
 }
 
 async fn runtime_has_active_hosted_jobs(
@@ -299,15 +610,12 @@ async fn preflight_runtime_stop(
     runtime: &RuntimeDetails,
     options: &StopOptions,
 ) -> Result<Option<StopOutcome>, (StatusCode, Json<ApiError>)> {
-    if options
+    if let Some(reason) = options
         .expected_identity
         .as_ref()
-        .is_some_and(|expected| !runtime_matches_expected_identity(runtime, expected))
+        .and_then(|expected| expected_identity_skip_reason(runtime, expected))
     {
-        return Ok(Some(StopOutcome::skipped(
-            runtime,
-            "runtime_identity_mismatch",
-        )));
+        return Ok(Some(StopOutcome::skipped(runtime, reason)));
     }
 
     if options.require_idle_timeout {
@@ -341,6 +649,78 @@ pub(super) async fn stop_runtime_safely(
     runtime_id: &Uuid,
     options: StopOptions,
 ) -> Result<SafeRuntimeStop, (StatusCode, Json<ApiError>)> {
+    stop_runtime_safely_with(state, runtime_id, options, FlushPolicy::CONTROLLER).await
+}
+
+/// [`stop_runtime_safely`] with an explicit flush policy: a stop a request
+/// set off (`FlushPolicy::REQUESTED`) never uses the owner's permission, and
+/// one that interrupts a requeued turn says so.
+pub(super) async fn stop_runtime_safely_with(
+    state: &AppState,
+    runtime_id: &Uuid,
+    options: StopOptions,
+    policy: FlushPolicy,
+) -> Result<SafeRuntimeStop, (StatusCode, Json<ApiError>)> {
+    // A controller fenced for pool retirement acts only for the drain: its
+    // own sweeps would act through this node's provider on runtimes that may
+    // now live on another node.
+    if state.runtime_drain.is_fenced() && !DRAIN_STOP_SOURCES.contains(&options.source) {
+        let mut connection =
+            state.pool.get().await.map_err(|error| {
+                internal_error(format!("failed to get stop connection: {error}"))
+            })?;
+        let transaction = connection.transaction().await.map_err(|error| {
+            internal_error(format!("failed to start stop transaction: {error}"))
+        })?;
+        let runtime = fetch_runtime_for_update(&transaction, runtime_id).await?;
+        transaction.rollback().await.ok();
+        info!(
+            runtime_id = %runtime_id,
+            source = options.source,
+            "this controller is retiring; leaving the stop to the serving controller"
+        );
+        let outcome = StopOutcome::skipped(&runtime, "controller_retiring");
+        return Ok(SafeRuntimeStop {
+            runtime,
+            outcome,
+            flush: FlushSummary::skipped(),
+        });
+    }
+
+    // Before the quarantine below fences the runtime: after it, the origin
+    // can no longer save anything to canonical. On the controller's own stop
+    // path the space owner's save-only permission covers a stop nobody holds
+    // a workspace lease for.
+    let flushed = flush_workspace_before_stop(state, runtime_id, &options, None, policy).await;
+    // An idle stop gives way to someone who came back while it flushed.
+    let reopened_since = flushed
+        .called_origin_since
+        .filter(|_| STOPS_THAT_YIELD_TO_A_RETURNING_USER.contains(&options.source));
+    let mut fenced = false;
+    let stopped = stop_after_flush(state, runtime_id, options, reopened_since, &mut fenced).await;
+    // The flush fenced the origin's saves for a stop that did not happen.
+    let flush = if fenced {
+        flushed.summary
+    } else {
+        flushed.resume_if_flushed(state).await
+    };
+    let (runtime, outcome) = stopped?;
+    Ok(SafeRuntimeStop {
+        runtime,
+        outcome,
+        flush,
+    })
+}
+
+/// The stop itself, after its flush. Sets `fenced` once the runtime is
+/// quarantined (or stopped), after which the origin keeps its save fence.
+async fn stop_after_flush(
+    state: &AppState,
+    runtime_id: &Uuid,
+    options: StopOptions,
+    reopened_since: Option<DateTime<Utc>>,
+    fenced: &mut bool,
+) -> Result<(RuntimeDetails, StopOutcome), (StatusCode, Json<ApiError>)> {
     let mut connection = state
         .pool
         .get()
@@ -371,14 +751,25 @@ pub(super) async fn stop_runtime_safely(
 
     if let Some((lease_id, already_quarantined)) = provider_release_lease {
         if !already_quarantined {
-            if let Some(outcome) = preflight_runtime_stop(&transaction, &runtime, &options).await? {
+            let mut skipped = preflight_runtime_stop(&transaction, &runtime, &options).await?;
+            if skipped.is_none() {
+                if let Some(since) = reopened_since {
+                    if workspace_reopened_since(&transaction, &runtime, since).await? {
+                        info!(
+                            runtime_id = %runtime.id,
+                            project_id = %runtime.project_id,
+                            source = options.source,
+                            "someone opened the space while its idle stop flushed; keeping the runtime"
+                        );
+                        skipped = Some(StopOutcome::skipped(&runtime, "workspace_reopened"));
+                    }
+                }
+            }
+            if let Some(outcome) = skipped {
                 transaction.rollback().await.map_err(|error| {
                     internal_error(format!("failed to rollback skipped stop: {error}"))
                 })?;
-                return Ok(SafeRuntimeStop {
-                    runtime: runtime_snapshot,
-                    outcome,
-                });
+                return Ok((runtime_snapshot, outcome));
             }
         }
 
@@ -399,6 +790,7 @@ pub(super) async fn stop_runtime_safely(
                 "failed to commit runtime provider-release quarantine: {error}"
             ))
         })?;
+        *fenced = true;
         crate::send_intents::publish_job_input_state_updates(state, &quarantine_input_updates);
         drop(connection);
 
@@ -466,10 +858,7 @@ pub(super) async fn stop_runtime_safely(
             state,
             &outcome.job_input_state_updates,
         );
-        return Ok(SafeRuntimeStop {
-            runtime: runtime_snapshot,
-            outcome,
-        });
+        return Ok((runtime_snapshot, outcome));
     }
 
     let outcome = perform_runtime_stop(&transaction, &runtime, options).await?;
@@ -478,6 +867,7 @@ pub(super) async fn stop_runtime_safely(
             .commit()
             .await
             .map_err(|error| internal_error(format!("failed to commit runtime stop: {error}")))?;
+        *fenced = true;
         crate::send_intents::publish_job_input_state_updates(
             state,
             &outcome.job_input_state_updates,
@@ -488,10 +878,41 @@ pub(super) async fn stop_runtime_safely(
         })?;
     }
 
-    Ok(SafeRuntimeStop {
-        runtime: runtime_snapshot,
-        outcome,
-    })
+    Ok((runtime_snapshot, outcome))
+}
+
+/// The identity a `/runtime/stop` caller expects the runtime to have.
+fn expected_runtime_identity(
+    expected_project_id: Option<&str>,
+    expected_provider: Option<&str>,
+    expected_display_name: Option<&str>,
+    expected_lease_id: Option<&str>,
+) -> Result<Option<RuntimeIdentityExpectation>, (StatusCode, Json<ApiError>)> {
+    let expected_project_id = expected_project_id
+        .map(|value| {
+            Uuid::from_str(value.trim())
+                .map_err(|_| bad_request("expected_project_id must be a valid UUID"))
+        })
+        .transpose()?;
+    let expected_lease_id = expected_lease_id
+        .map(|value| {
+            Uuid::from_str(value.trim())
+                .map_err(|_| bad_request("expected_lease_id must be a valid UUID"))
+        })
+        .transpose()?;
+    if expected_project_id.is_none()
+        && expected_provider.is_none()
+        && expected_display_name.is_none()
+        && expected_lease_id.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(RuntimeIdentityExpectation {
+        project_id: expected_project_id,
+        provider: expected_provider.map(str::to_string),
+        display_name: expected_display_name.map(str::to_string),
+        lease_id: expected_lease_id,
+    }))
 }
 
 pub(crate) async fn runtime_stop(
@@ -507,6 +928,7 @@ pub(crate) async fn runtime_stop(
         expected_project_id,
         expected_provider,
         expected_display_name,
+        expected_lease_id,
     } = payload;
     let runtime_id =
         Uuid::from_str(&runtime_id).map_err(|_| bad_request("runtime_id must be a valid UUID"))?;
@@ -533,162 +955,156 @@ pub(crate) async fn runtime_stop(
             }
         };
 
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection
-        .transaction()
-        .await
-        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
-
-    let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
-
-    match &auth_context {
-        StopAuth::Agent(context) => {
-            if runtime.project_id != context.project_id {
-                return Err(unauthorized(
-                    "agent cannot stop runtime from different project",
-                ));
-            }
-            ensure_agent_token_matches_runtime_lease_for_stop(
+    // Before this stop fences the runtime, let a hosted origin keep its
+    // workspace's work. A stop the checks below refuse flushes nothing. A
+    // user or a runtime asked for this stop, so it saves only under a
+    // workspace lease holder, never under the owner's save-only permission.
+    let flushed = match expected_runtime_identity(
+        expected_project_id.as_deref(),
+        expected_provider.as_deref(),
+        expected_display_name.as_deref(),
+        expected_lease_id.as_deref(),
+    ) {
+        Ok(expected_identity) => {
+            let flush_options = StopOptions {
+                source: "runtime_stop",
+                reason: reason.clone(),
+                skip_if_active_jobs,
+                require_idle_timeout: false,
+                allow_cleanup_pending_release: false,
+                expected_identity,
+            };
+            flush_workspace_before_stop(
                 &state,
-                &transaction,
-                context,
-                &runtime.id,
+                &runtime_id,
+                &flush_options,
+                Some((&auth_context, StopRequestKind::Stop)),
+                FlushPolicy::REQUESTED,
             )
-            .await?;
+            .await
         }
-        StopAuth::User(context) => {
-            // This endpoint is the narrow provider-cleanup control plane used
-            // after DELETE /projects/:id has made the project inaccessible to
-            // normal users. A directly authenticated service role may finish
-            // releasing that exact runtime without reopening generic access to
-            // tombstoned projects. User requests retain the usual project
-            // write check.
-            if !context.is_service_role {
-                let project = load_project_record(&transaction, &runtime.project_id).await?;
-                ensure_project_write_access(&transaction, &project, context, None).await?;
-            }
-            super::access::ensure_self_hosted_runtime_access(
-                &state,
-                &runtime.provider,
-                &runtime.capabilities,
-                context.user_id,
-                context.is_service_role,
-            )?;
-        }
-    }
-
-    let expected_project_id = expected_project_id
-        .map(|value| {
-            Uuid::from_str(value.trim())
-                .map_err(|_| bad_request("expected_project_id must be a valid UUID"))
-        })
-        .transpose()?;
-    let expected_identity = if expected_project_id.is_some()
-        || expected_provider.is_some()
-        || expected_display_name.is_some()
-    {
-        Some(RuntimeIdentityExpectation {
-            project_id: expected_project_id,
-            provider: expected_provider,
-            display_name: expected_display_name,
-        })
-    } else {
-        None
-    };
-    let strict_terminal_release_retry = require_provider_release
-        && should_skip_stop_for_terminal_runtime(&runtime)
-        && expected_identity
-            .as_ref()
-            .is_some_and(|expected| runtime_matches_expected_identity(&runtime, expected));
-
-    if provider_runtime_missing_release_generation(&state, &runtime)
-        && !strict_terminal_release_retry
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiError::new(
-                "provider-managed runtime is missing its active lease generation",
-            )),
-        ));
-    }
-
-    let stop_options = StopOptions {
-        source: "runtime_stop",
-        reason,
-        skip_if_active_jobs,
-        require_idle_timeout: false,
-        allow_cleanup_pending_release: false,
-        expected_identity,
-    };
-    let stop_reason_label = stop_options
-        .reason
-        .clone()
-        .unwrap_or_else(|| stop_options.source.to_string());
-
-    // Access control deliberately quarantines unknown/removed provider ids as
-    // private. Strict cleanup needs a stronger, positive classification: only
-    // a built-in/configured self-hosted provider or protected self-hosted
-    // runtime identity proves that no allocator release exists.
-    let provider_managed_runtime = runtime_requires_provider_release(&state, &runtime);
-    let private_self_hosted_runtime = !provider_managed_runtime;
-    let fenced_release_lease_id = if provider_managed_runtime {
-        if let Some(lease_id) = runtime.active_lease_id {
-            fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
-            Some(lease_id)
-        } else {
-            None
-        }
-    } else {
-        None
+        Err(_) => StopFlush::from(FlushSummary::skipped()),
     };
 
-    if require_provider_release
-        && provider_managed_runtime
-        && runtime.active_lease_id.is_none()
-        && !should_skip_stop_for_terminal_runtime(&runtime)
-    {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiError::new(
-                "strict provider release requires the active runtime lease generation",
-            )),
-        ));
-    }
-    if require_provider_release
-        && provider_managed_runtime
-        && should_skip_stop_for_terminal_runtime(&runtime)
-    {
-        let provider_release_was_acknowledged =
-            provider_release_was_acknowledged_after_latest_stop(
-                &transaction,
-                &runtime.id,
-                &runtime.provider,
-            )
-            .await?;
-        if !provider_release_was_acknowledged {
+    let stopped = async {
+        let mut connection = state
+            .pool
+            .get()
+            .await
+            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+        let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
+
+        authorize_runtime_stop_request(
+            &state,
+            &transaction,
+            &auth_context,
+            &runtime,
+            StopRequestKind::Stop,
+        )
+        .await?;
+
+        let expected_identity = expected_runtime_identity(
+            expected_project_id.as_deref(),
+            expected_provider.as_deref(),
+            expected_display_name.as_deref(),
+            expected_lease_id.as_deref(),
+        )?;
+        let strict_terminal_release_retry = require_provider_release
+            && should_skip_stop_for_terminal_runtime(&runtime)
+            && expected_identity
+                .as_ref()
+                .is_some_and(|expected| runtime_matches_expected_identity(&runtime, expected));
+
+        if provider_runtime_missing_release_generation(&state, &runtime)
+            && !strict_terminal_release_retry
+        {
             return Err((
                 StatusCode::CONFLICT,
                 Json(ApiError::new(
-                    "strict provider release cannot be proven for this terminal runtime",
+                    "provider-managed runtime is missing its active lease generation",
                 )),
             ));
         }
-    }
 
-    let preflight_skip = stop_options
-        .expected_identity
-        .as_ref()
-        .is_some_and(|expected| !runtime_matches_expected_identity(&runtime, expected))
-        || (stop_options.skip_if_active_jobs
-            && !matches!(runtime.status.as_str(), "stopped" | "offline" | "removed")
-            && runtime_has_active_hosted_jobs(&transaction, &runtime.id).await?);
+        let stop_options = StopOptions {
+            source: "runtime_stop",
+            reason,
+            skip_if_active_jobs,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity,
+        };
+        let stop_reason_label = stop_options
+            .reason
+            .clone()
+            .unwrap_or_else(|| stop_options.source.to_string());
 
-    let (outcome, provider_release) =
-        if let Some(lease_id) = fenced_release_lease_id.filter(|_| !preflight_skip) {
+        // Access control deliberately quarantines unknown/removed provider ids as
+        // private. Strict cleanup needs a stronger, positive classification: only
+        // a built-in/configured self-hosted provider or protected self-hosted
+        // runtime identity proves that no allocator release exists.
+        let provider_managed_runtime = runtime_requires_provider_release(&state, &runtime);
+        let private_self_hosted_runtime = !provider_managed_runtime;
+        let fenced_release_lease_id = if provider_managed_runtime {
+            if let Some(lease_id) = runtime.active_lease_id {
+                fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
+                Some(lease_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if require_provider_release
+            && provider_managed_runtime
+            && runtime.active_lease_id.is_none()
+            && !should_skip_stop_for_terminal_runtime(&runtime)
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new(
+                    "strict provider release requires the active runtime lease generation",
+                )),
+            ));
+        }
+        if require_provider_release
+            && provider_managed_runtime
+            && should_skip_stop_for_terminal_runtime(&runtime)
+        {
+            let provider_release_was_acknowledged =
+                provider_release_was_acknowledged_after_latest_stop(
+                    &transaction,
+                    &runtime.id,
+                    &runtime.provider,
+                )
+                .await?;
+            if !provider_release_was_acknowledged {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ApiError::new(
+                        "strict provider release cannot be proven for this terminal runtime",
+                    )),
+                ));
+            }
+        }
+
+        let preflight_skip = stop_options
+            .expected_identity
+            .as_ref()
+            .is_some_and(|expected| expected_identity_skip_reason(&runtime, expected).is_some())
+            || (stop_options.skip_if_active_jobs
+                && !matches!(runtime.status.as_str(), "stopped" | "offline" | "removed")
+                && runtime_has_active_hosted_jobs(&transaction, &runtime.id).await?);
+
+        let (outcome, provider_release) = if let Some(lease_id) =
+            fenced_release_lease_id.filter(|_| !preflight_skip)
+        {
             let quarantine_input_updates = quarantine_runtime_for_provider_release(
                 &transaction,
                 &runtime,
@@ -714,13 +1130,14 @@ pub(crate) async fn runtime_stop(
             if !provider_release.succeeded {
                 return Ok((
                     StatusCode::BAD_GATEWAY,
-                    Json(RuntimeStopResponse {
+                    RuntimeStopResponse {
                         ok: false,
                         status_changed: false,
                         provider_release_attempted: provider_release.attempted,
                         provider_release_succeeded: false,
                         skip_reason: Some("provider_cleanup_pending".to_string()),
-                    }),
+                        flush: None,
+                    },
                 ));
             }
 
@@ -810,34 +1227,41 @@ pub(crate) async fn runtime_stop(
             (outcome, provider_release)
         };
 
-    if let Some(reason) = outcome.skip_reason.as_deref() {
-        info!(runtime_id = %runtime_id, %reason, "runtime stop skipped state change");
-    }
-
-    if outcome.status_changed {
-        if let Err((status, payload)) = revoke_tunnels_for_scope(
-            &state,
-            &runtime.project_id,
-            Some(&runtime.id),
-            outcome.released_runtime_lease_id.as_ref(),
-            &stop_reason_label,
-        )
-        .await
-        {
-            warn!(
-                runtime_id = %runtime.id,
-                project_id = %runtime.project_id,
-                %status,
-                error = payload.0.message,
-                "failed to auto-revoke tunnels after runtime stop"
-            );
+        if let Some(reason) = outcome.skip_reason.as_deref() {
+            info!(runtime_id = %runtime_id, %reason, "runtime stop skipped state change");
         }
+
+        if outcome.status_changed {
+            if let Err((status, payload)) = revoke_tunnels_for_scope(
+                &state,
+                &runtime.project_id,
+                Some(&runtime.id),
+                outcome.released_runtime_lease_id.as_ref(),
+                &stop_reason_label,
+            )
+            .await
+            {
+                warn!(
+                    runtime_id = %runtime.id,
+                    project_id = %runtime.project_id,
+                    %status,
+                    error = payload.0.message,
+                    "failed to auto-revoke tunnels after runtime stop"
+                );
+            }
+        }
+
+        Ok::<_, (StatusCode, Json<ApiError>)>(build_runtime_stop_response(
+            &outcome,
+            &provider_release,
+            require_provider_release,
+        ))
     }
-
-    let (status, response) =
-        build_runtime_stop_response(&outcome, &provider_release, require_provider_release);
-
-    Ok((status, Json(response)))
+    .await;
+    // A stop that did not fence the runtime lifts the flush's save fence.
+    let flush = flushed.resume_unless_fenced(&state, &runtime_id).await;
+    let (status, response) = stopped?;
+    Ok((status, Json(response.with_flush(flush))))
 }
 
 pub(crate) async fn stop_runtime_for_project(
@@ -847,51 +1271,76 @@ pub(crate) async fn stop_runtime_for_project(
     reason: Option<String>,
     source: &'static str,
 ) -> Result<RuntimeStopResponse, (StatusCode, Json<ApiError>)> {
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection
-        .transaction()
-        .await
-        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    // Before the quarantine below fences the runtime. Only a runtime of this
+    // project, which is all this stop accepts, is flushed. Operators, users
+    // and dispatch handoffs ask for this stop, so it saves only under a
+    // workspace lease holder.
+    let flushed = flush_workspace_before_stop(
+        state,
+        runtime_id,
+        &StopOptions {
+            source,
+            reason: reason.clone(),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: Some(RuntimeIdentityExpectation {
+                project_id: Some(*project_id),
+                provider: None,
+                display_name: None,
+                lease_id: None,
+            }),
+        },
+        None,
+        FlushPolicy::REQUESTED,
+    )
+    .await;
 
-    let runtime = fetch_runtime_for_update(&transaction, runtime_id).await?;
-    if runtime.project_id != *project_id {
-        return Err(not_found("Runtime not found for project."));
-    }
-    if provider_runtime_missing_release_generation(state, &runtime) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiError::new(
-                "provider-managed runtime is missing its active lease generation",
-            )),
-        ));
-    }
+    let stopped = async {
+        let mut connection = state
+            .pool
+            .get()
+            .await
+            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    let stop_options = StopOptions {
-        source,
-        reason,
-        skip_if_active_jobs: false,
-        require_idle_timeout: false,
-        allow_cleanup_pending_release: false,
-        expected_identity: None,
-    };
-    let stop_reason_label = stop_options
-        .reason
-        .clone()
-        .unwrap_or_else(|| stop_options.source.to_string());
+        let runtime = fetch_runtime_for_update(&transaction, runtime_id).await?;
+        if runtime.project_id != *project_id {
+            return Err(not_found("Runtime not found for project."));
+        }
+        if provider_runtime_missing_release_generation(state, &runtime) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new(
+                    "provider-managed runtime is missing its active lease generation",
+                )),
+            ));
+        }
 
-    let provider_release_lease_id = if let Some(lease_id) = runtime.active_lease_id {
-        fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
-        runtime_requires_provider_release(state, &runtime).then_some(lease_id)
-    } else {
-        None
-    };
+        let stop_options = StopOptions {
+            source,
+            reason,
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        };
+        let stop_reason_label = stop_options
+            .reason
+            .clone()
+            .unwrap_or_else(|| stop_options.source.to_string());
 
-    let (outcome, provider_release) =
-        if let Some(lease_id) = provider_release_lease_id {
+        let provider_release_lease_id = if let Some(lease_id) = runtime.active_lease_id {
+            fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
+            runtime_requires_provider_release(state, &runtime).then_some(lease_id)
+        } else {
+            None
+        };
+
+        let (outcome, provider_release) = if let Some(lease_id) = provider_release_lease_id {
             let quarantine_input_updates = quarantine_runtime_for_provider_release(
                 &transaction,
                 &runtime,
@@ -980,31 +1429,39 @@ pub(crate) async fn stop_runtime_for_project(
             (outcome, ProviderReleaseOutcome::default())
         };
 
-    if outcome.status_changed {
-        if let Err((status, payload)) = revoke_tunnels_for_scope(
-            state,
-            &runtime.project_id,
-            Some(&runtime.id),
-            outcome.released_runtime_lease_id.as_ref(),
-            &stop_reason_label,
-        )
-        .await
-        {
-            warn!(
-                runtime_id = %runtime.id,
-                project_id = %runtime.project_id,
-                %status,
-                error = payload.0.message,
-                "failed to auto-revoke tunnels after runtime stop"
-            );
+        if outcome.status_changed {
+            if let Err((status, payload)) = revoke_tunnels_for_scope(
+                state,
+                &runtime.project_id,
+                Some(&runtime.id),
+                outcome.released_runtime_lease_id.as_ref(),
+                &stop_reason_label,
+            )
+            .await
+            {
+                warn!(
+                    runtime_id = %runtime.id,
+                    project_id = %runtime.project_id,
+                    %status,
+                    error = payload.0.message,
+                    "failed to auto-revoke tunnels after runtime stop"
+                );
+            }
         }
-    }
 
-    if let Some(reason) = outcome.skip_reason.as_deref() {
-        info!(runtime_id = %runtime_id, %reason, "runtime stop skipped state change");
-    }
+        if let Some(reason) = outcome.skip_reason.as_deref() {
+            info!(runtime_id = %runtime_id, %reason, "runtime stop skipped state change");
+        }
 
-    Ok(RuntimeStopResponse::from_outcome(&outcome).with_provider_release(&provider_release, false))
+        Ok::<_, (StatusCode, Json<ApiError>)>(
+            RuntimeStopResponse::from_outcome(&outcome)
+                .with_provider_release(&provider_release, false),
+        )
+    }
+    .await;
+    // A stop that did not fence the runtime lifts the flush's save fence.
+    let flush = flushed.resume_unless_fenced(state, runtime_id).await;
+    Ok(stopped?.with_flush(flush))
 }
 
 fn build_runtime_stop_response(
@@ -1168,6 +1625,9 @@ pub(crate) struct RuntimeRemovePayload {
 #[derive(Debug, Serialize)]
 pub(crate) struct RuntimeRemoveResponse {
     pub(crate) ok: bool,
+    /// What the removal did to keep the workspace's work, as on a stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flush: Option<FlushSummary>,
 }
 
 pub(crate) async fn runtime_remove(
@@ -1201,189 +1661,194 @@ pub(crate) async fn runtime_remove(
             }
         };
 
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let transaction = connection
-        .transaction()
-        .await
-        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    // Before this removal fences the runtime, let a hosted origin keep its
+    // workspace's work. A removal the checks below refuse flushes nothing.
+    let flushed = flush_workspace_before_stop(
+        &state,
+        &runtime_id,
+        &StopOptions {
+            source: "runtime_remove",
+            reason: reason.clone(),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        },
+        Some((&auth_context, StopRequestKind::Remove)),
+        FlushPolicy::REQUESTED,
+    )
+    .await;
 
-    let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
+    let removed = async {
+        let mut connection = state
+            .pool
+            .get()
+            .await
+            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    match &auth_context {
-        StopAuth::Agent(context) => {
-            if runtime.project_id != context.project_id {
-                return Err(unauthorized(
-                    "agent cannot remove runtime from different project",
-                ));
-            }
-            ensure_agent_token_matches_runtime_lease_for_stop(
-                &state,
-                &transaction,
-                context,
-                &runtime.id,
-            )
-            .await?;
+        let runtime = fetch_runtime_for_update(&transaction, &runtime_id).await?;
+
+        authorize_runtime_stop_request(
+            &state,
+            &transaction,
+            &auth_context,
+            &runtime,
+            StopRequestKind::Remove,
+        )
+        .await?;
+
+        if provider_runtime_missing_release_generation(&state, &runtime) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new(
+                    "provider-managed runtime is missing its active lease generation",
+                )),
+            ));
         }
-        StopAuth::User(context) => {
-            let project = load_project_record(&transaction, &runtime.project_id).await?;
-            ensure_project_write_access(&transaction, &project, context, None).await?;
-            super::access::ensure_self_hosted_runtime_access(
-                &state,
-                &runtime.provider,
-                &runtime.capabilities,
-                context.user_id,
-                context.is_service_role,
-            )?;
-        }
-    }
 
-    if provider_runtime_missing_release_generation(&state, &runtime) {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiError::new(
-                "provider-managed runtime is missing its active lease generation",
-            )),
-        ));
-    }
+        let stop_options = StopOptions {
+            source: "runtime_remove",
+            reason: reason.clone(),
+            skip_if_active_jobs: false,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: None,
+        };
+        let stop_label = stop_options
+            .reason
+            .clone()
+            .unwrap_or_else(|| stop_options.source.to_string());
 
-    let stop_options = StopOptions {
-        source: "runtime_remove",
-        reason: reason.clone(),
-        skip_if_active_jobs: false,
-        require_idle_timeout: false,
-        allow_cleanup_pending_release: false,
-        expected_identity: None,
-    };
-    let stop_label = stop_options
-        .reason
-        .clone()
-        .unwrap_or_else(|| stop_options.source.to_string());
+        if let Some(lease_id) = runtime.active_lease_id {
+            fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
+            if runtime_requires_provider_release(&state, &runtime) {
+                let quarantine_input_updates = quarantine_runtime_for_provider_release(
+                    &transaction,
+                    &runtime,
+                    &lease_id,
+                    &stop_label,
+                )
+                .await?;
+                transaction.commit().await.map_err(|error| {
+                    internal_error(format!(
+                        "failed to commit runtime removal quarantine: {error}"
+                    ))
+                })?;
+                crate::send_intents::publish_job_input_state_updates(
+                    &state,
+                    &quarantine_input_updates,
+                );
+                drop(connection);
 
-    if let Some(lease_id) = runtime.active_lease_id {
-        fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
-        if runtime_requires_provider_release(&state, &runtime) {
-            let quarantine_input_updates = quarantine_runtime_for_provider_release(
-                &transaction,
-                &runtime,
-                &lease_id,
-                &stop_label,
-            )
-            .await?;
-            transaction.commit().await.map_err(|error| {
-                internal_error(format!(
-                    "failed to commit runtime removal quarantine: {error}"
-                ))
-            })?;
-            crate::send_intents::publish_job_input_state_updates(&state, &quarantine_input_updates);
-            drop(connection);
+                let provider_release = release_runtime_via_provider(
+                    &state,
+                    &runtime,
+                    Some(&lease_id),
+                    "failed to stop runtime via provider during remove",
+                )
+                .await;
+                if !provider_release.succeeded {
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        Json(ApiError::new(
+                            "runtime provider cleanup is still pending; retry removal",
+                        )),
+                    ));
+                }
 
-            let provider_release = release_runtime_via_provider(
-                &state,
-                &runtime,
-                Some(&lease_id),
-                "failed to stop runtime via provider during remove",
-            )
-            .await;
-            if !provider_release.succeeded {
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(ApiError::new(
-                        "runtime provider cleanup is still pending; retry removal",
-                    )),
-                ));
-            }
-
-            let mut final_connection = state.pool.get().await.map_err(|error| {
-                internal_error(format!("failed to get removal connection: {error}"))
-            })?;
-            let final_transaction = final_connection.transaction().await.map_err(|error| {
-                internal_error(format!(
-                    "failed to start removal finalization transaction: {error}"
-                ))
-            })?;
-            let current_runtime = fetch_runtime_for_update(&final_transaction, &runtime.id).await?;
-            if current_runtime.active_lease_id != Some(lease_id) {
-                return Err((
-                    StatusCode::CONFLICT,
-                    Json(ApiError::new(
-                        "runtime lease generation is no longer current",
-                    )),
-                ));
-            }
-            let mut final_options = stop_options.clone();
-            final_options.allow_cleanup_pending_release = true;
-            let outcome =
-                perform_runtime_stop(&final_transaction, &current_runtime, final_options).await?;
-            record_runtime_event(
-                &final_transaction,
-                &runtime.id,
-                &runtime.project_id,
-                "provider_release_acknowledged",
-                json!({
-                    "provider": runtime.provider,
-                    "runtimeLeaseId": lease_id,
-                }),
-            )
-            .await?;
-            final_transaction
-                .execute(
-                    "update runtimes
+                let mut final_connection = state.pool.get().await.map_err(|error| {
+                    internal_error(format!("failed to get removal connection: {error}"))
+                })?;
+                let final_transaction = final_connection.transaction().await.map_err(|error| {
+                    internal_error(format!(
+                        "failed to start removal finalization transaction: {error}"
+                    ))
+                })?;
+                let current_runtime =
+                    fetch_runtime_for_update(&final_transaction, &runtime.id).await?;
+                if current_runtime.active_lease_id != Some(lease_id) {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        Json(ApiError::new(
+                            "runtime lease generation is no longer current",
+                        )),
+                    ));
+                }
+                let mut final_options = stop_options.clone();
+                final_options.allow_cleanup_pending_release = true;
+                let outcome =
+                    perform_runtime_stop(&final_transaction, &current_runtime, final_options)
+                        .await?;
+                record_runtime_event(
+                    &final_transaction,
+                    &runtime.id,
+                    &runtime.project_id,
+                    "provider_release_acknowledged",
+                    json!({
+                        "provider": runtime.provider,
+                        "runtimeLeaseId": lease_id,
+                    }),
+                )
+                .await?;
+                final_transaction
+                    .execute(
+                        "update runtimes
                      set status = 'removed', endpoint_url = null, task_ref = null,
                          drain_expires_at = null,
                          last_seen_at = now(), updated_at = now()
                      where id = $1",
-                    &[&runtime.id],
+                        &[&runtime.id],
+                    )
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("failed to mark runtime removed: {error}"))
+                    })?;
+                final_transaction.commit().await.map_err(|error| {
+                    internal_error(format!("failed to commit runtime removal: {error}"))
+                })?;
+                crate::send_intents::publish_job_input_state_updates(
+                    &state,
+                    &outcome.job_input_state_updates,
+                );
+                // Runtime preferences and tunnel revocation may perform nested
+                // work; never retain the sole database connection across them.
+                drop(final_connection);
+
+                state
+                    .runtime_preferences
+                    .clear_runtime(&runtime.project_id, &runtime.id)
+                    .await;
+                if let Err((status, payload)) = revoke_tunnels_for_scope(
+                    &state,
+                    &runtime.project_id,
+                    Some(&runtime.id),
+                    outcome.released_runtime_lease_id.as_ref(),
+                    &stop_label,
                 )
                 .await
-                .map_err(|error| {
-                    internal_error(format!("failed to mark runtime removed: {error}"))
-                })?;
-            final_transaction.commit().await.map_err(|error| {
-                internal_error(format!("failed to commit runtime removal: {error}"))
-            })?;
-            crate::send_intents::publish_job_input_state_updates(
-                &state,
-                &outcome.job_input_state_updates,
-            );
-            // Runtime preferences and tunnel revocation may perform nested
-            // work; never retain the sole database connection across them.
-            drop(final_connection);
-
-            state
-                .runtime_preferences
-                .clear_runtime(&runtime.project_id, &runtime.id)
-                .await;
-            if let Err((status, payload)) = revoke_tunnels_for_scope(
-                &state,
-                &runtime.project_id,
-                Some(&runtime.id),
-                outcome.released_runtime_lease_id.as_ref(),
-                &stop_label,
-            )
-            .await
-            {
-                warn!(
-                    runtime_id = %runtime.id,
-                    project_id = %runtime.project_id,
-                    %status,
-                    error = payload.0.message,
-                    "failed to revoke tunnels after runtime removal"
-                );
+                {
+                    warn!(
+                        runtime_id = %runtime.id,
+                        project_id = %runtime.project_id,
+                        %status,
+                        error = payload.0.message,
+                        "failed to revoke tunnels after runtime removal"
+                    );
+                }
+                return Ok(());
             }
-            return Ok(Json(RuntimeRemoveResponse { ok: true }));
         }
-    }
 
-    let outcome = perform_runtime_stop(&transaction, &runtime, stop_options).await?;
+        let outcome = perform_runtime_stop(&transaction, &runtime, stop_options).await?;
 
-    // Mark runtime as removed and clear endpoint/task
-    transaction
-        .execute(
-            "update runtimes
+        // Mark runtime as removed and clear endpoint/task
+        transaction
+            .execute(
+                "update runtimes
              set status = 'removed',
                  drain_expires_at = null,
                  endpoint_url = null,
@@ -1391,44 +1856,55 @@ pub(crate) async fn runtime_remove(
                  last_seen_at = now(),
                  updated_at = now()
              where id = $1",
-            &[&runtime.id],
+                &[&runtime.id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to mark runtime removed: {error}")))?;
+
+        // Clear preference if it points to this runtime.
+        state
+            .runtime_preferences
+            .clear_runtime(&runtime.project_id, &runtime.id)
+            .await;
+
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!("failed to commit runtime removal: {error}"))
+        })?;
+        crate::send_intents::publish_job_input_state_updates(
+            &state,
+            &outcome.job_input_state_updates,
+        );
+        drop(connection);
+
+        // Revoke tunnels for this runtime scope.
+        if let Err((status, payload)) = revoke_tunnels_for_scope(
+            &state,
+            &runtime.project_id,
+            Some(&runtime.id),
+            outcome.released_runtime_lease_id.as_ref(),
+            &stop_label,
         )
         .await
-        .map_err(|error| internal_error(format!("failed to mark runtime removed: {error}")))?;
+        {
+            warn!(
+                runtime_id = %runtime.id,
+                project_id = %runtime.project_id,
+                %status,
+                error = payload.0.message,
+                "failed to revoke tunnels after runtime removal"
+            );
+        }
 
-    // Clear preference if it points to this runtime.
-    state
-        .runtime_preferences
-        .clear_runtime(&runtime.project_id, &runtime.id)
-        .await;
-
-    transaction
-        .commit()
-        .await
-        .map_err(|error| internal_error(format!("failed to commit runtime removal: {error}")))?;
-    crate::send_intents::publish_job_input_state_updates(&state, &outcome.job_input_state_updates);
-    drop(connection);
-
-    // Revoke tunnels for this runtime scope.
-    if let Err((status, payload)) = revoke_tunnels_for_scope(
-        &state,
-        &runtime.project_id,
-        Some(&runtime.id),
-        outcome.released_runtime_lease_id.as_ref(),
-        &stop_label,
-    )
-    .await
-    {
-        warn!(
-            runtime_id = %runtime.id,
-            project_id = %runtime.project_id,
-            %status,
-            error = payload.0.message,
-            "failed to revoke tunnels after runtime removal"
-        );
+        Ok::<_, (StatusCode, Json<ApiError>)>(())
     }
-
-    Ok(Json(RuntimeRemoveResponse { ok: true }))
+    .await;
+    // A removal that did not fence the runtime lifts the flush's save fence.
+    let flush = flushed.resume_unless_fenced(&state, &runtime_id).await;
+    removed?;
+    Ok(Json(RuntimeRemoveResponse {
+        ok: true,
+        flush: Some(flush),
+    }))
 }
 
 pub(crate) async fn runtime_idle_reaper(
@@ -1511,15 +1987,16 @@ pub(crate) async fn runtime_idle_reaper(
             .clone()
             .unwrap_or_else(|| stop_options.source.to_string());
 
-        let SafeRuntimeStop { runtime, outcome } =
-            match stop_runtime_safely(&state, &runtime_id, stop_options).await {
-                Ok(value) => value,
-                Err((status, _body)) if status == StatusCode::NOT_FOUND => {
-                    info!(runtime_id = %runtime_id, "idle reaper candidate no longer exists");
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+        let SafeRuntimeStop {
+            runtime, outcome, ..
+        } = match stop_runtime_safely(&state, &runtime_id, stop_options).await {
+            Ok(value) => value,
+            Err((status, _body)) if status == StatusCode::NOT_FOUND => {
+                info!(runtime_id = %runtime_id, "idle reaper candidate no longer exists");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
 
         if outcome.status_changed {
             if let Err((status, payload)) = revoke_tunnels_for_scope(
@@ -1770,12 +2247,12 @@ pub(crate) async fn perform_runtime_stop(
 ) -> Result<StopOutcome, (StatusCode, Json<ApiError>)> {
     let now = Utc::now();
 
-    if options
+    if let Some(reason) = options
         .expected_identity
         .as_ref()
-        .is_some_and(|expected| !runtime_matches_expected_identity(runtime, expected))
+        .and_then(|expected| expected_identity_skip_reason(runtime, expected))
     {
-        return Ok(StopOutcome::skipped(runtime, "runtime_identity_mismatch"));
+        return Ok(StopOutcome::skipped(runtime, reason));
     }
 
     if options.require_idle_timeout {
@@ -1959,6 +2436,23 @@ pub(crate) async fn perform_runtime_stop(
     })
 }
 
+/// Why a stop that expects `expected` must skip `runtime`, if it must.
+fn expected_identity_skip_reason(
+    runtime: &RuntimeDetails,
+    expected: &RuntimeIdentityExpectation,
+) -> Option<&'static str> {
+    if !runtime_matches_expected_identity(runtime, expected) {
+        return Some("runtime_identity_mismatch");
+    }
+    if expected
+        .lease_id
+        .is_some_and(|lease_id| runtime.active_lease_id != Some(lease_id))
+    {
+        return Some("runtime_lease_mismatch");
+    }
+    None
+}
+
 fn runtime_matches_expected_identity(
     runtime: &RuntimeDetails,
     expected: &RuntimeIdentityExpectation,
@@ -2071,11 +2565,11 @@ fn runtime_requires_provider_release(state: &AppState, runtime: &RuntimeDetails)
 #[cfg(test)]
 mod tests {
     use super::{
-        build_runtime_stop_response, provider_runtime_missing_release_generation,
-        release_runtime_via_provider, release_runtime_via_resolved_provider,
-        runtime_matches_expected_identity, should_skip_stop_for_terminal_runtime,
-        ProviderReleaseOutcome, RuntimeIdentityExpectation, RuntimeStopPayload,
-        RuntimeStopResponse, StopOutcome,
+        build_runtime_stop_response, expected_identity_skip_reason,
+        provider_runtime_missing_release_generation, release_runtime_via_provider,
+        release_runtime_via_resolved_provider, runtime_matches_expected_identity,
+        should_skip_stop_for_terminal_runtime, ProviderReleaseOutcome, RuntimeIdentityExpectation,
+        RuntimeStopPayload, RuntimeStopResponse, StopOutcome,
     };
     use crate::config::RuntimeProviderConfig;
     use crate::runtime::db::RuntimeDetails;
@@ -2234,12 +2728,48 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_for_another_lease_generation_is_skipped_as_a_lease_mismatch() {
+        let lease = Uuid::new_v4();
+        let runtime = runtime_details("ready", Some(lease));
+        let expect = |lease_id| RuntimeIdentityExpectation {
+            project_id: Some(runtime.project_id),
+            provider: None,
+            display_name: None,
+            lease_id,
+        };
+        assert_eq!(
+            expected_identity_skip_reason(&runtime, &expect(Some(lease))),
+            None
+        );
+        assert_eq!(expected_identity_skip_reason(&runtime, &expect(None)), None);
+        assert_eq!(
+            expected_identity_skip_reason(&runtime, &expect(Some(Uuid::new_v4()))),
+            Some("runtime_lease_mismatch")
+        );
+        assert_eq!(
+            expected_identity_skip_reason(&runtime_details("stopped", None), &expect(Some(lease))),
+            Some("runtime_identity_mismatch"),
+            "another project's runtime is an identity mismatch first"
+        );
+        let stopped = RuntimeDetails {
+            project_id: runtime.project_id,
+            ..runtime_details("stopped", None)
+        };
+        assert_eq!(
+            expected_identity_skip_reason(&stopped, &expect(Some(lease))),
+            Some("runtime_lease_mismatch"),
+            "a runtime without that generation is skipped"
+        );
+    }
+
+    #[test]
     fn expected_runtime_identity_matches_all_supplied_fields() {
         let runtime = runtime_details("ready", None);
         let matching = RuntimeIdentityExpectation {
             project_id: Some(runtime.project_id),
             provider: Some("instafy-cloud".to_string()),
             display_name: Some("Hosted Runtime".to_string()),
+            lease_id: None,
         };
         assert!(runtime_matches_expected_identity(&runtime, &matching));
 
@@ -2248,16 +2778,19 @@ mod tests {
                 project_id: Some(Uuid::new_v4()),
                 provider: None,
                 display_name: None,
+                lease_id: None,
             },
             RuntimeIdentityExpectation {
                 project_id: None,
                 provider: Some("docker".to_string()),
                 display_name: None,
+                lease_id: None,
             },
             RuntimeIdentityExpectation {
                 project_id: None,
                 provider: None,
                 display_name: Some("Browser session".to_string()),
+                lease_id: None,
             },
         ] {
             assert!(!runtime_matches_expected_identity(&runtime, &mismatched));
@@ -2286,6 +2819,7 @@ mod tests {
                 provider_release_attempted: false,
                 provider_release_succeeded: false,
                 skip_reason: Some("active_jobs".to_string()),
+                flush: None,
             }
         );
         assert_eq!(

@@ -883,6 +883,41 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
         "dispatch_reconnect_released_stale_lease" => {
             copy_runtime_event_fields(&data, &["source", "leaseId", "runtimeStatus", "lastSeenAt"])
         }
+        // The pre-stop flush outcome: counts, status, whose name it saved
+        // under (`lease_holder`, `owner_grant` or `none`) and a fixed reason
+        // code only, never ref names, paths, tokens or the origin's error
+        // text.
+        "workspace_flush" => copy_runtime_event_fields(
+            &data,
+            &[
+                "status",
+                "writer",
+                "turnActive",
+                "unpushedRefs",
+                "recoveryRefs",
+                "parkedCommits",
+                "gitSyncStatus",
+                "reason",
+            ],
+        ),
+        // A pool-retirement drain's own actions and the generation it woke
+        // to flush a checkout (which the credit sweep never bills): ids,
+        // statuses and counts only.
+        "pool_retirement_flush_wake" => {
+            copy_runtime_event_fields(&data, &["phase", "runtimeLeaseId"])
+        }
+        "pool_retirement_drain" => copy_runtime_event_fields(
+            &data,
+            &[
+                "action",
+                "runtimeLeaseId",
+                "statusChanged",
+                "skipReason",
+                "flushStatus",
+                "unpushedRefs",
+                "checkoutKnown",
+            ],
+        ),
         // Tenant metadata can describe another project. The event kind itself
         // is sufficient for project-level diagnostics.
         "shared_tenant_linked" => JsonMap::new(),
@@ -1015,5 +1050,37 @@ mod runtime_event_tests {
         assert_eq!(provider_acknowledgement["provider"], "instafy-cloud");
         assert_eq!(provider_acknowledgement["runtimeLeaseId"], "lease-safe");
         assert!(provider_acknowledgement.get("responseBody").is_none());
+    }
+
+    #[test]
+    fn workspace_flush_runtime_event_keeps_counts_only() {
+        let flush = sanitize_runtime_event_data(
+            "workspace_flush",
+            json!({
+                "status": "kept_locally",
+                "writer": "owner_grant",
+                "turnActive": true,
+                "unpushedRefs": 1,
+                "recoveryRefs": 2,
+                "parkedCommits": 3,
+                "gitSyncStatus": "published",
+                "token": "never-recorded",
+                "unpushedRefNames": ["20261002T120000Z-unsaved-0123456789ab"],
+                "error": "origin flush answered 500: private detail",
+                "paths": ["secret/notes.md"]
+            }),
+        );
+        assert_eq!(
+            flush,
+            json!({
+                "status": "kept_locally",
+                "writer": "owner_grant",
+                "turnActive": true,
+                "unpushedRefs": 1,
+                "recoveryRefs": 2,
+                "parkedCommits": 3,
+                "gitSyncStatus": "published"
+            })
+        );
     }
 }

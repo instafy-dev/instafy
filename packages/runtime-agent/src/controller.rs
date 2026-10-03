@@ -153,6 +153,23 @@ struct LeaseResponse {
     jobs: Vec<LeaseJob>,
 }
 
+/// A leased job carries tokens and signed attachment URLs, so no part of a
+/// successful lease's body goes into an error or a log. serde's own message
+/// can quote the value it rejected, so only its category and position are kept.
+fn parse_lease_response(text: &str) -> Result<Vec<LeaseJob>, LeaseError> {
+    serde_json::from_str::<LeaseResponse>(text)
+        .map(|parsed| parsed.jobs)
+        .map_err(|error| {
+            LeaseError::Other(anyhow!(
+                "failed to parse lease response ({} bytes): {:?} error at line {} column {}",
+                text.len(),
+                error.classify(),
+                error.line(),
+                error.column()
+            ))
+        })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentJobInput {
@@ -587,13 +604,7 @@ impl ControllerClient {
             )));
         }
 
-        let parsed: LeaseResponse = serde_json::from_str(&text).map_err(|error| {
-            LeaseError::Other(anyhow!(
-                "failed to parse lease response: {error}; body={}",
-                text
-            ))
-        })?;
-        Ok(parsed.jobs)
+        parse_lease_response(&text)
     }
 
     pub async fn heartbeat(&self, reg: &Registration, job_id: Uuid) -> Result<()> {
@@ -1246,6 +1257,32 @@ mod tests {
         assert!(job.workspace_token.is_none());
         assert!(job.workspace_token_scopes.is_none());
         assert!(job.workspace_token_expires_at.is_none());
+    }
+
+    #[test]
+    fn a_lease_that_fails_to_parse_keeps_its_body_out_of_the_error() {
+        let marker = "lease-body-secret";
+        for body in [
+            // serde would quote the rejected value in its own message.
+            format!(r#"{{"jobs":[{{"id":"{marker}"}}]}}"#),
+            format!(
+                r#"{{"jobs":[{{"id":"{}","payload":{{"attachment_downloads":[{{"url":"https://storage.invalid/x?token={marker}"}}]}},"controller_token":7}}]}}"#,
+                Uuid::new_v4()
+            ),
+            format!(r#"{{"jobs":[{{"id":"{marker}"#),
+        ] {
+            let Err(LeaseError::Other(error)) = parse_lease_response(&body) else {
+                panic!("{body} parsed");
+            };
+            let message = format!("{error:#}");
+            assert!(
+                message.starts_with("failed to parse lease response"),
+                "{message}"
+            );
+            assert!(!message.contains(marker), "{message}");
+            assert!(!message.contains("storage.invalid"), "{message}");
+        }
+        assert_eq!(parse_lease_response(r#"{"jobs":[]}"#).unwrap().len(), 0);
     }
 
     #[test]

@@ -347,6 +347,7 @@ jobs:
             scripts/mirror-supabase-images.test.mjs \
             scripts/lib/supabaseStartMode.test.mjs \
             scripts/lib/supabaseSerialPull.test.mjs \
+            scripts/check-origin-git-compat-ci.test.mjs \
             scripts/check-supabase-migrations.test.mjs \
             scripts/test-supabase-migrations-empty-db.test.mjs \
             scripts/ensure-supabase-postgres-image.test.mjs \
@@ -542,6 +543,9 @@ jobs:
 
       - name: Test CLI automations
         run: pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts
+
+      - name: Test CLI git wrapper
+        run: pnpm --filter @instafy/cli exec vitest run test/git-wrapper.e2e.spec.ts
 
   javascript-desktop:
     name: JavaScript Desktop and runtime
@@ -1216,6 +1220,8 @@ jobs:
       - name: Check public Rust package
         run: |
           cargo check --locked --tests --manifest-path packages/runtime-provider-service/Cargo.toml
+          cargo test --locked --manifest-path packages/runtime-provider-core/Cargo.toml
+          cargo test --locked --manifest-path packages/runtime-provider-service/Cargo.toml
 
   rust-check-tunnel:
     name: Rust check tunnel broker

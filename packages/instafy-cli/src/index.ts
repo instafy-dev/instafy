@@ -837,7 +837,7 @@ failWithGroupHelp(recommendationsCommand);
 
 for (const operation of ["list", "submit"] as const) {
   const command = recommendationsCommand.command(operation)
-    .description(operation === "list" ? "List recommendations, including accepted and dismissed outcomes" : "Submit one recommendation from JSON");
+    .description(operation === "list" ? "List recommendations, including delivery and prior outcomes" : "Submit one recommendation; an optional message opens a private Octo chat");
   addSpaceOption(command, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
   addServerUrlOptions(command);
   addAccessTokenOptions(command, "Instafy access token");
@@ -1211,7 +1211,8 @@ const automationsCreateCommand = automationsCommand
   .command("create")
   .description("Create an automation")
   .requiredOption("--name <name>", "Automation name")
-  .requiredOption("--prompt <text>", "Prompt to run on schedule")
+  .option("--mode <mode>", "prompt|space_review (default: prompt; immutable after creation)")
+  .option("--prompt <text>", "Prompt to run on schedule (required for prompt mode)")
   .option("--schedule-kind <kind>", "weekly|hourly|once (default: weekly)")
   .option("--run-at <datetime>", "Run time for once schedule (RFC3339 or YYYY-MM-DDTHH:MM[:SS])")
   .option("--interval-hours <n>", "Interval hours (hourly schedule)", (value) => Number(value))
@@ -1252,6 +1253,7 @@ automationsCreateCommand
     try {
       await automationsCreate({
         name: opts.name,
+        mode: opts.mode,
         prompt: opts.prompt,
         scheduleKind: opts.scheduleKind,
         runAt: opts.runAt,
@@ -1261,7 +1263,7 @@ automationsCreateCommand
         timezone: opts.timezone,
         runtimeMode: opts.runtimeMode,
         runtimeProvider: opts.runtimeProvider,
-        silentWhenNothingToReport: Boolean(opts.silentWhenNothingToReport),
+        silentWhenNothingToReport: opts.silentWhenNothingToReport,
         resultVisibility: resolveResultVisibilityFlag(opts),
         paused: Boolean(opts.paused),
         project: resolveSpaceIdOption(opts),

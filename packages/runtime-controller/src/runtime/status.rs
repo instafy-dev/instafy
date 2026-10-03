@@ -26,7 +26,8 @@ use crate::{workspace::LOCAL_RUNTIME_RECENCY_SECONDS, workspace::REMOTE_RUNTIME_
 
 use super::db::{ensure_project_exists, sanitize_runtime_event_data};
 use super::ensure::RuntimeEnsureOriginInfo;
-use super::stop::{stop_runtime_safely, StopOptions};
+use super::pre_stop_flush::FlushPolicy;
+use super::stop::{stop_runtime_safely_with, StopOptions};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -415,6 +416,7 @@ pub(crate) async fn runtime_activity(
             &project_id,
             entry.idle_ttl_seconds,
             "explicit_idle_signal",
+            IdleRelease::Requested,
         )
         .await
         .map_err(|error| internal_error(format!("failed to release leases: {error}")))?;
@@ -1284,11 +1286,26 @@ pub(crate) async fn runtime_logs(
     Ok(Json(entries))
 }
 
+/// Who set off an idle lease release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum IdleRelease {
+    /// The controller's own idle sweep.
+    Sweep,
+    /// A client's idle signal (`POST .../runtime/activity`).
+    Requested,
+}
+
+/// Requeue the project's expired job leases and stop the runtimes that held
+/// them. Each such stop interrupts the requeued turn, so its pre-stop flush
+/// sets that turn's commits aside instead of publishing them. Only the
+/// controller's own sweep may save under the space owner's permission; a
+/// client's idle signal saves only under a workspace lease holder.
 pub(super) async fn release_leases_for_project(
     state: &AppState,
     project_id: &Uuid,
     idle_ttl_seconds: i64,
     reason: &str,
+    released_by: IdleRelease,
 ) -> AnyResult<usize> {
     let mut connection = state
         .pool
@@ -1390,7 +1407,7 @@ pub(super) async fn release_leases_for_project(
                 continue;
             }
         }
-        let safe_stop = stop_runtime_safely(
+        let safe_stop = stop_runtime_safely_with(
             state,
             runtime_id,
             StopOptions {
@@ -1402,6 +1419,13 @@ pub(super) async fn release_leases_for_project(
                 require_idle_timeout: false,
                 allow_cleanup_pending_release: false,
                 expected_identity: None,
+            },
+            FlushPolicy {
+                owner_grant: released_by == IdleRelease::Sweep,
+                // This runtime's job lease just ran out mid-turn and the job
+                // was requeued above: its turn is interrupted, whatever the
+                // jobs table shows now.
+                turn_interrupted: true,
             },
         )
         .await;

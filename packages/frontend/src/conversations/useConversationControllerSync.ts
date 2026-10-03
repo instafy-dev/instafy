@@ -24,6 +24,7 @@ import {
   extractConversationOriginMessageIdFromMetadata,
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
+  hasRecommendationOrigin,
   isPlainObject,
   parseTimestamp,
   resolveConversationVisibility,
@@ -36,6 +37,7 @@ import {
   type ConversationsState,
 } from "./conversationState";
 import { isUuid } from "./conversationMessageUtils";
+import { collectInternalConversationIds } from "./internalConversations";
 import {
   CONTROLLER_CONVERSATION_LIST_LIMIT,
   controllerConversationHasRemoteMessages,
@@ -55,6 +57,8 @@ const runtimeControllerEnabled = controllerClient.core.enabled;
 type ControllerConversationFetcher = (args: {
   projectId: string;
   limit: number;
+  internalOnly?: boolean;
+  rootsOnly?: boolean;
   signal?: AbortSignal;
 }) => Promise<ControllerProjectConversation[] | null>;
 
@@ -250,13 +254,21 @@ export function useConversationControllerSync({
 
     void (async () => {
       let remoteConversations: Awaited<ReturnType<ControllerConversationFetcher>> = null;
+      let internalConversations: Awaited<ReturnType<ControllerConversationFetcher>> = null;
       for (let attempt = 0; attempt < 4 && !cancelled; attempt += 1) {
         try {
-          remoteConversations = await fetchProjectConversationsFromController({
-            projectId,
-            limit: CONTROLLER_CONVERSATION_LIST_LIMIT,
-            signal: abortController.signal,
-          });
+          [remoteConversations, internalConversations] = await Promise.all([
+            fetchProjectConversationsFromController({
+              projectId,
+              limit: CONTROLLER_CONVERSATION_LIST_LIMIT,
+              signal: abortController.signal,
+            }),
+            fetchProjectConversationsFromController({
+              projectId, limit: 200, rootsOnly: true, internalOnly: true,
+              signal: abortController.signal,
+            }),
+          ]);
+          if (internalConversations === null) remoteConversations = null;
         } catch {
           if (cancelled) return;
           remoteConversations = null;
@@ -322,6 +334,20 @@ export function useConversationControllerSync({
 
       const isInitialSuccessfulHydration = !hydratedScopesRef.current.has(hydrationScope);
       hydratedScopesRef.current.add(hydrationScope);
+      // Separate discovery is independent of the newest ordinary chats/runs.
+      // Older controllers ignore internalOnly: trust only the new derived field,
+      // never their returned ordinary rows or user-supplied metadata markers.
+      const internalIds = collectInternalConversationIds(latestState.conversations, (internalConversations ?? [])
+        .filter((conversation) => conversation.internalPurpose === "space_review"
+          && conversation.projectId === projectId && isUuid(conversation.id))
+        .map((conversation) => conversation.id));
+      latestState.conversations.forEach((conversation) => {
+        if (internalIds.has(conversation.localId)) {
+          dispatch({ type: "RETIRE_INTERNAL", id: conversation.localId });
+        }
+      });
+      remoteConversations = remoteConversations.filter((conversation) =>
+        conversation.internalPurpose !== "space_review" && !internalIds.has(conversation.id));
       if (remoteConversations.length === 0) {
         completedSyncEpochsRef.current.set(
           hydrationScope,
@@ -395,7 +421,8 @@ export function useConversationControllerSync({
         );
         const routingPreferences =
           routingPreferencesFromMetadata ?? DEFAULT_CONVERSATION_ROUTING_PREFERENCES;
-        const createdByIsSelf = currentUserId !== null && remote.createdBy === currentUserId;
+        const createdByIsSelf = currentUserId !== null && remote.createdBy === currentUserId
+          && !hasRecommendationOrigin(metadata);
 
         const syncExistingConversationFromRemote = (
           conversation: ConversationState,
@@ -607,6 +634,7 @@ export function useConversationControllerSync({
       if (shouldAutoSelectControllerConversation) {
         const latestRemote = [...remoteConversations]
           .filter((remote) => isUuid(typeof remote?.id === "string" ? remote.id : ""))
+          .filter((remote) => !hasRecommendationOrigin(remote.metadata))
           .map((remote) => ({
             controllerId: remote.id as string,
             createdAt: parseTimestamp(remote.createdAt ?? null),

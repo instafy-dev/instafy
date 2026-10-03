@@ -212,6 +212,7 @@ mod tests {
             max_archive_bytes: 1024,
             staging_base: None,
             multi_tenant: false,
+            hosted_checkout: false,
         }
     }
 

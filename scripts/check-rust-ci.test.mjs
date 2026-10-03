@@ -187,13 +187,14 @@ test('only self-hosted Rust children install the fixed missing native packages w
   for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
 });
 
-test('the full reviewed five check and nine test commands and working directories are hash-bound', () => {
+test('the full reviewed seven check and nine test commands and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b,
-  // plus the reviewed runtime-agent proxy_retry_budget and read-reference selectors
-  // and the proxy_retry_budget runs for gpt-5.6-sol and gpt-5.5.
+  // plus the reviewed runtime-agent proxy_retry_budget and read-reference selectors,
+  // the proxy_retry_budget runs for gpt-5.6-sol and gpt-5.5, and the runtime
+  // provider core and service unit tests in the provider check.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
-    [checks, 'Check public Rust package', '555d7092d19a4cc330abb80fa5dc6c1a8785b916a0119adcc2fdfc2741e678ff', 5],
+    [checks, 'Check public Rust package', '7ab805f6d9f99e7d6cae9fd5ab924ebb4cc3612d07690f954330bbc0f6381608', 7],
     [suites, 'Run database-free Rust test suite', '33a7ea9059bf7898dfd6915acf32b8939589b844ec4fbef175436990d34f6d70', 9],
   ]) {
     const inventory = list.flatMap(item => {
@@ -213,7 +214,7 @@ test('the full reviewed five check and nine test commands and working directorie
     assert.equal(inventory.length, expectedCount);
     assert.equal(createHash('sha256').update(JSON.stringify(inventory)).digest('hex'), hash);
   }
-  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 12);
+  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 14);
   const agent = step('rust-test-agent', 'Run database-free Rust test suite');
   assert.match(agent, /--no-run\n          cargo test .* --lib --test controller_client --test proxy_retry_budget -- --test-threads=1/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration codex_read_reference_ -- --test-threads=1\n/u);
@@ -347,11 +348,12 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
       hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
   }
   // Full build.yml at the reviewed combined source 2ef4dde, plus only the reviewed
-  // proxy_retry_budget and read-reference selectors, the code-mode host build and the
-  // per-model proxy_retry_budget runs: retains all functional commands, aggregate guards,
-  // routing, permissions and other jobs.
+  // proxy_retry_budget and read-reference selectors, the code-mode host build, the
+  // per-model proxy_retry_budget runs, the runtime provider core and service unit
+  // tests and the CLI git wrapper suite: retains all functional commands, aggregate
+  // guards, routing, permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '8cbf3656bec54d9fe835e2d5e69440293f5b9a9dcbf0e8e5d06d97a548c87369');
+    '2acabac8448b630e2ed367ab5d3301a49e33a2c39546fd66317c18c1897e37bf');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

@@ -26,6 +26,7 @@ export interface RuntimeStoreState {
   runs: Record<string, RunRecord>;
   latestRunIds: Partial<Record<RunRecord["runType"], string>>;
   leasedRunIds: Record<string, true>;
+  internalConversationIds: Record<string, true>;
   pendingConversationMessages: ControllerConversationMessage[];
   pendingConversationCreations: ControllerConversationCreated[];
   pendingConversationUpdates: ControllerConversationUpdated[];
@@ -51,6 +52,7 @@ export type RuntimeAction =
   | { type: "removeRun"; runId: string }
   | { type: "markRunLeased"; runId: string }
   | { type: "clearRunLease"; runId: string }
+  | { type: "setInternalConversationIds"; conversationIds: string[] }
   | { type: "pushConversationMessage"; message: ControllerConversationMessage }
   | { type: "clearConversationMessages"; messageIds: string[] }
   | { type: "pushConversationCreation"; creation: ControllerConversationCreated }
@@ -78,6 +80,7 @@ export function createInitialRuntimeStoreState(): RuntimeStoreState {
     runs: {},
     latestRunIds: {},
     leasedRunIds: {},
+    internalConversationIds: {},
     pendingConversationMessages: [],
     pendingConversationCreations: [],
     pendingConversationUpdates: [],
@@ -265,6 +268,11 @@ export function runtimeReducer(
   action: RuntimeAction,
 ): RuntimeStoreState {
   switch (action.type) {
+    case "setInternalConversationIds":
+      return {
+        ...state,
+        internalConversationIds: Object.fromEntries(action.conversationIds.map((id) => [id, true])),
+      };
     case "setRuntime":
       return {
         ...state,

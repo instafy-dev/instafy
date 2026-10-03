@@ -25,6 +25,18 @@ use crate::{
     unauthorized, ApiError, AppState,
 };
 
+const MODE_PROMPT: &str = "prompt";
+const MODE_SPACE_REVIEW: &str = "space_review";
+const SPACE_REVIEW_PROMPT: &str = "Use the instafy-space-review skill to quietly review this space. Read bounded accessible source conversations and prior recommendations. Submit at most one genuinely useful, evidence-backed finding with a natural conversational message. Do not execute the suggested work or create conversations yourself. If nothing new is worth bringing up, submit nothing. Finish with exactly NO_RESPONSE; the controller delivers any submitted finding separately.";
+
+fn normalize_mode(raw: Option<&str>) -> Result<String, (StatusCode, Json<ApiError>)> {
+    match raw.unwrap_or(MODE_PROMPT).trim() {
+        MODE_PROMPT => Ok(MODE_PROMPT.to_string()),
+        MODE_SPACE_REVIEW => Ok(MODE_SPACE_REVIEW.to_string()),
+        _ => Err(bad_request("mode must be prompt or space_review")),
+    }
+}
+
 const DEFAULT_TIMEZONE: &str = "UTC";
 const DEFAULT_HOURLY_INTERVAL: i32 = 24;
 // Result-thread visibility (public API words). `private` keeps automation result
@@ -42,6 +54,8 @@ const AUTOMATION_SCHEDULER_BATCH_SIZE: i64 = 10;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateAutomationBody {
+    #[serde(default)]
+    mode: Option<String>,
     name: String,
     #[serde(default)]
     prompt_text: Option<String>,
@@ -76,6 +90,8 @@ struct CreateAutomationBody {
 #[serde(rename_all = "camelCase")]
 struct UpdateAutomationBody {
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     prompt_text: Option<String>,
@@ -109,7 +125,8 @@ struct UpdateAutomationBody {
 
 impl UpdateAutomationBody {
     fn has_settings_updates(&self) -> bool {
-        self.name.is_some()
+        self.mode.is_some()
+            || self.name.is_some()
             || self.prompt_text.is_some()
             || self.metadata.is_some()
             || self.schedule_kind.is_some()
@@ -167,6 +184,7 @@ fn can_view_automation(
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct AutomationPayload {
+    mode: String,
     id: String,
     project_id: String,
     user_id: String,
@@ -196,6 +214,7 @@ struct AutomationPayload {
 
 #[derive(Debug, Clone)]
 struct AutomationRecord {
+    mode: String,
     id: Uuid,
     project_id: Uuid,
     user_id: Uuid,
@@ -476,6 +495,7 @@ fn compute_next_weekly_run_at(
 
 fn row_to_record(row: &tokio_postgres::Row) -> AutomationRecord {
     AutomationRecord {
+        mode: row.get("mode"),
         id: row.get("id"),
         project_id: row.get("project_id"),
         user_id: row.get("user_id"),
@@ -506,6 +526,7 @@ fn row_to_record(row: &tokio_postgres::Row) -> AutomationRecord {
 
 fn record_to_payload(record: AutomationRecord) -> AutomationPayload {
     AutomationPayload {
+        mode: record.mode,
         id: record.id.to_string(),
         project_id: record.project_id.to_string(),
         user_id: record.user_id.to_string(),
@@ -609,6 +630,7 @@ async fn claim_due_automations(state: &AppState) -> anyhow::Result<Vec<Automatio
                  and next_run_at is not null
                  and next_run_at <= now()
                  and (locked_until is null or locked_until <= now())
+                 and (mode <> 'space_review' or not exists (select 1 from agent_jobs j where j.conversation_id=automations.conversation_id and j.status in ('queued','leased')))
                order by next_run_at asc
                limit $2
                for update skip locked
@@ -630,6 +652,7 @@ async fn claim_due_automations(state: &AppState) -> anyhow::Result<Vec<Automatio
                        runtime_provider,
                        silent_when_nothing_to_report,
                        result_visibility,
+                       mode,
                        conversation_id,
                        status,
                        locked_until,
@@ -903,6 +926,11 @@ async fn execute_automation_once(
             .or_insert(JsonValue::Bool(execution_mode != "plan_only"));
     }
 
+    if record.mode == MODE_SPACE_REVIEW {
+        request_metadata["controllerDispatch"] = json!({"suppressUserMessage": true});
+        request_metadata["spaceReview"] =
+            json!({"automationId":record.id,"enforcedBy":"runtime-controller"});
+    }
     let response = crate::dispatch::process_dispatch_prompt(
         state,
         &RequestContext {
@@ -925,7 +953,11 @@ async fn execute_automation_once(
             parent_conversation_id: None,
             thread_kind: Some("automation".to_string()),
             conversation_is_new: false,
-            prompt_text: record.prompt_text.clone(),
+            prompt_text: if record.mode == MODE_SPACE_REVIEW {
+                SPACE_REVIEW_PROMPT.to_string()
+            } else {
+                record.prompt_text.clone()
+            },
             intent: "feature".to_string(),
             plan_seed: None,
             metadata: request_metadata,
@@ -943,9 +975,10 @@ async fn execute_automation_once(
             runtime_updated_at: runtime_id.map(|_| now),
             runtime_display_name: None,
             prefer_runtime: runtime_id.is_some(),
-            expected_lane_idle: false,
+            expected_lane_idle: record.mode == MODE_SPACE_REVIEW,
             dispatch_queue_entry_id: None,
             allow_silent_automation_decline: record.silent_when_nothing_to_report,
+            allow_internal_review: record.mode == MODE_SPACE_REVIEW,
         },
     )
     .await;
@@ -1008,6 +1041,19 @@ async fn authorize_automation_execution(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
     let project = load_project_record(&transaction, &record.project_id).await?;
     ensure_project_write_access(&transaction, &project, &context, None).await?;
+    if record.mode == MODE_SPACE_REVIEW {
+        let id = record
+            .conversation_id
+            .ok_or_else(|| crate::forbidden("review execution anchor is unavailable"))?;
+        crate::recommendations::validate_private_root(
+            &transaction,
+            &record.project_id,
+            &record.user_id,
+            &id,
+        )
+        .await?;
+        crate::conversations::require_internal_review_anchor(&transaction, &id).await?;
+    }
     transaction.commit().await.map_err(|error| {
         internal_error(format!(
             "failed to finalize automation permission check: {error}"
@@ -1401,6 +1447,7 @@ async fn list_project_automations(
 	                    runtime_provider,
 	                    silent_when_nothing_to_report,
 	                    result_visibility,
+	                    mode,
 	                    conversation_id,
                     status,
                     locked_until,
@@ -1483,6 +1530,7 @@ async fn get_automation(
                     runtime_provider,
                     silent_when_nothing_to_report,
                     result_visibility,
+                    mode,
                     conversation_id,
                     status,
                     locked_until,
@@ -1548,6 +1596,8 @@ async fn create_project_automation(
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
 
+    let mode = normalize_mode(body.mode.as_deref())?;
+    let is_review = mode == MODE_SPACE_REVIEW;
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(bad_request("name is required"));
@@ -1568,6 +1618,10 @@ async fn create_project_automation(
         .filter(|value| !value.is_empty());
     let status = normalize_status(body.status);
     let result_visibility = normalize_result_visibility(body.result_visibility)?;
+    if is_review && result_visibility != RESULT_VISIBILITY_PRIVATE {
+        return Err(bad_request("space_review results must remain private"));
+    }
+    let silent_when_nothing_to_report = is_review || body.silent_when_nothing_to_report;
 
     let now = Utc::now();
 
@@ -1617,7 +1671,11 @@ async fn create_project_automation(
         return Err(bad_request("status must be active or paused"));
     }
 
-    let prompt_text = body.prompt_text.unwrap_or_default();
+    let prompt_text = if is_review {
+        SPACE_REVIEW_PROMPT.to_string()
+    } else {
+        body.prompt_text.unwrap_or_default()
+    };
 
     let next_run_at = if schedule_kind == "once" {
         run_at.expect("once schedules require runAt")
@@ -1665,18 +1723,60 @@ async fn create_project_automation(
     crate::ensure_project_write_access(&transaction, &project, &access_context, None).await?;
 
     let automation_id = Uuid::new_v4();
-    let conversation_id = Uuid::new_v4();
-    let conversation_visibility =
-        conversation_visibility_for_result_visibility(&result_visibility).to_string();
-    let conversation_metadata = build_automation_conversation_metadata(
-        user_id,
-        automation_id,
-        name.as_str(),
-        conversation_visibility.as_str(),
-    );
-    let conversation_metadata_param = PgJson(&conversation_metadata);
+    let conversation_id = if is_review {
+        if active_job.is_some() {
+            return Err(crate::forbidden(
+                "space_review schedules require a user session",
+            ));
+        }
+        // Serialize creation/recreation for the same owner and space. The
+        // anchor survives schedule deletion and preserves recommendation scope.
+        transaction
+            .query_one(
+                "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+                &[&format!("space-review:{user_id}:{project_id}")],
+            )
+            .await
+            .map_err(|e| internal_error(format!("failed to lock space review: {e}")))?;
+        if transaction.query_opt("select id from automations where user_id=$1 and project_id=$2 and mode='space_review'", &[&user_id,&project_id]).await
+            .map_err(|e| internal_error(format!("failed to check space review: {e}")))?.is_some() {
+            return Err((StatusCode::CONFLICT, Json(ApiError::new("This space already has a review automation. Update its schedule instead."))));
+        }
+        let existing = transaction.query_opt("select conversation_id from space_review_conversations where user_id=$1 and project_id=$2 for update", &[&user_id,&project_id]).await
+            .map_err(|e| internal_error(format!("failed to load review anchor: {e}")))?;
+        let conversation_id = if let Some(row) = existing {
+            let id: Uuid = row.get(0);
+            crate::recommendations::validate_private_root(&transaction, &project_id, &user_id, &id)
+                .await?;
+            id
+        } else {
+            let id = crate::recommendations::create_private_root(
+                &transaction,
+                &project_id,
+                &user_id,
+                &name,
+            )
+            .await?;
+            transaction.execute("insert into space_review_conversations(user_id,project_id,conversation_id) values($1,$2,$3)", &[&user_id,&project_id,&id]).await
+                .map_err(|e| internal_error(format!("failed to save review anchor: {e}")))?;
+            id
+        };
+        transaction.execute("update conversations set internal_purpose='space_review', thread_kind='automation', metadata=coalesce(metadata,'{}'::jsonb)||$2::jsonb where id=$1", &[&conversation_id,&PgJson(json!({"title":name,"visibility":"private","automationId":automation_id,"internalPurpose":"space_review"}))]).await
+            .map_err(|e| internal_error(format!("failed to mark review anchor: {e}")))?;
+        conversation_id
+    } else {
+        let conversation_id = Uuid::new_v4();
+        let conversation_visibility =
+            conversation_visibility_for_result_visibility(&result_visibility).to_string();
+        let conversation_metadata = build_automation_conversation_metadata(
+            user_id,
+            automation_id,
+            name.as_str(),
+            conversation_visibility.as_str(),
+        );
+        let conversation_metadata_param = PgJson(&conversation_metadata);
 
-    transaction
+        transaction
         .execute(
             "insert into conversations (id, project_id, created_by, metadata, visibility, thread_kind)
              values ($1, $2, $3, $4::jsonb, $5, 'automation')",
@@ -1690,27 +1790,30 @@ async fn create_project_automation(
         )
         .await
         .map_err(|error| internal_error(format!("failed to insert automation conversation: {error}")))?;
-    // Home's feed: the scheduled conversation exists from now on.
-    crate::activity::record_conversation_created_raw(
-        &transaction,
-        &project_id,
-        &conversation_id,
-        Some(user_id),
-        Some(name.as_str()),
-        Some("automation"),
-    )
-    .await;
-    transaction
-        .execute(
-            "insert into conversation_participants (conversation_id, user_id, role, added_by)
+        // Home's feed: the scheduled conversation exists from now on.
+        crate::activity::record_conversation_created_raw(
+            &transaction,
+            &project_id,
+            &conversation_id,
+            Some(user_id),
+            Some(name.as_str()),
+            Some("automation"),
+        )
+        .await;
+        transaction
+            .execute(
+                "insert into conversation_participants (conversation_id, user_id, role, added_by)
              values ($1, $2, 'owner', $3)
              on conflict (conversation_id, user_id) do nothing",
-            &[&conversation_id, &user_id, &user_id],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to insert automation participant: {error}"))
-        })?;
+                &[&conversation_id, &user_id, &user_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to insert automation participant: {error}"))
+            })?;
+
+        conversation_id
+    };
 
     let metadata_param = PgJson(&metadata);
     let inserted = transaction
@@ -1735,7 +1838,8 @@ async fn create_project_automation(
 	                 status,
 	                 run_at,
 	                 next_run_at,
-	                 result_visibility
+	                 result_visibility,
+	                 mode
 	             ) values (
 	                 $1,
 	                 $2,
@@ -1756,7 +1860,8 @@ async fn create_project_automation(
 	                 $17,
 	                 $18,
 	                 $19,
-	                 $20
+	                 $20,
+	                 $21
 	             )
 	             returning id,
 	                       project_id,
@@ -1775,6 +1880,7 @@ async fn create_project_automation(
                        runtime_provider,
                        silent_when_nothing_to_report,
                        result_visibility,
+                       mode,
                        conversation_id,
                        status,
                        locked_until,
@@ -1798,21 +1904,43 @@ async fn create_project_automation(
                 &timezone,
                 &runtime_mode,
                 &runtime_provider,
-                &body.silent_when_nothing_to_report,
+                &silent_when_nothing_to_report,
                 &conversation_id,
                 &status,
                 &run_at,
                 &next_run_at,
                 &result_visibility,
+                &mode,
             ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to insert automation: {error}")))?;
 
+    let internal_event = if is_review {
+        Some(
+            crate::recommendations::conversation_event_payload(&transaction, &conversation_id)
+                .await?,
+        )
+    } else {
+        None
+    };
     transaction
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit automation create: {error}")))?;
+
+    if let Some(payload) = internal_event {
+        crate::publish_controller_event_with_conversation(
+            &state.events,
+            "conversation.updated",
+            Some(project_id),
+            None,
+            Some(conversation_id),
+            None,
+            None,
+            payload,
+        );
+    }
 
     Ok(Json(record_to_payload(row_to_record(&inserted))))
 }
@@ -1881,6 +2009,7 @@ async fn update_automation(
 	                    runtime_provider,
 	                    silent_when_nothing_to_report,
 	                    result_visibility,
+	                    mode,
 	                    conversation_id,
                     status,
                     locked_until,
@@ -1915,6 +2044,31 @@ async fn update_automation(
 
     let project = crate::load_project_record(&transaction, &existing_record.project_id).await?;
     crate::ensure_project_write_access(&transaction, &project, &access_context, None).await?;
+
+    if let Some(mode) = body.mode.as_deref() {
+        if normalize_mode(Some(mode))? != existing_record.mode {
+            return Err(bad_request("automation mode cannot be changed"));
+        }
+    }
+    if existing_record.mode == MODE_SPACE_REVIEW {
+        if body
+            .result_visibility
+            .as_deref()
+            .is_some_and(|value| value != RESULT_VISIBILITY_PRIVATE)
+            || body.silent_when_nothing_to_report == Some(false)
+        {
+            return Err(bad_request(
+                "space_review execution must stay private and quiet",
+            ));
+        }
+        if body
+            .prompt_text
+            .as_deref()
+            .is_some_and(|value| value != SPACE_REVIEW_PROMPT)
+        {
+            return Err(bad_request("space_review uses its managed review prompt"));
+        }
+    }
 
     let name = body
         .name
@@ -2074,12 +2228,15 @@ async fn update_automation(
     };
 
     if let Some(conversation_id) = existing_record.conversation_id {
-        let meta = build_automation_conversation_metadata(
+        let mut meta = build_automation_conversation_metadata(
             user_id,
             existing_record.id,
             name.as_str(),
             conversation_visibility.as_str(),
         );
+        if existing_record.mode == MODE_SPACE_REVIEW {
+            meta["internalPurpose"] = json!("space_review");
+        }
         let meta_param = PgJson(&meta);
         transaction
             .execute(
@@ -2133,6 +2290,7 @@ async fn update_automation(
                        runtime_provider,
                        silent_when_nothing_to_report,
                        result_visibility,
+                       mode,
                        conversation_id,
                        status,
                        locked_until,
@@ -2301,6 +2459,7 @@ async fn run_automation_now(
 	                    runtime_provider,
 	                    silent_when_nothing_to_report,
 	                    result_visibility,
+	                    mode,
 	                    conversation_id,
                     status,
                     locked_until,
@@ -2336,6 +2495,16 @@ async fn run_automation_now(
     let project = crate::load_project_record(&transaction, &record.project_id).await?;
     crate::ensure_project_write_access(&transaction, &project, &access_context, None).await?;
 
+    if record.mode == MODE_SPACE_REVIEW {
+        let pending: bool = transaction.query_one("select exists(select 1 from agent_jobs where conversation_id=$1 and status in ('queued','leased'))", &[&record.conversation_id]).await
+            .map_err(|e| internal_error(format!("failed to check pending review: {e}")))?.get(0);
+        if pending || record.locked_until.is_some_and(|until| until > Utc::now()) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new("This space review is already running.")),
+            ));
+        }
+    }
     let now = Utc::now();
     let locked_until = now + ChronoDuration::seconds(AUTOMATION_SCHEDULER_LOCK_SECONDS);
     transaction
@@ -2376,7 +2545,7 @@ mod tests {
         normalize_result_visibility, unusable_runtime_id_failure, AutomationLaunchFailure,
         AutomationRecord, UpdateAutomationBody, CODE_AUTOMATION_ACCESS_DENIED,
         CODE_CONTROLLER_UNAVAILABLE, CODE_HOSTED_PROVIDER_UNSUPPORTED,
-        CODE_SELF_HOSTED_RUNTIME_OFFLINE, DEFAULT_TIMEZONE, RESULT_VISIBILITY_TEAM,
+        CODE_SELF_HOSTED_RUNTIME_OFFLINE, DEFAULT_TIMEZONE, MODE_PROMPT, RESULT_VISIBILITY_TEAM,
         SELF_HOSTED_LAUNCH_MARKER,
     };
     use crate::errors::ApiError;
@@ -2631,6 +2800,7 @@ mod tests {
     fn launch_failure_record() -> AutomationRecord {
         let now = Utc::now();
         AutomationRecord {
+            mode: MODE_PROMPT.to_string(),
             id: Uuid::nil(),
             project_id: Uuid::nil(),
             user_id: Uuid::nil(),
@@ -2761,3 +2931,7 @@ mod tests {
         assert_eq!(CODE_CONTROLLER_UNAVAILABLE, "controller_unavailable");
     }
 }
+
+#[cfg(test)]
+#[path = "quiet_space_review_tests.rs"]
+mod quiet_space_review_tests;

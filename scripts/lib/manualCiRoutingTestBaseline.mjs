@@ -37,7 +37,9 @@ export const MANUAL_CI_BASELINES = {
   // The reviewed Build baseline additionally selects proxy_retry_budget and
   // filtered read-reference integration tests, builds the Codex code-mode host and
   // runs proxy_retry_budget per model; check-rust-ci binds their exact argv.
-  "build.yml": { sha256: "a55051cd9c7efb2d4041b04ef926348d8eb97416c038b8cc6d18466979d733c1" },
+  // Reviewed additions: the CLI lane runs the git wrapper suite, and the
+  // provider lane runs the provider core and service unit tests.
+  "build.yml": { sha256: "18167270a4f9adba3f10e6a8b1b3abdc2b606108eb93734c8097af05e4190cab" },
   "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
   // The reviewed Auth and Controller DB baselines additionally trigger on the
   // GHCR image-mirror helper (and its lock/test for Auth, the serial-pull helper
@@ -45,7 +47,9 @@ export const MANUAL_CI_BASELINES = {
   // Auth also triggers on its email-template contract test in both event filters.
   "auth-email.yml": { sha256: "131392418f749d19a71fc0cf557da98ec43d38073a35551bf8d5d3070a2c1973" },
   "controller-db-tests.yml": { sha256: "dbda9359add1eb75752d6723e720c1506eb87abaf2110be218a7a8493f65bd59" },
-  "git-conflict-canary.yml": { sha256: "8c7e5c51772e998058fba924e3eff5fb166d5b012856f56b2bcf6d208a47de3b" },
+  // The reviewed conflict canary verifies the publish-by-merge procedure
+  // (recovery ref, merge, plain push); check-git-conflict-ci binds the step.
+  "git-conflict-canary.yml": { sha256: "246cdc35724f83b60bc74cbd03f407bd5ec63cb0444e2c11c8af5e9427653609" },
   "npm-release.yml": { sha256: "07f5c41b6ed624ce3d511dd43eda470573aefafd334996cfd76c8a072407612b" }
 };
 

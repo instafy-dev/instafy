@@ -216,6 +216,8 @@ export interface ControllerConversationUpdated {
 
 export interface ControllerProjectConversation {
   id: string;
+  /** Controller-derived identity used only to retire cached audit conversations. */
+  internalPurpose?: "space_review" | null;
   projectId: string;
   sessionId: string | null;
   createdBy: string | null;
@@ -234,6 +236,7 @@ export interface ControllerProjectConversation {
 export interface FetchProjectConversationsParams {
   projectId: string;
   limit?: number;
+  internalOnly?: boolean;
   rootsOnly?: boolean;
   parentConversationId?: string | null;
   rootConversationId?: string | null;
@@ -1233,6 +1236,9 @@ export async function fetchProjectConversationsFromController(
     const search = new URLSearchParams();
     if (params.limit) {
       search.set("limit", String(params.limit));
+    }
+    if (params.internalOnly) {
+      search.set("internalOnly", "true");
     }
     if (params.rootsOnly) {
       search.set("rootsOnly", "true");

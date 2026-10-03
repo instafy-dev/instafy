@@ -140,13 +140,7 @@ const CONVERSATION_TAB_ICON = (
   <ChatLines className={TAB_ICON_CLASS} aria-hidden="true" />
 );
 const PRIVATE_CONVERSATION_TAB_ICON = (
-  <span className="relative inline-flex items-center justify-center">
-    <ChatLines className={TAB_ICON_CLASS} aria-hidden="true" />
-    <Lock
-      className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-white p-[1px] text-slate-500 shadow-sm dark:bg-slate-950 dark:text-slate-300"
-      aria-hidden="true"
-    />
-  </span>
+  <Lock className={TAB_ICON_CLASS} aria-hidden="true" />
 );
 
 export const PANEL_META: Record<

@@ -38,11 +38,14 @@ use uuid::Uuid;
 
 mod browser_request;
 mod card_text;
+mod chat_attachments;
+pub(crate) use chat_attachments::TurnAttachments;
 mod conversation_context;
 mod git_sync;
 mod known_safe_command;
 mod routing_evidence;
 mod routing_recovery;
+mod save_report;
 
 mod handoff;
 mod learn;
@@ -610,6 +613,26 @@ fn skills_kickoff_artifacts(kickoff: Option<&SkillsKickoff>) -> Vec<JsonValue> {
 
 /// The lane name a skills lane checkpoint records on its `origin/apply` artifact.
 const SKILLS_IMPORT_LANE: &str = "skills/import";
+
+/// The lane name a write-scoped worker's checkpoint records on its
+/// `origin/apply` artifact.
+const WRITE_SCOPED_WORKER_LANE: &str = "multi-agent/write-scoped-worker";
+
+/// Save the files a write-scoped worker wrote through the same protected
+/// checkpoint a model turn's files take. The worker returns before any turn
+/// checkpoint runs, so without this its files would reach canonical history
+/// only through a stop's flush, as unsaved work.
+async fn checkpoint_write_scoped_worker(
+    mut execution: JobExecution,
+    checkpoint: workspace_commit::LaneCheckpoint<'_>,
+    files: &[CodexFileDescriptor],
+) -> JobExecution {
+    let (artifacts, not_saved) =
+        workspace_commit::checkpoint_lane_files_with_report(checkpoint, files).await;
+    execution.artifacts.extend(artifacts);
+    save_report::append_not_saved(&mut execution.summary, &not_saved);
+    execution
+}
 
 /// What the job does after the skills lane ran.
 enum SkillsLaneStep {
@@ -2208,6 +2231,12 @@ fn line_prefix_negates_command(prefix: &str) -> bool {
         || normalized.contains("without")
 }
 
+/// Whether this turn's checkpoint saves to the workspace's history. A
+/// client's `autoSyncAfterApply: false` used to leave a turn's changes
+/// unsaved until someone saved a version by hand. Work outside canonical
+/// history is lost with the machine, so that preference is ignored: every
+/// turn saves. Only the runtime-wide `RUNTIME_GIT_SYNC_AFTER_APPLY` setting
+/// can still turn saving off.
 fn resolve_auto_sync_after_apply_override(
     metadata: Option<&JsonValue>,
     prompt_text: &str,
@@ -2215,7 +2244,7 @@ fn resolve_auto_sync_after_apply_override(
     if prompt_requests_explicit_instafy_git_sync(prompt_text) {
         return Some(true);
     }
-    extract_auto_sync_after_apply_override(metadata)
+    extract_auto_sync_after_apply_override(metadata).filter(|enabled| *enabled)
 }
 
 fn workspace_commit_status(
@@ -2238,9 +2267,21 @@ fn workspace_commit_status(
         );
     }
     if result.git_sync_error.is_some() {
+        if result.save.recovery_ref.is_some() {
+            return (
+                "Workspace updated, but it could not be saved. The changes are kept as unsaved work.",
+                "sync_failed",
+            );
+        }
         return (
             "Workspace updated, but auto-save failed. Open Changes and click Save version.",
             "sync_failed",
+        );
+    }
+    if result.save.is_partial() {
+        return (
+            "Workspace saved, except the files named at the end of the reply.",
+            "partial",
         );
     }
     ("Workspace sync complete.", "completed")
@@ -2259,8 +2300,61 @@ fn workspace_commit_git_sync_status(
         "skipped"
     } else if result.git_sync_error.is_some() {
         "failed"
+    } else if result.save.is_partial() {
+        "partial"
     } else {
         "synced"
+    }
+}
+
+/// The `origin/apply` artifact recording a checkpoint: where the files went,
+/// what reached canonical `main`, and, per path, what did not
+/// (`conflictedPaths`, `rejectedPaths`) and where it is kept (`recoveryRef`).
+fn origin_apply_artifact(
+    result: &workspace_commit::CommitToOriginResult,
+    lane: Option<&str>,
+) -> JsonValue {
+    let mut metadata = json!({
+        "originId": result.origin_id.to_string(),
+        "endpoint": result.origin_endpoint,
+        "mode": result.origin_mode,
+        "leaseId": result.lease_id.to_string(),
+        "rev": result.apply_rev,
+        "baseRev": result.apply_base_rev,
+        "gitRev": result.git_rev,
+        "gitBaseRev": result.git_base_rev,
+        "gitSyncStatus": workspace_commit_git_sync_status(result),
+        "gitSyncAttempted": result.git_sync_attempted,
+        "gitSyncError": result.git_sync_error,
+        "paths": result.paths,
+        "conflictedPaths": result.save.conflicted_paths,
+        "rejectedPaths": result.save.rejected_paths,
+        "recoveryRef": result.save.recovery_ref,
+    });
+    if let Some(lane) = lane {
+        metadata["lane"] = json!(lane);
+    }
+    json!({
+        "kind": "origin/apply",
+        "metadata": metadata,
+    })
+}
+
+/// The progress line that reports a checkpoint's outcome.
+fn workspace_commit_progress_message(
+    result: &workspace_commit::CommitToOriginResult,
+) -> JobMessage {
+    let (status_message, status_code) = workspace_commit_status(result);
+    JobMessage {
+        content: status_message.to_string(),
+        message_type: Some("status".to_string()),
+        metadata: Some(json!({
+            "kind": "workspace_commit",
+            "status": status_code,
+            "gitSyncStatus": workspace_commit_git_sync_status(result),
+            "gitSyncAttempted": result.git_sync_attempted,
+            "gitSyncError": result.git_sync_error,
+        })),
     }
 }
 
@@ -2790,6 +2884,13 @@ const SECRET_REJECTION_CONTRACT: &str = "\
 - On a 401/403 or auth error, include the fitting `actions`.\n\
 - When the service or the skill's check rejects a value the space already holds (not a permission error on one resource), emit `request_secret` again for every value that rejection could be about, even if the person says they already replaced them in Secrets.\n\
 - `request_secret`: { type, name, optional valueLabel, description, whereToGet, skill, sensitive, agentHandles }\n";
+
+/// Native reference syntax is a Studio output contract, independent of which
+/// skill or response lane supplies the work. Include it on restored turns too:
+/// an existing provider thread may predate this guidance.
+const CHAT_REFERENCE_CONTRACT: &str = "\nChat references in replies:\n\
+- Use the source's observed title in prose. With its accessible ID, write `[[conversation:<id>|<actual chat title>]]` outside code formatting. Use `Source chat` when untitled; never invent titles or links.\n\
+- Show raw conversation, message or run UUIDs in prose or labels only when the user explicitly asks for technical identifiers. Keep IDs in link targets, tool arguments and API fields. If title or link is unavailable, describe the source.\n";
 
 /// Keeps a skill setup going on follow-up turns. The full Studio contract
 /// states this rule, but only the first turn of a thread gets that contract.
@@ -4288,6 +4389,33 @@ impl JobProcessor {
             .ok_or_else(|| anyhow!("job missing project scope"))
     }
 
+    /// Holds the chat attachments folder of a leased batch's conversation
+    /// until the batch is done. The controller batches only one
+    /// conversation's jobs, and they may run one after another: without the
+    /// hold, each would remove the folder at its end and the next would
+    /// download again, after its signed URLs may have expired. Nothing is
+    /// held for a single job, or for a batch that is not one conversation's.
+    pub(crate) fn hold_batch_attachments(&self, jobs: &[LeaseJob]) -> Option<TurnAttachments> {
+        let [first, rest @ ..] = jobs else {
+            return None;
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        let conversation_id = first.conversation_id?;
+        let project_id = self.project_id_for_job(first).ok()?;
+        let same_conversation = rest.iter().all(|job| {
+            job.conversation_id == Some(conversation_id)
+                && self.project_id_for_job(job).ok() == Some(project_id)
+        });
+        same_conversation.then(|| {
+            TurnAttachments::begin(
+                &self.config.project_workspace_dir(&project_id),
+                Some(&conversation_id),
+            )
+        })
+    }
+
     pub async fn cleanup_after_lease_lost(&self, job: &LeaseJob) {
         let intent = job.intent.as_deref().unwrap_or("").trim();
         if !intent.eq_ignore_ascii_case("terminal_command") {
@@ -4343,7 +4471,7 @@ impl JobProcessor {
         &self,
         registration: &Registration,
         job: &LeaseJob,
-        _progress: Option<JobProgress>,
+        progress: Option<JobProgress>,
         cancel_signal: Option<JobCancelSignal>,
     ) -> Result<JobExecution> {
         if let Some(signal) = cancel_signal.as_ref()
@@ -4365,17 +4493,20 @@ impl JobProcessor {
         let project_context_cards = self
             .load_relevant_project_context_cards(job, project_id, prompt_text)
             .await;
-        let (prompt, _loaded_learned_blocks, mut prompt_context) = self.build_prompt_with_text(
-            &project_id,
-            job,
-            &workspace_dir,
-            prompt_text,
-            true,
-            None,
-            &project_context_cards,
-            None,
-            None,
-        )?;
+        // As in run_apply_job: a worker may run on another runtime than the
+        // turn that received the attachments, so it fetches its own.
+        let (prompt, _loaded_learned_blocks, mut prompt_context, _turn_attachments) = self
+            .build_turn_prompt(
+                &project_id,
+                job,
+                &workspace_dir,
+                prompt_text,
+                None,
+                &project_context_cards,
+                None,
+                None,
+            )
+            .await?;
         annotate_prompt_context_final_output_mode(
             &mut prompt_context,
             final_output_mode_for_runtime_job(job, false, runtime_job_expectations(&job.payload)),
@@ -4383,7 +4514,7 @@ impl JobProcessor {
         let owned_paths = direct_owned_write_scopes(&workspace_dir, job)
             .ok_or_else(|| anyhow!("parallel write-scoped worker is missing owned paths"))?;
 
-        execute_write_scoped_worker_direct(
+        let (execution, files) = execute_write_scoped_worker_direct(
             &workspace_dir,
             &prompt,
             &prompt_context,
@@ -4391,7 +4522,33 @@ impl JobProcessor {
             registration.runtime_id,
             &proxy_config,
         )
-        .await
+        .await?;
+        // A worker running beside others saves its own files: nothing else
+        // would publish them before the runtime stops. Its files are written
+        // already, so a token that does not verify only skips the save.
+        let workspace_token = self
+            .verified_workspace_token(registration, job)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(?error, job_id = %job.id, "write-scoped worker cannot save its files: the workspace token did not verify");
+                None
+            });
+        let checkpoint = workspace_commit::LaneCheckpoint {
+            lane: WRITE_SCOPED_WORKER_LANE,
+            commit_to_workspace: true,
+            read_only_workspace: metadata_requests_read_only_workspace(job.payload.get("metadata")),
+            controller_base_url: &self.config.controller_base_url,
+            workspace_token: workspace_token.as_deref(),
+            project_id,
+            runtime_id: registration.runtime_id,
+            job_id: job.id,
+            run_id: job.run_id,
+            workspace_dir: &workspace_dir,
+            auto_sync_after_apply_override: None,
+            progress_sender: progress.as_ref().map(|progress| progress.sender.clone()),
+            local_origin: self.local_origin_sync(),
+        };
+        Ok(checkpoint_write_scoped_worker(execution, checkpoint, &files).await)
     }
 
     async fn guard_controller_token(
@@ -4604,11 +4761,68 @@ impl JobProcessor {
     }
 
     fn prepare_workspace(&self, project_id: &Uuid) -> Result<PathBuf> {
+        let path = self.prepare_workspace_dir(project_id)?;
+        learn::ensure_project_memory_scaffold(&path);
+        Ok(path)
+    }
+
+    /// The workspace directory, created if missing, without the project
+    /// memory scaffold. A turn refreshes the checkout before writing the
+    /// scaffold, because untracked scaffold copies of files `main` already
+    /// has would stop the checkout from moving to `main`.
+    fn prepare_workspace_dir(&self, project_id: &Uuid) -> Result<PathBuf> {
         let path = self.config.project_workspace_dir(project_id);
         fs::create_dir_all(&path)
             .with_context(|| format!("failed to prepare workspace directory {:?}", path))?;
-        learn::ensure_project_memory_scaffold(&path);
         Ok(path)
+    }
+
+    /// Before a turn, bring this runtime's checkout up to date with
+    /// canonical `main` (see [`workspace_commit::refresh_before_turn`]). A
+    /// failure is recorded on the turn and never fails it.
+    async fn refresh_workspace_before_turn(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+        project_id: Uuid,
+        workspace_token: Option<&str>,
+    ) -> workspace_commit::PreTurnRefreshOutcome {
+        let has_git_remote = self
+            .config
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.git_remote_url.as_deref())
+            .is_some_and(|url| !url.trim().is_empty());
+        let outcome = workspace_commit::refresh_before_turn(workspace_commit::PreTurnRefresh {
+            controller_base_url: &self.config.controller_base_url,
+            workspace_token,
+            project_id,
+            runtime_id: registration.runtime_id,
+            job_id: job.id,
+            run_id: job.run_id,
+            local_origin: self.local_origin_sync(),
+            has_git_remote,
+        })
+        .await;
+        match outcome.mode {
+            "failed" => warn!(
+                job_id = %job.id,
+                project_id = %project_id,
+                error = outcome.error.as_deref().unwrap_or_default(),
+                lease_error = outcome.lease_error.as_deref().unwrap_or_default(),
+                "could not bring the workspace up to date before the turn; continuing"
+            ),
+            mode => tracing::info!(
+                job_id = %job.id,
+                project_id = %project_id,
+                mode,
+                skipped = outcome.skipped_reason.unwrap_or_default(),
+                checkout_moved = ?outcome.response.as_ref().and_then(|response| response.checkout_moved),
+                unpushed_refs = ?outcome.response.as_ref().and_then(|response| response.unpushed_refs),
+                "workspace refreshed before the turn"
+            ),
+        }
+        outcome
     }
 
     fn codex_for_project(&self, project_id: &Uuid, workspace: &Path) -> Result<CodexClient> {
@@ -5334,7 +5548,32 @@ impl JobProcessor {
         let workspace_token = self.verified_workspace_token(registration, job).await?;
 
         let project_id = self.project_id_for_job(job)?;
-        let workspace_dir = self.prepare_workspace(&project_id)?;
+        let workspace_dir = self.prepare_workspace_dir(&project_id)?;
+        // Bring the checkout up to date before anything writes into it. The
+        // `/sync` lane publishes on its own.
+        let pre_turn_refresh = if commit_to_workspace
+            && git_sync::parse_git_sync_request(
+                job.payload
+                    .get("prompt_text")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default(),
+            )
+            .is_none()
+        {
+            // Boxed: this function's future is already large.
+            Some(
+                Box::pin(self.refresh_workspace_before_turn(
+                    registration,
+                    job,
+                    project_id,
+                    workspace_token.as_deref(),
+                ))
+                .await,
+            )
+        } else {
+            None
+        };
+        learn::ensure_project_memory_scaffold(&workspace_dir);
         let explicit_personal_browser_execution =
             crate::personal_browser::payload_requests_personal_browser(&job.payload);
         let explicit_shared_browser_execution =
@@ -5788,25 +6027,34 @@ impl JobProcessor {
                 || expects_generic_mcp_tool_execution,
         );
 
-        let (mut prompt, loaded_learned_blocks, mut prompt_context) =
+        // The turn's chat attachments stay on disk until it returns.
+        let (mut prompt, loaded_learned_blocks, mut prompt_context, _turn_attachments) =
             if expects_generic_mcp_tool_execution {
                 (
                     self.build_mcp_task_prompt(prompt_text)?,
                     Vec::new(),
                     JsonValue::Null,
+                    None,
                 )
             } else {
-                self.build_prompt_with_text(
-                    &project_id,
-                    job,
-                    &workspace_dir,
-                    prompt_text,
-                    true,
-                    provider_conversation_state_for_run.as_ref(),
-                    &project_context_cards,
-                    scoped_worker_path_observation.as_ref(),
-                    routing_pre_observation.as_ref(),
-                )?
+                let (prompt, loaded_learned_blocks, prompt_context, attachments) = self
+                    .build_turn_prompt(
+                        &project_id,
+                        job,
+                        &workspace_dir,
+                        prompt_text,
+                        provider_conversation_state_for_run.as_ref(),
+                        &project_context_cards,
+                        scoped_worker_path_observation.as_ref(),
+                        routing_pre_observation.as_ref(),
+                    )
+                    .await?;
+                (
+                    prompt,
+                    loaded_learned_blocks,
+                    prompt_context,
+                    Some(attachments),
+                )
             };
 
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
@@ -5887,7 +6135,7 @@ impl JobProcessor {
             && let Some(owned_paths) = direct_owned_write_scopes(&workspace_dir, job)
         {
             let proxy_config = direct_worker_proxy_config(proxy_envelope)?;
-            return execute_write_scoped_worker_direct(
+            let (execution, files) = execute_write_scoped_worker_direct(
                 &workspace_dir,
                 &prompt,
                 &prompt_context,
@@ -5895,14 +6143,33 @@ impl JobProcessor {
                 registration.runtime_id,
                 &proxy_config,
             )
-            .await;
+            .await?;
+            let checkpoint = workspace_commit::LaneCheckpoint {
+                lane: WRITE_SCOPED_WORKER_LANE,
+                commit_to_workspace,
+                read_only_workspace,
+                controller_base_url: &self.config.controller_base_url,
+                workspace_token: workspace_token.as_deref(),
+                project_id,
+                runtime_id: registration.runtime_id,
+                job_id: job.id,
+                run_id: job.run_id,
+                workspace_dir: &workspace_dir,
+                auto_sync_after_apply_override,
+                progress_sender: progress_sender
+                    .as_ref()
+                    .map(|progress| progress.sender.clone()),
+                local_origin: self.local_origin_sync(),
+            };
+            return Ok(Box::pin(checkpoint_write_scoped_worker(
+                execution, checkpoint, &files,
+            ))
+            .await);
         }
 
-        let git_status_before = if expects_workspace_file_changes || read_only_workspace {
-            collect_git_status_porcelain(&workspace_dir).await
-        } else {
-            None
-        };
+        // Always taken, so the checkpoint can save files the turn changed
+        // without reporting them.
+        let git_status_before = collect_git_status_porcelain(&workspace_dir).await;
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
@@ -6162,6 +6429,9 @@ impl JobProcessor {
             outcome.summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
         }
         let mut artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+        if let Some(refresh) = pre_turn_refresh.as_ref() {
+            artifacts.push(refresh.artifact());
+        }
         artifacts.extend(build_codex_artifacts(&output, &outcome));
         if let Some(observation) = scoped_worker_path_observation.as_ref() {
             artifacts.push(observation.artifact.clone());
@@ -6751,6 +7021,9 @@ impl JobProcessor {
                 && retry_normalized_files_len == 0;
 
             let mut retry_artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+            if let Some(refresh) = pre_turn_refresh.as_ref() {
+                retry_artifacts.push(refresh.artifact());
+            }
             retry_artifacts.extend(build_codex_artifacts(&retry_output, &retry_outcome));
             if evidence_requirements.requires_any() {
                 retry_artifacts.push(json!({
@@ -7074,9 +7347,23 @@ impl JobProcessor {
                 }
             }
 
+            let mut retry_not_saved = pre_turn_refresh
+                .as_ref()
+                .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
+                .unwrap_or_default();
             if commit_to_workspace {
+                let retry_commit_files = if read_only_workspace {
+                    retry_outcome.files.clone()
+                } else {
+                    Box::pin(checkpoint_files_with_status_delta(
+                        &workspace_dir,
+                        git_status_before.as_ref(),
+                        &retry_outcome.files,
+                    ))
+                    .await
+                };
                 if let Some(token) = workspace_token.as_deref() {
-                    if !retry_outcome.files.is_empty() {
+                    if !retry_commit_files.is_empty() {
                         if let Some(sender) = progress_sender
                             .as_ref()
                             .map(|progress| progress.sender.clone())
@@ -7099,7 +7386,7 @@ impl JobProcessor {
                             job.id,
                             job.run_id,
                             &workspace_dir,
-                            &retry_outcome.files,
+                            &retry_commit_files,
                             auto_sync_after_apply_override,
                             progress_sender
                                 .as_ref()
@@ -7109,52 +7396,13 @@ impl JobProcessor {
                         .await
                         {
                             Ok(Some(result)) => {
-                                let (status_message, status_code) =
-                                    workspace_commit_status(&result);
-                                let origin_id = result.origin_id.to_string();
-                                let lease_id = result.lease_id.to_string();
-                                let origin_endpoint = result.origin_endpoint.clone();
-                                let origin_mode = result.origin_mode.clone();
-                                let apply_rev = result.apply_rev.clone();
-                                let apply_base_rev = result.apply_base_rev.clone();
-                                let git_rev = result.git_rev.clone();
-                                let git_base_rev = result.git_base_rev.clone();
-                                let paths = result.paths.clone();
-                                let git_sync_attempted = result.git_sync_attempted;
-                                let git_sync_error = result.git_sync_error.clone();
-                                let git_sync_status = workspace_commit_git_sync_status(&result);
-                                retry_artifacts.push(json!({
-                                    "kind": "origin/apply",
-                                    "metadata": {
-                                        "originId": origin_id,
-                                        "endpoint": origin_endpoint,
-                                        "mode": origin_mode,
-                                        "leaseId": lease_id,
-                                        "rev": apply_rev,
-                                        "baseRev": apply_base_rev,
-                                        "gitRev": git_rev,
-                                        "gitBaseRev": git_base_rev,
-                                        "gitSyncStatus": git_sync_status,
-                                        "gitSyncAttempted": git_sync_attempted,
-                                        "gitSyncError": git_sync_error.clone(),
-                                        "paths": paths,
-                                    }
-                                }));
+                                retry_artifacts.push(origin_apply_artifact(&result, None));
+                                retry_not_saved.extend(result.not_saved_sentences());
                                 if let Some(sender) = progress_sender
                                     .as_ref()
                                     .map(|progress| progress.sender.clone())
                                 {
-                                    let _ = sender.send(JobMessage {
-                                        content: status_message.to_string(),
-                                        message_type: Some("status".to_string()),
-                                        metadata: Some(json!({
-                                            "kind": "workspace_commit",
-                                            "status": status_code,
-                                            "gitSyncStatus": git_sync_status,
-                                            "gitSyncAttempted": git_sync_attempted,
-                                            "gitSyncError": git_sync_error,
-                                        })),
-                                    });
+                                    let _ = sender.send(workspace_commit_progress_message(&result));
                                 }
                             }
                             Ok(None) => {}
@@ -7172,7 +7420,7 @@ impl JobProcessor {
                             }
                         }
                     }
-                } else if !retry_outcome.files.is_empty() {
+                } else if !retry_commit_files.is_empty() {
                     retry_artifacts.push(json!({
                         "kind": "origin/apply-skipped",
                         "metadata": { "reason": "missing_controller_token" }
@@ -7196,6 +7444,7 @@ impl JobProcessor {
                 streaming_active,
                 retry_messages,
             );
+            save_report::append_not_saved(&mut retry_outcome.summary, &retry_not_saved);
             return Ok(JobExecution {
                 summary: retry_outcome.summary,
                 suggested_replies: retry_outcome.suggested_replies,
@@ -7270,9 +7519,23 @@ impl JobProcessor {
             }
         }
 
+        let mut not_saved = pre_turn_refresh
+            .as_ref()
+            .map(workspace_commit::PreTurnRefreshOutcome::not_saved_sentences)
+            .unwrap_or_default();
         if commit_to_workspace {
+            let commit_files = if read_only_workspace {
+                outcome.files.clone()
+            } else {
+                Box::pin(checkpoint_files_with_status_delta(
+                    &workspace_dir,
+                    git_status_before.as_ref(),
+                    &outcome.files,
+                ))
+                .await
+            };
             if let Some(token) = workspace_token.as_deref() {
-                if !outcome.files.is_empty() {
+                if !commit_files.is_empty() {
                     if let Some(sender) = progress_sender
                         .as_ref()
                         .map(|progress| progress.sender.clone())
@@ -7295,7 +7558,7 @@ impl JobProcessor {
                         job.id,
                         job.run_id,
                         &workspace_dir,
-                        &outcome.files,
+                        &commit_files,
                         auto_sync_after_apply_override,
                         progress_sender
                             .as_ref()
@@ -7305,51 +7568,13 @@ impl JobProcessor {
                     .await
                     {
                         Ok(Some(result)) => {
-                            let (status_message, status_code) = workspace_commit_status(&result);
-                            let origin_id = result.origin_id.to_string();
-                            let lease_id = result.lease_id.to_string();
-                            let origin_endpoint = result.origin_endpoint.clone();
-                            let origin_mode = result.origin_mode.clone();
-                            let apply_rev = result.apply_rev.clone();
-                            let apply_base_rev = result.apply_base_rev.clone();
-                            let git_rev = result.git_rev.clone();
-                            let git_base_rev = result.git_base_rev.clone();
-                            let paths = result.paths.clone();
-                            let git_sync_attempted = result.git_sync_attempted;
-                            let git_sync_error = result.git_sync_error.clone();
-                            let git_sync_status = workspace_commit_git_sync_status(&result);
-                            artifacts.push(json!({
-                                "kind": "origin/apply",
-                                "metadata": {
-                                    "originId": origin_id,
-                                    "endpoint": origin_endpoint,
-                                    "mode": origin_mode,
-                                    "leaseId": lease_id,
-                                    "rev": apply_rev,
-                                    "baseRev": apply_base_rev,
-                                    "gitRev": git_rev,
-                                    "gitBaseRev": git_base_rev,
-                                    "gitSyncStatus": git_sync_status,
-                                    "gitSyncAttempted": git_sync_attempted,
-                                    "gitSyncError": git_sync_error.clone(),
-                                    "paths": paths,
-                                }
-                            }));
+                            artifacts.push(origin_apply_artifact(&result, None));
+                            not_saved.extend(result.not_saved_sentences());
                             if let Some(sender) = progress_sender
                                 .as_ref()
                                 .map(|progress| progress.sender.clone())
                             {
-                                let _ = sender.send(JobMessage {
-                                    content: status_message.to_string(),
-                                    message_type: Some("status".to_string()),
-                                    metadata: Some(json!({
-                                        "kind": "workspace_commit",
-                                        "status": status_code,
-                                        "gitSyncStatus": git_sync_status,
-                                        "gitSyncAttempted": git_sync_attempted,
-                                        "gitSyncError": git_sync_error,
-                                    })),
-                                });
+                                let _ = sender.send(workspace_commit_progress_message(&result));
                             }
                         }
                         Ok(None) => {}
@@ -7367,7 +7592,7 @@ impl JobProcessor {
                         }
                     }
                 }
-            } else if !outcome.files.is_empty() {
+            } else if !commit_files.is_empty() {
                 artifacts.push(json!({
                     "kind": "origin/apply-skipped",
                     "metadata": { "reason": "missing_controller_token" }
@@ -7389,6 +7614,7 @@ impl JobProcessor {
             streaming_active,
             interim_messages,
         );
+        save_report::append_not_saved(&mut outcome.summary, &not_saved);
         Ok(JobExecution {
             summary: outcome.summary,
             suggested_replies: outcome.suggested_replies,
@@ -7437,6 +7663,50 @@ impl JobProcessor {
         prompt.push_str("\nLatest user request:\n");
         prompt.push_str(trimmed_prompt);
         Ok(prompt)
+    }
+
+    /// A turn's prompt. The Storage attachments the controller signed for
+    /// the turn are downloaded into its conversation's folder first, so the
+    /// prompt lists the ones that arrived; a failure only leaves that
+    /// attachment out of the list. Every lane that runs a turn from a prompt
+    /// builds it here. The downloads stay until the returned
+    /// [`chat_attachments::TurnAttachments`] drops at the end of the turn.
+    #[allow(clippy::too_many_arguments)]
+    async fn build_turn_prompt(
+        &self,
+        project_id: &Uuid,
+        job: &LeaseJob,
+        workspace_dir: &Path,
+        prompt_text: &str,
+        provider_conversation_state: Option<&JsonValue>,
+        project_context_cards: &[PromptContextCard],
+        scoped_worker_path_observation: Option<&ScopedWorkerPathObservation>,
+        routing_pre_observation: Option<&RoutingPreObservation>,
+    ) -> Result<(
+        String,
+        Vec<LoadedLearnedBlock>,
+        JsonValue,
+        chat_attachments::TurnAttachments,
+    )> {
+        let attachments = chat_attachments::download_job_attachments(
+            job.id,
+            job.conversation_id.as_ref(),
+            &job.payload,
+            workspace_dir,
+        )
+        .await;
+        let (prompt, loaded_learned_blocks, prompt_context) = self.build_prompt_with_text(
+            project_id,
+            job,
+            workspace_dir,
+            prompt_text,
+            true,
+            provider_conversation_state,
+            project_context_cards,
+            scoped_worker_path_observation,
+            routing_pre_observation,
+        )?;
+        Ok((prompt, loaded_learned_blocks, prompt_context, attachments))
     }
 
     fn build_prompt_with_text(
@@ -8106,6 +8376,13 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        append_prompt_section(
+            &mut prompt,
+            &mut prompt_section_metrics,
+            "chatReferences",
+            CHAT_REFERENCE_CONTRACT,
+        );
+
         // Workers, lead checkpoints and planning turns act on work already
         // handed to them, so they do not carry the setup on to its next step.
         if !multi_agent_worker
@@ -8122,14 +8399,24 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             );
         }
 
+        let leased_attachments = chat_attachments::leased_attachment_names(&job.payload);
         let attachment_section = format_image_attachment_section(
             job.payload.get("metadata"),
             workspace_dir,
+            project_id,
+            job.conversation_id.as_ref(),
+            &leased_attachments,
         )
         .or_else(|| {
             let attachments =
                 collect_image_attachments_from_history(job.payload.get("conversation_history"));
-            format_image_attachment_section_from_attachments(&attachments, workspace_dir)
+            format_image_attachment_section_from_attachments(
+                &attachments,
+                workspace_dir,
+                project_id,
+                job.conversation_id.as_ref(),
+                &leased_attachments,
+            )
         });
 
         if let Some(section) = attachment_section {
@@ -12309,6 +12596,8 @@ impl DirectOwnedWriteScope {
     }
 }
 
+/// Run a write-scoped worker and write its files. Returns the execution and
+/// the files it wrote, for the checkpoint.
 async fn execute_write_scoped_worker_direct(
     workspace_dir: &Path,
     prompt: &str,
@@ -12316,7 +12605,7 @@ async fn execute_write_scoped_worker_direct(
     owned_paths: &[DirectOwnedWriteScope],
     runtime_id: Uuid,
     proxy_config: &DirectWorkerProxyConfig,
-) -> Result<JobExecution> {
+) -> Result<(JobExecution, Vec<CodexFileDescriptor>)> {
     let allowed_paths = owned_paths
         .iter()
         .map(|path| path.display_path.as_str())
@@ -12380,6 +12669,7 @@ async fn execute_write_scoped_worker_direct(
         .and_then(JsonValue::as_array)
         .ok_or_else(|| anyhow!("write-scoped worker JSON is missing files[]"))?;
     let mut applied_files = Vec::new();
+    let mut written = Vec::new();
     for file in files {
         let Some(path) = file.get("path").and_then(JsonValue::as_str).map(str::trim) else {
             continue;
@@ -12409,6 +12699,7 @@ async fn execute_write_scoped_worker_direct(
             "path": owned.display_path,
             "change": "modified",
         }));
+        written.push(descriptor);
     }
     if applied_files.is_empty() {
         bail!("write-scoped worker returned no owned file changes");
@@ -12437,17 +12728,20 @@ async fn execute_write_scoped_worker_direct(
         artifacts.push(build_codex_prompt_context_artifact(prompt_context, None));
     }
 
-    Ok(JobExecution {
-        summary,
-        suggested_replies: Vec::new(),
-        provider: "openai-proxy-write-scoped-worker".to_string(),
-        artifacts,
-        credit_snapshot: None,
-        provider_conversation_state: None,
-        messages: Vec::new(),
-        messages_streamed: false,
-        final_messages: Vec::new(),
-    })
+    Ok((
+        JobExecution {
+            summary,
+            suggested_replies: Vec::new(),
+            provider: "openai-proxy-write-scoped-worker".to_string(),
+            artifacts,
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        },
+        written,
+    ))
 }
 
 async fn post_scoped_worker_json(
@@ -14287,6 +14581,52 @@ async fn restore_clean_baseline_git_status_delta_excluding(
     restored
 }
 
+/// The files a turn's checkpoint saves: what the turn reported, plus every
+/// path whose `git status` changed during the turn (tools, generators and
+/// installs write files nobody reports). Changed paths that may never be
+/// published are left out here rather than reported as "Not saved": nobody
+/// asked for them, and they stay on this machine.
+async fn checkpoint_files_with_status_delta(
+    workspace_dir: &Path,
+    before: Option<&HashMap<String, GitStatusEntry>>,
+    reported: &[CodexFileDescriptor],
+) -> Vec<CodexFileDescriptor> {
+    let mut files = reported.to_vec();
+    let Some(before) = before else {
+        return files;
+    };
+    let Some(after) = collect_git_status_porcelain(workspace_dir).await else {
+        return files;
+    };
+    files.extend(status_delta_files_for_checkpoint(before, &after, reported));
+    files
+}
+
+fn status_delta_files_for_checkpoint(
+    before: &HashMap<String, GitStatusEntry>,
+    after: &HashMap<String, GitStatusEntry>,
+    reported: &[CodexFileDescriptor],
+) -> Vec<CodexFileDescriptor> {
+    let reported_paths = reported
+        .iter()
+        .filter(|file| !file.is_read_reference())
+        .flat_map(|file| [file.workspace_path.clone(), file.path.clone()])
+        .collect::<HashSet<_>>();
+    infer_codex_files_from_git_status_delta(before, after)
+        .into_iter()
+        .filter(|file| {
+            let Some(sanitized) = sanitize_relative_workspace_path(&file.workspace_path) else {
+                return false;
+            };
+            let path = sanitized.to_string_lossy().replace('\\', "/");
+            !path.is_empty()
+                && !reported_paths.contains(&path)
+                && !origin_http_server::paths::is_reserved_path(&path)
+                && !origin_http_server::publish_policy::is_unpublishable(&path)
+        })
+        .collect()
+}
+
 fn infer_codex_files_from_git_status_delta(
     before: &HashMap<String, GitStatusEntry>,
     after: &HashMap<String, GitStatusEntry>,
@@ -14462,15 +14802,31 @@ fn collect_job_context(payload: &JsonValue) -> Vec<String> {
         .collect()
 }
 
+/// The attachments of the conversation history, oldest first. A Storage
+/// attachment counts only from the user messages the controller signs for, so
+/// the prompt never names an older one as missing on every turn.
 fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<JsonValue> {
     let Some(JsonValue::Array(entries)) = history else {
         return Vec::new();
     };
+    let recent_user_messages: HashSet<usize> = entries
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, entry)| {
+            entry
+                .get("role")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|role| role.eq_ignore_ascii_case("user"))
+        })
+        .take(chat_attachments::HISTORY_USER_MESSAGES)
+        .map(|(index, _)| index)
+        .collect();
 
     let mut unique_paths = HashSet::new();
     let mut attachments = Vec::new();
 
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         let Some(map) = entry.as_object() else {
             continue;
         };
@@ -14503,25 +14859,15 @@ fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<Js
                 let Some(entry) = attachment.as_object() else {
                     continue;
                 };
-                let kind = entry
-                    .get("kind")
-                    .and_then(JsonValue::as_str)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_ascii_lowercase();
-                if kind != "image" {
-                    continue;
-                }
-                let workspace_path = entry
-                    .get("workspacePath")
-                    .and_then(JsonValue::as_str)
-                    .or_else(|| entry.get("workspace_path").and_then(JsonValue::as_str))
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty());
-                let Some(workspace_path) = workspace_path else {
+                let Some(key) = attachment_identity(entry) else {
                     continue;
                 };
-                if !unique_paths.insert(workspace_path.to_string()) {
+                if attachment_text_field(entry, "storagePath", "storage_path").is_some()
+                    && !recent_user_messages.contains(&index)
+                {
+                    continue;
+                }
+                if !unique_paths.insert(key) {
                     continue;
                 }
                 attachments.push(attachment.clone());
@@ -14535,6 +14881,9 @@ fn collect_image_attachments_from_history(history: Option<&JsonValue>) -> Vec<Js
 fn format_image_attachment_section(
     metadata: Option<&JsonValue>,
     workspace_dir: &Path,
+    project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
+    leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let Some(metadata) = metadata.and_then(JsonValue::as_object) else {
         return None;
@@ -14544,7 +14893,45 @@ fn format_image_attachment_section(
         return None;
     };
 
-    format_image_attachment_section_from_attachments(attachments, workspace_dir)
+    format_image_attachment_section_from_attachments(
+        attachments,
+        workspace_dir,
+        project_id,
+        conversation_id,
+        leased_attachments,
+    )
+}
+
+/// How an attachment is told apart from the others: a legacy image by its
+/// `workspacePath`, a Storage image or text file by its `storagePath`. Any
+/// other entry is not an attachment the prompt lists.
+fn attachment_identity(entry: &JsonMap<String, JsonValue>) -> Option<String> {
+    let kind = entry
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if let Some(storage_path) = attachment_text_field(entry, "storagePath", "storage_path") {
+        return matches!(kind.as_str(), "image" | "file").then(|| storage_path.to_string());
+    }
+    if kind != "image" {
+        return None;
+    }
+    attachment_text_field(entry, "workspacePath", "workspace_path").map(str::to_string)
+}
+
+fn attachment_text_field<'a>(
+    entry: &'a JsonMap<String, JsonValue>,
+    key: &str,
+    snake_key: &str,
+) -> Option<&'a str> {
+    entry
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .or_else(|| entry.get(snake_key).and_then(JsonValue::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn client_metadata(metadata: Option<&JsonValue>) -> Option<&serde_json::Map<String, JsonValue>> {
@@ -15301,53 +15688,82 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
     Some(formatted)
 }
 
+/// The prompt's attachments section. Legacy images name their workspace
+/// path. A Storage image or text file is listed at
+/// `.instafy/attachments/<conversationId>/` only when it belongs to the job's
+/// own conversation, this lease signed it and the pre-turn download left its
+/// file there; the others are named as unavailable so the agent neither
+/// guesses a path nor pretends to have read them.
 fn format_image_attachment_section_from_attachments(
     attachments: &[JsonValue],
     workspace_dir: &Path,
+    project_id: &Uuid,
+    conversation_id: Option<&Uuid>,
+    leased_attachments: &HashSet<String>,
 ) -> Option<String> {
     let mut lines = Vec::new();
+    let mut unavailable = Vec::new();
+    let mut lists_image = false;
+    let mut lists_text_file = false;
     for attachment in attachments {
         let Some(entry) = attachment.as_object() else {
             continue;
         };
-        let kind = entry
-            .get("kind")
-            .and_then(JsonValue::as_str)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        if kind != "image" {
+        if attachment_identity(entry).is_none() {
             continue;
         }
-        let workspace_path = entry
-            .get("workspacePath")
+        let is_image = entry
+            .get("kind")
             .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("workspace_path").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let Some(workspace_path) = workspace_path else {
-            continue;
-        };
-        let file_name = entry
-            .get("fileName")
-            .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("file_name").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
-        let mime_type = entry
-            .get("mimeType")
-            .and_then(JsonValue::as_str)
-            .or_else(|| entry.get("mime_type").and_then(JsonValue::as_str))
-            .map(|value| value.trim())
-            .filter(|value| !value.is_empty());
+            .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("image"));
+        let file_name = attachment_text_field(entry, "fileName", "file_name");
+        let mime_type = attachment_text_field(entry, "mimeType", "mime_type");
         let size_bytes = entry
             .get("sizeBytes")
             .and_then(JsonValue::as_u64)
             .or_else(|| entry.get("size_bytes").and_then(JsonValue::as_u64));
 
+        let workspace_path = match attachment_text_field(entry, "storagePath", "storage_path") {
+            Some(storage_path) => {
+                let downloaded = conversation_id
+                    .zip(chat_attachments::storage_path_file_name(
+                        storage_path,
+                        project_id,
+                        conversation_id,
+                    ))
+                    .filter(|(conversation_id, name)| {
+                        leased_attachments.contains(*name)
+                            && chat_attachments::attachment_is_available(
+                                workspace_dir,
+                                conversation_id,
+                                name,
+                            )
+                    });
+                let Some((conversation_id, name)) = downloaded else {
+                    unavailable.push(describe_unavailable_attachment(
+                        file_name, mime_type, size_bytes, is_image,
+                    ));
+                    continue;
+                };
+                chat_attachments::attachment_workspace_path(conversation_id, name)
+            }
+            None => {
+                let Some(path) = attachment_text_field(entry, "workspacePath", "workspace_path")
+                else {
+                    continue;
+                };
+                path.to_string()
+            }
+        };
+        if is_image {
+            lists_image = true;
+        } else {
+            lists_text_file = true;
+        }
+
         let mut line = String::new();
         line.push_str("workspacePath: ");
-        line.push_str(workspace_path);
+        line.push_str(&workspace_path);
         if file_name.is_some() || mime_type.is_some() || size_bytes.is_some() {
             line.push_str(" (");
             let mut wrote_detail = false;
@@ -15375,27 +15791,97 @@ fn format_image_attachment_section_from_attachments(
         lines.push(line);
     }
 
-    if lines.is_empty() {
+    if lines.is_empty() && unavailable.is_empty() {
         return None;
     }
 
     let mut section = String::new();
-    section.push_str("\nUser attached image(s):\n");
-    for line in lines {
-        section.push_str("- ");
-        section.push_str(&line);
-        section.push('\n');
-    }
-    section.push_str(&format!(
-        "\nPaths above are relative to the workspace root \"{}\".\n",
-        workspace_dir.display()
-    ));
-    section.push_str(
-        "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
+    if !lines.is_empty() {
+        section.push_str(if lists_text_file {
+            "\nUser attached file(s):\n"
+        } else {
+            "\nUser attached image(s):\n"
+        });
+        for line in lines {
+            section.push_str("- ");
+            section.push_str(&line);
+            section.push('\n');
+        }
+        section.push_str(&format!(
+            "\nPaths above are relative to the workspace root \"{}\".\n",
+            workspace_dir.display()
+        ));
+        if lists_image {
+            section.push_str(
+                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
 When calling `view_image`, use the `workspacePath` value (not the fileName).\n\
 If you cannot view the image for any reason, do your best using the filename/path context.\n",
-    );
+            );
+        }
+        if lists_text_file {
+            section.push_str(
+                "Read the attached text file(s) at their `workspacePath` before answering.\n",
+            );
+        }
+    }
+    if !unavailable.is_empty() {
+        section.push_str(
+            "\nThe user also attached file(s) that are not available in this workspace:\n",
+        );
+        let shown = unavailable.len().min(UNAVAILABLE_ATTACHMENTS_LISTED);
+        for description in &unavailable[..shown] {
+            section.push_str("- ");
+            section.push_str(description);
+            section.push('\n');
+        }
+        if unavailable.len() > shown {
+            section.push_str(&format!("- and {} more\n", unavailable.len() - shown));
+        }
+        section.push_str(
+            "You cannot open these. If the answer depends on one, say that it could not be loaded and ask the user to attach it again.\n",
+        );
+    }
     Some(section)
+}
+
+const UNAVAILABLE_ATTACHMENTS_LISTED: usize = 10;
+
+fn describe_unavailable_attachment(
+    file_name: Option<&str>,
+    mime_type: Option<&str>,
+    size_bytes: Option<u64>,
+    is_image: bool,
+) -> String {
+    // The client supplies the name and type, so each is kept to one bounded line.
+    let one_line = |value: &str| -> String {
+        value
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .take(120)
+            .collect()
+    };
+    let name = file_name
+        .map(one_line)
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| if is_image { "an image" } else { "a text file" }.to_string());
+    let mut details = Vec::new();
+    if let Some(mime_type) = mime_type {
+        details.push(format!("mimeType: {}", one_line(mime_type)));
+    }
+    if let Some(size) = size_bytes {
+        details.push(format!("sizeBytes: {size}"));
+    }
+    if details.is_empty() {
+        name
+    } else {
+        format!("{name} ({})", details.join(", "))
+    }
 }
 
 fn append_context_value(value: &JsonValue, output: &mut Vec<String>) {
@@ -16559,6 +17045,7 @@ mod tests {
                 "origin git sync failed (400 Bad Request): {\"error\":\"path is excluded from space history: tmp/example.txt\"}"
                     .to_string(),
             ),
+            save: Default::default(),
             paths: vec!["tmp/example.txt".to_string()],
         };
 
@@ -16661,6 +17148,310 @@ mod tests {
             Some(vec!["docs/**".to_string()])
         );
         assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+    }
+
+    #[tokio::test]
+    async fn parallel_write_scoped_worker_downloads_signed_attachments_before_its_prompt() {
+        use axum::extract::State;
+        use axum::routing::{get, post};
+
+        type Captured = Arc<Mutex<Option<JsonValue>>>;
+        async fn completions(
+            State(captured): State<Captured>,
+            axum::Json(body): axum::Json<JsonValue>,
+        ) -> axum::Json<JsonValue> {
+            *captured.lock() = Some(body);
+            let plan = json!({
+                "summary": "Wrote the alpha file.",
+                "files": [{ "path": "tmp/alpha.txt", "content": "alpha\n" }],
+            });
+            axum::Json(json!({ "choices": [{ "message": { "content": plan.to_string() } }] }))
+        }
+        let captured: Captured = Arc::new(Mutex::new(None));
+        let app = axum::Router::new()
+            .route("/object/screenshot", get(|| async { "png bytes" }))
+            .route("/v1/chat/completions", post(completions))
+            .with_state(captured.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let mut registration = test_registration_with_proxy();
+        registration.proxy = Some(ProxyEnvelopePayload {
+            url: base.clone(),
+            token: "proxy-token".to_string(),
+            expires_at: None,
+        });
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        // A worker's metadata carries no attachments, so its prompt takes them
+        // from the conversation history, as on a runtime spread.
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": "Write the alpha file from the screenshot.",
+                "metadata": {
+                    "multiAgentPlan": { "role": "worker", "groupId": "group-1" },
+                    "writeScope": { "mode": "owned", "ownedPaths": ["tmp/alpha.txt"] }
+                },
+                "conversation_history": [{
+                    "role": "user",
+                    "content": "Here is the screenshot.",
+                    "metadata": { "attachments": [{
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+                        "fileName": "screenshot.png",
+                        "mimeType": "image/png"
+                    }]}
+                }],
+                "attachment_downloads": [{
+                    "name": name,
+                    "url": format!("{base}/object/screenshot?token=signed"),
+                    "sizeBytes": 9
+                }]
+            }),
+        );
+        job.project_id = Some(project_id);
+        job.conversation_id = Some(conversation_id);
+        assert!(processor.can_run_parallel_direct_write_scoped_worker(&registration, &job));
+
+        processor
+            .run_parallel_direct_write_scoped_worker_job(&registration, &job, None, None)
+            .await
+            .expect("worker job runs");
+
+        // The prompt lists only a file that is on disk, so the download came
+        // first; the turn's end removed it again.
+        let request = captured.lock().clone().expect("worker called the proxy");
+        let worker_input = request["messages"][0]["content"]
+            .as_str()
+            .expect("worker input");
+        assert!(
+            worker_input.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: screenshot.png, mimeType: image/png)"
+            )),
+            "{worker_input}"
+        );
+        assert!(!worker_input.contains("not available"), "{worker_input}");
+        assert!(!worker_input.contains("token=signed"), "{worker_input}");
+        let workspace = tmp.path().join(project_id.to_string());
+        assert!(
+            !workspace
+                .join(".instafy/attachments")
+                .join(conversation_id.to_string())
+                .exists(),
+            "the worker's downloads outlived its turn"
+        );
+    }
+
+    /// The main turn lane builds its prompt through `build_turn_prompt` too:
+    /// the turn's message's own Storage attachment is downloaded into its
+    /// conversation's folder and listed there, the same file name under
+    /// another conversation is not, and the download lasts as long as the
+    /// turn.
+    #[tokio::test]
+    async fn a_turn_prompt_lists_its_messages_downloaded_attachments_until_the_turn_ends() {
+        let app = axum::Router::new().route(
+            "/object/photo",
+            axum::routing::get(|| async { "png bytes" }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let other_conversation_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        let prompt_text = "What is in the photo?";
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": prompt_text,
+                "metadata": { "attachments": [
+                    {
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+                        "fileName": "photo.png",
+                        "mimeType": "image/png"
+                    },
+                    {
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{other_conversation_id}/{name}"),
+                        "fileName": "elsewhere.png"
+                    }
+                ]},
+                "attachment_downloads": [{
+                    "name": name,
+                    "url": format!("{base}/object/photo?token=signed"),
+                    "sizeBytes": 9
+                }]
+            }),
+        );
+        job.project_id = Some(project_id);
+        job.conversation_id = Some(conversation_id);
+        let workspace = processor.prepare_workspace(&project_id).expect("workspace");
+
+        let (prompt, _, _, attachments) = processor
+            .build_turn_prompt(
+                &project_id,
+                &job,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect("turn prompt");
+
+        let folder = workspace
+            .join(".instafy/attachments")
+            .join(conversation_id.to_string());
+        assert_eq!(
+            fs::read(folder.join(name)).expect("downloaded"),
+            b"png bytes"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: photo.png, mimeType: image/png)\n"
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("not available in this workspace:\n- elsewhere.png\n"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains(&other_conversation_id.to_string()),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("token=signed"), "{prompt}");
+
+        drop(attachments);
+        assert!(!folder.exists(), "the downloads outlived the turn");
+    }
+
+    /// A leased batch is one conversation's jobs, which may run one after
+    /// another. Its hold keeps their attachments folder between them, so a
+    /// later job reuses an earlier job's download even when its own signed URL
+    /// no longer works; the folder goes when the batch is done.
+    #[tokio::test]
+    async fn a_batch_keeps_its_conversations_attachments_until_it_is_done() {
+        let app = axum::Router::new()
+            .route(
+                "/object/photo",
+                axum::routing::get(|| async { "png bytes" }),
+            )
+            .route(
+                "/object/expired",
+                axum::routing::get(|| async { axum::http::StatusCode::BAD_REQUEST }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        let prompt_text = "Compare the photo with the plan.";
+        let job = |object: &str| {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({
+                    "prompt_text": prompt_text,
+                    "metadata": { "attachments": [{
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+                        "fileName": "photo.png"
+                    }]},
+                    "attachment_downloads": [{
+                        "name": name,
+                        "url": format!("{base}/object/{object}?token=signed")
+                    }]
+                }),
+            );
+            job.project_id = Some(project_id);
+            job.conversation_id = Some(conversation_id);
+            job
+        };
+        let (first, second) = (job("photo"), job("expired"));
+        let workspace = processor.prepare_workspace(&project_id).expect("workspace");
+        let folder = workspace
+            .join(".instafy/attachments")
+            .join(conversation_id.to_string());
+
+        let batch = processor
+            .hold_batch_attachments(&[first.clone(), second.clone()])
+            .expect("a batch of one conversation is held");
+        let (_, _, _, turn) = processor
+            .build_turn_prompt(
+                &project_id,
+                &first,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect("first prompt");
+        drop(turn);
+        assert_eq!(
+            fs::read(folder.join(name)).expect("kept for the batch"),
+            b"png bytes"
+        );
+        let (prompt, _, _, turn) = processor
+            .build_turn_prompt(
+                &project_id,
+                &second,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .expect("second prompt");
+        assert!(
+            prompt.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: photo.png)\n"
+            )),
+            "{prompt}"
+        );
+        drop(turn);
+        drop(batch);
+        assert!(!folder.exists(), "the downloads outlived the batch");
+
+        // Nothing is held for one job, or for jobs of two conversations.
+        let mut elsewhere = job("photo");
+        elsewhere.conversation_id = Some(Uuid::new_v4());
+        assert!(
+            processor
+                .hold_batch_attachments(std::slice::from_ref(&first))
+                .is_none()
+        );
+        assert!(
+            processor
+                .hold_batch_attachments(&[first, elsewhere])
+                .is_none()
+        );
     }
 
     #[test]
@@ -16932,7 +17723,7 @@ mod tests {
     }
 
     #[test]
-    fn negated_instafy_git_sync_command_does_not_override_preference() {
+    fn a_disabled_auto_save_preference_is_ignored() {
         let value = json!({
             "git": {
                 "autoSyncAfterApply": false
@@ -16940,10 +17731,211 @@ mod tests {
         });
         let prompt = "Do NOT use `instafy git sync` for this conflict-resolution path.";
 
+        // `false` no longer keeps a turn's changes out of saved history: the
+        // runtime default (save) applies.
         assert_eq!(
             resolve_auto_sync_after_apply_override(Some(&value), prompt),
-            Some(false)
+            None
         );
+        assert_eq!(
+            resolve_auto_sync_after_apply_override(Some(&value), ""),
+            None
+        );
+        let nested = json!({
+            "promptMetadata": { "git": { "auto_sync_after_apply": "0" } }
+        });
+        assert_eq!(
+            resolve_auto_sync_after_apply_override(Some(&nested), ""),
+            None
+        );
+        let enabled = json!({ "git": { "autoSyncAfterApply": true } });
+        assert_eq!(
+            resolve_auto_sync_after_apply_override(Some(&enabled), ""),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_checkpoint_saves_reported_paths_plus_the_turns_status_delta() {
+        use workspace_change_detection::GitStatusEntry;
+        let entry = |code: &str, fingerprint: &str| {
+            GitStatusEntry::new(code, Some(fingerprint.to_string()))
+        };
+        let before = HashMap::from([
+            ("dirty-before.md".to_string(), entry(" M", "a")),
+            ("touched-again.md".to_string(), entry(" M", "a")),
+        ]);
+        let after = HashMap::from([
+            ("dirty-before.md".to_string(), entry(" M", "a")),
+            ("touched-again.md".to_string(), entry(" M", "b")),
+            ("reported.rs".to_string(), entry("??", "c")),
+            ("package-lock.json".to_string(), entry(" M", "d")),
+            ("removed.txt".to_string(), entry(" D", "")),
+            (".env".to_string(), entry("??", "e")),
+            ("id_rsa".to_string(), entry("??", "f")),
+            ("node_modules/x/index.js".to_string(), entry("??", "g")),
+            (".instafy/state.json".to_string(), entry("??", "h")),
+            ("chat-upload-1.png".to_string(), entry("??", "i")),
+        ]);
+        let reported = vec![CodexFileDescriptor {
+            path: "reported.rs".to_string(),
+            workspace_path: "reported.rs".to_string(),
+            label: None,
+            description: None,
+            mime_type: None,
+            content: None,
+            content_base64: None,
+            change: FileChangeDescriptor::parse(json!({ "type": "created" })),
+        }];
+
+        let extra = status_delta_files_for_checkpoint(&before, &after, &reported);
+        let mut paths = extra
+            .iter()
+            .map(|file| file.workspace_path.as_str())
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["package-lock.json", "removed.txt", "touched-again.md"]
+        );
+        let removed = extra
+            .iter()
+            .find(|file| file.workspace_path == "removed.txt")
+            .unwrap();
+        assert!(matches!(
+            removed.change.as_ref().map(|change| &change.kind),
+            Some(FileChangeKind::Deleted)
+        ));
+    }
+
+    fn test_origin_settings(git_remote_url: Option<&str>) -> crate::config::OriginSettings {
+        crate::config::OriginSettings {
+            origin_id: Uuid::new_v4(),
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            git_remote_url: git_remote_url.map(str::to_string),
+            git_branch: "main".to_string(),
+            git_remote_name: "origin".to_string(),
+            git_author_name: "Instafy Origin".to_string(),
+            git_author_email: "origin@instafy.dev".to_string(),
+            rathole_bin: "rathole".to_string(),
+            rathole_state_dir: PathBuf::from("/nonexistent"),
+            rathole_use_subcommands: false,
+            tunnel_refresh_margin: Duration::from_secs(60),
+            controller_internal_token: None,
+            skip_auth: false,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(60),
+            jwks_url: reqwest::Url::parse("http://127.0.0.1:9/.well-known/jwks.json").unwrap(),
+            max_archive_bytes: 1024,
+            staging_root: None,
+            endpoint: None,
+            protocols: vec!["http".to_string()],
+            region: None,
+            device_id: None,
+            metadata: None,
+            mode: "hosted".to_string(),
+            tunnel_enabled: false,
+            tunnel_provider: None,
+            tunnel_hostname: None,
+            tunnel_url: None,
+            tunnel_id: None,
+            tunnel_status: None,
+            tunnel_expires_at: None,
+            tunnel_last_rotation_at: None,
+        }
+    }
+
+    /// The refresh runs before a turn, before the scaffold writes anything
+    /// into the checkout, and without a workspace lease it falls back to the
+    /// origin's read-only refresh.
+    #[test]
+    fn a_turn_refreshes_the_checkout_before_the_scaffold_with_a_read_only_fallback() {
+        // `run_apply_job` needs a runtime-sized stack, as in production.
+        const STACK_SIZE: usize = 32 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .thread_stack_size(STACK_SIZE)
+                    .build()
+                    .unwrap()
+                    .block_on(turn_refreshes_before_the_scaffold())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn turn_refreshes_before_the_scaffold() {
+        let tmp = tempdir().expect("temp dir");
+        let base = test_job_processor(tmp.path());
+        let mut config = (*base.config).clone();
+        config.origin = Some(test_origin_settings(Some("http://127.0.0.1:9/project.git")));
+        let processor = JobProcessor::new(Arc::new(config.clone()));
+        let job = test_lease_job(None, json!({ "prompt_text": "/mcp list" }));
+        let workspace = config.project_workspace_dir(&job.project_id.unwrap());
+
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
+        let observed = Arc::clone(&calls);
+        let scaffold = workspace.join(learn::INSTAFY_FILENAME);
+        processor.set_local_origin_sync(Some(LocalOriginSync {
+            origin_id: Uuid::new_v4(),
+            endpoint: "http://127.0.0.1:9".to_string(),
+            read_only_refresh: Some(crate::origin::ReadOnlyRefresh::new(move || {
+                let observed = Arc::clone(&observed);
+                let scaffold = scaffold.clone();
+                async move {
+                    observed.lock().unwrap().push(scaffold.exists());
+                    Ok(json!({ "rev": "main", "checkoutMoved": true }))
+                }
+            })),
+        }));
+
+        let execution = processor
+            .run_apply_job(
+                &test_registration_with_proxy(),
+                &job,
+                true,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("the mcp lane finishes");
+        assert_eq!(execution.provider, "mcp");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![false],
+            "refreshed once, before the scaffold existed"
+        );
+        assert!(workspace.join(learn::INSTAFY_FILENAME).exists());
+
+        // `/sync` publishes on its own; jobs that do not commit never refresh.
+        let sync = test_lease_job(None, json!({ "prompt_text": "/sync" }));
+        let _ = processor
+            .run_apply_job(
+                &test_registration_with_proxy(),
+                &sync,
+                true,
+                None,
+                None,
+                None,
+            )
+            .await;
+        let _ = processor
+            .run_apply_job(
+                &test_registration_with_proxy(),
+                &job,
+                false,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -19052,9 +20044,11 @@ mod tests {
         let prompt_tokens = estimate_prompt_token_count(&prompt_text);
         // The budget was 1,350 with the path included. The secret-rejection
         // block added about 100 tokens, because follow-up turns are where a
-        // rejected value gets reported. Raise it again only on purpose.
+        // rejected value gets reported. The shared chat-reference contract adds
+        // up to 125 tokens, including for threads begun before a runtime upgrade.
+        // Raise it again only on purpose.
         assert!(
-            prompt_tokens < 1_425,
+            prompt_tokens < 1_550,
             "compact restored prompt was unexpectedly large: {prompt_tokens} estimated tokens, {} chars without the workspace path",
             prompt_text.len()
         );
@@ -19266,6 +20260,103 @@ mod tests {
             response_contract_tokens < 650,
             "planning response contract should stay compact, got {response_contract_tokens}"
         );
+    }
+
+    #[test]
+    fn ordinary_reply_prompts_share_readable_chat_references_across_lanes() {
+        // A short reply to an ordinary chat must get the format contract even
+        // without a review skill in the workspace or in the selected skills.
+        // Restored provider threads must receive it again after a runtime upgrade.
+        for lane in ["full", "restored", "cross_chat", "write"] {
+            let tmp = tempdir().expect("temp dir");
+            let processor = test_job_processor(tmp.path());
+            let project_id = Uuid::new_v4();
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({
+                    "metadata": {},
+                    "conversation_history": [{
+                        "role": "assistant",
+                        "content": "We can resume the workshop invitation draft using [[conversation:00000000-0000-4000-8000-000000000001|Workshop planning]]."
+                    }]
+                }),
+            );
+            job.project_id = Some(project_id);
+            if lane == "cross_chat" {
+                job = job_with_agent_routing_preflight(
+                    &job,
+                    &test_agent_routing_preflight(
+                        AgentRoutingPreflightRoute::CrossChatLookup,
+                        true,
+                        false,
+                    ),
+                );
+            } else if lane == "write" {
+                job.payload["metadata"]["runtimeExpectations"] =
+                    json!({"workspaceFileChanges": true});
+            }
+            let provider_state = json!({
+                "defaultThreadId": "existing-thread-before-upgrade",
+                "historyReplayRequired": false
+            });
+            let (prompt, _, metrics) = processor
+                .build_prompt_with_text(
+                    &project_id,
+                    &job,
+                    tmp.path(),
+                    "yes",
+                    true,
+                    (lane == "restored").then_some(&provider_state),
+                    &[],
+                    None,
+                    None,
+                )
+                .expect("prompt should build");
+
+            assert_eq!(
+                prompt.matches("Chat references in replies:").count(),
+                1,
+                "{lane}"
+            );
+            assert!(prompt.contains("source's observed title"), "{lane}");
+            assert!(
+                prompt.contains("[[conversation:<id>|<actual chat title>]]"),
+                "{lane}"
+            );
+            assert!(prompt.contains("outside code formatting"), "{lane}");
+            assert!(
+                prompt.contains("only when the user explicitly asks for technical identifiers"),
+                "{lane}"
+            );
+            assert!(
+                prompt.contains("Keep IDs in link targets, tool arguments and API fields"),
+                "{lane}"
+            );
+            assert!(prompt.contains("Latest user request:\nyes"), "{lane}");
+            assert!(
+                metrics["promptSections"]["chatReferences"]["chars"]
+                    .as_u64()
+                    .unwrap()
+                    > 0,
+                "{lane}"
+            );
+            assert!(
+                metrics["promptSections"]["chatReferences"]["estimatedTokens"]
+                    .as_u64()
+                    .unwrap()
+                    <= 125,
+                "{lane}"
+            );
+            assert!(!prompt.contains("# Space review"), "{lane}");
+            match lane {
+                "restored" => assert_eq!(metrics["promptMode"], "stateful_compact"),
+                "cross_chat" => {
+                    assert!(prompt.contains("Cross-chat context recovery response contract"))
+                }
+                "write" => assert!(prompt.contains("Direct workspace-change response contract")),
+                _ => assert!(prompt.contains("Please follow these constraints")),
+            }
+        }
     }
 
     #[test]

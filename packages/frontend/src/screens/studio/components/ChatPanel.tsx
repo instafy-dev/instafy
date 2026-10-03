@@ -29,7 +29,6 @@ import {
 } from "../../../utils/floatingSurfacePosition";
 import { ChatGettingStartedCard } from "./ChatGettingStartedCard";
 import { ConnectSheet } from "./ConnectSheet";
-import { SpaceReviewDialog } from "./SpaceReviewDialog";
 import { SkillsImportModal } from "./SkillsImportModal";
 import type { Connector, SkillConnector } from "./connectors";
 import { routeConnectorSelection } from "./connectorRouting";
@@ -547,7 +546,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     capturedAt: number;
   } | null>(null);
   const [composerInlineCompletion, setComposerInlineCompletion] = useState<string | null>(null);
-  const [spaceReviewOpen, setSpaceReviewOpen] = useState(false);
   useLayoutEffect(() => {
     latestInputValueRef.current = inputValue;
   }, [inputValue]);
@@ -6048,15 +6046,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
-      {spaceReviewOpen && activeProjectId ? (
-        <SpaceReviewDialog
-          key={`${activeProjectId}:${currentUserId ?? "anonymous"}`}
-          projectId={activeProjectId}
-          canWrite={projectCapabilitiesResolved === true && canWriteProject === true}
-          onClose={() => setSpaceReviewOpen(false)}
-        />
-      ) : null}
-
       <ChatComposerSurface
         viewNavigation={hasComposerViewNavigation ? conversationWorkspace ? <ConversationWorkspaceViews placement="composer" /> : <ConversationSurfaceTabs
           presentation="composer" chatPanelId={chatPanelId} resources={resourceTabs}
@@ -6192,7 +6181,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onBrowseConnectors: openConnectBrowse,
           installedSkillNames: installedSkills.names,
           onInsertCommand: handleInsertSlashCommand,
-          onOpenSpaceReview: activeProjectId ? () => setSpaceReviewOpen(true) : undefined,
           onQueueMessage: () => {
             void invokeSubmitMessage(undefined, { intent: "queue" });
           },

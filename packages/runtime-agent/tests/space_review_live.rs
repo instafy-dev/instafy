@@ -28,10 +28,18 @@ struct Fixture {
     minimum_new: usize,
     #[serde(default = "maximum_new")]
     maximum_new: usize,
+    #[serde(default)]
+    minimum_delivered: usize,
+    #[serde(default = "maximum_delivered")]
+    maximum_delivered: usize,
 }
 
 fn maximum_new() -> usize {
-    3
+    1
+}
+
+fn maximum_delivered() -> usize {
+    1
 }
 
 struct Environment(Vec<(String, Option<std::ffi::OsString>)>);
@@ -143,6 +151,35 @@ fn has_model_turn(artifacts: &[Value]) -> bool {
                 })
             })
     })
+}
+
+// Count delivery transitions, including legacy proposals delivered for the first time.
+// A retry of an already delivered key must not count as another conversation.
+fn verify_delivery_changes(before: &[Value], after: &[Value]) -> Result<usize> {
+    for previous in before.iter().filter(|item| {
+        item["delivered"] == true
+            || matches!(item["status"].as_str(), Some("accepted" | "dismissed"))
+    }) {
+        ensure!(
+            after.iter().any(|item| item == previous),
+            "an earlier delivered or terminal recommendation changed"
+        );
+    }
+    for item in after {
+        ensure!(
+            item["deliveredConversationId"].is_null(),
+            "a scoped review response exposed a delivery conversation ID"
+        );
+    }
+    Ok(after
+        .iter()
+        .filter(|item| {
+            item["delivered"] == true
+                && !before
+                    .iter()
+                    .any(|previous| previous["id"] == item["id"] && previous["delivered"] == true)
+        })
+        .count())
 }
 
 fn workspace_inventory(root: &Path, directory: &Path, entries: &mut Vec<Value>) -> Result<()> {
@@ -448,15 +485,19 @@ async fn run_space_review_live() -> Result<()> {
         report["liveModelTurnVerified"] == true,
         "live review did not prove a codex-embedded model turn with positive token usage"
     );
-    for previous in before
-        .iter()
-        .filter(|item| matches!(item["status"].as_str(), Some("accepted" | "dismissed")))
-    {
-        ensure!(
-            after.iter().any(|item| item == previous),
-            "an earlier terminal recommendation changed"
-        );
-    }
+    ensure!(
+        report["suggestedReplies"]
+            .as_array()
+            .is_some_and(|replies| replies.is_empty()),
+        "space review emitted competing suggested replies"
+    );
+    let delivered_count = verify_delivery_changes(&before, &after)?;
+    ensure!(
+        (fixture.minimum_delivered..=fixture.maximum_delivered).contains(&delivered_count),
+        "expected {}..={} new deliveries, observed {delivered_count}; inspect private report",
+        fixture.minimum_delivered,
+        fixture.maximum_delivered
+    );
     let new_count = after
         .iter()
         .filter(|item| !before.iter().any(|previous| previous["id"] == item["id"]))
@@ -468,7 +509,7 @@ async fn run_space_review_live() -> Result<()> {
         fixture.maximum_new
     );
     println!(
-        "live review completed through Instafy proxy: model={model}, new_recommendations={new_count}"
+        "live review completed through Instafy proxy: model={model}, new_recommendations={new_count}, new_deliveries={delivered_count}"
     );
     Ok(())
 }
@@ -485,4 +526,48 @@ fn model_turn_evidence_requires_completed_nonzero_usage() {
     assert!(has_model_turn(&[
         json!({"kind":"codex/run-log","events":[{"type":"turn.completed","usage":{"total_tokens":12}}]})
     ]));
+}
+
+#[test]
+fn delivery_check_counts_new_delivery_and_legacy_transition_but_not_retries() -> Result<()> {
+    let existing =
+        json!({"id":"first","status":"proposed","delivered":true,"deliveredConversationId":null});
+    let legacy = json!({"id":"legacy","status":"proposed","delivered":false});
+    let delivered_legacy =
+        json!({"id":"legacy","status":"proposed","delivered":true,"deliveredConversationId":null});
+    let fresh =
+        json!({"id":"new","status":"proposed","delivered":true,"deliveredConversationId":null});
+    assert_eq!(
+        verify_delivery_changes(
+            std::slice::from_ref(&existing),
+            std::slice::from_ref(&existing)
+        )?,
+        0
+    );
+    assert_eq!(
+        verify_delivery_changes(
+            &[existing.clone(), legacy],
+            &[existing, delivered_legacy, fresh]
+        )?,
+        2
+    );
+    Ok(())
+}
+
+#[test]
+fn delivery_check_rejects_private_ids_and_changed_prior_choices() {
+    let original =
+        json!({"id":"first","status":"proposed","delivered":true,"deliveredConversationId":null});
+    let mut changed = original.clone();
+    changed["deliveredConversationId"] = json!(Uuid::new_v4());
+    assert!(verify_delivery_changes(&[], &[changed]).is_err());
+    for status in ["proposed", "accepted", "dismissed"] {
+        let mut previous = original.clone();
+        previous["status"] = json!(status);
+        previous["delivered"] = json!(status == "proposed");
+        let mut changed = previous.clone();
+        changed["title"] = json!("Resurfaced");
+        assert!(verify_delivery_changes(std::slice::from_ref(&previous), &[changed]).is_err());
+        assert!(verify_delivery_changes(&[previous], &[]).is_err());
+    }
 }
