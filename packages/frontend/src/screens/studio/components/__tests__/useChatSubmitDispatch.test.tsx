@@ -4,6 +4,7 @@ import { act, type MutableRefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatSubmitDispatch } from "../useChatSubmitDispatch";
+import { ChatAttachmentUploadError } from "../../../../lib/chatAttachments";
 
 type HookOptions = Parameters<typeof useChatSubmitDispatch>[0];
 type HookResult = ReturnType<typeof useChatSubmitDispatch>;
@@ -129,5 +130,92 @@ describe("useChatSubmitDispatch", () => {
     // The send still counts as in flight while it goes out.
     expect(options.setSendingAttachment).toHaveBeenNthCalledWith(1, true);
     expect(options.setSendingAttachment).toHaveBeenLastCalledWith(false);
+  });
+
+  describe("when an attachment upload fails", () => {
+    const image = new File(["png"], "shot.png", { type: "image/png" });
+    function optionsFor(overrides: Partial<HookOptions> = {}): HookOptions {
+      return {
+        activeConversationId: "conversation-1",
+        clearInputEditor: vi.fn(),
+        clearImageAttachments: vi.fn(),
+        focusInput: vi.fn(),
+        isChatInputFocused: vi.fn(() => false),
+        latestInputValueRef: { current: "What is in this screenshot?" },
+        mentionableAgentHandles: ["octo"],
+        onInputChange: vi.fn(),
+        onSubmit: vi.fn(async () => {
+          throw new ChatAttachmentUploadError("Couldn't reach storage. Check your connection and try again.");
+        }),
+        scrollToBottom: vi.fn(),
+        setSendingAttachment: vi.fn(),
+        shouldAutoScrollRef: { current: false },
+        ...overrides,
+      };
+    }
+    async function submitWith(options: HookOptions) {
+      const resultRef: MutableRefObject<HookResult | null> = { current: null };
+      await act(async () => {
+        root.render(<Harness options={options} resultRef={resultRef} />);
+      });
+      await act(async () => {
+        await resultRef.current?.performSubmit({
+          message: "What is in this screenshot?",
+          editorState: "{\"root\":{}}",
+          imageFiles: [image],
+        });
+      });
+    }
+
+    it("puts the unsent text back in the composer and keeps the staged images", async () => {
+      const options = optionsFor();
+      await submitWith(options);
+      const latestInputValueRef = options.latestInputValueRef;
+
+      // The composer was cleared for the send, then given the draft back.
+      expect(options.onInputChange).toHaveBeenNthCalledWith(1, "conversation-1", "", null);
+      expect(options.onInputChange).toHaveBeenLastCalledWith(
+        "conversation-1",
+        "What is in this screenshot?",
+        "{\"root\":{}}",
+      );
+      expect(latestInputValueRef.current).toBe("What is in this screenshot?");
+      expect(options.clearImageAttachments).not.toHaveBeenCalled();
+      expect(options.setSendingAttachment).toHaveBeenLastCalledWith(false);
+    });
+
+    it("keeps text typed during the upload below the restored draft", async () => {
+      const latestInputValueRef = { current: "What is in this screenshot?" };
+      const options = optionsFor({
+        latestInputValueRef,
+        onSubmit: vi.fn(async () => {
+          latestInputValueRef.current = "and one more thing";
+          throw new ChatAttachmentUploadError("Attachments must be 20 MB or smaller.");
+        }),
+      });
+      await submitWith(options);
+      expect(latestInputValueRef.current).toBe("What is in this screenshot?\n\nand one more thing");
+      expect(options.onInputChange).toHaveBeenLastCalledWith(
+        "conversation-1",
+        "What is in this screenshot?\n\nand one more thing",
+        null,
+      );
+    });
+
+    it("leaves other failures to their callers", async () => {
+      const options = optionsFor({
+        onSubmit: vi.fn(async () => {
+          throw new Error("browser task was not dispatched");
+        }),
+      });
+      const resultRef: MutableRefObject<HookResult | null> = { current: null };
+      await act(async () => {
+        root.render(<Harness options={options} resultRef={resultRef} />);
+      });
+      await expect(
+        resultRef.current!.performSubmit({ message: "hi", editorState: null, imageFiles: [] }),
+      ).rejects.toThrow("browser task was not dispatched");
+      expect(options.setSendingAttachment).toHaveBeenLastCalledWith(false);
+    });
   });
 });

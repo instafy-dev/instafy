@@ -27,6 +27,7 @@ describe("resolveProjectCapabilities", () => {
       canWrite: false,
       canShare: false,
       canManage: false,
+      chatAttachments: null,
     });
   });
 
@@ -47,6 +48,7 @@ describe("resolveProjectCapabilities", () => {
       canWrite: true,
       canShare: false,
       canManage: false,
+      chatAttachments: null,
     });
   });
 
@@ -61,7 +63,22 @@ describe("resolveProjectCapabilities", () => {
       canWrite: true,
       canShare: true,
       canManage: true,
+      chatAttachments: null,
     });
+  });
+
+  it("reads whether chat attachments can be stored, and nothing else", () => {
+    const resolve = (attachments: unknown) =>
+      resolveProjectCapabilities(
+        { ...baseSummary, effectiveRole: "builder", attachments: attachments as string },
+        "builder-1",
+      )?.chatAttachments;
+    expect(resolve("storage")).toBe("storage");
+    expect(resolve("none")).toBe("none");
+    expect(resolve(" NONE ")).toBe("none");
+    // An older controller says nothing, and an unknown answer is not "none".
+    expect(resolve(undefined)).toBeNull();
+    expect(resolve("s3")).toBeNull();
   });
 
   it("does not guess access from an old response for a non-owner", () => {

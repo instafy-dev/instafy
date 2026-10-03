@@ -1,7 +1,11 @@
-import { controllerClient } from "../sdk/instafy";
+import {
+  ChatAttachmentUploadError,
+  describeChatAttachmentUploadError,
+  removeChatAttachments,
+  uploadChatAttachment,
+  type ChatStorageAttachment,
+} from "../lib/chatAttachments";
 import type { ChatMessage } from "../screens/studio/types";
-
-const { applyChanges: applyWorkspaceChangesViaOrigin } = controllerClient.workspace.origin;
 
 export function detectClientTimezone(): string {
   try {
@@ -104,57 +108,6 @@ export function sanitizeChatUploadFileName(rawName: string): string {
   return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
 }
 
-export function mimeTypeToExtension(mimeType: string): string {
-  const normalized = (mimeType ?? "").trim().toLowerCase();
-  switch (normalized) {
-    case "image/jpeg":
-      return "jpg";
-    case "image/png":
-      return "png";
-    case "image/webp":
-      return "webp";
-    case "image/gif":
-      return "gif";
-    case "image/svg+xml":
-      return "svg";
-    default:
-      return "img";
-  }
-}
-
-export function shouldRetryChatImageUploadError(message: string): boolean {
-  const lower = (message ?? "").toLowerCase();
-  if (
-    lower.includes("failed to fetch") ||
-    lower.includes("networkerror") ||
-    lower.includes("load failed") ||
-    lower.includes("gateway timeout") ||
-    lower.includes("timed out") ||
-    lower.includes("timeout") ||
-    lower.includes("aborterror")
-  ) {
-    return true;
-  }
-  const match = lower.match(/origin apply failed \((\d+)\)/);
-  if (match) {
-    const status = Number(match[1]);
-    if (status === 408 || status === 429 || (status >= 500 && status <= 599)) {
-      return true;
-    }
-  }
-  return (
-    lower.includes("no origin available") ||
-    lower.includes("origin is offline") ||
-    lower.includes("failed to obtain origin token") ||
-    lower.includes("project lock acquisition failed") ||
-    lower.includes("project lock renewal failed") ||
-    lower.includes("workspace lease acquisition failed") ||
-    lower.includes("workspace lease renewal failed") ||
-    lower.includes("runtime is unavailable") ||
-    lower.includes("runtime_not_ready")
-  );
-}
-
 export function resolveSubmittedImageFiles(imageFile?: File | null, imageFiles?: File[]) {
   const provided = Array.isArray(imageFiles)
     ? imageFiles.filter((file): file is File => file instanceof File)
@@ -190,81 +143,41 @@ export function patchConversationMessageMetadata(
   });
 }
 
-export async function uploadConversationImageAttachments(args: {
+/**
+ * Stores a message's attachments in its conversation's Storage folder with the
+ * person's session and returns their message metadata, in order. The
+ * conversation must already exist on the controller. When any upload fails,
+ * the ones that succeeded are removed again and a ChatAttachmentUploadError
+ * with plain copy is thrown, so a message is sent with all of its attachments
+ * or not at all.
+ */
+export async function uploadConversationAttachments(args: {
   projectId: string;
-  runtimeId: string | null;
-  imageFiles: File[];
-}) {
-  const { projectId, runtimeId, imageFiles } = args;
-  const attachments: Array<{
-    kind: "image";
-    workspacePath: string;
-    fileName: string;
-    mimeType: string | null;
-    sizeBytes: number;
-  }> = [];
-
-  for (const imageFile of imageFiles) {
-    const safeName = sanitizeChatUploadFileName(imageFile.name || "image");
-    const ext = safeName.includes(".") ? "" : mimeTypeToExtension(imageFile.type);
-    const fileName = ext ? `${safeName}.${ext}` : safeName;
-    const uploadId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const workspacePath = `chat-upload-${Date.now()}-${uploadId}-${fileName}`;
-
-    const bytes = new Uint8Array(await imageFile.arrayBuffer());
-    const uploadDeadline = Date.now() + 60_000;
-    let uploadAttempt = 0;
-    let result = await applyWorkspaceChangesViaOrigin({
-      projectId,
-      files: [
-        {
-          path: workspacePath,
-          bytes,
-          encoding: "binary",
-        },
-      ],
-      deletes: [],
-      runtimeId,
-      preferRuntime: runtimeId,
-      accessToken: null,
-    });
-    while (!result.ok && Date.now() < uploadDeadline) {
-      const errorMessage = result.error ?? "Failed to upload image.";
-      if (!shouldRetryChatImageUploadError(errorMessage)) {
-        break;
-      }
-      uploadAttempt += 1;
-      await sleep(Math.min(500 * uploadAttempt, 2_000));
-      result = await applyWorkspaceChangesViaOrigin({
+  conversationId: string;
+  files: File[];
+}): Promise<ChatStorageAttachment[]> {
+  const { projectId, conversationId, files } = args;
+  const results = await Promise.allSettled(
+    files.map((file) =>
+      uploadChatAttachment({
         projectId,
-        files: [
-          {
-            path: workspacePath,
-            bytes,
-            encoding: "binary",
-          },
-        ],
-        deletes: [],
-        runtimeId,
-        preferRuntime: runtimeId,
-        accessToken: null,
-      });
-    }
-    if (!result.ok) {
-      throw new Error(result.error ?? "Failed to upload image.");
-    }
-
-    attachments.push({
-      kind: "image",
-      workspacePath,
-      fileName,
-      mimeType: imageFile.type || null,
-      sizeBytes: imageFile.size,
-    });
+        conversationId,
+        file,
+        fileName: sanitizeChatUploadFileName(file.name || "attachment"),
+      }),
+    ),
+  );
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) {
+    await removeChatAttachments(
+      results.flatMap((result) => (result.status === "fulfilled" ? [result.value.storagePath] : [])),
+    );
+    const reason: unknown = failure.reason;
+    throw reason instanceof ChatAttachmentUploadError
+      ? reason
+      : new ChatAttachmentUploadError(describeChatAttachmentUploadError(reason), { cause: reason });
   }
-
-  return attachments;
+  return results.map((result) => (result as PromiseFulfilledResult<ChatStorageAttachment>).value);
 }

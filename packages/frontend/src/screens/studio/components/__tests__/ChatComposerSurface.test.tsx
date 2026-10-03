@@ -24,6 +24,7 @@ vi.mock("../ComposerActionMenu", () => ({
     <div
       data-testid="mock-composer-action-menu"
       data-upload-image={String(typeof props.onUploadImage === "function")}
+      data-upload-image-unavailable={String(props.uploadImageUnavailableReason ?? "")}
       data-insert-suggestion={String(typeof props.onInsertSuggestion === "function")}
       data-trigger-class={String(props.triggerClassName ?? "")}
       data-trigger-icon-class={String(props.triggerIconClassName ?? "")}
@@ -446,6 +447,19 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-image-upload-input"]')).not.toBeNull();
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mock-menu-upload-image"]')?.click());
     expect(onOpenImagePicker).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers only the image types Storage takes, and turns uploads off when it can't store them", async () => {
+    await act(async () => renderLayout());
+    const input = container.querySelector<HTMLInputElement>('[data-testid="chat-image-upload-input"]');
+    expect(input?.accept).toBe("image/png,image/jpeg,image/webp,image/gif");
+    expect(input?.disabled).toBe(false);
+
+    await act(async () => renderLayout({ imageUploadUnavailableReason: "This server can't store attachments." }));
+    const menu = layoutNodes().menu;
+    expect(menu?.getAttribute("data-upload-image-unavailable")).toBe("This server can't store attachments.");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="mock-menu-upload-image"]')?.disabled).toBe(true);
+    expect(container.querySelector<HTMLInputElement>('[data-testid="chat-image-upload-input"]')?.disabled).toBe(true);
   });
 
   it("owns the chat safe area and retains composer controls across keyboard transitions", async () => {

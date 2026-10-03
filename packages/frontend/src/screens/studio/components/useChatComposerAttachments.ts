@@ -9,6 +9,12 @@ import {
   type DragEvent,
 } from "react";
 import type { StatusIntent } from "../../../status/useStatus";
+import {
+  CHAT_ATTACHMENT_SIZE_REQUIREMENT,
+  CHAT_IMAGE_TYPE_REQUIREMENT,
+  chatAttachmentFileProblem,
+  isChatImageMimeType,
+} from "../../../lib/chatAttachments";
 
 export type PendingChatImageAttachment = {
   id: string;
@@ -27,16 +33,25 @@ function revokePreviewUrl(previewUrl: string) {
   }
 }
 
+// A pasted image is taken over from the editor even when its type is one the
+// bucket refuses, so the person hears why it was not added instead of nothing.
+function isImageLike(type: string | null | undefined): boolean {
+  return (type ?? "").trim().toLowerCase().startsWith("image/");
+}
+
 export function useChatComposerAttachments({
   draftKey,
   isInputLocked,
   showStatus,
   onAttachmentsAdded,
+  unavailableReason = null,
 }: {
   draftKey: string;
   isInputLocked: () => boolean;
   showStatus: ShowStatus;
   onAttachmentsAdded?: () => void;
+  /** Set when this server cannot store attachments; paste and drop say it. */
+  unavailableReason?: string | null;
 }) {
   const attachmentDraftsRef = useRef(new Map<string, PendingChatImageAttachment[]>());
   const [attachmentDrafts, setAttachmentDrafts] = useState(attachmentDraftsRef.current);
@@ -91,18 +106,30 @@ export function useChatComposerAttachments({
 
   const attachImageFiles = useCallback(
     (files: File[]) => {
-      const maxBytes = 5 * 1024 * 1024;
+      if (files.length === 0) {
+        return;
+      }
+      if (unavailableReason) {
+        showStatus(unavailableReason, "info", 4000);
+        return;
+      }
       const nextAttachments: PendingChatImageAttachment[] = [];
-      let hasNonImage = false;
+      let hasUnsupported = false;
       let hasTooLarge = false;
+      let hasEmpty = false;
 
       for (const file of files) {
-        if (!file.type || !file.type.startsWith("image/")) {
-          hasNonImage = true;
+        const problem = isChatImageMimeType(file.type) ? chatAttachmentFileProblem(file) : "type";
+        if (problem === "type") {
+          hasUnsupported = true;
           continue;
         }
-        if (file.size > maxBytes) {
+        if (problem === "size") {
           hasTooLarge = true;
+          continue;
+        }
+        if (problem === "empty") {
+          hasEmpty = true;
           continue;
         }
         const id =
@@ -116,11 +143,14 @@ export function useChatComposerAttachments({
         });
       }
 
-      if (hasNonImage) {
-        showStatus("Skipped non-image files.", "info", 3000);
+      if (hasUnsupported) {
+        showStatus(CHAT_IMAGE_TYPE_REQUIREMENT, "info", 4000);
       }
       if (hasTooLarge) {
-        showStatus("Skipped image(s) larger than 5MB.", "error", 4000);
+        showStatus(CHAT_ATTACHMENT_SIZE_REQUIREMENT, "error", 4000);
+      }
+      if (hasEmpty) {
+        showStatus("Empty files weren't added.", "info", 3000);
       }
       if (nextAttachments.length === 0) {
         return;
@@ -129,7 +159,7 @@ export function useChatComposerAttachments({
       onAttachmentsAdded?.();
       setImageAttachments((previous) => [...previous, ...nextAttachments]);
     },
-    [onAttachmentsAdded, setImageAttachments, showStatus],
+    [onAttachmentsAdded, setImageAttachments, showStatus, unavailableReason],
   );
 
   const handleImageInputChange = useCallback(
@@ -154,10 +184,10 @@ export function useChatComposerAttachments({
       event.preventDefault();
 
       const items = Array.from(dataTransfer.items ?? []);
-      const hasImage = items.some((item) => item.kind === "file" && item.type.startsWith("image/"));
-      dataTransfer.dropEffect = !isInputLocked() && hasImage ? "copy" : "none";
+      const hasImage = items.some((item) => item.kind === "file" && isImageLike(item.type));
+      dataTransfer.dropEffect = !isInputLocked() && !unavailableReason && hasImage ? "copy" : "none";
     },
-    [isInputLocked],
+    [isInputLocked, unavailableReason],
   );
 
   const handleComposerDrop = useCallback(
@@ -180,15 +210,14 @@ export function useChatComposerAttachments({
         return;
       }
 
-      const images = files.filter((file) => file.type.startsWith("image/"));
-      if (images.length === 0) {
-        showStatus("Drop an image file to upload.", "error", 3500);
+      if (unavailableReason) {
+        showStatus(unavailableReason, "info", 4000);
         return;
       }
 
-      attachImageFiles(images);
+      attachImageFiles(files);
     },
-    [attachImageFiles, isInputLocked, showStatus],
+    [attachImageFiles, isInputLocked, showStatus, unavailableReason],
   );
 
   const handleComposerPaste = useCallback(
@@ -200,7 +229,7 @@ export function useChatComposerAttachments({
 
       const items = Array.from(clipboardData.items ?? []);
       const imageFiles = items
-        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .filter((item) => item.kind === "file" && isImageLike(item.type))
         .map((item) => item.getAsFile())
         .filter((file): file is File => file instanceof File);
       if (imageFiles.length === 0) {

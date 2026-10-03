@@ -1,12 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const storage = vi.hoisted(() => ({ upload: vi.fn(), remove: vi.fn() }));
+vi.mock("../../lib/supabaseClient", () => ({
+  hasSupabaseConfig: true,
+  supabase: { storage: { from: () => storage } },
+}));
 
 import type { ChatMessage } from "../../screens/studio/types";
+import { ChatAttachmentUploadError } from "../../lib/chatAttachments";
 import {
-  mimeTypeToExtension,
   patchConversationMessageMetadata,
   sanitizeChatUploadFileName,
-  shouldRetryChatImageUploadError,
+  uploadConversationAttachments,
 } from "../conversationSubmitHelpers";
+
+const PROJECT = "11111111-2222-4333-8444-555555555555";
+const CONVERSATION = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
 function createMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -27,18 +36,50 @@ describe("conversationSubmitHelpers", () => {
     expect(sanitizeChatUploadFileName("   ")).toBe("image");
   });
 
-  it("maps known mime types and falls back to a generic extension", () => {
-    expect(mimeTypeToExtension("image/jpeg")).toBe("jpg");
-    expect(mimeTypeToExtension("image/svg+xml")).toBe("svg");
-    expect(mimeTypeToExtension("application/octet-stream")).toBe("img");
-  });
+  describe("uploadConversationAttachments", () => {
+    beforeEach(() => {
+      storage.upload.mockReset().mockResolvedValue({ data: {}, error: null });
+      storage.remove.mockReset().mockResolvedValue({ data: [], error: null });
+    });
 
-  it("retries transient upload failures and ignores permanent ones", () => {
-    expect(shouldRetryChatImageUploadError("Failed to fetch")).toBe(true);
-    expect(shouldRetryChatImageUploadError("Origin apply failed (500)")).toBe(true);
-    expect(shouldRetryChatImageUploadError("runtime_not_ready")).toBe(true);
-    expect(shouldRetryChatImageUploadError("Origin apply failed (400)")).toBe(false);
-    expect(shouldRetryChatImageUploadError("unsupported file type")).toBe(false);
+    it("stores each file in the conversation's folder and keeps their order", async () => {
+      const attachments = await uploadConversationAttachments({
+        projectId: PROJECT,
+        conversationId: CONVERSATION,
+        files: [
+          new File(["a"], "first shot.png", { type: "image/png" }),
+          new File(["bb"], "base.txt", { type: "text/plain" }),
+        ],
+      });
+      expect(attachments.map(({ kind, fileName, mimeType, sizeBytes }) => ({ kind, fileName, mimeType, sizeBytes })))
+        .toEqual([
+          { kind: "image", fileName: "first-shot.png", mimeType: "image/png", sizeBytes: 1 },
+          { kind: "file", fileName: "base.txt", mimeType: "text/plain", sizeBytes: 2 },
+        ]);
+      for (const attachment of attachments) {
+        expect(attachment.storagePath.startsWith(`${PROJECT}/${CONVERSATION}/`)).toBe(true);
+      }
+      expect(storage.upload.mock.calls.map(([path]) => path)).toEqual(
+        attachments.map((attachment) => attachment.storagePath),
+      );
+    });
+
+    it("sends all of a message's attachments or none: a failure removes the stored ones", async () => {
+      storage.upload
+        .mockResolvedValueOnce({ data: {}, error: null })
+        .mockResolvedValueOnce({ data: null, error: { message: "Payload too large", status: 413, statusCode: "413" } });
+      const upload = uploadConversationAttachments({
+        projectId: PROJECT,
+        conversationId: CONVERSATION,
+        files: [
+          new File(["a"], "a.png", { type: "image/png" }),
+          new File(["b"], "b.png", { type: "image/png" }),
+        ],
+      });
+      await expect(upload).rejects.toBeInstanceOf(ChatAttachmentUploadError);
+      await expect(upload).rejects.toThrow("Attachments must be 20 MB or smaller.");
+      expect(storage.remove).toHaveBeenCalledWith([storage.upload.mock.calls[0][0]]);
+    });
   });
 
   it("patches conversation message metadata without dropping existing fields", () => {
