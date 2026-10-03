@@ -1,6 +1,6 @@
 //! Chat attachments: images and text files sent with a message. They live in
 //! the private `chat-attachments` Supabase Storage bucket as
-//! `<projectId>/<uuid>.<ext>` (supabase/migrations/20261002140000_chat_attachments.sql)
+//! `<projectId>/<uuid>.<ext>` (supabase/migrations/20261003120000_chat_attachments.sql)
 //! and never in a space's git history.
 //!
 //! Browsers upload and read them with the user's own session: every member

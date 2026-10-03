@@ -16,7 +16,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / 'supabase/migrations/20260906120000_durable_notifications.sql'
-CHAT_ATTACHMENTS_MIGRATION = ROOT / 'supabase/migrations/20261002140000_chat_attachments.sql'
+CHAT_ATTACHMENTS_MIGRATION = ROOT / 'supabase/migrations/20261003120000_chat_attachments.sql'
 PG = Path(os.environ.get('PG_BIN', Path(shutil.which('initdb') or '/opt/homebrew/opt/postgresql@17/bin/initdb').parent))
 
 

@@ -13,7 +13,7 @@ touches them, and publishing a turn never includes them.
 - A message records each attachment in its metadata as
   `{ kind: "image" | "file", storagePath, fileName, mimeType, sizeBytes }`.
 
-`supabase/migrations/20261002140000_chat_attachments.sql` creates the bucket and its policies.
+`supabase/migrations/20261003120000_chat_attachments.sql` creates the bucket and its policies.
 Two functions decide access. Both require a signed-in caller, a name of the shape above with
 the space id in its one canonical spelling, and a space that exists and is not deleted.
 

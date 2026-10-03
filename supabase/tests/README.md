@@ -64,7 +64,7 @@ another user, while owners still pin, switch and clear their own credentials and
 deleting a credential still clears pins to it. It also rolls back.
 
 The cluster has no Supabase Storage, so the replay also proves that
-`20261002140000_chat_attachments.sql` succeeds without it and only reports a notice. The
+`20261003120000_chat_attachments.sql` succeeds without it and only reports a notice. The
 run then installs `storage_stub.sql`, the buckets and objects columns the Storage policies
 read, and reruns that migration twice, as an install that adds Storage later does.
 `chat_attachments.sql` then checks the private `chat-attachments` bucket, inside a transaction
