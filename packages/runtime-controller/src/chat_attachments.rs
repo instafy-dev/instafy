@@ -53,7 +53,7 @@ const MAX_DESCRIBED_NAME_CHARS: usize = 120;
 
 /// `<uuid>.<ext>`: a canonical uuid, then one of the bucket's extensions. The
 /// object name's last segment and the runtime's file name under
-/// `.instafy/attachments/`.
+/// `.instafy/attachments/<conversationId>/`.
 pub(crate) fn file_name_is_valid(name: &str) -> bool {
     let Some((stem, extension)) = name.split_once('.') else {
         return false;

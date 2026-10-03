@@ -2,8 +2,9 @@
 //! database: which runtimes the agent lease route gives signed URLs, for which
 //! objects (only the leased conversation's), that a job row cannot supply URLs
 //! of its own, that the route returns its pool slot before it waits on Storage,
-//! and that deleting a space, or the team with all its spaces, purges their
-//! prefixes, every conversation's folder included.
+//! that deleting a space, or the team with all its spaces, purges their
+//! prefixes, every conversation's folder included, and that a refused delete
+//! purges nothing.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -698,6 +699,150 @@ async fn delete_organization_purges_every_space_prefix_after_the_delete_commits(
         .execute(
             "delete from auth.users where id = $1",
             &[&space.owner_user_id],
+        )
+        .await;
+    result.and(user_cleanup.map(|_| ()).map_err(anyhow::Error::from))
+}
+
+/// The purge starts only once a delete has passed its checks: a delete that
+/// is refused, or that finds no space or team, never reaches Storage.
+#[tokio::test]
+async fn a_refused_or_empty_delete_purges_nothing() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("a_refused_or_empty_delete_purges_nothing").await?;
+    let space = Space {
+        org_id: Uuid::new_v4(),
+        project_id: Uuid::new_v4(),
+        owner_user_id: Uuid::new_v4(),
+        conversation_id: Uuid::new_v4(),
+    };
+    let builder_user_id = Uuid::new_v4();
+    let objects: Vec<String> = (1..=2)
+        .map(|n| {
+            format!(
+                "{}/{}/6a000000-0000-4000-8000-{n:012}.png",
+                space.project_id, space.conversation_id
+            )
+        })
+        .collect();
+    let bucket = FakeBucket::new(SERVICE_ROLE_KEY, objects.clone());
+    let (storage_url, storage_server) = bucket.serve().await;
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "chat-attachment-refused-purge",
+    );
+    config._supabase_project_url = storage_url;
+    config.supabase_service_role_key = Some(SERVICE_ROLE_KEY.to_string());
+    let builder_token = crate::auth::issue_controller_token(&config, &builder_user_id)
+        .map_err(|(status, axum::Json(error))| {
+            anyhow::anyhow!("issue builder token: {status} {}", error.message)
+        })?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+
+    let fixture = SharedDbFixture {
+        organizations: vec![space.org_id],
+        projects: vec![space.project_id],
+    };
+    let body_pool = pool.clone();
+    let result = with_shared_db_fixture(fixture, async {
+        let pool = body_pool;
+        seed_space(&pool, &space, json!([])).await?;
+        ensure_test_user(&pool, &builder_user_id).await?;
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into org_memberships (org_id, user_id, role) values ($1, $2, 'builder')",
+                    &[&space.org_id, &builder_user_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into project_memberships (project_id, user_id, role)
+                     values ($1, $2, 'builder')",
+                    &[&space.project_id, &builder_user_id],
+                )
+                .await?;
+        }
+        let requests = [
+            (
+                format!("/projects/{}", space.project_id),
+                builder_token.clone(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                format!("/orgs/{}", space.org_id),
+                builder_token.clone(),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                format!("/projects/{}", Uuid::new_v4()),
+                SERVICE_ROLE_KEY.to_string(),
+                StatusCode::NOT_FOUND,
+            ),
+            // A repeated team delete succeeds without a team to purge.
+            (
+                format!("/orgs/{}", Uuid::new_v4()),
+                SERVICE_ROLE_KEY.to_string(),
+                StatusCode::NO_CONTENT,
+            ),
+        ];
+        for (uri, token, expected) in requests {
+            let response = crate::projects::router()
+                .with_state(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(&uri)
+                        .header(
+                            axum::http::header::AUTHORIZATION,
+                            format!("Bearer {token}"),
+                        )
+                        .body(Body::empty())?,
+                )
+                .await?;
+            anyhow::ensure!(
+                response.status() == expected,
+                "DELETE {uri} returned {}, not {expected}",
+                response.status()
+            );
+        }
+        let status: String = pool
+            .get()
+            .await?
+            .query_one(
+                "select status from projects where id = $1",
+                &[&space.project_id],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(status == "active", "the space is {status}");
+
+        // A purge would list the bucket well within this.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        anyhow::ensure!(
+            bucket.listed_prefixes().is_empty() && bucket.deletes() == 0,
+            "a refused delete reached Storage: listed {:?}, {} deletes",
+            bucket.listed_prefixes(),
+            bucket.deletes()
+        );
+        anyhow::ensure!(
+            bucket.objects() == objects,
+            "objects: {:?}",
+            bucket.objects()
+        );
+        Ok(())
+    })
+    .await;
+    storage_server.abort();
+    let user_cleanup = pool
+        .get()
+        .await?
+        .execute(
+            "delete from auth.users where id = any($1)",
+            &[&vec![space.owner_user_id, builder_user_id]],
         )
         .await;
     result.and(user_cleanup.map(|_| ()).map_err(anyhow::Error::from))
