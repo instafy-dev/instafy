@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { gatewayMode } from "../utils/gatewayMode.js";
 import {
   assertGitRemoteFileText,
   clearRuntimePreference,
@@ -25,6 +26,9 @@ test.describe("Git-canonical sync conflicts", () => {
     (process.env.GIT_CANONICAL ?? "").trim() !== "1",
     "Requires git-canonical stack (start with GIT_CANONICAL=1)."
   );
+  // Rebasing a dirty working copy is the stateful gateway's behaviour; the
+  // stateless gateway refuses a stale baseRev instead (file-concurrency-chat).
+  test.skip(gatewayMode() !== "legacy", "Stateful gateway only (PLAYWRIGHT_GATEWAY_MODE=legacy or unset).");
 
   test.describe.configure({ timeout: 240_000 });
   let activeProjectId: string | null = null;
