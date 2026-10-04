@@ -250,3 +250,25 @@ pub(crate) fn install_shard_hook(remote: &Path, env: &[(&str, &str)]) {
     std::fs::write(&update, wrapper).unwrap();
     std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+/// Runs git through a shell script for commands built on the current thread
+/// only (the server's `GIT_PROGRAM_OVERRIDE`): `prelude` runs first with the
+/// command's arguments in "$@", then the real git. Dropping it restores git.
+pub(crate) struct GitWrapper;
+
+impl GitWrapper {
+    pub(crate) fn install(dir: &Path, prelude: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = dir.join(format!("git-wrapper-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&script, format!("#!/bin/sh\n{prelude}\nexec git \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(script));
+        Self
+    }
+}
+
+impl Drop for GitWrapper {
+    fn drop(&mut self) {
+        crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+    }
+}

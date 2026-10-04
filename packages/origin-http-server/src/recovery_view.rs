@@ -267,11 +267,61 @@ pub(crate) fn resolve_local(
             Some(commit) if commit == *rev => Ok(Some(commit)),
             _ => Err(ViewError::RevNotFound),
         },
-        ReadAt::Ref(reference) => match git.commit_id(reference.as_str())? {
-            Some(commit) => Ok(Some(commit)),
+        ReadAt::Ref(reference) => match local_tip(git, reference)? {
+            Some(tip) => match git.commit_id(&tip)? {
+                Some(commit) => Ok(Some(commit)),
+                None => Err(ViewError::RefNotFound),
+            },
             None => Err(ViewError::RefNotFound),
         },
     }
+}
+
+/// What `reference` names here, found by its exact name. Git's own lookup
+/// of a missing name falls back to other forms (a name ending in
+/// `-<n>-g<hex>` reads as an abbreviated commit id), and on a
+/// case-insensitive disk two names that differ only in letter case are one
+/// file; neither may stand for the ref. `None` when the ref is not here, or
+/// another ref here differs from it only in letter case.
+pub(crate) fn local_tip(
+    git: &WorkspaceGit<'_>,
+    reference: &RecoveryRef,
+) -> Result<Option<String>, ViewError> {
+    let namespace = reference
+        .as_str()
+        .rsplit_once('/')
+        .map(|(namespace, _)| namespace)
+        .unwrap_or_default();
+    let mut tip = None;
+    for (name, id) in local_refs(git, &[namespace])? {
+        if name == reference.as_str() {
+            tip = Some(id);
+        } else if name.eq_ignore_ascii_case(reference.as_str()) {
+            return Ok(None);
+        }
+    }
+    Ok(tip)
+}
+
+/// `(name, id)` of every local ref under the `namespaces`.
+fn local_refs(
+    git: &WorkspaceGit<'_>,
+    namespaces: &[&str],
+) -> Result<Vec<(String, String)>, ViewError> {
+    let mut args = vec![
+        "for-each-ref",
+        "--format=%(refname)%00%(objectname)",
+        "--end-of-options",
+    ];
+    args.extend(namespaces);
+    let raw = git.stdout(&args)?;
+    Ok(raw
+        .lines()
+        .filter_map(|line| {
+            let (name, id) = line.split_once('\0')?;
+            Some((name.to_string(), id.to_string()))
+        })
+        .collect())
 }
 
 /// Whether an entry is a file or a folder.
@@ -550,22 +600,30 @@ pub(crate) fn first_parent_history(
 }
 
 /// `(ref, rev)` for every recovery and salvage ref on `remote` that passes
-/// the rule; any other name there is left out.
+/// the rule. Any other name there is left out, and so is every name that
+/// differs from another one there only in letter case: on a
+/// case-insensitive disk (a Desktop checkout) the two would be one file, so
+/// neither can be fetched or read as itself.
 pub(crate) fn list_remote_refs(
     git: &WorkspaceGit<'_>,
     remote: &str,
 ) -> Result<Vec<(RecoveryRef, String)>, ViewError> {
-    let recovery = format!("{RECOVERY_REF_ROOT}/*");
-    let salvage = format!("{SALVAGE_REF_ROOT}/*");
-    let raw = git.stdout(&[
-        "ls-remote",
-        "--refs",
-        "--end-of-options",
-        remote,
-        &recovery,
-        &salvage,
-    ])?;
-    Ok(parse_ls_remote(&raw))
+    let listed = remote_names(git, remote)?;
+    let mut refs = Vec::new();
+    for (name, rev) in &listed {
+        if differs_only_in_case(name, listed.iter().map(|(other, _)| other.as_str())) {
+            tracing::warn!(
+                target: "origin_recovery",
+                reference = %name,
+                "left a recovery ref out: another ref differs from it only in letter case"
+            );
+            continue;
+        }
+        if let (Ok(reference), Ok(rev)) = (RecoveryRef::parse(name), parse_rev(rev)) {
+            refs.push((reference, rev));
+        }
+    }
+    Ok(refs)
 }
 
 /// The commit `reference` names on `remote`, or `None` when it is gone.
@@ -583,32 +641,110 @@ pub(crate) fn remote_tip(
     ])?;
     Ok(parse_ls_remote(&raw)
         .into_iter()
-        .find(|(listed, _)| listed == reference)
-        .map(|(_, rev)| rev))
+        .find(|(name, _)| name == reference.as_str())
+        .and_then(|(_, rev)| parse_rev(&rev).ok()))
 }
 
-fn parse_ls_remote(raw: &str) -> Vec<(RecoveryRef, String)> {
+/// Every `(name, rev)` under the recovery and salvage namespaces on
+/// `remote`, whether or not it passes the rule.
+fn remote_names(git: &WorkspaceGit<'_>, remote: &str) -> Result<Vec<(String, String)>, ViewError> {
+    let recovery = format!("{RECOVERY_REF_ROOT}/*");
+    let salvage = format!("{SALVAGE_REF_ROOT}/*");
+    let raw = git.stdout(&[
+        "ls-remote",
+        "--refs",
+        "--end-of-options",
+        remote,
+        &recovery,
+        &salvage,
+    ])?;
+    Ok(parse_ls_remote(&raw))
+}
+
+fn parse_ls_remote(raw: &str) -> Vec<(String, String)> {
     raw.lines()
         .filter_map(|line| {
             let (rev, name) = line.split_once('\t')?;
-            Some((
-                RecoveryRef::parse(name.trim()).ok()?,
-                parse_rev(rev.trim()).ok()?,
-            ))
+            Some((name.trim().to_string(), rev.trim().to_string()))
         })
         .collect()
 }
 
-/// Fetch exactly `references` from `remote` into the same names here,
-/// replacing whatever they named before.
+/// Whether one of `others` is `name` in another letter case.
+fn differs_only_in_case<'b>(name: &str, mut others: impl Iterator<Item = &'b str>) -> bool {
+    others.any(|other| other != name && other.eq_ignore_ascii_case(name))
+}
+
+/// What [`fetch_refs`] did with each ref it was asked for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FetchedRefs {
+    /// Fetched, with the commit each one names here now.
+    pub fetched: Vec<(RecoveryRef, String)>,
+    /// Not on the remote (any more): dismissed, restored or never there.
+    pub missing: Vec<RecoveryRef>,
+    /// Left alone: another ref on the remote or here differs from it only
+    /// in letter case, so on a case-insensitive disk fetching it would
+    /// overwrite the other.
+    pub ambiguous: Vec<RecoveryRef>,
+}
+
+/// Fetch `references` from `remote` into the same names here, replacing
+/// whatever they named before. A ref the remote no longer has (another tab
+/// dismissed it, a publish retired it, even between the listing and the
+/// fetch) is reported missing and never fails the others; only a failure
+/// to reach the remote is an error.
 pub(crate) fn fetch_refs(
     git: &WorkspaceGit<'_>,
     remote: &str,
     references: &[&RecoveryRef],
-) -> Result<(), ViewError> {
+) -> Result<FetchedRefs, ViewError> {
+    let mut outcome = FetchedRefs::default();
     if references.is_empty() {
-        return Ok(());
+        return Ok(outcome);
     }
+    let listed = remote_names(git, remote)?;
+    let here = local_refs(git, &[RECOVERY_REF_ROOT, SALVAGE_REF_ROOT])?;
+    let mut wanted = Vec::new();
+    for reference in references {
+        let name = reference.as_str();
+        let others = listed.iter().chain(&here).map(|(other, _)| other.as_str());
+        if differs_only_in_case(name, others) {
+            outcome.ambiguous.push((*reference).clone());
+        } else if listed.iter().any(|(listed, _)| listed == name) {
+            wanted.push(*reference);
+        } else {
+            outcome.missing.push((*reference).clone());
+        }
+    }
+    if !wanted.is_empty() && fetch_exactly(git, remote, &wanted).is_err() {
+        // One ref vanished after the listing, or the remote failed: fetch
+        // each on its own and tell the two apart.
+        let mut still = Vec::new();
+        for reference in wanted {
+            match fetch_exactly(git, remote, &[reference]) {
+                Ok(()) => still.push(reference),
+                Err(error) => match remote_tip(git, remote, reference)? {
+                    None => outcome.missing.push(reference.clone()),
+                    Some(_) => return Err(error),
+                },
+            }
+        }
+        wanted = still;
+    }
+    for reference in wanted {
+        match local_tip(git, reference)? {
+            Some(tip) => outcome.fetched.push((reference.clone(), tip)),
+            None => outcome.missing.push(reference.clone()),
+        }
+    }
+    Ok(outcome)
+}
+
+fn fetch_exactly(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    references: &[&RecoveryRef],
+) -> Result<(), ViewError> {
     let refspecs: Vec<String> = references
         .iter()
         .map(|reference| format!("+{0}:{0}", reference.as_str()))
@@ -671,21 +807,27 @@ pub(crate) struct RecoveryItem {
     timestamp: i64,
 }
 
-/// Describe `refs` (each with the commit it names, already present here),
-/// newest first, at most [`MAX_RECOVERY_ITEMS`]. `main` (when it exists)
-/// gives each item its `base`.
+/// Describe `refs` (each with the commit it names, fetched here), newest
+/// first, at most [`MAX_RECOVERY_ITEMS`]; a ref whose commit is not here is
+/// left out. `main` (when it exists) gives each listed item its `base`.
 pub(crate) fn describe(
     git: &WorkspaceGit<'_>,
     refs: &[(RecoveryRef, String)],
     main: Option<&str>,
 ) -> Result<Vec<RecoveryItem>, ViewError> {
+    // A ref whose commit is not here (it vanished before it could be
+    // fetched) is left out rather than failing the list.
     let revs: Vec<String> = refs.iter().map(|(_, rev)| rev.clone()).collect();
+    let present: Vec<&(RecoveryRef, String)> = refs
+        .iter()
+        .zip(git.object_sizes(&revs)?)
+        .filter(|(_, found)| matches!(found, Some((kind, _)) if kind == "commit"))
+        .map(|(entry, _)| entry)
+        .collect();
+    let revs: Vec<String> = present.iter().map(|(_, rev)| rev.clone()).collect();
     let objects = git.read_objects(&revs)?;
-    let mut items = Vec::with_capacity(refs.len());
-    for ((reference, rev), object) in refs.iter().zip(objects) {
-        if object.kind != "commit" {
-            continue;
-        }
+    let mut items = Vec::with_capacity(present.len());
+    for ((reference, rev), object) in present.into_iter().zip(objects) {
         let commit = parse_commit(&object.data);
         let kind = match reference.source() {
             RefSource::Salvage => ItemKind::Salvage,
@@ -711,10 +853,6 @@ pub(crate) fn describe(
             .map(|(_, value)| value.clone())
             .take(MAX_RECOVERY_ITEM_PATHS)
             .collect();
-        let base = match main {
-            Some(main) => git.merge_base(rev, main)?,
-            None => None,
-        };
         items.push(RecoveryItem {
             reference: reference.as_str().to_string(),
             rev: rev.clone(),
@@ -726,7 +864,7 @@ pub(crate) fn describe(
                 RefSource::Salvage => None,
             },
             paths,
-            base,
+            base: None,
             dismissible: reference.dismissible(),
             timestamp: commit.timestamp,
         });
@@ -736,7 +874,13 @@ pub(crate) fn describe(
             .cmp(&a.timestamp)
             .then_with(|| a.reference.cmp(&b.reference))
     });
+    // The cap comes before the one merge-base per item.
     items.truncate(MAX_RECOVERY_ITEMS);
+    if let Some(main) = main {
+        for item in &mut items {
+            item.base = git.merge_base(&item.rev, main)?;
+        }
+    }
     Ok(items)
 }
 
@@ -1454,7 +1598,13 @@ mod tests {
         );
         let gone = RecoveryRef::parse(&format!("refs/instafy/recovery/{ORIGIN}/gone")).unwrap();
         assert_eq!(remote_tip(&git, url, &gone).unwrap(), None);
-        assert!(fetch_refs(&git, url, &[&gone]).is_err());
+        assert_eq!(
+            fetch_refs(&git, url, &[&gone]).unwrap(),
+            FetchedRefs {
+                missing: vec![gone.clone()],
+                ..FetchedRefs::default()
+            }
+        );
 
         let at = ReadAt::Ref(conflict_name.clone());
         assert!(matches!(
@@ -1526,6 +1676,256 @@ mod tests {
             .unwrap()
             .iter()
             .all(|item| item.base.is_none()));
+    }
+
+    /// A bare canonical repository holding `refs` (and `main`), written as
+    /// packed refs so that names differing only in letter case can coexist
+    /// even on a case-insensitive disk.
+    fn canonical_with_packed_refs(root: &Path, refs: &[(&str, &str)], main: &str) -> PathBuf {
+        let canonical = root.join("canonical.git");
+        let mut sorted: Vec<(&str, &str)> = refs.to_vec();
+        sorted.push((MAIN_REF, main));
+        sorted.sort();
+        let mut packed = String::from("# pack-refs with: peeled fully-peeled sorted \n");
+        for (name, id) in sorted {
+            packed.push_str(&format!("{id} {name}\n"));
+        }
+        std::fs::write(canonical.join("packed-refs"), packed).unwrap();
+        canonical
+    }
+
+    /// A name that is not a ref is never read as some other commit, even
+    /// when git could parse it as an abbreviated id.
+    #[test]
+    fn a_missing_ref_is_never_read_as_another_commit() {
+        let (_dir, root) = tempdir();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let files = tree(&git, &[("a.txt", "a\n")]);
+        let main = commit(&git, &files, &[], 1_700_000_000, "main\n");
+        git.update_ref(MAIN_REF, &main, None, "test").unwrap();
+        for name in [
+            format!(
+                "refs/instafy/salvage/gateway/nothing-here-1-g{}",
+                &main[..7]
+            ),
+            format!("refs/instafy/recovery/{ORIGIN}/x-0-g{}", &main[..4]),
+        ] {
+            let at = ReadAt::from_query(&git, None, Some(&name)).unwrap();
+            assert!(
+                matches!(resolve_local(&git, &at), Err(ViewError::RefNotFound)),
+                "{name}"
+            );
+        }
+        let real = RecoveryRef::parse("refs/instafy/salvage/gateway/node-1-0123abcd").unwrap();
+        git.update_ref(real.as_str(), &main, None, "test").unwrap();
+        assert_eq!(
+            resolve_local(&git, &ReadAt::Ref(real)).unwrap().as_deref(),
+            Some(main.as_str())
+        );
+    }
+
+    /// Refs whose names differ only in letter case would be one file on a
+    /// case-insensitive disk (a Desktop checkout): they are left out of the
+    /// listing, never fetched and never read as each other, and the rest of
+    /// the list still works.
+    #[test]
+    fn refs_that_differ_only_in_case_are_never_fetched_or_read_as_each_other() {
+        let (_dir, root) = tempdir();
+        git_in(
+            &root,
+            &["init", "--quiet", "--bare", "-b", "main", "canonical.git"],
+        );
+        let canonical_dir = root.join("canonical.git");
+        let remote = WorkspaceGit::bare(&canonical_dir, None);
+        let files = tree(&remote, &[("a.txt", "a\n")]);
+        let main = commit(&remote, &files, &[], 1_700_000_000, "main\n");
+        let one = commit(&remote, &files, &[&main], 1_700_000_100, "one\n");
+        let two = commit(&remote, &files, &[&main], 1_700_000_200, "two\n");
+        let base = format!("refs/instafy/recovery/{ORIGIN}");
+        let upper = format!("{base}/20261002T120000Z-unsaved-x");
+        let lower = format!("{base}/20261002t120000z-unsaved-x");
+        let plain = format!("{base}/20261002T130000Z-stale-y");
+        let only_upper = format!("{base}/20261002T140000Z-unsaved-z");
+        let canonical = canonical_with_packed_refs(
+            &root,
+            &[
+                (&upper, &two),
+                (&lower, &one),
+                (&plain, &one),
+                (&only_upper, &two),
+            ],
+            &main,
+        );
+        let url = canonical.to_str().unwrap();
+
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        // The mirror already holds the lower-case form of `only_upper`.
+        fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
+        let only_lower = only_upper.to_ascii_lowercase();
+        let objects_of_one = format!("+{plain}:{only_lower}");
+        fetch(&git, &canonical, &objects_of_one);
+
+        let listed = list_remote_refs(&git, url).unwrap();
+        let mut names: Vec<&str> = listed.iter().map(|(name, _)| name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec![plain.as_str(), only_upper.as_str()]);
+
+        let refs: Vec<RecoveryRef> = [&upper, &lower, &plain, &only_upper]
+            .iter()
+            .map(|name| RecoveryRef::parse(name).unwrap())
+            .collect();
+        let outcome = fetch_refs(&git, url, &refs.iter().collect::<Vec<_>>()).unwrap();
+        assert_eq!(
+            outcome,
+            FetchedRefs {
+                fetched: vec![(refs[2].clone(), one.clone())],
+                missing: Vec::new(),
+                ambiguous: vec![refs[0].clone(), refs[1].clone(), refs[3].clone()],
+            }
+        );
+        for reference in [&refs[0], &refs[1], &refs[3]] {
+            assert!(
+                matches!(
+                    resolve_local(&git, &ReadAt::Ref(reference.clone())),
+                    Err(ViewError::RefNotFound)
+                ),
+                "{}",
+                reference.as_str()
+            );
+        }
+        assert_eq!(
+            resolve_local(&git, &ReadAt::Ref(refs[2].clone()))
+                .unwrap()
+                .as_deref(),
+            Some(one.as_str())
+        );
+        assert_eq!(describe(&git, &listed, Some(&main)).unwrap().len(), 1);
+    }
+
+    /// A ref deleted between the listing and the fetch (another tab
+    /// dismissed it, a publish retired it) is reported missing; the others
+    /// are fetched and described.
+    #[test]
+    fn a_ref_that_vanishes_before_the_fetch_leaves_the_others_listed() {
+        let (_dir, root) = tempdir();
+        git_in(
+            &root,
+            &["init", "--quiet", "--bare", "-b", "main", "canonical.git"],
+        );
+        let canonical = root.join("canonical.git");
+        let remote = WorkspaceGit::bare(&canonical, None);
+        let files = tree(&remote, &[("a.txt", "a\n")]);
+        let main = commit(&remote, &files, &[], 1_700_000_000, "main\n");
+        remote.update_ref(MAIN_REF, &main, None, "test").unwrap();
+        let gone = RecoveryRef::parse(&format!("refs/instafy/recovery/{ORIGIN}/gone")).unwrap();
+        let kept = RecoveryRef::parse(&format!("refs/instafy/recovery/{ORIGIN}/kept")).unwrap();
+        let gone_rev = commit(&remote, &files, &[&main], 1_700_000_100, "gone\n");
+        let kept_rev = commit(&remote, &files, &[&main], 1_700_000_200, "kept\n");
+        remote
+            .update_ref(gone.as_str(), &gone_rev, None, "test")
+            .unwrap();
+        remote
+            .update_ref(kept.as_str(), &kept_rev, None, "test")
+            .unwrap();
+
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let url = canonical.to_str().unwrap();
+        fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
+        let listed = list_remote_refs(&git, url).unwrap();
+        assert_eq!(listed.len(), 2);
+
+        // The ref disappears right before the first fetch starts.
+        let marker = root.join("deleted");
+        let outcome = {
+            let _wrapper = crate::test_support::GitWrapper::install(
+                &root,
+                &format!(
+                    "for arg in \"$@\"; do\n  if [ \"$arg\" = fetch ] && [ ! -e '{marker}' ]; then\n    \
+                     : > '{marker}'\n    \
+                     env -u GIT_DIR git --git-dir '{canonical}' update-ref -d '{gone}'\n  fi\ndone",
+                    marker = marker.display(),
+                    canonical = canonical.display(),
+                    gone = gone.as_str(),
+                ),
+            );
+            fetch_refs(&git, url, &[&gone, &kept]).unwrap()
+        };
+        assert!(marker.exists(), "the ref was not deleted mid-fetch");
+        assert_eq!(
+            outcome,
+            FetchedRefs {
+                fetched: vec![(kept.clone(), kept_rev.clone())],
+                missing: vec![gone.clone()],
+                ambiguous: Vec::new(),
+            }
+        );
+        let items = describe(&git, &listed, Some(&main)).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.rev.as_str())
+                .collect::<Vec<_>>(),
+            vec![kept_rev.as_str()]
+        );
+        assert!(matches!(
+            resolve_local(&git, &ReadAt::Ref(gone)),
+            Err(ViewError::RefNotFound)
+        ));
+
+        // An unreachable remote is still an error.
+        let nowhere = root.join("nowhere.git");
+        assert!(fetch_refs(&git, nowhere.to_str().unwrap(), &[&kept]).is_err());
+    }
+
+    /// The listing is capped before the one merge-base per item, so a pile
+    /// of refs costs at most [`MAX_RECOVERY_ITEMS`] merge-base processes.
+    #[test]
+    fn describe_caps_the_list_before_any_merge_base() {
+        let (_dir, root) = tempdir();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let files = tree(&git, &[("a.txt", "a\n")]);
+        let main = commit(&git, &files, &[], 1_700_000_000, "main\n");
+        let total = MAX_RECOVERY_ITEMS + 5;
+        let refs: Vec<(RecoveryRef, String)> = (0..total)
+            .map(|index| {
+                let rev = commit(
+                    &git,
+                    &files,
+                    &[&main],
+                    1_700_000_000 + 10 * (index as i64 + 1),
+                    &format!("work {index}\n"),
+                );
+                let name = format!("refs/instafy/recovery/{ORIGIN}/item-{index:03}");
+                (RecoveryRef::parse(&name).unwrap(), rev)
+            })
+            .collect();
+
+        let log = root.join("merge-bases.log");
+        let items = {
+            let _wrapper = crate::test_support::GitWrapper::install(
+                &root,
+                &format!(
+                    "for arg in \"$@\"; do\n  if [ \"$arg\" = merge-base ]; then echo x >> '{}'; fi\ndone",
+                    log.display()
+                ),
+            );
+            describe(&git, &refs, Some(&main)).unwrap()
+        };
+        let merge_bases = std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        assert_eq!(merge_bases, MAX_RECOVERY_ITEMS);
+        assert_eq!(items.len(), MAX_RECOVERY_ITEMS);
+        assert_eq!(items[0].reference, refs[total - 1].0.as_str());
+        assert_eq!(items[MAX_RECOVERY_ITEMS - 1].reference, refs[5].0.as_str());
+        assert!(items
+            .iter()
+            .all(|item| item.base.as_deref() == Some(main.as_str())));
     }
 
     #[test]
