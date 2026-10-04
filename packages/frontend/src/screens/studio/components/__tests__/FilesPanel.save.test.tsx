@@ -338,6 +338,19 @@ describe("FilesPanel one Save", () => {
     expect(query("files-explorer-new-file")?.disabled).toBe(true);
   });
 
+  it.each(["stateless", "legacy"] as const)("leaves out an empty Modified row (%s)", async (mode) => {
+    mocks.versioning.mode = mode;
+    await render([buffer({ modifiedAt: null, size: 12 })]);
+    const footer = () => container.querySelector("footer")?.textContent ?? "";
+    expect(footer()).toContain("Size");
+    expect(footer()).not.toContain("Modified");
+    expect(footer()).not.toContain("\u2014");
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render([buffer({ modifiedAt: "2026-10-04T10:00:00.000Z" })]);
+    expect(footer()).toContain("Modified");
+  });
+
   it("disables Save for a read-only member", async () => {
     mocks.project.canWriteProject = false;
     await render([buffer()]);

@@ -450,7 +450,7 @@ function formatFileSize(bytes: number | null | undefined): string {
 
 function formatTimestamp(timestamp: string | null | undefined): string {
   if (!timestamp) {
-    return "—";
+    return "";
   }
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) {
@@ -2585,6 +2585,7 @@ export function FilesPanel({
     }
   }, [focusDirectory, normalizedRootPath, renderTextViewer, viewerState]);
 
+  const viewerModifiedAt = viewerState.entry?.modified ?? activeFile?.modifiedAt ?? null;
   const viewerPanel = useMemo(
     () => (
       <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
@@ -2594,14 +2595,15 @@ export function FilesPanel({
           <footer className={`border-t border-slate-200/70 px-4 py-2.5 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
             <div className="flex flex-wrap items-center gap-4">
               <span>Size · {formatFileSize(viewerState.entry.size ?? activeFile?.size ?? null)}</span>
-              <span>Modified · {formatTimestamp(viewerState.entry.modified ?? activeFile?.modifiedAt ?? null)}</span>
+              {/* Listings without a time (the stateless gateway) leave the row out. */}
+              {viewerModifiedAt ? <span>Modified · {formatTimestamp(viewerModifiedAt)}</span> : null}
               {viewerState.entry.mimeType ? <span>MIME · {viewerState.entry.mimeType}</span> : null}
             </div>
           </footer>
         ) : null}
       </div>
     ),
-    [activeFile, viewerBody, viewerHeader, viewerState.entry]
+    [activeFile, viewerBody, viewerHeader, viewerModifiedAt, viewerState.entry]
   );
 
   useEffect(() => {
