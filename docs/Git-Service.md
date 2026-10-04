@@ -334,7 +334,8 @@ Studio picks its versioning UI per space from the project's default origin:
 - **Unsaved work** (History only): work kept on `refs/instafy/recovery/*` and
   `refs/instafy/salvage/*`, listed with `GET /git/recovery`. Restore commits it as a new version
   (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
-  version, keep the current one, or ask the agent) and finishes with a `keep` list. "Use this
+  version, keep the current one, or ask the agent) and finishes with a `keep` list, or Cancel,
+  which closes the choices and restores nothing else (the only way out for salvage). "Use this
   version" reads the file at the ref and saves it on top of the head the restore reported. A 404
   coded `not_found` at the ref becomes a delete only when a listing at the ref shows the ref still
   resolves without the path; an uncoded 404, or `unsupported_entry` for a symlink or submodule
@@ -348,9 +349,11 @@ Studio picks its versioning UI per space from the project's default origin:
   version (`POST /git/sync`), naming files it kept on the computer and why.
 
 The nav badge counts uncommitted changes in Changes and unsaved-work entries in History; salvage
-entries, which cannot be removed, count only until the viewer has seen them. Each viewer sees one
-chat row the first time new unsaved work appears (opening History counts as seeing it); it is not
-written into the conversation.
+entries, which cannot be removed, count only until the viewer has seen them (newer recovery
+entries never push a seen salvage entry out). Each viewer sees one chat row the first time new
+unsaved work appears (opening History counts as seeing it); it is not written into the
+conversation. What a viewer has seen lives in the browser's storage, and in memory for the session
+when the browser refuses storage.
 
 ## Local dev (what we should wire into `pnpm stack:up`)
 - Start `git-shard-0` + `git-edge` in Docker (compose file), storing repos in a local docker volume.
