@@ -3819,6 +3819,23 @@ fn forwardable_instafy_client(headers: &HeaderMap) -> Option<&str> {
     safe.then_some(value)
 }
 
+/// `POST git/revert-commit` is forwarded only for a request carrying a valid
+/// `X-Instafy-Client` label. Today's gateway serves it with a working-copy
+/// revert that browsers never reached before; only clients built for the
+/// stateless gateway send the label and offer Revert, so nothing else
+/// changes. Without the label the route answers 404 like any unlisted one.
+fn ensure_origin_proxy_client_label(
+    method: &Method,
+    path: &CanonicalOriginProxyPath,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let requires_label = *method == Method::POST && path.normalized == "git/revert-commit";
+    if requires_label && forwardable_instafy_client(headers).is_none() {
+        return Err(not_found("origin path not found"));
+    }
+    Ok(())
+}
+
 fn origin_proxy_request_body_limit(method: &Method, path: &str) -> usize {
     match (method, path.trim().trim_start_matches('/')) {
         (&Method::POST, "browser/webrtc/offer") => ORIGIN_PROXY_WEBRTC_BODY_BYTES,
@@ -4205,6 +4222,7 @@ async fn proxy_origin_request(
     let method = request.method().clone();
     let canonical_path = canonical_origin_proxy_path(suffix)?;
     let required_scopes = classify_canonical_origin_proxy_request(&method, &canonical_path)?;
+    ensure_origin_proxy_client_label(&method, &canonical_path, request.headers())?;
     let is_webrtc_capabilities =
         method == Method::GET && canonical_path.normalized == "browser/capabilities";
     let is_webrtc_offer =
@@ -5462,6 +5480,34 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
                 );
                 assert!(!upstream.as_str().contains("token"));
             }
+        }
+    }
+
+    #[test]
+    fn revert_commit_is_proxied_only_for_labelled_clients() {
+        let revert = canonical_origin_proxy_path("/git/revert-commit").unwrap();
+        let mut headers = HeaderMap::new();
+        let refused = ensure_origin_proxy_client_label(&Method::POST, &revert, &headers)
+            .expect_err("unlabelled revert-commit must not be forwarded");
+        assert_eq!(refused.0, StatusCode::NOT_FOUND);
+
+        headers.insert(INSTAFY_CLIENT_HEADER, "web/1.2.3".parse().unwrap());
+        assert!(ensure_origin_proxy_client_label(&Method::POST, &revert, &headers).is_ok());
+        headers.insert(INSTAFY_CLIENT_HEADER, "web 1.2.3".parse().unwrap());
+        assert!(ensure_origin_proxy_client_label(&Method::POST, &revert, &headers).is_err());
+
+        // Nothing else needs the label.
+        let unlabelled = HeaderMap::new();
+        for (method, path) in [
+            (Method::POST, "/apply"),
+            (Method::POST, "/git/sync"),
+            (Method::POST, "/git/revert"),
+            (Method::POST, "/git/recovery/restore"),
+            (Method::GET, "/git/recovery"),
+            (Method::GET, "/git/history"),
+        ] {
+            let path = canonical_origin_proxy_path(path).unwrap();
+            assert!(ensure_origin_proxy_client_label(&method, &path, &unlabelled).is_ok());
         }
     }
 
