@@ -73,7 +73,7 @@ function sanitizeScopeTestId(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]+/g, "-");
 }
 
-export function SourceControlDrawer({
+export function LegacyChangesDrawer({
   onRequestClose,
   openRequest,
 }: {

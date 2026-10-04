@@ -68,7 +68,7 @@ vi.mock("../WorkspaceGitRollingDiffPanel", () => ({
   WorkspaceGitRollingDiffPanel: () => null,
 }));
 
-import { SourceControlDrawer } from "../SourceControlDrawer";
+import { LegacyChangesDrawer } from "../LegacyChangesDrawer";
 
 async function flushAsyncWork() {
   await act(async () => {
@@ -77,7 +77,7 @@ async function flushAsyncWork() {
   });
 }
 
-describe("SourceControlDrawer project access", () => {
+describe("LegacyChangesDrawer project access", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -129,7 +129,7 @@ describe("SourceControlDrawer project access", () => {
   it.each([899, 900, 960, 1024])("uses Studio's responsive review layout at %ipx", async (width) => {
     Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
     await act(async () => {
-      root.render(<SourceControlDrawer openRequest={{ key: 1, previewPath: "src/app.ts", reviewMode: "focused" }} />);
+      root.render(<LegacyChangesDrawer openRequest={{ key: 1, previewPath: "src/app.ts", reviewMode: "focused" }} />);
     });
     await flushAsyncWork();
 
@@ -148,7 +148,7 @@ describe("SourceControlDrawer project access", () => {
 
   it("keeps review available but disables every destructive version-control action for a viewer", async () => {
     await act(async () => {
-      root.render(<SourceControlDrawer />);
+      root.render(<LegacyChangesDrawer />);
     });
     await flushAsyncWork();
 

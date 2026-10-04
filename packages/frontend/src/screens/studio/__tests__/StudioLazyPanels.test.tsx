@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FilesPanel, SourceControlDrawer } from "../StudioLazyPanels";
 
 vi.mock("../components/FilesPanel", () => new Promise(() => undefined));
-vi.mock("../components/SourceControlDrawer", () => new Promise(() => undefined));
+vi.mock("../components/LegacyChangesDrawer", () => new Promise(() => undefined));
 
 describe("Studio lazy panel fallbacks", () => {
   let root: Root;
