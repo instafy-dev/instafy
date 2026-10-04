@@ -531,8 +531,8 @@ pub struct AppConfig {
     pub git_shards: Vec<String>,
     pub hosted_origin_endpoint: Option<String>,
     /// `INSTAFY_AUTHOR_PSEUDONYM_KEYS`: versioned keys for the per-space
-    /// author pseudonyms signed into users' workspace-write tokens. Required
-    /// with `hosted_origin_endpoint`; `None` mints no author claims.
+    /// author pseudonyms signed into users' workspace-write tokens. `None`
+    /// (unset) mints no author claims, so origins keep their own identity.
     pub author_pseudonym_keys: Option<crate::author_identity::AuthorPseudonymKeyring>,
     #[allow(dead_code)]
     pub(crate) browser_turn_rest: Option<crate::browser_turn::BrowserTurnRestConfig>,
@@ -775,13 +775,12 @@ impl AppConfig {
         ) {
             warn!("{warning}");
         }
-        // Checked with the other secrets, before any network IO: a hosted
-        // gateway without the keyring could not attribute cloud saves.
+        // Checked with the other secrets, before any network IO: a malformed
+        // keyring refuses to start, a missing one only warns.
         let author_pseudonym_keys = crate::author_identity::resolve_author_pseudonym_keys(
             std::env::var(crate::author_identity::AUTHOR_PSEUDONYM_KEYS_ENV)
                 .ok()
                 .as_deref(),
-            read_first_env(&["HOSTED_ORIGIN_ENDPOINT"]).is_some(),
         )?;
 
         let port = std::env::var("PORT")

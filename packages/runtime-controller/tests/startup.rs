@@ -505,26 +505,34 @@ fn startup_accepts_previous_credential_keys_without_echoing_them() {
 }
 
 #[test]
-fn startup_refuses_a_hosted_gateway_without_author_pseudonym_keys_before_network_io() {
-    // The hosted gateway commits every cloud save; without the keyring it
-    // could not attribute them to per-space pseudonyms.
-    let server = MockServer::start();
-    let requests = server.mock(|_when, then| {
-        then.status(500);
-    });
-    for configured in [None, Some("  ")] {
-        let result = run_controller(&server, |command| {
-            command.env("HOSTED_ORIGIN_ENDPOINT", "http://127.0.0.1:9");
-            if let Some(value) = configured {
-                command.env("INSTAFY_AUTHOR_PSEUDONYM_KEYS", value);
-            }
-        });
-        assert_normal_error(
-            &result,
-            "INSTAFY_AUTHOR_PSEUDONYM_KEYS must be set when HOSTED_ORIGIN_ENDPOINT is configured",
-        );
+fn startup_with_a_hosted_gateway_runs_without_author_pseudonym_keys() {
+    // A missing keyring must not become a controller outage: tokens then
+    // carry no author, so commits keep the origin's own identity. It warns,
+    // with or without DEV_MODE.
+    for dev_mode in [false, true] {
+        for configured in [None, Some("  ")] {
+            let server = MockServer::start();
+            let jwks = jwks_fixture(&server);
+            let result = run_controller(&server, |command| {
+                command
+                    .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+                    .env("HOSTED_ORIGIN_ENDPOINT", "http://127.0.0.1:9");
+                if dev_mode {
+                    command.env("DEV_MODE", "1");
+                }
+                if let Some(value) = configured {
+                    command.env("INSTAFY_AUTHOR_PSEUDONYM_KEYS", value);
+                }
+            });
+            // Configuration completed: startup got as far as the database.
+            assert_normal_error(&result, "failed to parse DATABASE_URL");
+            assert!(result.output.contains(
+                "INSTAFY_AUTHOR_PSEUDONYM_KEYS is unset: workspace-write tokens carry no author, \
+                 so commits use the origin's own git identity"
+            ));
+            jwks.assert_hits(1);
+        }
     }
-    requests.assert_hits(0);
 }
 
 #[test]

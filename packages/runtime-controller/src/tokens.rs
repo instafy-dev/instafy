@@ -377,4 +377,54 @@ mod tests {
             .expect("mint token without author");
         assert!(signed_payload(&plain.token).get("author_email").is_none());
     }
+
+    fn unconnected_pool() -> crate::config::PgPool {
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )
+        .expect("connection manager");
+        bb8::Pool::builder().max_size(1).build_unchecked(manager)
+    }
+
+    #[tokio::test]
+    async fn no_author_claims_without_a_keyring_or_for_the_service_user() {
+        // Never touches the database: both cases return before any lookup.
+        let pool = unconnected_pool();
+        let project_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "author-claims-without-keyring",
+        );
+        // Unset keyring, even with a hosted gateway: the controller runs and
+        // origins keep their own identity.
+        config.hosted_origin_endpoint = Some("http://127.0.0.1:9".to_string());
+        config.author_pseudonym_keys = None;
+        assert!(crate::author_identity::author_claims_for_user(
+            &config,
+            &pool,
+            &project_id,
+            &user_id
+        )
+        .await
+        .is_none());
+
+        config.author_pseudonym_keys = Some(
+            crate::author_identity::AuthorPseudonymKeyring::parse(
+                "v1:ERERERERERERERERERERERERERERERERERERERERERE=",
+            )
+            .expect("keyring"),
+        );
+        config.service_runtime_user_id = Some(user_id);
+        assert!(crate::author_identity::author_claims_for_user(
+            &config,
+            &pool,
+            &project_id,
+            &user_id
+        )
+        .await
+        .is_none());
+    }
 }

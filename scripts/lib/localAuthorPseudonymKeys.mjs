@@ -41,8 +41,8 @@ export function isValidAuthorPseudonymKeys(raw) {
 
 /**
  * Resolve INSTAFY_AUTHOR_PSEUDONYM_KEYS for a controller launched by the
- * local harness. The controller refuses to start with a hosted gateway
- * endpoint and no keyring.
+ * local harness, so local saves are attributed to author pseudonyms (without
+ * it the controller still starts and commits keep the origin's identity).
  *
  * An explicit value wins and is left for the controller to validate.
  * Otherwise a random per-checkout key is generated once and kept,

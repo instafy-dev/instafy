@@ -3139,8 +3139,8 @@ async function startControllerIfNeeded(
     explicit: process.env.USER_TOKEN_SECRET,
     filePath: userTokenSecretPath,
   });
-  // The controller refuses to start with HOSTED_ORIGIN_ENDPOINT and no keyring
-  // for the per-space author pseudonyms of cloud saves.
+  // Without this keyring the controller still starts, but saves keep the
+  // origin's own git identity instead of per-space author pseudonyms.
   env.INSTAFY_AUTHOR_PSEUDONYM_KEYS = ensureLocalAuthorPseudonymKeys({
     explicit: process.env.INSTAFY_AUTHOR_PSEUDONYM_KEYS,
     filePath: authorPseudonymKeysPath,

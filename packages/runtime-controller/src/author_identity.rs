@@ -6,7 +6,9 @@
 //! secret (`INSTAFY_AUTHOR_PSEUDONYM_KEYS`), and the display name from
 //! `profiles.full_name` (or "Instafy user"). The controller signs both into
 //! the origin token as `author_name` / `author_email`; origins that do not
-//! read them, or tokens without them, keep the origin's own identity.
+//! read them, or tokens without them, keep the origin's own identity. So a
+//! controller without the keyring still starts: it warns and mints no
+//! author claims, and no user id can reach history either way.
 //!
 //! The keyring is versioned and the email carries the version, so adding a
 //! key changes the address of new commits only: every older address still
@@ -234,12 +236,12 @@ fn base32_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Resolve the keyring at startup. A hosted workspace gateway commits every
-/// cloud save, so with `HOSTED_ORIGIN_ENDPOINT` configured the keyring is
-/// required. Without one, saves keep each origin's own identity.
+/// Resolve the keyring at startup. A malformed value refuses to start, so a
+/// typo fails loudly. An unset or blank one only warns: tokens then carry no
+/// author and every save keeps its origin's own git identity, which is safe
+/// but not attributed to anyone.
 pub fn resolve_author_pseudonym_keys(
     configured: Option<&str>,
-    hosted_origin_endpoint_configured: bool,
 ) -> anyhow::Result<Option<AuthorPseudonymKeyring>> {
     match configured.map(str::trim).filter(|value| !value.is_empty()) {
         Some(raw) => {
@@ -251,16 +253,12 @@ pub fn resolve_author_pseudonym_keys(
             );
             Ok(Some(keyring))
         }
-        None if hosted_origin_endpoint_configured => anyhow::bail!(
-            "{AUTHOR_PSEUDONYM_KEYS_ENV} must be set when HOSTED_ORIGIN_ENDPOINT is configured: \
-             the hosted gateway attributes cloud saves to per-space pseudonyms made with it. \
-             Generate a key with `openssl rand -base64 32` and set \
-             {AUTHOR_PSEUDONYM_KEYS_ENV}=v1:<key>"
-        ),
         None => {
             warn!(
                 "{AUTHOR_PSEUDONYM_KEYS_ENV} is unset: workspace-write tokens carry no author, so \
-                 saves are attributed to each origin's own git identity"
+                 commits use the origin's own git identity instead of a per-space author \
+                 pseudonym. Generate a key with `openssl rand -base64 32` and set \
+                 {AUTHOR_PSEUDONYM_KEYS_ENV}=v1:<key>"
             );
             Ok(None)
         }
@@ -477,28 +475,18 @@ mod tests {
     }
 
     #[test]
-    fn hosted_gateway_requires_the_keyring() {
-        let error = resolve_author_pseudonym_keys(None, true)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("must be set when HOSTED_ORIGIN_ENDPOINT"),
-            "{error}"
-        );
-        assert!(resolve_author_pseudonym_keys(Some("   "), true).is_err());
-
-        assert!(resolve_author_pseudonym_keys(None, false)
-            .unwrap()
-            .is_none());
-        assert!(resolve_author_pseudonym_keys(Some(""), false)
-            .unwrap()
-            .is_none());
-        let configured = resolve_author_pseudonym_keys(Some(&format!("v1:{KEY_V1}")), true)
+    fn a_missing_keyring_starts_without_authors_and_a_malformed_one_refuses() {
+        // Unset or blank: no keyring, so no author claims; never an error.
+        for unset in [None, Some(""), Some("  \n")] {
+            assert!(resolve_author_pseudonym_keys(unset).unwrap().is_none());
+        }
+        let configured = resolve_author_pseudonym_keys(Some(&format!("v1:{KEY_V1}")))
             .unwrap()
             .expect("configured keyring");
         assert_eq!(configured.current_version(), 1);
-        // A malformed value is refused even without a hosted gateway.
-        assert!(resolve_author_pseudonym_keys(Some("v1:short"), false).is_err());
+        // A typo fails loudly.
+        assert!(resolve_author_pseudonym_keys(Some("v1:short")).is_err());
+        assert!(resolve_author_pseudonym_keys(Some(KEY_V1)).is_err());
     }
 
     #[test]
