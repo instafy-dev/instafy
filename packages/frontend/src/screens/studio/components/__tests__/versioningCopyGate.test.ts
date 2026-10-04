@@ -38,7 +38,7 @@ describe("versioning copy gate", () => {
       const offenders = source
         .split("\n")
         .map((line, index) => [index + 1, line] as const)
-        .filter(([, line]) => line.includes("—"));
+        .filter(([, line]) => line.includes("\u2014"));
       expect(offenders, offenders.map(([line, text]) => `${line}: ${text.trim()}`).join("\n")).toEqual([]);
     },
   );
@@ -54,4 +54,14 @@ describe("versioning copy gate", () => {
       expect(offenders, offenders.map(([line, text]) => `${line}: ${text.trim()}`).join("\n")).toEqual([]);
     },
   );
+
+  // The gate keeps its own rule: it names the dash by escape, so a scan that
+  // covers test files never trips over the gate itself.
+  it("names the dash by escape in its own source", () => {
+    const offenders = readFileSync(fileURLToPath(import.meta.url), "utf8")
+      .split("\n")
+      .map((line, index) => [index + 1, line] as const)
+      .filter(([, line]) => line.includes("\u2014"));
+    expect(offenders, offenders.map(([line, text]) => `${line}: ${text.trim()}`).join("\n")).toEqual([]);
+  });
 });
