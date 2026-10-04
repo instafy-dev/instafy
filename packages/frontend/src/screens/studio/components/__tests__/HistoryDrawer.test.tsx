@@ -496,6 +496,30 @@ describe("HistoryDrawer", () => {
     }
   });
 
+  it("keeps results in view: the status region is outside the scrolling list", async () => {
+    mocks.fetchHistory.mockResolvedValueOnce(page(Array.from({ length: 20 }, (_, index) => historyEntry(index + 1)), { hasMore: true }));
+    mocks.revertCommit.mockResolvedValue({
+      ok: false,
+      code: "revert_conflict",
+      paths: ["a.txt"],
+      errorInfo: { status: 409, code: "revert_conflict", message: "conflict", routeUnavailable: false },
+    });
+    await render();
+    const toggles = container.querySelectorAll<HTMLButtonElement>('[data-testid="source-control-history-toggle"]');
+    await act(async () => toggles[19]?.click());
+    await act(async () => q<HTMLButtonElement>(container, "source-control-history-revert")?.click());
+    await act(async () => q<HTMLButtonElement>(document.body, "history-revert-dialog-confirm")?.click());
+    await flush();
+    const status = q(container, "history-status");
+    const scroller = q(container, "history-scroll");
+    expect(status?.textContent).toContain("Later changes touch the same files");
+    expect(scroller?.contains(status)).toBe(false);
+    expect(scroller?.contains(q(container, "history-revert-ask-agent"))).toBe(false);
+    // Between the header and the list, in the drawer's own column.
+    expect(status?.parentElement).toBe(q(container, "source-control-drawer"));
+    expect(status?.compareDocumentPosition(scroller!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
   it("disables Revert and Save as version for a viewer but keeps Review", async () => {
     mocks.project = { activeProjectId: "project-1", projectCapabilitiesResolved: true, canWriteProject: false };
     mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyCount: 2, dirtyPaths: [], pathGroups: [] });

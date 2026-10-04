@@ -462,28 +462,30 @@ export function HistoryDrawer({
         }
       />
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
-        <div role="status" aria-live="polite" data-testid="history-status" className="px-1">
-          {notice ? (
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
-              <Text as="span" variant="body" tone="inherit" className={NOTICE_TONE_CLASS[notice.tone]}>
-                {notice.text}
-              </Text>
-              {notice.action ? (
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  radius="xl"
-                  onPress={notice.action.onPress}
-                  data-testid={notice.action.testId}
-                >
-                  {notice.action.label}
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
+      {/* Outside the scrolling list, so a result stays in view of the row
+          (or the Show more button) that caused it. */}
+      <div role="status" aria-live="polite" data-testid="history-status" className="shrink-0 px-5">
+        {notice ? (
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
+            <Text as="span" variant="body" tone="inherit" className={NOTICE_TONE_CLASS[notice.tone]}>
+              {notice.text}
+            </Text>
+            {notice.action ? (
+              <Button
+                variant="ghost"
+                size="xs"
+                radius="xl"
+                onPress={notice.action.onPress}
+                data-testid={notice.action.testId}
+              >
+                {notice.action.label}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4" data-testid="history-scroll">
         {!ready && probeUnanswered ? (
           <div
             className="flex flex-wrap items-center justify-center gap-2 px-2 py-10"
