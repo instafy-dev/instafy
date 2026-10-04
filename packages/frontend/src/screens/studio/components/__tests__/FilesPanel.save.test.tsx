@@ -509,6 +509,17 @@ describe("FilesPanel one Save", () => {
     expect(file()).toMatchObject({ generated: "saved", modified: "edited", baseRev: REV_1 });
   });
 
+  it("starts no save from a Try again pressed after its panel closed", async () => {
+    mocks.saveChanges.mockResolvedValueOnce(failed({ status: 409, code: "main_busy" }));
+    await render([buffer()]);
+    await pressSave();
+    const { onAction } = mocks.showStatus.mock.calls[0][3];
+    await closePanel();
+    await act(async () => { onAction(); });
+    await settle();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves a buffer alone when a newer read replaced it during the save", async () => {
     const pending = deferred<ReturnType<typeof saved>>();
     mocks.saveChanges.mockReturnValueOnce(pending.promise);

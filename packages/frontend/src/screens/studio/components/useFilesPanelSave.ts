@@ -446,6 +446,11 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
   }, [effectiveBuffer, updateBuffer]);
 
   const save = useCallback(async (request?: SaveRequest) => {
+    // A save starts only from a mounted panel (its editor holds the newest
+    // text); one that is running when the panel closes still finishes.
+    if (!mountedRef.current) {
+      return;
+    }
     const requested = { fileId: request?.fileId ?? null };
     if (savingRef.current) {
       trailingRef.current = requested;
