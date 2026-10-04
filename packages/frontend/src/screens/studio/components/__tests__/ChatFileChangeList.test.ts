@@ -14,6 +14,7 @@ const {
   showStatus,
   projectAccessState,
   runtimeState,
+  versioningState,
 } = vi.hoisted(() => ({
   fetchWorkspaceGitDiff: vi.fn(),
   revertWorkspaceGitPaths: vi.fn(),
@@ -27,6 +28,11 @@ const {
     canWriteProject: true,
   },
   runtimeState: { effectiveRuntimeId: null as string | null, runtimeReady: false },
+  versioningState: {
+    mode: "legacy" as "legacy" | "stateless" | "desktop",
+    recovery: "unknown" as "unknown" | "supported" | "unsupported",
+    originId: null as string | null,
+  },
 }));
 
 vi.mock("../../../../sdk/instafy", () => ({
@@ -48,6 +54,10 @@ vi.mock("../../../../runtime/useRuntime", () => ({
     effectiveRuntimeId: runtimeState.effectiveRuntimeId,
     runtimeReady: runtimeState.runtimeReady,
   }),
+}));
+
+vi.mock("../../../../workspace/useWorkspaceVersioning", () => ({
+  useWorkspaceVersioning: () => ({ ...versioningState, resolved: versioningState.mode !== "legacy" }),
 }));
 
 vi.mock("../../../../status/useStatus", () => ({
@@ -116,6 +126,9 @@ describe("ChatFileChangeList", () => {
     projectAccessState.canWriteProject = true;
     runtimeState.effectiveRuntimeId = null;
     runtimeState.runtimeReady = false;
+    versioningState.mode = "legacy";
+    versioningState.recovery = "unknown";
+    versioningState.originId = null;
   });
 
   afterEach(async () => {
@@ -570,9 +583,10 @@ describe("ChatFileChangeList", () => {
     );
 
     // The plain-words explanation reaches pointer users (tooltip) and
-    // assistive tech (described-by on the Review action).
+    // assistive tech (described-by on the Review action). It no longer
+    // points at a manual Save version, which never sees the agent's work.
     const explanation =
-      "Saving failed when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.";
+      "These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is kept as unsaved work.";
     expect(state?.getAttribute("title")).toBe(explanation);
     const review = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-review"]');
     const describedBy = review?.getAttribute("aria-describedby") ?? "";
@@ -620,7 +634,7 @@ describe("ChatFileChangeList", () => {
     expect(note?.classList.contains("sr-only")).toBe(true);
   });
 
-  it("explains auto-save being off with its own words", async () => {
+  it("explains a save that did not run with the same words as a failed one", async () => {
     await act(async () => {
       root.render(
         createElement(ChatFileChangeList, {
@@ -634,9 +648,147 @@ describe("ChatFileChangeList", () => {
     const state = container.querySelector<HTMLElement>('[data-testid="chat-file-change-unsaved"]');
     expect(state?.textContent).toContain("Not saved");
     expect(state?.getAttribute("title")).toBe(
-      "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.",
+      "These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is kept as unsaved work.",
     );
-    expect(state?.getAttribute("title")).not.toMatch(/\u2014/);
+    expect(state?.getAttribute("title")).not.toMatch(/auto-save|save a version|\u2014/i);
+  });
+
+  it("points at History when the space lists Unsaved work there", async () => {
+    versioningState.mode = "stateless";
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [fileChange("notes.md")],
+          projectId: "p1",
+          unsavedReason: "save_failed",
+        }),
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="chat-file-change-unsaved"]')?.getAttribute("title"),
+    ).toBe(
+      "These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is kept under History, in Unsaved work.",
+    );
+  });
+
+  it("does not point a Desktop space at History until its origin lists unsaved work", async () => {
+    versioningState.mode = "desktop";
+    versioningState.recovery = "unsupported";
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [{ ...fileChange("notes.md"), notSaved: { reason: "conflicted" as const, keptSavedVersion: true } }],
+          projectId: "p1",
+        }),
+      );
+    });
+    const chip = container.querySelector<HTMLElement>('[data-testid="chat-file-change-not-saved-chip"]');
+    expect(chip?.getAttribute("title")).toBe(
+      "Changed in the space while the agent worked. The agent's version is kept as unsaved work.",
+    );
+
+    versioningState.recovery = "supported";
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [{ ...fileChange("notes.md"), notSaved: { reason: "conflicted" as const, keptSavedVersion: true } }],
+          projectId: "p1",
+        }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="chat-file-change-not-saved-chip"]')?.getAttribute("title"),
+    ).toBe("Changed in the space while the agent worked. The agent's version is kept under History, in Unsaved work.");
+  });
+
+  it("marks each file a partial save left out, next to its own chip", async () => {
+    const files = [
+      fileChange("src/app.ts"),
+      { ...fileChange(".env"), notSaved: { reason: "secret" as const, keptSavedVersion: false } },
+      { ...fileChange("media/clip.mp4"), notSaved: { reason: "too_large" as const, keptSavedVersion: true } },
+    ];
+
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: "p1", messageId: "msg-1" }));
+    });
+
+    // The whole change is not marked: most of it was saved.
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
+      "Edited 3 files · 2 not saved",
+    );
+
+    const rowOrder = Array.from(container.querySelectorAll("[data-testid]")).map((node) =>
+      node.getAttribute("data-testid") === "chat-file-change-file-chip"
+        ? `file:${node.textContent}`
+        : node.getAttribute("data-testid"),
+    );
+    expect(rowOrder.slice(0, 7)).toEqual([
+      "chat-file-change-summary",
+      "chat-file-change-toggle-files",
+      "file:app.ts",
+      "file:.env",
+      "chat-file-change-not-saved-chip",
+      "file:clip.mp4",
+      "chat-file-change-not-saved-chip",
+    ]);
+
+    const chips = container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-file-change-not-saved-chip"]');
+    expect(chips[0]?.querySelector("span:not(.sr-only)")?.textContent).toBe("Not saved");
+    expect(chips[0]?.textContent).toContain(".env");
+    expect(chips[0]?.title).toBe("Secret files stay out of the space. Use Secrets for these values.");
+    expect(chips[1]?.title).toBe(
+      "Larger than 20 MB, so it isn't saved to the space. The saved version is unchanged.",
+    );
+
+    // A tap opens that file's reason under the row, and only that one.
+    const notes = container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-not-saved-note"]');
+    expect(notes).toHaveLength(2);
+    expect(chips[0]?.getAttribute("aria-controls")).toBe(notes[0]?.id);
+    expect(chips[0]?.getAttribute("aria-expanded")).toBe("false");
+    expect(notes[0]?.classList.contains("sr-only")).toBe(true);
+    await act(async () => {
+      chips[0]?.click();
+    });
+    expect(chips[0]?.getAttribute("aria-expanded")).toBe("true");
+    expect(notes[0]?.classList.contains("sr-only")).toBe(false);
+    expect(notes[0]?.textContent).toBe(".env: Secret files stay out of the space. Use Secrets for these values.");
+    expect(notes[1]?.classList.contains("sr-only")).toBe(true);
+    expect(notes[0]?.parentElement?.getAttribute("data-testid")).toBe("chat-file-change-summary");
+    expect(container.textContent).not.toMatch(/\u2014/);
+  });
+
+  it("words every reason a save can leave a file out for", async () => {
+    const reasons = [
+      ["excluded", "Build output, dependency and cache folders aren't saved to the space."],
+      ["ignored", "This file matches .gitignore, so it isn't saved to the space."],
+      ["attachment", "Old chat upload files aren't saved to the space."],
+      ["policy", "This space's file rules refused this file."],
+      ["unsupported", "Links and special files can't be saved."],
+      ["unknown", "The space didn't save this file."],
+    ] as const;
+    const files = reasons.map(([reason], index) => ({
+      ...fileChange(`dir/file-${index}.txt`),
+      notSaved: { reason, keptSavedVersion: false },
+    }));
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files: files.slice(0, 4), projectId: null }));
+    });
+    expect(
+      Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-not-saved-chip"]')).map(
+        (chip) => chip.title,
+      ),
+    ).toEqual(reasons.slice(0, 4).map(([, text]) => text));
+
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files: files.slice(4), projectId: null }));
+    });
+    expect(
+      Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-not-saved-chip"]')).map(
+        (chip) => chip.title,
+      ),
+    ).toEqual(reasons.slice(4).map(([, text]) => text));
   });
 
   it("shows no save state when the save worked or was never attempted", async () => {

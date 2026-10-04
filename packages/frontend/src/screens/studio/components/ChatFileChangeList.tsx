@@ -1,5 +1,5 @@
 import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Eye, NavArrowRight, OpenNewWindow, Undo, WarningTriangle } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { useStatus } from "../../../status/useStatus";
@@ -7,6 +7,7 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
+import { useWorkspaceVersioning } from "../../../workspace/useWorkspaceVersioning";
 import { getUnifiedDiffRowClass, parseUnifiedDiff, splitUnifiedDiffHeader } from "../../../utils/unifiedDiff";
 import type {
   ChatMessageCommitRange,
@@ -16,6 +17,7 @@ import type {
   ChatMessageUnsavedReason,
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
+import { describeFileNotSaved, describeUnsavedChanges } from "./chatFileChangeCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 
 const {
@@ -85,7 +87,7 @@ const chipBaseClass =
   "inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border px-2.5 text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950 disabled:pointer-events-none disabled:opacity-45";
 // One distinguishing property per rail role: the summary is a borderless label,
 // file chips are the only bordered pills, actions are ghost buttons.
-// summaryToggleClass is the chat-wide disclosure vocabulary — reused by other chat surfaces.
+// summaryToggleClass is the chat-wide disclosure vocabulary, reused by other chat surfaces.
 // -ml-1.5 hangs the pill's own padding so the label TEXT aligns with the message text column.
 export const summaryToggleClass = `${chipBaseClass} -ml-1.5 border-transparent px-1.5 font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-200 dark:hover:bg-white/[0.07]`;
 const actionChipClass = `${chipBaseClass} border-transparent font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:hover:bg-white/[0.07] dark:hover:text-slate-100`;
@@ -246,16 +248,6 @@ function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {
   return "Edited";
 }
 
-// Plain-words reason behind the "Not saved" state. Hosted spaces keep unsaved
-// changes only on the machine running them, which can be replaced. The state
-// is a snapshot of the turn's own save, so the words describe that turn and
-// stay true after a later Save version.
-function describeUnsavedChanges(reason: ChatMessageUnsavedReason): string {
-  return reason === "auto_save_off"
-    ? "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts."
-    : "Saving failed when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.";
-}
-
 function buildSyntheticDiffPreview(
   path: string,
   contentText: string,
@@ -306,8 +298,9 @@ export function ChatFileChangeList({
   // The run's base..head commits: pins diffs to what that run changed (real
   // edit diffs on snapshot-history origins, stable after later edits).
   commitRange?: ChatMessageCommitRange | null;
-  // Set when the run's save failed or auto-save was off: the changes exist
-  // only on the space's machine, so the rail says "Not saved".
+  // Set when the run's save failed or did not run, so the rail says "Not
+  // saved" for the whole change. Files a partial save left out carry their
+  // own `notSaved` instead.
   unsavedReason?: ChatMessageUnsavedReason | null;
   // Identity of the chat message these changes belong to. When present, the
   // Undo chip becomes a conversational affordance (#165): it asks the agent to
@@ -318,8 +311,16 @@ export function ChatFileChangeList({
 }) {
   const { openPanelTab, requestUrlPush, openGitDiffTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
-  const { effectiveRuntimeId, runtimeReady } = useRuntime();
+  const { effectiveRuntimeId, runtimeReady, desktopOrigin } = useRuntime();
   const projectAccess = useOptionalProjectAccess();
+  // How the space keeps versions. Instances share one probe and cache.
+  const versioning = useWorkspaceVersioning({ projectId, origin: desktopOrigin });
+  // Only a History drawer with an Unsaved work section can be pointed at:
+  // the stateless gateway has one, a Desktop origin once it lists recovery.
+  const unsavedWorkPlacement = {
+    unsavedWorkInHistory:
+      versioning.mode === "stateless" || (versioning.mode === "desktop" && versioning.recovery === "supported"),
+  };
   const projectWriteEnabled =
     projectAccess?.projectCapabilitiesResolved === true &&
     projectAccess.canWriteProject === true;
@@ -334,6 +335,7 @@ export function ChatFileChangeList({
     () => resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
   );
   const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
+  const [openNotSavedNotes, setOpenNotSavedNotes] = useState<Record<string, boolean>>({});
   const cardIdBase = useId();
 
   const resolvedFiles = useMemo(() => resolveUniqueChatFileChanges(files), [files]);
@@ -389,6 +391,8 @@ export function ChatFileChangeList({
   const totalCount = uniquePaths.length;
 
   const revertedCount = totalCount - pendingCount;
+  // Files the turn's save left out; reverted ones have nothing left to save.
+  const notSavedCount = pendingEntries.filter((entry) => entry.file.notSaved).length;
 
   const compactSummaryLabel = (() => {
     if (totalCount === 0) {
@@ -397,17 +401,18 @@ export function ChatFileChangeList({
     if (pendingCount === 0) {
       return `Reverted ${formatFileCount(totalCount)}`;
     }
+    const notSavedSuffix = notSavedCount > 0 ? ` · ${notSavedCount} not saved` : "";
     if (revertedCount > 0) {
-      return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} reverted`;
+      return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} reverted${notSavedSuffix}`;
     }
-    return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}`;
+    return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}${notSavedSuffix}`;
   })();
 
   // Reverted files have nothing left to save, so the state follows the actions.
-  const unsavedNote = unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedReason) : null;
+  const unsavedNote = unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedWorkPlacement) : null;
   const unsavedNoteId = `${cardIdBase}-unsaved`;
 
-  // A single file needs no summary/toggle chip — the file chip carries everything.
+  // A single file needs no summary/toggle chip: the file chip carries everything.
   const showSummaryToggle = totalCount > 1;
   const visibleChipEntries = railExpanded || !showSummaryToggle ? resolvedFiles : [];
   const chipLabels = resolveChipLabels(resolvedFiles);
@@ -466,7 +471,7 @@ export function ChatFileChangeList({
         // A newly created file can return an empty diff during the brief window
         // before its change is committed/synced on the origin. Rather than
         // dead-ending on "No diff available", synthesize the added-lines diff from
-        // the file's current contents — accurate for a create (every line is new).
+        // the file's current contents, which is accurate for a create (every line is new).
         const shouldSynthesizeEmptyDiff =
           diffValue.trim().length === 0 &&
           (isExcludedFromSpaceHistoryPath(path) || changeType === "created");
@@ -735,7 +740,7 @@ export function ChatFileChangeList({
         });
         showStatus("Undid changes.", "success", 4000);
         setDiffRefreshNonce((value) => value + 1);
-        // Fully-reverted rails are history — tuck them down to the summary chip.
+        // Fully reverted rails are history: tuck them down to the summary chip.
         const remainingPending = pendingPaths.filter((path) => !targetPaths.includes(path));
         if (remainingPending.length === 0 && totalCount > 1) {
           setRailExpanded(false);
@@ -760,7 +765,7 @@ export function ChatFileChangeList({
 
   // Conversational undo (#165): ask the agent to undo this message's change
   // rather than silently reverting files. ChatPanel listens, fills the
-  // composer, and sends — the request lands in the thread like any user turn.
+  // composer, and sends, so the request lands in the thread like any user turn.
   const handleUndoRequest = useCallback(() => {
     if (!messageId || undoRequestPending || typeof window === "undefined") {
       return;
@@ -828,9 +833,13 @@ export function ChatFileChangeList({
             const isReverted = Boolean(undoStatusByPath[workspacePath]);
             const cardOpen = Boolean(expandedDiffByPath[workspacePath]);
             const isDeleted = file.changeType === "deleted";
+            const chipLabel = middleTruncateLabel(chipLabels.get(workspacePath) ?? workspacePath);
+            const notSavedReason =
+              file.notSaved && !isReverted ? describeFileNotSaved(file.notSaved, unsavedWorkPlacement) : null;
+            const notSavedNoteOpen = Boolean(openNotSavedNotes[workspacePath]);
             return (
+              <Fragment key={workspacePath}>
               <button
-                key={workspacePath}
                 type="button"
                 className={
                   cardOpen
@@ -849,7 +858,7 @@ export function ChatFileChangeList({
               >
                 {isReverted ? <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" /> : null}
                 <span className={`min-w-0 max-w-56 truncate ${isDeleted ? "line-through" : ""}`}>
-                  {middleTruncateLabel(chipLabels.get(workspacePath) ?? workspacePath)}
+                  {chipLabel}
                 </span>
                 {isReverted ? <span className="sr-only">(reverted)</span> : null}
                 {!isReverted && stat?.kind === "ready" ? (
@@ -861,6 +870,26 @@ export function ChatFileChangeList({
                   />
                 ) : null}
               </button>
+              {/* This file's own save state sits right after its chip, as
+                  glyph and words; a tap opens the reason under the row. */}
+              {notSavedReason ? (
+                <button
+                  type="button"
+                  className={unsavedStateClass}
+                  onClick={() =>
+                    setOpenNotSavedNotes((prev) => ({ ...prev, [workspacePath]: !prev[workspacePath] }))
+                  }
+                  aria-expanded={notSavedNoteOpen}
+                  aria-controls={`${cardIdBase}-not-saved-${index}`}
+                  title={notSavedReason}
+                  data-testid="chat-file-change-not-saved-chip"
+                >
+                  <WarningTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <span>Not saved</span>
+                  <span className="sr-only">{`: ${chipLabel}`}</span>
+                </button>
+              ) : null}
+              </Fragment>
             );
           })}
           </span>
@@ -940,6 +969,25 @@ export function ChatFileChangeList({
           {unsavedNote}
         </p>
       ) : null}
+
+      {visibleChipEntries.map(({ file, workspacePath }, index) => {
+        if (!file.notSaved || undoStatusByPath[workspacePath]) {
+          return null;
+        }
+        return (
+          <p
+            key={workspacePath}
+            id={`${cardIdBase}-not-saved-${index}`}
+            className={
+              openNotSavedNotes[workspacePath] ? "mt-1 text-xs text-slate-600 dark:text-slate-300" : "sr-only"
+            }
+            data-testid="chat-file-change-not-saved-note"
+          >
+            <span className="font-mono">{chipLabels.get(workspacePath) ?? workspacePath}</span>
+            {`: ${describeFileNotSaved(file.notSaved, unsavedWorkPlacement)}`}
+          </p>
+        );
+      })}
 
       {resolvedFiles.map(({ file, workspacePath, displayLabel }, index) => {
         if (!railExpanded || !expandedDiffByPath[workspacePath]) {
@@ -1027,7 +1075,7 @@ export function ChatFileChangeList({
                     <span className="mx-0.5 h-3.5 w-px shrink-0 bg-slate-200 dark:bg-white/[0.08]" aria-hidden="true" />
                     {/* Direct file revert stays available from the file card,
                         where its scope (this file's workspace changes) is
-                        unambiguous — the chip-row Undo is the conversational
+                        unambiguous; the chip-row Undo is the conversational
                         affordance. */}
                     <IconButton
                       aria-label={`Revert file changes to ${workspacePath}`}
