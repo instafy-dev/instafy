@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RevertWorkspaceGitCommitResult } from "../../../../services/runtimeController/workspaceGit";
-import { describeChangeRevertOutcome } from "../chatFileChangeCopy";
+import { describeChangeRevertOutcome, describeUnsavedChanges } from "../chatFileChangeCopy";
 
 function failure(
   status: number,
@@ -134,5 +134,30 @@ describe("describeChangeRevertOutcome", () => {
     expect(describeChangeRevertOutcome(null).message).toBe(
       "Couldn't revert this change. Try again, or ask the agent to undo it.",
     );
+  });
+});
+
+describe("describeUnsavedChanges", () => {
+  it("promises the next turn's save only for a save that failed", () => {
+    expect(describeUnsavedChanges("save_failed", { unsavedWorkInHistory: false, saveVersionInChanges: true })).toBe(
+      "These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is kept as unsaved work.",
+    );
+    expect(describeUnsavedChanges("save_failed", { unsavedWorkInHistory: true })).toBe(
+      "These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is kept under History, in Unsaved work.",
+    );
+  });
+
+  it("says saving is off without promising a later save", () => {
+    // RUNTIME_GIT_SYNC_AFTER_APPLY=0 turns saving off for every turn on that
+    // runtime: no later turn saves, and nothing is kept as unsaved work.
+    const legacy = describeUnsavedChanges("auto_save_off", { unsavedWorkInHistory: false, saveVersionInChanges: true });
+    expect(legacy).toBe(
+      "Saving is turned off on this space's runtime, so these changes weren't saved to the space. To save them, open Changes and use Save version.",
+    );
+    const stateless = describeUnsavedChanges("auto_save_off", { unsavedWorkInHistory: true });
+    expect(stateless).toBe("Saving is turned off on this space's runtime, so these changes weren't saved to the space.");
+    for (const text of [legacy, stateless]) {
+      expect(text).not.toMatch(/next turn|unsaved work/i);
+    }
   });
 });

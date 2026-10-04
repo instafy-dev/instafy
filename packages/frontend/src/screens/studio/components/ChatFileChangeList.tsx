@@ -321,9 +321,11 @@ export function ChatFileChangeList({
   const versioning = useWorkspaceVersioning({ projectId, origin: desktopOrigin });
   // Only a History drawer with an Unsaved work section can be pointed at:
   // the stateless gateway has one, a Desktop origin once it lists recovery.
+  // A space that keeps versions the old way still saves from Changes.
   const unsavedWorkPlacement = {
     unsavedWorkInHistory:
       versioning.mode === "stateless" || (versioning.mode === "desktop" && versioning.recovery === "supported"),
+    saveVersionInChanges: versioning.mode === "legacy",
   };
   // Every save is a version on the stateless gateway and on a Desktop origin.
   // There the change is undone by reverting its canonical commit range as a
@@ -423,7 +425,8 @@ export function ChatFileChangeList({
   })();
 
   // Reverted files have nothing left to save, so the state follows the actions.
-  const unsavedNote = unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedWorkPlacement) : null;
+  const unsavedNote =
+    unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedReason, unsavedWorkPlacement) : null;
   const unsavedNoteId = `${cardIdBase}-unsaved`;
 
   // A single file needs no summary/toggle chip: the file chip carries everything.

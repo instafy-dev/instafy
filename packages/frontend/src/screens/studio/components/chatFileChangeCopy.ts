@@ -2,7 +2,7 @@ import {
   REVERT_ROUTE_UNAVAILABLE_MESSAGE,
   type RevertWorkspaceGitCommitResult,
 } from "../../../services/runtimeController/workspaceGit";
-import type { ChatMessageFileNotSaved } from "../types";
+import type { ChatMessageFileNotSaved, ChatMessageUnsavedReason } from "../types";
 
 // Copy for the chat change card's save state. Work that did not reach the
 // space's saved history is kept on an unsaved-work ref. Only a space whose
@@ -10,15 +10,26 @@ import type { ChatMessageFileNotSaved } from "../types";
 // work is kept without naming a place the UI does not show.
 export interface UnsavedWorkPlacement {
   unsavedWorkInHistory: boolean;
+  // The space keeps versions the old way, so Changes still has Save version.
+  saveVersionInChanges?: boolean;
 }
 
 function keptAs({ unsavedWorkInHistory }: UnsavedWorkPlacement): string {
   return unsavedWorkInHistory ? "kept under History, in Unsaved work" : "kept as unsaved work";
 }
 
-// The message-level note when the turn's save failed or did not run. Every
-// turn saves, so the next turn picks up what this one left behind.
-export function describeUnsavedChanges(placement: UnsavedWorkPlacement): string {
+const SAVING_OFF_MESSAGE = "Saving is turned off on this space's runtime, so these changes weren't saved to the space.";
+
+// The message-level note when the turn's save failed or did not run.
+export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placement: UnsavedWorkPlacement): string {
+  if (reason === "auto_save_off") {
+    // Only the runtime-wide setting turns saving off now. It applies to every
+    // turn, so no later turn saves these, and nothing is kept as unsaved work.
+    return placement.saveVersionInChanges
+      ? `${SAVING_OFF_MESSAGE} To save them, open Changes and use Save version.`
+      : SAVING_OFF_MESSAGE;
+  }
+  // Every turn saves, so the next turn picks up what this one left behind.
   return `These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is ${keptAs(placement)}.`;
 }
 

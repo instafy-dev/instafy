@@ -638,7 +638,9 @@ describe("ChatFileChangeList", () => {
     expect(note?.classList.contains("sr-only")).toBe(true);
   });
 
-  it("explains a save that did not run with the same words as a failed one", async () => {
+  it("says saving is off without promising a later save, and points at Save version", async () => {
+    // Only the runtime-wide setting turns saving off now, and it applies to
+    // every turn: the next turn does not save these either.
     await act(async () => {
       root.render(
         createElement(ChatFileChangeList, {
@@ -652,9 +654,24 @@ describe("ChatFileChangeList", () => {
     const state = container.querySelector<HTMLElement>('[data-testid="chat-file-change-unsaved"]');
     expect(state?.textContent).toContain("Not saved");
     expect(state?.getAttribute("title")).toBe(
-      "These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is kept as unsaved work.",
+      "Saving is turned off on this space's runtime, so these changes weren't saved to the space. To save them, open Changes and use Save version.",
     );
-    expect(state?.getAttribute("title")).not.toMatch(/auto-save|save a version|\u2014/i);
+    expect(state?.getAttribute("title")).not.toMatch(/next turn|auto-save/i);
+
+    // Where every save is a version there is no Save version to point at.
+    versioningState.mode = "stateless";
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [fileChange("notes.md")],
+          projectId: "p1",
+          unsavedReason: "auto_save_off",
+        }),
+      );
+    });
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')?.getAttribute("title")).toBe(
+      "Saving is turned off on this space's runtime, so these changes weren't saved to the space.",
+    );
   });
 
   it("points at History when the space lists Unsaved work there", async () => {
