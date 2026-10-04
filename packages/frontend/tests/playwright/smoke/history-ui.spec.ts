@@ -235,7 +235,11 @@ test.describe("History UI (stateless gateway)", () => {
       timeout: 60_000,
     });
     await row.getByTestId("unsaved-work-restore-rest").click();
-    await expect(page.getByTestId("history-status")).toContainText("Restored as a new version.", { timeout: 60_000 });
+    // The only kept file is already saved, so the rest adds no version.
+    await expect(page.getByTestId("history-status")).toContainText(
+      "Nothing to restore. The saved version already has this work.",
+      { timeout: 60_000 },
+    );
     expect((await readWorkspaceFileText(page, filePath, { projectId })) ?? "").toBe(`kept ${unique}\n`);
   });
 

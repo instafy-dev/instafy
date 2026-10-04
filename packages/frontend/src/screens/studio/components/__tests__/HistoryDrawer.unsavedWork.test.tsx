@@ -308,6 +308,27 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(q(row(container, SALVAGE), "unsaved-work-restored")).not.toBeNull();
   });
 
+  it("does not claim a new version when restoring an already restored salvage entry", async () => {
+    mocks.fetchRecovery.mockResolvedValue(
+      list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false, restoredRev: NEW_HEAD })]),
+    );
+    mocks.restoreRecovery.mockResolvedValue({
+      ok: true,
+      rev: NEW_HEAD,
+      baseRev: NEW_HEAD,
+      committed: false,
+      notRestored: [],
+      refDeleted: false,
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, SALVAGE), "unsaved-work-restore");
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Nothing to restore. The saved version already has this work.",
+    );
+  });
+
   it("asks per file after a restore conflict and restores the rest with a keep list", async () => {
     mocks.restoreRecovery
       .mockResolvedValueOnce({
@@ -392,7 +413,42 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(
       expect.objectContaining({ ref: RECOVERY, keep: ["src/b.ts"], baseRev: "d".repeat(40) }),
     );
-    expect(q(container, "history-status")?.textContent).toContain("Restored as a new version.");
+    // The path the person kept is named as kept, not as a refused secret.
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Restored as a new version. Kept the current version of src/b.ts.",
+    );
+  });
+
+  it("says nothing was restored when every conflicted file was kept and nothing else is left", async () => {
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["src/a.ts", "src/b.ts"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: false,
+        notRestored: ["src/a.ts", "src/b.ts"],
+        refDeleted: true,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-restore");
+    const paths = Array.from(row(container, RECOVERY).querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path"]'));
+    await press(paths[0]!, "unsaved-work-path-keep");
+    await press(paths[1]!, "unsaved-work-path-keep");
+    await press(row(container, RECOVERY), "unsaved-work-restore-rest");
+    expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ keep: ["src/a.ts", "src/b.ts"] }));
+    const status = q(container, "history-status")?.textContent ?? "";
+    expect(status).toBe("Nothing else to restore. Kept the current version of src/a.ts, src/b.ts.");
+    expect(status).not.toContain("Secret and ignored");
+    expect(status).not.toContain("Restored as a new version");
   });
 
   describe("a 404 at the ref", () => {

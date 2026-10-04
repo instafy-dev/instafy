@@ -299,12 +299,41 @@ export const UNSAVED_WORK_ERROR_COPY = "Couldn't check for unsaved work.";
 export const UNSAVED_WORK_READ_FAILED_COPY =
   "Couldn't read this file from the unsaved work, so nothing was saved. Refreshing.";
 
-export function restoreSuccessCopy(notRestored: string[]): string {
-  const base = "Restored as a new version.";
-  if (notRestored.length === 0) {
-    return base;
+/**
+ * A finished restore. `kept` are the paths the person chose "Keep current"
+ * for (the server reports them in `notRestored` too); only the rest of
+ * `notRestored` were refused as secret or ignored. `committed: false` means
+ * no version was made: the saved version already held everything left.
+ */
+export function restoreSuccessCopy({
+  committed,
+  notRestored,
+  kept = [],
+}: {
+  committed: boolean | null | undefined;
+  notRestored: string[];
+  kept?: string[];
+}): string {
+  const keptSet = new Set(kept);
+  const keptPaths = Array.from(keptSet);
+  const refused = notRestored.filter((path) => !keptSet.has(path));
+  const sentences: string[] = [];
+  if (committed === false) {
+    sentences.push(
+      keptPaths.length > 0
+        ? "Nothing else to restore."
+        : "Nothing to restore. The saved version already has this work.",
+    );
+  } else {
+    sentences.push("Restored as a new version.");
   }
-  return `${base} Not restored: ${formatPathList(notRestored)}. Secret and ignored files stay out of the space.`;
+  if (keptPaths.length > 0) {
+    sentences.push(`Kept the current version of ${formatPathList(keptPaths)}.`);
+  }
+  if (refused.length > 0) {
+    sentences.push(`Not restored: ${formatPathList(refused)}. Secret and ignored files stay out of the space.`);
+  }
+  return sentences.join(" ");
 }
 
 export function restoreDirtyPathsCopy(paths: string[]): string {

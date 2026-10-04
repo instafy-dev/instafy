@@ -139,7 +139,14 @@ export function UnsavedWorkSection({
         return;
       }
       if (result.ok) {
-        onNotice({ tone: "success", text: restoreSuccessCopy(result.notRestored) });
+        onNotice({
+          tone: result.committed === false ? "info" : "success",
+          text: restoreSuccessCopy({
+            committed: result.committed,
+            notRestored: result.notRestored,
+            kept: options.keep ?? [],
+          }),
+        });
         clearConflict(entry.ref);
         patchUnsavedWorkEntries(projectId, originId, (entries) =>
           result.refDeleted
