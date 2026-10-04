@@ -109,6 +109,20 @@ export function describeRevertOtherWork(otherPaths: readonly string[], canAskAge
   return canAskAgent ? `${undo} Ask the agent to undo just this change.` : undo;
 }
 
+// A version published by merging (the space moved while the agent worked)
+// has two parents. A revert of it needs a base, and that base would undo
+// every local commit the merge brought in, not only this turn's: the card
+// cannot bound it, so it never offers Revert for one. A Desktop origin's
+// review of a clean merge lists no files at all, which is how the dialog
+// recognises it; elsewhere the origin refuses the revert (400) before it
+// writes anything.
+const COMBINED_VERSION_MESSAGE =
+  "This change was saved in a version that combines several saves, so it can't be reverted here.";
+
+export function describeRevertCombined(canAskAgent: boolean): string {
+  return canAskAgent ? `${COMBINED_VERSION_MESSAGE} Ask the agent to undo just this change.` : COMBINED_VERSION_MESSAGE;
+}
+
 export interface ChangeRevertOutcome {
   intent: "success" | "info" | "warning" | "error";
   message: string;
@@ -276,10 +290,10 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
   if (status === 409) {
     return outcome("warning", BUSY_MESSAGE);
   }
-  // A 400 is a change the origin cannot revert by itself, such as a merge,
-  // which needs a base the card does not send.
+  // A 400 is a version the origin cannot revert without a base: a merge,
+  // which the card never sends a base for (see describeRevertCombined).
   if (status === 400) {
-    return outcome("warning", "This change can't be reverted here. Ask the agent to undo it.", {
+    return outcome("warning", `${COMBINED_VERSION_MESSAGE} Ask the agent to undo it.`, {
       offerAgentUndo: true,
     });
   }

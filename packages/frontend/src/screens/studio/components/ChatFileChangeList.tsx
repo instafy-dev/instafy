@@ -25,6 +25,7 @@ import {
   REVERT_CHECKING_MESSAGE,
   describeChangeRevertOutcome,
   describeFileNotSaved,
+  describeRevertCombined,
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
@@ -94,6 +95,9 @@ type ChatChangeRevertScope =
   // turn saved without listing them on the card.
   | { status: "ready"; paths: string[]; unlistedPaths: string[] }
   | { status: "other_work"; otherPaths: string[] }
+  // The version lists no files of its own: a merge, which the card cannot
+  // bound to this turn's commits.
+  | { status: "combined" }
   // `stillLoading`: the gateway was still fetching the space's history, even
   // after one retry.
   | { status: "failed"; stillLoading?: boolean };
@@ -900,6 +904,14 @@ export function ChatFileChangeList({
     const paths = Array.from(
       new Set(review.entries.map((entry) => normalizeWorkspacePath(entry.path)).filter((path) => path.length > 0)),
     );
+    // A turn's own save always changes files. A version that lists none is
+    // a merge whose combined review is empty (a Desktop origin's review of a
+    // clean merge), and a revert of it would need a base the card cannot
+    // bound to this turn: ask the agent instead.
+    if (paths.length === 0) {
+      setRevertScope({ status: "combined" });
+      return;
+    }
     const otherPaths = paths.filter((path) => !turnPaths.has(path));
     setRevertScope(
       otherPaths.length > 0
@@ -1077,6 +1089,21 @@ export function ChatFileChangeList({
     }
     revertCancelRef.current?.focus();
   }, [revertConfirmOpen, revertScope?.status]);
+
+  const revertScopeMessage = (() => {
+    switch (revertScope?.status) {
+      case "ready":
+        return describeRevertConfirm(revertScope.unlistedPaths);
+      case "other_work":
+        return describeRevertOtherWork(revertScope.otherPaths, Boolean(messageId));
+      case "combined":
+        return describeRevertCombined(Boolean(messageId));
+      case "failed":
+        return revertScope.stillLoading ? REVERT_CHECK_STILL_LOADING_MESSAGE : REVERT_CHECK_FAILED_MESSAGE;
+      default:
+        return REVERT_CHECKING_MESSAGE;
+    }
+  })();
 
   const conversationalUndoChip = messageId ? (
     <button
@@ -1519,15 +1546,7 @@ export function ChatFileChangeList({
               className="mt-2 text-sm text-slate-500 dark:text-slate-400"
               data-testid="chat-file-change-revert-scope"
             >
-              {revertScope?.status === "ready"
-                ? describeRevertConfirm(revertScope.unlistedPaths)
-                : revertScope?.status === "other_work"
-                  ? describeRevertOtherWork(revertScope.otherPaths, Boolean(messageId))
-                  : revertScope?.status === "failed"
-                    ? revertScope.stillLoading
-                      ? REVERT_CHECK_STILL_LOADING_MESSAGE
-                      : REVERT_CHECK_FAILED_MESSAGE
-                    : REVERT_CHECKING_MESSAGE}
+              {revertScopeMessage}
             </p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
               <Button
@@ -1541,7 +1560,7 @@ export function ChatFileChangeList({
               </Button>
               {/* Each action has its own key, so React never reuses one
                   button's node (and its focus) for another action. */}
-              {revertScope?.status === "other_work" ? (
+              {revertScope?.status === "other_work" || revertScope?.status === "combined" ? (
                 messageId ? (
                   <Button
                     key="ask"

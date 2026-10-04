@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { RevertWorkspaceGitCommitResult } from "../../../../services/runtimeController/workspaceGit";
 import {
   describeChangeRevertOutcome,
+  describeRevertCombined,
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
@@ -125,8 +126,11 @@ describe("describeChangeRevertOutcome", () => {
       message: "This change isn't in the space's saved history, so it can't be reverted here. Ask the agent to undo it.",
       offerAgentUndo: true,
     });
+    // Without a base, the origin refuses only a merge (or a first commit,
+    // which no turn's range starts from).
     expect(describeChangeRevertOutcome(failure(400))).toMatchObject({
-      message: "This change can't be reverted here. Ask the agent to undo it.",
+      message:
+        "This change was saved in a version that combines several saves, so it can't be reverted here. Ask the agent to undo it.",
       offerAgentUndo: true,
     });
     expect(describeChangeRevertOutcome(failure(409, "not_saved")).message).toBe(
@@ -280,6 +284,17 @@ describe("describeRevertConfirm", () => {
     );
     expect(describeRevertConfirm(["package-lock.json", "dist/app.js"])).toBe(
       "A new version that undoes it is saved on top. Nothing is removed from history. It also undoes this turn's changes to package-lock.json and dist/app.js.",
+    );
+  });
+});
+
+describe("describeRevertCombined", () => {
+  it("says a merged version can't be reverted here, and the way forward", () => {
+    expect(describeRevertCombined(true)).toBe(
+      "This change was saved in a version that combines several saves, so it can't be reverted here. Ask the agent to undo just this change.",
+    );
+    expect(describeRevertCombined(false)).toBe(
+      "This change was saved in a version that combines several saves, so it can't be reverted here.",
     );
   });
 });

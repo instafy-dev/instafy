@@ -1212,6 +1212,48 @@ describe("ChatFileChangeList", () => {
       ).toBe(false);
     });
 
+    it("offers the agent instead of Revert for a version published by merging", async () => {
+      // The space moved while the agent worked, so its save published a
+      // merge. A Desktop origin's review of a clean merge lists no files,
+      // and a revert of it would need a base that also undoes every local
+      // commit the merge brought in.
+      versioningState.mode = "desktop";
+      versioningState.originId = "desktop-origin";
+      versionTouches();
+      const requests: MessageUndoRequestDetail[] = [];
+      const listener = (event: Event) => requests.push((event as CustomEvent<MessageUndoRequestDetail>).detail);
+      window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+      try {
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange, messageId: "msg-7" });
+        await openRevertDialog();
+
+        expect(dialog()?.getAttribute("data-state")).toBe("combined");
+        expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+          "This change was saved in a version that combines several saves, so it can't be reverted here. Ask the agent to undo just this change.",
+        );
+        expect(document.querySelector('[data-testid="chat-file-change-revert-confirm"]')).toBeNull();
+
+        await act(async () => {
+          document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-ask-agent"]')?.click();
+        });
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.messageId).toBe("msg-7");
+        expect(dialog()).toBeNull();
+        expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+      }
+
+      // Without a message to undo there is nothing to press but Cancel.
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "This change was saved in a version that combines several saves, so it can't be reverted here.",
+      );
+      expect(document.querySelector('[data-testid="chat-file-change-revert-confirm"]')).toBeNull();
+      expect(document.querySelector('[data-testid="chat-file-change-revert-ask-agent"]')).toBeNull();
+    });
+
     it("offers no Revert for a version with other work even without a message to undo", async () => {
       versionTouches("src/app.ts", "notes/earlier.md");
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
