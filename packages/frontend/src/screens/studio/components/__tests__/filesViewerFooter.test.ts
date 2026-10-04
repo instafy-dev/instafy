@@ -17,7 +17,7 @@ describe("describeFileViewerFacts", () => {
     const facts = describeFileViewerFacts({ size: 12, modified: null, mimeType: null });
     expect(facts).toEqual([{ label: "Size", value: "12 B" }]);
     expect(describeFileViewerFacts({ size: null, modified: "  ", mimeType: "" })).toEqual([]);
-    expect(JSON.stringify(describeFileViewerFacts({}))).not.toMatch(/—/);
+    expect(JSON.stringify(describeFileViewerFacts({}))).not.toMatch(/\u2014/);
   });
 
   it("formats sizes and keeps an unparseable timestamp as written", () => {

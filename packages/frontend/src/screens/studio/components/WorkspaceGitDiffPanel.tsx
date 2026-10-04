@@ -163,8 +163,8 @@ export interface WorkspaceGitDiffPanelProps {
   path: string | null;
   projectId: string | null;
   commit?: string | null;
-  // With base set, the origin diffs base→commit (or base→worktree) tree-to-tree
-  // — the pinned per-run view used by chat diff cards.
+  // With base set, the origin diffs base→commit (or base→worktree) tree-to-tree:
+  // the pinned per-run view used by chat diff cards.
   base?: string | null;
   /** Read objects from a recovery or salvage ref (History, unsaved work). */
   gitRef?: string | null;
@@ -329,7 +329,7 @@ export function WorkspaceGitDiffPanel({
     }
     const headerPath =
       stripDiffSidePrefix(diffHeader.bPath) ?? stripDiffSidePrefix(diffHeader.aPath) ?? normalizedPath;
-    // The panel heading already names the file — echoing it here is noise.
+    // The panel heading already names the file; echoing it here is noise.
     // Show the change label instead; paths reappear only when they differ.
     return headerPath === normalizedPath ? getDiffHeaderLabel(diffHeader.change) : headerPath;
   }, [diffHeader, normalizedPath]);
@@ -389,7 +389,7 @@ export function WorkspaceGitDiffPanel({
             </Heading>
             {showModeLabel ? (
               <Text variant="label" tone="secondary" className="leading-tight">
-                {/* The panel only ever shows diffs — the label carries the mode, not the word "diff". */}
+                {/* The panel only ever shows diffs: the label carries the mode, not the word "diff". */}
                 {modeLabelText ?? (base ? "Agent run" : commit ? "Saved version" : "Working tree")}
               </Text>
             ) : null}
