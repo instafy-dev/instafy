@@ -74,15 +74,19 @@ The hook checks every pushed ref:
   lower case. In a repository git marked `core.ignorecase` when it created it, ref names must also
   be ASCII, because some other letters fold onto ASCII ones there.
 - **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) hold work
-  recovered from retired workspaces and may be the only copy of it. A push may not create, move or
-  delete them. Only the shard can set the hook environment that would allow it, never from a
-  request header, and no request sets it yet. This check and the ASCII rule run before
-  `GIT_POLICY_DISABLED`.
+  recovered from retired workspaces and may be the only copy of it. An ordinary push may not
+  create, move or delete them. Only a push the shard marked as a salvage push, because it carries
+  the controller's exact salvage credential (see
+  [Controller-only salvage pushes](#controller-only-salvage-pushes)), may create one, and only as
+  `refs/instafy/salvage/gateway/<name>` with a lower-case `[0-9a-z._-]` name. Nothing can move or
+  delete a salvage ref, and every other ref update in a salvage push is refused. The shard sets the
+  hook environment for this itself, never from a request header. These rules and the ASCII rule run
+  before `GIT_POLICY_DISABLED`.
 - **`main`** is fast-forward only and cannot be deleted. A name that differs from it only in letter
   case is refused.
 - **`refs/instafy/`** holds only recovery refs, `refs/instafy/recovery/<origin id>/<name>` with a
-  lower-case UUID and a name of `[0-9A-Za-z._-]`. A push may create or move nothing else there, so
-  a stray ref such as `refs/instafy/recovery` cannot block them.
+  lower-case UUID and a name of `[0-9A-Za-z._-]`, and the salvage refs above. A push may create or
+  move nothing else there, so a stray ref such as `refs/instafy/recovery` cannot block them.
 - **Other refs**, recovery refs included, may be deleted by any client allowed to push
   (`git.write`).
 - **Every ref points to a commit**, directly or through an annotated tag.
@@ -97,7 +101,7 @@ Knobs:
 - `GIT_DENY_PATHS` (optional, comma-separated glob patterns): additional blocked paths (e.g. `*/vendor/*,*.zip`)
 - `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB): largest pack one push may send. Any value
   other than a positive whole number of bytes stops the shard from starting.
-- `GIT_POLICY_DISABLED=1`: disable the hook's checks except salvage ref protection and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rules and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
 roll it back to an older shard image: older shards rewrite per-repository hooks on each request
@@ -214,6 +218,40 @@ acknowledgement/status into `502 Bad Gateway`. This prevents an older shard's or
 `404` from being mistaken for deletion during a rolling upgrade. Cleanup automation must require
 the exact header/status pair; an initial cleanup normally observes `deleted-v1`, and a second exact
 `DELETE` provides readback proof as `404` plus `absent-v1`.
+
+### Controller-only salvage pushes
+
+Work recovered from retired workspace copies is kept on canonical as salvage refs. Writing one
+needs a separate controller capability, `git.salvage`, which can do nothing else:
+
+1. Use an unscoped controller-internal or Supabase service-role bearer to call
+   `POST /projects/<uuid>/git/access_token` with `{"scopes":["git.salvage"]}`.
+2. Push with the returned token as the bearer credential through Git Edge, creating
+   `refs/instafy/salvage/gateway/<name>` (`<name>` is lower-case `[0-9a-z._-]`) with an empty
+   expected old value, for example `git push --force-with-lease=<ref>: origin <commit>:<ref>`.
+
+`git.salvage` must be the only requested scope, always mints with a fixed 120-second lifetime, and
+cannot be minted by a human session or any scoped runtime, job, origin or pre-stop grant token. The
+controller logs each issuance with the project id, never the token. Git Edge accepts the token only
+for the two requests of a push (`GET info/refs?service=git-receive-pack` and
+`POST git-receive-pack`), and only in its exact shape: protocol `git`, the repository's project,
+subject `instafy-controller-salvage`, `git.salvage` as the only scope, the fixed lifetime, and no
+runtime, origin, lease, run or browser binding. A token that names `git.salvage` is refused for
+reads, deletion and in any other shape.
+
+Git Shard checks the token again: a receive-pack request whose bearer lists `git.salvage` must
+verify against `GIT_JWKS_URL` and `GIT_AUDIENCE` and have the same exact shape, or the shard
+refuses the request before it touches the repository, so the credential can never push as an
+ordinary `git.write` one. Other pushes are left to Git Edge as before. A verified salvage push may
+only create salvage refs: it cannot move or delete one, and every other ref update in the same push
+(`main`, branches, tags, recovery refs) is refused. Object checks, the push size bound, deny paths
+and the blob size cap apply as for any push, so a salvage commit carrying a denied path or an
+oversized file is refused and has to leave that path out. Nothing removes a salvage ref through
+Git; an operator can delete one on the shard host after review.
+
+Upgrades: deploy shards before Git Edge. An older shard does not check the salvage credential and
+would run its push as an ordinary write, so no salvage token may be minted until every shard runs
+this policy.
 
 Request headers whose names start with `X-Instafy-Git-` are reserved for messages between Git
 Edge and Git Shard. Git Edge drops every client-supplied header in that namespace before it

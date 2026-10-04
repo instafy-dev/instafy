@@ -23,7 +23,9 @@ start if the hooks cannot run or git ignores the command-scope configuration. Th
 - Deny common churn paths (like `node_modules/`, from `REPO_POLICY_DENY_PATTERNS` in `src/policy.rs`)
 - Per-blob size caps, checked on the net change between the old and new tip, merges included
 - Object checks (`receive.fsckObjects`) and a push size bound (`GIT_MAX_PUSH_BYTES`)
-- Salvage refs (`refs/instafy/salvage/**`, any letter case) that no push can change
+- Salvage refs (`refs/instafy/salvage/**`, any letter case) that no push can move or delete; only
+  a push carrying the controller's exact `git.salvage` credential may create one, under
+  `refs/instafy/salvage/gateway/`
 - Only recovery refs (`refs/instafy/recovery/<origin id>/<name>`) may be created under `refs/instafy/`
 
 See `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_MAX_PUSH_BYTES` and `GIT_POLICY_DISABLED` in
