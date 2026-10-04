@@ -2061,7 +2061,9 @@ export function FilesPanel({
                     >
                       <div className="flex w-full items-center justify-between">
                         <span>{entry.name}</span>
-                        {dirtyFileIds.has(entry.path) ? <span className="text-xs text-rose-500">●</span> : null}
+                        {dirtyFileIds.has(entry.path) ? (
+                          <span className="text-xs text-rose-500" role="img" aria-label="Unsaved changes">●</span>
+                        ) : null}
                       </div>
                       <Text as="p" variant="caption" tone="subtle" className="w-full break-words">
                         {entry.path}

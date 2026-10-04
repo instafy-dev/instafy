@@ -851,6 +851,19 @@ describe("FilesPanel one Save", () => {
     }));
   });
 
+  it("names the unsaved dot in search results for screen readers", async () => {
+    await render([buffer()]);
+    const search = container.querySelector<HTMLInputElement>('input[type="search"], input[aria-label*="Search"]');
+    expect(search).not.toBeNull();
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setValue.call(search, "READ");
+      search!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const dot = query("files-entry-README-md")?.querySelector('[role="img"]');
+    expect(dot?.getAttribute("aria-label")).toBe("Unsaved changes");
+  });
+
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {
     await render([buffer()]);
     expect(query("files-explorer-new-file")?.disabled).toBe(false);

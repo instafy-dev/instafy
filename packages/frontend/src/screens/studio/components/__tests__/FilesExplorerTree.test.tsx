@@ -70,6 +70,15 @@ describe("Files explorer folder rows", () => {
     expect(props.onToggle).toHaveBeenCalledTimes(3);
   });
 
+  it("names the unsaved dot for screen readers", async () => {
+    await render({ dirtyFileIds: new Set(["notes.md"]) });
+    const row = query("files-entry-notes-md")!;
+    const dot = row.querySelector('[role="img"]');
+    expect(dot?.getAttribute("aria-label")).toBe("Unsaved changes");
+    expect(dot?.textContent).toBe("\u25cf");
+    expect(query("files-entry-skills")!.querySelector('[role="img"]')).toBeNull();
+  });
+
   it("shows an expanded folder's loading line until its listing arrives", async () => {
     const renderDirectoryStatus = vi.fn((path: string) => <span>Loading files… ({path})</span>);
     await render({ expandedDirectories: new Set(["skills"]), renderDirectoryStatus });
