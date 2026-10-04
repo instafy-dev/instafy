@@ -1,5 +1,5 @@
 import type { ControllerOriginSummary } from "../originTypes";
-import { fetchWorkspaceGitStatusFromController } from "./workspaceGit";
+import { fetchWorkspaceGitStatusFromController, type WorkspaceGitStatus } from "./workspaceGit";
 import {
   getCachedWorkspaceVersioning,
   knownRecoverySupport,
@@ -36,7 +36,9 @@ export type {
  * - Desktop and EFS origins are `desktop`; no request is made.
  * - Hosted origins get one `GET /git/status?limit=1` pinned to the summary's
  *   origin (no `preferHosted`, no `preferRuntime`). `stateless: true` means
- *   `stateless`; anything else, including 404 and errors, means `legacy`.
+ *   `stateless`; any other answer, including a 404, means `legacy`. A probe
+ *   that gets no answer (no token, a network or server error) stores
+ *   nothing: the previous entry, stale or not, stays as it was.
  * - Any other origin mode is `legacy`.
  *
  * Saves never depend on the result (decision D4); it only chooses chrome and
@@ -77,6 +79,18 @@ function modeForOrigin(originMode: VersioningOriginMode): VersioningMode | null 
     return "desktop";
   }
   return originMode === "hosted" ? null : "legacy";
+}
+
+/**
+ * The status call got an answer from the origin: a status (busy included) or
+ * a 404 (`supported: false`). No token, a network or server error, or an
+ * error reported in place of a status is no answer.
+ */
+function isStatusAnswer(status: WorkspaceGitStatus | null): boolean {
+  if (!status) {
+    return false;
+  }
+  return status.supported === false || !status.error;
 }
 
 /** True when a cached entry can be used without probing again. */
@@ -130,8 +144,14 @@ export async function probeWorkspaceVersioning(
         limit: 1,
         routing: "default",
         accessToken: params.accessToken ?? null,
+        // This probe stores its own answer; it is not an outside signal.
+        noteVersioningSignals: false,
       }).catch(() => null);
       stateless = status?.stateless === true;
+      if (!stateless && !isStatusAnswer(status)) {
+        // No answer: never store a mode as fresh. The entry stays as it was.
+        return getCachedWorkspaceVersioning(projectId, originId);
+      }
       mode = stateless ? "stateless" : "legacy";
     }
     if (latestProbe.get(key) !== seq) {

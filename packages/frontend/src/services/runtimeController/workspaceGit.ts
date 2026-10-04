@@ -115,6 +115,12 @@ export async function fetchWorkspaceGitStatusFromController(params: {
   limit?: number;
   offset?: number;
   routing?: WorkspaceOriginRouting;
+  /**
+   * Report a `stateless: true` answer to the versioning cache (default). The
+   * capability probe turns this off: it stores its own answer, and its own
+   * response must not count as a signal that arrived while it was running.
+   */
+  noteVersioningSignals?: boolean;
 }): Promise<WorkspaceGitStatus | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -275,7 +281,7 @@ export async function fetchWorkspaceGitStatusFromController(params: {
     const busy = isTransientWorkspaceBusyError(payloadError);
     const error = busy ? null : payloadError;
     const stateless = payload.stateless === true;
-    if (stateless) {
+    if (stateless && params.noteVersioningSignals !== false) {
       noteVersioningSignal(statusToken.originId, "stateless");
     }
 

@@ -47,12 +47,14 @@ describe("probeWorkspaceVersioning", () => {
     mocks.status.mockResolvedValue(statusResult({ stateless: true }));
     const result = await probeWorkspaceVersioning({ projectId: "p", origin: gateway });
     expect(result).toMatchObject({ projectId: "p", originId: "gateway", originMode: "hosted", mode: "stateless", stateless: true, stale: false });
+    // The probe's own answer is not reported as an outside signal.
     expect(mocks.status).toHaveBeenCalledWith({
       projectId: "p",
       originId: "gateway",
       limit: 1,
       routing: "default",
       accessToken: null,
+      noteVersioningSignals: false,
     });
   });
 
@@ -60,16 +62,33 @@ describe("probeWorkspaceVersioning", () => {
     ["no stateless field", statusResult()],
     ["stateless: false", statusResult({ stateless: false })],
     ["404 (supported: false)", { ...statusResult({ supported: false }), error: "git status unavailable" }],
-    ["an error answer", statusResult({ error: "Unable to load changes right now. Try Refresh." })],
-    ["no answer", null],
+    ["a busy answer", statusResult({ busy: true, error: null })],
   ])("a hosted origin with %s is legacy", async (_label, answer) => {
     mocks.status.mockResolvedValue(answer);
-    expect((await probeWorkspaceVersioning({ projectId: "p", origin: gateway }))?.mode).toBe("legacy");
+    expect(await probeWorkspaceVersioning({ projectId: "p", origin: gateway })).toMatchObject({ mode: "legacy", stale: false });
   });
 
-  it("a status call that throws is legacy", async () => {
+  it.each([
+    ["an error answer", () => mocks.status.mockResolvedValue(statusResult({ error: "Unable to load changes right now. Try Refresh." }))],
+    ["no answer", () => mocks.status.mockResolvedValue(null)],
+    ["a call that throws", () => mocks.status.mockRejectedValue(new Error("network"))],
+  ])("a probe with %s stores nothing", async (_label, arrange) => {
+    arrange();
+    expect(await probeWorkspaceVersioning({ projectId: "p", origin: gateway })).toBeNull();
+    expect(getCachedWorkspaceVersioning("p", "gateway")).toBeNull();
+  });
+
+  it("a failed probe leaves a stale entry stale, never fresh legacy", async () => {
+    await probeWorkspaceVersioning({ projectId: "p", origin: gateway });
+    noteVersioningSignal("gateway", "committed");
+    const stale = getCachedWorkspaceVersioning("p", "gateway");
+    expect(stale).toMatchObject({ mode: "legacy", stale: true });
+
+    mocks.status.mockResolvedValue(null);
+    expect(await probeWorkspaceVersioning({ projectId: "p", origin: gateway, force: true })).toBe(stale);
     mocks.status.mockRejectedValue(new Error("network"));
-    expect((await probeWorkspaceVersioning({ projectId: "p", origin: gateway }))?.mode).toBe("legacy");
+    expect(await probeWorkspaceVersioning({ projectId: "p", origin: gateway, force: true })).toBe(stale);
+    expect(getCachedWorkspaceVersioning("p", "gateway")).toBe(stale);
   });
 
   it("an unknown origin mode is legacy without a request", async () => {
