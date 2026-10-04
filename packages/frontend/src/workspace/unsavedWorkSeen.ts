@@ -8,8 +8,15 @@ import type { WorkspaceRecoveryEntry } from "../sdk/instafy";
  */
 
 const SEEN_STORAGE_PREFIX = "instafy.unsavedWork.seen.";
-/** Keep the newest keys only; recovery refs are short-lived. */
+/** Keep the newest recovery keys only; recovery refs are short-lived. */
 const SEEN_LIMIT = 200;
+/**
+ * Salvage refs are kept for good and cannot be removed, and only being seen
+ * stops them counting on the badge: newer recovery keys never push them out.
+ * They have a cap of their own (one gateway salvage per space in practice).
+ */
+const SALVAGE_SEEN_LIMIT = 100;
+const SALVAGE_REF_PREFIX = "refs/instafy/salvage/";
 
 const seenListeners = new Set<() => void>();
 let seenVersion = 0;
@@ -46,6 +53,19 @@ export function unsavedWorkSeenKey(entry: Pick<WorkspaceRecoveryEntry, "ref" | "
   return `${entry.ref}@${entry.rev}`;
 }
 
+function isSalvageSeenKey(key: string): boolean {
+  return key.startsWith(SALVAGE_REF_PREFIX);
+}
+
+/** The newest keys of each kind, in their original order. */
+function trimSeenKeys(keys: string[]): string[] {
+  const kept = new Set([
+    ...keys.filter(isSalvageSeenKey).slice(-SALVAGE_SEEN_LIMIT),
+    ...keys.filter((key) => !isSalvageSeenKey(key)).slice(-SEEN_LIMIT),
+  ]);
+  return keys.filter((key) => kept.has(key));
+}
+
 export function readUnsavedWorkSeen(
   projectId: string | null | undefined,
   userId: string | null | undefined,
@@ -75,7 +95,7 @@ export function markUnsavedWorkSeen(
     seen.delete(key);
     seen.add(key);
   }
-  const kept = Array.from(seen).slice(-SEEN_LIMIT);
+  const kept = trimSeenKeys(Array.from(seen));
   try {
     window.localStorage.setItem(seenStorageKey(projectId, userId), JSON.stringify(kept));
   } catch (_error) {
