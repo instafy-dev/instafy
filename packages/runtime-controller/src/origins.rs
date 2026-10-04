@@ -6946,7 +6946,10 @@ fn git_access_token_ttl_seconds(
     ttl_seconds.max(1)
 }
 
-fn has_direct_git_delete_service_authentication(
+/// Whether the request's bearer is exactly the controller's internal token or
+/// the configured service-role key, unscoped. Required for the controller-only
+/// git capabilities (`git.delete`, `git.salvage`).
+fn has_direct_service_authentication(
     config: &AppConfig,
     headers: &HeaderMap,
     context: &RequestContext,
@@ -6988,7 +6991,7 @@ async fn post_git_access_token(
         .ok_or_else(|| bad_request("projectId is required"))?;
 
     let direct_service_authentication =
-        has_direct_git_delete_service_authentication(&state.config, &headers, &context);
+        has_direct_service_authentication(&state.config, &headers, &context);
     let normalized_scopes =
         normalize_git_access_token_scopes(&context, &body.scopes, direct_service_authentication)?;
     let controller_capability = controller_git_capability(&normalized_scopes);
@@ -7170,8 +7173,9 @@ async fn post_git_access_token(
         mint_scoped_token(&state.config, token_request)?
     };
     if normalized_scopes.as_slice() == [GIT_SALVAGE_SCOPE] {
-        // An audit line for every salvage credential; never the token.
-        info!(%project_id, "issued a git.salvage token");
+        // An audit line for every salvage credential: its token id, which the
+        // shard logs again with the refs it creates; never the token.
+        info!(%project_id, jti = %minted.jti, "issued a git.salvage token");
     }
 
     let response = GitAccessTokenResponse {
