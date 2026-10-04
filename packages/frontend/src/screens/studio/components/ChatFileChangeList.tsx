@@ -822,7 +822,9 @@ export function ChatFileChangeList({
     return () => window.clearTimeout(timer);
   }, [undoRequestPending]);
 
-  const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange);
+  // One saved revert undoes the whole version; files it left alone (never
+  // saved) are not something a second revert can reach.
+  const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange && !revertedByVersion);
 
   // "Revert this change": a new version that undoes the run's canonical range
   // (`{commit: head, base}`), on the origin the versioning probe described.
@@ -856,7 +858,15 @@ export function ChatFileChangeList({
       const outcome = describeChangeRevertOutcome(result);
       if (outcome.reverted) {
         const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));
-        const targetPaths = pendingPaths.filter((path) => !left.has(path));
+        // A version revert only undoes what reached the saved history. Files
+        // the turn's save left out (Not saved) and folders that are never
+        // saved stay as they are, and keep their state on the card.
+        const targetPaths = pendingEntries
+          .filter(
+            ({ file, workspacePath }) =>
+              !left.has(workspacePath) && !file.notSaved && !isExcludedFromSpaceHistoryPath(workspacePath),
+          )
+          .map(({ workspacePath }) => workspacePath);
         setRevertedByVersion(true);
         setUndoStatusByPath((prev) => {
           const next = { ...prev };
@@ -889,6 +899,7 @@ export function ChatFileChangeList({
     changeTypeByPath,
     handleUndoRequest,
     messageId,
+    pendingEntries,
     pendingPaths,
     projectId,
     projectWriteEnabled,

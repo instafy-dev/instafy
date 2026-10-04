@@ -1179,6 +1179,39 @@ describe("ChatFileChangeList", () => {
       expect(revertChip()).not.toBeNull();
     });
 
+    it("marks only files that reached the saved history as reverted", async () => {
+      revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
+      await renderCard({
+        files: [
+          fileChange("src/app.ts"),
+          { ...fileChange(".env"), notSaved: { reason: "secret" as const, keptSavedVersion: false } },
+          { ...fileChange("tmp/out.log"), changeType: "created" as const },
+        ],
+        commitRange: gitRange,
+      });
+      expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
+        "Edited 3 files · 1 not saved",
+      );
+
+      await confirmRevert();
+
+      // The saved file is undone; the secret the save left out and the
+      // never-saved tmp/ file are untouched, and .env still says Not saved.
+      expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
+        "Edited 3 files · 1 reverted · 1 not saved",
+      );
+      const chipTitles = Array.from(
+        container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
+      ).map((chip) => chip.title);
+      expect(chipTitles).toEqual(["src/app.ts (reverted)", ".env", "tmp/out.log"]);
+      const notSaved = container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-not-saved-chip"]');
+      expect(notSaved).toHaveLength(1);
+      expect(notSaved[0]?.textContent).toContain(".env");
+      // Review stays for what is left; a second revert could not reach it.
+      expect(container.querySelector('[data-testid="chat-file-change-review"]')).not.toBeNull();
+      expect(revertChip()).toBeNull();
+    });
+
     describe("keyboard focus after a revert", () => {
       function confirmButton() {
         return document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]');
