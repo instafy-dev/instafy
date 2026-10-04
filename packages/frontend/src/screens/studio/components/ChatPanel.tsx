@@ -150,6 +150,7 @@ import {
   buildTimedSyntheticChatRows,
   ChatPostTranscriptAuxiliaryRows,
 } from "./ChatSystemRows";
+import { useUnsavedWorkNotice } from "./useUnsavedWorkNotice";
 import {
   ChatImageLightboxOverlay,
   ChatInvitePromptOverlay,
@@ -657,6 +658,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       conversationId: activeConversationControllerId, messageId: requestedMessageId!, visitKey: chatScrollHistoryVisit.key }
     : null);
   const messages = messageTargetActive ? messageContext.messages : recentMessages;
+  const unsavedWorkNotice = useUnsavedWorkNotice({ userId: currentUserId, messages });
   const hasMoreHistory = messageTargetActive ? messageContext.hasOlder : hasMoreRecentHistory;
   const isHistoryLoading = messageTargetActive ? messageContext.loading : isRecentHistoryLoading;
   const isInitialHistoryLoading = messageTargetActive
@@ -5751,6 +5753,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               onWorkspaceFileStaleMerge={() => void handleWorkspaceFileStaleMerge()}
               onWorkspaceFileStaleReload={handleWorkspaceFileStaleReload}
               onWorkspaceFileStaleDismiss={handleWorkspaceFileStaleDismiss}
+              unsavedWorkNotice={unsavedWorkNotice}
               workspaceGitSyncConflictDetails={workspaceGitSyncConflictDetails}
               workspaceGitSyncConflictDetectedAt={workspaceGitSyncConflict?.detectedAt ?? null}
               credentialGateStateForBubble={presentedCredentialGateStateForBubble}
