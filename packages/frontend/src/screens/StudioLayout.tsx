@@ -1,5 +1,6 @@
 import { StudioDraftsProvider, StudioDraftPanel } from "../workspace/StudioDrafts";
 import { StudioDraftNavigationGuard } from "../navigation/StudioDraftNavigationGuard";
+import { StudioFileBufferDrafts } from "../workspace/StudioFileBufferDrafts";
 import { buildHomeFeed } from "./studio/homeFeed";
 import { getHomeNotificationTarget } from "./studio/homeNotifications";
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
@@ -189,6 +190,7 @@ export function StudioLayout() {
   const restorePanelDestination = useStudioNavigation();
   return (
     <StudioDraftsProvider key={user?.id ?? "signed-out"}>
+      <StudioFileBufferDrafts />
       <StudioDraftNavigationGuard>
         <StudioStartupGate>
           <WorkspaceTabsProvider locationSearch={location.search} onRestorePanelDestination={restorePanelDestination}>

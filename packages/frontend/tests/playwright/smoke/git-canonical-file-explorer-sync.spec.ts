@@ -1,4 +1,6 @@
 import { fileExplorerAction } from "../utils/filesExplorer.js";
+import { recordOriginRequests } from "../utils/filesEditor.js";
+import { assertGatewayMode, gatewayMode } from "../utils/gatewayMode.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -42,6 +44,9 @@ test.describe("Git-canonical file explorer sync", () => {
     page.setDefaultTimeout(60_000);
     const projectId = await prepareStudio(page);
     activeProjectId = projectId;
+    if (projectId) {
+      await assertGatewayMode(page, projectId);
+    }
     await clearRuntimePreference(page, { projectId, source: "git-canonical-file-explorer-sync" });
     if (projectId) {
       const runtimeId = await ensureHostedRuntimeReady(page, projectId);
@@ -74,6 +79,7 @@ test.describe("Git-canonical file explorer sync", () => {
     await page.getByTestId("code-search-input").fill(filePath);
     await expect(page.getByTestId(fileTestId)).toHaveCount(0);
 
+    const recorded = recordOriginRequests(page);
     const remoteCommit = await pushGitRemoteFileText(page, filePath, `${fileContents}\n`, {
       projectId: activeProjectId,
       message: `playwright: external push ${filePath}`,
@@ -107,6 +113,14 @@ test.describe("Git-canonical file explorer sync", () => {
         { timeout: 120_000 },
       )
       .not.toBeNull();
+
+    if (gatewayMode() === "stateless") {
+      // The commit event pins every reload to the pushed commit, and the
+      // stateless explorer never asks for a blocking sync.
+      const params = recorded.entries.map((url) => new URL(url).searchParams);
+      expect(params.some((search) => search.get("rev") === remoteCommit)).toBe(true);
+      expect(params.every((search) => search.get("sync") !== "blocking")).toBe(true);
+    }
 
     // The contract for this spec is explorer-level detection of external git updates.
     // Opening Monaco can fail if the runtime lease rotates while the row is already visible.

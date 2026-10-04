@@ -11,6 +11,7 @@ import { NotchedMessageShell } from "./ChatMessageEntries";
 import { ThreadSpine } from "./ThreadSpine";
 import type { AssistantAgentIdentity } from "./chatAssistantIdentity";
 import type { WorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
+import { SAVE_COPY } from "./workspaceSaveCopy";
 
 const CHAT_LEFT_SPINE_OFFSET_CLASS = "left-[-26px]";
 const ASSISTANT_AVATAR_GUTTER_PLACEHOLDER = (
@@ -186,7 +187,7 @@ export function ChatPostTranscriptAuxiliaryRows({
 }: {
   jobThreadPresent: boolean;
   workspaceFileStaleNotice: WorkspaceFileStaleNotice | null;
-  workspaceFileStaleBusy: null | "merge";
+  workspaceFileStaleBusy: null | "merge" | "reload";
   workspaceFileStaleError: string | null;
   onWorkspaceFileStaleMerge: () => void;
   onWorkspaceFileStaleReload: () => void;
@@ -246,7 +247,11 @@ export function ChatPostTranscriptAuxiliaryRows({
             testId="workspace-file-stale-card"
             overline="Space"
             title={`"${workspaceFileStaleNotice.label}" changed`}
-            description="A newer version was saved while you were editing. Reload discards your unsaved edits; Merge keeps both."
+            description={
+              workspaceFileStaleNotice.variant === "desktop"
+                ? SAVE_COPY.desktopStaleDescription
+                : "A newer version was saved while you were editing. Reload discards your unsaved edits; Merge keeps both."
+            }
             actions={[
               {
                 id: "merge",
@@ -254,6 +259,7 @@ export function ChatPostTranscriptAuxiliaryRows({
                 variant: "primary",
                 onPress: () => void onWorkspaceFileStaleMerge(),
                 isLoading: workspaceFileStaleBusy === "merge",
+                isDisabled: workspaceFileStaleBusy === "reload",
                 loadingLabel: "Starting merge…",
                 testId: "workspace-file-stale-merge",
               },
@@ -262,7 +268,8 @@ export function ChatPostTranscriptAuxiliaryRows({
                 label: "Reload latest",
                 variant: "outline",
                 onPress: onWorkspaceFileStaleReload,
-                isDisabled: workspaceFileStaleBusy !== null,
+                isLoading: workspaceFileStaleBusy === "reload",
+                isDisabled: workspaceFileStaleBusy === "merge",
                 testId: "workspace-file-stale-reload",
               },
               {

@@ -184,6 +184,15 @@ describe("saveWorkspaceChanges", () => {
     expect(result).toMatchObject({ ok: true, rev: "pushed", committed: null, via: "sync", saved: ["src/a.ts"], report: null });
   });
 
+  it("treats an accepted apply with an unreadable body as applied and finishes with the sync", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response("{not json", { status: 200, headers: { "content-type": "application/json" } }))
+      .mockResolvedValueOnce(json(200, { rev: "m2", baseRev: "m1", committed: true }));
+    const result = await saveWorkspaceChanges({ projectId: "p", originId: "gateway", files: [{ path: "a", content: "x" }], baseRev: "m1" });
+    expect(calls().map((call) => call.url)).toEqual([`${GATEWAY}/apply`, `${GATEWAY}/git/sync`]);
+    expect(result).toMatchObject({ ok: true, rev: "m2", committed: true, via: "sync" });
+  });
+
   it("follows D4 for committed:false: the sync still runs and reports nothing new", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(json(200, { rev: "m", baseRev: "m", committed: false }))

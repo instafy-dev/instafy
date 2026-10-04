@@ -3,7 +3,8 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { useBlocker } from "react-router-dom";
 import { Button } from "../components/Button";
 import { StudioDialogModal } from "../components/aria/StudioModal";
-import { useStudioDraftSnapshot, useStudioDraftStore } from "../workspace/StudioDrafts";
+import { isFileBufferDraftKey, useStudioDraftSnapshot, useStudioDraftStore } from "../workspace/StudioDrafts";
+import { isDesktopShell } from "../lib/desktopShell";
 
 const runImmediately = (action: () => void) => action();
 const NavigationContext = createContext(runImmediately);
@@ -32,12 +33,18 @@ export function StudioDraftNavigationGuard({ children }: { children: ReactNode }
     else action();
   }, [store]);
   const hasWork = drafts.length > 0 || protections.length > 0;
+  // Unsaved Files buffers stay on this device, so leaving does not discard them.
+  const fileDraftCount = drafts.filter(item => isFileBufferDraftKey(item.key)).length;
+  const onlyFileBuffers = !protections.length && fileDraftCount > 0 && fileDraftCount === drafts.length;
+  // In the Desktop app a blocked unload silently cancels closing the window or
+  // quitting (no dialog is shown there), so kept file buffers never block it.
+  const blocksUnload = hasWork && !(onlyFileBuffers && isDesktopShell());
   useEffect(() => {
-    if (!hasWork) return;
+    if (!blocksUnload) return;
     const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [hasWork]);
+  }, [blocksUnload]);
   const stay = () => {
     setPending(null);
     if (blocker.state === "blocked") blocker.reset();
@@ -66,11 +73,13 @@ export function StudioDraftNavigationGuard({ children }: { children: ReactNode }
       <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
         {busy ? "Wait for the current operation to finish before leaving."
           : protections.length ? `Your ${protections[0].label} is still open. Discard it to leave, or keep editing.`
-            : "Your unsaved settings are kept while you browse Studio. Leaving Studio will discard them."}
+            : onlyFileBuffers
+              ? `You have unsaved edits in ${fileDraftCount} ${fileDraftCount === 1 ? "file" : "files"}. They stay on this device until you save.`
+              : "Your unsaved settings are kept while you browse Studio. Leaving Studio will discard them."}
       </p>
       <div className="mt-5 flex flex-wrap justify-end gap-2">
         <Button onPress={stay} variant="outline" autoFocus>Keep editing</Button>
-        {!busy ? <Button onPress={leave}>{hasWork ? "Discard and leave" : "Continue"}</Button> : null}
+        {!busy ? <Button onPress={leave}>{onlyFileBuffers ? "Leave" : hasWork ? "Discard and leave" : "Continue"}</Button> : null}
       </div>
     </StudioDialogModal>
   </NavigationContext.Provider>;

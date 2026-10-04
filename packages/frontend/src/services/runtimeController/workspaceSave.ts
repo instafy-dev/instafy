@@ -170,15 +170,19 @@ export async function saveWorkspaceChanges(request: WorkspaceSaveRequest): Promi
         request.leaseConflictRetryDelayMs ?? WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
     },
     async (context) => {
-      const applied = await postOriginApply((init) => context.fetch("apply", init), {
-        projectId,
-        leaseId: context.leaseId,
-        files,
-        deletes,
-        baseRev: request.baseRev,
-        expected: request.expected,
-        commitMessage: request.commitMessage,
-      });
+      const applied = await postOriginApply(
+        (init) => context.fetch("apply", init),
+        {
+          projectId,
+          leaseId: context.leaseId,
+          files,
+          deletes,
+          baseRev: request.baseRev,
+          expected: request.expected,
+          commitMessage: request.commitMessage,
+        },
+        { tolerateUnreadableBody: true },
+      );
       noteApplyVersioningSignals(context.originId, applied);
       if (!applied.ok) {
         return { kind: "apply_failed", error: applied.error };

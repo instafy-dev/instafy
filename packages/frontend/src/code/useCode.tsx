@@ -6,17 +6,28 @@ import {
   useCallback,
   useRef,
   useEffect,
+  useLayoutEffect,
   type ReactNode
 } from "react";
 import type { CodeWorkspace } from "../types";
 import { createDefaultCodeWorkspace, cloneCodeWorkspace } from "./defaults";
+import { keepSavedVersionIds } from "./savedVersionIds";
 import { useWorkspaceStore } from "../store";
 
 type UpdateWorkspaceFn = (current: CodeWorkspace) => CodeWorkspace;
 
+export interface UpdateWorkspaceOptions {
+  recordHistory?: boolean;
+  /**
+   * When the provider has unmounted (Studio closed while a save ran), apply
+   * the update to the persisted store instead, so the buffers keep it.
+   */
+  keepAfterUnmount?: boolean;
+}
+
 interface CodeContextValue {
   workspace: CodeWorkspace;
-  updateWorkspace: (updater: UpdateWorkspaceFn, options?: { recordHistory?: boolean }) => void;
+  updateWorkspace: (updater: UpdateWorkspaceFn, options?: UpdateWorkspaceOptions) => void;
   replaceWorkspace: (snapshot: CodeWorkspace, options?: { resetHistory?: boolean; setInitial?: boolean }) => void;
   setActiveFile: (fileId: string | null) => void;
   updateFileContent: (fileId: string, value: string) => void;
@@ -88,7 +99,7 @@ function reducer(state: CodeHistoryState, action: CodeAction): CodeHistoryState 
       return {
         ...state,
         past: state.past.slice(0, state.past.length - 1),
-        present: previous,
+        present: keepSavedVersionIds(previous, state.present),
         future: [cloneCodeWorkspace(state.present), ...state.future]
       };
     }
@@ -100,7 +111,7 @@ function reducer(state: CodeHistoryState, action: CodeAction): CodeHistoryState 
       return {
         ...state,
         past: [...state.past, cloneCodeWorkspace(state.present)],
-        present: next,
+        present: keepSavedVersionIds(next, state.present),
         future: rest
       };
     }
@@ -150,31 +161,38 @@ export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) 
 
   const syncingFromStoreRef = useRef(false);
   const ignoreStoreBroadcastRef = useRef(false);
+  /** The store's code this provider was first rendered from, if it was. */
+  const renderedFromStoreRef = useRef(initialWorkspace ? null : storeCode ?? null);
 
   useEffect(() => {
-    const unsubscribe = useWorkspaceStore.subscribe(
-      (store) => store.state.code,
-      (nextCode) => {
-        if (!nextCode) {
-          return;
-        }
-        if (ignoreStoreBroadcastRef.current) {
-          ignoreStoreBroadcastRef.current = false;
-          return;
-        }
-        const current = stateRef.current.present;
-        if (areWorkspacesEqual(nextCode, current)) {
-          return;
-        }
-        syncingFromStoreRef.current = true;
-        dispatch({
-          type: "SET",
-          next: nextCode,
-          resetHistory: false,
-          setInitial: false
-        });
+    const takeStoreCode = (nextCode: CodeWorkspace | null | undefined) => {
+      if (!nextCode) {
+        return;
       }
-    );
+      if (ignoreStoreBroadcastRef.current) {
+        ignoreStoreBroadcastRef.current = false;
+        return;
+      }
+      const current = stateRef.current.present;
+      if (areWorkspacesEqual(nextCode, current)) {
+        return;
+      }
+      syncingFromStoreRef.current = true;
+      dispatch({
+        type: "SET",
+        next: nextCode,
+        resetHistory: false,
+        setInitial: false
+      });
+    };
+    const unsubscribe = useWorkspaceStore.subscribe((store) => store.state.code, takeStoreCode);
+    // A change the store took after this provider's first render and before
+    // this subscription (a save that finished while Studio opened) was sent
+    // to nobody. Take it now, so the first write below does not undo it.
+    const storeCodeNow = useWorkspaceStore.getState().state.code;
+    if (renderedFromStoreRef.current && storeCodeNow !== renderedFromStoreRef.current) {
+      takeStoreCode(storeCodeNow);
+    }
     return unsubscribe;
   }, []);
 
@@ -183,12 +201,38 @@ export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) 
       syncingFromStoreRef.current = false;
       return;
     }
+    // Skip only the store's echo of this push, which it sends while
+    // `updateCode` runs. A push that changes nothing there (the first one
+    // after mount repeats what the store holds) sends no echo, and the next
+    // change made elsewhere (a space switch, a save that finished while
+    // Studio was closed) must still reach this provider.
     ignoreStoreBroadcastRef.current = true;
-    storeUpdateCode(() => cloneCodeWorkspace(state.present));
+    try {
+      storeUpdateCode(() => cloneCodeWorkspace(state.present));
+    } finally {
+      ignoreStoreBroadcastRef.current = false;
+    }
   }, [state.present, storeUpdateCode]);
 
+  // Cleared in the commit that removes the provider (leaving Studio), not
+  // after it: an update arriving between the two would otherwise be
+  // dispatched to a reducer that is already gone.
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const updateWorkspace = useCallback(
-    (updater: UpdateWorkspaceFn, options?: { recordHistory?: boolean }) => {
+    (updater: UpdateWorkspaceFn, options?: UpdateWorkspaceOptions) => {
+      if (!mountedRef.current && options?.keepAfterUnmount) {
+        // No reducer to apply it to, and the next provider starts from the
+        // store: the update goes there.
+        useWorkspaceStore.getState().updateCode((code) => (code ? updater(cloneCodeWorkspace(code)) : code));
+        return;
+      }
       dispatch({
         type: "APPLY",
         updater,

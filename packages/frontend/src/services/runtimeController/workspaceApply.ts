@@ -87,6 +87,14 @@ export type OriginApplyPostResult =
 export async function postOriginApply(
   send: (init: RequestInit) => Promise<Response>,
   request: OriginApplyRequest,
+  options?: {
+    /**
+     * Treat an accepted (2xx) apply whose JSON body cannot be read as
+     * applied, without its details. Saves use this: the write landed, so it
+     * must not be reported as not applied. Legacy callers keep throwing.
+     */
+    tolerateUnreadableBody?: boolean;
+  },
 ): Promise<OriginApplyPostResult> {
   const archive = createOriginArchive(request.files);
   const manifest = buildOriginManifest(request);
@@ -124,7 +132,13 @@ export async function postOriginApply(
   let committed: boolean | undefined;
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
-    const body = (await response.json()) as Record<string, unknown>;
+    let body: Record<string, unknown>;
+    if (options?.tolerateUnreadableBody) {
+      const parsed = (await response.json().catch(() => null)) as unknown;
+      body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    } else {
+      body = (await response.json()) as Record<string, unknown>;
+    }
     if (typeof body.rev === "string") {
       rev = body.rev;
     }

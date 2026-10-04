@@ -1,8 +1,18 @@
 import { test, expect, type Page } from "@playwright/test";
 import {
+  applyManifestText,
+  openFileInFiles,
+  pressSaveShortcut,
+  recordOriginRequests,
+  replaceEditorText,
+  waitForApply,
+} from "../utils/filesEditor.js";
+import { assertGatewayMode, gatewayMode } from "../utils/gatewayMode.js";
+import {
   assertGitRemoteFileText,
   clearRuntimePreference,
   prepareStudio,
+  pushGitRemoteFileText,
   readWorkspaceFileText,
   requestHostedRuntime,
   resetRuntimeUserState,
@@ -45,6 +55,7 @@ test.describe("Git-canonical persistence", () => {
   });
 
   test("applies workspace changes and commits to git remote", async ({ page }) => {
+    test.skip(gatewayMode() !== "legacy", "Stateful gateway flow (Save draft, then sync).");
     if (!activeProjectId) {
       throw new Error("Active project id missing for git-canonical persistence test.");
     }
@@ -87,5 +98,60 @@ test.describe("Git-canonical persistence", () => {
         { timeout: 120_000 }
       )
       .toBe(expectedText);
+  });
+});
+
+test.describe("Git-canonical persistence on the stateless gateway", () => {
+  test.skip(
+    (process.env.GIT_CANONICAL ?? "").trim() !== "1" || gatewayMode() !== "stateless",
+    "Requires a git-canonical stack with the stateless gateway (GIT_CANONICAL=1, PLAYWRIGHT_GATEWAY_MODE=stateless).",
+  );
+
+  test.describe.configure({ timeout: 240_000 });
+
+  test.afterEach(async ({ page }) => {
+    await resetRuntimeUserState(page, { source: "git-canonical-persistence:stateless:cleanup" }).catch(() => {});
+  });
+
+  test("one Save commits on apply and never calls /git/sync", async ({ page }) => {
+    page.setDefaultTimeout(60_000);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    const projectId = await prepareStudio(page);
+    if (!projectId) {
+      throw new Error("Active project id missing for the stateless persistence test.");
+    }
+    await assertGatewayMode(page, projectId);
+
+    const unique = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const filePath = `playwright-stateless-save-${unique}.txt`;
+    const savedText = `saved from Files ${unique}`;
+    const seeded = await pushGitRemoteFileText(page, filePath, `seed ${unique}\n`, {
+      projectId,
+      message: `playwright: seed ${filePath}`,
+      requireGitRemote: true,
+    });
+    expect(seeded).toBeTruthy();
+
+    await openFileInFiles(page, projectId, filePath);
+    await expect(page.getByTestId("code-save-draft-button")).toHaveCount(0);
+    await expect(page.getByTestId("code-save-button")).toHaveAttribute("aria-label", "Save");
+
+    const recorded = recordOriginRequests(page);
+    await replaceEditorText(page, `${savedText}\n`);
+    await expect(page.getByTestId("code-save-button")).toBeEnabled({ timeout: 30_000 });
+    const applied = waitForApply(page);
+    await pressSaveShortcut(page);
+    const response = await applied;
+
+    expect(response.status()).toBe(200);
+    expect(((await response.json()) as { committed?: boolean }).committed).toBe(true);
+    const manifest = applyManifestText(response.request());
+    expect(manifest).toMatch(/"baseRev":"[0-9a-f]{40}"/);
+    expect(manifest).toContain(`"expected":{"${filePath}":"`);
+    expect(manifest).not.toContain("idempotencyKey");
+    await expect(page.getByTestId("code-save-button")).toBeDisabled({ timeout: 30_000 });
+    expect(recorded.syncs).toHaveLength(0);
+
+    await assertGitRemoteFileText(page, filePath, { projectId, expectedText: savedText, requireGitRemote: true });
   });
 });

@@ -13,6 +13,9 @@
 - Large-chat navigation/cache benchmark: `pnpm --filter @instafy/frontend test:e2e:conversation-perf`
 - Headed: `pnpm test:e2e:headed`
 - Target a failing spec: `pnpm -C packages/frontend test:e2e -- tests/playwright/app.spec.ts -g "renders landing hero content"`
+- Gateway mode: `PLAYWRIGHT_GATEWAY_MODE=legacy|stateless` names the hosted gateway the local stack
+  runs. Specs for the other mode skip, and specs that name the mode fail (never skip) when the
+  project's default origin answers otherwise. Unset means the stateful gateway with no probe.
 
 The default `pnpm test:e2e` loop is intentionally product-focused:
 - it covers the regular Playwright regression surface

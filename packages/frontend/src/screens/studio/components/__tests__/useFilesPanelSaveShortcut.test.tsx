@@ -100,6 +100,23 @@ describe("FilesPanel save shortcut ownership", () => {
     expect(saveVersion).toHaveBeenCalledOnce();
   });
 
+  it("runs one Save for both shortcuts when both refs hold the same handler", async () => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    function SingleSave() {
+      useFilesPanelSaveShortcut({ editorContainerRef: editorRef, markdownPreviewContainerRef: previewRef,
+        viewerStateRef: viewerRef, saveDraftHandlerRef: { current: save }, saveVersionHandlerRef: { current: save } });
+      return null;
+    }
+    await act(async () => root.render(<SingleSave />));
+    expect(press({ metaKey: true }).defaultPrevented).toBe(true);
+    expect(press({ ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(true);
+    expect(save).toHaveBeenCalledTimes(2);
+    expect(saveDraft).not.toHaveBeenCalled();
+    expect(saveVersion).not.toHaveBeenCalled();
+  });
+
   it("does not claim a shortcut with no text viewer or save handler", () => {
     viewerRef.current = { mode: "image" };
     expect(press().defaultPrevented).toBe(false);

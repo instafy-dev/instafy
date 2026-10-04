@@ -152,6 +152,35 @@ Native environments can choose:
 - **FS API** (same as Studio) via `/apply` (write) + `/git/sync` (commit/push), or
 - **git client** directly (`clone/commit/push`), as long as `main` protections/hook policies are enforced.
 
+### Saving files in Studio
+Studio picks how the Files editor saves from the space's default origin (the controller's
+`GET /projects/:id/origin`), probing `GET /git/status?limit=1` for a hosted origin:
+- **Stateful gateway** (no `stateless: true` in the status, or unknown): Save draft and Save
+  version, exactly as before.
+- **Stateless gateway** (`stateless: true`) and **Desktop origins**: one Save (Cmd/Ctrl+S, also
+  Shift+Cmd/Ctrl+S). Each save is one `/apply` manifest pinned to the origin the file was read
+  from, and checked the way that origin checks it, even after the default origin changed (the
+  Desktop app went offline or came online). On the stateless gateway it carries `baseRev` (the
+  `X-Instafy-Rev` of the read) and `expected` (the read's blob id) and commits on apply; on a
+  Desktop origin it carries `expected` when the blob id is known and is published with
+  `/git/sync {paths}`. If the file changed in the space meanwhile, the save answers 409 and the
+  edits stay in the editor with a card that offers Merge or Reload. An edit read before such a
+  change of origin or mode is checked once against the space's text when the file is opened: the
+  same base text needs nothing, a different one raises the card. A new file stays in the browser
+  until its first Save (which creates it on the default origin), and a new folder is one commit
+  of its `.instafy.keep` placeholder, which the first save into the folder removes. Commit events
+  reload the explorer at the event's commit; the editor's own saves, deletes and new folders are
+  not reloaded, even when their event arrives before the save's response, and every open Files
+  panel (the Files tab, the explorer drawer, a chat file surface) shows them at once. A save that
+  is still running when its panel closes, the user switches spaces or leaves Studio is still
+  recorded on the file, also when the user comes back before it finishes, so the next save builds
+  on it. A save that fails once the user is in another space or has left Studio shows no message:
+  the file keeps its unsaved edits, and when the file changed in the space its card waits in that
+  space's chat. A file read again after a save shows what the space holds then, even when that is
+  the text the save started from. Unsaved edits warn when leaving Studio;
+  inside the Desktop app they do not block closing the window or quitting, because they stay on
+  this device.
+
 ### Embedded repositories and protected checkpoints
 
 A model turn may edit a repository nested inside the canonical workspace. The model-facing job token must not mint origin write tokens or run `instafy git sync`. After the turn, the trusted runtime hands changed path descriptors to the protected checkpoint. The origin temporarily excludes nested `.git` metadata while staging those paths, restores it on every success/error path, then commits and pushes through the normal canonical credentials.

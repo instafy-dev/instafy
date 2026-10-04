@@ -730,7 +730,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     const dirtyLookup = new Map<string, boolean>();
     const titleLookup = new Map<string, string>();
     workspace.files.forEach((file) => {
-      dirtyLookup.set(file.id, file.modified !== file.generated);
+      dirtyLookup.set(file.id, file.modified !== file.generated || file.isNew === true);
       titleLookup.set(file.id, file.label ?? file.path);
     });
     const currentTabs = tabsRef.current;

@@ -1,5 +1,6 @@
 import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useWorkspaceVersioning } from "../../../workspace/useWorkspaceVersioning";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
@@ -27,6 +28,8 @@ import { SettingsShell, type SettingsCategory } from "./SettingsShell";
 import { useSkillsDiscoveryRequest } from "./skillsDiscoveryRequest";
 import { useSkillsDiscoveryState } from "./useSkillsDiscoveryState";
 import { useSkillsImportFlow } from "./useSkillsImportFlow";
+import { isVersionedFilesMode, LEGACY_FILES_VERSIONING, type FilesVersioning } from "./filesVersioning";
+import { skillsWorkspaceReads, toggleSkillAsVersion, uninstallSkillAsVersion } from "./skillsWorkspaceWrites";
 
 const SKILLS_ROOT_PATH = ".agents/skills";
 const SKILL_FILE_NAME = "SKILL.md";
@@ -551,8 +554,24 @@ function resolveDiscoverySourceMeta(discovered: ControllerSkillDiscoveryItem): {
 
 export function SkillsPanel() {
   const { activeProjectId } = useProject();
-  const { effectiveRuntimeId } = useRuntime();
+  const { effectiveRuntimeId, desktopOrigin } = useRuntime();
   const { showStatus } = useStatus();
+  // On the stateless gateway and Desktop origins, reads and writes use the
+  // pinned default origin and every change is one version; legacy keeps
+  // today's runtime-first reads and separate writes.
+  const versioningState = useWorkspaceVersioning({ projectId: activeProjectId, origin: desktopOrigin });
+  const filesVersioning = useMemo<FilesVersioning>(
+    () => ({ mode: versioningState.mode, originId: versioningState.originId }),
+    [versioningState.mode, versioningState.originId],
+  );
+  const versioned = isVersionedFilesMode(filesVersioning);
+  // Legacy reads ignore the origin, so they keep one identity when the origin
+  // summary arrives and today's requests are not sent a second time.
+  const readsVersioning = versioned ? filesVersioning : LEGACY_FILES_VERSIONING;
+  const workspaceReads = useMemo(
+    () => skillsWorkspaceReads(readsVersioning, versioned, effectiveRuntimeId ?? null),
+    [effectiveRuntimeId, readsVersioning, versioned],
+  );
   const { activeConversationId, assistantEnabled, onInputChange, onSubmit, isAssistantTyping } =
     useConversation();
   const { openPanelTab, requestUrlPush } = useWorkspaceTabs();
@@ -570,11 +589,7 @@ export function SkillsPanel() {
 
   const loadSkillFromDirectory = useCallback(
     async (projectId: string, directoryPath: string, directoryName: string): Promise<SkillItem | null> => {
-      const directoryEntries = await controllerClient.workspace.files.list({
-        projectId,
-        path: directoryPath,
-        runtimeId: effectiveRuntimeId ?? null,
-      });
+      const directoryEntries = await workspaceReads.list(projectId, directoryPath);
 
       if (!directoryEntries) {
         return null;
@@ -597,13 +612,7 @@ export function SkillsPanel() {
       const disabledPath = `${directoryPath}/${DISABLED_SKILL_FILE_NAME}`;
       const filePath = status === "enabled" ? enabledPath : disabledPath;
 
-      const skillFile = await controllerClient.workspace.files.read({
-        projectId,
-        path: filePath,
-        runtimeId: effectiveRuntimeId ?? null,
-      });
-
-      const content = skillFile?.contentText ?? "";
+      const content = (await workspaceReads.readText(projectId, filePath)) ?? "";
       const parsed = parseSkillDocumentDetails(content);
       const title = parsed.headingTitle ?? parsed.frontmatterName ?? humanizeSkillName(directoryName);
       const description = parsed.summaryParagraph ?? parsed.frontmatterDescription ?? null;
@@ -616,11 +625,7 @@ export function SkillsPanel() {
         if (isExternalImageSource(resolvedImagePath)) {
           iconUrl = resolvedImagePath;
         } else {
-          iconUrl = await controllerClient.workspace.files.getRawUrl({
-            projectId,
-            path: resolvedImagePath,
-            runtimeId: effectiveRuntimeId ?? null,
-          });
+          iconUrl = await workspaceReads.rawUrl(projectId, resolvedImagePath);
         }
       }
 
@@ -637,7 +642,7 @@ export function SkillsPanel() {
         disabledPath,
       };
     },
-    [effectiveRuntimeId],
+    [workspaceReads],
   );
 
   const loadSkills = useCallback(async () => {
@@ -655,11 +660,7 @@ export function SkillsPanel() {
     setError(null);
 
     try {
-      const rootEntries = await controllerClient.workspace.files.list({
-        projectId,
-        path: SKILLS_ROOT_PATH,
-        runtimeId: effectiveRuntimeId ?? null,
-      });
+      const rootEntries = await workspaceReads.list(projectId, SKILLS_ROOT_PATH);
 
       if (rootEntries === null) {
         throw new Error("Unable to list skills from workspace.");
@@ -703,7 +704,7 @@ export function SkillsPanel() {
         setLoading(false);
       }
     }
-  }, [activeProjectId, effectiveRuntimeId, loadSkillFromDirectory]);
+  }, [activeProjectId, loadSkillFromDirectory, workspaceReads]);
 
   useEffect(() => {
     void loadSkills();
@@ -904,6 +905,23 @@ export function SkillsPanel() {
 
       setTogglePendingSkillId(skill.id);
       try {
+        if (versioned) {
+          const toggled = await toggleSkillAsVersion({
+            projectId,
+            versioning: filesVersioning,
+            sourcePath,
+            targetPath,
+            enabled,
+            slug: skill.slug,
+            title: skill.title,
+          });
+          if (!toggled.ok) {
+            throw new Error(toggled.message);
+          }
+          showStatus(`${skill.title} is now ${enabled ? "active" : "inactive"}.`, "success", 3000);
+          await loadSkills();
+          return;
+        }
         const sourceFile = await controllerClient.workspace.files.read({
           projectId,
           path: sourcePath,
@@ -948,7 +966,7 @@ export function SkillsPanel() {
         setTogglePendingSkillId(null);
       }
     },
-    [activeProjectId, effectiveRuntimeId, loadSkills, showStatus],
+    [activeProjectId, effectiveRuntimeId, filesVersioning, loadSkills, showStatus, versioned],
   );
 
   const handleUninstallSkill = useCallback(
@@ -961,26 +979,39 @@ export function SkillsPanel() {
 
       setUninstallPendingSkillId(skill.id);
       try {
-        const deleteParams = {
-          projectId,
-          path: skill.directoryPath,
-          runtimeId: effectiveRuntimeId ?? null,
-        };
-
-        let result = await controllerClient.workspace.files.delete(deleteParams);
-        if (!result?.ok || !result.deleted) {
-          await new Promise((resolve) => {
-            if (typeof window === "undefined") {
-              setTimeout(resolve, 250);
-              return;
-            }
-            window.setTimeout(resolve, 250);
+        if (versioned) {
+          const removed = await uninstallSkillAsVersion({
+            projectId,
+            versioning: filesVersioning,
+            directoryPath: skill.directoryPath,
+            slug: skill.slug,
+            title: skill.title,
           });
-          result = await controllerClient.workspace.files.delete(deleteParams);
-        }
+          if (!removed.ok) {
+            throw new Error(removed.message);
+          }
+        } else {
+          const deleteParams = {
+            projectId,
+            path: skill.directoryPath,
+            runtimeId: effectiveRuntimeId ?? null,
+          };
 
-        if (!result?.ok || !result.deleted) {
-          throw new Error("Unable to uninstall skill.");
+          let result = await controllerClient.workspace.files.delete(deleteParams);
+          if (!result?.ok || !result.deleted) {
+            await new Promise((resolve) => {
+              if (typeof window === "undefined") {
+                setTimeout(resolve, 250);
+                return;
+              }
+              window.setTimeout(resolve, 250);
+            });
+            result = await controllerClient.workspace.files.delete(deleteParams);
+          }
+
+          if (!result?.ok || !result.deleted) {
+            throw new Error("Unable to uninstall skill.");
+          }
         }
 
         setBrokenSkillIcons((current) => {
@@ -1003,7 +1034,7 @@ export function SkillsPanel() {
         setUninstallPendingSkillId(null);
       }
     },
-    [activeProjectId, effectiveRuntimeId, loadSkills, showStatus],
+    [activeProjectId, effectiveRuntimeId, filesVersioning, loadSkills, showStatus, versioned],
   );
 
   const handleDiscoveredSkillAction = useCallback(
