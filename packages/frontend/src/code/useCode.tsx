@@ -160,31 +160,38 @@ export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) 
 
   const syncingFromStoreRef = useRef(false);
   const ignoreStoreBroadcastRef = useRef(false);
+  /** The store's code this provider was first rendered from, if it was. */
+  const renderedFromStoreRef = useRef(initialWorkspace ? null : storeCode ?? null);
 
   useEffect(() => {
-    const unsubscribe = useWorkspaceStore.subscribe(
-      (store) => store.state.code,
-      (nextCode) => {
-        if (!nextCode) {
-          return;
-        }
-        if (ignoreStoreBroadcastRef.current) {
-          ignoreStoreBroadcastRef.current = false;
-          return;
-        }
-        const current = stateRef.current.present;
-        if (areWorkspacesEqual(nextCode, current)) {
-          return;
-        }
-        syncingFromStoreRef.current = true;
-        dispatch({
-          type: "SET",
-          next: nextCode,
-          resetHistory: false,
-          setInitial: false
-        });
+    const takeStoreCode = (nextCode: CodeWorkspace | null | undefined) => {
+      if (!nextCode) {
+        return;
       }
-    );
+      if (ignoreStoreBroadcastRef.current) {
+        ignoreStoreBroadcastRef.current = false;
+        return;
+      }
+      const current = stateRef.current.present;
+      if (areWorkspacesEqual(nextCode, current)) {
+        return;
+      }
+      syncingFromStoreRef.current = true;
+      dispatch({
+        type: "SET",
+        next: nextCode,
+        resetHistory: false,
+        setInitial: false
+      });
+    };
+    const unsubscribe = useWorkspaceStore.subscribe((store) => store.state.code, takeStoreCode);
+    // A change the store took after this provider's first render and before
+    // this subscription (a save that finished while Studio opened) was sent
+    // to nobody. Take it now, so the first write below does not undo it.
+    const storeCodeNow = useWorkspaceStore.getState().state.code;
+    if (renderedFromStoreRef.current && storeCodeNow !== renderedFromStoreRef.current) {
+      takeStoreCode(storeCodeNow);
+    }
     return unsubscribe;
   }, []);
 

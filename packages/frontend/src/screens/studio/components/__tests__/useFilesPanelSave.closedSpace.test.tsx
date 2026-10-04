@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, useRef } from "react";
+import { act, useLayoutEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodeProvider, useCode } from "../../../../code/useCode";
@@ -122,6 +122,18 @@ describe("a save that outlives its space or Studio", () => {
     });
   }
 
+  async function saveOnceMoreOnTopOfThat() {
+    await act(async () => code.updateFileContent("README.md", "edited once more"));
+    mocks.saveChanges.mockResolvedValueOnce(saved("4".repeat(40), REV_3));
+    await act(async () => { await save(); });
+    await settle();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(3);
+    expect(mocks.saveChanges.mock.calls[2][0]).toMatchObject({
+      baseRev: REV_3,
+      expected: { "README.md": await gitBlobOid("edited more") },
+    });
+  }
+
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
@@ -184,13 +196,46 @@ describe("a save that outlives its space or Studio", () => {
     await saveAgainOnTopOfIt();
     expect(code.workspace.files[0]).toMatchObject({ generated: "edited more", baseRev: REV_3 });
     // And the save after that builds on the second one, not on the first read.
-    await act(async () => code.updateFileContent("README.md", "edited once more"));
-    mocks.saveChanges.mockResolvedValueOnce(saved("4".repeat(40), REV_3));
-    await act(async () => { await save(); });
-    await settle();
-    expect(mocks.saveChanges.mock.calls[2][0]).toMatchObject({
-      baseRev: REV_3,
-      expected: { "README.md": await gitBlobOid("edited more") },
+    await saveOnceMoreOnTopOfThat();
+  });
+
+  describe("when the save finishes in the moment Studio opens", () => {
+    // React renders on its own schedule here, as in the browser: the save's
+    // response lands after the commit that opens Studio and before the
+    // effects that follow it.
+    async function onReactSchedule(run: () => void) {
+      const environment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      environment.IS_REACT_ACT_ENVIRONMENT = false;
+      try {
+        run();
+        for (let tick = 0; tick < 30; tick += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2));
+        }
+      } finally {
+        environment.IS_REACT_ACT_ENVIRONMENT = true;
+      }
+      await settle();
+    }
+    function OnCommit({ run }: { run: () => void }) {
+      useLayoutEffect(() => run(), [run]);
+      return null;
+    }
+
+    it("keeps the result when it arrives as Studio opens again", async () => {
+      openSpaces({ "space-a": codeWith([buffer()]) }, "space-a");
+      await renderStudio();
+      const pending = await startSave();
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      const resolveSave = () => pending.resolve(saved(REV_2));
+      await onReactSchedule(() =>
+        root.render(<CodeProvider><Panel /><OnCommit run={resolveSave} /></CodeProvider>),
+      );
+      const savedBlob = await gitBlobOid("edited");
+      expect(code.workspace.files[0]).toMatchObject({ generated: "edited", modified: "edited", baseRev: REV_2, blobOid: savedBlob });
+      expect(useWorkspaceStore.getState().state.code.files[0]).toMatchObject({ generated: "edited", baseRev: REV_2 });
+      await saveAgainOnTopOfIt();
+      await saveOnceMoreOnTopOfThat();
     });
   });
 

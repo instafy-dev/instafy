@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useWorkspaceStore } from "../../store";
@@ -72,6 +72,27 @@ describe("CodeProvider and the store's code", () => {
     ]);
     expect(useWorkspaceStore.getState().projects["space-a"].code.files).toEqual([
       expect.objectContaining({ id: "a.md", modified: "space a" }),
+    ]);
+  });
+
+  it("takes a store change made after its first render and before it subscribed, without writing over it", async () => {
+    // A save that finishes while Studio opens again: the store takes it after
+    // the provider rendered from the store and before its effects ran.
+    function SaveFinishesNow() {
+      useLayoutEffect(() => {
+        useWorkspaceStore.getState().updateCode((current) => ({
+          ...current,
+          files: current.files.map((entry) => ({ ...entry, generated: "saved meanwhile", modified: "saved meanwhile" })),
+        }));
+      }, []);
+      return null;
+    }
+    await act(async () => root.render(null));
+    await act(async () => root.render(<CodeProvider><Capture /><SaveFinishesNow /></CodeProvider>));
+    expect(code.workspace.files).toEqual([expect.objectContaining({ id: "a.md", generated: "saved meanwhile" })]);
+    expect(storeCode().files).toEqual([expect.objectContaining({ id: "a.md", generated: "saved meanwhile" })]);
+    expect(useWorkspaceStore.getState().projects["space-a"].code.files).toEqual([
+      expect.objectContaining({ id: "a.md", generated: "saved meanwhile" }),
     ]);
   });
 
