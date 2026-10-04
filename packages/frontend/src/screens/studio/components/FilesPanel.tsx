@@ -1684,9 +1684,13 @@ export function FilesPanel({
     presentFailure: presentWriteFailure,
   });
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Nothing to save. The button stays focusable then (aria-disabled, not
+  // native disabled): a save started from it with the keyboard would
+  // otherwise drop focus to the page the moment the buffer turns clean.
+  const nothingToSave = !activeFile || !isFileBufferDirty(activeFile);
   useEffect(() => {
-    // React Aria buttons drop aria-busy, so it is set on the element (after
-    // every render, so a remounted button gets it too).
+    // React Aria buttons drop aria-busy and aria-disabled, so both are set on
+    // the element (after every render, so a remounted button gets them too).
     const button = saveButtonRef.current;
     if (!button) {
       return;
@@ -1695,6 +1699,11 @@ export function FilesPanel({
       button.setAttribute("aria-busy", "true");
     } else {
       button.removeAttribute("aria-busy");
+    }
+    if (nothingToSave) {
+      button.setAttribute("aria-disabled", "true");
+    } else {
+      button.removeAttribute("aria-disabled");
     }
   });
 
@@ -2341,11 +2350,16 @@ export function FilesPanel({
               {versioned ? (
                 <IconButton
                   ref={saveButtonRef}
-                  onPress={() => void handleSave()}
-                  isDisabled={projectWriteDisabled || !originAvailable || !isFileBufferDirty(activeFile)}
+                  onPress={() => {
+                    if (isFileBufferDirty(activeFile)) {
+                      void handleSave();
+                    }
+                  }}
+                  isDisabled={projectWriteDisabled || !originAvailable}
                   variant="primary"
                   size="sm"
                   radius="full"
+                  className="aria-disabled:pointer-events-none aria-disabled:opacity-60"
                   data-testid="code-save-button"
                   aria-label={versionedSaving ? "Saving" : "Save"}
                   title={`Save (${SAVE_SHORTCUT_LABEL})`}

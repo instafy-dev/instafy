@@ -136,6 +136,11 @@ describe("FilesPanel one Save", () => {
   const staleEvents: unknown[] = [];
   const onStale = (event: Event) => staleEvents.push((event as CustomEvent).detail);
   const query = (testId: string) => container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`);
+  /** Save cannot act: natively disabled, or (clean buffer) aria-disabled and still focusable. */
+  const saveUnavailable = () => {
+    const button = query("code-save-button");
+    return Boolean(button?.disabled || button?.getAttribute("aria-disabled") === "true");
+  };
   const file = () => testCodeHandle.current!.workspace.files[0];
 
   async function render(files: CodeFile[]) {
@@ -210,9 +215,12 @@ describe("FilesPanel one Save", () => {
     expect(query("code-save-draft-button")).toBeNull();
     expect(save?.getAttribute("aria-label")).toBe("Save");
     expect(save?.getAttribute("title")).toMatch(/^Save \((⌘S|Ctrl\+S)\)$/);
-    expect(save?.disabled).toBe(true);
+    expect(saveUnavailable()).toBe(true);
+    // Clean, it stays in the tab order rather than being natively disabled.
+    expect(save?.disabled).toBe(false);
+    expect(save?.getAttribute("aria-disabled")).toBe("true");
     await edit("edited");
-    expect(query("code-save-button")?.disabled).toBe(false);
+    expect(saveUnavailable()).toBe(false);
   });
 
   it("keeps both legacy saves and today's routing in legacy mode", async () => {
@@ -240,7 +248,7 @@ describe("FilesPanel one Save", () => {
     expect(mocks.syncToRemote).not.toHaveBeenCalled();
     expect(file()).toMatchObject({ generated: "edited", modified: "edited", baseRev: REV_2 });
     expect(file().isNew).toBeUndefined();
-    expect(query("code-save-button")?.disabled).toBe(true);
+    expect(saveUnavailable()).toBe(true);
     expect(mocks.showStatus).not.toHaveBeenCalled();
   });
 
@@ -257,6 +265,25 @@ describe("FilesPanel one Save", () => {
     expect(mocks.saveChanges).toHaveBeenCalledTimes(3);
     // The second save is based on the first one's commit.
     expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ baseRev: REV_2, files: [{ content: "edit 0" }] });
+  });
+
+  it("keeps keyboard focus on Save after a save from it", async () => {
+    await render([buffer()]);
+    const save = query("code-save-button")!;
+    save.focus();
+    expect(document.activeElement).toBe(save);
+    // A virtual click, as assistive technology and Enter on a focused button send.
+    await act(async () => { save.click(); });
+    await settle();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+    expect(file()).toMatchObject({ generated: "edited", modified: "edited" });
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(save);
+    // Pressed again while clean, it does nothing.
+    await act(async () => { save.click(); });
+    await settle();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
   });
 
   it("queues exactly one trailing save that uses the first save's revision", async () => {
@@ -317,7 +344,7 @@ describe("FilesPanel one Save", () => {
 
   it("creates a new file on its first Save with expected null on the parent listing's rev", async () => {
     await render([buffer({ generated: "", modified: "", isNew: true, baseRev: null, blobOid: null })]);
-    expect(query("code-save-button")?.disabled).toBe(false);
+    expect(saveUnavailable()).toBe(false);
     await pressSave();
     expect(mocks.saveChanges).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ baseRev: REV_1, expected: { "README.md": null }, files: [{ path: "README.md", content: "", encoding: "utf8" }] }),
@@ -642,7 +669,7 @@ describe("FilesPanel one Save", () => {
       await render([buffer({ baseRev: null })]);
       await pressSave();
       expect(file()).toMatchObject({ generated: "saved", modified: "edited", blobOid: await gitBlobOid("edited") });
-      expect(query("code-save-button")?.disabled).toBe(false);
+      expect(saveUnavailable()).toBe(false);
       // No History drawer lists Unsaved work here, so the copy does not send the user there.
       expect(mocks.showStatus).toHaveBeenCalledWith(
         "Not saved: the remote refused the push. Your edits are kept here. Try again in a moment.",
@@ -702,7 +729,7 @@ describe("FilesPanel one Save", () => {
       await pressSave();
       expect(mocks.saveChanges.mock.calls[0][0]).toMatchObject({ expected: { "new.md": null } });
       expect(file()).toMatchObject({ generated: "", modified: "", isNew: true, blobOid: EMPTY_BLOB });
-      expect(query("code-save-button")?.disabled).toBe(false);
+      expect(saveUnavailable()).toBe(false);
       mocks.saveChanges.mockResolvedValueOnce({
         ...saved(REV_2), originMode: "desktop", committed: false, via: "sync", saved: ["new.md"],
       });
