@@ -741,6 +741,35 @@ describe("FilesPanel one Save", () => {
     expect(file()).toMatchObject({ generated: "edited", modified: "edited", baseRev: rev, blobOid: savedBlob });
   });
 
+  it("opens the file again during its save without calling its own new version a change", async () => {
+    const rev = "8".repeat(40);
+    const savedBlob = await gitBlobOid("edited");
+    const pending = deferred<ReturnType<typeof saved>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    await settle();
+    mocks.listAt.mockImplementation(async () => ({
+      ok: true,
+      entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: savedBlob }],
+      rev,
+      originId: "origin-1",
+      originMode: "hosted",
+    }));
+    // The save's commit event lists the folder before the save's response.
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+    });
+    await settle();
+    await act(async () => { query("files-entry-README-md")?.click(); });
+    await settle();
+    expect(staleEvents).toEqual([]);
+    await act(async () => { pending.resolve(saved(rev)); });
+    await settle();
+    expect(staleEvents).toEqual([]);
+    expect(file()).toMatchObject({ generated: "edited", modified: "edited", baseRev: rev, blobOid: savedBlob });
+  });
+
   it("still reports a change in the space that arrives while a save runs", async () => {
     const rev = "9".repeat(40);
     const pending = deferred<ReturnType<typeof failed>>();

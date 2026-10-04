@@ -24,6 +24,7 @@ import {
   isVersionedFilesMode,
   LEGACY_FILES_VERSIONING,
   type FilesVersioning,
+  type OwnRevisions,
 } from "./filesVersioning";
 import { raiseWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
 import { SAVE_COPY } from "./workspaceSaveCopy";
@@ -142,6 +143,8 @@ interface UseFilesPanelViewerStateParams {
   activeFilePathRef: RefObject<string | null>;
   /** Legacy unless the default origin keeps every save as a version. */
   versioning?: FilesVersioning;
+  /** This tab's saves (versioned modes): a listing that shows one running is not a change. */
+  ownRevisions?: OwnRevisions | null;
 }
 
 export interface OpenTextFileOptions {
@@ -211,6 +214,7 @@ export function useFilesPanelViewerState({
   workspaceFiles,
   activeFilePathRef,
   versioning = LEGACY_FILES_VERSIONING,
+  ownRevisions = null,
 }: UseFilesPanelViewerStateParams) {
   const versioned = isVersionedFilesMode(versioning);
   // Legacy requests never depend on the origin id (they keep today's routing).
@@ -543,7 +547,9 @@ export function useFilesPanelViewerState({
           });
           shouldForceFetch = decision === "refetch" || decision === "verify";
           verifyDraft = decision === "verify";
-          if (decision === "stale") {
+          // A save of this file that is still running wrote the listed blob:
+          // the buffer catches up when the save settles.
+          if (decision === "stale" && !ownRevisions?.hasWrite(entry.path, entry.blobOid)) {
             raiseStaleBuffer(existing, entry);
           }
         }
@@ -731,6 +737,7 @@ export function useFilesPanelViewerState({
       getParentPath,
       isLargeScreen,
       openFileTab,
+      ownRevisions,
       previewScopeKey,
       raiseStaleBuffer,
       rawUrlRequest,

@@ -1207,6 +1207,7 @@ export function FilesPanel({
     workspaceFiles: workspace.files,
     activeFilePathRef,
     versioning: filesVersioning,
+    ownRevisions: versioned ? ownRevisions : null,
   });
 
   const embeddedOpenRef = useRef(openFileFromEvent);
