@@ -553,6 +553,109 @@ describe("FilesPanel one Save", () => {
     expect(file()).toMatchObject({ generated: "saved", modified: "edited" });
   });
 
+  describe("a buffer read without a revision (stateless)", () => {
+    const readFile = (contentText: string) => ({
+      ok: true,
+      file: { path: "README.md", isText: true, contentText, rev: REV_3, blobOid: "e".repeat(40), originId: "origin-1" },
+    });
+
+    it("saves on the read's revision and blob when the space still holds its base text", async () => {
+      mocks.readAt.mockResolvedValue(readFile("saved"));
+      await render([buffer({ baseRev: null })]);
+      await pressSave();
+      expect(mocks.readAt).toHaveBeenCalledExactlyOnceWith({
+        projectId: "space-a", path: "README.md", routing: "default", originId: "origin-1",
+      });
+      expect(mocks.saveChanges).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ baseRev: REV_3, expected: { "README.md": "e".repeat(40) } }),
+      );
+    });
+
+    it("raises the stale card and saves nothing when the space holds other text", async () => {
+      mocks.readAt.mockResolvedValue(readFile("someone else's text"));
+      await render([buffer({ baseRev: null })]);
+      await pressSave();
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md", baseText: "saved", localText: "edited" })]);
+      expect(mocks.showStatus).toHaveBeenCalledWith(
+        '"README.md" changed while you were editing. Your edits are kept.',
+        "error",
+        8000,
+        expect.objectContaining({ actionLabel: "Resolve" }),
+      );
+      expect(file()).toMatchObject({ generated: "saved", modified: "edited", baseRev: null });
+    });
+  });
+
+  describe("on a Desktop origin", () => {
+    beforeEach(() => {
+      mocks.versioning.mode = "desktop";
+    });
+    const desktopSaved = (patch: Record<string, unknown> = {}) => ({
+      ...saved(REV_2), originMode: "desktop", committed: false, via: "sync", baseRev: null, ...patch,
+    });
+
+    it("sends expected without baseRev and the version message for the publish", async () => {
+      mocks.saveChanges.mockResolvedValue(desktopSaved());
+      await render([buffer({ baseRev: null })]);
+      await pressSave();
+      expect(mocks.saveChanges).toHaveBeenCalledExactlyOnceWith({
+        projectId: "space-a",
+        originId: "origin-1",
+        files: [{ path: "README.md", content: "edited", encoding: "utf8" }],
+        expected: { "README.md": BLOB_A },
+        syncMessage: "Update README.md",
+      });
+      expect(file()).toMatchObject({ generated: "edited", baseRev: null, blobOid: await gitBlobOid("edited") });
+    });
+
+    it("marks the buffer saved to the folder and raises the Desktop card when the space moved on", async () => {
+      mocks.saveChanges.mockResolvedValue(desktopSaved({ conflicted: ["README.md"], saved: [] }));
+      await render([buffer({ baseRev: null })]);
+      await pressSave();
+      expect(file()).toMatchObject({ generated: "edited", modified: "edited" });
+      expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md", variant: "desktop", localText: "edited" })]);
+      expect(mocks.showStatus).toHaveBeenCalledWith(
+        '"README.md" changed while you were editing. Your edits are kept.',
+        "error",
+        8000,
+        expect.objectContaining({ actionLabel: "Resolve" }),
+      );
+    });
+
+    it("keeps an edit that reached the folder but was not published unsaved, with the folder's blob", async () => {
+      mocks.saveChanges.mockResolvedValue({
+        ...failed({ status: 503, code: "not_saved", report: { failure: "the remote refused the push" } }),
+        stage: "sync",
+        originMode: "desktop",
+        applied: true,
+      });
+      await render([buffer({ baseRev: null })]);
+      await pressSave();
+      expect(file()).toMatchObject({ generated: "saved", modified: "edited", blobOid: await gitBlobOid("edited") });
+      expect(query("code-save-button")?.disabled).toBe(false);
+      mocks.saveChanges.mockResolvedValue(desktopSaved());
+      await pressSave();
+      expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ expected: { "README.md": await gitBlobOid("edited") } });
+    });
+  });
+
+  it("tries a save once more when the space is still loading", async () => {
+    mocks.saveChanges
+      .mockResolvedValueOnce(failed({ status: 503, code: "fetch_pending", retryAfterMs: 0 }))
+      .mockResolvedValueOnce(failed({ status: 503, code: "fetch_pending", retryAfterMs: 0 }));
+    await render([buffer()]);
+    await pressSave();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+    expect(mocks.saveChanges.mock.calls[1][0]).toEqual(mocks.saveChanges.mock.calls[0][0]);
+    expect(mocks.showStatus).toHaveBeenCalledWith(
+      "The space is still loading. Try again in a moment.",
+      "error",
+      8000,
+      undefined,
+    );
+  });
+
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {
     await render([buffer()]);
     expect(query("files-explorer-new-file")?.disabled).toBe(false);
