@@ -141,7 +141,8 @@ import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
-import { useStudioGitStatusBadge } from "./useStudioGitStatusBadge";
+import { useWorkspaceVersioningBadge } from "./useWorkspaceVersioningBadge";
+import { sourceControlTitle as resolveSourceControlTitle, useActiveWorkspaceVersioning } from "../workspace/useActiveWorkspaceVersioning";
 import { canRememberTeamWorkspace, resolveActiveTeamName, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
@@ -1155,12 +1156,21 @@ function StudioLayoutInner() {
     showStatus,
   ]);
 
-  const { gitDirtyCount, gitSupported } = useStudioGitStatusBadge({
+  // Changes (legacy) or History (stateless and Desktop spaces): the nav
+  // label, the topbar title and the badge's source follow the mode.
+  const workspaceVersioning = useActiveWorkspaceVersioning({
+    enabled: projectReadyForWorkspace && !controllerProjectMissing,
+  });
+  const sourceControlTitle = resolveSourceControlTitle(workspaceVersioning.chromeMode);
+  const { badge: sourceControlBadge } = useWorkspaceVersioningBadge({
     activeProjectId,
     controllerProjectMissing,
     projectReadyForWorkspace,
     effectiveRuntimeId,
     runtimeReady,
+    chromeMode: workspaceVersioning.chromeMode,
+    historyReady: workspaceVersioning.historyReady,
+    originId: workspaceVersioning.originId,
   });
 
     useEffect(() => {
@@ -1240,22 +1250,14 @@ function StudioLayoutInner() {
     setMobileGitReviewSheet,
   ]);
 
-  const sourceControlBadge = useMemo(() => {
-    if (!gitSupported || gitDirtyCount <= 0) {
-      return null;
-    }
-    const label = `${gitDirtyCount} uncommitted ${gitDirtyCount === 1 ? "change" : "changes"}`;
-    return { count: gitDirtyCount, label };
-  }, [gitDirtyCount, gitSupported]);
-
     const sidebarItems = useMemo(() => {
       return navItems.map((item) => {
         if (item.id === "sourceControl") {
-          return { ...item, badge: sourceControlBadge };
+          return { ...item, label: sourceControlTitle, badge: sourceControlBadge };
         }
         return item;
       });
-    }, [sourceControlBadge]);
+    }, [sourceControlBadge, sourceControlTitle]);
 
     const sidebarMoreItems = useMemo(() => {
       return navMoreItems.map((item) => item.id === "credits" ? { ...item, indicator: creditsIndicator ?? null } : item);
@@ -1725,7 +1727,11 @@ function StudioLayoutInner() {
     drawerOverlay: showMobileLeftDrawerOverlay ? leftDrawer : null,
     loadingChats: workspaceLoadingChats,
   });
-  const topbarLocationOverride = topbarLocation ? topbarLocations[topbarLocation] : null;
+  const topbarLocationOverride = topbarLocation
+    ? topbarLocation === "sourceControl"
+      ? { ...topbarLocations.sourceControl, title: sourceControlTitle }
+      : topbarLocations[topbarLocation]
+    : null;
 
   const showChatActions = !projectAccessBlocked;
 
@@ -1827,7 +1833,7 @@ function StudioLayoutInner() {
       workspaceContentIsLazy = true;
       workspaceContent = (
         <div className="flex h-full flex-col overflow-hidden">
-          <SourceControlDrawer openRequest={sourceControlOpenRequest} />
+          <SourceControlDrawer openRequest={sourceControlOpenRequest} title={sourceControlTitle} />
         </div>
       );
     } else if (activeWorkspaceTab.panel === "projects") {
@@ -2136,6 +2142,7 @@ function StudioLayoutInner() {
                 ) : leftDrawer === "sourceControl" ? (
                   <SourceControlDrawer
                     openRequest={sourceControlOpenRequest}
+                    title={sourceControlTitle}
                     onRequestClose={() => {
                       requestHistoryPush();
                       setLeftDrawer(null);
@@ -2289,6 +2296,7 @@ function StudioLayoutInner() {
                 ) : leftDrawer === "sourceControl" ? (
                   <SourceControlDrawer
                     openRequest={sourceControlOpenRequest}
+                    title={sourceControlTitle}
                     onRequestClose={() => {
                       requestHistoryPush();
                       setLeftDrawer(null);

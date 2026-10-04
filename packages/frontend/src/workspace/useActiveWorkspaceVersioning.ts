@@ -30,6 +30,11 @@ export function isHistoryMode(mode: VersioningMode): boolean {
   return mode === "stateless" || mode === "desktop";
 }
 
+/** The nav label and drawer title: "Changes" in legacy and while unknown. */
+export function sourceControlTitle(mode: VersioningMode): "History" | "Changes" {
+  return isHistoryMode(mode) ? "History" : "Changes";
+}
+
 /**
  * The versioning mode of the active project's default origin
  * (`runtimeStore.desktopOrigin`). Instances share the probe cache, so

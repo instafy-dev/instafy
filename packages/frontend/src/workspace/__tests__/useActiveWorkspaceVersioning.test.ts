@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isHistoryMode, resolveChromeMode } from "../useActiveWorkspaceVersioning";
+import { isHistoryMode, resolveChromeMode, sourceControlTitle } from "../useActiveWorkspaceVersioning";
 
 describe("resolveChromeMode", () => {
   it("is legacy without an origin, whatever the guess", () => {
@@ -23,6 +23,16 @@ describe("resolveChromeMode", () => {
     );
     expect(resolveChromeMode({ originId: "o", resolved: false, mode: "legacy", firstPaintMode: "legacy" })).toBe(
       "legacy",
+    );
+  });
+
+  it("labels the nav History in the new modes and Changes in legacy", () => {
+    expect(sourceControlTitle("legacy")).toBe("Changes");
+    expect(sourceControlTitle("stateless")).toBe("History");
+    expect(sourceControlTitle("desktop")).toBe("History");
+    // Unknown resolves to legacy, so it reads Changes.
+    expect(sourceControlTitle(resolveChromeMode({ originId: null, resolved: false, mode: "legacy", firstPaintMode: "legacy" }))).toBe(
+      "Changes",
     );
   });
 
