@@ -6,7 +6,11 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
-import { controllerClient, type ControllerWorkspaceEntry } from "../../../sdk/instafy";
+import {
+  controllerClient,
+  type ControllerWorkspaceEntry,
+  type ControllerWorkspaceFileContent,
+} from "../../../sdk/instafy";
 import type { CodeFile, CodeWorkspace, WorkspaceEntryKind } from "../../../types";
 import {
   buildBinaryPreviewScopeKey,
@@ -14,6 +18,15 @@ import {
   readBinaryPreviewRequest,
   rememberBinaryPreviewRequest,
 } from "./filesBinaryPreviewMemory";
+import {
+  decideCachedOpen,
+  isFileBufferDirty,
+  isVersionedFilesMode,
+  LEGACY_FILES_VERSIONING,
+  type FilesVersioning,
+} from "./filesVersioning";
+import { raiseWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
+import { SAVE_COPY } from "./workspaceSaveCopy";
 
 type DirectoryEntries = Record<string, ControllerWorkspaceEntry[]>;
 
@@ -127,6 +140,15 @@ interface UseFilesPanelViewerStateParams {
   ) => void;
   workspaceFiles: CodeFile[];
   activeFilePathRef: RefObject<string | null>;
+  /** Legacy unless the default origin keeps every save as a version. */
+  versioning?: FilesVersioning;
+}
+
+export interface OpenTextFileOptions {
+  forceFetch?: boolean;
+  preserveDraft?: boolean;
+  /** Read at this commit (a commit event's rev); retried unpinned if unknown. */
+  rev?: string | null;
 }
 
 function createEntryFromWorkspaceFile(file: CodeFile): ControllerWorkspaceEntry {
@@ -186,7 +208,11 @@ export function useFilesPanelViewerState({
   updateWorkspace,
   workspaceFiles,
   activeFilePathRef,
+  versioning = LEGACY_FILES_VERSIONING,
 }: UseFilesPanelViewerStateParams) {
+  const versioned = isVersionedFilesMode(versioning);
+  // Legacy requests never depend on the origin id (they keep today's routing).
+  const pinnedOriginId = versioned ? versioning.originId : null;
   const previewScopeKey = buildBinaryPreviewScopeKey(previewOwnerId, activeProjectId);
   // Identity changes invalidate old closures immediately, including A -> B -> A.
   // Runtime selection is part of workspace ownership even within the same space.
@@ -452,8 +478,33 @@ export function useFilesPanelViewerState({
     ],
   );
 
+  const raiseStaleBuffer = useCallback(
+    (file: CodeFile, entry: ControllerWorkspaceEntry) => {
+      raiseWorkspaceFileStaleNotice({
+        projectId: activeProjectId,
+        path: entry.path,
+        label: entry.name || entry.path.split("/").pop() || entry.path,
+        baseText: file.generated,
+        localText: file.modified,
+        detectedAt: Date.now(),
+        originId: file.originId ?? null,
+      });
+    },
+    [activeProjectId],
+  );
+
+  // Raw URLs keep today's request in legacy mode; the versioned modes read
+  // the pinned default origin, at a commit when one is given.
+  const rawUrlRequest = useCallback(
+    (projectId: string, path: string, rev?: string | null) =>
+      versioned
+        ? { projectId, path, routing: "default" as const, originId: pinnedOriginId, ...(rev ? { rev } : {}) }
+        : { projectId, path, runtimeId: effectiveRuntimeId ?? null },
+    [effectiveRuntimeId, pinnedOriginId, versioned],
+  );
+
   const openTextFile = useCallback(
-    async (entry: ControllerWorkspaceEntry, options?: { forceFetch?: boolean; preserveDraft?: boolean; request?: FileOpenRequest }) => {
+    async (entry: ControllerWorkspaceEntry, options?: OpenTextFileOptions & { request?: FileOpenRequest }) => {
       const request = options?.request ?? beginOpenRequest();
       if (!activeProjectId || !request.isCurrent()) {
         return;
@@ -472,30 +523,70 @@ export function useFilesPanelViewerState({
             (existingGenerated !== null && existingGenerated.length === 0 && expectedSize > 0) ||
             (existingModified !== null && existingModified.length === 0 && expectedSize > 0)));
 
-      const shouldForceFetch = options?.forceFetch ?? computedShouldForceFetch;
+      let shouldForceFetch = options?.forceFetch ?? computedShouldForceFetch;
+      if (versioned && existing) {
+        if (existing.isNew === true) {
+          // Never fetch a buffer that was never saved: the space has no file yet.
+          shouldForceFetch = false;
+        } else if (options?.forceFetch === undefined) {
+          const decision = decideCachedOpen({
+            cached: existing,
+            listingBlobOid: entry.blobOid,
+            mode: versioning.mode,
+          });
+          shouldForceFetch = decision === "refetch";
+          if (decision === "stale") {
+            raiseStaleBuffer(existing, entry);
+          }
+        }
+      }
 
       let textContent: string | null = shouldForceFetch ? null : existingGenerated;
       let mimeType = entry.mimeType ?? existing?.mimeType ?? null;
       let size = entry.size ?? existing?.size ?? null;
 
       if (shouldForceFetch) {
-        const result = await controllerClient.workspace.files.read({
-          projectId: activeProjectId,
-          path: entry.path,
-          runtimeId: effectiveRuntimeId ?? null,
-        });
-        if (!request.isCurrent()) return;
+        let result: ControllerWorkspaceFileContent | null;
+        let pinnedRev = versioned ? options?.rev?.trim() || null : null;
+        if (versioned) {
+          const readAt = (rev: string | null) =>
+            controllerClient.workspace.files.readAt({
+              projectId: activeProjectId,
+              path: entry.path,
+              routing: "default",
+              originId: pinnedOriginId,
+              ...(rev ? { rev } : {}),
+            });
+          let read = await readAt(pinnedRev);
+          if (!request.isCurrent()) return;
+          if (read && !read.ok && read.error.code === "rev_not_found" && pinnedRev) {
+            pinnedRev = null;
+            read = await readAt(null);
+            if (!request.isCurrent()) return;
+          }
+          if (read && !read.ok && read.error.code === "too_large") {
+            setViewerState({ mode: "error", entry, error: SAVE_COPY.readTooLarge });
+            showStatus(SAVE_COPY.readTooLarge, "error");
+            return;
+          }
+          result = read?.ok ? read.file : null;
+        } else {
+          result = await controllerClient.workspace.files.read({
+            projectId: activeProjectId,
+            path: entry.path,
+            runtimeId: effectiveRuntimeId ?? null,
+          });
+          if (!request.isCurrent()) return;
+        }
         if (!result) {
           setViewerState({ mode: "error", entry, error: "Unable to load file content." });
           showStatus("Unable to load file content.", "error");
           return;
         }
         if (!result.isText) {
-          const rawUrl = await controllerClient.workspace.files.getRawUrl({
-            projectId: activeProjectId,
-            path: entry.path,
-            runtimeId: effectiveRuntimeId ?? null,
-          });
+          const rawUrl = await controllerClient.workspace.files.getRawUrl(
+            rawUrlRequest(activeProjectId, entry.path, pinnedRev),
+          );
           if (!request.isCurrent()) return;
           setViewerState({
             mode: "unsupported",
@@ -509,6 +600,27 @@ export function useFilesPanelViewerState({
         textContent = result.contentText ?? "";
         mimeType = result.mimeType ?? entry.mimeType ?? null;
         size = result.size ?? entry.size ?? null;
+        const readIds = versioned
+          ? {
+              baseRev: result.rev ?? null,
+              blobOid: result.blobOid ?? null,
+              originId: result.originId ?? pinnedOriginId ?? null,
+              readAt: Date.now(),
+            }
+          : null;
+
+        if (versioned && options?.preserveDraft && existing && isFileBufferDirty(existing)) {
+          // The draft keeps the ids it was read at; a newer version in the
+          // space is reported instead of being taken in silently.
+          const decision = decideCachedOpen({
+            cached: existing,
+            listingBlobOid: readIds?.blobOid,
+            mode: versioning.mode,
+          });
+          if (decision === "stale") {
+            raiseStaleBuffer(existing, entry);
+          }
+        }
 
         updateWorkspace(
           (current) => {
@@ -526,11 +638,18 @@ export function useFilesPanelViewerState({
               modifiedAt: entry.modified ?? null,
               generated: textContent ?? "",
               modified: textContent ?? "",
+              ...(readIds ?? {}),
             };
             const draft = current.files.find(file => file.id === entry.path);
             if (options?.preserveDraft && draft && draft.modified !== draft.generated) {
               nextFile.generated = draft.generated;
               nextFile.modified = draft.modified;
+              if (readIds) {
+                nextFile.baseRev = draft.baseRev ?? null;
+                nextFile.blobOid = draft.blobOid ?? null;
+                nextFile.originId = draft.originId ?? null;
+                nextFile.readAt = draft.readAt ?? null;
+              }
             }
             return {
               ...current,
@@ -582,12 +701,17 @@ export function useFilesPanelViewerState({
       isLargeScreen,
       openFileTab,
       previewScopeKey,
+      raiseStaleBuffer,
+      rawUrlRequest,
       requestUrlPush,
       setActiveFile,
       setMobileView,
       setViewerState,
       showStatus,
       updateWorkspace,
+      pinnedOriginId,
+      versioned,
+      versioning.mode,
       workspaceFiles,
     ],
   );
@@ -600,11 +724,9 @@ export function useFilesPanelViewerState({
       setActiveFile(null);
       setViewerState({ mode: "loading", entry, error: null });
       try {
-        const rawUrl = await controllerClient.workspace.files.getRawUrl({
-          projectId: activeProjectId,
-          path: entry.path,
-          runtimeId: effectiveRuntimeId ?? null,
-        });
+        const rawUrl = await controllerClient.workspace.files.getRawUrl(
+          rawUrlRequest(activeProjectId, entry.path),
+        );
         if (!request.isCurrent()) return;
         if (!rawUrl) {
           throw new Error("Missing file URL");
@@ -625,9 +747,9 @@ export function useFilesPanelViewerState({
     [
       activeProjectId,
       beginOpenRequest,
-      effectiveRuntimeId,
       isLargeScreen,
       previewScopeKey,
+      rawUrlRequest,
       setActiveFile,
       setMobileView,
       setViewerState,
@@ -643,11 +765,9 @@ export function useFilesPanelViewerState({
       setActiveFile(null);
       let rawUrl: string | null;
       try {
-        rawUrl = await controllerClient.workspace.files.getRawUrl({
-          projectId: activeProjectId,
-          path: entry.path,
-          runtimeId: effectiveRuntimeId ?? null,
-        });
+        rawUrl = await controllerClient.workspace.files.getRawUrl(
+          rawUrlRequest(activeProjectId, entry.path),
+        );
       } catch (error) {
         if (!request.isCurrent()) return;
         forgetBinaryPreviewRequest(previewScopeKey);
@@ -668,9 +788,9 @@ export function useFilesPanelViewerState({
     [
       activeProjectId,
       beginOpenRequest,
-      effectiveRuntimeId,
       isLargeScreen,
       previewScopeKey,
+      rawUrlRequest,
       setActiveFile,
       setMobileView,
       setViewerState,
@@ -690,11 +810,7 @@ export function useFilesPanelViewerState({
     setViewerState({ mode: "loading", entry: remembered.entry, error: null });
 
     void controllerClient.workspace.files
-      .getRawUrl({
-        projectId: activeProjectId,
-        path: remembered.entry.path,
-        runtimeId: effectiveRuntimeId ?? null,
-      })
+      .getRawUrl(rawUrlRequest(activeProjectId, remembered.entry.path))
       .then((rawUrl) => {
         if (cancelled || !request.isCurrent()) {
           return;
@@ -729,8 +845,8 @@ export function useFilesPanelViewerState({
   }, [
     activeProjectId,
     beginOpenRequest,
-    effectiveRuntimeId,
     previewScopeKey,
+    rawUrlRequest,
     setActiveFile,
     setViewerState,
   ]);
