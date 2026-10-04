@@ -1,26 +1,20 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{Cursor, Write};
 use std::path::{Path as StdPath, PathBuf};
 use std::str::FromStr;
-use std::time::Duration as StdDuration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
-use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::time::timeout;
 use uuid::Uuid;
-use zip::write::{FileOptions, ZipWriter};
 
 use crate::auth::{authenticate_request, RequestContext};
+use crate::author_identity::author_claims_for_user;
 use crate::conversations::{ensure_conversation_access, load_conversation_record};
 use crate::errors::{
     bad_request, database_unavailable, describe_db_error, forbidden, internal_error, not_found,
@@ -30,10 +24,12 @@ use crate::origins::{
     acquire_fresh_lease, release_lease,
     resolve_accessible_origin_for_protocol_with_hosted_fallback, LeaseAcquireOutcome,
 };
+use crate::project_memory_origin::{
+    bootstrap_write_via_origin, read_origin_snapshot, BootstrapWriteOutcome, OriginBootstrapTarget,
+    OriginReadSnapshot, ProjectMemoryWriteFile,
+};
 use crate::state::{publish_project_access_changed, publish_project_signal, AppState, EventHub};
-use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
-
-const ORIGIN_APPLY_TIMEOUT_SECS: u64 = 180;
+use crate::tokens::{mint_scoped_token, mint_scoped_token_with_author, ScopedTokenRequest};
 
 /// Roster invalidation for a space's viewers (the targeted
 /// `project.access_changed` still tells the affected user). Signal only:
@@ -753,25 +749,11 @@ struct BootstrapProjectMemoryResponse {
     reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OriginManifestFileEntry {
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    size: Option<u64>,
-}
-
 #[derive(Debug, Clone)]
 struct ProjectMemoryTemplateFile {
     path: &'static str,
     asset_relative_path: &'static str,
     fallback_content: &'static str,
-}
-
-#[derive(Debug, Clone)]
-struct ProjectMemoryWriteFile {
-    path: String,
-    content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -5739,113 +5721,22 @@ async fn bootstrap_project_memory_scaffold(
     let endpoint = origin.endpoint.trim_end_matches('/').to_string();
     let token_subject = origin_subject.to_string();
 
-    let read_token = mint_scoped_token(
-        &state.config,
-        ScopedTokenRequest {
-            audience: origin.id.to_string(),
-            subject: token_subject.clone(),
-            project_id: project_id.to_string(),
-            origin_id: Some(origin.id.to_string()),
-            runtime_id: None,
-            protocol: Some("http".to_string()),
-            scopes: vec!["fs.read".to_string()],
-            lease_id: None,
-            run_id: None,
-            prefer_runtime: None,
-            ttl_seconds: Some(180),
+    let read_token =
+        mint_project_memory_read_token(state, project_id, &origin.id, &token_subject, 180)?;
+    let paths = project_memory_bootstrap_paths();
+    let first = read_origin_snapshot(
+        &OriginBootstrapTarget {
+            http: &state.http_client,
+            endpoint: &endpoint,
+            origin_id: origin.id,
+            project_id: *project_id,
         },
-    )?;
-
-    let existing_managed_state =
-        read_project_memory_managed_defaults_state(state, &endpoint, &read_token.token).await?;
-    let existing_state_file_content = origin_read_text_file(
-        state,
-        &endpoint,
-        &read_token.token,
-        PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH,
+        &read_token,
+        &paths,
     )
     .await?;
 
-    let mut next_state_files: BTreeMap<String, ProjectMemoryManagedDefaultsFileState> =
-        BTreeMap::new();
-    let mut files_to_write: Vec<ProjectMemoryWriteFile> = Vec::new();
-
-    for template in PROJECT_MEMORY_TEMPLATE_FILES {
-        let path = template.path.to_string();
-        let template_content = load_project_memory_template_content(&template);
-        let template_hash = sha256_hex(&template_content);
-        let existing_file_content =
-            origin_read_text_file(state, &endpoint, &read_token.token, &path).await?;
-        let tracked_hash = existing_managed_state
-            .as_ref()
-            .and_then(|managed| managed.files.get(&path))
-            .map(|entry| entry.applied_sha256.as_str());
-
-        match existing_file_content {
-            None => {
-                files_to_write.push(ProjectMemoryWriteFile {
-                    path: path.clone(),
-                    content: template_content.clone(),
-                });
-                next_state_files.insert(
-                    path,
-                    ProjectMemoryManagedDefaultsFileState {
-                        applied_sha256: template_hash,
-                    },
-                );
-            }
-            Some(current_content) => {
-                let current_hash = sha256_hex(&current_content);
-                let should_update = matches!(tracked_hash, Some(recorded_hash) if recorded_hash == current_hash && recorded_hash != template_hash);
-
-                if should_update {
-                    files_to_write.push(ProjectMemoryWriteFile {
-                        path: path.clone(),
-                        content: template_content.clone(),
-                    });
-                    next_state_files.insert(
-                        path,
-                        ProjectMemoryManagedDefaultsFileState {
-                            applied_sha256: template_hash,
-                        },
-                    );
-                } else {
-                    // Keep existing file content (including user edits) and update managed
-                    // baseline so future template changes only auto-apply when unchanged.
-                    next_state_files.insert(
-                        path,
-                        ProjectMemoryManagedDefaultsFileState {
-                            applied_sha256: current_hash,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    let next_managed_state = ProjectMemoryManagedDefaultsState {
-        version: 1,
-        files: next_state_files,
-    };
-    let next_state_content =
-        serde_json::to_string_pretty(&next_managed_state).map_err(|error| {
-            internal_error(format!(
-                "failed to serialize managed defaults state: {error}"
-            ))
-        })?;
-    let next_state_content = format!("{next_state_content}\n");
-    let should_write_state = existing_state_file_content
-        .as_deref()
-        .map(|current| current != next_state_content)
-        .unwrap_or(true);
-    if should_write_state {
-        files_to_write.push(ProjectMemoryWriteFile {
-            path: PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH.to_string(),
-            content: next_state_content,
-        });
-    }
-
-    if files_to_write.is_empty() {
+    if plan_project_memory_writes(&first)?.is_empty() {
         return Ok(BootstrapProjectMemoryOutcome {
             reason: Some("already-present".to_string()),
             ..BootstrapProjectMemoryOutcome::default()
@@ -5887,11 +5778,20 @@ async fn bootstrap_project_memory_scaffold(
     let apply_task = tokio::spawn(async move {
         let apply_result: Result<BootstrapProjectMemoryOutcome, (StatusCode, Json<ApiError>)> =
             async {
-                let write_token = mint_scoped_token(
+                // A person's bootstrap is authored by their pseudonym in this
+                // space; the service runtime user keeps the origin's identity.
+                let author = author_claims_for_user(
+                    &task_state.config,
+                    &task_state.pool,
+                    &task_project_id,
+                    &origin_subject,
+                )
+                .await;
+                let write_token = mint_scoped_token_with_author(
                     &task_state.config,
                     ScopedTokenRequest {
                         audience: task_origin_id.to_string(),
-                        subject: token_subject,
+                        subject: token_subject.clone(),
                         project_id: task_project_id.to_string(),
                         origin_id: Some(task_origin_id.to_string()),
                         runtime_id: None,
@@ -5902,90 +5802,52 @@ async fn bootstrap_project_memory_scaffold(
                         prefer_runtime: None,
                         ttl_seconds: Some(300),
                     },
+                    author,
+                )?;
+                // The re-read after a conflict may come long after the first.
+                let retry_read_token = mint_project_memory_read_token(
+                    &task_state,
+                    &task_project_id,
+                    &task_origin_id,
+                    &token_subject,
+                    300,
                 )?;
 
-                let (archive, manifest_files) = build_project_memory_archive(&files_to_write)
-                    .map_err(|error| {
-                        internal_error(format!("failed to build bootstrap archive: {error}"))
-                    })?;
-
-                let manifest = json!({
-                    "projectId": task_project_id.to_string(),
-                    "leaseId": lease_id.to_string(),
-                    "generatedAt": Utc::now().to_rfc3339(),
-                    "files": manifest_files,
-                    "deletes": [],
-                    // Ensure managed defaults never leave git-canonical workspaces dirty when we
-                    // introduce new template files (for example new default skills).
-                    "autoCommitAfterApply": true,
-                    "commitMessage": "instafy: bootstrap project memory",
-                });
-
-                let manifest_json = serde_json::to_vec(&manifest).map_err(|error| {
-                    internal_error(format!("failed to serialize bootstrap manifest: {error}"))
-                })?;
-
-                let apply_url = format!("{endpoint}/apply");
-                let form = Form::new()
-                    .part(
-                        "manifest",
-                        Part::bytes(manifest_json)
-                            .file_name("manifest.json")
-                            .mime_str("application/json")
-                            .map_err(|error| {
-                                internal_error(format!("failed to build manifest part: {error}"))
-                            })?,
-                    )
-                    .part(
-                        "archive",
-                        Part::bytes(archive)
-                            .file_name("workspace.zip")
-                            .mime_str("application/zip")
-                            .map_err(|error| {
-                                internal_error(format!("failed to build archive part: {error}"))
-                            })?,
-                    );
-
-                let response = timeout(
-                    StdDuration::from_secs(ORIGIN_APPLY_TIMEOUT_SECS),
-                    task_state
-                        .http_client
-                        .post(apply_url)
-                        .bearer_auth(write_token.token)
-                        .multipart(form)
-                        .send(),
+                let outcome = bootstrap_write_via_origin(
+                    &OriginBootstrapTarget {
+                        http: &task_state.http_client,
+                        endpoint: &endpoint,
+                        origin_id: task_origin_id,
+                        project_id: task_project_id,
+                    },
+                    &retry_read_token,
+                    &write_token.token,
+                    lease_id,
+                    &paths,
+                    first,
+                    plan_project_memory_writes,
                 )
-                .await
-                .map_err(|_| internal_error("origin apply request timed out"))?
-                .map_err(|error| internal_error(format!("origin apply request failed: {error}")))?;
-
-                let status = response.status();
-                if !status.is_success() {
-                    let body = response.text().await.unwrap_or_default();
-                    return Err(internal_error(format!(
-                        "origin apply failed ({}): {}",
-                        status.as_u16(),
-                        body
-                    )));
-                }
-
-                let payload = response
-                    .json::<serde_json::Value>()
-                    .await
-                    .map_err(|error| {
-                        internal_error(format!("origin apply response invalid: {error}"))
-                    })?;
-                let rev = payload
-                    .get("rev")
-                    .and_then(|value| value.as_str())
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty());
-
-                Ok(BootstrapProjectMemoryOutcome {
-                    seeded: true,
-                    file_count: files_to_write.len(),
-                    rev,
-                    reason: None,
+                .await?;
+                Ok(match outcome {
+                    BootstrapWriteOutcome::Seeded { file_count, rev } => {
+                        BootstrapProjectMemoryOutcome {
+                            seeded: true,
+                            file_count,
+                            rev,
+                            reason: None,
+                        }
+                    }
+                    BootstrapWriteOutcome::AlreadyPresent { rev } => {
+                        BootstrapProjectMemoryOutcome {
+                            rev,
+                            reason: Some("already-present".to_string()),
+                            ..BootstrapProjectMemoryOutcome::default()
+                        }
+                    }
+                    BootstrapWriteOutcome::WorkspaceBusy => BootstrapProjectMemoryOutcome {
+                        reason: Some("workspace-busy".to_string()),
+                        ..BootstrapProjectMemoryOutcome::default()
+                    },
                 })
             }
             .await;
@@ -6018,123 +5880,153 @@ async fn bootstrap_project_memory_scaffold(
     })?
 }
 
-async fn read_project_memory_managed_defaults_state(
+fn mint_project_memory_read_token(
     state: &AppState,
-    endpoint: &str,
-    token: &str,
-) -> Result<Option<ProjectMemoryManagedDefaultsState>, (StatusCode, Json<ApiError>)> {
-    let Some(raw) = origin_read_text_file(
-        state,
-        endpoint,
-        token,
-        PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH,
+    project_id: &Uuid,
+    origin_id: &Uuid,
+    subject: &str,
+    ttl_seconds: i64,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    mint_scoped_token(
+        &state.config,
+        ScopedTokenRequest {
+            audience: origin_id.to_string(),
+            subject: subject.to_string(),
+            project_id: project_id.to_string(),
+            origin_id: Some(origin_id.to_string()),
+            runtime_id: None,
+            protocol: Some("http".to_string()),
+            scopes: vec!["fs.read".to_string()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(ttl_seconds),
+        },
     )
-    .await?
-    else {
-        return Ok(None);
-    };
+    .map(|token| token.token)
+}
 
-    let parsed = serde_json::from_str::<ProjectMemoryManagedDefaultsState>(&raw);
-    match parsed {
+/// The managed state file, then every template, in the order they are read.
+fn project_memory_bootstrap_paths() -> Vec<String> {
+    std::iter::once(PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH)
+        .chain(
+            PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .map(|template| template.path),
+        )
+        .map(str::to_string)
+        .collect()
+}
+
+/// What the bootstrap writes given what the origin holds: missing templates,
+/// templates still exactly as last applied (so a changed template reaches
+/// them), and the managed state file when it changes. A file the user edited
+/// keeps its content and becomes the new baseline.
+fn plan_project_memory_writes(
+    snapshot: &OriginReadSnapshot,
+) -> Result<Vec<ProjectMemoryWriteFile>, (StatusCode, Json<ApiError>)> {
+    let existing_state_file_content = snapshot.content(PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH);
+    let existing_managed_state =
+        parse_project_memory_managed_defaults_state(existing_state_file_content);
+
+    let mut next_state_files: BTreeMap<String, ProjectMemoryManagedDefaultsFileState> =
+        BTreeMap::new();
+    let mut files_to_write: Vec<ProjectMemoryWriteFile> = Vec::new();
+
+    for template in PROJECT_MEMORY_TEMPLATE_FILES {
+        let path = template.path.to_string();
+        let template_content = load_project_memory_template_content(&template);
+        let template_hash = sha256_hex(&template_content);
+        let tracked_hash = existing_managed_state
+            .as_ref()
+            .and_then(|managed| managed.files.get(&path))
+            .map(|entry| entry.applied_sha256.as_str());
+
+        match snapshot.content(&path) {
+            None => {
+                files_to_write.push(ProjectMemoryWriteFile {
+                    path: path.clone(),
+                    content: template_content.clone(),
+                });
+                next_state_files.insert(
+                    path,
+                    ProjectMemoryManagedDefaultsFileState {
+                        applied_sha256: template_hash,
+                    },
+                );
+            }
+            Some(current_content) => {
+                let current_hash = sha256_hex(current_content);
+                let should_update = matches!(tracked_hash, Some(recorded_hash) if recorded_hash == current_hash && recorded_hash != template_hash);
+
+                if should_update {
+                    files_to_write.push(ProjectMemoryWriteFile {
+                        path: path.clone(),
+                        content: template_content.clone(),
+                    });
+                    next_state_files.insert(
+                        path,
+                        ProjectMemoryManagedDefaultsFileState {
+                            applied_sha256: template_hash,
+                        },
+                    );
+                } else {
+                    // Keep existing file content (including user edits) and update managed
+                    // baseline so future template changes only auto-apply when unchanged.
+                    next_state_files.insert(
+                        path,
+                        ProjectMemoryManagedDefaultsFileState {
+                            applied_sha256: current_hash,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    let next_managed_state = ProjectMemoryManagedDefaultsState {
+        version: 1,
+        files: next_state_files,
+    };
+    let next_state_content =
+        serde_json::to_string_pretty(&next_managed_state).map_err(|error| {
+            internal_error(format!(
+                "failed to serialize managed defaults state: {error}"
+            ))
+        })?;
+    let next_state_content = format!("{next_state_content}\n");
+    let should_write_state = existing_state_file_content
+        .map(|current| current != next_state_content)
+        .unwrap_or(true);
+    if should_write_state {
+        files_to_write.push(ProjectMemoryWriteFile {
+            path: PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH.to_string(),
+            content: next_state_content,
+        });
+    }
+
+    Ok(files_to_write)
+}
+
+fn parse_project_memory_managed_defaults_state(
+    raw: Option<&str>,
+) -> Option<ProjectMemoryManagedDefaultsState> {
+    let raw = raw?;
+    match serde_json::from_str::<ProjectMemoryManagedDefaultsState>(raw) {
         Ok(mut state) => {
             if state.version == 0 {
                 state.version = 1;
             }
-            Ok(Some(state))
+            Some(state)
         }
         Err(error) => {
             tracing::warn!(
                 error = %error,
                 "failed to parse managed defaults state; re-initializing"
             );
-            Ok(None)
+            None
         }
     }
-}
-
-async fn origin_read_text_file(
-    state: &AppState,
-    endpoint: &str,
-    token: &str,
-    path: &str,
-) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
-    let encoded = encode_workspace_path(path);
-    let url = format!("{endpoint}/files/{encoded}?encoding=base64");
-    let response = timeout(
-        StdDuration::from_secs(20),
-        state.http_client.get(url).bearer_auth(token).send(),
-    )
-    .await
-    .map_err(|_| internal_error("origin file lookup timed out"))?
-    .map_err(|error| internal_error(format!("origin file lookup failed: {error}")))?;
-    let status = response.status();
-
-    if status.as_u16() == 404 {
-        return Ok(None);
-    }
-
-    if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        return Err(internal_error(format!(
-            "origin file lookup failed ({}): {}",
-            status.as_u16(),
-            text
-        )));
-    }
-
-    let payload = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|error| internal_error(format!("origin file response invalid: {error}")))?;
-    let encoded_content = payload
-        .get("contentBase64")
-        .or_else(|| payload.get("content_base64"))
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| internal_error("origin file response missing contentBase64"))?;
-    let bytes = BASE64_STANDARD.decode(encoded_content).map_err(|error| {
-        internal_error(format!(
-            "origin file response base64 decode failed: {error}"
-        ))
-    })?;
-    let text = String::from_utf8(bytes)
-        .map_err(|error| internal_error(format!("origin file response was not UTF-8: {error}")))?;
-    Ok(Some(text))
-}
-
-fn encode_workspace_path(path: &str) -> String {
-    path.split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| urlencoding::encode(segment).into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn build_project_memory_archive(
-    files: &[ProjectMemoryWriteFile],
-) -> Result<(Vec<u8>, Vec<OriginManifestFileEntry>), String> {
-    let out = Cursor::new(Vec::<u8>::new());
-    let mut writer = ZipWriter::new(out);
-    let options = FileOptions::<()>::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut manifest_files: Vec<OriginManifestFileEntry> = Vec::new();
-
-    for file in files {
-        writer
-            .start_file(file.path.as_str(), options)
-            .map_err(|error| format!("zip write failed: {error}"))?;
-        writer
-            .write_all(file.content.as_bytes())
-            .map_err(|error| format!("zip write failed: {error}"))?;
-        manifest_files.push(OriginManifestFileEntry {
-            path: file.path.to_string(),
-            size: Some(file.content.len() as u64),
-        });
-    }
-
-    let cursor = writer
-        .finish()
-        .map_err(|error| format!("zip finalize failed: {error}"))?;
-
-    Ok((cursor.into_inner(), manifest_files))
 }
 
 fn sha256_hex(content: &str) -> String {
@@ -6531,5 +6423,122 @@ mod project_access_tests {
                 "acceptUrl": "https://studio.example.com/invite?token=one-time"
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod project_memory_bootstrap_tests {
+    use super::{
+        plan_project_memory_writes, project_memory_bootstrap_paths, sha256_hex,
+        PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH,
+    };
+    use crate::project_memory_origin::test_support::{rev_for, start, StubState};
+    use crate::project_memory_origin::{
+        bootstrap_write_via_origin, read_origin_snapshot, BootstrapWriteOutcome,
+        OriginBootstrapTarget,
+    };
+    use serde_json::{json, Value};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn a_newer_agents_md_saved_between_read_and_write_is_kept() {
+        // The bootstrap reads AGENTS.md as missing, then someone saves their
+        // own before the write lands. The conditional write is refused, and
+        // the re-read plan keeps their file and records it as the baseline.
+        let theirs = "# Our own agent notes\n";
+        let origin = start(StubState {
+            rev: Some(rev_for(0)),
+            report_blobs: true,
+            check_expected: true,
+            concurrent_write: Some(("AGENTS.md".to_string(), theirs.to_string())),
+            ..StubState::default()
+        })
+        .await;
+        let http = reqwest::Client::new();
+        let target = OriginBootstrapTarget {
+            http: &http,
+            endpoint: &origin.endpoint,
+            origin_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+        };
+        let paths = project_memory_bootstrap_paths();
+        let first = read_origin_snapshot(&target, "read-token", &paths)
+            .await
+            .expect("first read");
+        let first_plan = plan_project_memory_writes(&first).expect("first plan");
+        assert!(first_plan.iter().any(|write| write.path == "AGENTS.md"));
+
+        let outcome = bootstrap_write_via_origin(
+            &target,
+            "read-token",
+            "write-token",
+            Uuid::new_v4(),
+            &paths,
+            first,
+            plan_project_memory_writes,
+        )
+        .await
+        .expect("bootstrap");
+        let BootstrapWriteOutcome::Seeded { file_count, .. } = outcome else {
+            panic!("expected the retry to seed the remaining files");
+        };
+        assert_eq!(file_count, first_plan.len() - 1);
+
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), 2);
+        assert_eq!(stub.applies[0]["expected"]["AGENTS.md"], Value::Null);
+        assert!(stub.applies[1]["expected"].get("AGENTS.md").is_none());
+        assert!(stub.applies[1]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file["path"] != "AGENTS.md"));
+        assert_eq!(stub.files["AGENTS.md"], theirs);
+        let managed: Value =
+            serde_json::from_str(&stub.files[PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH])
+                .expect("managed state JSON");
+        assert_eq!(
+            managed["files"]["AGENTS.md"]["appliedSha256"],
+            json!(sha256_hex(theirs))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_up_to_date_space_writes_nothing() {
+        let origin = start(StubState {
+            rev: Some(rev_for(0)),
+            report_blobs: true,
+            ..StubState::default()
+        })
+        .await;
+        let http = reqwest::Client::new();
+        let target = OriginBootstrapTarget {
+            http: &http,
+            endpoint: &origin.endpoint,
+            origin_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+        };
+        let paths = project_memory_bootstrap_paths();
+        let first = read_origin_snapshot(&target, "read-token", &paths)
+            .await
+            .expect("first read");
+        bootstrap_write_via_origin(
+            &target,
+            "read-token",
+            "write-token",
+            Uuid::new_v4(),
+            &paths,
+            first,
+            plan_project_memory_writes,
+        )
+        .await
+        .expect("seed");
+
+        let second = read_origin_snapshot(&target, "read-token", &paths)
+            .await
+            .expect("second read");
+        assert!(plan_project_memory_writes(&second)
+            .expect("second plan")
+            .is_empty());
     }
 }

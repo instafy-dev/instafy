@@ -59,6 +59,7 @@ mod operator_metrics;
 mod org_limits;
 mod origins;
 mod ota;
+mod project_memory_origin;
 mod projects;
 mod provider_devices;
 mod provider_identifiers;

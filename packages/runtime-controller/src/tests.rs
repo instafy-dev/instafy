@@ -16922,6 +16922,205 @@ async fn project_memory_bootstrap_releases_lease_after_request_cancellation() ->
     Ok(())
 }
 
+fn jwt_payload(token: &str) -> serde_json::Value {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let payload = token.split('.').nth(1).expect("JWT payload segment");
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).expect("base64url payload"))
+        .expect("JSON payload")
+}
+
+async fn insert_bootstrap_project(
+    pool: &PgPool,
+    project_id: &Uuid,
+    owner_user_id: &Uuid,
+    full_name: Option<&str>,
+) -> anyhow::Result<()> {
+    ensure_test_user(pool, owner_user_id).await?;
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "INSERT INTO projects (id, owner_user_id, project_type, status)
+             VALUES ($1, $2, 'customer', 'active')",
+            &[project_id, owner_user_id],
+        )
+        .await?;
+    if let Some(full_name) = full_name {
+        connection
+            .execute(
+                "insert into profiles (user_id, full_name) values ($1, $2)
+                 on conflict (user_id) do update set full_name = excluded.full_name",
+                &[owner_user_id, &full_name],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+async fn post_project_memory_bootstrap(
+    pool: &PgPool,
+    config: AppConfig,
+    project_id: &Uuid,
+) -> anyhow::Result<serde_json::Value> {
+    let app = crate::projects::router().with_state(build_test_state(pool.clone(), config));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/memory/bootstrap"))
+                .header("authorization", "Bearer service-role-token")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    Ok(serde_json::from_slice(
+        &to_bytes(response.into_body(), usize::MAX).await?,
+    )?)
+}
+
+async fn assert_bootstrap_lease_released(pool: &PgPool, project_id: &Uuid) -> anyhow::Result<()> {
+    let connection = pool.get().await?;
+    let rows = connection
+        .query(
+            "SELECT status FROM workspace_leases
+             WHERE project_id = $1 AND metadata ->> 'source' = 'project_memory_bootstrap'",
+            &[project_id],
+        )
+        .await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, String>("status"), "released");
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_memory_bootstrap_pins_reads_retries_a_conflict_and_authors_with_the_pseudonym(
+) -> anyhow::Result<()> {
+    use crate::project_memory_origin::test_support::{rev_for, start, StubState};
+
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping project memory CAS bootstrap test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    insert_bootstrap_project(&pool, &project_id, &owner_user_id, Some("Ada Lovelace")).await?;
+
+    // A gateway that reports what it serves, honours `expected`, and refuses
+    // the first write as if main moved under it.
+    let rev = rev_for(0);
+    let origin = start(StubState {
+        files: [("AGENTS.md".to_string(), "# Team notes\n".to_string())]
+            .into_iter()
+            .collect(),
+        rev: Some(rev.clone()),
+        report_blobs: true,
+        check_expected: true,
+        forced_conflicts: 1,
+        ..StubState::default()
+    })
+    .await;
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "project-memory-cas",
+    );
+    config.hosted_origin_endpoint = Some(origin.endpoint.clone());
+    let keyring = crate::author_identity::AuthorPseudonymKeyring::parse(
+        "v1:ERERERERERERERERERERERERERERERERERERERERERE=",
+    )?;
+    config.author_pseudonym_keys = Some(keyring.clone());
+
+    let body = post_project_memory_bootstrap(&pool, config, &project_id).await?;
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["seeded"], true, "{body}");
+
+    {
+        let stub = origin.state.lock().unwrap();
+        // Two read passes (the first write was refused), each pinned after
+        // its first read.
+        let paths_per_pass = stub.reads.len() / 2;
+        assert_eq!(stub.reads.len(), paths_per_pass * 2);
+        for pass in stub.reads.chunks(paths_per_pass) {
+            assert_eq!(pass[0].1, None);
+            assert!(pass[1..]
+                .iter()
+                .all(|(_, pinned)| pinned.as_deref() == Some(rev.as_str())));
+        }
+
+        assert_eq!(stub.applies.len(), 2);
+        for manifest in &stub.applies {
+            assert_eq!(manifest["baseRev"], rev.as_str());
+            assert_eq!(manifest["expected"]["INSTAFY.md"], serde_json::Value::Null);
+            // The team's own AGENTS.md is kept, never overwritten.
+            assert!(manifest["expected"].get("AGENTS.md").is_none());
+        }
+        assert_eq!(stub.files["AGENTS.md"], "# Team notes\n");
+
+        // The write token names the owner's pseudonym and profile name, never
+        // their id or account email.
+        let payload = jwt_payload(&stub.apply_tokens[1]);
+        assert_eq!(payload["scopes"], json!(["fs.write"]));
+        assert_eq!(payload["author_name"], "Ada Lovelace");
+        assert_eq!(
+            payload["author_email"],
+            keyring.pseudonym(&project_id, &owner_user_id).as_str()
+        );
+        let author = format!("{} {}", payload["author_name"], payload["author_email"]);
+        assert!(!author.contains(&owner_user_id.to_string()));
+        assert!(!author.contains("controller-test+"));
+    }
+
+    assert_bootstrap_lease_released(&pool, &project_id).await?;
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_memory_bootstrap_writes_unconditionally_to_an_origin_without_read_state(
+) -> anyhow::Result<()> {
+    use crate::project_memory_origin::test_support::{start, StubState};
+
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping legacy origin bootstrap test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    insert_bootstrap_project(&pool, &project_id, &owner_user_id, None).await?;
+
+    // Today's gateway: no X-Instafy-Rev or X-Instafy-Blob, and it ignores
+    // baseRev and expected.
+    let origin = start(StubState::default()).await;
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "project-memory-legacy-origin",
+    );
+    config.hosted_origin_endpoint = Some(origin.endpoint.clone());
+
+    let body = post_project_memory_bootstrap(&pool, config, &project_id).await?;
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["seeded"], true, "{body}");
+
+    {
+        let stub = origin.state.lock().unwrap();
+        assert!(stub.reads.iter().all(|(_, pinned)| pinned.is_none()));
+        assert_eq!(stub.applies.len(), 1);
+        assert!(stub.applies[0].get("baseRev").is_none());
+        assert!(stub.applies[0].get("expected").is_none());
+        // No keyring configured: the origin keeps its own identity.
+        let payload = jwt_payload(&stub.apply_tokens[0]);
+        assert!(payload.get("author_email").is_none());
+        assert!(payload.get("author_name").is_none());
+    }
+
+    assert_bootstrap_lease_released(&pool, &project_id).await?;
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn record_commit_receipt_persists_payload() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
