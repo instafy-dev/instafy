@@ -165,6 +165,9 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const EMPTY_DIRECTORY_PLACEHOLDER = ".instafy.keep";
+// Shared by every Files panel instance (main, explorer portal, chat): a
+// commit this tab wrote is not a reason for any of them to reload.
+const FILES_OWN_REVISIONS: OwnRevisions = createOwnRevisions();
 const SAVE_SHORTCUT_LABEL =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? "") ? "⌘S" : "Ctrl+S";
 const INSTAFY_ROOT_ENTRY_NAMES = new Set([".agents", ".instafy", "AGENTS.md", "AGENTS.py", "INSTAFY.md"]);
@@ -497,11 +500,7 @@ export function FilesPanel({
   const versioned = isVersionedFilesMode(filesVersioning);
   const originAvailable =
     Boolean(desktopOrigin?.endpoint) && desktopOrigin?.presence?.status !== "offline";
-  const ownRevisionsRef = useRef<OwnRevisions | null>(null);
-  if (!ownRevisionsRef.current) {
-    ownRevisionsRef.current = createOwnRevisions();
-  }
-  const ownRevisions = ownRevisionsRef.current;
+  const ownRevisions = FILES_OWN_REVISIONS;
   const { openFileTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
   const isLargeScreen = useStudioDesktopLayout();
   const touchExplorer = useTouchLikeInput() && !isLargeScreen;
