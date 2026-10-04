@@ -279,9 +279,11 @@ pub fn resolve_author_pseudonym_keys(
     }
 }
 
-/// Unicode format characters (general category Cf): zero-width, soft hyphen,
-/// bidirectional embeddings, overrides and isolates, tags. They render
-/// invisible or reorder text in `git log` and History.
+/// Unicode format characters (general category Cf): zero-width space, soft
+/// hyphen, bidirectional marks, embeddings, overrides and isolates, tags.
+/// They render invisible or reorder text in `git log` and History. The
+/// zero-width non-joiner and joiner (U+200C, U+200D) are kept: names in
+/// Persian and other scripts, and emoji sequences, need them.
 fn is_format_character(ch: char) -> bool {
     matches!(
         ch as u32,
@@ -293,7 +295,8 @@ fn is_format_character(ch: char) -> bool {
             | 0x0890..=0x0891
             | 0x08E2
             | 0x180E
-            | 0x200B..=0x200F
+            | 0x200B
+            | 0x200E..=0x200F
             | 0x202A..=0x202E
             | 0x2060..=0x2064
             | 0x2066..=0x206F
@@ -313,6 +316,11 @@ fn is_format_character(ch: char) -> bool {
 /// nothing else makes git refuse the commit.
 fn is_git_crud(ch: char) -> bool {
     (ch as u32) <= 0x20 || matches!(ch, '.' | ',' | ':' | ';' | '<' | '>' | '"' | '\\' | '\'')
+}
+
+/// The joiners kept inside a name; meaningless at either end.
+fn is_joiner(ch: char) -> bool {
+    matches!(ch, '\u{200C}' | '\u{200D}')
 }
 
 /// The name written as a commit's author: `profiles.full_name` with control
@@ -342,7 +350,7 @@ pub fn author_display_name(full_name: Option<&str>) -> String {
     while !collapsed.is_char_boundary(end) {
         end -= 1;
     }
-    let bounded = collapsed[..end].trim_matches(is_git_crud);
+    let bounded = collapsed[..end].trim_matches(|ch| is_git_crud(ch) || is_joiner(ch));
     if bounded.is_empty() {
         AUTHOR_FALLBACK_NAME.to_string()
     } else {
@@ -585,9 +593,20 @@ mod tests {
         assert_eq!(author_display_name(Some("\u{202E}evil")), "evil");
         assert_eq!(author_display_name(Some("\u{2066}Ada\u{2069}")), "Ada");
         assert_eq!(
-            author_display_name(Some("A\u{200B}d\u{200D}a\u{FEFF}")),
+            author_display_name(Some("A\u{200B}d\u{2060}a\u{FEFF}\u{200E}\u{061C}")),
             "Ada"
         );
+        // Joiners stay: a Persian name with a zero-width non-joiner, and an
+        // emoji ZWJ sequence. Alone or at either end they mean nothing.
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{0646}\u{0627}";
+        assert_eq!(author_display_name(Some(persian)), persian);
+        let technologist = "Ada \u{1F469}\u{200D}\u{1F4BB}";
+        assert_eq!(author_display_name(Some(technologist)), technologist);
+        assert_eq!(
+            author_display_name(Some("\u{200D}\u{200C}")),
+            AUTHOR_FALLBACK_NAME
+        );
+        assert_eq!(author_display_name(Some("\u{200C}Ada\u{200D}")), "Ada");
         assert_eq!(author_display_name(Some("\u{00AD}")), AUTHOR_FALLBACK_NAME);
         assert_eq!(
             author_display_name(Some("\u{E0041}\u{E0042}")),
