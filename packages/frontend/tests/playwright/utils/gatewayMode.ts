@@ -1,18 +1,28 @@
-import type { Page } from "@playwright/test";
+import { test, type Page } from "@playwright/test";
 import { fetchDefaultOriginGitStatus } from "./harness.js";
 
 /**
- * Which hosted gateway a Playwright run targets.
+ * Which hosted gateway a Playwright run targets: `legacy` (today's stateful
+ * gateway) or `stateless` (`/git/status` answers `stateless: true`).
  *
- * `PLAYWRIGHT_GATEWAY_MODE=legacy|stateless` names the stack. Specs written
- * for one mode skip the other, and `assertGatewayMode` probes the project's
- * default origin and fails (it never skips) when the stack disagrees, so a
- * wrong or missing stack cannot pass silently. Unset means legacy (today's
- * stateful gateway) and no probe, which keeps existing runs unchanged.
+ * `PLAYWRIGHT_GATEWAY_MODE=legacy|stateless` names the stack; unset means
+ * legacy. Specs written for one mode skip the other. Both checks below fail
+ * (they never skip) when the stack disagrees, so a wrong or missing stack
+ * cannot pass silently:
+ * - `assertGatewayMode` probes only when the mode is named, which keeps runs
+ *   with the variable unset exactly as before.
+ * - `requireGatewayMode` skips a spec written for the other mode and probes
+ *   whenever the spec runs, unset included.
  */
 export type PlaywrightGatewayMode = "legacy" | "stateless";
+export type GatewayMode = PlaywrightGatewayMode;
 
 export const GATEWAY_MODE_ENV = "PLAYWRIGHT_GATEWAY_MODE";
+
+type GatewayStatusProbe = (
+  page: Page,
+  options: { projectId: string },
+) => ReturnType<typeof fetchDefaultOriginGitStatus>;
 
 export function readGatewayModeEnv(env: NodeJS.ProcessEnv = process.env): PlaywrightGatewayMode | null {
   const raw = (env[GATEWAY_MODE_ENV] ?? "").trim().toLowerCase();
@@ -28,6 +38,11 @@ export function readGatewayModeEnv(env: NodeJS.ProcessEnv = process.env): Playwr
 /** The mode specs should assume: the named one, or legacy when unset. */
 export function gatewayMode(env: NodeJS.ProcessEnv = process.env): PlaywrightGatewayMode {
   return readGatewayModeEnv(env) ?? "legacy";
+}
+
+/** The stack's declared mode (same as `gatewayMode`). */
+export function declaredGatewayMode(env: NodeJS.ProcessEnv = process.env): GatewayMode {
+  return gatewayMode(env);
 }
 
 /** Map a `/git/status` answer to the mode the Studio would choose. */
@@ -47,13 +62,34 @@ export function gatewayModeFromStatus(
 }
 
 /**
+ * Ask the project's default origin how it keeps versions (one status call).
+ * Throws when the origin gives no usable answer.
+ */
+export async function probeGatewayMode(
+  page: Page,
+  projectId: string,
+  probe: GatewayStatusProbe = fetchDefaultOriginGitStatus,
+): Promise<GatewayMode> {
+  const status = await probe(page, { projectId });
+  const mode = gatewayModeFromStatus(status);
+  if (!mode) {
+    throw new Error(
+      status
+        ? `[gatewayMode] /git/status answered ${status.statusCode}.`
+        : "[gatewayMode] No origin token: the controller URL and service role key are required to probe the gateway.",
+    );
+  }
+  return mode;
+}
+
+/**
  * Fail the test when the named mode and the stack disagree. Does nothing
  * when the mode is not named.
  */
 export async function assertGatewayMode(
   page: Page,
   projectId: string,
-  probe: (page: Page, options: { projectId: string }) => ReturnType<typeof fetchDefaultOriginGitStatus> = fetchDefaultOriginGitStatus,
+  probe: GatewayStatusProbe = fetchDefaultOriginGitStatus,
 ): Promise<void> {
   const expected = readGatewayModeEnv();
   if (!expected) {
@@ -63,6 +99,30 @@ export async function assertGatewayMode(
   if (actual !== expected) {
     throw new Error(
       `${GATEWAY_MODE_ENV}=${expected}, but the project's default origin answers as ${actual ?? "unreachable"}.`,
+    );
+  }
+}
+
+/**
+ * Skip unless the stack declares `required`; fail when the declared mode and
+ * the gateway's answer disagree.
+ */
+export async function requireGatewayMode(
+  page: Page,
+  projectId: string,
+  required: GatewayMode,
+  probe: GatewayStatusProbe = fetchDefaultOriginGitStatus,
+): Promise<void> {
+  const declared = declaredGatewayMode();
+  if (declared !== required) {
+    test.skip(true, `Covers the ${required} gateway; set ${GATEWAY_MODE_ENV}=${required}.`);
+    return;
+  }
+  const probed = await probeGatewayMode(page, projectId, probe);
+  if (probed !== declared) {
+    throw new Error(
+      `${GATEWAY_MODE_ENV}=${declared}, but the stack's gateway answers as ${probed}. ` +
+        "Start the matching stack or fix the variable.",
     );
   }
 }
