@@ -43,7 +43,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use runtime_contracts::{AccessTokenClaims, GIT_DELETE_SCOPE, GIT_DELETE_TOKEN_TTL_SECONDS};
+use runtime_contracts::{
+    AccessTokenClaims, GIT_DELETE_SCOPE, GIT_DELETE_TOKEN_TTL_SECONDS, GIT_SALVAGE_SCOPE,
+    GIT_SALVAGE_TOKEN_SUBJECT, GIT_SALVAGE_TOKEN_TTL_SECONDS,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -7036,6 +7039,90 @@ async fn project_roles_gate_write_credentials_and_scoped_token_exchanges() -> an
     assert!(service_delete_claims.origin_id.is_none());
     assert!(service_delete_claims.lease_id.is_none());
     assert!(service_delete_claims.run_id.is_none());
+
+    // git.salvage follows the same rules: exact, service-only, fixed lifetime.
+    for (caller, bearer) in [
+        ("human", builder_token.as_str()),
+        ("origin", scoped_read_token.as_str()),
+        ("runtime", runtime_capability_token.as_str()),
+    ] {
+        let response = origin_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/git/access_token"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {bearer}"))
+                    .body(Body::from(
+                        json!({ "scopes": ["git.salvage"], "ttlSeconds": 600 }).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{caller} minted git.salvage"
+        );
+    }
+
+    let mixed_salvage_scope = origin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/git/access_token"))
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer internal")
+                .body(Body::from(
+                    json!({ "scopes": ["git.write", "git.salvage"] }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(mixed_salvage_scope.status(), StatusCode::BAD_REQUEST);
+
+    let service_salvage_token = origin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/git/access_token"))
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer internal")
+                .body(Body::from(
+                    json!({ "scopes": ["git.salvage"], "ttlSeconds": 600 }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(service_salvage_token.status(), StatusCode::OK);
+    let service_salvage_token: serde_json::Value =
+        serde_json::from_slice(&to_bytes(service_salvage_token.into_body(), usize::MAX).await?)?;
+    assert_eq!(service_salvage_token["scopes"], json!([GIT_SALVAGE_SCOPE]));
+    assert_eq!(
+        service_salvage_token["expiresIn"],
+        GIT_SALVAGE_TOKEN_TTL_SECONDS
+    );
+    let service_salvage_claims = decode_scoped_token(
+        &config,
+        service_salvage_token["token"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("service git.salvage response omitted token"))?,
+        "service git salvage token",
+    )
+    .map_err(|error| controller_error("decode service git.salvage token", error))?;
+    assert_eq!(service_salvage_claims.aud, "git");
+    assert_eq!(service_salvage_claims.sub, GIT_SALVAGE_TOKEN_SUBJECT);
+    assert_eq!(service_salvage_claims.project_id, project_id.to_string());
+    assert_eq!(service_salvage_claims.protocol.as_deref(), Some("git"));
+    assert_eq!(service_salvage_claims.scopes, vec![GIT_SALVAGE_SCOPE]);
+    assert_eq!(
+        service_salvage_claims.exp - service_salvage_claims.iat,
+        GIT_SALVAGE_TOKEN_TTL_SECONDS
+    );
+    assert!(service_salvage_claims.runtime_id.is_none());
+    assert!(service_salvage_claims.origin_id.is_none());
+    assert!(service_salvage_claims.lease_id.is_none());
+    assert!(service_salvage_claims.run_id.is_none());
 
     let runtime_git_write = origin_app
         .clone()
