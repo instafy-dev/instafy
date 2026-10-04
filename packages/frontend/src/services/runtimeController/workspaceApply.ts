@@ -1,5 +1,11 @@
 import { zipSync, strToU8 } from "fflate";
 import { runtimeControllerEnabled } from "./core";
+import { parseOriginErrorText, type OriginError } from "./originErrors";
+import {
+  originHeaders,
+  withWorkspaceWriteLease,
+  type WorkspaceOriginRouting,
+} from "./originRequest";
 import { fetchOriginSummary, requestOriginAccessToken } from "./origins";
 import {
   acquireWorkspaceLease,
@@ -7,6 +13,7 @@ import {
   type WorkspaceLease,
 } from "./workspaceLeases";
 import { normalizeWorkspaceRelativePath } from "./workspaceUtils";
+import { noteVersioningSignal } from "./workspaceVersioningCache";
 
 export interface OriginApplyFile {
   path: string;
@@ -14,6 +21,9 @@ export interface OriginApplyFile {
   bytes?: Uint8Array;
   encoding?: "utf8" | "binary";
 }
+
+/** Blob id each path must hold before the write (`null`: the path must not exist). */
+export type OriginApplyExpected = Record<string, string | null>;
 
 export interface OriginApplyOptions {
   projectId: string;
@@ -26,15 +36,118 @@ export interface OriginApplyOptions {
   runtimeId?: string | null;
   leaseSeconds?: number;
   retainLease?: boolean;
+  /** The commit the edit was based on (stateless gateway compare-and-swap). */
+  baseRev?: string | null;
+  /** Blob ids the paths must still hold; a mismatch answers 409 `head_moved`. */
+  expected?: OriginApplyExpected | null;
+  /** Commit message; the gateway writes a plain default when absent. */
+  commitMessage?: string | null;
+  /**
+   * `legacy` (default): today's routing (runtime origin when one is
+   * preferred, else the default origin's summary). `default`: the pinned or
+   * default origin, never `preferRuntime`.
+   */
+  routing?: WorkspaceOriginRouting;
 }
 
 export interface OriginApplyResult {
   ok: boolean;
   rev?: string | null;
+  /** `main` the write was applied on, when the origin reports it. */
+  baseRev?: string | null;
+  /** Present only on origins that commit on apply (stateless gateway). */
+  committed?: boolean;
   mode?: string;
   endpoint?: string;
   leaseId?: string | null;
+  originId?: string | null;
+  originMode?: string | null;
   error?: string;
+  errorInfo?: OriginError;
+}
+
+export interface OriginApplyRequest {
+  projectId: string;
+  leaseId: string | null;
+  files: OriginApplyFile[];
+  deletes: string[];
+  baseRev?: string | null;
+  expected?: OriginApplyExpected | null;
+  commitMessage?: string | null;
+}
+
+export type OriginApplyPostResult =
+  | { ok: true; rev: string | null; baseRev: string | null; committed?: boolean }
+  | { ok: false; status: number; text: string; error: OriginError };
+
+/**
+ * POST one apply (manifest + zip archive) through `send` and parse the
+ * answer. Shared by the legacy apply, default-routed applies and saves.
+ */
+export async function postOriginApply(
+  send: (init: RequestInit) => Promise<Response>,
+  request: OriginApplyRequest,
+): Promise<OriginApplyPostResult> {
+  const archive = createOriginArchive(request.files);
+  const manifest = buildOriginManifest(request);
+
+  const formData = new FormData();
+  formData.append(
+    "manifest",
+    new Blob([JSON.stringify(manifest)], { type: "application/json" }),
+    "manifest.json",
+  );
+  const archiveBuffer = archive.buffer.slice(
+    archive.byteOffset,
+    archive.byteOffset + archive.byteLength,
+  ) as ArrayBuffer;
+  formData.append(
+    "archive",
+    new Blob([archiveBuffer], { type: "application/zip" }),
+    "workspace.zip",
+  );
+
+  const response = await send({ method: "POST", body: formData });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    return {
+      ok: false,
+      status: response.status,
+      text,
+      error: parseOriginErrorText(response.status, text, response.headers),
+    };
+  }
+
+  let rev: string | null = null;
+  let baseRev: string | null = null;
+  let committed: boolean | undefined;
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    const body = (await response.json()) as Record<string, unknown>;
+    if (typeof body.rev === "string") {
+      rev = body.rev;
+    }
+    if (typeof body.baseRev === "string") {
+      baseRev = body.baseRev;
+    }
+    if (typeof body.committed === "boolean") {
+      committed = body.committed;
+    }
+  }
+  return committed === undefined ? { ok: true, rev, baseRev } : { ok: true, rev, baseRev, committed };
+}
+
+/** Report what an apply answer revealed about how its origin keeps versions. */
+export function noteApplyVersioningSignals(
+  originId: string | null | undefined,
+  result: OriginApplyPostResult,
+): void {
+  if (result.ok && result.committed === true) {
+    noteVersioningSignal(originId, "committed");
+  } else if (!result.ok && result.error.code === "delete_requires_base_rev") {
+    noteVersioningSignal(originId, "delete_requires_base_rev");
+  }
 }
 
 export async function applyWorkspaceChangesViaOrigin(
@@ -52,6 +165,10 @@ export async function applyWorkspaceChangesViaOrigin(
   }
   if (files.length === 0 && deletes.length === 0) {
     return { ok: false, error: "no changes supplied" };
+  }
+
+  if (params.routing === "default") {
+    return applyWithDefaultRouting(params, files, deletes);
   }
 
   let runtimePreference = params.preferRuntime ?? params.runtimeId ?? null;
@@ -123,68 +240,56 @@ export async function applyWorkspaceChangesViaOrigin(
       leaseIdForRelease = token.leaseId;
     }
 
-    const archive = createOriginArchive(files);
-    const manifest = buildOriginManifest({
-      projectId,
-      files,
-      deletes,
-      leaseId: leaseId ?? null,
-    });
-
     const endpoint = token.endpoint.replace(/\/+$/, "");
     const applyUrl = `${endpoint}/apply`;
 
-    const formData = new FormData();
-    formData.append(
-      "manifest",
-      new Blob([JSON.stringify(manifest)], { type: "application/json" }),
-      "manifest.json",
-    );
-    const archiveBuffer = archive.buffer.slice(
-      archive.byteOffset,
-      archive.byteOffset + archive.byteLength,
-    ) as ArrayBuffer;
-    formData.append(
-      "archive",
-      new Blob([archiveBuffer], { type: "application/zip" }),
-      "workspace.zip",
-    );
-
-    const response = await fetch(applyUrl, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token.token}`,
+    const posted = await postOriginApply(
+      (init) =>
+        fetch(applyUrl, {
+          ...init,
+          headers: originHeaders(token.token),
+        }),
+      {
+        projectId,
+        files,
+        deletes,
+        leaseId: leaseId ?? null,
+        baseRev: params.baseRev,
+        expected: params.expected,
+        commitMessage: params.commitMessage,
       },
-      body: formData,
-    });
+    );
+    noteApplyVersioningSignals(token.originId, posted);
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
+    if (!posted.ok) {
       return {
         ok: false,
         mode: token.mode,
         endpoint: endpoint,
         leaseId: leaseId ?? null,
-        error: `origin apply failed (${response.status}): ${text}`,
+        originId: token.originId ?? null,
+        originMode: token.mode ?? null,
+        error: `origin apply failed (${posted.status}): ${posted.text}`,
+        errorInfo: posted.error,
       };
     }
 
-    let rev: string | null = null;
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      const body = (await response.json()) as Record<string, unknown>;
-      if (typeof body.rev === "string") {
-        rev = body.rev;
-      }
-    }
-
-    return {
+    const result: OriginApplyResult = {
       ok: true,
-      rev,
+      rev: posted.rev,
       mode: token.mode,
       endpoint,
       leaseId: leaseId ?? null,
+      originId: token.originId ?? null,
+      originMode: token.mode ?? null,
     };
+    if (posted.baseRev) {
+      result.baseRev = posted.baseRev;
+    }
+    if (posted.committed !== undefined) {
+      result.committed = posted.committed;
+    }
+    return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(
@@ -215,12 +320,97 @@ export async function applyWorkspaceChangesViaOrigin(
   }
 }
 
-function buildOriginManifest(input: {
-  projectId: string;
-  files: OriginApplyFile[];
-  deletes: string[];
-  leaseId: string | null;
-}) {
+async function applyWithDefaultRouting(
+  params: OriginApplyOptions,
+  files: OriginApplyFile[],
+  deletes: string[],
+): Promise<OriginApplyResult> {
+  const outcome = await withWorkspaceWriteLease(
+    {
+      projectId: params.projectId,
+      originId: params.originId ?? null,
+      runtimeId: params.runtimeId ?? null,
+      accessToken: params.accessToken ?? null,
+      leaseId: params.leaseId ?? null,
+      leaseSeconds: params.leaseSeconds,
+      retainLease: params.retainLease,
+    },
+    async (context) => {
+      const posted = await postOriginApply((init) => context.fetch("apply", init), {
+        projectId: params.projectId,
+        files,
+        deletes,
+        leaseId: context.leaseId,
+        baseRev: params.baseRev,
+        expected: params.expected,
+        commitMessage: params.commitMessage,
+      });
+      noteApplyVersioningSignals(context.originId, posted);
+      return posted;
+    },
+  );
+
+  if (!outcome.ok) {
+    return {
+      ok: false,
+      mode: outcome.originMode ?? undefined,
+      endpoint: outcome.endpoint ?? undefined,
+      leaseId: outcome.leaseId,
+      originId: outcome.originId,
+      originMode: outcome.originMode,
+      error: outcome.error.message,
+      errorInfo: outcome.error,
+    };
+  }
+  const posted = outcome.value;
+  if (!posted.ok) {
+    return {
+      ok: false,
+      mode: outcome.originMode,
+      endpoint: outcome.endpoint,
+      leaseId: outcome.leaseId,
+      originId: outcome.originId,
+      originMode: outcome.originMode,
+      error: `origin apply failed (${posted.status}): ${posted.text}`,
+      errorInfo: posted.error,
+    };
+  }
+  const result: OriginApplyResult = {
+    ok: true,
+    rev: posted.rev,
+    mode: outcome.originMode,
+    endpoint: outcome.endpoint,
+    leaseId: outcome.leaseId,
+    originId: outcome.originId,
+    originMode: outcome.originMode,
+  };
+  if (posted.baseRev) {
+    result.baseRev = posted.baseRev;
+  }
+  if (posted.committed !== undefined) {
+    result.committed = posted.committed;
+  }
+  return result;
+}
+
+function normalizeExpected(
+  expected: OriginApplyExpected | null | undefined,
+): Record<string, string | null> | null {
+  if (!expected) {
+    return null;
+  }
+  const normalized: Record<string, string | null> = {};
+  for (const [path, oid] of Object.entries(expected)) {
+    const normalizedPath = normalizeWorkspaceRelativePath(path);
+    if (!normalizedPath) {
+      continue;
+    }
+    normalized[normalizedPath] = typeof oid === "string" && oid.trim().length > 0 ? oid.trim() : null;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function buildOriginManifest(input: OriginApplyRequest) {
   const files = input.files.map((file) => {
     const normalizedPath = normalizeWorkspaceRelativePath(file.path);
     const size =
@@ -238,13 +428,27 @@ function buildOriginManifest(input: {
     normalizeWorkspaceRelativePath(path),
   );
 
-  return {
+  const manifest: Record<string, unknown> = {
     projectId: input.projectId,
     leaseId: input.leaseId,
     files,
     deletes,
     generatedAt: new Date().toISOString(),
   };
+  // Newer fields are added only when set, so legacy manifests stay as they were.
+  const baseRev = input.baseRev?.trim();
+  if (baseRev) {
+    manifest.baseRev = baseRev;
+  }
+  const expected = normalizeExpected(input.expected);
+  if (expected) {
+    manifest.expected = expected;
+  }
+  const commitMessage = input.commitMessage?.trim();
+  if (commitMessage) {
+    manifest.commitMessage = commitMessage;
+  }
+  return manifest;
 }
 
 function createOriginArchive(files: OriginApplyFile[]): Uint8Array {
