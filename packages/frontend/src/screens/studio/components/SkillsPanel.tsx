@@ -28,7 +28,7 @@ import { SettingsShell, type SettingsCategory } from "./SettingsShell";
 import { useSkillsDiscoveryRequest } from "./skillsDiscoveryRequest";
 import { useSkillsDiscoveryState } from "./useSkillsDiscoveryState";
 import { useSkillsImportFlow } from "./useSkillsImportFlow";
-import { isVersionedFilesMode, type FilesVersioning } from "./filesVersioning";
+import { isVersionedFilesMode, LEGACY_FILES_VERSIONING, type FilesVersioning } from "./filesVersioning";
 import { skillsWorkspaceReads, toggleSkillAsVersion, uninstallSkillAsVersion } from "./skillsWorkspaceWrites";
 
 const SKILLS_ROOT_PATH = ".agents/skills";
@@ -565,9 +565,12 @@ export function SkillsPanel() {
     [versioningState.mode, versioningState.originId],
   );
   const versioned = isVersionedFilesMode(filesVersioning);
+  // Legacy reads ignore the origin, so they keep one identity when the origin
+  // summary arrives and today's requests are not sent a second time.
+  const readsVersioning = versioned ? filesVersioning : LEGACY_FILES_VERSIONING;
   const workspaceReads = useMemo(
-    () => skillsWorkspaceReads(filesVersioning, versioned, effectiveRuntimeId ?? null),
-    [effectiveRuntimeId, filesVersioning, versioned],
+    () => skillsWorkspaceReads(readsVersioning, versioned, effectiveRuntimeId ?? null),
+    [effectiveRuntimeId, readsVersioning, versioned],
   );
   const { activeConversationId, assistantEnabled, onInputChange, onSubmit, isAssistantTyping } =
     useConversation();
