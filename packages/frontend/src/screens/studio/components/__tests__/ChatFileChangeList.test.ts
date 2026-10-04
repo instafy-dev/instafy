@@ -1411,6 +1411,52 @@ describe("ChatFileChangeList", () => {
       expect(chipTitles).toEqual(["src/app.ts", "src/util.ts (reverted)"]);
     });
 
+    it("marks a moved file's old path reverted too, though the review lists the new path only", async () => {
+      // The runtime records the move as a deletion and a creation; the
+      // origin's review detects the rename and lists only the new path.
+      versioningState.mode = "desktop";
+      versioningState.originId = "desktop-origin";
+      fetchWorkspaceGitHistoryReview.mockResolvedValue({
+        supported: true,
+        commit: head,
+        entries: [{ path: "src/components/Button.tsx", code: "R", embeddedRepoRoot: null }],
+        busy: false,
+        error: null,
+      });
+      revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
+      const files = [
+        { ...fileChange("src/Button.tsx"), changeType: "deleted" as const },
+        { ...fileChange("src/components/Button.tsx"), changeType: "created" as const },
+      ];
+      await renderCard({
+        files,
+        commitRange: { ...gitRange, savedPaths: ["src/Button.tsx", "src/components/Button.tsx"] },
+      });
+      await confirmRevert();
+
+      const chipTitles = () =>
+        Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]')).map(
+          (chip) => chip.title,
+        );
+      expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
+        "Reverted 2 files",
+      );
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-toggle-files"]')?.click();
+      });
+      expect(chipTitles()).toEqual(["src/Button.tsx (reverted)", "src/components/Button.tsx (reverted)"]);
+
+      // Without the turn's own save naming the old path, nothing says the
+      // version touched it, so it keeps its state.
+      revertWorkspaceGitCommit.mockClear();
+      root.unmount();
+      root = createRoot(container);
+      await renderCard({ files, commitRange: gitRange });
+      await confirmRevert();
+      expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+      expect(chipTitles()).toEqual(["src/Button.tsx", "src/components/Button.tsx (reverted)"]);
+    });
+
     it("does nothing when the confirmation is cancelled", async () => {
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
       await act(async () => {

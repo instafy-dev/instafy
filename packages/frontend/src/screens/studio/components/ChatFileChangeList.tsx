@@ -95,8 +95,10 @@ type ChatFileUndoStatus = "reverted" | "removed";
 type ChatChangeRevertScope =
   | { status: "checking" }
   // `paths` is everything the version touched; `unlistedPaths` the ones this
-  // turn saved without listing them on the card.
-  | { status: "ready"; paths: string[]; unlistedPaths: string[] }
+  // turn saved without listing them on the card; `renameSources` the card's
+  // deleted files the review left out because it lists a rename by its new
+  // path only.
+  | { status: "ready"; paths: string[]; unlistedPaths: string[]; renameSources: string[] }
   | { status: "other_work"; otherPaths: string[] }
   // The version lists no files of its own: a merge, which the card cannot
   // bound to this turn's commits.
@@ -911,7 +913,8 @@ export function ChatFileChangeList({
       return;
     }
     const cardPaths = new Set(uniquePaths);
-    const turnPaths = new Set([...uniquePaths, ...(revertRange.savedPaths ?? []).map(normalizeWorkspacePath)]);
+    const savedPaths = new Set((revertRange.savedPaths ?? []).map(normalizeWorkspacePath));
+    const turnPaths = new Set([...uniquePaths, ...savedPaths]);
     const paths = Array.from(
       new Set(review.entries.map((entry) => normalizeWorkspacePath(entry.path)).filter((path) => path.length > 0)),
     );
@@ -924,12 +927,29 @@ export function ChatFileChangeList({
       return;
     }
     const otherPaths = paths.filter((path) => !turnPaths.has(path));
-    setRevertScope(
-      otherPaths.length > 0
-        ? { status: "other_work", otherPaths }
-        : { status: "ready", paths, unlistedPaths: paths.filter((path) => !cardPaths.has(path)) },
-    );
-  }, [projectId, revertRange, uniquePaths, versioning.originId]);
+    if (otherPaths.length > 0) {
+      setRevertScope({ status: "other_work", otherPaths });
+      return;
+    }
+    // The runtime records a moved file as two changes (old path deleted, new
+    // path created), but the origin's review detects the rename and lists
+    // only the new path. The revert brings the old path back too: a deleted
+    // card file the turn's own save selected, and that the review left out,
+    // is that rename's source.
+    const reviewPaths = new Set(paths);
+    const listsRename = review.entries.some((entry) => entry.code.trim().toUpperCase().startsWith("R"));
+    const renameSources = listsRename
+      ? uniquePaths.filter(
+          (path) => changeTypeByPath[path] === "deleted" && savedPaths.has(path) && !reviewPaths.has(path),
+        )
+      : [];
+    setRevertScope({
+      status: "ready",
+      paths,
+      unlistedPaths: paths.filter((path) => !cardPaths.has(path)),
+      renameSources,
+    });
+  }, [changeTypeByPath, projectId, revertRange, uniquePaths, versioning.originId]);
 
   const openRevertDialog = useCallback(() => {
     // The chip stays focusable while a revert runs, but opens nothing.
@@ -1036,7 +1056,7 @@ export function ChatFileChangeList({
     }
     const request = revertRequestRef.current + 1;
     revertRequestRef.current = request;
-    const revertedVersionPaths = new Set(revertScope.paths);
+    const revertedVersionPaths = new Set([...revertScope.paths, ...revertScope.renameSources]);
     setRevertingChange(true);
     const revert = () =>
       revertWorkspaceGitCommitFromController({
