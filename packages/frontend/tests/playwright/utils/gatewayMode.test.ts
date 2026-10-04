@@ -1,10 +1,25 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Page } from "@playwright/test";
-import { assertGatewayMode, gatewayMode, gatewayModeFromStatus, readGatewayModeEnv } from "./gatewayMode.js";
+import {
+  assertGatewayMode,
+  gatewayMode,
+  gatewayModeFromStatus,
+  probeGatewayMode,
+  readGatewayModeEnv,
+  requireGatewayMode,
+} from "./gatewayMode.js";
+
+const playwrightTest = vi.hoisted(() => ({ skip: vi.fn() }));
+
+vi.mock("@playwright/test", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@playwright/test")>()),
+  test: playwrightTest,
+}));
 
 describe("Playwright gateway mode", () => {
   const original = process.env.PLAYWRIGHT_GATEWAY_MODE;
   afterEach(() => {
+    playwrightTest.skip.mockReset();
     if (original === undefined) {
       delete process.env.PLAYWRIGHT_GATEWAY_MODE;
     } else {
@@ -39,5 +54,42 @@ describe("Playwright gateway mode", () => {
     ).resolves.toBeUndefined();
     delete process.env.PLAYWRIGHT_GATEWAY_MODE;
     await expect(assertGatewayMode(page, "p", async () => null)).resolves.toBeUndefined();
+  });
+  it("probes the default origin and fails when it gives no usable answer", async () => {
+    const page = {} as Page;
+    await expect(
+      probeGatewayMode(page, "p", async () => ({ statusCode: 200, payload: { stateless: true } })),
+    ).resolves.toBe("stateless");
+    await expect(probeGatewayMode(page, "p", async () => ({ statusCode: 404, payload: null }))).resolves.toBe("legacy");
+    await expect(probeGatewayMode(page, "p", async () => ({ statusCode: 502, payload: null }))).rejects.toThrow(
+      /answered 502/,
+    );
+    await expect(probeGatewayMode(page, "p", async () => null)).rejects.toThrow(/No origin token/);
+  });
+
+  it("skips a spec for the other mode without probing", async () => {
+    const page = {} as Page;
+    const probe = vi.fn(async () => ({ statusCode: 200, payload: {} }));
+    delete process.env.PLAYWRIGHT_GATEWAY_MODE;
+    await requireGatewayMode(page, "p", "stateless", probe);
+    expect(playwrightTest.skip).toHaveBeenCalledWith(true, expect.stringMatching(/PLAYWRIGHT_GATEWAY_MODE=stateless/));
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("probes whenever a required spec runs, unset included, and fails on a mismatch", async () => {
+    const page = {} as Page;
+    delete process.env.PLAYWRIGHT_GATEWAY_MODE;
+    await expect(
+      requireGatewayMode(page, "p", "legacy", async () => ({ statusCode: 200, payload: { stateless: true } })),
+    ).rejects.toThrow(/PLAYWRIGHT_GATEWAY_MODE=legacy, but the stack's gateway answers as stateless/);
+    await expect(
+      requireGatewayMode(page, "p", "legacy", async () => ({ statusCode: 200, payload: {} })),
+    ).resolves.toBeUndefined();
+    process.env.PLAYWRIGHT_GATEWAY_MODE = "stateless";
+    await expect(
+      requireGatewayMode(page, "p", "stateless", async () => ({ statusCode: 200, payload: { stateless: true } })),
+    ).resolves.toBeUndefined();
+    await expect(requireGatewayMode(page, "p", "stateless", async () => null)).rejects.toThrow(/No origin token/);
+    expect(playwrightTest.skip).not.toHaveBeenCalled();
   });
 });
