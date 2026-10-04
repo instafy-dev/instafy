@@ -157,6 +157,43 @@ describe("a save that outlives its space or Studio", () => {
     await saveAgainOnTopOfIt();
   });
 
+  it.each([
+    ["without typing", false],
+    ["after typing", true],
+  ] as const)("keeps the result when Studio is left and opened again before the save finishes (%s)", async (_case, types) => {
+    openSpaces({ "space-a": codeWith([buffer()]) }, "space-a");
+    await renderStudio();
+    const pending = await startSave();
+    await act(async () => root.unmount());
+    // Back in Studio before the save's response: a new code provider starts
+    // from the store, which still holds the edit and its old revision.
+    root = createRoot(container);
+    await renderStudio();
+    expect(code.workspace.files[0]).toMatchObject({ generated: "saved", modified: "edited", baseRev: REV_1 });
+    if (types) {
+      await act(async () => code.updateFileContent("README.md", "edited more"));
+    }
+    await act(async () => { pending.resolve(saved(REV_2)); });
+    await settle();
+    const savedBlob = await gitBlobOid("edited");
+    expect(code.workspace.files[0]).toMatchObject({
+      generated: "edited", modified: types ? "edited more" : "edited", baseRev: REV_2, blobOid: savedBlob,
+    });
+    expect(useWorkspaceStore.getState().state.code.files[0]).toMatchObject({ generated: "edited", baseRev: REV_2 });
+
+    await saveAgainOnTopOfIt();
+    expect(code.workspace.files[0]).toMatchObject({ generated: "edited more", baseRev: REV_3 });
+    // And the save after that builds on the second one, not on the first read.
+    await act(async () => code.updateFileContent("README.md", "edited once more"));
+    mocks.saveChanges.mockResolvedValueOnce(saved("4".repeat(40), REV_3));
+    await act(async () => { await save(); });
+    await settle();
+    expect(mocks.saveChanges.mock.calls[2][0]).toMatchObject({
+      baseRev: REV_3,
+      expected: { "README.md": await gitBlobOid("edited more") },
+    });
+  });
+
   it("keeps the result on its space when the user switched spaces first", async () => {
     openSpaces({ "space-a": codeWith([buffer()]), "space-b": codeWith([]) }, "space-a");
     // The Files panel is keyed by the space, as in Studio.

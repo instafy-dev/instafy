@@ -193,8 +193,17 @@ export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) 
       syncingFromStoreRef.current = false;
       return;
     }
+    // Skip only the store's echo of this push, which it sends while
+    // `updateCode` runs. A push that changes nothing there (the first one
+    // after mount repeats what the store holds) sends no echo, and the next
+    // change made elsewhere (a space switch, a save that finished while
+    // Studio was closed) must still reach this provider.
     ignoreStoreBroadcastRef.current = true;
-    storeUpdateCode(() => cloneCodeWorkspace(state.present));
+    try {
+      storeUpdateCode(() => cloneCodeWorkspace(state.present));
+    } finally {
+      ignoreStoreBroadcastRef.current = false;
+    }
   }, [state.present, storeUpdateCode]);
 
   const mountedRef = useRef(true);
