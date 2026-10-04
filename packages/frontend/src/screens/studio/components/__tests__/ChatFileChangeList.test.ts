@@ -1133,6 +1133,52 @@ describe("ChatFileChangeList", () => {
       );
     });
 
+    function stillLoading(retryAfterMs: number) {
+      return {
+        ok: false,
+        conflict: false,
+        code: "fetch_pending",
+        errorInfo: { status: 503, code: "fetch_pending", message: "fetch pending", retryAfterMs, routeUnavailable: false },
+      };
+    }
+
+    async function waitFor(ms: number) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      });
+    }
+
+    it("retries once while the space is still loading, then reverts", async () => {
+      revertWorkspaceGitCommit
+        .mockResolvedValueOnce(stillLoading(5))
+        .mockResolvedValueOnce({ ok: true, rev: "c".repeat(40), committed: true });
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await confirmRevert();
+      await waitFor(30);
+
+      expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(2);
+      expect(revertWorkspaceGitCommit.mock.calls[1]?.[0]).toEqual(revertWorkspaceGitCommit.mock.calls[0]?.[0]);
+      expect(showStatus).toHaveBeenCalledTimes(1);
+      expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+    });
+
+    it("says the space is still loading when the retry finds it loading too", async () => {
+      revertWorkspaceGitCommit.mockResolvedValue(stillLoading(5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await confirmRevert();
+      await waitFor(30);
+
+      expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(2);
+      expect(showStatus).toHaveBeenCalledTimes(1);
+      expect(showStatus).toHaveBeenCalledWith(
+        "The space is still loading. Try again in a moment.",
+        "warning",
+        6500,
+        undefined,
+      );
+      expect(revertChip()).not.toBeNull();
+    });
+
     it("leaves the files as they were when there was nothing to revert", async () => {
       revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: head, committed: false });
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });

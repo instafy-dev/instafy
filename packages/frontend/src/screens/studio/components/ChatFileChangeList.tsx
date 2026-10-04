@@ -19,7 +19,12 @@ import type {
   ChatMessageUnsavedReason,
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
-import { describeChangeRevertOutcome, describeFileNotSaved, describeUnsavedChanges } from "./chatFileChangeCopy";
+import {
+  describeChangeRevertOutcome,
+  describeFileNotSaved,
+  describeUnsavedChanges,
+  revertRetryDelayMs,
+} from "./chatFileChangeCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 
 const {
@@ -822,15 +827,24 @@ export function ChatFileChangeList({
     }
     setRevertingChange(true);
     try {
-      const result = await revertWorkspaceGitCommitFromController({
-        projectId,
-        commit: revertRange.head,
-        base: revertRange.base,
-        originId: versioning.originId,
-        routing: "default",
-        // An agent checkpoint holds the project lease briefly: retry once.
-        leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
-      });
+      const revert = () =>
+        revertWorkspaceGitCommitFromController({
+          projectId,
+          commit: revertRange.head,
+          base: revertRange.base,
+          originId: versioning.originId,
+          routing: "default",
+          // An agent checkpoint holds the project lease briefly: retry once.
+          leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
+        });
+      let result = await revert();
+      // A gateway still fetching the space's history asks for a moment.
+      // Nothing was committed, so one retry after that delay is safe.
+      const retryDelay = revertRetryDelayMs(result);
+      if (retryDelay !== null) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        result = await revert();
+      }
       const outcome = describeChangeRevertOutcome(result);
       if (outcome.reverted) {
         const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));

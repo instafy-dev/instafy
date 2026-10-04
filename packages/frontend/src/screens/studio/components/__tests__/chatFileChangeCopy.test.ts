@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RevertWorkspaceGitCommitResult } from "../../../../services/runtimeController/workspaceGit";
-import { describeChangeRevertOutcome, describeUnsavedChanges } from "../chatFileChangeCopy";
+import { describeChangeRevertOutcome, describeUnsavedChanges, revertRetryDelayMs } from "../chatFileChangeCopy";
 
 function failure(
   status: number,
@@ -106,7 +106,6 @@ describe("describeChangeRevertOutcome", () => {
   it("maps unreachable origins, missing commits and refused requests", () => {
     for (const [status, code] of [
       [502, "canonical_unreachable"],
-      [503, "fetch_pending"],
       [0, "token_unavailable"],
       [0, "network_error"],
       [503, undefined],
@@ -134,6 +133,40 @@ describe("describeChangeRevertOutcome", () => {
     expect(describeChangeRevertOutcome(null).message).toBe(
       "Couldn't revert this change. Try again, or ask the agent to undo it.",
     );
+  });
+});
+
+describe("a revert while the space is still loading", () => {
+  function pending(retryAfterMs?: number): RevertWorkspaceGitCommitResult {
+    return {
+      ok: false,
+      conflict: false,
+      code: "fetch_pending",
+      errorInfo: { status: 503, code: "fetch_pending", message: "fetch pending", retryAfterMs, routeUnavailable: false },
+    };
+  }
+
+  it("retries once after Retry-After, capped at 5 s", () => {
+    expect(revertRetryDelayMs(pending(2000))).toBe(2000);
+    expect(revertRetryDelayMs(pending(0))).toBe(0);
+    expect(revertRetryDelayMs(pending(9000))).toBe(5000);
+    expect(revertRetryDelayMs(pending())).toBe(2000);
+  });
+
+  it("does not retry anything else", () => {
+    expect(revertRetryDelayMs(null)).toBeNull();
+    expect(revertRetryDelayMs({ ok: true, rev: "c".repeat(40) })).toBeNull();
+    expect(revertRetryDelayMs(failure(503))).toBeNull();
+    expect(revertRetryDelayMs(failure(502, "canonical_unreachable"))).toBeNull();
+    expect(revertRetryDelayMs(failure(409, "main_busy"))).toBeNull();
+  });
+
+  it("says the space is still loading, not that it is unreachable", () => {
+    expect(describeChangeRevertOutcome(pending(2000))).toMatchObject({
+      intent: "warning",
+      message: "The space is still loading. Try again in a moment.",
+      reverted: false,
+    });
   });
 });
 

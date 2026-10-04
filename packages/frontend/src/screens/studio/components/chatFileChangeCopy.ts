@@ -117,7 +117,30 @@ function refusedPathRule(code: string | null, reason: string | null): string | n
 }
 
 const BUSY_MESSAGE = "The space is busy saving other changes. Try again in a moment.";
+const STILL_LOADING_MESSAGE = "The space is still loading. Try again in a moment.";
 const UNREACHABLE_MESSAGE = "Couldn't reach the space's saved files. Try again.";
+
+const FETCH_PENDING_RETRY_DEFAULT_MS = 2000;
+const FETCH_PENDING_RETRY_MAX_MS = 5000;
+
+// A gateway still fetching the space's saved history answers 503
+// fetch_pending with Retry-After. Nothing was committed, so the card retries
+// once after that delay (at most 5 s). Null for every other result.
+export function revertRetryDelayMs(result: RevertWorkspaceGitCommitResult | null): number | null {
+  if (!result || result.ok) {
+    return null;
+  }
+  const code = result.code ?? result.errorInfo?.code ?? null;
+  if (code !== "fetch_pending") {
+    return null;
+  }
+  const retryAfter = result.errorInfo?.retryAfterMs;
+  const delay =
+    typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0
+      ? retryAfter
+      : FETCH_PENDING_RETRY_DEFAULT_MS;
+  return Math.min(delay, FETCH_PENDING_RETRY_MAX_MS);
+}
 const FALLBACK_MESSAGE = "Couldn't revert this change. Try again, or ask the agent to undo it.";
 
 // What "Revert this change" did, as one toast: the request is
@@ -187,9 +210,10 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
         "This change isn't in the space's saved history, so it can't be reverted here. Ask the agent to undo it.",
         { offerAgentUndo: true },
       );
+    case "fetch_pending":
+      return outcome("warning", STILL_LOADING_MESSAGE);
     case "canonical_unreachable":
     case "push_rejected":
-    case "fetch_pending":
     case "workspace_stopping":
     case "token_unavailable":
     case "network_error":
