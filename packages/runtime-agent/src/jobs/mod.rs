@@ -7858,6 +7858,7 @@ impl JobProcessor {
         Ok((prompt, loaded_learned_blocks, prompt_context, attachments))
     }
 
+    #[cfg(test)]
     fn build_prompt_with_text(
         &self,
         project_id: &Uuid,
