@@ -55,6 +55,8 @@ export interface UseFilesPanelSaveOptions {
   readOnly: boolean;
   /** The default origin is reachable (gateway up, Desktop app online). */
   originAvailable: boolean;
+  /** History lists Unsaved work for the default origin, so copy may point there. */
+  unsavedWorkVisible?: boolean;
   /** The active buffer as the store has it now. */
   getActiveFile: () => CodeFile | null;
   /** The newest text of the active buffer (the editor's value when mounted). */
@@ -369,7 +371,12 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     };
 
     if (!result.ok) {
-      const copy = describeSaveFailure({ error: result.error, mode, label });
+      const copy = describeSaveFailure({
+        error: result.error,
+        mode,
+        label,
+        unsavedWorkVisible: onDefaultOrigin && current.unsavedWorkVisible === true,
+      });
       if (copy.staleNotice) {
         raiseStale(projectId, file, content, originId, null);
       }

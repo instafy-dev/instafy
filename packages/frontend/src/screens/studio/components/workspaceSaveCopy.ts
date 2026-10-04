@@ -71,11 +71,21 @@ function trimSentence(value: string): string {
   return value.trim().replace(/[.\s]+$/, "");
 }
 
-function notSavedMessage(error: OriginError): string {
+/**
+ * A Desktop publish that failed. The work stays in the folder on this
+ * computer, and a save keeps the edits in the editor too. History's Unsaved
+ * work is named only where the user can open it: when the History drawer
+ * lists recovery entries for this origin.
+ */
+function notSavedMessage(error: OriginError, operation: SaveCopyOperation, unsavedWorkVisible: boolean): string {
   const failure = trimSentence(error.report?.failure ?? error.message ?? "");
-  return failure
-    ? `Not saved: ${failure}. The work is kept under History, in Unsaved work.`
-    : "Not saved. The work is kept under History, in Unsaved work.";
+  const lead = failure ? `Not saved: ${failure}.` : "Not saved.";
+  if (unsavedWorkVisible) {
+    return `${lead} The work is kept under History, in Unsaved work.`;
+  }
+  return operation === "save"
+    ? `${lead} Your edits are kept here. Try again in a moment.`
+    : `${lead} Try again in a moment.`;
 }
 
 /** Copy for one path the origin refused to publish, by its reason. */
@@ -130,6 +140,8 @@ export function describeSaveFailure(params: {
   mode: VersioningMode;
   label: string;
   operation?: SaveCopyOperation;
+  /** History shows Unsaved work for this origin (recovery is supported). */
+  unsavedWorkVisible?: boolean;
 }): SaveCopy {
   const { error, mode, label } = params;
   const operation = params.operation ?? "save";
@@ -170,7 +182,7 @@ export function describeSaveFailure(params: {
     case "fetch_pending":
       return { message: SAVE_COPY.fetchPending };
     case "not_saved":
-      return { message: notSavedMessage(error) };
+      return { message: notSavedMessage(error, operation, params.unsavedWorkVisible === true) };
     case "dismissal_not_applied":
       return { message: SAVE_COPY.dismissalNotApplied };
     default:

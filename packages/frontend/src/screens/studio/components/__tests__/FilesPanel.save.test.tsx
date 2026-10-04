@@ -25,7 +25,11 @@ const mocks = vi.hoisted(() => ({
   syncToRemote: vi.fn(),
   noteSignal: vi.fn(),
   showStatus: vi.fn(),
-  versioning: { mode: "stateless" as "legacy" | "stateless" | "desktop", originId: "origin-1" as string | null },
+  versioning: {
+    mode: "stateless" as "legacy" | "stateless" | "desktop",
+    originId: "origin-1" as string | null,
+    recovery: "unknown" as "unknown" | "supported" | "unsupported",
+  },
   runtime: {
     effectiveRuntimeId: "runtime-1",
     runtimeReady: false,
@@ -86,7 +90,7 @@ vi.mock("../../../../workspace/useWorkspaceVersioning", () => ({
     originId: mocks.versioning.originId,
     originMode: "hosted",
     stateless: mocks.versioning.mode === "stateless",
-    recovery: "unknown",
+    recovery: mocks.versioning.recovery,
     checkedAt: 1,
     refresh: async () => null,
   }),
@@ -175,6 +179,7 @@ describe("FilesPanel one Save", () => {
     vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([new DOMRect(0, 0, 400, 400)] as unknown as DOMRectList);
     mocks.versioning.mode = "stateless";
     mocks.versioning.originId = "origin-1";
+    mocks.versioning.recovery = "unknown";
     mocks.project.canWriteProject = true;
     mocks.listAt.mockImplementation(async ({ path }: { path?: string }) => ({
       ok: true,
@@ -638,9 +643,34 @@ describe("FilesPanel one Save", () => {
       await pressSave();
       expect(file()).toMatchObject({ generated: "saved", modified: "edited", blobOid: await gitBlobOid("edited") });
       expect(query("code-save-button")?.disabled).toBe(false);
+      // No History drawer lists Unsaved work here, so the copy does not send the user there.
+      expect(mocks.showStatus).toHaveBeenCalledWith(
+        "Not saved: the remote refused the push. Your edits are kept here. Try again in a moment.",
+        "error",
+        8000,
+        undefined,
+      );
       mocks.saveChanges.mockResolvedValue(desktopSaved());
       await pressSave();
       expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ expected: { "README.md": await gitBlobOid("edited") } });
+    });
+
+    it("points a publish failure at Unsaved work once History lists it", async () => {
+      mocks.versioning.recovery = "supported";
+      mocks.saveChanges.mockResolvedValue({
+        ...failed({ status: 503, code: "not_saved", report: { failure: "the remote refused the push" } }),
+        stage: "sync",
+        originMode: "desktop",
+        applied: true,
+      });
+      await render([buffer({ baseRev: null })]);
+      await pressSave();
+      expect(mocks.showStatus).toHaveBeenCalledWith(
+        "Not saved: the remote refused the push. The work is kept under History, in Unsaved work.",
+        "error",
+        8000,
+        undefined,
+      );
     });
   });
 

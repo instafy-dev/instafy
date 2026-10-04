@@ -76,23 +76,28 @@ describe("workspace save copy", () => {
   });
 
   it("explains Desktop publish refusals", () => {
-    const notSaved = describeSaveFailure({
-      error: error({
-        status: 503,
-        code: "not_saved",
-        message: "not saved",
-        report: {
-          rev: null, baseRev: null, localRev: null, gitSyncStatus: "unpublished", recoveryRef: null,
-          recoveryRefs: [], conflictedPaths: [], rejectedPaths: [], checkoutMoved: false, unpushedRefs: 0,
-          failure: "the remote refused the push.", retryable: true,
-        },
-      }),
-      mode: "desktop",
-      label: "a",
+    const notSavedError = error({
+      status: 503,
+      code: "not_saved",
+      message: "not saved",
+      report: {
+        rev: null, baseRev: null, localRev: null, gitSyncStatus: "unpublished", recoveryRef: null,
+        recoveryRefs: [], conflictedPaths: [], rejectedPaths: [], checkoutMoved: false, unpushedRefs: 0,
+        failure: "the remote refused the push.", retryable: true,
+      },
     });
-    expect(notSaved.message).toBe(
+    const notSaved = (patch: { operation?: "save" | "delete"; unsavedWorkVisible?: boolean } = {}) =>
+      describeSaveFailure({ error: notSavedError, mode: "desktop", label: "a", ...patch }).message;
+    // Without a History drawer listing Unsaved work, the copy names what the user can see.
+    expect(notSaved()).toBe(
+      "Not saved: the remote refused the push. Your edits are kept here. Try again in a moment.",
+    );
+    expect(notSaved({ operation: "delete" })).toBe("Not saved: the remote refused the push. Try again in a moment.");
+    expect(notSaved({ unsavedWorkVisible: true })).toBe(
       "Not saved: the remote refused the push. The work is kept under History, in Unsaved work.",
     );
+    expect(describeSaveFailure({ error: error({ status: 409, code: "not_saved" }), mode: "desktop", label: "a" }).message)
+      .toBe("Not saved: refused. Your edits are kept here. Try again in a moment.");
     expect(describeSaveFailure({ error: error({ status: 422, code: "dismissal_not_applied" }), mode: "desktop", label: "a" }).message).toBe(
       SAVE_COPY.dismissalNotApplied,
     );

@@ -1670,6 +1670,8 @@ export function FilesPanel({
     activeProjectId,
     readOnly: projectWriteDisabled,
     originAvailable,
+    // Only once History has listed Unsaved work for this origin.
+    unsavedWorkVisible: versioningState.recovery === "supported",
     getActiveFile: () => activeFileRef.current,
     getPendingContent: (file) =>
       file.id === activeFileRef.current?.id ? getPendingActiveFileContent() ?? file.modified : file.modified,
