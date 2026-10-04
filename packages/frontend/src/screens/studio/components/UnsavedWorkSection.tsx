@@ -25,12 +25,13 @@ import {
   restoreDirtyPathsCopy,
   restoreSuccessCopy,
   UNSAVED_WORK_ERROR_COPY,
+  UNSAVED_WORK_READ_FAILED_COPY,
   unsavedWorkAskAgentPrompt,
   unsavedWorkTitle,
   type HistoryNotice,
   type HistoryOriginKind,
 } from "./historyCopy";
-import { checkDesktopFolderPath } from "./unsavedWorkPathChecks";
+import { checkDesktopFolderPath, confirmPathAbsentAtRef } from "./unsavedWorkPathChecks";
 import { formatRelativeCommitTime } from "./workspaceGitReviewShared";
 
 const LEASE_RETRY_DELAY_MS = 1_500;
@@ -255,8 +256,26 @@ export function UnsavedWorkSection({
       let files: OriginApplyFile[] = [];
       let deletes: string[] = [];
       if (read.ok) {
+        if (read.file.rev && read.file.rev !== entry.rev) {
+          // The ref holds newer work than the row the person chose from.
+          clearConflict(entry.ref);
+          refreshAfterMove();
+          return;
+        }
         files = [{ path, bytes: decodeBase64(read.file.contentBase64), encoding: "binary" }];
-      } else if (read.notFound) {
+      } else if (read.notFound && !read.error.routeUnavailable) {
+        // A 404 is a delete only when the ref still resolves without the path.
+        const absence = await confirmPathAbsentAtRef({ projectId, originId, ref: entry.ref, rev: entry.rev, path });
+        if (absence === "moved") {
+          clearConflict(entry.ref);
+          refreshAfterMove();
+          return;
+        }
+        if (absence !== "absent") {
+          onNotice({ tone: "error", text: UNSAVED_WORK_READ_FAILED_COPY });
+          void refresh({ force: true });
+          return;
+        }
         deletes = [path];
       } else {
         onNotice({
@@ -321,7 +340,19 @@ export function UnsavedWorkSection({
         onCommitted(saved.rev);
       }
     },
-    [conflicts, headRev, onCommitted, onNotice, originId, originKind, projectId, resolvePath],
+    [
+      clearConflict,
+      conflicts,
+      headRev,
+      onCommitted,
+      onNotice,
+      originId,
+      originKind,
+      projectId,
+      refresh,
+      refreshAfterMove,
+      resolvePath,
+    ],
   );
 
   const openReview = useCallback(

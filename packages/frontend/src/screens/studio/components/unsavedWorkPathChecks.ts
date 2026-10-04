@@ -20,6 +20,74 @@ function parentFolder(path: string): string {
   return index > 0 ? path.slice(0, index) : "";
 }
 
+function baseName(path: string): string {
+  const index = path.lastIndexOf("/");
+  return index >= 0 ? path.slice(index + 1) : path;
+}
+
+/**
+ * What a ref holds at a path whose read answered 404: `absent` (the kept
+ * work deletes it), `moved` (the ref no longer names `rev`) or `unknown`.
+ */
+export type RefPathAbsence = "absent" | "moved" | "unknown";
+
+/**
+ * A read of `path` at `ref` answered 404. That is a delete only when the
+ * ref still resolves and its tree lacks the path: a ref that another viewer
+ * removed answers 404 for every path too. A listing that shows entries
+ * proves the ref resolves; a listing whose `X-Instafy-Rev` names another
+ * commit means the ref moved since the list loaded.
+ */
+export async function confirmPathAbsentAtRef({
+  projectId,
+  originId,
+  ref,
+  rev,
+  path,
+}: {
+  projectId: string;
+  originId: string;
+  ref: string;
+  rev: string;
+  path: string;
+}): Promise<RefPathAbsence> {
+  const target = normalizePath(path);
+  const parent = parentFolder(target);
+  const name = baseName(target);
+  const list = (folder: string) =>
+    controllerClient.workspace.files
+      .listAt({ projectId, originId, path: folder, ref, routing: "default" })
+      .catch(() => null);
+
+  const listing = await list(parent);
+  if (!listing || !listing.ok) {
+    return "unknown";
+  }
+  if (listing.rev && listing.rev !== rev) {
+    return "moved";
+  }
+  if (listing.entries.length > 0) {
+    const listed = listing.entries.some(
+      (entry) => entry.name === name || baseName(normalizePath(entry.path)) === name,
+    );
+    // Listed after all (a folder now, or hidden from reads): not a plain delete.
+    return listed ? "unknown" : "absent";
+  }
+  if (!parent) {
+    return "unknown";
+  }
+  // The parent lists nothing: the work removed that folder, or the ref is
+  // gone. A root that lists entries at the ref tells the two apart.
+  const root = await list("");
+  if (!root || !root.ok) {
+    return "unknown";
+  }
+  if (root.rev && root.rev !== rev) {
+    return "moved";
+  }
+  return root.entries.length > 0 ? "absent" : "unknown";
+}
+
 export type DesktopFolderPathCheck =
   | { ok: true; blobOid: string | null }
   | { ok: false; reason: "dirty" }

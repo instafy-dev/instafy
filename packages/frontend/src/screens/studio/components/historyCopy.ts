@@ -296,6 +296,8 @@ export const RECOVERY_REF_MOVED_COPY = "This entry changed. Refreshing.";
 export const ALREADY_REMOVED_COPY = "Already removed.";
 export const REMOVED_COPY = "Removed.";
 export const UNSAVED_WORK_ERROR_COPY = "Couldn't check for unsaved work.";
+export const UNSAVED_WORK_READ_FAILED_COPY =
+  "Couldn't read this file from the unsaved work, so nothing was saved. Refreshing.";
 
 export function restoreSuccessCopy(notRestored: string[]): string {
   const base = "Restored as a new version.";

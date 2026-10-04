@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   restoreRecovery: vi.fn(),
   dismissRecovery: vi.fn(),
   readAt: vi.fn(),
+  listAt: vi.fn(),
   saveChanges: vi.fn(),
   openGitReviewTab: vi.fn(),
   openConversationTab: vi.fn(),
@@ -53,7 +54,7 @@ vi.mock("../../../../sdk/instafy", () => ({
         restoreRecovery: mocks.restoreRecovery,
         dismissRecovery: mocks.dismissRecovery,
       },
-      files: { readAt: mocks.readAt },
+      files: { readAt: mocks.readAt, listAt: mocks.listAt },
       save: { changes: mocks.saveChanges },
     },
   },
@@ -328,7 +329,15 @@ describe("HistoryDrawer: Unsaved work", () => {
       });
     mocks.readAt
       .mockResolvedValueOnce({ ok: true, file: { path: "src/a.ts", contentBase64: btoa("kept\n"), size: 5 } })
-      .mockResolvedValueOnce({ ok: false, notFound: true, error: originError(404, undefined), originId: "origin-1", originMode: "hosted" });
+      .mockResolvedValueOnce({ ok: false, notFound: true, error: originError(404, "not_found"), originId: "origin-1", originMode: "hosted" });
+    // The ref still resolves at the listed rev, and its src/ has no gone.ts: a real delete.
+    mocks.listAt.mockResolvedValue({
+      ok: true,
+      entries: [{ name: "a.ts", path: "src/a.ts", kind: "file" }],
+      rev: "a".repeat(40),
+      originId: "origin-1",
+      originMode: "hosted",
+    });
     mocks.saveChanges
       .mockResolvedValueOnce({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] })
       .mockResolvedValueOnce({ ok: true, rev: "d".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/gone.ts"] });
@@ -369,6 +378,13 @@ describe("HistoryDrawer: Unsaved work", () => {
 
     // The ref deletes this one: it becomes a delete on top of the previous save.
     await press(paths[2]!, "unsaved-work-path-use");
+    expect(mocks.listAt).toHaveBeenCalledWith({
+      projectId: "project-1",
+      originId: "origin-1",
+      path: "src",
+      ref: RECOVERY,
+      routing: "default",
+    });
     expect(mocks.saveChanges.mock.calls[1]?.[0]).toMatchObject({ files: [], deletes: ["src/gone.ts"], baseRev: "1".repeat(40) });
 
     expect(row(container, RECOVERY).querySelectorAll('[data-testid="unsaved-work-path-resolved"]')).toHaveLength(3);
@@ -377,6 +393,95 @@ describe("HistoryDrawer: Unsaved work", () => {
       expect.objectContaining({ ref: RECOVERY, keep: ["src/b.ts"], baseRev: "d".repeat(40) }),
     );
     expect(q(container, "history-status")?.textContent).toContain("Restored as a new version.");
+  });
+
+  describe("a 404 at the ref", () => {
+    function conflictOn(paths: string[]) {
+      mocks.restoreRecovery.mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    }
+
+    function listing(entries: unknown[], rev: string | null = "a".repeat(40)) {
+      return { ok: true, entries, rev, originId: "origin-1", originMode: "hosted" };
+    }
+
+    it("is not a delete when the ref itself is gone", async () => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: true,
+        error: originError(404, "not_found", { message: "that ref does not exist" }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      // Every listing at a missing ref is empty too.
+      mocks.listAt.mockResolvedValue(listing([], null));
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      const listsBefore = mocks.fetchRecovery.mock.calls.length;
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.listAt).toHaveBeenCalledWith(expect.objectContaining({ path: "", ref: RECOVERY }));
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Couldn't read this file from the unsaved work, so nothing was saved. Refreshing.",
+      );
+      expect(mocks.fetchRecovery.mock.calls.length).toBe(listsBefore + 1);
+    });
+
+    it("is not a delete when the read route is missing", async () => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: true,
+        error: originError(404, undefined, { message: "origin path not found", routeUnavailable: true }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.listAt).not.toHaveBeenCalled();
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toContain("Couldn't read this file from the unsaved work.");
+    });
+
+    it("deletes a path whose whole folder the work removed", async () => {
+      conflictOn(["src/old/gone.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: true,
+        error: originError(404, "not_found"),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      mocks.listAt.mockImplementation(async (params: { path: string }) =>
+        params.path === "" ? listing([{ name: "README.md", path: "README.md", kind: "file" }]) : listing([]),
+      );
+      mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: [] });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ files: [], deletes: ["src/old/gone.ts"] });
+    });
+
+    it("refreshes instead of writing when the ref moved since the list loaded", async () => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: true,
+        file: { path: "src/a.ts", contentBase64: btoa("newer\n"), size: 6, rev: "9".repeat(40) },
+      });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe("This entry changed. Refreshing.");
+      expect(q(row(container, RECOVERY), "unsaved-work-conflict")).toBeNull();
+    });
   });
 
   it("offers ask-the-agent per file with the ref to read from", async () => {
