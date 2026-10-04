@@ -209,6 +209,7 @@ export function useRuntimeControllerSync({
             type: "applyOriginSummary",
             summary: originSummary,
             derivedPresence: originPresence,
+            projectId,
           });
         }
       } catch (originError) {
@@ -535,6 +536,7 @@ export function useRuntimeControllerSync({
                 type: "applyOriginSummary",
                 summary: originSummary,
                 derivedPresence: originPresence,
+                projectId,
               });
             } else if (event.kind === "origin.expired") {
               dispatch({

@@ -32,6 +32,12 @@ export interface RuntimeStoreState {
   pendingConversationUpdates: ControllerConversationUpdated[];
   localWorkspace: LocalWorkspacePresence | null;
   desktopOrigin: ControllerOriginSummary | null;
+  /**
+   * The project `desktopOrigin` was fetched for; null when unknown. During a
+   * project switch the store still holds the previous project's summary for
+   * a commit, and this tells the two apart.
+   */
+  desktopOriginProjectId: string | null;
   runtimeStatuses: ControllerRuntimeStatusEntry[];
   preferredRuntimeId: string | null;
   sessionRuntimeId: string | null;
@@ -69,6 +75,8 @@ export type RuntimeAction =
       type: "applyOriginSummary";
       summary: ControllerOriginSummary | null;
       derivedPresence: LocalWorkspacePresence | null;
+      /** The project the summary belongs to. */
+      projectId?: string | null;
     }
   | { type: "setSessionRuntime"; runtimeId: string | null }
   | { type: "upsertAgentToken"; runtimeId: string; snapshot: AgentTokenSnapshot }
@@ -86,6 +94,7 @@ export function createInitialRuntimeStoreState(): RuntimeStoreState {
     pendingConversationUpdates: [],
     localWorkspace: null,
     desktopOrigin: null,
+    desktopOriginProjectId: null,
     runtimeStatuses: [],
     preferredRuntimeId: null,
     sessionRuntimeId: null,
@@ -471,6 +480,7 @@ export function runtimeReducer(
       return {
         ...state,
         desktopOrigin: nextOrigin,
+        desktopOriginProjectId: nextOrigin ? (action.projectId ?? null) : null,
         localWorkspace: nextWorkspace,
       };
     }
