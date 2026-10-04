@@ -9,6 +9,8 @@ import type { CodeFile, CodeWorkspace } from "../../../types";
 import { gitBlobOid } from "../../../utils/gitBlobOid";
 import {
   advanceListingRevisions,
+  bufferSaveOriginId,
+  bufferVersioningMode,
   EMPTY_DIRECTORY_PLACEHOLDER,
   type FilesVersioning,
   type OwnRevisions,
@@ -254,17 +256,21 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     if (!current.enabled || !projectId || !storeFile || current.readOnly) {
       return;
     }
-    const mode = current.versioning.mode;
     const file = effectiveBuffer(storeFile);
     const content = current.getPendingContent(storeFile);
     if (content === file.generated && file.isNew !== true) {
       return;
     }
+    // The save goes to the buffer's origin and is checked the way that
+    // origin checks it, whatever the default origin is now.
+    const originId = bufferSaveOriginId(file, current.versioning);
+    const mode = bufferVersioningMode(file, current.versioning);
+    const onDefaultOrigin = originId === current.versioning.originId;
     const label = labelOf(file);
     const retry = () => {
       void saveRef.current();
     };
-    if (!current.originAvailable) {
+    if (onDefaultOrigin && !current.originAvailable) {
       current.presentFailure(
         { message: mode === "desktop" ? SAVE_COPY.desktopUnreachable : SAVE_COPY.statelessUnreachable },
         retry,
@@ -274,7 +280,6 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
 
     const path = file.path;
     const parent = parentOf(path);
-    const originId = file.originId ?? current.versioning.originId ?? null;
     let baseRev: string | null = null;
     let blobOid: string | null = file.blobOid ?? null;
 
@@ -314,7 +319,9 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     const expected: Record<string, string | null> | null =
       file.isNew === true ? { [path]: null } : blobOid ? { [path]: blobOid } : null;
     const keepPath = parent ? `${parent}/${EMPTY_DIRECTORY_PLACEHOLDER}` : EMPTY_DIRECTORY_PLACEHOLDER;
-    const deletesKeep = current.keepFoldersRef.current.has(parent);
+    // The explorer lists the default origin, so only a save there can
+    // replace that origin's folder placeholder.
+    const deletesKeep = onDefaultOrigin && current.keepFoldersRef.current.has(parent);
     const request: WorkspaceSaveRequest = {
       projectId,
       originId,
@@ -382,14 +389,14 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       file,
       {
         generated: content,
-        baseRev: mode === "stateless" ? result.rev ?? baseRev : file.baseRev ?? null,
+        baseRev: mode === "stateless" ? result.rev ?? baseRev : null,
         blobOid: savedOid,
         originId: result.originId || originId,
         isNew: false,
       },
       content,
     );
-    if (mode === "stateless" && (result.originId || originId) === current.versioning.originId) {
+    if (mode === "stateless" && onDefaultOrigin) {
       // The explorer's listings come from this origin: those at the commit
       // this save built on are current at the save's commit too.
       current.directoryRevsRef.current = advanceListingRevisions(

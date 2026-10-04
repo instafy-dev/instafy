@@ -514,6 +514,45 @@ describe("FilesPanel one Save", () => {
     await settle();
   });
 
+  it("saves a buffer read from the gateway back to it with its revision while the Desktop is the default", async () => {
+    mocks.versioning.mode = "desktop";
+    mocks.versioning.originId = "desktop-1";
+    mocks.saveChanges.mockResolvedValue({ ...saved(REV_2), originId: "gateway-1" });
+    await render([buffer({ originId: "gateway-1" })]);
+    await pressSave();
+    expect(mocks.saveChanges).toHaveBeenCalledExactlyOnceWith({
+      projectId: "space-a",
+      originId: "gateway-1",
+      files: [{ path: "README.md", content: "edited", encoding: "utf8" }],
+      baseRev: REV_1,
+      expected: { "README.md": BLOB_A },
+      syncMessage: "Update README.md",
+    });
+    expect(file()).toMatchObject({ generated: "edited", baseRev: REV_2, originId: "gateway-1" });
+  });
+
+  it("explains an offline Desktop folder for a buffer read from it while the gateway is the default", async () => {
+    mocks.versioning.originId = "gateway-1";
+    mocks.saveChanges.mockResolvedValue(failed({ status: 0, code: "token_unavailable" }));
+    await render([buffer({ originId: "desktop-1", baseRev: null })]);
+    await pressSave();
+    expect(mocks.readAt).not.toHaveBeenCalled();
+    expect(mocks.saveChanges).toHaveBeenCalledExactlyOnceWith({
+      projectId: "space-a",
+      originId: "desktop-1",
+      files: [{ path: "README.md", content: "edited", encoding: "utf8" }],
+      expected: { "README.md": BLOB_A },
+      syncMessage: "Update README.md",
+    });
+    expect(mocks.showStatus).toHaveBeenCalledWith(
+      "The folder on this computer isn't connected. Your edits are kept here.",
+      "error",
+      8000,
+      undefined,
+    );
+    expect(file()).toMatchObject({ generated: "saved", modified: "edited" });
+  });
+
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {
     await render([buffer()]);
     expect(query("files-explorer-new-file")?.disabled).toBe(false);

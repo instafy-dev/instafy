@@ -536,6 +536,7 @@ export function useFilesPanelViewerState({
             cached: existing,
             listingBlobOid: entry.blobOid,
             mode: versioning.mode,
+            originId: pinnedOriginId,
           });
           shouldForceFetch = decision === "refetch";
           if (decision === "stale") {
@@ -644,6 +645,7 @@ export function useFilesPanelViewerState({
               cached: existing,
               listingBlobOid: readIds?.blobOid,
               mode: versioning.mode,
+              originId: pinnedOriginId,
             });
             if (decision === "stale") {
               raiseStaleBuffer(existing, entry);

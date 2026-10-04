@@ -154,11 +154,27 @@ describe("useFilesPanelViewerState in the versioned modes", () => {
     expect(staleEvents).toHaveLength(1);
   });
 
+  it("reads a clean buffer from another origin again from the origin read now", async () => {
+    await render({
+      versioning: { mode: "desktop", originId: "desktop-1" },
+      workspaceFiles: [cached({ originId: "gateway-1" })],
+    });
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue(readOk({ originId: "desktop-1", rev: null }));
+    await open(entry("README.md", BLOB_A));
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledExactlyOnceWith({
+      projectId: "space-a", path: "README.md", routing: "default", originId: "desktop-1",
+    });
+    expect(workspace.files[0]).toMatchObject({ originId: "desktop-1", baseRev: null, blobOid: BLOB_B });
+  });
+
   it("checks a Desktop buffer by blob only", async () => {
-    await render({ versioning: { mode: "desktop", originId: "desk-1" }, workspaceFiles: [cached({ baseRev: null })] });
+    await render({
+      versioning: { mode: "desktop", originId: "desk-1" },
+      workspaceFiles: [cached({ baseRev: null, originId: "desk-1" })],
+    });
     await open(entry("README.md", BLOB_A));
     expect(controllerClient.workspace.files.readAt).not.toHaveBeenCalled();
-    await render({ workspaceFiles: [cached({ baseRev: null, blobOid: null, modified: "edited" })] });
+    await render({ workspaceFiles: [cached({ baseRev: null, blobOid: null, originId: "desk-1", modified: "edited" })] });
     await open(entry("README.md", BLOB_A));
     expect(staleEvents).toHaveLength(1);
   });

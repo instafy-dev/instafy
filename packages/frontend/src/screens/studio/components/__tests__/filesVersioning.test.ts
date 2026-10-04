@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { CodeFile } from "../../../../types";
 import {
   advanceListingRevisions,
+  bufferSaveOriginId,
+  bufferVersioningMode,
   createOwnRevisions,
   decideCachedOpen,
   isFileBufferDirty,
@@ -77,10 +79,36 @@ describe("Files versioning helpers", () => {
       expect(desktop({ isNew: true, generated: "", modified: "" }, BLOB_A)).toBe("reuse");
     });
 
+    it("does not trust read ids from another origin than the one read now", () => {
+      const fromGateway = { blobOid: BLOB_A, baseRev: REV, originId: "gateway-1" };
+      const open = (cached: Partial<CodeFile>) =>
+        decideCachedOpen({ cached: buffer(cached), listingBlobOid: BLOB_A, mode: "desktop", originId: "desktop-1" });
+      expect(open(fromGateway)).toBe("refetch");
+      expect(open({ ...fromGateway, modified: "edit" })).toBe("stale");
+      expect(open({ ...fromGateway, originId: "desktop-1" })).toBe("reuse");
+    });
+
     it("keeps a dirty buffer when the listing has no blob to compare", () => {
       expect(stateless({ blobOid: BLOB_A, baseRev: REV, modified: "edit" }, null)).toBe("reuse");
       expect(stateless({ blobOid: BLOB_A, baseRev: REV }, null)).toBe("refetch");
     });
+  });
+
+  it("saves a buffer to its own origin and checks it the way that origin does", () => {
+    const desktopMode = { mode: "desktop" as const, originId: "desktop-1" };
+    const statelessMode = { mode: "stateless" as const, originId: "gateway-1" };
+    const fromGateway = buffer({ originId: "gateway-1", baseRev: REV, blobOid: BLOB_A });
+    const fromDesktop = buffer({ originId: "desktop-1", blobOid: BLOB_A });
+    expect(bufferSaveOriginId(fromGateway, desktopMode)).toBe("gateway-1");
+    expect(bufferVersioningMode(fromGateway, desktopMode)).toBe("stateless");
+    expect(bufferSaveOriginId(fromDesktop, statelessMode)).toBe("desktop-1");
+    expect(bufferVersioningMode(fromDesktop, statelessMode)).toBe("desktop");
+    expect(bufferVersioningMode(fromGateway, statelessMode)).toBe("stateless");
+    expect(bufferVersioningMode(buffer(), desktopMode)).toBe("desktop");
+    // A new file that was never written anywhere goes where the space is saved now.
+    const created = buffer({ originId: "gateway-1", isNew: true, generated: "", modified: "" });
+    expect(bufferSaveOriginId(created, desktopMode)).toBe("desktop-1");
+    expect(bufferVersioningMode(created, desktopMode)).toBe("desktop");
   });
 
   it("remembers own revisions for 60 seconds", () => {

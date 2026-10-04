@@ -33,6 +33,40 @@ export function isFileBufferDirty(file: Pick<CodeFile, "modified" | "generated" 
   return file.modified !== file.generated || file.isNew === true;
 }
 
+/**
+ * The origin a buffer's save goes to. A buffer keeps the origin it was read
+ * from (plan 2.1.7), so an edit read from the folder on this computer is never
+ * written to the gateway by accident. A new file that was never written
+ * anywhere is created where the space is saved now.
+ */
+export function bufferSaveOriginId(
+  file: Pick<CodeFile, "originId" | "isNew" | "blobOid">,
+  versioning: FilesVersioning,
+): string | null {
+  if (file.isNew === true && !file.blobOid) {
+    return versioning.originId ?? file.originId ?? null;
+  }
+  return file.originId ?? versioning.originId ?? null;
+}
+
+/**
+ * How a save to the buffer's origin is checked. On the default origin that is
+ * the current mode. A buffer from another origin (the Desktop app went offline
+ * or came online since the read) follows what its read recorded: only the
+ * stateless gateway serves a commit (`baseRev`); a Desktop read has a blob id
+ * and no commit.
+ */
+export function bufferVersioningMode(
+  file: Pick<CodeFile, "originId" | "isNew" | "blobOid" | "baseRev">,
+  versioning: FilesVersioning,
+): VersioningMode {
+  const originId = bufferSaveOriginId(file, versioning);
+  if (!originId || originId === versioning.originId) {
+    return versioning.mode;
+  }
+  return file.baseRev ? "stateless" : "desktop";
+}
+
 export type CachedOpenDecision = "reuse" | "refetch" | "stale";
 
 /**
@@ -50,22 +84,27 @@ export type CachedOpenDecision = "reuse" | "refetch" | "stale";
  *
  * A buffer "lacks its read ids" when, on the stateless gateway, it has no
  * `baseRev` (a save could not be checked against newer versions), or, on a
- * Desktop origin, no `blobOid`. When either blob id is missing otherwise the
+ * Desktop origin, no `blobOid`, or when it was read from another origin than
+ * the one the panel reads now (its ids say nothing about this origin's
+ * version). When either blob id is missing otherwise the
  * two cannot be compared: a clean buffer is fetched again and a dirty one is
  * kept (its save still sends `baseRev`, so it cannot overwrite a newer
  * version). A new, never-saved buffer is always reused.
  */
 export function decideCachedOpen(params: {
-  cached: Pick<CodeFile, "modified" | "generated" | "isNew" | "blobOid" | "baseRev">;
+  cached: Pick<CodeFile, "modified" | "generated" | "isNew" | "blobOid" | "baseRev" | "originId">;
   listingBlobOid: string | null | undefined;
   mode: VersioningMode;
+  /** The origin the panel reads now. */
+  originId?: string | null;
 }): CachedOpenDecision {
   const { cached, listingBlobOid, mode } = params;
   if (cached.isNew === true) {
     return "reuse";
   }
   const dirty = isFileBufferDirty(cached);
-  const lacksReadIds = mode === "stateless" ? !cached.baseRev : !cached.blobOid;
+  const otherOrigin = Boolean(cached.originId && params.originId && cached.originId !== params.originId);
+  const lacksReadIds = otherOrigin || (mode === "stateless" ? !cached.baseRev : !cached.blobOid);
   if (lacksReadIds) {
     return dirty ? "stale" : "refetch";
   }
