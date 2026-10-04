@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { CodeFile } from "../../../../types";
 import {
   advanceListingRevisions,
+  applyOwnCommitToEntries,
+  applyOwnCommitToListings,
   bufferSaveOriginId,
   bufferVersioningMode,
   createOwnRevisions,
@@ -167,6 +169,84 @@ describe("Files versioning helpers", () => {
     expect(advanceListingRevisions(revs, REV_3, REV_2)).toBe(revs);
     expect(advanceListingRevisions(revs, null, REV_3)).toBe(revs);
     expect(advanceListingRevisions(revs, REV, REV)).toBe(revs);
+  });
+
+  it("passes a recorded own commit to every subscriber and counts its revision as own", () => {
+    const own = createOwnRevisions();
+    const seen: string[] = [];
+    const stop = own.subscribe((commit) => seen.push(`a:${commit.rev}`));
+    own.subscribe((commit) => seen.push(`b:${commit.rev}`));
+    const commit = { projectId: "space-a", originId: "origin-1", parentRev: REV, rev: "2".repeat(40), writes: [], deletes: [] };
+    own.recordCommit(commit);
+    stop();
+    own.recordCommit({ ...commit, rev: "3".repeat(40) });
+    expect(seen).toEqual([`a:${"2".repeat(40)}`, `b:${"2".repeat(40)}`, `b:${"3".repeat(40)}`]);
+    expect(own.has("2".repeat(40))).toBe(true);
+  });
+
+  describe("an own commit in a panel's listings", () => {
+    const REV_2 = "2".repeat(40);
+    const sort = (entries: { name: string }[]) => [...entries].sort((a, b) => a.name.localeCompare(b.name));
+    const file = (path: string, blobOid: string) => ({ name: path.split("/").pop()!, path, kind: "file" as const, blobOid });
+    const dir = (path: string) => ({ name: path.split("/").pop()!, path, kind: "directory" as const });
+
+    it("takes it only in the folders listed at its parent, or without a revision", () => {
+      const applied = applyOwnCommitToListings(
+        { revs: { "": REV, docs: REV, src: "9".repeat(40), desk: null }, keepFolders: new Set(["docs"]) },
+        { parentRev: REV, rev: REV_2, writes: [{ path: "docs/a.md", blobOid: BLOB_B }], deletes: ["docs/.instafy.keep"] },
+      );
+      expect(applied.revs).toEqual({ "": REV_2, docs: REV_2, src: "9".repeat(40), desk: null });
+      expect(Array.from(applied.folders).sort()).toEqual(["", "desk", "docs"]);
+      expect(applied.keepFolders.has("docs")).toBe(false);
+    });
+
+    it("records a new folder's placeholder and forgets a deleted folder's listings", () => {
+      const created = applyOwnCommitToListings(
+        { revs: { "": REV }, keepFolders: new Set() },
+        { parentRev: REV, rev: REV_2, writes: [{ path: "notes/.instafy.keep", blobOid: null }], deletes: [] },
+      );
+      expect(created.keepFolders.has("notes")).toBe(true);
+      const deleted = applyOwnCommitToListings(
+        { revs: { "": REV, docs: REV, "docs/deep": REV, docsy: REV }, keepFolders: new Set(["docs/deep", "docsy"]) },
+        { parentRev: REV, rev: REV_2, writes: [], deletes: ["docs"] },
+      );
+      expect(deleted.revs).toEqual({ "": REV_2, docsy: REV_2 });
+      expect(Array.from(deleted.keepFolders)).toEqual(["docsy"]);
+    });
+
+    it("updates a written file, adds new files and folders, and removes deleted paths", () => {
+      const entries = {
+        "": [dir("docs"), dir("other"), file("README.md", BLOB_A)],
+        docs: [file("docs/old.md", BLOB_A)],
+        other: [file("other/x.md", BLOB_A)],
+      };
+      const folders = new Set(["", "docs"]);
+      const next = applyOwnCommitToEntries(entries, folders, {
+        writes: [
+          { path: "README.md", blobOid: BLOB_B, size: 3, modified: "2026-10-04T10:00:00.000Z" },
+          { path: "notes/todo.md", blobOid: BLOB_B },
+          { path: "docs/new.md", blobOid: BLOB_B },
+          { path: "other/x.md", blobOid: BLOB_B },
+        ],
+        deletes: ["docs/old.md"],
+      }, sort as never);
+      expect(next[""]).toEqual([
+        dir("docs"),
+        dir("notes"),
+        dir("other"),
+        { ...file("README.md", BLOB_B), size: 3, modified: "2026-10-04T10:00:00.000Z" },
+      ]);
+      expect(next.docs).toEqual([file("docs/new.md", BLOB_B)]);
+      // A folder listed at another commit keeps what it shows.
+      expect(next.other).toBe(entries.other);
+      expect(next.notes).toBeUndefined();
+      expect(entries[""][2]).toEqual(file("README.md", BLOB_A));
+      const withoutDocs = applyOwnCommitToEntries(next, folders, { writes: [], deletes: ["docs"] }, sort as never);
+      expect(withoutDocs[""].map((entry) => entry.path)).toEqual(["notes", "other", "README.md"]);
+      expect(withoutDocs.docs).toBeUndefined();
+      expect(applyOwnCommitToEntries(entries, new Set(), { writes: [{ path: "README.md", blobOid: BLOB_B }], deletes: [] }, sort as never))
+        .toBe(entries);
+    });
   });
 
   it("adds never-saved buffers to their listed folder only", () => {

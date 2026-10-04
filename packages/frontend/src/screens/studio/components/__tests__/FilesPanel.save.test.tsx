@@ -442,6 +442,90 @@ describe("FilesPanel one Save", () => {
     expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ deletes: ["docs"], baseRev: REV_2 });
   });
 
+  describe("two Files panels at once (a chat file surface and the Files drawer)", () => {
+    async function renderTwo(files: CodeFile[]) {
+      await act(async () =>
+        root.render(
+          <TestCodeProvider initial={{ files, activeFileId: files[0]?.id ?? null }}>
+            <div data-panel="chat"><FilesPanel previewOwnerId={null} /></div>
+            <div data-panel="drawer"><FilesPanel previewOwnerId={null} /></div>
+          </TestCodeProvider>,
+        ),
+      );
+      await settle();
+    }
+    const inPanel = (panel: "chat" | "drawer", testId: string) =>
+      container.querySelector<HTMLButtonElement>(`[data-panel="${panel}"] [data-testid="${testId}"]`);
+    async function deleteFromDrawer(testId: string) {
+      const row = inPanel("drawer", testId);
+      expect(row).not.toBeNull();
+      await act(async () => {
+        row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      });
+      await act(async () => {
+        document.querySelector<HTMLButtonElement>('[data-testid="files-explorer-menu-delete"]')!.click();
+      });
+      await settle();
+    }
+    async function ownCommitEvent(rev: string) {
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+      });
+      await settle();
+    }
+
+    it("deletes in one panel a file saved from the other on top of that save", async () => {
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      await renderTwo([buffer()]);
+      await act(async () => { inPanel("chat", "code-save-button")?.click(); });
+      await settle();
+      expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+      mocks.listAt.mockClear();
+      await ownCommitEvent(REV_2);
+      expect(mocks.listAt).not.toHaveBeenCalled();
+      mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_3), baseRev: REV_2, saved: [] });
+      await deleteFromDrawer("files-entry-README-md");
+      expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+      expect(mocks.saveChanges.mock.calls[1][0]).toEqual({
+        projectId: "space-a",
+        originId: "origin-1",
+        deletes: ["README.md"],
+        baseRev: REV_2,
+        expected: { "README.md": await gitBlobOid("edited") },
+      });
+    });
+
+    it("drops a file deleted in one panel from the other's explorer", async () => {
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.listAt.mockImplementation(async () => ({
+        ok: true,
+        entries: [
+          { name: "README.md", path: "README.md", kind: "file", blobOid: BLOB_A },
+          { name: "notes.md", path: "notes.md", kind: "file", blobOid: "c".repeat(40) },
+        ],
+        rev: REV_1,
+        originId: "origin-1",
+        originMode: "hosted",
+      }));
+      await renderTwo([buffer({ modified: "saved" })]);
+      expect(inPanel("chat", "files-entry-notes-md")).not.toBeNull();
+      mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_2), saved: [] });
+      // The drawer lists the folder again after its own delete; the chat
+      // panel takes the delete from the commit.
+      mocks.listAt.mockImplementation(async () => ({
+        ok: true,
+        entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: BLOB_A }],
+        rev: REV_2,
+        originId: "origin-1",
+        originMode: "hosted",
+      }));
+      await deleteFromDrawer("files-entry-notes-md");
+      expect(mocks.saveChanges.mock.calls[0][0]).toMatchObject({ deletes: ["notes.md"], baseRev: REV_1 });
+      expect(inPanel("drawer", "files-entry-notes-md")).toBeNull();
+      expect(inPanel("chat", "files-entry-notes-md")).toBeNull();
+    });
+  });
+
   it("keeps a listing's revision when the save built on a newer commit", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     // Main had moved to REV_2 (someone else's change) when this save landed.

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { controllerClient, type ControllerWorkspaceEntry } from "../../../sdk/instafy";
 import {
-  advanceListingRevisions,
   isVersionedFilesMode,
   LEGACY_FILES_VERSIONING,
   type FilesVersioning,
@@ -408,14 +407,15 @@ export function useFilesPanelCreateEntries({
           failCreate(describeSaveFailure({ error: result.error, mode: versionedMode, label: folderName, operation: "create" }));
           return;
         }
-        versionedHooks.ownRevisions.add(result.rev);
-        if (versionedMode === "stateless") {
-          versionedHooks.directoryRevsRef.current = advanceListingRevisions(
-            versionedHooks.directoryRevsRef.current,
-            result.baseRev,
-            result.rev,
-          );
-        }
+        // Every Files panel shows the folder and moves its listings past the commit.
+        versionedHooks.ownRevisions.recordCommit({
+          projectId: activeProjectId,
+          originId: pinnedOriginId,
+          parentRev: versionedMode === "stateless" ? result.baseRev ?? null : null,
+          rev: result.rev ?? null,
+          writes: [{ path: placeholderPath, blobOid: null }],
+          deletes: [],
+        });
         versionedHooks.keepFoldersRef.current.add(folderPath);
       } else {
         const response = await controllerClient.workspace.files.write({

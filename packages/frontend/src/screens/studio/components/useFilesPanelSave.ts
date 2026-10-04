@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import {
   controllerClient,
   type ControllerWorkspaceEntry,
@@ -8,7 +8,6 @@ import {
 import type { CodeFile, CodeWorkspace } from "../../../types";
 import { gitBlobOid } from "../../../utils/gitBlobOid";
 import {
-  advanceListingRevisions,
   bufferSaveOriginId,
   bufferVersioningMode,
   EMPTY_DIRECTORY_PLACEHOLDER,
@@ -30,8 +29,6 @@ import {
 /** The longest wait for a `503 fetch_pending` before the one retry. */
 export const SAVE_FETCH_PENDING_RETRY_CAP_MS = 5_000;
 const SAVE_FETCH_PENDING_DEFAULT_MS = 1_000;
-
-type DirectoryEntries = Record<string, ControllerWorkspaceEntry[]>;
 
 export interface UseFilesPanelSaveOptions {
   /** Only the stateless and desktop modes save through this hook. */
@@ -56,7 +53,6 @@ export interface UseFilesPanelSaveOptions {
   directoryRevsRef: MutableRefObject<Record<string, string | null>>;
   keepFoldersRef: MutableRefObject<Set<string>>;
   loadDirectory: (path: string, options?: { force?: boolean }) => Promise<ControllerWorkspaceEntry[] | null>;
-  setDirectoryEntries: Dispatch<SetStateAction<DirectoryEntries>>;
   ownRevisions: OwnRevisions;
   /** Show a failure (or a partial save) with its copy; `retry` saves again. */
   presentFailure: (copy: SaveCopy, retry: () => void) => void;
@@ -135,13 +131,18 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     };
   }, []);
 
-  const updateBuffer = useCallback((projectId: string, file: CodeFile, after: SavedBufferIds, savedText: string | null) => {
+  const updateBuffer = useCallback((
+    projectId: string,
+    file: CodeFile,
+    after: SavedBufferIds,
+    saved: { at: string; size: number } | null,
+  ) => {
     const current = optionsRef.current;
     // Every panel (and a trailing save) reads the buffer this way until the
     // store shows it.
     current.ownRevisions.noteSaved(projectId, file.path, savedBufferIds(file), after);
-    const savedAt = savedText !== null ? new Date().toISOString() : null;
-    const size = savedText !== null ? new TextEncoder().encode(savedText).length : null;
+    const savedAt = saved?.at ?? null;
+    const size = saved?.size ?? null;
     // The code store outlives this panel, so a save that finishes after the
     // panel closed is still recorded on its buffer.
     current.updateWorkspace(
@@ -175,29 +176,6 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       },
       { recordHistory: false },
     );
-    if (savedAt === null || size === null || !mountedRef.current) {
-      return;
-    }
-    const parent = parentOf(file.path);
-    current.setDirectoryEntries((previous) => {
-      const entries = previous[parent];
-      if (!entries) {
-        return previous;
-      }
-      const existing = entries.find((entry) => entry.path === file.path);
-      const updated: ControllerWorkspaceEntry = {
-        ...(existing ?? { name: labelOf(file), path: file.path, kind: "file" as const }),
-        size,
-        modified: savedAt,
-        ...(after.blobOid ? { blobOid: after.blobOid } : {}),
-      };
-      return {
-        ...previous,
-        [parent]: existing
-          ? entries.map((entry) => (entry.path === file.path ? updated : entry))
-          : [...entries, updated],
-      };
-    });
   }, []);
 
   const runSave = useCallback(async (fileId: string | null) => {
@@ -307,9 +285,20 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
         await (current.wait ?? defaultWait)(Math.max(0, delay));
         result = await controllerClient.workspace.save.changes(request);
       }
-      if (result.ok) {
-        // Shared by every panel instance, so another panel never reloads on it.
-        current.ownRevisions.add(result.rev);
+      const saved = result.ok
+        ? { at: new Date().toISOString(), size: new TextEncoder().encode(content).length }
+        : null;
+      if (result.ok && saved) {
+        // Every Files panel shows the save in its explorer and moves its
+        // listings past the commit; none reloads on the commit's event.
+        current.ownRevisions.recordCommit({
+          projectId,
+          originId,
+          parentRev: mode === "stateless" ? result.baseRev ?? null : null,
+          rev: result.rev ?? null,
+          writes: [{ path, blobOid: savedOid, size: saved.size, modified: saved.at }],
+          deletes: deletesKeep && !result.conflicted.includes(path) ? [keepPath] : [],
+        });
         current.ownRevisions.add(result.report?.localRev ?? null);
       }
       // The panel may have closed while the save ran (a chat file surface, a
@@ -364,17 +353,8 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
           originId: result.originId || originId,
           isNew: false,
         },
-        content,
+        saved,
       );
-      if (mode === "stateless" && onDefaultOrigin) {
-        // The explorer's listings come from this origin: those at the commit
-        // this save built on are current at the save's commit too.
-        current.directoryRevsRef.current = advanceListingRevisions(
-          current.directoryRevsRef.current,
-          result.baseRev,
-          result.rev,
-        );
-      }
 
       if (result.conflicted.includes(path)) {
         // Desktop: the space has a newer version. The user's bytes stay in the
@@ -382,9 +362,6 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
         raiseStale(projectId, file, content, result.originId || originId, "desktop");
         present({ message: staleSaveMessage(label), action: RESOLVE });
         return;
-      }
-      if (deletesKeep) {
-        current.keepFoldersRef.current.delete(parent);
       }
       const rejected = result.rejected.find((entry) => entry.path === path);
       if (rejected) {

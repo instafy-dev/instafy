@@ -11,7 +11,8 @@ import type { OpenTextFileOptions, ViewerState } from "./useFilesPanelViewerStat
 import type { StudioDirectoryListingListener } from "../useStudioKnownFiles";
 import type { CodeFile } from "../../../types";
 import {
-  advanceListingRevisions,
+  applyOwnCommitToEntries,
+  applyOwnCommitToListings,
   EMPTY_DIRECTORY_PLACEHOLDER,
   isVersionedFilesMode,
   LEGACY_FILES_VERSIONING,
@@ -233,6 +234,40 @@ export function useFilesPanelWorkspaceTree({
   useEffect(() => {
     expandedDirectoriesRef.current = expandedDirectories;
   }, [expandedDirectories]);
+
+  // A commit this tab made from any Files panel (this one included) is shown
+  // here as it is made: its event is ignored as own, so the folders are not
+  // listed again, and a later delete or new folder must not send a revision
+  // that this tab's own commit moved past.
+  const ownRevisionsForCommits = versioned ? versionedOptions?.ownRevisions ?? null : null;
+  useEffect(() => {
+    if (!ownRevisionsForCommits) {
+      return;
+    }
+    return ownRevisionsForCommits.subscribe((commit) => {
+      const scope = requestScopeRef.current;
+      if (
+        !scope.activeProjectId ||
+        commit.projectId !== scope.activeProjectId ||
+        (commit.originId ?? null) !== (scope.pinnedOriginId ?? null)
+      ) {
+        return;
+      }
+      const applied = applyOwnCommitToListings(
+        { revs: directoryRevsRef.current, keepFolders: keepFoldersRef.current },
+        commit,
+      );
+      directoryRevsRef.current = applied.revs;
+      keepFoldersRef.current = applied.keepFolders;
+      directoryEntriesRef.current = applyOwnCommitToEntries(
+        directoryEntriesRef.current,
+        applied.folders,
+        commit,
+        sortEntries,
+      );
+      setDirectoryEntries((previous) => applyOwnCommitToEntries(previous, applied.folders, commit, sortEntries));
+    });
+  }, [ownRevisionsForCommits, sortEntries]);
 
   useEffect(() => {
     if (!explorerMenu) {
@@ -926,18 +961,16 @@ export function useFilesPanelWorkspaceTree({
         });
         return false;
       }
-      hooks.ownRevisions.add(result.rev);
-      if (versionedMode === "stateless") {
-        directoryRevsRef.current = advanceListingRevisions(directoryRevsRef.current, result.baseRev, result.rev);
-      }
+      // Every Files panel drops the path and moves its listings past the commit.
+      hooks.ownRevisions.recordCommit({
+        projectId: activeProjectId,
+        originId: pinnedOriginId,
+        parentRev: versionedMode === "stateless" ? result.baseRev ?? null : null,
+        rev: result.rev ?? null,
+        writes: [],
+        deletes: [normalizedPath],
+      });
       hooks.discardBuffers(normalizedPath);
-      if (entry.kind === "directory") {
-        for (const folder of Array.from(keepFoldersRef.current)) {
-          if (folder === normalizedPath || folder.startsWith(`${normalizedPath}/`)) {
-            keepFoldersRef.current.delete(folder);
-          }
-        }
-      }
       return true;
     },
     [activeProjectId, getParentPath, loadDirectory, normalizePath, pinnedOriginId, versionedMode],

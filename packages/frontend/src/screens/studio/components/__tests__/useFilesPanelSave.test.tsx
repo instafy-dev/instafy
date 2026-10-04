@@ -49,7 +49,6 @@ describe("useFilesPanelSave fetch_pending retry", () => {
       directoryRevsRef: { current: { "": REV_1 } },
       keepFoldersRef: { current: new Set() },
       loadDirectory: vi.fn(async () => []),
-      setDirectoryEntries: vi.fn(),
       ownRevisions: createOwnRevisions(),
       presentFailure,
       wait,

@@ -159,6 +159,27 @@ function withSavedBufferIds(file: CodeFile, ids: SavedBufferIds): CodeFile {
   return next;
 }
 
+/** A file an own commit wrote, with the blob it holds now. */
+export type OwnCommitWrite = {
+  path: string;
+  blobOid: string | null;
+  size?: number | null;
+  modified?: string | null;
+};
+
+/** A commit this tab made from a Files panel: a save, a delete, a new folder. */
+export interface OwnCommit {
+  projectId: string;
+  /** The origin it was written to; panels listing another origin leave it alone. */
+  originId: string | null;
+  /** The commit's actual parent (the gateway's answer); null when the origin keeps no revisions. */
+  parentRev: string | null;
+  rev: string | null;
+  writes: OwnCommitWrite[];
+  /** Deleted paths; a folder goes with everything in it. */
+  deletes: string[];
+}
+
 /**
  * This tab's own saves, shared by every Files panel instance (the Files tab,
  * the explorer drawer, a chat file surface), so none of them mistakes one for
@@ -188,6 +209,14 @@ export interface OwnRevisions {
   noteSaved: (projectId: string, path: string, before: SavedBufferIds, after: SavedBufferIds) => void;
   /** `file` as this tab's last finished save of it left it. */
   latest: (projectId: string | null, file: CodeFile) => CodeFile;
+  /**
+   * Record a commit this tab made (its revision is own) and pass it to every
+   * mounted Files panel, which shows it in its explorer and moves its listing
+   * revisions past it: the commit's event is ignored as own, so no panel
+   * would list the folders again.
+   */
+  recordCommit: (commit: OwnCommit) => void;
+  subscribe: (listener: (commit: OwnCommit) => void) => () => void;
 }
 
 export const OWN_REVISION_WINDOW_MS = 60_000;
@@ -210,7 +239,32 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
     return path && oid ? `${path}\u0000${oid}` : null;
   };
   const savedKey = (projectId: string, path: string) => `${projectId}\u0000${path}`;
+  const listeners = new Set<(commit: OwnCommit) => void>();
+  const add = (rev: string | null | undefined) => {
+    const value = rev?.trim();
+    if (!value) {
+      return;
+    }
+    prune();
+    revisions.set(value, now());
+  };
   return {
+    recordCommit(commit) {
+      add(commit.rev);
+      for (const listener of Array.from(listeners)) {
+        try {
+          listener(commit);
+        } catch (error) {
+          console.warn("[files-panel] failed to apply an own commit:", error);
+        }
+      }
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
     addWrite(path, blobOid) {
       const key = writeKey(path, blobOid);
       if (!key) {
@@ -256,14 +310,7 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
       saved.delete(key);
       return file;
     },
-    add(rev) {
-      const value = rev?.trim();
-      if (!value) {
-        return;
-      }
-      prune();
-      revisions.set(value, now());
-    },
+    add,
     has(rev) {
       const value = rev?.trim();
       if (!value) {
@@ -315,6 +362,120 @@ export function advanceListingRevisions(
       }
       next[path] = to;
     }
+  }
+  return next;
+}
+
+function isAtOrUnder(path: string, folder: string): boolean {
+  return path === folder || path.startsWith(`${folder}/`);
+}
+
+function baseNameOf(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * Apply an own commit to a panel's listing revisions and placeholder folders.
+ * `folders` are the listed folders that show what the commit built on (listed
+ * at its parent, or without a revision, as on a Desktop origin); only those
+ * take its changes, so a folder listed at another commit keeps what it shows.
+ */
+export function applyOwnCommitToListings(
+  listings: { revs: Record<string, string | null>; keepFolders: ReadonlySet<string> },
+  commit: Pick<OwnCommit, "parentRev" | "rev" | "writes" | "deletes">,
+): { revs: Record<string, string | null>; keepFolders: Set<string>; folders: Set<string> } {
+  const parent = commit.parentRev?.trim() || null;
+  const folders = new Set<string>();
+  for (const [folder, rev] of Object.entries(listings.revs)) {
+    if (!rev || (parent !== null && rev === parent)) {
+      folders.add(folder);
+    }
+  }
+  let revs = advanceListingRevisions(listings.revs, commit.parentRev, commit.rev);
+  const keepFolders = new Set(listings.keepFolders);
+  for (const write of commit.writes) {
+    if (baseNameOf(write.path) === EMPTY_DIRECTORY_PLACEHOLDER) {
+      keepFolders.add(parentOf(write.path));
+    }
+  }
+  for (const deleted of commit.deletes) {
+    if (baseNameOf(deleted) === EMPTY_DIRECTORY_PLACEHOLDER) {
+      keepFolders.delete(parentOf(deleted));
+    }
+    for (const folder of Array.from(keepFolders)) {
+      if (isAtOrUnder(folder, deleted)) {
+        keepFolders.delete(folder);
+      }
+    }
+    for (const folder of Object.keys(revs)) {
+      if (folder && isAtOrUnder(folder, deleted)) {
+        revs = revs === listings.revs ? { ...revs } : revs;
+        delete revs[folder];
+        folders.delete(folder);
+      }
+    }
+  }
+  return { revs, keepFolders, folders };
+}
+
+/**
+ * Show an own commit in the listings of `folders` (see
+ * `applyOwnCommitToListings`): a written file gets its new blob, or appears
+ * with any folder that is new; a deleted path disappears, and so do the
+ * listings of a deleted folder.
+ */
+export function applyOwnCommitToEntries(
+  entries: Record<string, ControllerWorkspaceEntry[]>,
+  folders: ReadonlySet<string>,
+  commit: Pick<OwnCommit, "writes" | "deletes">,
+  sortEntries: (entries: ControllerWorkspaceEntry[]) => ControllerWorkspaceEntry[],
+): Record<string, ControllerWorkspaceEntry[]> {
+  let next = entries;
+  const writable = () => {
+    if (next === entries) {
+      next = { ...entries };
+    }
+    return next;
+  };
+  const listedIn = (folder: string) => (folders.has(folder) ? next[folder] : undefined);
+  for (const deleted of commit.deletes) {
+    for (const folder of Object.keys(next)) {
+      if (folder && isAtOrUnder(folder, deleted)) {
+        delete writable()[folder];
+      }
+    }
+    const parent = parentOf(deleted);
+    const listed = listedIn(parent);
+    if (listed?.some((entry) => entry.path === deleted)) {
+      writable()[parent] = listed.filter((entry) => entry.path !== deleted);
+    }
+  }
+  for (const write of commit.writes) {
+    const segments = write.path.split("/");
+    let parent = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const folder = parent ? `${parent}/${segments[index]}` : segments[index];
+      const listed = listedIn(parent);
+      if (listed && !listed.some((entry) => entry.path === folder)) {
+        writable()[parent] = sortEntries([...listed, { name: segments[index], path: folder, kind: "directory" }]);
+      }
+      parent = folder;
+    }
+    const name = segments[segments.length - 1];
+    const listed = listedIn(parent);
+    if (!listed || name === EMPTY_DIRECTORY_PLACEHOLDER) {
+      continue;
+    }
+    const existing = listed.find((entry) => entry.path === write.path);
+    const updated: ControllerWorkspaceEntry = {
+      ...(existing ?? { name, path: write.path, kind: "file" as const }),
+      ...(write.size !== undefined ? { size: write.size } : {}),
+      ...(write.modified !== undefined ? { modified: write.modified } : {}),
+      ...(write.blobOid ? { blobOid: write.blobOid } : {}),
+    };
+    writable()[parent] = existing
+      ? listed.map((entry) => (entry.path === write.path ? updated : entry))
+      : sortEntries([...listed, updated]);
   }
   return next;
 }

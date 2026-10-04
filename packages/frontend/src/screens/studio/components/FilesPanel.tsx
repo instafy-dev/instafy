@@ -1682,7 +1682,6 @@ export function FilesPanel({
     directoryRevsRef,
     keepFoldersRef,
     loadDirectory,
-    setDirectoryEntries,
     ownRevisions,
     presentFailure: presentWriteFailure,
   });
