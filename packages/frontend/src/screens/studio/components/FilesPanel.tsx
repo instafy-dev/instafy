@@ -1673,6 +1673,7 @@ export function FilesPanel({
     // Only once History has listed Unsaved work for this origin.
     unsavedWorkVisible: versioningState.recovery === "supported",
     getActiveFile: () => activeFileRef.current,
+    getFile: (fileId) => workspaceFilesRef.current.find((file) => file.id === fileId) ?? null,
     getPendingContent: (file) =>
       file.id === activeFileRef.current?.id ? getPendingActiveFileContent() ?? file.modified : file.modified,
     updateWorkspace,

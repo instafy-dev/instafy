@@ -43,6 +43,7 @@ describe("useFilesPanelSave fetch_pending retry", () => {
       readOnly: false,
       originAvailable: true,
       getActiveFile: () => file,
+      getFile: () => file,
       getPendingContent: (buffer) => buffer.modified,
       updateWorkspace: vi.fn(),
       directoryRevsRef: { current: { "": REV_1 } },

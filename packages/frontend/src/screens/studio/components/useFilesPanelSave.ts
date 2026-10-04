@@ -59,6 +59,8 @@ export interface UseFilesPanelSaveOptions {
   unsavedWorkVisible?: boolean;
   /** The active buffer as the store has it now. */
   getActiveFile: () => CodeFile | null;
+  /** Any buffer as the store has it now (a retry saves the file that failed). */
+  getFile: (fileId: string) => CodeFile | null;
   /** The newest text of the active buffer (the editor's value when mounted). */
   getPendingContent: (file: CodeFile) => string;
   updateWorkspace: (
@@ -75,6 +77,9 @@ export interface UseFilesPanelSaveOptions {
   /** Test seam for the fetch_pending wait. */
   wait?: (ms: number) => Promise<void>;
 }
+
+/** A save of one buffer; without a file id, the active one. */
+export type SaveRequest = { fileId?: string | null };
 
 function parentOf(path: string): string {
   const index = path.lastIndexOf("/");
@@ -150,12 +155,13 @@ const defaultWait = (ms: number) => new Promise<void>((resolve) => setTimeout(re
 export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const trailingRef = useRef(false);
+  /** The one save queued behind the running one (its file, or the active one). */
+  const trailingRef = useRef<{ fileId: string | null } | null>(null);
   const pendingUpdatesRef = useRef(new Map<string, PendingBufferUpdate>());
   const mountedRef = useRef(true);
   const optionsRef = useRef(options);
   optionsRef.current = options;
-  const saveRef = useRef<() => Promise<void>>(async () => undefined);
+  const saveRef = useRef<(request?: SaveRequest) => Promise<void>>(async () => undefined);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -251,10 +257,10 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     });
   }, []);
 
-  const runSave = useCallback(async () => {
+  const runSave = useCallback(async (fileId: string | null) => {
     const current = optionsRef.current;
     const projectId = current.activeProjectId;
-    const storeFile = current.getActiveFile();
+    const storeFile = fileId ? current.getFile(fileId) : current.getActiveFile();
     if (!current.enabled || !projectId || !storeFile || current.readOnly) {
       return;
     }
@@ -269,8 +275,9 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     const mode = bufferVersioningMode(file, current.versioning);
     const onDefaultOrigin = originId === current.versioning.originId;
     const label = labelOf(file);
+    // Trying again saves this file, even when another one is open by then.
     const retry = () => {
-      void saveRef.current();
+      void saveRef.current({ fileId: file.id });
     };
     if (onDefaultOrigin && !current.originAvailable) {
       current.presentFailure(
@@ -438,22 +445,28 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     }
   }, [effectiveBuffer, updateBuffer]);
 
-  const save = useCallback(async () => {
+  const save = useCallback(async (request?: SaveRequest) => {
+    const requested = { fileId: request?.fileId ?? null };
     if (savingRef.current) {
-      trailingRef.current = true;
+      trailingRef.current = requested;
       return;
     }
     savingRef.current = true;
     setSaving(true);
+    // The save running now; a press meanwhile replaces the queued one.
+    let target: { fileId: string | null } | null = requested;
+    const queued = () => (mountedRef.current ? trailingRef.current : null);
     try {
-      do {
-        trailingRef.current = false;
-        await runSave();
-      } while (trailingRef.current && mountedRef.current);
+      while (target) {
+        trailingRef.current = null;
+        await runSave(target.fileId);
+        target = queued();
+      }
     } catch (error) {
       console.warn("[files-panel] save failed:", error);
       const current = optionsRef.current;
-      const file = current.getActiveFile();
+      const fileId = target?.fileId ?? null;
+      const file = fileId ? current.getFile(fileId) : current.getActiveFile();
       const copy = describeSaveFailure({
         error: { status: 0, code: "network_error", message: String(error), routeUnavailable: false },
         mode: current.versioning.mode,
@@ -461,14 +474,14 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       });
       if (mountedRef.current) {
         current.presentFailure(copy, () => {
-          void saveRef.current();
+          void saveRef.current(file ? { fileId: file.id } : undefined);
         });
       } else {
         current.presentFailure({ message: copy.message }, () => undefined);
       }
     } finally {
       savingRef.current = false;
-      trailingRef.current = false;
+      trailingRef.current = null;
       if (mountedRef.current) {
         setSaving(false);
       }

@@ -327,6 +327,31 @@ describe("FilesPanel one Save", () => {
     expect(mocks.tabs.openPanelTab).toHaveBeenCalledWith("chat", { activate: true });
   });
 
+  it("tries the file that failed again, even when another one is open by then", async () => {
+    mocks.saveChanges.mockResolvedValueOnce(failed({ status: 409, code: "main_busy" }));
+    const other = buffer({ id: "B.md", path: "B.md", label: "B.md", generated: "b", modified: "b edited", blobOid: "f".repeat(40) });
+    await render([buffer(), other]);
+    await pressSave();
+    expect(mocks.showStatus).toHaveBeenCalledWith(
+      "The space is busy saving other changes. Try again in a moment.",
+      "error",
+      8000,
+      expect.objectContaining({ actionLabel: "Try again" }),
+    );
+    await act(async () => testCodeHandle.current!.setActiveFile("B.md"));
+    mocks.saveChanges.mockResolvedValueOnce(saved(REV_2));
+    await act(async () => { mocks.showStatus.mock.calls[0][3].onAction(); });
+    await settle();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+    expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({
+      files: [{ path: "README.md", content: "edited", encoding: "utf8" }],
+      baseRev: REV_1,
+    });
+    const files = testCodeHandle.current!.workspace.files;
+    expect(files.find((entry) => entry.id === "README.md")).toMatchObject({ generated: "edited", modified: "edited" });
+    expect(files.find((entry) => entry.id === "B.md")).toMatchObject({ generated: "b", modified: "b edited" });
+  });
+
   it("explains a refused secret file and opens Secrets", async () => {
     mocks.saveChanges.mockResolvedValue(failed({ status: 422, code: "excluded_path", reason: "secret" }));
     await render([buffer({ id: ".env", path: ".env", label: ".env" })]);
