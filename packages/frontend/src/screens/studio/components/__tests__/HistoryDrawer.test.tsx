@@ -431,6 +431,27 @@ describe("HistoryDrawer", () => {
     expect(q(document.body, "history-revert-dialog")).toBeNull();
   });
 
+  it("says which files a Desktop revert left on this computer", async () => {
+    mocks.revertCommit.mockResolvedValue({
+      ok: true,
+      rev: hex(99),
+      report: {
+        gitSyncStatus: "partial",
+        conflictedPaths: ["a.ts"],
+        rejectedPaths: [{ path: ".env", reason: "secret", keptSavedVersion: false }],
+      },
+    });
+    await render(desktop());
+    await confirmRevert();
+    const status = q(container, "history-status");
+    expect(status?.textContent).toBe(
+      "Reverted. Saved as a new version. 1 file wasn't saved because it changed in the space: a.ts. " +
+        "Your version is still in the folder on this computer. " +
+        ".env stays on this computer: secret files aren't saved to the space.",
+    );
+    expect(status?.querySelector("span")?.className).toContain("text-secondary-800");
+  });
+
   it("omits base when the history has no first parent and reports a no-op revert", async () => {
     mocks.fetchHistory.mockResolvedValueOnce(page([historyEntry(1, { firstParent: undefined })]));
     mocks.revertCommit.mockResolvedValue({ ok: true, rev: hex(1), committed: false });

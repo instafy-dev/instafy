@@ -20,6 +20,8 @@ import { DesktopChangesLine } from "./DesktopChangesLine";
 import { HistoryConfirmDialog } from "./HistoryConfirmDialog";
 import { UnsavedWorkSection } from "./UnsavedWorkSection";
 import {
+  conflictedOnComputerCopy,
+  keptOnComputerCopy,
   resolveHistoryAuthor,
   REVERT_DIALOG,
   revertAskAgentPrompt,
@@ -378,9 +380,17 @@ export function HistoryDrawer({
           leaseConflictRetryDelayMs: LEASE_RETRY_DELAY_MS,
         });
         if (result?.ok) {
+          // Desktop: publishing the revert can leave files in the folder
+          // only (they changed in the space, or the space refuses them).
+          const report = originKind === "desktop" ? result.report : null;
+          const conflicted = report?.conflictedPaths ?? [];
+          const leftOnComputer = [
+            ...(conflicted.length > 0 ? [conflictedOnComputerCopy(conflicted)] : []),
+            ...keptOnComputerCopy(report?.rejectedPaths ?? []),
+          ];
           setNotice({
-            tone: result.committed === false ? "info" : "success",
-            text: revertSuccessCopy(result.committed),
+            tone: leftOnComputer.length > 0 ? "warning" : result.committed === false ? "info" : "success",
+            text: [revertSuccessCopy(result.committed), ...leftOnComputer].join(" "),
           });
           if (result.committed !== false) {
             handleCommitted(result.rev ?? null);
