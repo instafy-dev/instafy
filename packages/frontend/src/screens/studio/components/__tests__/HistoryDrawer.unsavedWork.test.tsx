@@ -610,6 +610,32 @@ describe("HistoryDrawer: Unsaved work", () => {
     });
   });
 
+  it("offers one way on during a conflict, so a second Restore cannot drop the choices", async () => {
+    mocks.restoreRecovery.mockResolvedValueOnce({
+      ok: false,
+      stage: "response",
+      error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["src/a.ts", "src/b.ts"] }),
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-restore");
+    const entry = row(container, RECOVERY);
+    expect(q(entry, "unsaved-work-restore")).toBeNull();
+    // Review and Remove stay on the row.
+    expect(q(entry, "unsaved-work-review")).not.toBeNull();
+    expect(q(entry, "unsaved-work-remove")).not.toBeNull();
+    const paths = Array.from(entry.querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path"]'));
+    await press(paths[0]!, "unsaved-work-path-keep");
+    expect(entry.querySelectorAll('[data-testid="unsaved-work-path-resolved"]')).toHaveLength(1);
+    expect(q(entry, "unsaved-work-restore")).toBeNull();
+    expect(q(entry, "unsaved-work-restore-rest")).toBeNull();
+    await press(paths[1]!, "unsaved-work-path-keep");
+    expect(entry.querySelectorAll('[data-testid="unsaved-work-path-resolved"]')).toHaveLength(2);
+    expect(q(entry, "unsaved-work-restore-rest")).not.toBeNull();
+    expect(mocks.restoreRecovery).toHaveBeenCalledTimes(1);
+  });
+
   it("offers Remove instead of Restore the rest for a conflict entry", async () => {
     mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(CONFLICT, { kind: "conflict", paths: ["src/a.ts"] })]));
     mocks.restoreRecovery.mockResolvedValueOnce({

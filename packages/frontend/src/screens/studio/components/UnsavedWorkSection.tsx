@@ -470,19 +470,21 @@ export function UnsavedWorkSection({
                 >
                   Review
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  radius="xl"
-                  isPending={busyKey === `${entry.ref}:restore`}
-                  isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:restore`)}
-                  onPress={() =>
-                    void runAction(`${entry.ref}:restore`, () => restore(entry, { head: conflict?.head ?? null }))
-                  }
-                  data-testid="unsaved-work-restore"
-                >
-                  Restore
-                </Button>
+                {conflict ? null : (
+                  // While a restore conflict is open, "Restore the rest" is the
+                  // one way on; a plain Restore would drop the per-file choices.
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    radius="xl"
+                    isPending={busyKey === `${entry.ref}:restore`}
+                    isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:restore`)}
+                    onPress={() => void runAction(`${entry.ref}:restore`, () => restore(entry))}
+                    data-testid="unsaved-work-restore"
+                  >
+                    Restore
+                  </Button>
+                )}
                 {entry.dismissible ? (
                   <Button
                     variant="ghost"
