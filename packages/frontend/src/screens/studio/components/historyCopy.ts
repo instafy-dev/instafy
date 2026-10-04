@@ -336,6 +336,16 @@ export function restoreSuccessCopy({
   return sentences.join(" ");
 }
 
+/** "Keep current" on one conflicted file. */
+export function keptPathCopy(path: string): string {
+  return `Kept the current version of ${path}.`;
+}
+
+/** "Use this version" saved one conflicted file. */
+export function savedPathVersionCopy(path: string): string {
+  return `Saved this version of ${path}.`;
+}
+
 export function restoreDirtyPathsCopy(paths: string[]): string {
   return `Files on this computer have edits this restore would change: ${formatPathList(paths)}. Save them first.`;
 }

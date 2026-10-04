@@ -19,6 +19,7 @@ import type { ActiveWorkspaceVersioning } from "../../../workspace/useActiveWork
 import { DesktopChangesLine } from "./DesktopChangesLine";
 import { HistoryConfirmDialog } from "./HistoryConfirmDialog";
 import { UnsavedWorkSection } from "./UnsavedWorkSection";
+import { PROGRAMMATIC_FOCUS_CLASS, restoreLostFocus } from "./historyFocus";
 import {
   conflictedOnComputerCopy,
   keptOnComputerCopy,
@@ -119,6 +120,8 @@ export function HistoryDrawer({
   const probeUnanswered =
     !ready && (probeRetry === "failed" || (probeRetry === "idle" && probeFailed));
   const focusCommitRef = useRef<string | null>(null);
+  // Bumped when Show more goes away under the keyboard.
+  const [headingFocusRequests, setHeadingFocusRequests] = useState(0);
   const rowButtonsRef = useRef(new Map<string, HTMLButtonElement>());
 
   const cancelBusyRetry = useCallback(() => {
@@ -256,6 +259,17 @@ export function HistoryDrawer({
     };
   }, [projectId, ready]);
 
+  /** The stable place focus falls back to: the Saved versions heading. */
+  const focusSavedVersionsHeading = useCallback(() => {
+    restoreLostFocus(document.getElementById(savedVersionsLabelId));
+  }, [savedVersionsLabelId]);
+
+  useEffect(() => {
+    if (headingFocusRequests > 0) {
+      focusSavedVersionsHeading();
+    }
+  }, [focusSavedVersionsHeading, headingFocusRequests]);
+
   // Show more keeps focus on the first new row.
   useEffect(() => {
     const commit = focusCommitRef.current;
@@ -315,6 +329,7 @@ export function HistoryDrawer({
     if (fresh.length === 0) {
       // A server that ignores `skip` answers the first page again: stop here.
       setHistory((previous) => ({ ...previous, hasMore: false }));
+      setHeadingFocusRequests((value) => value + 1);
       return;
     }
     focusCommitRef.current = fresh[0]?.commit ?? null;
@@ -532,6 +547,7 @@ export function HistoryDrawer({
                   handleCommitted(rev);
                   setStatusRefreshKey((key) => key + 1);
                 }}
+                onFocusFallback={focusSavedVersionsHeading}
               />
             ) : null}
 
@@ -551,6 +567,7 @@ export function HistoryDrawer({
                 }}
                 onAskAgent={askAgent}
                 onReloadHistory={() => loadHistory({ silent: true })}
+                onFocusFallback={focusSavedVersionsHeading}
               />
             ) : null}
 
@@ -558,9 +575,10 @@ export function HistoryDrawer({
               <Text
                 as="h3"
                 id={savedVersionsLabelId}
+                tabIndex={-1}
                 variant="caption"
                 tone="muted"
-                className="px-1 py-1.5 font-medium"
+                className={`px-1 py-1.5 font-medium ${PROGRAMMATIC_FOCUS_CLASS}`}
               >
                 Saved versions
               </Text>

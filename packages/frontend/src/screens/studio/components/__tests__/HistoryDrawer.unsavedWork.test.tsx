@@ -834,6 +834,97 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(container.querySelector('[data-testid="unsaved-work-entry"]')).toBeNull();
   });
 
+  describe("keyboard focus", () => {
+    const SECOND = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-3";
+
+    async function pressWithFocus(scope: ParentNode, testId: string) {
+      const button = q<HTMLButtonElement>(scope, testId);
+      expect(button).not.toBeNull();
+      await act(async () => button!.focus());
+      expect(document.activeElement).toBe(button);
+      await act(async () => button!.click());
+      await flush();
+    }
+
+    function conflictOn(paths: string[]) {
+      mocks.restoreRecovery.mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    }
+
+    const pathItems = () =>
+      Array.from(row(container, RECOVERY).querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path"]'));
+    const savedVersionsHeading = () =>
+      Array.from(container.querySelectorAll("h3")).find((heading) => heading.textContent === "Saved versions");
+
+    it("walks through the files of a conflict and lands on Restore the rest", async () => {
+      conflictOn(["src/a.ts", "src/b.ts"]);
+      await render();
+      await pressWithFocus(row(container, RECOVERY), "unsaved-work-restore");
+      // The row's Restore gave way to the per-file choices.
+      expect(document.activeElement).toBe(q(pathItems()[0]!, "unsaved-work-path-use"));
+      await pressWithFocus(pathItems()[0]!, "unsaved-work-path-keep");
+      expect(document.activeElement).toBe(q(pathItems()[1]!, "unsaved-work-path-use"));
+      expect(q(container, "history-status")?.textContent).toBe("Kept the current version of src/a.ts.");
+      await pressWithFocus(pathItems()[1]!, "unsaved-work-path-keep");
+      expect(document.activeElement).toBe(q(row(container, RECOVERY), "unsaved-work-restore-rest"));
+    });
+
+    it("moves on to the next file once Use this version saved", async () => {
+      conflictOn(["src/a.ts", "src/b.ts"]);
+      mocks.readAt.mockResolvedValue({ ok: true, file: { path: "src/a.ts", contentBase64: btoa("kept\n"), size: 5 } });
+      mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await pressWithFocus(pathItems()[0]!, "unsaved-work-path-use");
+      expect(document.activeElement).toBe(q(pathItems()[1]!, "unsaved-work-path-use"));
+      expect(q(container, "history-status")?.textContent).toBe("Saved this version of src/a.ts.");
+    });
+
+    it("moves to the next row after Remove, and to Saved versions after the last row", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY), recoveryEntry(SECOND)]));
+      mocks.dismissRecovery.mockResolvedValue({ ok: true, dismissed: true, missing: false, originId: "origin-1", originMode: "hosted" });
+      await render();
+      mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+      await pressWithFocus(row(container, RECOVERY), "unsaved-work-remove");
+      await press(document.body, "unsaved-work-remove-dialog-confirm");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+      expect(document.activeElement).toBe(q(row(container, SECOND), "unsaved-work-review"));
+
+      await pressWithFocus(row(container, SECOND), "unsaved-work-remove");
+      await press(document.body, "unsaved-work-remove-dialog-confirm");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+      expect(q(container, "unsaved-work-section")).toBeNull();
+      expect(document.activeElement).toBe(savedVersionsHeading());
+    });
+
+    it("moves to the next row when a restore removes this one", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY), recoveryEntry(SECOND)]));
+      mocks.restoreRecovery.mockResolvedValue({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: HEAD,
+        committed: true,
+        notRestored: [],
+        refDeleted: true,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      await render();
+      mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+      await pressWithFocus(row(container, RECOVERY), "unsaved-work-restore");
+      expect(document.activeElement).toBe(q(row(container, SECOND), "unsaved-work-review"));
+    });
+  });
+
   describe("for assistive technology", () => {
     const SECOND = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-3";
 

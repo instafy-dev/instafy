@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { controllerClient } from "../../../sdk/instafy";
+import { restoreLostFocus } from "./historyFocus";
 import {
   conflictedOnComputerCopy,
   DESKTOP_NOTHING_TO_SAVE_COPY,
@@ -30,6 +31,7 @@ export function DesktopChangesLine({
   onBusyChange,
   onNotice,
   onCommitted,
+  onFocusFallback,
 }: {
   projectId: string;
   originId: string;
@@ -41,12 +43,19 @@ export function DesktopChangesLine({
   onBusyChange: (busy: boolean) => void;
   onNotice: (notice: HistoryNotice) => void;
   onCommitted: (rev: string | null) => void;
+  /** Focus a stable place when the line hides under the keyboard. */
+  onFocusFallback?: () => void;
 }) {
   const [count, setCount] = useState<number | null>(null);
   const [statusFailed, setStatusFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const checkSeqRef = useRef(0);
   const countRef = useRef<number | null>(null);
+  const retryRef = useRef<HTMLButtonElement | null>(null);
+  // Bumped once a save and the count check after it are done.
+  const [settledSaves, setSettledSaves] = useState(0);
+  const focusFallbackRef = useRef(onFocusFallback);
+  focusFallbackRef.current = onFocusFallback;
 
   const check = useCallback(async () => {
     const seq = ++checkSeqRef.current;
@@ -118,9 +127,21 @@ export function DesktopChangesLine({
     } finally {
       setSaving(false);
       onBusyChange(false);
-      void check();
     }
+    await check();
+    setSettledSaves((value) => value + 1);
   }, [canWrite, check, onBusyChange, onCommitted, onNotice, originId, projectId, saving]);
+
+  // The line hides at zero (or turns into the error row) under the button
+  // that was pressed: keep keyboard focus in the drawer.
+  useEffect(() => {
+    if (settledSaves === 0) {
+      return;
+    }
+    if (!restoreLostFocus(retryRef.current)) {
+      focusFallbackRef.current?.();
+    }
+  }, [settledSaves]);
 
   if (statusFailed) {
     return (
@@ -128,7 +149,14 @@ export function DesktopChangesLine({
         <Text as="span" variant="body" tone="muted">
           {DESKTOP_STATUS_ERROR_COPY}
         </Text>
-        <Button variant="ghost" size="xs" radius="xl" onPress={() => void check()} data-testid="desktop-changes-retry">
+        <Button
+          ref={retryRef}
+          variant="ghost"
+          size="xs"
+          radius="xl"
+          onPress={() => void check()}
+          data-testid="desktop-changes-retry"
+        >
           Retry
         </Button>
       </div>

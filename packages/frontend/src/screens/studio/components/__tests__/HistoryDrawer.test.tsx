@@ -346,6 +346,38 @@ describe("HistoryDrawer", () => {
     });
   });
 
+  describe("keyboard focus", () => {
+    const savedVersionsHeading = () =>
+      Array.from(container.querySelectorAll("h3")).find((heading) => heading.textContent === "Saved versions");
+
+    it("lands on Saved versions when Show more goes away", async () => {
+      const first = Array.from({ length: 20 }, (_, index) => historyEntry(index + 1));
+      mocks.fetchHistory.mockResolvedValueOnce(page(first, { hasMore: true }));
+      await render();
+      mocks.fetchHistory.mockResolvedValueOnce(page(first, { hasMore: true }));
+      const more = q<HTMLButtonElement>(container, "history-show-more");
+      await act(async () => more?.focus());
+      await act(async () => more?.click());
+      await flush();
+      expect(q(container, "history-show-more")).toBeNull();
+      expect(document.activeElement).toBe(savedVersionsHeading());
+    });
+
+    it("lands on Saved versions when Save as version empties the Desktop line", async () => {
+      mocks.fetchStatus
+        .mockResolvedValueOnce({ supported: true, dirtyCount: 2, dirtyPaths: [], pathGroups: [] })
+        .mockResolvedValue({ supported: true, dirtyCount: 0, dirtyPaths: [], pathGroups: [] });
+      mocks.syncToRemote.mockResolvedValue({ ok: true, rev: hex(77), committed: true, report: null });
+      await render(desktop());
+      const save = q<HTMLButtonElement>(container, "desktop-save-as-version");
+      await act(async () => save?.focus());
+      await act(async () => save?.click());
+      await flush();
+      expect(q(container, "desktop-changes-line")).toBeNull();
+      expect(document.activeElement).toBe(savedVersionsHeading());
+    });
+  });
+
   it("shows no Show more for a short page (a Desktop origin capped at 12)", async () => {
     mocks.fetchHistory.mockResolvedValueOnce(page(Array.from({ length: 12 }, (_, index) => historyEntry(index + 1))));
     await render(desktop());
