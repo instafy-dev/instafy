@@ -204,7 +204,10 @@ export interface OwnRevisions {
    * A finished save of `path` in `projectId`: a buffer that the code store
    * still shows at `before` reads as `after` until the store catches up
    * (React applies the update on its next render, and a trailing save or a
-   * commit event can come first).
+   * commit event can come first). A buffer read after the save finished is
+   * not lagging: it shows the file as the space has it now, even when that is
+   * the text the save started from again (a Desktop read has no revision that
+   * would tell the two apart).
    */
   noteSaved: (projectId: string, path: string, before: SavedBufferIds, after: SavedBufferIds) => void;
   /** `file` as this tab's last finished save of it left it. */
@@ -225,7 +228,7 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
   const revisions = new Map<string, number>();
   /** Saves in flight per path and blob (two panels can save the same bytes). */
   const writes = new Map<string, number>();
-  const saved = new Map<string, { before: SavedBufferIds; after: SavedBufferIds }>();
+  const saved = new Map<string, { before: SavedBufferIds; after: SavedBufferIds; at: number }>();
   const prune = () => {
     const cutoff = now() - OWN_REVISION_WINDOW_MS;
     for (const [key, at] of revisions) {
@@ -291,7 +294,7 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
     },
     noteSaved(projectId, path, before, after) {
       if (projectId && path) {
-        saved.set(savedKey(projectId, path), { before, after });
+        saved.set(savedKey(projectId, path), { before, after, at: now() });
       }
     },
     latest(projectId, file) {
@@ -303,7 +306,7 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
       if (!entry) {
         return file;
       }
-      if (sameSavedBufferIds(savedBufferIds(file), entry.before)) {
+      if ((file.readAt ?? 0) <= entry.at && sameSavedBufferIds(savedBufferIds(file), entry.before)) {
         return withSavedBufferIds(file, entry.after);
       }
       // The store shows the save now, or the buffer moved on (a newer read).

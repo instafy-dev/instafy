@@ -160,6 +160,23 @@ describe("Files versioning helpers", () => {
     expect(own.latest("space-a", before)).toBe(before);
   });
 
+  it("lets a read made after the save win, even when it shows the text the save started from", () => {
+    let now = 5_000;
+    const own = createOwnRevisions(() => now);
+    // A Desktop read: a blob id and no revision.
+    const before = buffer({ generated: "saved", modified: "edited", baseRev: null, blobOid: BLOB_A, originId: "desk-1", readAt: 4_000 });
+    const after = { generated: "edited", baseRev: null, blobOid: BLOB_B, originId: "desk-1", isNew: false };
+    own.noteSaved("space-a", "README.md", savedBufferIds(before), after);
+    // The read the save started from (or one in the same moment) still lags.
+    expect(own.latest("space-a", before)).toMatchObject({ generated: "edited", blobOid: BLOB_B });
+    expect(own.latest("space-a", { ...before, readAt: 5_000 })).toMatchObject({ generated: "edited", blobOid: BLOB_B });
+    now = 9_000;
+    // Read again later, the file holds the old text: that read is the truth.
+    const reread = { ...before, modified: "saved", readAt: 8_000 };
+    expect(own.latest("space-a", reread)).toBe(reread);
+    expect(own.latest("space-a", before)).toBe(before);
+  });
+
   it("moves only the listings at the commit an own save built on to that save's commit", () => {
     const REV_2 = "2".repeat(40);
     const REV_3 = "3".repeat(40);

@@ -1006,6 +1006,51 @@ describe("FilesPanel one Save", () => {
       expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ expected: { "README.md": await gitBlobOid("edited") } });
     });
 
+    // Typing the text the earlier save wrote must still save, too.
+    it.each(["mine", "edited"])(
+      "saves on a read made after an earlier save, when the file went back to its old text outside Studio (typed %j)",
+      async (typed) => {
+        mocks.saveChanges.mockResolvedValue(desktopSaved());
+        await render([buffer({ baseRev: null })]);
+        await pressSave();
+        expect(file()).toMatchObject({ generated: "edited", blobOid: await gitBlobOid("edited") });
+        await closePanel();
+        // Outside Studio (git checkout, an editor's undo) the file goes back to
+        // the bytes the save started from. A Desktop read has no revision.
+        mocks.listAt.mockImplementation(async () => ({
+          ok: true,
+          entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: BLOB_A }],
+          rev: null,
+          originId: "origin-1",
+          originMode: "desktop",
+        }));
+        mocks.readAt.mockResolvedValue({
+          ok: true,
+          file: { path: "README.md", isText: true, contentText: "saved", rev: null, blobOid: BLOB_A, originId: "origin-1" },
+        });
+        await act(async () =>
+          root.render(
+            <TestCodeProvider initial={{ files: [], activeFileId: null }}>
+              <FilesPanel previewOwnerId={null} />
+            </TestCodeProvider>,
+          ),
+        );
+        await settle();
+        await act(async () => { query("files-entry-README-md")?.click(); });
+        await settle();
+        expect(mocks.readAt).toHaveBeenCalledWith(expect.objectContaining({ path: "README.md" }));
+        expect(file()).toMatchObject({ generated: "saved", modified: "saved", baseRev: null, blobOid: BLOB_A });
+
+        await edit(typed);
+        await pressSave();
+        expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+        expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({
+          files: [{ path: "README.md", content: typed, encoding: "utf8" }],
+          expected: { "README.md": BLOB_A },
+        });
+      },
+    );
+
     it("points a publish failure at Unsaved work once History lists it", async () => {
       mocks.versioning.recovery = "supported";
       mocks.saveChanges.mockResolvedValue({
