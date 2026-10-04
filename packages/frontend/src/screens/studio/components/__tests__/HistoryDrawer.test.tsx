@@ -247,18 +247,38 @@ describe("HistoryDrawer", () => {
     expect(status?.firstElementChild).not.toBe(firstMessage);
     expect(mocks.fetchHistory).not.toHaveBeenCalled();
 
-    // An answer: the list replaces Retry and focus lands on Saved versions.
+    // An answer before the list is ready: Retry goes away, focus waits on
+    // the drawer's title and the status says what happens next.
     mocks.probe.mockResolvedValueOnce({ mode: "stateless" });
     await act(async () => retry?.click());
     await flush();
+    expect(q(container, "history-probe-retry")).toBeNull();
+    const title = container.querySelector("h2");
+    expect(title?.textContent).toBe("History");
+    expect(document.activeElement).toBe(title);
+    expect(status?.textContent).toBe("Loading saved versions…");
+
+    // The list shows: Saved versions takes focus over from the title.
     await act(async () =>
       root.render(<HistoryDrawer versioning={versioning()} onRequestClose={onRequestClose} probeFailed />),
     );
     await flush();
-    expect(q(container, "history-probe-retry")).toBeNull();
     const heading = Array.from(container.querySelectorAll("h3")).find((item) => item.textContent === "Saved versions");
     expect(document.activeElement).toBe(heading);
     expect(q(container, "history-status")?.textContent).toBe("");
+  });
+
+  it("leaves focus on Refresh when its probe answers before the list is ready", async () => {
+    await render(versioning({ resolved: false, historyReady: false }), vi.fn(), { probeFailed: true });
+    const refresh = q<HTMLButtonElement>(container, "source-control-refresh");
+    mocks.probe.mockResolvedValueOnce({ mode: "stateless" });
+    await act(async () => refresh?.focus());
+    await act(async () => refresh?.click());
+    await flush();
+    expect(q(container, "history-probe-retry")).toBeNull();
+    expect(document.activeElement).toBe(refresh);
+    // The failure is no longer true: the status says what happens next.
+    expect(q(container, "history-status")?.textContent).toBe("Loading saved versions…");
   });
 
   it("describes Retry with the failure it retries, also after a repeated failure", async () => {

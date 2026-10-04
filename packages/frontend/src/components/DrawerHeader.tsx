@@ -13,6 +13,8 @@ export interface DrawerHeaderProps {
   className?: string;
   contentClassName?: string;
   titleClassName?: string;
+  /** Attributes for the title element, such as an id and tabIndex so focus can land on it. */
+  titleProps?: { id?: string; tabIndex?: number; "aria-describedby"?: string };
   subtitleClassName?: string;
   actionsClassName?: string;
 }
@@ -28,6 +30,7 @@ export function DrawerHeader({
   className,
   contentClassName,
   titleClassName,
+  titleProps,
   subtitleClassName,
   actionsClassName,
 }: DrawerHeaderProps) {
@@ -47,6 +50,7 @@ export function DrawerHeader({
         {icon ? <div className="shrink-0">{icon}</div> : null}
         <div className="min-w-0">
           <Text
+            {...titleProps}
             as={titleAs}
             variant={touchDensity ? "title" : "bodyStrong"}
             tone="primary"

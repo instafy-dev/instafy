@@ -448,6 +448,35 @@ describe("HistoryDrawer: keyboard focus under latency", () => {
     });
   });
 
+  describe("mode probe", () => {
+    it("Retry lands on the drawer's title while the list gets ready, then on Saved versions", async () => {
+      mocks.probe.mockImplementation(() => later({ mode: "stateless" }, 20));
+      const onRequestClose = vi.fn();
+      root.render(
+        <HistoryDrawer
+          versioning={versioning({ resolved: false, historyReady: false })}
+          onRequestClose={onRequestClose}
+          probeFailed
+        />,
+      );
+      await until(() => q(container, "history-probe-retry") !== null, "Retry");
+
+      await pressFocused(q(container, "history-probe-retry"), "Retry");
+      await until(() => q(container, "history-probe-retry") === null, "Retry to go");
+      await settle(30);
+      const title = container.querySelector("h2");
+      expect(title?.textContent).toBe("History");
+      expect(document.activeElement).toBe(title);
+      expect(status()).toBe("Loading saved versions…");
+
+      root.render(<HistoryDrawer versioning={versioning()} onRequestClose={onRequestClose} probeFailed />);
+      await until(() => heading() !== null, "Saved versions");
+      await settle();
+      expect(document.activeElement).toBe(heading());
+      expect(status()).toBe("");
+    });
+  });
+
   describe("Show more", () => {
     const firstPage = Array.from({ length: 20 }, (_, index) => historyEntry(index + 1));
 

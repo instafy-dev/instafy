@@ -47,6 +47,7 @@ const HISTORY_LOAD_ERROR_COPY = "Couldn't load saved versions. Try Refresh.";
 const HISTORY_MORE_ERROR_COPY = "Couldn't load more saved versions. Try again.";
 const HISTORY_BUSY_COPY = "Checking saved versions…";
 const HISTORY_PROBE_ERROR_COPY = "Couldn't check this space's saved versions.";
+const HISTORY_PROBE_ANSWERED_COPY = "Loading saved versions…";
 const HISTORY_BUSY_ERROR_COPY = "The space is busy saving changes. Try Refresh in a moment.";
 const HISTORY_MORE_BUSY_COPY = "The space is busy saving changes. Try Show more again in a moment.";
 const HISTORY_NO_MORE_COPY = "No more saved versions.";
@@ -110,6 +111,7 @@ export function HistoryDrawer({
   const originKind: HistoryOriginKind = versioning.chromeMode === "desktop" ? "desktop" : "stateless";
   const savedVersionsLabelId = useId();
   const statusTextId = useId();
+  const drawerTitleId = useId();
 
   const [history, setHistory] = useState<HistoryListState>(EMPTY_HISTORY);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -295,18 +297,36 @@ export function HistoryDrawer({
     }
   }, [focusSavedVersionsHeading, headingFocusRequests]);
 
-  // Retry goes away once a probe answers and the list shows: focus the heading.
-  const probeRowShownRef = useRef(false);
+  // Retry goes away once a probe answers. With the list showing, focus goes
+  // to Saved versions. While the list is not ready yet, focus waits on the
+  // drawer's title (always there), the status says what happens next, and
+  // Saved versions takes focus over from the title once it shows.
+  const probeRowRef = useRef<"none" | "shown" | "parked">("none");
   useEffect(() => {
     if (probeUnanswered) {
-      probeRowShownRef.current = true;
+      probeRowRef.current = "shown";
       return;
     }
-    if (probeRowShownRef.current && ready) {
-      probeRowShownRef.current = false;
-      focusSavedVersionsHeading();
+    if (probeRowRef.current === "none") {
+      return;
     }
-  }, [focusSavedVersionsHeading, probeUnanswered, ready]);
+    const title = document.getElementById(drawerTitleId);
+    if (ready) {
+      const parked = probeRowRef.current === "parked" && title !== null && document.activeElement === title;
+      probeRowRef.current = "none";
+      if (parked) {
+        document.getElementById(savedVersionsLabelId)?.focus();
+      } else {
+        focusSavedVersionsHeading();
+      }
+      return;
+    }
+    if (probeRowRef.current === "shown") {
+      probeRowRef.current = "parked";
+      restoreLostFocus(title);
+      setNotice({ tone: "info", text: HISTORY_PROBE_ANSWERED_COPY });
+    }
+  }, [drawerTitleId, focusSavedVersionsHeading, probeUnanswered, ready, savedVersionsLabelId, setNotice]);
 
   // Show more keeps focus on the first new row.
   useEffect(() => {
@@ -518,6 +538,10 @@ export function HistoryDrawer({
       <DrawerHeader
         frame="rail"
         title="History"
+        titleAs="h2"
+        // A fixed place for focus when the control that had it goes away.
+        titleProps={{ id: drawerTitleId, tabIndex: -1 }}
+        titleClassName={PROGRAMMATIC_FOCUS_CLASS}
         icon={<GitBranch className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
         actions={
           <>
