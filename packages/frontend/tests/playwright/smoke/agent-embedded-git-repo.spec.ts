@@ -117,12 +117,6 @@ async function selectHostedRuntimeForChat(page: Page, runtime: HostedRuntimeRead
   await expect(runtimeButton).not.toContainText(/missing runtime/i, { timeout: 30_000 });
 }
 
-async function setAssistantAutoSync(page: Page, enabled: boolean) {
-  await page.evaluate((value) => {
-    window.localStorage.setItem("instafy.git.autoSyncAfterApply", value ? "1" : "0");
-  }, enabled);
-}
-
 async function sendChatAndWait(
   page: Page,
   message: string,
@@ -221,7 +215,6 @@ test.describe("Embedded git repo (git-inside-git) sync", () => {
     seededCredentialId = null;
     seededCredentialCreated = false;
     await clearRuntimePreference(page, { projectId, source: "agent-embedded-git-repo" });
-    await setAssistantAutoSync(page, false);
   });
 
   test.afterEach(async ({ page }) => {
@@ -305,7 +298,6 @@ test.describe("Embedded git repo (git-inside-git) sync", () => {
     });
     await writeWorkspaceFile(page, filePath, `${seedText}\n`, { projectId: activeProjectId });
     initEmbeddedGitRepo(activeProjectId, repoDir);
-    await setAssistantAutoSync(page, true);
     const seededCredential = await ensureRealDefaultCodexCredential(page);
     seededCredentialId = seededCredential.credentialId;
     seededCredentialCreated = seededCredential.created;

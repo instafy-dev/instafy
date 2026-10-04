@@ -39,12 +39,6 @@ async function openProfileSettings(page: Page) {
   await expect(page.getByTestId("profile-settings-section")).toBeVisible();
 }
 
-async function openProfilePreferences(page: Page) {
-  await openProfileSettings(page);
-  await page.getByTestId("settings-category-profile-preferences").click();
-  await expect(page.getByTestId("profile-preference-git-auto-sync")).toBeVisible();
-}
-
 test.describe("Settings browser history", () => {
   test.setTimeout(120_000);
 
@@ -79,23 +73,11 @@ test.describe("Settings browser history", () => {
     await expect(page.getByTestId("profile-settings-section")).toBeVisible();
   });
 
-  test("profile preference toggles assistant auto-save", async ({ page }) => {
-    await page.evaluate(() => window.localStorage.setItem("instafy.git.autoSyncAfterApply", "1"));
-    await openProfilePreferences(page);
-    const toggle = page.getByTestId("profile-preference-git-auto-sync");
-
-    await expect(toggle).toBeChecked();
-    await toggle.uncheck();
-    await expect(toggle).not.toBeChecked();
-    await expect
-      .poll(async () => await page.evaluate(() => window.localStorage.getItem("instafy.git.autoSyncAfterApply")))
-      .toBe("0");
-
-    await toggle.check();
-    await expect(toggle).toBeChecked();
-    await expect
-      .poll(async () => await page.evaluate(() => window.localStorage.getItem("instafy.git.autoSyncAfterApply")))
-      .toBe("1");
+  test("profile settings have no auto-save preference", async ({ page }) => {
+    await openProfileSettings(page);
+    await expect(page.getByTestId("settings-category-profile-account")).toBeVisible();
+    await expect(page.getByTestId("settings-category-profile-preferences")).toHaveCount(0);
+    await expect(page.getByTestId("profile-preference-git-auto-sync")).toHaveCount(0);
   });
 
   for (const width of [1280, 390]) {

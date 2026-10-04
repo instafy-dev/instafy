@@ -175,8 +175,8 @@ narrow screens. Both offer Your settings, Support and Sign out. Support unread
 badges stay in Home rather than also appearing on the profile picture. Device
 alert permission and channel controls live together under Your settings →
 Notifications; the account menu does not toggle device permissions. Profile,
-Preferences and Notifications remain visible as category tabs on narrow screens.
-Appearance choices (System, Light and Dark) live under Preferences.
+Appearance and Notifications remain visible as category tabs on narrow screens.
+Appearance choices (System, Light and Dark) live under Appearance.
 
 The server owns monotonic seen/read/archive timestamps; a stale device cannot
 unread or unarchive a notification. Existing API read-all/archive operations

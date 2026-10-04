@@ -23,10 +23,13 @@ export function buildOrganizationSettingsCategorySearch(
   return params.toString();
 }
 
+// An unknown category resolves to the tab's first one, so an old link to the
+// removed profile "preferences" category (its only setting, auto-save, is
+// gone because every turn saves) opens Profile.
 const categoriesByTab = {
   org: ["profile", "members", "ai", "billing", "danger"],
   project: ["overview", "access", "providers", "ai", "danger"],
-  profile: ["account", "appearance", "notifications", "preferences", "advanced"],
+  profile: ["account", "appearance", "notifications", "advanced"],
 } as const;
 
 export function isSettingsCategory(tab: SettingsTab, category: string): boolean {
