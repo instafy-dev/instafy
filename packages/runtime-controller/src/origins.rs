@@ -3767,6 +3767,7 @@ fn classify_canonical_origin_proxy_request(
                 || normalized == "git/diff"
                 || normalized == "git/history"
                 || normalized == "git/history/review"
+                || normalized == "git/recovery"
             {
                 Ok(ORIGIN_PROXY_READ_SCOPES)
             } else {
@@ -3774,7 +3775,13 @@ fn classify_canonical_origin_proxy_request(
             }
         }
         Method::POST => {
-            if normalized == "apply" || normalized == "git/sync" || normalized == "git/revert" {
+            if normalized == "apply"
+                || normalized == "git/sync"
+                || normalized == "git/revert"
+                || normalized == "git/revert-commit"
+                || normalized == "git/recovery/restore"
+                || normalized == "git/recovery/dismiss"
+            {
                 Ok(ORIGIN_PROXY_WRITE_SCOPES)
             } else if normalized == "browser/webrtc/offer" {
                 Ok(ORIGIN_PROXY_BROWSER_VIEW_SCOPES)
@@ -3793,6 +3800,23 @@ fn classify_canonical_origin_proxy_request(
             Json(ApiError::new("method not allowed")),
         )),
     }
+}
+
+/// Request header naming the client build that made a proxied request. The
+/// origin only logs it (diagnostics); it never affects authorization.
+const INSTAFY_CLIENT_HEADER: &str = "x-instafy-client";
+const INSTAFY_CLIENT_HEADER_MAX_BYTES: usize = 64;
+
+/// The `X-Instafy-Client` value to forward, if it is a short token such as
+/// `web/1.2.3`. Anything else is dropped rather than relayed into origin logs.
+fn forwardable_instafy_client(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(INSTAFY_CLIENT_HEADER)?.to_str().ok()?.trim();
+    let safe = !value.is_empty()
+        && value.len() <= INSTAFY_CLIENT_HEADER_MAX_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'+')
+        });
+    safe.then_some(value)
 }
 
 fn origin_proxy_request_body_limit(method: &Method, path: &str) -> usize {
@@ -4267,6 +4291,9 @@ async fn proxy_origin_request(
         .and_then(|value| value.to_str().ok())
     {
         builder = builder.header("if-none-match", value);
+    }
+    if let Some(value) = forwardable_instafy_client(&headers) {
+        builder = builder.header(INSTAFY_CLIENT_HEADER, value);
     }
 
     if is_webrtc_capabilities || is_webrtc_offer {
@@ -5330,6 +5357,124 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         let scopes = classify_origin_proxy_request(&Method::GET, "/git/history/review")
             .expect("history review should be proxyable");
         assert_eq!(scopes, ORIGIN_PROXY_READ_SCOPES);
+    }
+
+    #[test]
+    fn classify_origin_proxy_request_allows_exact_recovery_and_revert_routes() {
+        for (method, path, scopes) in [
+            (Method::GET, "/git/recovery", ORIGIN_PROXY_READ_SCOPES),
+            (Method::HEAD, "/git/recovery", ORIGIN_PROXY_READ_SCOPES),
+            (
+                Method::POST,
+                "/git/revert-commit",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+            (
+                Method::POST,
+                "/git/recovery/restore",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+            (
+                Method::POST,
+                "/git/recovery/dismiss",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+            // Encoded spellings canonicalize to the same exact routes.
+            (
+                Method::POST,
+                "/git/recovery/%72estore",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+        ] {
+            assert_eq!(
+                classify_origin_proxy_request(&method, path).expect(path),
+                scopes,
+                "{method} {path}"
+            );
+        }
+
+        for (method, path) in [
+            // Writes never pass as reads, and the list is not a write.
+            (Method::GET, "/git/recovery/restore"),
+            (Method::GET, "/git/recovery/dismiss"),
+            (Method::GET, "/git/revert-commit"),
+            (Method::POST, "/git/recovery"),
+            // Nearby paths stay closed.
+            (Method::GET, "/git/recovery/x"),
+            (Method::GET, "/git/recoveryx"),
+            (Method::POST, "/git/recovery/restore/x"),
+            (Method::POST, "/git/recovery/dismiss/x"),
+            (Method::POST, "/git/recovery/x"),
+            (Method::POST, "/git/revert-commit/x"),
+            (Method::POST, "/git/revert-commits"),
+            (Method::POST, "/git/flush"),
+            (Method::POST, "/git/flush/resume"),
+        ] {
+            assert!(
+                classify_origin_proxy_request(&method, path).is_err(),
+                "{method} {path} must not be proxyable"
+            );
+        }
+        for method in [Method::PUT, Method::DELETE, Method::PATCH] {
+            assert!(classify_origin_proxy_request(&method, "/git/recovery/dismiss").is_err());
+        }
+    }
+
+    #[test]
+    fn origin_proxy_forwards_ref_and_rev_reads_and_drops_the_token() {
+        let reference = format!("refs/instafy/recovery/{}/n", Uuid::new_v4());
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let raw_query = format!("ref={}&rev={rev}&token=t", reference.replace('/', "%2F"));
+        for route in [
+            "/files/src/app.ts",
+            "/raw/src/app.ts",
+            "/entries",
+            "/git/diff",
+        ] {
+            let path = canonical_origin_proxy_path(route).expect("safe read route");
+            assert_eq!(
+                classify_canonical_origin_proxy_request(&Method::GET, &path).expect(route),
+                ORIGIN_PROXY_READ_SCOPES
+            );
+            for query in [
+                raw_query.clone(),
+                format!("ref={reference}&rev={rev}&token=t"),
+            ] {
+                let (token, forwarded) = split_origin_proxy_query(Some(&query));
+                assert_eq!(token.as_deref(), Some("t"));
+                let upstream = build_origin_proxy_upstream_url(
+                    "http://10.99.0.80:8788",
+                    &path,
+                    forwarded.as_deref(),
+                )
+                .expect("upstream URL");
+                let pairs = upstream
+                    .query_pairs()
+                    .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    pairs,
+                    vec![
+                        ("ref".to_string(), reference.clone()),
+                        ("rev".to_string(), rev.to_string()),
+                    ],
+                    "{route}?{query}"
+                );
+                assert!(!upstream.as_str().contains("token"));
+            }
+        }
+    }
+
+    #[test]
+    fn origin_proxy_forwards_only_a_short_client_label() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(forwardable_instafy_client(&headers), None);
+        headers.insert(INSTAFY_CLIENT_HEADER, "web/1.2.3+abc".parse().unwrap());
+        assert_eq!(forwardable_instafy_client(&headers), Some("web/1.2.3+abc"));
+        for rejected in ["", "web 1.2", "web;rm", &"x".repeat(65)] {
+            headers.insert(INSTAFY_CLIENT_HEADER, rejected.parse().unwrap());
+            assert_eq!(forwardable_instafy_client(&headers), None, "{rejected:?}");
+        }
     }
 
     #[test]
