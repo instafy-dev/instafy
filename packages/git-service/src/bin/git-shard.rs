@@ -10,7 +10,7 @@ use axum::Router;
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
-use git_service::auth::{extract_token, TokenValidator};
+use git_service::auth::{extract_token, token_lists_scope_unverified, TokenValidator};
 use git_service::config::GitShardConfig;
 use git_service::error::ServiceError;
 use git_service::events::{
@@ -23,8 +23,9 @@ use git_service::git_http_backend::{
 use git_service::policy::{install_shared_hooks, verify_shared_hooks};
 use git_service::repo::{delete_bare_repo, ensure_repo_exists};
 use git_service::routing::{
-    is_exact_repo_root_delete, parse_repo_segment, GIT_DELETE_RESULT_ABSENT,
-    GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE,
+    is_exact_repo_root_delete, parse_repo_segment, required_scope, validate_salvage_push_claims,
+    GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER,
+    GIT_DELETE_SCOPE, GIT_SALVAGE_SCOPE, GIT_WRITE_SCOPE,
 };
 use runtime_contracts::{
     AccessTokenClaims, GIT_DELETE_TOKEN_SUBJECT, GIT_DELETE_TOKEN_TTL_SECONDS,
@@ -38,7 +39,9 @@ struct AppState {
     /// Where pushes record their ref updates; set when push events are on.
     push_reports_dir: Option<Arc<Path>>,
     webhook_http: reqwest::Client,
-    delete_validator: TokenValidator,
+    /// Verifies the controller credentials the shard checks itself:
+    /// repository deletion and salvage pushes.
+    token_validator: TokenValidator,
 }
 
 #[tokio::main]
@@ -69,6 +72,7 @@ async fn main() -> anyhow::Result<()> {
         hooks_dir: &hooks_dir,
         max_push_bytes: config.max_push_bytes,
         push_report: None,
+        salvage_push: false,
     })?;
     info!(hooks_dir = %hooks_dir, "installed shared push policy");
     let push_reports_dir: Option<Arc<Path>> = if config.events_webhook.is_some() {
@@ -84,13 +88,13 @@ async fn main() -> anyhow::Result<()> {
     let http = reqwest::Client::builder()
         .user_agent("instafy-git-shard/0.1")
         .build()?;
-    let delete_validator = TokenValidator::new(http.clone(), config.jwks_url.clone());
+    let token_validator = TokenValidator::new(http.clone(), config.jwks_url.clone());
     let app_state = AppState {
         config,
         hooks_dir,
         push_reports_dir,
         webhook_http: http,
-        delete_validator,
+        token_validator,
     };
 
     let app = Router::new()
@@ -125,6 +129,11 @@ async fn handle_git(
         return handle_authorized_repository_delete(config, repo_dir).await;
     }
 
+    // A push that carries the salvage credential is checked here as well as
+    // at Git Edge, before anything else happens for it.
+    let salvage_push = required_scope(&parts.method, &path, parts.uri.query())? == GIT_WRITE_SCOPE
+        && authorize_salvage_push(&state, &parts.headers, &repo_name).await?;
+
     // Ensure repo exists (optionally auto-init). This is blocking filesystem/git work.
     let repo_dir_for_init = repo_dir.clone();
     tokio::task::spawn_blocking(move || ensure_repo_exists(&config, &repo_dir_for_init))
@@ -149,6 +158,7 @@ async fn handle_git(
         hooks_dir: &state.hooks_dir,
         max_push_bytes: state.config.max_push_bytes,
         push_report: push_report.as_deref().and_then(Path::to_str),
+        salvage_push,
     };
 
     let backend =
@@ -259,10 +269,38 @@ async fn authorize_repository_delete(
 ) -> Result<(), ServiceError> {
     let token = extract_token(headers)?;
     let claims = state
-        .delete_validator
+        .token_validator
         .validate(&token, Some(&state.config.audience))
         .await?;
     validate_repository_delete_claims(&claims, repo_name)
+}
+
+/// Whether a push may run as a salvage push, which may only create salvage
+/// refs (see `git_service::policy::SALVAGE_PUSH_ENV`).
+///
+/// Only a bearer that lists `git.salvage` is checked here. It must verify
+/// against `GIT_JWKS_URL` and `GIT_AUDIENCE` and have the exact salvage shape
+/// for this repository, or the request is refused, so a salvage credential
+/// never pushes as an ordinary `git.write` one. Every other push is trusted to
+/// Git Edge as before and runs without the salvage flag.
+async fn authorize_salvage_push(
+    state: &AppState,
+    headers: &HeaderMap,
+    repo_name: &str,
+) -> Result<bool, ServiceError> {
+    let Ok(token) = extract_token(headers) else {
+        return Ok(false);
+    };
+    if !token_lists_scope_unverified(&token, GIT_SALVAGE_SCOPE) {
+        return Ok(false);
+    }
+    let claims = state
+        .token_validator
+        .validate(&token, Some(&state.config.audience))
+        .await?;
+    validate_salvage_push_claims(&claims, repo_name)?;
+    info!(repo = %repo_name, "salvage push authorized");
+    Ok(true)
 }
 
 fn validate_repository_delete_claims(
@@ -369,7 +407,7 @@ mod tests {
             .expect("install shared hooks");
         let http = reqwest::Client::new();
         AppState {
-            delete_validator: TokenValidator::new(http.clone(), config.jwks_url.clone()),
+            token_validator: TokenValidator::new(http.clone(), config.jwks_url.clone()),
             hooks_dir: hooks_dir.to_str().expect("utf-8 hooks dir").into(),
             push_reports_dir: None,
             config,
@@ -488,6 +526,54 @@ mod tests {
 
         assert!(matches!(result, Err(ServiceError::Unauthorized(_))));
         assert!(!repo_path.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unverified_salvage_push_is_refused_before_auto_init() -> anyhow::Result<()> {
+        use base64::Engine as _;
+
+        let temp_root = unique_temp_dir("instafy-git-shard-salvage-unverified");
+        let repo_root = temp_root.join("repos");
+        std::fs::create_dir_all(&repo_root)?;
+        let project_id = uuid::Uuid::new_v4();
+        let repo_path = repo_root.join(format!("{project_id}.git"));
+        let state = test_state(repo_root, true);
+
+        // A token that only claims the salvage scope, with no valid signature
+        // (the test JWKS URL serves nothing).
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let payload = serde_json::json!({ "scopes": [GIT_SALVAGE_SCOPE] }).to_string();
+        let token = format!(
+            "{}.{}.{}",
+            engine.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#),
+            engine.encode(payload),
+            engine.encode("signature")
+        );
+        for (method, uri) in [
+            (
+                "GET",
+                format!("/{project_id}.git/info/refs?service=git-receive-pack"),
+            ),
+            ("POST", format!("/{project_id}.git/git-receive-pack")),
+        ] {
+            let result = handle_git(
+                State(state.clone()),
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ServiceError::Unauthorized(_))),
+                "{method} {uri}"
+            );
+            assert!(!repo_path.exists(), "{method} {uri} created the repository");
+        }
 
         let _ = std::fs::remove_dir_all(&temp_root);
         Ok(())

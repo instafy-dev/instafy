@@ -28,6 +28,9 @@ pub struct GitHttpBackendOptions<'a> {
     /// File the shared `post-receive` hook appends this push's ref updates
     /// to. `None` for requests whose updates nobody reads.
     pub push_report: Option<&'a str>,
+    /// Mark this push as a salvage push ([`SALVAGE_PUSH_ENV`]). Only for a
+    /// request the shard authorized with the exact salvage credential.
+    pub salvage_push: bool,
 }
 
 pub struct GitHttpBackendResponse {
@@ -63,8 +66,8 @@ const REMOVED_BACKEND_ENV: [&str; 3] = [
     // an inherited value could replace the shared hooks directory.
     "GIT_CONFIG_PARAMETERS",
     // Hook environment comes only from the shard, per request. Request
-    // headers are never turned into environment variables, and no request
-    // sets the salvage flag yet.
+    // headers are never turned into environment variables, and the salvage
+    // flag is set only from `GitHttpBackendOptions::salvage_push`.
     SALVAGE_PUSH_ENV,
     PUSH_REPORT_ENV,
 ];
@@ -133,6 +136,9 @@ pub async fn run_git_http_backend(
     command.envs(backend_config_env(options));
     if let Some(push_report) = options.push_report {
         command.env(PUSH_REPORT_ENV, push_report);
+    }
+    if options.salvage_push {
+        command.env(SALVAGE_PUSH_ENV, "1");
     }
     let mut child = command
         .env("PATH_INFO", path)
@@ -320,6 +326,7 @@ mod tests {
             hooks_dir: "/var/lib/instafy-git/repos/.instafy-hooks",
             max_push_bytes: 4096,
             push_report: None,
+            salvage_push: false,
         };
         assert_eq!(
             backend_config(&options),
@@ -367,6 +374,7 @@ mod tests {
             hooks_dir: hooks_str,
             max_push_bytes: 4096,
             push_report: None,
+            salvage_push: false,
         };
         verify_backend_config(&options).expect("git applies GIT_CONFIG_COUNT");
         let _ = std::fs::remove_dir_all(&root);
