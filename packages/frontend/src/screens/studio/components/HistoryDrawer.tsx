@@ -17,6 +17,7 @@ import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import { DesktopChangesLine } from "./DesktopChangesLine";
 import { HistoryConfirmDialog } from "./HistoryConfirmDialog";
+import { UnsavedWorkSection } from "./UnsavedWorkSection";
 import {
   resolveHistoryAuthor,
   REVERT_DIALOG,
@@ -95,10 +96,11 @@ export function HistoryDrawer({
   const focusCommitRef = useRef<string | null>(null);
   const rowButtonsRef = useRef(new Map<string, HTMLButtonElement>());
 
+  /** Load the first page; resolves to the newest saved version (`main`). */
   const loadHistory = useCallback(
-    async (options?: { silent?: boolean }) => {
+    async (options?: { silent?: boolean }): Promise<string | null> => {
       if (!ready || !projectId || !originId) {
-        return;
+        return null;
       }
       const seq = ++historySeqRef.current;
       if (!options?.silent) {
@@ -108,20 +110,20 @@ export function HistoryDrawer({
         .fetchHistory({ projectId, originId, routing: "default", limit: HISTORY_PAGE_SIZE })
         .catch(() => null);
       if (seq !== historySeqRef.current) {
-        return;
+        return null;
       }
       lastHistoryLoadRef.current = Date.now();
       if (!page) {
         setHistory((previous) => ({ ...previous, status: "error", error: HISTORY_LOAD_ERROR_COPY }));
-        return;
+        return null;
       }
       if (page.busy) {
         setHistory((previous) => ({ ...previous, status: previous.status === "loading" ? "ok" : previous.status }));
-        return;
+        return null;
       }
       if (!page.supported) {
         setHistory({ status: "ok", entries: [], hasMore: false, error: null });
-        return;
+        return null;
       }
       if (page.error) {
         setHistory((previous) => ({
@@ -130,7 +132,7 @@ export function HistoryDrawer({
           hasMore: false,
           error: page.error ?? HISTORY_LOAD_ERROR_COPY,
         }));
-        return;
+        return null;
       }
       setHistory({
         status: "ok",
@@ -138,6 +140,7 @@ export function HistoryDrawer({
         hasMore: page.hasMore === true && page.entries.length > 0,
         error: null,
       });
+      return page.entries[0]?.commit ?? null;
     },
     [originId, projectId, ready],
   );
@@ -426,6 +429,25 @@ export function HistoryDrawer({
                   handleCommitted(rev);
                   setStatusRefreshKey((key) => key + 1);
                 }}
+              />
+            ) : null}
+
+            {projectId && originId ? (
+              <UnsavedWorkSection
+                projectId={projectId}
+                originId={originId}
+                originKind={originKind}
+                canWrite={canWrite}
+                disabled={actionBusy}
+                headRev={entries[0]?.commit ?? null}
+                onBusyChange={setActionBusy}
+                onNotice={setNotice}
+                onCommitted={(rev) => {
+                  handleCommitted(rev);
+                  setStatusRefreshKey((key) => key + 1);
+                }}
+                onAskAgent={askAgent}
+                onReloadHistory={() => loadHistory({ silent: true })}
               />
             ) : null}
 

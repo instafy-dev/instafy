@@ -202,17 +202,20 @@ export interface UseUnsavedWorkResult extends UnsavedWorkSnapshot {
 
 /**
  * The unsaved-work list of one origin. With `enabled`, it loads on mount and
- * when the project or origin changes (reusing a list fetched moments ago),
- * and again on window focus when the list is older than five minutes.
+ * when the project or origin changes (reusing a list fetched moments ago,
+ * unless `mountRefresh` is `force`, as when the History drawer opens), and
+ * again on window focus when the list is older than five minutes.
  */
 export function useUnsavedWork({
   projectId,
   originId,
   enabled,
+  mountRefresh = "reuse",
 }: {
   projectId: string | null | undefined;
   originId: string | null | undefined;
   enabled: boolean;
+  mountRefresh?: "reuse" | "force";
 }): UseUnsavedWorkResult {
   const project = projectId?.trim() || null;
   const origin = originId?.trim() || null;
@@ -237,9 +240,10 @@ export function useUnsavedWork({
     void refreshUnsavedWork({
       projectId: project,
       originId: origin,
+      force: mountRefresh === "force",
       maxAgeMs: UNSAVED_WORK_MOUNT_REUSE_MS,
     });
-  }, [active, origin, project]);
+  }, [active, mountRefresh, origin, project]);
 
   useEffect(() => {
     if (!active || typeof window === "undefined") {

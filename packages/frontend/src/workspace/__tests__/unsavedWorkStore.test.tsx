@@ -138,7 +138,12 @@ describe("useUnsavedWork", () => {
   let root: Root;
   let latest: UseUnsavedWorkResult | null = null;
 
-  function Probe(props: { projectId: string | null; originId: string | null; enabled: boolean }) {
+  function Probe(props: {
+    projectId: string | null;
+    originId: string | null;
+    enabled: boolean;
+    mountRefresh?: "reuse" | "force";
+  }) {
     latest = useUnsavedWork(props);
     return null;
   }
@@ -185,6 +190,18 @@ describe("useUnsavedWork", () => {
 
     vi.setSystemTime(new Date(Date.now() + UNSAVED_WORK_FOCUS_REFRESH_MS));
     window.dispatchEvent(new Event("focus"));
+    await flush();
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses a fresh list on mount unless the mount forces one (the drawer opening)", async () => {
+    await refreshUnsavedWork({ projectId: "p", originId: "o" });
+    await act(async () => root.render(<Probe projectId="p" originId="o" enabled />));
+    await flush();
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => root.render(<Probe projectId="p" originId="o" enabled mountRefresh="force" />));
     await flush();
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
   });
