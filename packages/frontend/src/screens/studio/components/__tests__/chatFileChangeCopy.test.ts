@@ -6,6 +6,7 @@ import {
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
+  fetchPendingRetryDelayMs,
   revertRetryDelayMs,
 } from "../chatFileChangeCopy";
 
@@ -157,6 +158,15 @@ describe("a revert while the space is still loading", () => {
     expect(revertRetryDelayMs(pending(0))).toBe(0);
     expect(revertRetryDelayMs(pending(9000))).toBe(5000);
     expect(revertRetryDelayMs(pending())).toBe(2000);
+  });
+
+  it("uses the same delay for the check before Revert", () => {
+    expect(fetchPendingRetryDelayMs({ code: "fetch_pending", retryAfterMs: 1000 })).toBe(1000);
+    expect(fetchPendingRetryDelayMs({ code: "fetch_pending", retryAfterMs: 60_000 })).toBe(5000);
+    expect(fetchPendingRetryDelayMs({ code: "fetch_pending" })).toBe(2000);
+    expect(fetchPendingRetryDelayMs({ code: "canonical_unreachable", retryAfterMs: 1000 })).toBeNull();
+    expect(fetchPendingRetryDelayMs({})).toBeNull();
+    expect(fetchPendingRetryDelayMs(undefined)).toBeNull();
   });
 
   it("does not retry anything else", () => {

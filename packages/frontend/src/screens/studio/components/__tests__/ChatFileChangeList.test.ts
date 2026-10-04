@@ -1275,6 +1275,73 @@ describe("ChatFileChangeList", () => {
       expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
     });
 
+    // The gateway's copy of the space is cold: it fetches first and answers
+    // 503 fetch_pending with Retry-After.
+    function reviewStillLoading(retryAfterMs: number) {
+      return {
+        supported: true,
+        commit: head,
+        entries: [],
+        busy: false,
+        error: "Unable to load saved version changes right now. Try Refresh.",
+        errorInfo: { status: 503, code: "fetch_pending", message: "fetch pending", retryAfterMs, routeUnavailable: false },
+      };
+    }
+
+    it("checks again once while the space is still loading, then offers Revert", async () => {
+      fetchWorkspaceGitHistoryReview.mockResolvedValueOnce(reviewStillLoading(5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+
+      // Still checking while it waits for the gateway.
+      expect(dialog()?.getAttribute("data-state")).toBe("checking");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
+      expect(fetchWorkspaceGitHistoryReview.mock.calls[1]?.[0]).toEqual(fetchWorkspaceGitHistoryReview.mock.calls[0]?.[0]);
+      expect(dialog()?.getAttribute("data-state")).toBe("ready");
+      expect(
+        document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]')?.disabled,
+      ).toBe(false);
+    });
+
+    it("says the space is still loading when the second check finds it loading too", async () => {
+      fetchWorkspaceGitHistoryReview.mockResolvedValue(reviewStillLoading(5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
+      expect(dialog()?.getAttribute("data-state")).toBe("failed");
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "The space is still loading. Try again in a moment.",
+      );
+      expect(document.querySelector('[data-testid="chat-file-change-revert-retry-check"]')).not.toBeNull();
+      expect(document.querySelector('[data-testid="chat-file-change-revert-confirm"]')).toBeNull();
+      expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+    });
+
+    it("does not retry a check that failed for another reason", async () => {
+      fetchWorkspaceGitHistoryReview.mockResolvedValueOnce({
+        ...reviewStillLoading(5),
+        errorInfo: { status: 502, message: "upstream", routeUnavailable: false },
+      });
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(1);
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "Couldn't check what this change includes. Try again.",
+      );
+    });
+
     it("marks only the files the reverted version touched", async () => {
       // The head version holds src/util.ts only; src/app.ts reached the
       // saved history in another version this revert does not touch.

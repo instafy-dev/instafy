@@ -21,12 +21,14 @@ import type {
 import { truncateMultiline } from "./chatContentHelpers";
 import {
   REVERT_CHECK_FAILED_MESSAGE,
+  REVERT_CHECK_STILL_LOADING_MESSAGE,
   REVERT_CHECKING_MESSAGE,
   describeChangeRevertOutcome,
   describeFileNotSaved,
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
+  fetchPendingRetryDelayMs,
   revertRetryDelayMs,
 } from "./chatFileChangeCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
@@ -92,7 +94,9 @@ type ChatChangeRevertScope =
   // turn saved without listing them on the card.
   | { status: "ready"; paths: string[]; unlistedPaths: string[] }
   | { status: "other_work"; otherPaths: string[] }
-  | { status: "failed" };
+  // `stillLoading`: the gateway was still fetching the space's history, even
+  // after one retry.
+  | { status: "failed"; stillLoading?: boolean };
 
 type ResolvedChatFileChange = {
   file: ChatMessageFileChange;
@@ -862,17 +866,33 @@ export function ChatFileChangeList({
       return;
     }
     setRevertScope({ status: "checking" });
-    const review = await fetchWorkspaceGitHistoryReviewFromController({
-      projectId,
-      commit: revertRange.head,
-      originId: versioning.originId,
-      routing: "default",
-    });
+    const reviewHead = () =>
+      fetchWorkspaceGitHistoryReviewFromController({
+        projectId,
+        commit: revertRange.head,
+        originId: versioning.originId,
+        routing: "default",
+      });
+    let review = await reviewHead();
     if (revertScopeRequestRef.current !== request) {
       return;
     }
+    // A gateway whose copy of the space is cold fetches first and asks for a
+    // moment (503 fetch_pending). This check is the first request to meet
+    // it, so it waits that moment and asks once more.
+    const retryDelay = fetchPendingRetryDelayMs(review?.errorInfo);
+    if (retryDelay !== null) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      if (revertScopeRequestRef.current !== request) {
+        return;
+      }
+      review = await reviewHead();
+      if (revertScopeRequestRef.current !== request) {
+        return;
+      }
+    }
     if (!review || !review.supported || review.busy || review.error) {
-      setRevertScope({ status: "failed" });
+      setRevertScope({ status: "failed", stillLoading: review?.errorInfo?.code === "fetch_pending" });
       return;
     }
     const cardPaths = new Set(uniquePaths);
@@ -1490,7 +1510,9 @@ export function ChatFileChangeList({
                 : revertScope?.status === "other_work"
                   ? describeRevertOtherWork(revertScope.otherPaths, Boolean(messageId))
                   : revertScope?.status === "failed"
-                    ? REVERT_CHECK_FAILED_MESSAGE
+                    ? revertScope.stillLoading
+                      ? REVERT_CHECK_STILL_LOADING_MESSAGE
+                      : REVERT_CHECK_FAILED_MESSAGE
                     : REVERT_CHECKING_MESSAGE}
             </p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">

@@ -100,6 +100,8 @@ export interface WorkspaceGitHistoryReview {
   entries: WorkspaceGitDirtyPath[];
   busy?: boolean;
   error?: string | null;
+  /** The origin's structured answer when it refused the review (status, code, Retry-After). */
+  errorInfo?: OriginError;
 }
 
 function isTransientWorkspaceBusyError(value: string | null | undefined): boolean {
@@ -660,6 +662,9 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
     return null;
   }
 
+  // Kept for the caller when the origin answers with an error, so it can
+  // tell a gateway that is still fetching (503 fetch_pending) from others.
+  let errorInfo: OriginError | undefined;
   try {
     const originToken = await requestOriginAccessToken({
       projectId,
@@ -692,6 +697,7 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
+      errorInfo = parseOriginErrorText(response.status, text, response.headers);
       throw new Error(`origin git history review failed (${response.status}): ${text}`);
     }
 
@@ -731,6 +737,7 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
         entries: [],
         busy: true,
         error: null,
+        ...(errorInfo ? { errorInfo } : {}),
       };
     }
     return {
@@ -739,6 +746,7 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
       entries: [],
       busy: false,
       error: "Unable to load saved version changes right now. Try Refresh.",
+      ...(errorInfo ? { errorInfo } : {}),
     };
   }
 }

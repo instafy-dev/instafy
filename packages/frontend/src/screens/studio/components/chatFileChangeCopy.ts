@@ -1,3 +1,4 @@
+import type { OriginError } from "../../../services/runtimeController/originErrors";
 import {
   REVERT_ROUTE_UNAVAILABLE_MESSAGE,
   type RevertWorkspaceGitCommitResult,
@@ -152,23 +153,34 @@ const FETCH_PENDING_RETRY_DEFAULT_MS = 2000;
 const FETCH_PENDING_RETRY_MAX_MS = 5000;
 
 // A gateway still fetching the space's saved history answers 503
-// fetch_pending with Retry-After. Nothing was committed, so the card retries
-// once after that delay (at most 5 s). Null for every other result.
-export function revertRetryDelayMs(result: RevertWorkspaceGitCommitResult | null): number | null {
-  if (!result || result.ok) {
+// fetch_pending with Retry-After. The card retries once after that delay
+// (at most 5 s). Null for every other answer.
+export function fetchPendingRetryDelayMs(
+  error: Pick<OriginError, "code" | "retryAfterMs"> | null | undefined,
+): number | null {
+  if (error?.code !== "fetch_pending") {
     return null;
   }
-  const code = result.code ?? result.errorInfo?.code ?? null;
-  if (code !== "fetch_pending") {
-    return null;
-  }
-  const retryAfter = result.errorInfo?.retryAfterMs;
+  const retryAfter = error.retryAfterMs;
   const delay =
     typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0
       ? retryAfter
       : FETCH_PENDING_RETRY_DEFAULT_MS;
   return Math.min(delay, FETCH_PENDING_RETRY_MAX_MS);
 }
+
+// The same for the revert itself: nothing was committed by a fetch_pending
+// answer, so one retry is safe.
+export function revertRetryDelayMs(result: RevertWorkspaceGitCommitResult | null): number | null {
+  if (!result || result.ok) {
+    return null;
+  }
+  const code = result.code ?? result.errorInfo?.code ?? null;
+  return fetchPendingRetryDelayMs({ code: code ?? undefined, retryAfterMs: result.errorInfo?.retryAfterMs });
+}
+
+// The check before Revert met a gateway that was still fetching, twice.
+export const REVERT_CHECK_STILL_LOADING_MESSAGE = STILL_LOADING_MESSAGE;
 const FALLBACK_MESSAGE = "Couldn't revert this change. Try again, or ask the agent to undo it.";
 
 // What "Revert this change" did, as one toast: the request is
