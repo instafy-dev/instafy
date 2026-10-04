@@ -169,4 +169,57 @@ describe("LegacyChangesDrawer project access", () => {
     expect(mocks.revertPaths).not.toHaveBeenCalled();
     expect(mocks.revertCommit).not.toHaveBeenCalled();
   });
+
+  describe("title", () => {
+    const title = () =>
+      Array.from(container.querySelectorAll("p")).find((element) => element.textContent === "Changes") ?? null;
+
+    it("renders as it always has when it did not replace History", async () => {
+      await act(async () => {
+        root.render(<LegacyChangesDrawer />);
+      });
+      await flushAsyncWork();
+      expect(title()).not.toBeNull();
+      expect(title()?.hasAttribute("tabindex")).toBe(false);
+      expect(title()?.hasAttribute("id")).toBe(false);
+      expect(title()?.hasAttribute("aria-describedby")).toBe(false);
+      expect(container.textContent).not.toContain("instead of History");
+    });
+
+    it("takes the focus History dropped and says why, until focus moves on", async () => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      await act(async () => {
+        root.render(<LegacyChangesDrawer arrivalNotice="This space shows Changes instead of History." />);
+      });
+      await flushAsyncWork();
+      const heading = title();
+      expect(document.activeElement).toBe(heading);
+      const describedBy = heading?.getAttribute("aria-describedby") ?? "";
+      expect(document.getElementById(describedBy)?.textContent).toBe("This space shows Changes instead of History.");
+
+      // Once focus moves on, the title is plain text again.
+      const refresh = container.querySelector<HTMLButtonElement>('[data-testid="source-control-refresh"]');
+      await act(async () => refresh?.focus());
+      await flushAsyncWork();
+      expect(heading?.hasAttribute("tabindex")).toBe(false);
+      expect(heading?.hasAttribute("aria-describedby")).toBe(false);
+      expect(container.textContent).not.toContain("instead of History");
+    });
+
+    it("leaves focus where the person put it", async () => {
+      const outside = document.createElement("button");
+      document.body.appendChild(outside);
+      outside.focus();
+      try {
+        await act(async () => {
+          root.render(<LegacyChangesDrawer arrivalNotice="This space shows Changes instead of History." />);
+        });
+        await flushAsyncWork();
+        expect(document.activeElement).toBe(outside);
+        expect(title()?.hasAttribute("tabindex")).toBe(false);
+      } finally {
+        outside.remove();
+      }
+    });
+  });
 });

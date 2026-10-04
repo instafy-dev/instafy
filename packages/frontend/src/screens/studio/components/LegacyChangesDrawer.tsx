@@ -1,5 +1,5 @@
 import { DARK_DIVIDER_BORDER_CLASS, DARK_PANEL_BG_CLASS, DARK_PANEL_BORDER_CLASS } from "../../../theme/darkSurfaces";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   CheckSquare,
   CloudUpload,
@@ -47,6 +47,7 @@ import {
   getStatusBadge,
   parseSavedVersionSubject,
 } from "./workspaceGitReviewShared";
+import { PROGRAMMATIC_FOCUS_CLASS, restoreLostFocus } from "./historyFocus";
 
 const LARGE_CHANGESET_THRESHOLD = 150;
 const DIRTY_PATH_PAGE_LIMIT = 100;
@@ -76,6 +77,7 @@ function sanitizeScopeTestId(value: string): string {
 export function LegacyChangesDrawer({
   onRequestClose,
   openRequest,
+  arrivalNotice = null,
 }: {
   onRequestClose?: () => void;
   openRequest?: {
@@ -83,7 +85,33 @@ export function LegacyChangesDrawer({
     previewPath: string | null;
     reviewMode?: GitReviewMode;
   } | null;
+  /**
+   * Set only when this drawer replaced History while History had keyboard
+   * focus (a probe answered that the space uses Changes). The title takes
+   * the focus that fell to the page and is described by this text until
+   * focus moves on. Unset, the drawer renders as it always has.
+   */
+  arrivalNotice?: string | null;
 }) {
+  const titleId = useId();
+  const arrivalNoteId = useId();
+  const [arrivalDone, setArrivalDone] = useState(false);
+  const arrivalNote = arrivalNotice && !arrivalDone ? arrivalNotice : null;
+  useEffect(() => {
+    if (!arrivalNote) {
+      return undefined;
+    }
+    const title = document.getElementById(titleId);
+    // Already on the title counts too (effects can run twice in development).
+    const focused = title !== null && (document.activeElement === title || restoreLostFocus(title));
+    if (!title || !focused) {
+      setArrivalDone(true);
+      return undefined;
+    }
+    const done = () => setArrivalDone(true);
+    title.addEventListener("blur", done);
+    return () => title.removeEventListener("blur", done);
+  }, [arrivalNote, titleId]);
   const {
     activeProjectId,
     projectCapabilitiesResolved,
@@ -1185,6 +1213,8 @@ export function LegacyChangesDrawer({
       <DrawerHeader
         frame="rail"
         title="Changes"
+        titleProps={arrivalNote ? { id: titleId, tabIndex: -1, "aria-describedby": arrivalNoteId } : undefined}
+        titleClassName={arrivalNote ? PROGRAMMATIC_FOCUS_CLASS : undefined}
         icon={<GitBranch className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
         actions={
           <>
@@ -1218,6 +1248,11 @@ export function LegacyChangesDrawer({
           </>
         }
       />
+      {arrivalNote ? (
+        <span id={arrivalNoteId} className="sr-only">
+          {arrivalNote}
+        </span>
+      ) : null}
 
       <div className="min-h-0 flex-1 overflow-hidden">
         {loading && !status ? (

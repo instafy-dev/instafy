@@ -159,7 +159,7 @@ describe("HistoryDrawer", () => {
   async function render(
     state: ActiveWorkspaceVersioning = versioning(),
     onRequestClose = vi.fn(),
-    extra: { probeFailed?: boolean } = {},
+    extra: { probeFailed?: boolean; arrivalNotice?: string | null } = {},
   ) {
     await act(async () =>
       root.render(<HistoryDrawer versioning={state} onRequestClose={onRequestClose} {...extra} />),
@@ -296,6 +296,15 @@ describe("HistoryDrawer", () => {
     await flush();
     expect(q(container, "history-probe-retry")).toBe(retry);
     expect(description()).toBe("Couldn't check this space's saved versions.");
+  });
+
+  it("takes the focus Changes dropped on its title and says why", async () => {
+    (document.activeElement as HTMLElement | null)?.blur();
+    await render(versioning(), vi.fn(), { arrivalNotice: "This space shows History instead of Changes." });
+    const title = container.querySelector("h2");
+    expect(title?.textContent).toBe("History");
+    expect(document.activeElement).toBe(title);
+    expect(q(container, "history-status")?.textContent).toBe("This space shows History instead of Changes.");
   });
 
   it("keeps focus on Refresh while it reloads an empty list", async () => {

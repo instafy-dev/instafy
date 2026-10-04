@@ -19,22 +19,35 @@ vi.mock("../../../../services/runtimeController/workspaceGit", () => ({
   fetchWorkspaceGitStatusFromController: mocks.status,
 }));
 vi.mock("../LegacyChangesDrawer", () => ({
-  LegacyChangesDrawer: () => <div data-testid="legacy-body" />,
+  LegacyChangesDrawer: ({ arrivalNotice }: { arrivalNotice?: string | null }) => (
+    <div data-testid="legacy-body" data-arrival={arrivalNotice ?? ""}>
+      <button type="button" data-testid="legacy-refresh">
+        Refresh
+      </button>
+    </div>
+  ),
 }));
 vi.mock("../HistoryDrawer", () => ({
   HistoryDrawer: ({
     versioning,
     probeFailed,
+    arrivalNotice,
   }: {
     versioning: { historyReady: boolean; chromeMode: string };
     probeFailed?: boolean;
+    arrivalNotice?: string | null;
   }) => (
     <div
       data-testid="history-body"
       data-ready={String(versioning.historyReady)}
       data-mode={versioning.chromeMode}
       data-probe-failed={String(probeFailed === true)}
-    />
+      data-arrival={arrivalNotice ?? ""}
+    >
+      <button type="button" data-testid="history-retry">
+        Retry
+      </button>
+    </div>
   ),
 }));
 
@@ -129,6 +142,62 @@ describe("SourceControlDrawer switch", () => {
     await act(async () => answer(status()));
     await flush();
     expect(container.querySelector('[data-testid="legacy-body"]')).not.toBeNull();
+  });
+
+  describe("when one drawer replaces the other", () => {
+    function pendingProbe() {
+      let answer!: (value: unknown) => void;
+      mocks.status.mockReturnValue(
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      );
+      return (value: unknown) => answer(value);
+    }
+
+    const body = (testId: string) => container.querySelector(`[data-testid="${testId}"]`);
+
+    it("hands the keyboard to Changes when History goes away under it", async () => {
+      window.localStorage.setItem("instafy.versioning.mode.project-1", "stateless");
+      mocks.origin = { originId: "gateway", mode: "hosted" };
+      const answer = pendingProbe();
+      await render();
+      const retry = container.querySelector<HTMLButtonElement>('[data-testid="history-retry"]');
+      await act(async () => retry?.focus());
+      expect(document.activeElement).toBe(retry);
+      await act(async () => answer(status()));
+      await flush();
+      expect(body("legacy-body")?.getAttribute("data-arrival")).toBe("This space shows Changes instead of History.");
+    });
+
+    it("hands the keyboard to History when Changes goes away under it", async () => {
+      mocks.origin = { originId: "gateway", mode: "hosted" };
+      const answer = pendingProbe();
+      await render();
+      const refresh = container.querySelector<HTMLButtonElement>('[data-testid="legacy-refresh"]');
+      await act(async () => refresh?.focus());
+      await act(async () => answer(status(true)));
+      await flush();
+      expect(body("history-body")?.getAttribute("data-arrival")).toBe("This space shows History instead of Changes.");
+    });
+
+    it("moves nothing when the keyboard was elsewhere", async () => {
+      window.localStorage.setItem("instafy.versioning.mode.project-1", "stateless");
+      mocks.origin = { originId: "gateway", mode: "hosted" };
+      const answer = pendingProbe();
+      const outside = document.createElement("button");
+      document.body.appendChild(outside);
+      try {
+        await render();
+        await act(async () => outside.focus());
+        await act(async () => answer(status()));
+        await flush();
+        expect(body("legacy-body")?.getAttribute("data-arrival")).toBe("");
+        expect(document.activeElement).toBe(outside);
+      } finally {
+        outside.remove();
+      }
+    });
   });
 
   it("tells History when the probe made on opening got no answer", async () => {
