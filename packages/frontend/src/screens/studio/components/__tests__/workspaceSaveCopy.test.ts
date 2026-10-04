@@ -122,6 +122,22 @@ describe("workspace save copy", () => {
     );
   });
 
+  it("words deletes and folder creation without promising kept edits", () => {
+    const describeOp = (patch: Partial<OriginError>, operation: "delete" | "create", mode: "stateless" | "desktop" = "stateless") =>
+      describeSaveFailure({ error: error(patch), mode, label: "docs", operation });
+    expect(describeOp({ code: "head_moved" }, "delete")).toEqual({
+      message: '"docs" changed in the space. Refresh the folder and try again.',
+    });
+    expect(describeOp({ code: "head_moved" }, "create").message).toBe('"docs" already exists in the space. Refresh the folder.');
+    expect(describeOp({ status: 502 }, "delete").message).toBe("Couldn't reach the space's saved files. Try again.");
+    expect(describeOp({ status: 0, code: "network_error" }, "create", "desktop").message).toBe(
+      "The folder on this computer isn't connected.",
+    );
+    expect(describeOp({ status: 400 }, "delete").message).toBe('Couldn\'t delete "docs".');
+    expect(describeOp({ status: 400 }, "create").message).toBe('Couldn\'t create "docs".');
+    expect(describeOp({ code: "main_busy" }, "delete").action?.kind).toBe("retry");
+  });
+
   it("keeps the copy free of em dashes", () => {
     const source = readFileSync(fileURLToPath(new URL("../workspaceSaveCopy.ts", import.meta.url)), "utf8");
     expect(source).not.toContain("—");

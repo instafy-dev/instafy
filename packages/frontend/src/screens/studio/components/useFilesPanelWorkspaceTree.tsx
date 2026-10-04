@@ -6,9 +6,18 @@ import {
   addFloatingSurfaceViewportChangeListener,
   clampFloatingSurfacePositionToStudioViewport,
 } from "../../../utils/floatingSurfacePosition";
-import { writeWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
-import type { ViewerState } from "./useFilesPanelViewerState";
+import { raiseWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
+import type { OpenTextFileOptions, ViewerState } from "./useFilesPanelViewerState";
 import type { StudioDirectoryListingListener } from "../useStudioKnownFiles";
+import type { CodeFile } from "../../../types";
+import {
+  EMPTY_DIRECTORY_PLACEHOLDER,
+  isVersionedFilesMode,
+  LEGACY_FILES_VERSIONING,
+  type FilesVersioning,
+  type OwnRevisions,
+} from "./filesVersioning";
+import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./workspaceSaveCopy";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -33,9 +42,23 @@ type ViewerActionHandlers = {
   openImageFile: (entry: ControllerWorkspaceEntry) => Promise<void>;
   openTextFile: (
     entry: ControllerWorkspaceEntry,
-    options?: { forceFetch?: boolean },
+    options?: OpenTextFileOptions,
   ) => Promise<void>;
   openUnsupportedFile: (entry: ControllerWorkspaceEntry) => Promise<void>;
+};
+
+/** Versioned-mode wiring; absent in legacy mode. */
+export type FilesTreeVersionedOptions = {
+  /** Revisions this tab wrote; their commit events are not reloads. */
+  ownRevisions: OwnRevisions;
+  /** The open buffer for a path, if any. */
+  getBuffer: (path: string) => CodeFile | null;
+  /** Drop buffers at or under a deleted path. */
+  discardBuffers: (path: string) => void;
+  /** Origin reachable and the member may write. */
+  writeReady: boolean;
+  /** Present a failed write with its copy and action. */
+  onWriteFailure: (copy: SaveCopy, retry: () => void) => void;
 };
 
 type UseFilesPanelWorkspaceTreeParams = {
@@ -71,16 +94,27 @@ type UseFilesPanelWorkspaceTreeParams = {
   workspaceOwnerKey?: string;
   onDirectoryEntriesLoaded?: StudioDirectoryListingListener;
   readOnly?: boolean;
+  /** Legacy unless the default origin keeps every save as a version. */
+  versioning?: FilesVersioning;
+  versionedOptions?: FilesTreeVersionedOptions | null;
+};
+
+export type LoadDirectoryOptions = {
+  force?: boolean;
+  syncMode?: "background" | "blocking";
+  signal?: AbortSignal;
+  /** Versioned modes: list at this commit (retried unpinned when unknown). */
+  rev?: string | null;
 };
 
 type LoadDirectory = (
   path: string,
-  options?: { force?: boolean; syncMode?: "background" | "blocking"; signal?: AbortSignal },
+  options?: LoadDirectoryOptions,
 ) => Promise<ControllerWorkspaceEntry[] | null>;
 
 type RefreshFromWorkspaceCommit = (
   projectIdFromEvent: string | null | undefined,
-  options?: { forceSync?: boolean },
+  options?: { forceSync?: boolean; rev?: string | null },
 ) => Promise<void>;
 
 function clampExplorerMenuPosition(clientX: number, clientY: number) {
@@ -136,7 +170,18 @@ export function useFilesPanelWorkspaceTree({
   workspaceOwnerKey,
   onDirectoryEntriesLoaded,
   readOnly = false,
+  versioning = LEGACY_FILES_VERSIONING,
+  versionedOptions = null,
 }: UseFilesPanelWorkspaceTreeParams) {
+  const versioned = isVersionedFilesMode(versioning) && versionedOptions !== null;
+  const versionedMode = versioned ? versioning.mode : "legacy";
+  const pinnedOriginId = versioned ? versioning.originId : null;
+  const versionedOptionsRef = useRef(versionedOptions);
+  versionedOptionsRef.current = versionedOptions;
+  /** `X-Instafy-Rev` of each folder's last listing (versioned modes). */
+  const directoryRevsRef = useRef<Record<string, string | null>>({});
+  /** Folders whose listing holds the empty-folder placeholder. */
+  const keepFoldersRef = useRef<Set<string>>(new Set());
   const [directoryEntries, setDirectoryEntries] = useState<DirectoryEntries>({});
   const directoryEntriesRef = useRef<DirectoryEntries>({});
   const [directoryStatus, setDirectoryStatus] = useState<DirectoryStatus>({});
@@ -155,8 +200,8 @@ export function useFilesPanelWorkspaceTree({
   const [explorerMenu, setExplorerMenu] = useState<ExplorerMenuState>(null);
   const explorerMenuRef = useRef<HTMLDivElement | null>(null);
   const requestScope = useMemo(() => ({ activeProjectId, effectiveRuntimeId, workspaceOwnerId, workspaceOwnerKey,
-    onDirectoryEntriesLoaded }), [activeProjectId, effectiveRuntimeId,
-    workspaceOwnerId, workspaceOwnerKey, onDirectoryEntriesLoaded]);
+    onDirectoryEntriesLoaded, versionedMode, pinnedOriginId }), [activeProjectId, effectiveRuntimeId,
+    workspaceOwnerId, workspaceOwnerKey, onDirectoryEntriesLoaded, versionedMode, pinnedOriginId]);
   const requestScopeRef = useRef(requestScope);
   requestScopeRef.current = requestScope;
   const lifetimeRef = useRef({ active: true, scope: requestScope });
@@ -175,6 +220,8 @@ export function useFilesPanelWorkspaceTree({
     directoryEntriesRef.current = {};
     directoryStatusRef.current = {};
     directoryAttemptsRef.current = {};
+    directoryRevsRef.current = {};
+    keepFoldersRef.current = new Set();
     directoryRequestsRef.current.clear();
     setDirectoryEntries({});
     setDirectoryStatus({});
@@ -220,7 +267,7 @@ export function useFilesPanelWorkspaceTree({
   const loadDirectory = useCallback<LoadDirectory>(
     async (
       path: string,
-      options?: { force?: boolean; syncMode?: "background" | "blocking"; signal?: AbortSignal },
+      options?: LoadDirectoryOptions,
     ): Promise<ControllerWorkspaceEntry[] | null> => {
       const lifetime = lifetimeRef.current;
       const isOwnerCurrent = () => lifetime.active && lifetimeRef.current === lifetime
@@ -260,13 +307,36 @@ export function useFilesPanelWorkspaceTree({
       }));
 
       let entries: ControllerWorkspaceEntry[] | null = null;
+      let listingRev: string | null = null;
       try {
-        entries = await controllerClient.workspace.files.list({
-          projectId: activeProjectId,
-          path: normalizedPath.length > 0 ? normalizedPath : undefined,
-          runtimeId: effectiveRuntimeId ?? null,
-          syncMode: options?.syncMode ?? (options?.force ? "blocking" : undefined),
-        });
+        if (versioned) {
+          // Pinned to the default origin, never `sync=blocking`; a commit
+          // that the origin does not know yet is listed unpinned instead.
+          const listAt = (rev: string | null) =>
+            controllerClient.workspace.files.listAt({
+              projectId: activeProjectId,
+              path: normalizedPath.length > 0 ? normalizedPath : undefined,
+              routing: "default",
+              originId: pinnedOriginId,
+              ...(rev ? { rev } : {}),
+            });
+          const pinned = options?.rev?.trim() || null;
+          let listing = await listAt(pinned);
+          if (pinned && listing && !listing.ok && listing.error.code === "rev_not_found" && isCurrent()) {
+            listing = await listAt(null);
+          }
+          if (listing?.ok) {
+            entries = listing.entries;
+            listingRev = listing.rev;
+          }
+        } else {
+          entries = await controllerClient.workspace.files.list({
+            projectId: activeProjectId,
+            path: normalizedPath.length > 0 ? normalizedPath : undefined,
+            runtimeId: effectiveRuntimeId ?? null,
+            syncMode: options?.syncMode ?? (options?.force ? "blocking" : undefined),
+          });
+        }
       } catch (error) {
         if (!isCurrent()) { removeAbortListener(); return null; }
         console.warn("[files-panel] directory load failed:", error);
@@ -312,6 +382,14 @@ export function useFilesPanelWorkspaceTree({
       );
       const sorted = sortEntries(filtered);
       delete directoryAttemptsRef.current[normalizedPath];
+      if (versioned) {
+        directoryRevsRef.current = { ...directoryRevsRef.current, [normalizedPath]: listingRev };
+        if (entries.some((entry) => entry.kind === "file" && entry.name === EMPTY_DIRECTORY_PLACEHOLDER)) {
+          keepFoldersRef.current.add(normalizedPath);
+        } else {
+          keepFoldersRef.current.delete(normalizedPath);
+        }
+      }
       setDirectoryEntries((prev) => ({
         ...prev,
         [normalizedPath]: sorted,
@@ -324,7 +402,8 @@ export function useFilesPanelWorkspaceTree({
       removeAbortListener();
       return sorted;
     },
-    [activeProjectId, effectiveRuntimeId, normalizePath, onDirectoryEntriesLoaded, requestScope, sortEntries, workspaceBrowseReady],
+    [activeProjectId, effectiveRuntimeId, normalizePath, onDirectoryEntriesLoaded, pinnedOriginId, requestScope, sortEntries,
+      versioned, workspaceBrowseReady],
   );
 
   useEffect(() => {
@@ -449,8 +528,55 @@ export function useFilesPanelWorkspaceTree({
     });
   }, [activeFilePath, normalizedRootPath, normalizePath, sortEntries]);
 
+  const notifyStaleViewerEntry = useCallback(
+    (entry: ControllerWorkspaceEntry, originId?: string | null) => {
+      if (!activeProjectId || typeof window === "undefined") {
+        return;
+      }
+      const now = Date.now();
+      const lastNotice = lastWorkspaceFileStaleNoticeRef.current;
+      const shouldNotify =
+        !lastNotice || lastNotice.path !== entry.path || now - lastNotice.at > 2500;
+      if (!shouldNotify) {
+        return;
+      }
+      lastWorkspaceFileStaleNoticeRef.current = { path: entry.path, at: now };
+
+      const fileLabel = entry.name ?? entry.path.split("/").pop() ?? entry.path;
+      const baseText =
+        activeFileGeneratedRef.current.fileId === entry.path &&
+        typeof activeFileGeneratedRef.current.value === "string"
+          ? activeFileGeneratedRef.current.value
+          : "";
+      const localText = (() => {
+        const fromEditor = getActiveEditorValue();
+        if (typeof fromEditor === "string") {
+          return fromEditor;
+        }
+        if (
+          activeFileDraftRef.current.fileId === entry.path &&
+          typeof activeFileDraftRef.current.value === "string"
+        ) {
+          return activeFileDraftRef.current.value;
+        }
+        return baseText;
+      })();
+
+      raiseWorkspaceFileStaleNotice({
+        projectId: activeProjectId,
+        path: entry.path,
+        label: fileLabel,
+        baseText,
+        localText,
+        detectedAt: now,
+        ...(originId !== undefined ? { originId } : {}),
+      });
+    },
+    [activeProjectId, activeFileDraftRef, activeFileGeneratedRef, getActiveEditorValue],
+  );
+
   const refreshViewerEntryFromWorkspace = useCallback(
-    async (entry: ControllerWorkspaceEntry) => {
+    async (entry: ControllerWorkspaceEntry, rev?: string | null) => {
       const viewerActions = viewerActionsRef.current;
       if (!viewerActions || !activeProjectId) {
         return;
@@ -466,53 +592,28 @@ export function useFilesPanelWorkspaceTree({
         return;
       }
 
+      const versionedHooks = versioned ? versionedOptionsRef.current : null;
+      if (versionedHooks) {
+        // Compare the open buffer with the new listing: the same blob needs
+        // nothing; a changed file is read again at the event's commit when
+        // clean, and reported when it has unsaved edits.
+        const buffer = versionedHooks.getBuffer(entry.path);
+        if (buffer?.isNew === true) {
+          return;
+        }
+        if (buffer?.blobOid && entry.blobOid && buffer.blobOid === entry.blobOid) {
+          return;
+        }
+        if (dirtyFileIdsRef.current.has(entry.path)) {
+          notifyStaleViewerEntry(entry, buffer?.originId ?? null);
+          return;
+        }
+        await viewerActions.openTextFile(entry, { forceFetch: true, rev: rev ?? null });
+        return;
+      }
+
       if (dirtyFileIdsRef.current.has(entry.path)) {
-        if (typeof window === "undefined") {
-          return;
-        }
-        const now = Date.now();
-        const lastNotice = lastWorkspaceFileStaleNoticeRef.current;
-        const shouldNotify =
-          !lastNotice || lastNotice.path !== entry.path || now - lastNotice.at > 2500;
-        if (!shouldNotify) {
-          return;
-        }
-        lastWorkspaceFileStaleNoticeRef.current = { path: entry.path, at: now };
-
-        const fileLabel = entry.name ?? entry.path.split("/").pop() ?? entry.path;
-        const baseText =
-          activeFileGeneratedRef.current.fileId === entry.path &&
-          typeof activeFileGeneratedRef.current.value === "string"
-            ? activeFileGeneratedRef.current.value
-            : "";
-        const localText = (() => {
-          const fromEditor = getActiveEditorValue();
-          if (typeof fromEditor === "string") {
-            return fromEditor;
-          }
-          if (
-            activeFileDraftRef.current.fileId === entry.path &&
-            typeof activeFileDraftRef.current.value === "string"
-          ) {
-            return activeFileDraftRef.current.value;
-          }
-          return baseText;
-        })();
-
-        const notice = {
-          projectId: activeProjectId,
-          path: entry.path,
-          label: fileLabel,
-          baseText,
-          localText,
-          detectedAt: now,
-        };
-        writeWorkspaceFileStaleNotice(notice);
-        window.dispatchEvent(
-          new CustomEvent("instafy:workspace-file-stale", {
-            detail: notice,
-          }),
-        );
+        notifyStaleViewerEntry(entry);
         return;
       }
 
@@ -520,12 +621,11 @@ export function useFilesPanelWorkspaceTree({
     },
     [
       activeProjectId,
-      activeFileDraftRef,
-      activeFileGeneratedRef,
       dirtyFileIdsRef,
-      getActiveEditorValue,
       isImageEntry,
       isLikelyTextEntry,
+      notifyStaleViewerEntry,
+      versioned,
       viewerActionsRef,
     ],
   );
@@ -533,7 +633,7 @@ export function useFilesPanelWorkspaceTree({
   const refreshFromWorkspaceCommit = useCallback<RefreshFromWorkspaceCommit>(
     async (
       projectIdFromEvent: string | null | undefined,
-      options?: { forceSync?: boolean },
+      options?: { forceSync?: boolean; rev?: string | null },
     ) => {
       if (!runtimeControllerEnabled || !activeProjectId) {
         return;
@@ -549,16 +649,36 @@ export function useFilesPanelWorkspaceTree({
         }
       });
 
-      await Promise.all(
-        Array.from(pathsToRefresh).map((path) =>
-          loadDirectory(path, {
-            force: true,
-            syncMode: options?.forceSync ? "blocking" : undefined,
-          }).catch((error) => {
+      let viewerRev: string | null = null;
+      if (versioned) {
+        // Every listing is read at one commit: the event's, or (for a manual
+        // refresh) whatever the root listing was served from.
+        const reload = (path: string, rev: string | null) =>
+          loadDirectory(path, { force: true, ...(rev ? { rev } : {}) }).catch((error) => {
             console.warn("[files-panel] failed to refresh directory", path, error);
-          }),
-        ),
-      );
+          });
+        let rev = options?.rev?.trim() || null;
+        const others = Array.from(pathsToRefresh).filter((path) => path !== normalizedRootPath);
+        if (rev) {
+          await Promise.all(Array.from(pathsToRefresh).map((path) => reload(path, rev)));
+        } else {
+          await reload(normalizedRootPath, null);
+          rev = directoryRevsRef.current[normalizedRootPath] ?? null;
+          await Promise.all(others.map((path) => reload(path, rev)));
+        }
+        viewerRev = rev;
+      } else {
+        await Promise.all(
+          Array.from(pathsToRefresh).map((path) =>
+            loadDirectory(path, {
+              force: true,
+              syncMode: options?.forceSync ? "blocking" : undefined,
+            }).catch((error) => {
+              console.warn("[files-panel] failed to refresh directory", path, error);
+            }),
+          ),
+        );
+      }
 
       const currentViewer = viewerStateRef.current;
       if (!currentViewer?.entry) {
@@ -575,7 +695,7 @@ export function useFilesPanelWorkspaceTree({
 
       if (latestEntry.kind === "file") {
         try {
-          await refreshViewerEntryFromWorkspace(latestEntry);
+          await refreshViewerEntryFromWorkspace(latestEntry, viewerRev);
         } catch (error) {
           console.warn("[files-panel] failed to refresh viewer after commit", error);
         }
@@ -588,6 +708,7 @@ export function useFilesPanelWorkspaceTree({
       normalizePath,
       normalizedRootPath,
       refreshViewerEntryFromWorkspace,
+      versioned,
       viewerStateRef,
     ],
   );
@@ -638,6 +759,17 @@ export function useFilesPanelWorkspaceTree({
           ? (commitData as { rev: string }).rev.trim()
           : null;
 
+      if (versioned) {
+        // This tab's own saves are already on screen; anything else is read
+        // at the event's commit.
+        if (commitRev && versionedOptionsRef.current?.ownRevisions.has(commitRev)) {
+          return;
+        }
+        clearPendingWorkspaceRefresh();
+        void refreshFromWorkspaceCommit(projectIdFromEvent, { rev: commitRev });
+        return;
+      }
+
       const lastLocalCommit = lastLocalCommitRef.current;
       if (lastLocalCommit) {
         const ageMs = Date.now() - lastLocalCommit.at;
@@ -675,7 +807,7 @@ export function useFilesPanelWorkspaceTree({
       window.removeEventListener("instafy:workspace-commit", commitHandler as EventListener);
       window.removeEventListener("instafy:workspace-change", workspaceChangeHandler as EventListener);
     };
-  }, [lastLocalCommitRef, refreshFromWorkspaceCommit]);
+  }, [lastLocalCommitRef, refreshFromWorkspaceCommit, versioned]);
 
   const openExplorerMenu = useCallback(
     (params: {
@@ -718,9 +850,80 @@ export function useFilesPanelWorkspaceTree({
     [getParentPath, normalizePath, openExplorerMenu],
   );
 
+  /**
+   * Versioned-mode delete: one manifest pinned to the default origin. On the
+   * stateless gateway it carries the parent listing's rev as `baseRev` (a
+   * directory delete needs it) and, for a file, the listed blob as
+   * `expected`. A buffer that was never saved is only dropped locally.
+   * Returns false when nothing was deleted (the failure is already shown).
+   */
+  const deleteVersionedEntry = useCallback(
+    async (
+      entry: ExplorerDeleteEntry,
+      normalizedPath: string,
+      hooks: FilesTreeVersionedOptions,
+    ): Promise<boolean> => {
+      if (!activeProjectId) {
+        return false;
+      }
+      if (entry.kind === "file" && hooks.getBuffer(normalizedPath)?.isNew === true) {
+        hooks.discardBuffers(normalizedPath);
+        return true;
+      }
+      const parentPath = getParentPath(normalizedPath) ?? "";
+      let baseRev = directoryRevsRef.current[parentPath] ?? null;
+      if (versionedMode === "stateless" && !baseRev) {
+        await loadDirectory(parentPath, { force: true });
+        baseRev = directoryRevsRef.current[parentPath] ?? null;
+      }
+      if (versionedMode === "stateless" && !baseRev) {
+        hooks.onWriteFailure({ message: SAVE_COPY.deleteRequiresBaseRev }, () => undefined);
+        return false;
+      }
+      const listed = findEntryByPath(directoryEntriesRef.current, normalizedPath, getParentPath, normalizePath);
+      const expected =
+        entry.kind === "file" && listed?.blobOid ? { [normalizedPath]: listed.blobOid } : null;
+      const result = await controllerClient.workspace.save.changes({
+        projectId: activeProjectId,
+        originId: pinnedOriginId,
+        deletes: [normalizedPath],
+        ...(versionedMode === "stateless" && baseRev ? { baseRev } : {}),
+        ...(expected ? { expected } : {}),
+      });
+      if (!result.ok) {
+        const copy = describeSaveFailure({
+          error: result.error,
+          mode: versionedMode,
+          label: entry.name,
+          operation: "delete",
+        });
+        hooks.onWriteFailure(copy, () => {
+          void handleDeleteExplorerEntryRef.current?.(entry, { confirmed: true });
+        });
+        return false;
+      }
+      hooks.ownRevisions.add(result.rev);
+      hooks.discardBuffers(normalizedPath);
+      if (entry.kind === "directory") {
+        for (const folder of Array.from(keepFoldersRef.current)) {
+          if (folder === normalizedPath || folder.startsWith(`${normalizedPath}/`)) {
+            keepFoldersRef.current.delete(folder);
+          }
+        }
+      }
+      return true;
+    },
+    [activeProjectId, getParentPath, loadDirectory, normalizePath, pinnedOriginId, versionedMode],
+  );
+  const handleDeleteExplorerEntryRef = useRef<
+    ((entry: ExplorerDeleteEntry, options?: { confirmed?: boolean }) => Promise<void>) | null
+  >(null);
+
   const handleDeleteExplorerEntry = useCallback(
-    async (entry: ExplorerDeleteEntry) => {
-      if (readOnly || !activeProjectId || !runtimeReady) {
+    async (entry: ExplorerDeleteEntry, options?: { confirmed?: boolean }) => {
+      const versionedHooks = versioned ? versionedOptionsRef.current : null;
+      const writeReady = versionedHooks ? versionedHooks.writeReady : runtimeReady;
+      if (readOnly || !activeProjectId || !writeReady) {
         return;
       }
       const normalizedPath = normalizePath(entry.path);
@@ -732,7 +935,7 @@ export function useFilesPanelWorkspaceTree({
         showStatus("Cannot delete an unsafe path.", "warning", 3500);
         return;
       }
-      if (typeof window !== "undefined") {
+      if (typeof window !== "undefined" && options?.confirmed !== true) {
         const label = entry.kind === "directory" ? "folder" : "file";
         const confirmed = window.confirm(`Delete ${label} “${entry.name}”?`);
         if (!confirmed) {
@@ -741,17 +944,24 @@ export function useFilesPanelWorkspaceTree({
       }
 
       try {
-        const response = await controllerClient.workspace.files.delete({
-          projectId: activeProjectId,
-          path: normalizedPath,
-          recursive: entry.kind === "directory",
-          runtimeId: effectiveRuntimeId ?? null,
-        });
-        if (!response?.ok) {
-          throw new Error("Unable to delete entry.");
-        }
-        if (typeof response.rev === "string" && response.rev.trim().length > 0) {
-          lastLocalCommitRef.current = { rev: response.rev.trim(), at: Date.now() };
+        if (versionedHooks) {
+          const deleted = await deleteVersionedEntry(entry, normalizedPath, versionedHooks);
+          if (!deleted) {
+            return;
+          }
+        } else {
+          const response = await controllerClient.workspace.files.delete({
+            projectId: activeProjectId,
+            path: normalizedPath,
+            recursive: entry.kind === "directory",
+            runtimeId: effectiveRuntimeId ?? null,
+          });
+          if (!response?.ok) {
+            throw new Error("Unable to delete entry.");
+          }
+          if (typeof response.rev === "string" && response.rev.trim().length > 0) {
+            lastLocalCommitRef.current = { rev: response.rev.trim(), at: Date.now() };
+          }
         }
 
         if (activeFilePathRef.current === entry.path) {
@@ -794,6 +1004,7 @@ export function useFilesPanelWorkspaceTree({
     [
       activeFilePathRef,
       activeProjectId,
+      deleteVersionedEntry,
       effectiveRuntimeId,
       getParentPath,
       isSafeWorkspaceRelativePath,
@@ -805,8 +1016,11 @@ export function useFilesPanelWorkspaceTree({
       setActiveFile,
       setViewerStateRef,
       showStatus,
+      versioned,
     ],
   );
+
+  handleDeleteExplorerEntryRef.current = handleDeleteExplorerEntry;
 
   // Pressing a folder row flips its disclosure at once and its listing
   // follows. A folder that was never listed is loaded even before the
@@ -934,5 +1148,7 @@ export function useFilesPanelWorkspaceTree({
     renderDirectoryStatus,
     getDirectoryLoadingLabel,
     resolveCreateEntryParentPath,
+    directoryRevsRef,
+    keepFoldersRef,
   };
 }

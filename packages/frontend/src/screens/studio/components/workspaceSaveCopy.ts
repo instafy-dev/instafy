@@ -60,6 +60,12 @@ export function genericSaveMessage(label: string): string {
   return `Couldn't save "${label}". Your edits are kept here.`;
 }
 
+/**
+ * What the failed write was. A save keeps the user's edits, so its copy says
+ * so; deleting a file or creating a folder has no edits to keep.
+ */
+export type SaveCopyOperation = "save" | "delete" | "create";
+
 function trimSentence(value: string): string {
   return value.trim().replace(/[.\s]+$/, "");
 }
@@ -122,11 +128,19 @@ export function describeSaveFailure(params: {
   error: OriginError;
   mode: VersioningMode;
   label: string;
+  operation?: SaveCopyOperation;
 }): SaveCopy {
   const { error, mode, label } = params;
+  const operation = params.operation ?? "save";
   switch (error.code) {
     case "head_moved":
     case "path_type_conflict":
+      if (operation === "delete") {
+        return { message: `"${label}" changed in the space. Refresh the folder and try again.` };
+      }
+      if (operation === "create") {
+        return { message: `"${label}" already exists in the space. Refresh the folder.` };
+      }
       return { message: staleSaveMessage(label), action: RESOLVE_ACTION, staleNotice: true };
     case "main_busy":
       return { message: SAVE_COPY.mainBusy, action: RETRY_ACTION };
@@ -159,9 +173,20 @@ export function describeSaveFailure(params: {
       break;
   }
   if (isUnreachable(error)) {
+    if (operation !== "save") {
+      return mode === "desktop"
+        ? { message: "The folder on this computer isn't connected." }
+        : { message: "Couldn't reach the space's saved files. Try again." };
+    }
     return mode === "desktop"
       ? { message: SAVE_COPY.desktopUnreachable }
       : { message: SAVE_COPY.statelessUnreachable };
+  }
+  if (operation === "delete") {
+    return { message: `Couldn't delete "${label}".` };
+  }
+  if (operation === "create") {
+    return { message: `Couldn't create "${label}".` };
   }
   return { message: genericSaveMessage(label) };
 }
