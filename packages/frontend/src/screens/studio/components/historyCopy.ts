@@ -272,6 +272,7 @@ export function desktopSavedCopy(count: number): string {
 
 export const DESKTOP_NOTHING_TO_SAVE_COPY = "Nothing new to save.";
 export const DESKTOP_STATUS_ERROR_COPY = "Couldn't check the folder on this computer.";
+export const DESKTOP_NO_CHANGES_COPY = "No files changed outside Studio.";
 
 export function desktopSaveFailureCopy(error: OriginError | null | undefined): string {
   if (!error) {
@@ -292,6 +293,13 @@ export const REMOVE_DIALOG = {
 } as const;
 
 export const RESTORE_CONFLICT_INTRO = "These files changed since this work was kept. Choose a version for each:";
+
+/** Announced when a restore stops at a conflict and the per-file choices open. */
+export function restoreConflictNoticeCopy(count: number): string {
+  return `Not restored yet: ${formatFileCount(count)} changed since this work was kept.`;
+}
+
+export const NO_UNSAVED_WORK_COPY = "No unsaved work.";
 export const RECOVERY_REF_MOVED_COPY = "This entry changed. Refreshing.";
 export const ALREADY_REMOVED_COPY = "Already removed.";
 export const REMOVED_COPY = "Removed.";

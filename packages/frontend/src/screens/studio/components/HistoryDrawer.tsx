@@ -49,6 +49,11 @@ const HISTORY_BUSY_COPY = "Checking saved versions…";
 const HISTORY_PROBE_ERROR_COPY = "Couldn't check this space's saved versions.";
 const HISTORY_BUSY_ERROR_COPY = "The space is busy saving changes. Try Refresh in a moment.";
 const HISTORY_MORE_BUSY_COPY = "The space is busy saving changes. Try Show more again in a moment.";
+const HISTORY_NO_MORE_COPY = "No more saved versions.";
+
+function loadedMoreVersionsCopy(count: number): string {
+  return `Loaded ${count} more saved ${count === 1 ? "version" : "versions"}.`;
+}
 
 /** A mode probe asked from History: which control asked, and whether the last one failed. */
 type ProbeState = { running: "refresh" | "retry" | null; failed: boolean | null };
@@ -381,6 +386,7 @@ export function HistoryDrawer({
     if (fresh.length === 0) {
       // A server that ignores `skip` answers the first page again: stop here.
       setHistory((previous) => ({ ...previous, hasMore: false }));
+      setNotice({ tone: "info", text: HISTORY_NO_MORE_COPY });
       setHeadingFocusRequests((value) => value + 1);
       return;
     }
@@ -390,6 +396,7 @@ export function HistoryDrawer({
       entries: [...previous.entries, ...fresh],
       hasMore: page.hasMore === true,
     }));
+    setNotice({ tone: "info", text: loadedMoreVersionsCopy(fresh.length) });
   }, [history.entries, loadingMore, originId, projectId, ready, setNotice]);
 
   const handleCommitted = useCallback(

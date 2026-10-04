@@ -24,10 +24,12 @@ import {
   historyFailureCopy,
   keptOnComputerCopy,
   MAIN_BUSY_COPY,
+  NO_UNSAVED_WORK_COPY,
   RECOVERY_REF_MOVED_COPY,
   REMOVE_DIALOG,
   REMOVED_COPY,
   RESTORE_CONFLICT_INTRO,
+  restoreConflictNoticeCopy,
   restoreDirtyPathsCopy,
   restoreSuccessCopy,
   UNSAVED_WORK_ERROR_COPY,
@@ -51,7 +53,9 @@ const LEASE_RETRY_DELAY_MS = 1_500;
 type FocusRequest =
   | { kind: "path"; ref: string; path: string }
   | { kind: "conflict"; ref: string }
-  | { kind: "row"; ref: string; index: number };
+  | { kind: "row"; ref: string; index: number }
+  /** The error row's Retry gave way to the list (or to nothing). */
+  | { kind: "section" };
 
 function byTestId(scope: ParentNode | null | undefined, testId: string): HTMLElement | null {
   return scope?.querySelector<HTMLElement>(`[data-testid="${testId}"]`) ?? null;
@@ -116,14 +120,24 @@ export function UnsavedWorkSection({
   const { refresh } = unsavedWork;
   const sectionRef = useRef<HTMLElement | null>(null);
   const focusRequestRef = useRef<FocusRequest | null>(null);
+  // Bumped with a request made after the render it needs already happened.
+  const [, setFocusRequests] = useState(0);
   const entriesRef = useRef(unsavedWork.entries);
   entriesRef.current = unsavedWork.entries;
 
-  /** After this row's action: its own first action, or the row now in its place. */
-  const requestRowFocus = useCallback((ref: string) => {
-    const index = entriesRef.current.findIndex((item) => item.ref === ref);
-    focusRequestRef.current = { kind: "row", ref, index: Math.max(0, index) };
+  const requestFocus = useCallback((request: FocusRequest) => {
+    focusRequestRef.current = request;
+    setFocusRequests((value) => value + 1);
   }, []);
+
+  /** After this row's action: its own first action, or the row now in its place. */
+  const requestRowFocus = useCallback(
+    (ref: string) => {
+      const index = entriesRef.current.findIndex((item) => item.ref === ref);
+      requestFocus({ kind: "row", ref, index: Math.max(0, index) });
+    },
+    [requestFocus],
+  );
 
   // Pressed controls unmount (a resolved file's buttons, a removed row): put
   // keyboard focus on the next thing to do once the section is idle again.
@@ -138,7 +152,9 @@ export function UnsavedWorkSection({
     );
     const rowOf = (ref: string) => rows.find((element) => element.getAttribute("data-ref") === ref) ?? null;
     let moved: boolean;
-    if (request.kind === "row") {
+    if (request.kind === "section") {
+      moved = restoreLostFocus(byTestId(rows[0], "unsaved-work-review"));
+    } else if (request.kind === "row") {
       const row = rowOf(request.ref) ?? rows[Math.min(request.index, rows.length - 1)] ?? null;
       moved = restoreLostFocus(byTestId(row, "unsaved-work-review"));
     } else {
@@ -238,18 +254,22 @@ export function UnsavedWorkSection({
       }
       const error = result.error;
       switch (error.code) {
-        case "restore_conflict":
-          focusRequestRef.current = { kind: "conflict", ref: entry.ref };
+        case "restore_conflict": {
+          const paths = error.paths && error.paths.length > 0 ? error.paths : entry.paths;
+          // Restore gives way to the per-file choices: say why, and focus the first.
+          requestFocus({ kind: "conflict", ref: entry.ref });
+          onNotice({ tone: "warning", text: restoreConflictNoticeCopy(paths.length) });
           setConflicts((previous) => ({
             ...previous,
             [entry.ref]: {
               rev: entry.rev,
               head: error.head ?? baseRev,
-              paths: error.paths && error.paths.length > 0 ? error.paths : entry.paths,
+              paths,
               resolutions: {},
             },
           }));
           return;
+        }
         case "recovery_ref_moved":
           requestRowFocus(entry.ref);
           clearConflict(entry.ref);
@@ -282,6 +302,7 @@ export function UnsavedWorkSection({
       projectId,
       refresh,
       refreshAfterMove,
+      requestFocus,
       requestRowFocus,
       setConflicts,
     ],
@@ -448,7 +469,7 @@ export function UnsavedWorkSection({
         onNotice({ tone: "warning", text: keptOnComputerCopy(rejected).join(" ") });
         return;
       }
-      focusRequestRef.current = { kind: "path", ref: entry.ref, path };
+      requestFocus({ kind: "path", ref: entry.ref, path });
       resolvePath(entry.ref, path, "use", saved.rev ?? head);
       onNotice({ tone: "success", text: savedPathVersionCopy(path) });
       if (saved.committed !== false) {
@@ -466,6 +487,7 @@ export function UnsavedWorkSection({
       projectId,
       refresh,
       refreshAfterMove,
+      requestFocus,
       resolvePath,
       setConflicts,
     ],
@@ -504,6 +526,18 @@ export function UnsavedWorkSection({
     }
   }, [entries, projectId, unsavedWork.status, userId]);
 
+  const retryList = async () => {
+    const snapshot = await refresh({ force: true });
+    if (snapshot.status === "error") {
+      // The error row stays, and Retry kept focus while it waited.
+      return;
+    }
+    if (snapshot.status === "ok" && snapshot.entries.length === 0) {
+      onNotice({ tone: "info", text: NO_UNSAVED_WORK_COPY });
+    }
+    requestFocus({ kind: "section" });
+  };
+
   if (unsavedWork.status === "error") {
     return (
       <section className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5" data-testid="unsaved-work-error">
@@ -514,7 +548,7 @@ export function UnsavedWorkSection({
           variant="ghost"
           size="xs"
           radius="xl"
-          onPress={() => void refresh({ force: true })}
+          onPress={() => void retryList()}
           isPending={unsavedWork.loading}
           data-testid="unsaved-work-retry"
         >
@@ -672,7 +706,7 @@ export function UnsavedWorkSection({
                               aria-describedby={pathId}
                               isDisabled={!canWrite || locked}
                               onPress={() => {
-                                focusRequestRef.current = { kind: "path", ref: entry.ref, path };
+                                requestFocus({ kind: "path", ref: entry.ref, path });
                                 resolvePath(entry.ref, path, "keep");
                                 onNotice({ tone: "info", text: keptPathCopy(path) });
                               }}

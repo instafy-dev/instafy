@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FocusEvent } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { controllerClient } from "../../../sdk/instafy";
-import { restoreLostFocus } from "./historyFocus";
+import { focusWasLost, restoreLostFocus } from "./historyFocus";
 import {
   conflictedOnComputerCopy,
+  DESKTOP_NO_CHANGES_COPY,
   DESKTOP_NOTHING_TO_SAVE_COPY,
   DESKTOP_SAVE_MESSAGE,
   DESKTOP_STATUS_ERROR_COPY,
@@ -16,6 +17,8 @@ import {
 } from "./historyCopy";
 
 const LEASE_RETRY_DELAY_MS = 1_500;
+
+type LineShape = "hidden" | "line" | "error";
 
 /**
  * Desktop only: files changed in the folder outside Studio, with one action
@@ -49,28 +52,30 @@ export function DesktopChangesLine({
   const [count, setCount] = useState<number | null>(null);
   const [statusFailed, setStatusFailed] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const checkSeqRef = useRef(0);
   const countRef = useRef<number | null>(null);
+  const saveRef = useRef<HTMLButtonElement | null>(null);
   const retryRef = useRef<HTMLButtonElement | null>(null);
-  // Bumped once a save and the count check after it are done.
-  const [settledSaves, setSettledSaves] = useState(0);
+  const labelId = useId();
   const focusFallbackRef = useRef(onFocusFallback);
   focusFallbackRef.current = onFocusFallback;
 
-  const check = useCallback(async () => {
+  /** Resolves to the count it showed, or null when this check was dropped or failed. */
+  const check = useCallback(async (): Promise<number | null> => {
     const seq = ++checkSeqRef.current;
     const status = await controllerClient.workspace.git
       .fetchStatus({ projectId, originId, routing: "default", limit: 1 })
       .catch(() => null);
     if (seq !== checkSeqRef.current) {
-      return;
+      return null;
     }
     if (status?.busy) {
-      return;
+      return null;
     }
     if (!status || (status.supported && status.error)) {
       setStatusFailed(true);
-      return;
+      return null;
     }
     setStatusFailed(false);
     const next = status.supported
@@ -78,6 +83,7 @@ export function DesktopChangesLine({
       : 0;
     countRef.current = next;
     setCount(next);
+    return next;
   }, [originId, projectId]);
 
   useEffect(() => {
@@ -134,23 +140,63 @@ export function DesktopChangesLine({
     }
     // Whatever the answer: the line shows what the folder holds now.
     await check();
-    setSettledSaves((value) => value + 1);
   }, [canWrite, check, onBusyChange, onCommitted, onNotice, originId, projectId, saving]);
 
-  // The line hides at zero (or turns into the error row) under the button
-  // that was pressed: keep keyboard focus in the drawer.
+  const handleRetry = useCallback(async () => {
+    setRetrying(true);
+    const next = await check();
+    setRetrying(false);
+    if (next === 0) {
+      // The error row goes away and nothing takes its place: say why.
+      onNotice({ tone: "info", text: DESKTOP_NO_CHANGES_COPY });
+    }
+  }, [check, onNotice]);
+
+  // Keyboard focus inside the line or its error row. Removing the focused
+  // button may or may not fire blur, so only a move to another element clears it.
+  const hadFocusRef = useRef(false);
+  const handleFocus = useCallback(() => {
+    hadFocusRef.current = true;
+  }, []);
+  const handleBlur = useCallback((event: FocusEvent<HTMLElement>) => {
+    const next = event.relatedTarget;
+    if (next instanceof Node && !event.currentTarget.contains(next)) {
+      hadFocusRef.current = false;
+    }
+  }, []);
+
+  // Whichever check changes the shape (the save's own, the drawer's, a
+  // Retry), the control that had focus is gone with the old shape: the line
+  // takes it to Save as version, the error row to Retry, and a hidden line
+  // to the drawer's fallback (the Saved versions heading).
+  const shape: LineShape = statusFailed ? "error" : count ? "line" : "hidden";
+  const shapeRef = useRef<LineShape>("hidden");
   useEffect(() => {
-    if (settledSaves === 0) {
+    const previous = shapeRef.current;
+    shapeRef.current = shape;
+    if (previous === shape || previous === "hidden" || !hadFocusRef.current) {
       return;
     }
-    if (!restoreLostFocus(retryRef.current)) {
-      focusFallbackRef.current?.();
+    if (shape === "line") {
+      restoreLostFocus(saveRef.current);
+    } else if (shape === "error") {
+      restoreLostFocus(retryRef.current);
+    } else {
+      hadFocusRef.current = false;
+      if (focusWasLost()) {
+        focusFallbackRef.current?.();
+      }
     }
-  }, [settledSaves]);
+  }, [shape]);
 
-  if (statusFailed) {
+  if (shape === "error") {
     return (
-      <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5" data-testid="desktop-changes-error">
+      <div
+        className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5"
+        data-testid="desktop-changes-error"
+        onFocus={handleFocus}
+        onBlur={handleBlur}
+      >
         <Text as="span" variant="body" tone="muted">
           {DESKTOP_STATUS_ERROR_COPY}
         </Text>
@@ -159,7 +205,8 @@ export function DesktopChangesLine({
           variant="ghost"
           size="xs"
           radius="xl"
-          onPress={() => void check()}
+          onPress={() => void handleRetry()}
+          isPending={retrying}
           data-testid="desktop-changes-retry"
         >
           Retry
@@ -168,19 +215,26 @@ export function DesktopChangesLine({
     );
   }
 
-  if (!count) {
+  if (shape === "hidden" || !count) {
     return null;
   }
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5" data-testid="desktop-changes-line">
-      <Text as="span" variant="body" tone="secondary">
+    <div
+      className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5"
+      data-testid="desktop-changes-line"
+      onFocus={handleFocus}
+      onBlur={handleBlur}
+    >
+      <Text as="span" id={labelId} variant="body" tone="secondary">
         {desktopChangesLabel(count)}
       </Text>
       <Button
+        ref={saveRef}
         variant="outline"
         size="sm"
         radius="xl"
+        aria-describedby={labelId}
         onPress={() => void handleSave()}
         isPending={saving}
         isDisabled={!canWrite || (disabled && !saving)}
