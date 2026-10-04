@@ -662,13 +662,22 @@ export function useFilesPanelWorkspaceTree({
       });
 
       let viewerRev: string | null = null;
+      // The listings this refresh read. React shows them on its next render,
+      // so the explorer's state still holds the previous ones here.
+      const reloaded: DirectoryEntries = {};
       if (versioned) {
         // Every listing is read at one commit: the event's, or (for a manual
         // refresh) whatever the root listing was served from.
         const reload = (path: string, rev: string | null) =>
-          loadDirectory(path, { force: true, ...(rev ? { rev } : {}) }).catch((error) => {
-            console.warn("[files-panel] failed to refresh directory", path, error);
-          });
+          loadDirectory(path, { force: true, ...(rev ? { rev } : {}) })
+            .then((entries) => {
+              if (entries) {
+                reloaded[normalizePath(path)] = entries;
+              }
+            })
+            .catch((error) => {
+              console.warn("[files-panel] failed to refresh directory", path, error);
+            });
         let rev = options?.rev?.trim() || null;
         const others = Array.from(pathsToRefresh).filter((path) => path !== normalizedRootPath);
         if (rev) {
@@ -699,7 +708,7 @@ export function useFilesPanelWorkspaceTree({
 
       const latestEntry =
         findEntryByPath(
-          directoryEntriesRef.current,
+          versioned ? { ...directoryEntriesRef.current, ...reloaded } : directoryEntriesRef.current,
           currentViewer.entry.path,
           getParentPath,
           normalizePath,

@@ -536,6 +536,51 @@ describe("FilesPanel one Save", () => {
     expect(file()).toMatchObject({ generated: "theirs", modified: "theirs", baseRev: REV_3 });
   });
 
+  describe("a commit event, with React rendering on its own schedule as in the browser", () => {
+    const REV_9 = "9".repeat(40);
+    const THEIRS = "d".repeat(40);
+    // The event's listings are read before React shows them in the explorer.
+    async function unbatchedCommitEvent(rev: string) {
+      await settle();
+      expect(mocks.readAt).not.toHaveBeenCalled();
+      mocks.listAt.mockImplementation(async () => ({
+        ok: true,
+        entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: THEIRS }],
+        rev: REV_9,
+        originId: "origin-1",
+        originMode: "hosted",
+      }));
+      mocks.readAt.mockResolvedValue({
+        ok: true,
+        file: { path: "README.md", isText: true, contentText: "theirs", rev: REV_9, blobOid: THEIRS, originId: "origin-1" },
+      });
+      const environment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      environment.IS_REACT_ACT_ENVIRONMENT = false;
+      try {
+        window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+        for (let tick = 0; tick < 20; tick += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+      } finally {
+        environment.IS_REACT_ACT_ENVIRONMENT = true;
+      }
+    }
+
+    it("reads a clean open file again when the commit changed it", async () => {
+      await render([buffer({ modified: "saved" })]);
+      await unbatchedCommitEvent(REV_9);
+      expect(mocks.readAt).toHaveBeenCalledWith(expect.objectContaining({ path: "README.md", rev: REV_9 }));
+      expect(file()).toMatchObject({ generated: "theirs", modified: "theirs", baseRev: REV_9, blobOid: THEIRS });
+    });
+
+    it("raises the stale card for unsaved edits when the commit changed the file", async () => {
+      await render([buffer()]);
+      await unbatchedCommitEvent(REV_9);
+      expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md", localText: "edited" })]);
+      expect(mocks.readAt).not.toHaveBeenCalled();
+    });
+  });
+
   it("takes its own save's commit event as its own when it arrives before the response", async () => {
     const rev = "8".repeat(40);
     const savedBlob = await gitBlobOid("edited");
