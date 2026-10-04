@@ -5606,6 +5606,28 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
     }
 
     #[test]
+    fn browser_access_tokens_cannot_request_the_import_scope() {
+        // Only the controller's own import mints `workspace.import`; an
+        // origin honours idempotency keys and the baseRev exemption for it.
+        for scopes in [
+            vec![crate::imports::WORKSPACE_IMPORT_SCOPE.to_string()],
+            vec![
+                "fs.write".to_string(),
+                crate::imports::WORKSPACE_IMPORT_SCOPE.to_string(),
+            ],
+        ] {
+            assert_eq!(
+                normalize_origin_access_scopes("http", &scopes),
+                Err("unsupported scope requested")
+            );
+        }
+        assert_eq!(
+            normalize_origin_access_scopes("http", &["fs.write".to_string()]),
+            Ok(vec!["fs.write".to_string()])
+        );
+    }
+
+    #[test]
     fn build_origin_jwks_returns_empty_when_missing() {
         let jwks = build_origin_jwks_from_pem(None, None, None).expect("jwks build");
         let keys = jwks

@@ -11,6 +11,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
+use hmac::{Hmac, Mac};
 use once_cell::sync::Lazy;
 use reqwest::multipart::Part;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,8 @@ use zip::write::{FileOptions, ZipWriter};
 use zip::ZipArchive;
 
 use crate::auth::{authenticate_request, claims_have_scopes, RequestContext};
+use crate::author_identity::{author_claims_for_user, AuthorClaims};
+use crate::config::AppConfig;
 use crate::device_auth::{
     load_user_github_access_token, resolve_github_device_auth_session,
     GithubDeviceAuthSessionResolution,
@@ -40,7 +43,7 @@ use crate::origins::{
     resolve_accessible_origin_for_protocol_with_hosted_fallback,
     resolve_origin_proxy_upstream_endpoint, LeaseAcquireOutcome, WorkspaceOriginRecord,
 };
-use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
+use crate::tokens::{mint_scoped_token_with_author, ScopedTokenRequest};
 use crate::{
     bad_request, ensure_project_write_access, forbidden, internal_error, load_project_record,
     not_found, too_many_requests, unauthorized, ApiError, AppState, ProjectRecord,
@@ -74,6 +77,17 @@ const GITHUB_IMPORT_WORKSPACE_LEASE_SECONDS: i64 = GITHUB_IMPORT_ORIGIN_TOKEN_TT
 const GITHUB_IMPORT_APPLY_TOKEN_TTL_SECONDS: i64 = 180;
 const GITHUB_IMPORT_STATUS_TOKEN_TTL_SECONDS: i64 = 60;
 const GITHUB_IMPORT_SYNC_TOKEN_TTL_SECONDS: i64 = 300;
+/// Extra scope on every origin token an import mints, next to `fs.write`.
+/// It marks a controller-run import: an origin honours `idempotencyKey`
+/// (and accepts an apply without `baseRev`) only for such a token. It is not
+/// a scope `POST /origin/access-token` grants, so a browser cannot mint it.
+/// Origins that predate it ignore it: they only check that `fs.write` is
+/// present.
+pub(crate) const WORKSPACE_IMPORT_SCOPE: &str = "workspace.import";
+/// Domain label of the import apply key (see
+/// [`github_import_origin_apply_key`]).
+const IMPORT_APPLY_KEY_DOMAIN_LABEL: &[u8] = b"instafy:import-apply-key:v1\0";
+const IMPORT_APPLY_KEY_PREFIX: &str = "imp:";
 
 static GITHUB_IMPORT_ADMISSION: Lazy<Semaphore> = Lazy::new(|| {
     let permits = std::env::var("CONTROLLER_GITHUB_IMPORT_MAX_CONCURRENT")
@@ -1950,16 +1964,43 @@ async fn load_prepared_github_import_origin(
     Ok(origin)
 }
 
+/// The idempotency key an origin sees for an import: `imp:` and the hex
+/// HMAC-SHA256, keyed by the controller's `USER_TOKEN_SECRET`, of the domain
+/// label, the project id and the browser's key. The browser's key stays in
+/// `github_import_operations` for replay lookups and never reaches an origin
+/// or git history, and nobody without the secret can compute a key that
+/// matches a real import's. 68 characters from the origin's key charset.
+fn github_import_origin_apply_key(
+    secret: &str,
+    project_id: &Uuid,
+    idempotency_key: &str,
+) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(IMPORT_APPLY_KEY_DOMAIN_LABEL);
+    mac.update(project_id.to_string().as_bytes());
+    mac.update(b"\0");
+    mac.update(idempotency_key.as_bytes());
+    format!(
+        "{IMPORT_APPLY_KEY_PREFIX}{}",
+        hex::encode(mac.finalize().into_bytes())
+    )
+}
+
+/// The origin token of one import step: `fs.write` plus
+/// [`WORKSPACE_IMPORT_SCOPE`], bound to the import's lease. `author` is set
+/// on the apply token only, the one that creates the import's commit.
 fn mint_github_import_origin_token(
-    state: &AppState,
+    config: &AppConfig,
     project_id: &Uuid,
     user_id: &Uuid,
     lease_id: &Uuid,
     origin: &WorkspaceOriginRecord,
     ttl_seconds: i64,
+    author: Option<AuthorClaims>,
 ) -> Result<String, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token(
-        &state.config,
+    mint_scoped_token_with_author(
+        config,
         ScopedTokenRequest {
             audience: origin.id.to_string(),
             subject: user_id.to_string(),
@@ -1967,12 +2008,13 @@ fn mint_github_import_origin_token(
             origin_id: Some(origin.id.to_string()),
             runtime_id: None,
             protocol: Some("http".to_string()),
-            scopes: vec!["fs.write".to_string()],
+            scopes: vec!["fs.write".to_string(), WORKSPACE_IMPORT_SCOPE.to_string()],
             lease_id: Some(lease_id.to_string()),
             run_id: None,
             prefer_runtime: None,
             ttl_seconds: Some(ttl_seconds),
         },
+        author,
     )
     .map(|token| token.token)
 }
@@ -1989,29 +2031,50 @@ async fn query_prepared_origin_apply_status(
 ) -> Result<OriginApplyStatus, (StatusCode, Json<ApiError>)> {
     let origin = load_prepared_github_import_origin(state, project_id, prepared).await?;
     let scoped_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_STATUS_TOKEN_TTL_SECONDS,
+        None,
     )?;
     let request_fingerprint =
         github_import_request_fingerprint(canonical_repo, &prepared.source_revision, target_path);
+    let origin_key = github_import_origin_apply_key(
+        &state.config.user_token_secret,
+        project_id,
+        idempotency_key,
+    );
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
+    request_origin_apply_status(
+        &state.http_client,
+        &origin_base,
+        host_override.as_deref(),
+        &scoped_token,
+        &origin_key,
+        &request_fingerprint,
+    )
+    .await
+}
+
+async fn request_origin_apply_status(
+    http_client: &reqwest::Client,
+    origin_base: &str,
+    host_override: Option<&str>,
+    bearer_token: &str,
+    origin_key: &str,
+    request_fingerprint: &str,
+) -> Result<OriginApplyStatus, (StatusCode, Json<ApiError>)> {
     let status_url = format!("{}/apply/status", origin_base.trim_end_matches('/'));
-    let mut request = state
-        .http_client
+    let mut request = http_client
         .post(status_url)
-        .bearer_auth(&scoped_token)
+        .bearer_auth(bearer_token)
         .json(&json!({
-            "idempotencyKey": idempotency_key,
+            "idempotencyKey": origin_key,
             "requestFingerprint": request_fingerprint,
         }));
-    if let Some(host) = host_override
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(host) = host_override.filter(|value| !value.trim().is_empty()) {
         request = request.header("host", host);
     }
 
@@ -2128,13 +2191,15 @@ async fn import_github_zip_and_apply(
     }
 
     let origin = load_prepared_github_import_origin(state, project_id, prepared_state).await?;
+    let author = author_claims_for_user(&state.config, &state.pool, project_id, user_id).await;
     let scoped_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_APPLY_TOKEN_TTL_SECONDS,
+        author,
     )?;
 
     let canonical_repo = format!("{owner}/{repo}");
@@ -2147,12 +2212,17 @@ async fn import_github_zip_and_apply(
         "instafy: import {owner}/{repo}@{}",
         &prepared_state.source_revision[..12.min(prepared_state.source_revision.len())]
     );
+    let origin_key = github_import_origin_apply_key(
+        &state.config.user_token_secret,
+        project_id,
+        idempotency_key,
+    );
     let manifest = build_origin_manifest(
         project_id,
         lease_id,
         &prepared_archive.files,
         Some(commit_message.clone()),
-        Some(idempotency_key),
+        Some(&origin_key),
         Some(&request_fingerprint),
     );
     let manifest_json = serde_json::to_vec(&manifest)
@@ -2268,12 +2338,13 @@ async fn import_github_zip_and_apply(
         .await?;
 
     let sync_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_SYNC_TOKEN_TTL_SECONDS,
+        None,
     )?;
     let synced_rev = sync_origin_git_after_apply(
         &state.http_client,
@@ -2313,12 +2384,13 @@ async fn resume_applied_github_import(
         ));
     }
     let scoped_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_SYNC_TOKEN_TTL_SECONDS,
+        None,
     )?;
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
     let commit_message = format!(
@@ -3248,16 +3320,17 @@ fn github_import_archive_limits() -> GithubImportArchiveLimits {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_bounded_mutating_origin_request,
-        github_import_operation_can_retry_without_admission, github_import_request_fingerprint,
-        github_import_role_can_write, normalize_github_import_idempotency_key, parse_github_ref,
+        build_origin_manifest, execute_bounded_mutating_origin_request,
+        github_import_operation_can_retry_without_admission, github_import_origin_apply_key,
+        github_import_request_fingerprint, github_import_role_can_write,
+        mint_github_import_origin_token, normalize_github_import_idempotency_key, parse_github_ref,
         parse_github_repo, parse_import_target_path, parse_origin_apply_status_response,
         read_github_zipball_body, repack_github_zip, repack_github_zip_with_limits,
-        resolve_github_import_auth, resolve_project_github_auth_policy,
-        sync_origin_git_after_apply, GithubImportArchiveLimits, GithubImportAuthSource,
-        OriginApplyStatus, ProjectGithubAuthPolicy, GITHUB_IMPORT_RATE_WINDOW_SECONDS,
-        GITHUB_IMPORT_WORKSPACE_BUSY_MESSAGE, ORIGIN_GIT_REMOTE_NOT_CONFIGURED,
-        ORIGIN_RESPONSE_MAX_BYTES,
+        request_origin_apply_status, resolve_github_import_auth,
+        resolve_project_github_auth_policy, sync_origin_git_after_apply, GithubImportArchiveLimits,
+        GithubImportAuthSource, OriginApplyStatus, ProjectGithubAuthPolicy,
+        GITHUB_IMPORT_RATE_WINDOW_SECONDS, GITHUB_IMPORT_WORKSPACE_BUSY_MESSAGE,
+        ORIGIN_GIT_REMOTE_NOT_CONFIGURED, ORIGIN_RESPONSE_MAX_BYTES, WORKSPACE_IMPORT_SCOPE,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -4286,6 +4359,175 @@ mod tests {
         mock.assert_async().await;
         assert!(error.ambiguous);
         assert!(mutation_may_be_in_flight.load(Ordering::Acquire));
+    }
+
+    const IMPORT_KEY_SECRET: &str = "inert-import-key-secret-0123456789abcdef";
+
+    fn import_project_id() -> Uuid {
+        Uuid::parse_str("6f1c2a8e-0b5d-4c3e-9a7f-2d4e6b8c0a1f").unwrap()
+    }
+
+    fn jwt_payload(token: &str) -> serde_json::Value {
+        use base64::Engine as _;
+        let payload = token.split('.').nth(1).expect("JWT payload segment");
+        serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .expect("base64url payload"),
+        )
+        .expect("JSON payload")
+    }
+
+    #[test]
+    fn import_apply_key_is_a_keyed_hmac_never_the_browser_key() {
+        let browser_key = "github-import-v1:abc";
+        let key =
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &import_project_id(), browser_key);
+        // Known answer: HMAC-SHA256(secret, "instafy:import-apply-key:v1\0" project "\0" key).
+        assert_eq!(
+            key,
+            "imp:5a93abc186d7cf6bf1ebb2ae927ea341e0f7b32ca21aa991e59eeceea843403c"
+        );
+        assert_eq!(key.len(), 68);
+        assert!(!key.contains("github-import"));
+        // Fits the origin's idempotency-key rule (<= 256 of [A-Za-z0-9:._-]).
+        assert!(key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-')));
+
+        assert_eq!(
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &import_project_id(), browser_key),
+            key
+        );
+        assert_ne!(
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &Uuid::new_v4(), browser_key),
+            key
+        );
+        assert_ne!(
+            github_import_origin_apply_key(
+                IMPORT_KEY_SECRET,
+                &import_project_id(),
+                "github-import-v1:abd"
+            ),
+            key
+        );
+        assert_ne!(
+            github_import_origin_apply_key(
+                "another-inert-import-key-secret-0123456789",
+                &import_project_id(),
+                browser_key
+            ),
+            key
+        );
+
+        let manifest = build_origin_manifest(
+            &import_project_id(),
+            &Uuid::new_v4(),
+            &[],
+            Some("instafy: import octocat/hello-world@0123456789ab".to_string()),
+            Some(&key),
+            Some("sha256:fingerprint"),
+        );
+        assert_eq!(manifest["idempotencyKey"], key.as_str());
+        assert!(!manifest.to_string().contains(browser_key));
+    }
+
+    #[test]
+    fn import_origin_tokens_carry_the_import_scope_and_only_the_apply_names_an_author() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "github-import-origin-token",
+        );
+        let user_id = Uuid::new_v4();
+        let origin = crate::origins::WorkspaceOriginRecord {
+            id: Uuid::new_v4(),
+            project_id: import_project_id(),
+            mode: crate::origins::OriginMode::Hosted,
+            endpoint: "http://127.0.0.1:9".to_string(),
+            protocols: vec!["http".to_string()],
+            region: None,
+            device_id: None,
+            metadata: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let author = crate::author_identity::AuthorClaims {
+            name: "Ada Lovelace".to_string(),
+            email: "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev".to_string(),
+        };
+        let apply = mint_github_import_origin_token(
+            &config,
+            &import_project_id(),
+            &user_id,
+            &Uuid::new_v4(),
+            &origin,
+            180,
+            Some(author.clone()),
+        )
+        .expect("mint import apply token");
+        let payload = jwt_payload(&apply);
+        assert_eq!(
+            payload["scopes"],
+            json!(["fs.write", WORKSPACE_IMPORT_SCOPE])
+        );
+        assert_eq!(payload["author_email"], author.email.as_str());
+        assert_eq!(payload["author_name"], "Ada Lovelace");
+        assert!(!payload["author_email"]
+            .as_str()
+            .unwrap()
+            .contains(&user_id.to_string()));
+
+        let status = mint_github_import_origin_token(
+            &config,
+            &import_project_id(),
+            &user_id,
+            &Uuid::new_v4(),
+            &origin,
+            60,
+            None,
+        )
+        .expect("mint import status token");
+        let payload = jwt_payload(&status);
+        assert_eq!(
+            payload["scopes"],
+            json!(["fs.write", WORKSPACE_IMPORT_SCOPE])
+        );
+        assert!(payload.get("author_email").is_none());
+        assert!(payload.get("author_name").is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_status_queries_send_the_derived_key_not_the_browser_key() {
+        let browser_key = "github-import-v1:status-query";
+        let origin_key =
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &import_project_id(), browser_key);
+        let server = MockServer::start_async().await;
+        let missing = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/apply/status")
+                    .header("authorization", "Bearer import-token")
+                    .json_body(json!({
+                        "idempotencyKey": origin_key,
+                        "requestFingerprint": "sha256:fingerprint",
+                    }));
+                then.status(404).json_body(json!({ "error": "not found" }));
+            })
+            .await;
+
+        let status = request_origin_apply_status(
+            &reqwest::Client::new(),
+            &server.base_url(),
+            None,
+            "import-token",
+            &origin_key,
+            "sha256:fingerprint",
+        )
+        .await
+        .expect("apply status");
+        missing.assert_async().await;
+        assert!(matches!(status, OriginApplyStatus::Missing));
     }
 
     #[tokio::test]
