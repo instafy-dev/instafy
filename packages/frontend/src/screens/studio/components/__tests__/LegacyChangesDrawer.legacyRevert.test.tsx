@@ -165,6 +165,9 @@ describe("LegacyChangesDrawer revert", () => {
     await flushAsyncWork();
 
     expect(window.confirm).toHaveBeenCalledOnce();
+    expect(window.confirm).toHaveBeenCalledWith(
+      'Revert "Saved version"? A new version undoing this change is saved on top. Nothing is deleted from history.',
+    );
     expect(fetch).not.toHaveBeenCalled();
     expect(mocks.acquire).not.toHaveBeenCalled();
     expect(mocks.token).not.toHaveBeenCalled();

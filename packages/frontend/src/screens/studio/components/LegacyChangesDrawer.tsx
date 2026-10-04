@@ -641,7 +641,7 @@ export function LegacyChangesDrawer({
         return;
       }
       const confirmRevert = window.confirm(
-        `Revert "${entry.subject}"? A new version undoing this change is saved on top — nothing is deleted from history.`,
+        `Revert "${entry.subject}"? A new version undoing this change is saved on top. Nothing is deleted from history.`,
       );
       if (!confirmRevert) {
         return;
@@ -656,7 +656,7 @@ export function LegacyChangesDrawer({
           const detail = result?.error ?? "Unable to revert this version right now.";
           if (result?.conflict) {
             showStatus(
-              "This version can't be reverted automatically — later changes touch the same files. Ask the Assistant to undo it instead.",
+              "This version can't be reverted automatically: later changes touch the same files. Ask the Assistant to undo it instead.",
               "warning",
               6500,
             );
