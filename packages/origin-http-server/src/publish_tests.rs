@@ -1646,48 +1646,153 @@ fn a_selection_leaves_other_staged_changes_alone() {
 // Static rules for the publish modules.
 // ---------------------------------------------------------------------------
 
-/// The production code of a module: every `#[cfg(test)]` module removed
-/// (inline, or declared with `;`, behind any further attributes such as
-/// `#[path]`) wherever it sits in the file, and every comment line. The
-/// rest of the file is kept.
+/// The production code of a module: its comments removed, then every
+/// `#[cfg(test)]` module (inline, or declared with `;`, behind any further
+/// attributes such as `#[path]`) wherever it sits in the file. The rest of
+/// the file is kept, string literals included.
 fn production_source(source: &str) -> String {
-    test_modules(source)
-        .0
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    test_modules(source).0
 }
 
-/// `source` without its `#[cfg(test)]` modules, and each removed module's
-/// name with its `#[path]` (if any).
+/// `source` without its comments and its `#[cfg(test)]` modules, and each
+/// removed module's name with its `#[path]` (if any). The marker counts only
+/// in code: not in a comment or a string or character literal.
 fn test_modules(source: &str) -> (String, Vec<(String, Option<String>)>) {
     const MARKER: &str = "#[cfg(test)]";
+    let (uncommented, masked) = mask_source(source);
     let mut kept = String::new();
     let mut modules = Vec::new();
-    let mut rest = source;
-    while let Some(start) = rest.find(MARKER) {
-        kept.push_str(&rest[..start]);
-        let after = &rest[start + MARKER.len()..];
-        match test_module_item(after) {
+    let mut position = 0;
+    while let Some(found) = masked[position..].find(MARKER) {
+        let start = position + found;
+        let after = start + MARKER.len();
+        kept.push_str(&uncommented[position..start]);
+        match test_module_item(&masked[after..], &uncommented[after..]) {
             Some((end, name, path)) => {
                 modules.push((name, path));
-                rest = &after[end..];
+                position = after + end;
             }
             None => {
                 kept.push_str(MARKER);
-                rest = after;
+                position = after;
             }
         }
     }
-    kept.push_str(rest);
+    kept.push_str(&uncommented[position..]);
     (kept, modules)
 }
 
-/// When `text` (what follows a `#[cfg(test)]`) is, after whitespace and
-/// further attributes, `[pub[(…)]] mod <name>;` or `… mod <name> { … }`:
-/// the offset just past that item, the module's name and its `#[path]`.
-fn test_module_item(text: &str) -> Option<(usize, String, Option<String>)> {
+/// `source` with every comment blanked, and a copy that also has the
+/// contents of every string and character literal blanked. Blanking keeps
+/// each byte's offset (each blanked byte becomes a space, newlines stay),
+/// so an offset in one is the same place in the other.
+fn mask_source(source: &str) -> (String, String) {
+    let bytes = source.as_bytes();
+    let mut uncommented = bytes.to_vec();
+    let mut masked = bytes.to_vec();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for byte in &mut out[from..to] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+    };
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if byte == b'/' && next == Some(b'/') {
+            let end = index + source[index..].find('\n').unwrap_or(bytes.len() - index);
+            blank(&mut uncommented, index, end);
+            blank(&mut masked, index, end);
+            index = end;
+            continue;
+        }
+        if byte == b'/' && next == Some(b'*') {
+            let mut depth = 0usize;
+            let mut end = index;
+            while end < bytes.len() {
+                if bytes[end] == b'/' && bytes.get(end + 1) == Some(&b'*') {
+                    depth += 1;
+                    end += 2;
+                } else if bytes[end] == b'*' && bytes.get(end + 1) == Some(&b'/') {
+                    depth -= 1;
+                    end += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    end += 1;
+                }
+            }
+            blank(&mut uncommented, index, end);
+            blank(&mut masked, index, end);
+            index = end;
+            continue;
+        }
+        let raw_start = byte == b'r'
+            && (index == 0
+                || !is_ident(bytes[index - 1])
+                || (bytes[index - 1] == b'b' && (index < 2 || !is_ident(bytes[index - 2]))));
+        if raw_start && matches!(next, Some(b'"') | Some(b'#')) {
+            let hashes = bytes[index + 1..]
+                .iter()
+                .take_while(|byte| **byte == b'#')
+                .count();
+            if bytes.get(index + 1 + hashes) == Some(&b'"') {
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let body = index + 2 + hashes;
+                let close = body
+                    + source[body..]
+                        .find(&terminator)
+                        .unwrap_or(bytes.len() - body);
+                blank(&mut masked, body, close);
+                index = (close + terminator.len()).min(bytes.len());
+                continue;
+            }
+        }
+        if byte == b'"' {
+            let mut end = index + 1;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            let end = end.min(bytes.len());
+            blank(&mut masked, index + 1, end);
+            index = end + 1;
+            continue;
+        }
+        if byte == b'\'' {
+            let close = if next == Some(b'\\') {
+                source[index + 2..]
+                    .find('\'')
+                    .map(|offset| index + 2 + offset)
+            } else {
+                source[index + 1..].chars().next().and_then(|character| {
+                    let after = index + 1 + character.len_utf8();
+                    (bytes.get(after) == Some(&b'\'')).then_some(after)
+                })
+            };
+            if let Some(close) = close {
+                blank(&mut masked, index + 1, close);
+                index = close + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    (
+        String::from_utf8(uncommented).expect("blanking keeps UTF-8"),
+        String::from_utf8(masked).expect("blanking keeps UTF-8"),
+    )
+}
+
+/// When `text` (code after a `#[cfg(test)]`, with comments and literals
+/// blanked) is, after whitespace and further attributes,
+/// `[pub[(…)]] mod <name>;` or `… mod <name> { … }`: the offset just past
+/// that item, the module's name and its `#[path]` (read from `original`,
+/// the same text with its literals).
+fn test_module_item(text: &str, original: &str) -> Option<(usize, String, Option<String>)> {
     let skip_space = |index: usize| {
         index
             + text[index..]
@@ -1698,7 +1803,7 @@ fn test_module_item(text: &str) -> Option<(usize, String, Option<String>)> {
     let mut path = None;
     while text[index..].starts_with("#[") {
         let end = matching_close(text, index + 1)?;
-        let attribute = text[index + 2..end - 1].trim();
+        let attribute = original[index + 2..end - 1].trim();
         if let Some(value) = attribute.strip_prefix("path") {
             path = Some(
                 value
@@ -2093,6 +2198,11 @@ fn the_spawn_rule_catches_a_module_that_runs_git_itself() {
         // way a `mod.rs` lists its submodules.
         "mod cache;\n#[cfg(test)]\nmod tests;\nfn run() { let _ = std::process::Command::new(PROGRAM); }\n",
         "#[cfg(test)]\n#[path = \"cache_tests.rs\"]\nmod tests;\nfn run() { let _ = Command::new(PROGRAM); }\n",
+        // A comment or a literal that ends with the marker hides nothing.
+        "/// Kept apart from the code built under #[cfg(test)]\nmod wire {\n    pub fn run() { let _ = std::process::Command::new(\"git\"); }\n}\n",
+        "fn f() {} // #[cfg(test)]\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
+        "/* #[cfg(test)] */\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
+        "const NOTE: &str = r#\"x #[cfg(test)]\nmod fake {\"#;\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
         // Production code after an inline test module whose literals hold
         // braces.
         "#[cfg(test)]\nmod tests {\n    fn t() { let _ = \"}\"; let _ = '{'; let _ = r#\"}\"#; }\n}\nfn run() { let _ = Command::new(PROGRAM); }\n",
