@@ -1181,7 +1181,7 @@ export function LegacyChangesDrawer({
   );
 
   return (
-    <div className="@container relative flex h-full min-h-0 flex-col" data-testid="source-control-drawer">
+    <div className="@container relative flex h-full min-h-0 flex-col" data-testid="source-control-drawer" data-mode="legacy">
       <DrawerHeader
         frame="rail"
         title="Changes"

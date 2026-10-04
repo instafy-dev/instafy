@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FilesPanel, SourceControlDrawer } from "../StudioLazyPanels";
 
 vi.mock("../components/FilesPanel", () => new Promise(() => undefined));
-vi.mock("../components/LegacyChangesDrawer", () => new Promise(() => undefined));
+vi.mock("../components/SourceControlDrawer", () => new Promise(() => undefined));
 
 describe("Studio lazy panel fallbacks", () => {
   let root: Root;
@@ -47,6 +47,11 @@ describe("Studio lazy panel fallbacks", () => {
     expect(portal.querySelector('[role="status"]')?.textContent).toContain("Loading files");
     await act(async () => portal.querySelector<HTMLButtonElement>('[aria-label="Close files"]')?.click());
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("names the loading frame after the drawer it opens", async () => {
+    await act(async () => root.render(<SourceControlDrawer title="History" onRequestClose={vi.fn()} />));
+    expect(container.querySelector('[aria-label="Close history"]')).not.toBeNull();
   });
 
   it("allows closing Changes while its panel downloads", async () => {
