@@ -297,16 +297,19 @@ pub(crate) fn resolve(
                 .fetched
                 .pop()
             {
-                Some((_, commit)) => Ok(Some(commit)),
+                Some(fetched) => Ok(Some(fetched.commit)),
                 None => Err(ViewError::RefNotFound),
             }
         }
     }
 }
 
-/// Whether `rev` is a commit here whose tree is here too. A fetch or
-/// promotion that stopped partway in an older version could leave a commit
-/// without its tree; such a commit is not readable, so the caller fetches.
+/// Whether `rev` is a commit here that is complete: its tree is here, and a
+/// local ref reaches it. Git moves a ref only after the fetch's
+/// connectivity check, so whatever a ref reaches has every object it names,
+/// while a fetch that stopped partway can leave loose objects (written
+/// commit first) that no ref reaches. Such a commit is not readable, so the
+/// caller fetches. Two processes.
 fn readable_commit(git: &WorkspaceGit<'_>, rev: &str) -> Result<bool, ViewError> {
     let input = format!("{rev}\n{rev}^{{tree}}\n");
     let raw = git.stdout_opts(
@@ -317,10 +320,21 @@ fn readable_commit(git: &WorkspaceGit<'_>, rev: &str) -> Result<bool, ViewError>
         },
     )?;
     let lines: Vec<&str> = raw.lines().collect();
-    Ok(matches!(
+    let present = matches!(
         lines.as_slice(),
         [commit, tree] if *commit == format!("{rev} commit") && tree.ends_with(" tree")
-    ))
+    );
+    if !present {
+        return Ok(false);
+    }
+    let reaching = git.stdout(&[
+        "for-each-ref",
+        "--count=1",
+        "--format=%(refname)",
+        "--contains",
+        rev,
+    ])?;
+    Ok(!reaching.is_empty())
 }
 
 /// `(name, id)` of every local ref under the `namespaces`.
@@ -680,13 +694,24 @@ fn parse_ls_remote(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// One fetched recovery or salvage ref.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FetchedRef {
+    pub reference: RecoveryRef,
+    /// The id the ref names on the remote: the commit, or an annotated tag
+    /// of it. A lease on the ref (dismiss, restore) uses this id.
+    pub tip: String,
+    /// The commit, now here and complete.
+    pub commit: String,
+}
+
 /// What [`fetch_refs`] did with each ref it was asked for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FetchedRefs {
-    /// Fetched: the commit each one names on the remote, now here.
-    pub fetched: Vec<(RecoveryRef, String)>,
-    /// Not on the remote (any more), or not naming a commit: dismissed,
-    /// restored or never there.
+    /// Fetched: each ref with the commit it names on the remote.
+    pub fetched: Vec<FetchedRef>,
+    /// Not on the remote (any more), or naming neither a commit nor an
+    /// annotated tag of one: dismissed, restored or never there.
     pub missing: Vec<RecoveryRef>,
 }
 
@@ -727,7 +752,8 @@ pub(crate) fn fetch_refs(
     if listed.is_empty() {
         return Ok(outcome);
     }
-    sweep_stale_fetches(git)?;
+    // Housekeeping: it never fails the call.
+    sweep_stale_fetches(git);
     let scratch = FetchScratch::new(git);
     // (index, ref, the commit the remote names it at)
     let mut pending: Vec<(usize, &RecoveryRef, String)> = listed
@@ -735,8 +761,8 @@ pub(crate) fn fetch_refs(
         .enumerate()
         .map(|(index, (reference, rev))| (index, reference, rev.clone()))
         .collect();
-    // (id, type) of what each ref fetched as listed.
-    let mut found: Vec<Option<(String, String)>> = vec![None; listed.len()];
+    // What each ref fetched as listed.
+    let mut found: Vec<Option<ScratchRef>> = vec![None; listed.len()];
     let mut attempt = 0;
     loop {
         let targets: Vec<(&RecoveryRef, String)> = pending
@@ -747,8 +773,8 @@ pub(crate) fn fetch_refs(
         if result.is_ok() {
             let here = scratch.read()?;
             pending.retain(|(index, _, rev)| match here.get(&scratch.target(*index)) {
-                Some((id, kind)) if id == rev => {
-                    found[*index] = Some((id.clone(), kind.clone()));
+                Some(fetched) if fetched.id == *rev => {
+                    found[*index] = Some(fetched.clone());
                     false
                 }
                 _ => true,
@@ -791,12 +817,23 @@ pub(crate) fn fetch_refs(
         }
     }
 
-    // Only commits count.
+    // A commit, or an annotated tag of one (the shard accepts both).
     for (index, (reference, _)) in listed.iter().enumerate() {
-        match found[index].take() {
-            Some((id, kind)) if kind == "commit" => outcome.fetched.push((reference.clone(), id)),
-            Some(_) => outcome.missing.push(reference.clone()),
-            None => {}
+        let Some(fetched) = found[index].take() else {
+            continue;
+        };
+        let commit = match (fetched.kind.as_str(), fetched.peeled_kind.as_str()) {
+            ("commit", _) => Some(fetched.id.clone()),
+            ("tag", "commit") => Some(fetched.peeled.clone()),
+            _ => None,
+        };
+        match commit {
+            Some(commit) => outcome.fetched.push(FetchedRef {
+                reference: reference.clone(),
+                tip: fetched.id,
+                commit,
+            }),
+            None => outcome.missing.push(reference.clone()),
         }
     }
     Ok(outcome)
@@ -804,15 +841,21 @@ pub(crate) fn fetch_refs(
 
 /// Remove every fetch namespace older than [`FETCH_SCRATCH_STALE_AFTER`]
 /// (or not named the way this server names them): a call that died left
-/// it. Called by [`fetch_refs`] and when the server starts. Returns how
-/// many refs were removed.
-pub(crate) fn sweep_stale_fetches(git: &WorkspaceGit<'_>) -> Result<usize, ViewError> {
+/// it. Called by [`fetch_refs`] and when the server starts, under the same
+/// age rule. Best effort: it never fails, and logs only counts. Several
+/// calls may sweep the same refs at once: a ref another call already
+/// removed is not an error. Returns how many stale refs it removed.
+pub(crate) fn sweep_stale_fetches(git: &WorkspaceGit<'_>) -> usize {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let prefix = format!("{FETCHED_REF_ROOT}/");
-    let stale: Vec<(String, String)> = local_refs(git, &[FETCHED_REF_ROOT])?
+    let Ok(listed) = local_refs(git, &[FETCHED_REF_ROOT]) else {
+        tracing::warn!(target: "origin_recovery", "could not list fetch refs to sweep");
+        return 0;
+    };
+    let stale: Vec<(String, String)> = listed
         .into_iter()
         .filter(|(name, _)| {
             let started = name
@@ -825,27 +868,60 @@ pub(crate) fn sweep_stale_fetches(git: &WorkspaceGit<'_>) -> Result<usize, ViewE
             }
         })
         .collect();
-    delete_refs(git, &stale)?;
-    Ok(stale.len())
+    if delete_refs(git, &stale).is_err() {
+        tracing::warn!(
+            target: "origin_recovery",
+            stale = stale.len(),
+            "could not remove stale fetch refs"
+        );
+        return 0;
+    }
+    stale.len()
 }
 
-/// Delete `refs` (`(name, id)`) in one transaction.
+/// Delete the refs named in `refs` (`(name, id)`), which must all be fetch
+/// refs, in one transaction. `--no-deref` deletes a symbolic ref itself,
+/// never the ref it points to, and no old id is given, so a ref that is
+/// already gone is not an error.
 fn delete_refs(git: &WorkspaceGit<'_>, refs: &[(String, String)]) -> Result<(), ViewError> {
-    if refs.is_empty() {
+    let prefix = format!("{FETCHED_REF_ROOT}/");
+    let mut transaction = String::new();
+    for (name, _) in refs {
+        if name.starts_with(&prefix) {
+            transaction.push_str(&format!("delete {name}\n"));
+        }
+    }
+    if transaction.is_empty() {
         return Ok(());
     }
-    let mut transaction = String::new();
-    for (name, id) in refs {
-        transaction.push_str(&format!("delete {name} {id}\n"));
-    }
+    // A delete locks `packed-refs`, which every concurrent delete in the
+    // repository also locks: wait for it (and for loose ref locks) instead
+    // of failing after git's default of one second.
     git.ok_opts(
-        &["update-ref", "--stdin"],
+        &["update-ref", "--no-deref", "--stdin"],
         &RunOpts {
             stdin: Some(transaction.as_bytes()),
+            env: vec![
+                ("GIT_CONFIG_COUNT", "2".into()),
+                ("GIT_CONFIG_KEY_0", "core.packedRefsTimeout".into()),
+                ("GIT_CONFIG_VALUE_0", "10000".into()),
+                ("GIT_CONFIG_KEY_1", "core.filesRefLockTimeout".into()),
+                ("GIT_CONFIG_VALUE_1", "2000".into()),
+            ],
             ..RunOpts::default()
         },
     )?;
     Ok(())
+}
+
+/// What a fetch ref names: the object, its type, and for an annotated tag
+/// the object the tag names.
+#[derive(Clone, Debug)]
+struct ScratchRef {
+    id: String,
+    kind: String,
+    peeled: String,
+    peeled_kind: String,
 }
 
 /// The namespace one [`fetch_refs`] call fetches into,
@@ -872,12 +948,11 @@ impl<'g, 'a> FetchScratch<'g, 'a> {
         format!("{}/{index}", self.namespace)
     }
 
-    /// Each ref here, with the id it names and that object's type, read
-    /// with one `for-each-ref`.
-    fn read(&self) -> Result<std::collections::HashMap<String, (String, String)>, ViewError> {
+    /// Each ref here, with what it names, read with one `for-each-ref`.
+    fn read(&self) -> Result<std::collections::HashMap<String, ScratchRef>, ViewError> {
         let raw = self.git.stdout(&[
             "for-each-ref",
-            "--format=%(refname)%00%(objectname)%00%(objecttype)",
+            "--format=%(refname)%00%(objectname)%00%(objecttype)%00%(*objectname)%00%(*objecttype)",
             "--end-of-options",
             &self.namespace,
         ])?;
@@ -886,9 +961,13 @@ impl<'g, 'a> FetchScratch<'g, 'a> {
             .filter_map(|line| {
                 let mut fields = line.split('\0');
                 let name = fields.next()?.to_string();
-                let id = fields.next()?.to_string();
-                let kind = fields.next()?.to_string();
-                Some((name, (id, kind)))
+                let fetched = ScratchRef {
+                    id: fields.next()?.to_string(),
+                    kind: fields.next()?.to_string(),
+                    peeled: fields.next().unwrap_or_default().to_string(),
+                    peeled_kind: fields.next().unwrap_or_default().to_string(),
+                };
+                Some((name, fetched))
             })
             .collect())
     }
@@ -955,7 +1034,10 @@ impl From<RecoveryKind> for ItemKind {
 pub(crate) struct RecoveryItem {
     #[serde(rename = "ref")]
     pub reference: String,
+    /// The id the ref names: a lease on the ref (dismiss, restore) uses it.
     pub rev: String,
+    /// The commit (the same as `rev` unless the ref names an annotated tag).
+    pub commit: String,
     pub kind: ItemKind,
     pub subject: String,
     /// The committer date, ISO 8601.
@@ -972,27 +1054,31 @@ pub(crate) struct RecoveryItem {
     timestamp: i64,
 }
 
-/// Describe `refs` (each with the commit it names, fetched here), newest
-/// first, at most [`MAX_RECOVERY_ITEMS`]; a ref whose commit is not here is
-/// left out. `main` (when it exists) gives each listed item its `base`.
+/// Describe `refs` (as [`fetch_refs`] fetched them), newest first, at most
+/// [`MAX_RECOVERY_ITEMS`]; a ref whose commit is not here is left out.
+/// `main` (when it exists) gives each listed item its `base`.
 pub(crate) fn describe(
     git: &WorkspaceGit<'_>,
-    refs: &[(RecoveryRef, String)],
+    refs: &[FetchedRef],
     main: Option<&str>,
 ) -> Result<Vec<RecoveryItem>, ViewError> {
     // A ref whose commit is not here (it vanished before it could be
     // fetched) is left out rather than failing the list.
-    let revs: Vec<String> = refs.iter().map(|(_, rev)| rev.clone()).collect();
-    let present: Vec<&(RecoveryRef, String)> = refs
+    let commits: Vec<String> = refs.iter().map(|fetched| fetched.commit.clone()).collect();
+    let present: Vec<&FetchedRef> = refs
         .iter()
-        .zip(git.object_sizes(&revs)?)
+        .zip(git.object_sizes(&commits)?)
         .filter(|(_, found)| matches!(found, Some((kind, _)) if kind == "commit"))
         .map(|(entry, _)| entry)
         .collect();
-    let revs: Vec<String> = present.iter().map(|(_, rev)| rev.clone()).collect();
-    let objects = git.read_objects(&revs)?;
+    let commits: Vec<String> = present
+        .iter()
+        .map(|fetched| fetched.commit.clone())
+        .collect();
+    let objects = git.read_objects(&commits)?;
     let mut items = Vec::with_capacity(present.len());
-    for ((reference, rev), object) in present.into_iter().zip(objects) {
+    for (fetched, object) in present.into_iter().zip(objects) {
+        let reference = &fetched.reference;
         let commit = parse_commit(&object.data);
         let kind = match reference.source() {
             RefSource::Salvage => ItemKind::Salvage,
@@ -1020,7 +1106,8 @@ pub(crate) fn describe(
             .collect();
         items.push(RecoveryItem {
             reference: reference.as_str().to_string(),
-            rev: rev.clone(),
+            rev: fetched.tip.clone(),
+            commit: fetched.commit.clone(),
             kind,
             subject: commit.subject,
             date: commit.date,
@@ -1043,7 +1130,7 @@ pub(crate) fn describe(
     items.truncate(MAX_RECOVERY_ITEMS);
     if let Some(main) = main {
         for item in &mut items {
-            item.base = git.merge_base(&item.rev, main)?;
+            item.base = git.merge_base(&item.commit, main)?;
         }
     }
     Ok(items)
@@ -1218,6 +1305,25 @@ mod tests {
             GitIdentity::new("Instafy", "origin@instafy.dev").at(Some(format!("{epoch} +0130")));
         git.commit_tree(tree, parents, &identity, &identity, message.as_bytes())
             .unwrap()
+    }
+
+    /// `(ref, tip)` of each fetched ref, as a listing pairs them.
+    fn pairs(fetched: &[FetchedRef]) -> Vec<(RecoveryRef, String)> {
+        fetched
+            .iter()
+            .map(|fetched| (fetched.reference.clone(), fetched.tip.clone()))
+            .collect()
+    }
+
+    /// Refs that name their commits directly, as fetched.
+    fn as_fetched(refs: &[(RecoveryRef, String)]) -> Vec<FetchedRef> {
+        refs.iter()
+            .map(|(reference, rev)| FetchedRef {
+                reference: reference.clone(),
+                tip: rev.clone(),
+                commit: rev.clone(),
+            })
+            .collect()
     }
 
     #[test]
@@ -1789,7 +1895,7 @@ mod tests {
 
         let at = ReadAt::Ref(conflict_name.clone());
         let fetched = fetch_refs(&git, url, &listed).unwrap();
-        assert_eq!(fetched.fetched, listed);
+        assert_eq!(pairs(&fetched.fetched), listed);
         assert!(fetched.missing.is_empty());
         fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
         assert_eq!(
@@ -1804,7 +1910,7 @@ mod tests {
         };
         assert_eq!(entries.len(), 2);
 
-        let items = describe(&git, &listed, Some(&main)).unwrap();
+        let items = describe(&git, &fetched.fetched, Some(&main)).unwrap();
         let summary: Vec<(&str, ItemKind, bool, Vec<&str>)> = items
             .iter()
             .map(|item| {
@@ -1853,7 +1959,7 @@ mod tests {
         assert!(json.get("timestamp").is_none(), "{json}");
 
         // Without main there is no base.
-        assert!(describe(&git, &listed, None)
+        assert!(describe(&git, &fetched.fetched, None)
             .unwrap()
             .iter()
             .all(|item| item.base.is_none()));
@@ -1991,7 +2097,7 @@ mod tests {
 
             let fetched = fetch_refs(&git, url, &listed).unwrap();
             assert!(fetched.missing.is_empty(), "{fetched:?}");
-            assert_eq!(fetched.fetched, listed);
+            assert_eq!(pairs(&fetched.fetched), listed);
             for (reference, rev) in &listed {
                 assert_eq!(
                     resolve(&git, url, &ReadAt::Ref(reference.clone()))
@@ -2082,11 +2188,12 @@ mod tests {
         assert_eq!(
             outcome,
             FetchedRefs {
-                fetched: vec![(kept.clone(), kept_rev.clone())],
+                fetched: as_fetched(&[(kept.clone(), kept_rev.clone())]),
                 missing: vec![gone.clone()],
             }
         );
-        let items = describe(&git, &listed, Some(&main)).unwrap();
+        // Even when given the stale listing, only what is here is described.
+        let items = describe(&git, &as_fetched(&listed), Some(&main)).unwrap();
         assert_eq!(
             items
                 .iter()
@@ -2143,7 +2250,7 @@ mod tests {
                     log.display()
                 ),
             );
-            describe(&git, &refs, Some(&main)).unwrap()
+            describe(&git, &as_fetched(&refs), Some(&main)).unwrap()
         };
         let merge_bases = std::fs::read_to_string(&log)
             .unwrap_or_default()
@@ -2334,7 +2441,7 @@ mod tests {
                         mine.rotate_left((thread + call) % listed.len());
                         mine.truncate(3 + (thread + call) % 5);
                         let fetched = fetch_refs(&git, url, &mine).unwrap();
-                        assert_eq!(fetched.fetched, mine);
+                        assert_eq!(pairs(&fetched.fetched), mine);
                         assert!(fetched.missing.is_empty());
                     }
                 });
@@ -2402,7 +2509,7 @@ mod tests {
         for name in [&stale, &unnamed, &live] {
             git.update_ref(name, &main, None, "test").unwrap();
         }
-        assert_eq!(sweep_stale_fetches(&git).unwrap(), 2);
+        assert_eq!(sweep_stale_fetches(&git), 2);
         let left: Vec<String> = git
             .refs_under(FETCHED_REF_ROOT)
             .unwrap()
@@ -2423,18 +2530,26 @@ mod tests {
         assert_eq!(left, vec![live]);
     }
 
-    /// A fetch keeps a pack instead of writing loose objects (which git
-    /// writes commit first), so a fetch that cannot finish never leaves a
-    /// commit without its tree; and a commit already here without its tree
-    /// (left by an older fetch) is not readable, so the caller fetches.
+    /// A fetch that stops partway can leave loose objects (git writes them
+    /// commit first) that no ref reaches; git moves a ref only after its
+    /// connectivity check. A `?rev` read accepts a commit only when its tree
+    /// is here and a local ref reaches it, so such a commit is "not here"
+    /// and the caller fetches; a commit a ref reaches reads normally. The
+    /// check costs two processes.
     #[test]
-    fn an_interrupted_fetch_never_leaves_a_readable_commit_without_its_tree() {
+    fn a_commit_no_ref_reaches_is_not_readable() {
         let (_dir, root) = tempdir();
-        let (canonical, _main, revs) = canonical_with_many_refs(&root, 1);
+        let (canonical, main, revs) = canonical_with_many_refs(&root, 1);
         let url = canonical.to_str().unwrap();
-        let canonical_git = WorkspaceGit::bare(&canonical, None);
         let tip = revs[0].clone();
+        let canonical_git = WorkspaceGit::bare(&canonical, None);
+        let blob = canonical_git
+            .stdout(&["rev-parse", &format!("{tip}:a.txt")])
+            .unwrap();
         let tree_id = canonical_git.tree_id(&tip).unwrap();
+        assert!(![&tip, &main, &tree_id]
+            .iter()
+            .any(|id| id[..2] == blob[..2]));
 
         let workspace = root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
@@ -2445,37 +2560,44 @@ mod tests {
             (WorkspaceGit::bare(&mirror, None), mirror.join("objects")),
         ];
         for (git, objects) in &layouts {
-            // The tree's loose-object folder cannot be made (a full disk).
-            std::fs::write(objects.join(&tree_id[..2]), b"").unwrap();
+            // The blob's loose-object folder cannot be made (a full disk):
+            // the fetch stops after writing the commits and the tree.
+            std::fs::write(objects.join(&blob[..2]), b"").unwrap();
             let listed = list_remote_refs(git, url).unwrap();
-            let fetched = fetch_refs(git, url, &listed).unwrap();
-            assert_eq!(fetched.fetched, listed);
-            assert_eq!(
-                resolve(git, url, &ReadAt::Rev(tip.clone()))
-                    .unwrap()
-                    .as_deref(),
-                Some(tip.as_str())
-            );
+            assert!(fetch_refs(git, url, &listed).is_err());
+            assert_eq!(git.commit_id(&tip).unwrap().as_deref(), Some(tip.as_str()));
+            assert!(git.test(&["cat-file", "-e", &tree_id]).unwrap());
             assert!(matches!(
-                read_tree_at(git, &tip, "").unwrap(),
-                TreeRead::Directory(_)
+                resolve(git, url, &ReadAt::Rev(tip.clone())),
+                Err(ViewError::RevNotFound)
             ));
-            std::fs::remove_file(objects.join(&tree_id[..2])).unwrap();
+            std::fs::remove_file(objects.join(&blob[..2])).unwrap();
+
+            // Once a ref reaches it, it reads, at two processes.
+            fetch(git, &canonical, &format!("+{tip}:refs/heads/recovered"));
+            let log = root.join("resolve.log");
+            let _ = std::fs::remove_file(&log);
+            let resolved = {
+                let _wrapper =
+                    crate::test_support::GitWrapper::install(&root, &log_subcommands(&log));
+                resolve(git, url, &ReadAt::Rev(tip.clone())).unwrap()
+            };
+            assert_eq!(resolved.as_deref(), Some(tip.as_str()));
+            // (A checkout also reads its config before each command.)
+            let counts = subcommand_counts(&log);
+            let commands: usize = counts
+                .iter()
+                .filter(|(name, _)| name.as_str() != "config")
+                .map(|(_, count)| count)
+                .sum();
+            assert_eq!(commands, 2, "{counts:?}");
+            assert!(matches!(
+                read_blob_at(git, &tip, "a.txt", 1 << 20).unwrap(),
+                BlobRead::Found { .. }
+            ));
         }
 
-        // A pack that cannot be written leaves nothing readable.
-        let blocked = bare(&root, "blocked.git");
-        let git = WorkspaceGit::bare(&blocked, None);
-        std::fs::remove_dir_all(blocked.join("objects/pack")).unwrap();
-        std::fs::write(blocked.join("objects/pack"), b"").unwrap();
-        let listed = list_remote_refs(&git, url).unwrap();
-        assert!(fetch_refs(&git, url, &listed).is_err());
-        assert!(matches!(
-            resolve(&git, url, &ReadAt::Rev(tip.clone())),
-            Err(ViewError::RevNotFound)
-        ));
-
-        // A commit here whose tree is not.
+        // A commit here whose tree is not, even if a ref names it.
         let damaged = bare(&root, "damaged.git");
         let git = WorkspaceGit::bare(&damaged, None);
         let raw = format!(
@@ -2490,14 +2612,152 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(
-            git.commit_id(&orphan).unwrap().as_deref(),
-            Some(orphan.as_str())
-        );
+        git.update_ref("refs/heads/orphan", &orphan, None, "test")
+            .unwrap();
         assert!(matches!(
             resolve(&git, url, &ReadAt::Rev(orphan)),
             Err(ViewError::RevNotFound)
         ));
+    }
+
+    /// The shard accepts a recovery ref that names its commit through an
+    /// annotated tag: it is listed, fetched, read and described, and the
+    /// item keeps the tag's id as `rev`, the id a lease on the ref needs.
+    #[test]
+    fn a_recovery_ref_naming_an_annotated_tag_reads_as_its_commit() {
+        let (_dir, root) = tempdir();
+        let (canonical, main, revs) = canonical_with_many_refs(&root, 1);
+        let url = canonical.to_str().unwrap();
+        git_in(
+            &canonical,
+            &[
+                "-c",
+                "user.name=Tagger",
+                "-c",
+                "user.email=tagger@instafy.dev",
+                "tag",
+                "-a",
+                "-m",
+                "kept",
+                "kept",
+                &revs[0],
+            ],
+        );
+        let tag = git_in(&canonical, &["rev-parse", "refs/tags/kept"]);
+        let name = format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-tagged");
+        git_in(&canonical, &["update-ref", &name, &tag]);
+        let reference = RecoveryRef::parse(&name).unwrap();
+
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
+        let listed = list_remote_refs(&git, url).unwrap();
+        assert!(listed.contains(&(reference.clone(), tag.clone())));
+        let fetched = fetch_refs(&git, url, &listed).unwrap();
+        assert!(fetched.missing.is_empty(), "{fetched:?}");
+        let tagged = fetched
+            .fetched
+            .iter()
+            .find(|fetched| fetched.reference == reference)
+            .unwrap();
+        assert_eq!(
+            (tagged.tip.as_str(), tagged.commit.as_str()),
+            (tag.as_str(), revs[0].as_str())
+        );
+        assert_eq!(
+            resolve(&git, url, &ReadAt::Ref(reference.clone()))
+                .unwrap()
+                .as_deref(),
+            Some(revs[0].as_str())
+        );
+        let items = describe(&git, &fetched.fetched, Some(&main)).unwrap();
+        let item = items.iter().find(|item| item.reference == name).unwrap();
+        assert_eq!(
+            (item.rev.as_str(), item.commit.as_str()),
+            (tag.as_str(), revs[0].as_str())
+        );
+        assert_eq!(item.base.as_deref(), Some(main.as_str()));
+        assert!(item.dismissible);
+    }
+
+    /// Calls that start together while a stale namespace is here all
+    /// succeed: the sweep is housekeeping, and a ref another call already
+    /// removed is not an error.
+    #[test]
+    fn concurrent_calls_with_a_stale_namespace_all_succeed() {
+        let (_dir, root) = tempdir();
+        let (canonical, main, _revs) = canonical_with_many_refs(&root, 4);
+        let url = canonical.to_str().unwrap();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
+        let listed = list_remote_refs(&git, url).unwrap();
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - FETCH_SCRATCH_STALE_AFTER.as_secs()
+            - 60;
+        for round in 0..5 {
+            for index in 0..20 {
+                let name = format!("{FETCHED_REF_ROOT}/{old}-{round:032x}/{index}");
+                git.update_ref(&name, &main, None, "test").unwrap();
+            }
+            let start = std::sync::Barrier::new(8);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    let (listed, mirror, start) = (&listed, &mirror, &start);
+                    scope.spawn(move || {
+                        let git = WorkspaceGit::bare(mirror, None);
+                        start.wait();
+                        let fetched = fetch_refs(&git, url, listed).unwrap();
+                        assert_eq!(pairs(&fetched.fetched), *listed);
+                    });
+                }
+            });
+            assert!(git.refs_under(FETCHED_REF_ROOT).unwrap().is_empty());
+        }
+    }
+
+    /// A symbolic ref under the fetch root that points elsewhere is
+    /// removed itself; the ref it points to is never touched.
+    #[test]
+    fn sweeping_a_symbolic_fetch_ref_never_deletes_its_target() {
+        let (_dir, root) = tempdir();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let files = tree(&git, &[("a.txt", "a\n")]);
+        let main = commit(&git, &files, &[], 1_700_000_000, "main\n");
+        git.update_ref(MAIN_REF, &main, None, "test").unwrap();
+        let link = format!("{FETCHED_REF_ROOT}/1000-aa/0");
+        git.ok(&["symbolic-ref", &link, MAIN_REF]).unwrap();
+        assert_eq!(sweep_stale_fetches(&git), 1);
+        assert_eq!(
+            git.commit_id(MAIN_REF).unwrap().as_deref(),
+            Some(main.as_str())
+        );
+        assert!(git.refs_under(FETCHED_REF_ROOT).unwrap().is_empty());
+    }
+
+    /// A `?ref=` read lists the remote once and fetches once.
+    #[test]
+    fn a_ref_read_lists_the_remote_once() {
+        let (_dir, root) = tempdir();
+        let (canonical, _main, revs) = canonical_with_many_refs(&root, 3);
+        let url = canonical.to_str().unwrap();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let reference =
+            RecoveryRef::parse(&format!("refs/instafy/recovery/{ORIGIN}/item-001")).unwrap();
+        let log = root.join("commands.log");
+        let resolved = {
+            let _wrapper = crate::test_support::GitWrapper::install(&root, &log_subcommands(&log));
+            resolve(&git, url, &ReadAt::Ref(reference)).unwrap()
+        };
+        assert_eq!(resolved.as_deref(), Some(revs[1].as_str()));
+        let counts = subcommand_counts(&log);
+        assert_eq!(counts.get("ls-remote"), Some(&1), "{counts:?}");
+        assert_eq!(counts.get("fetch"), Some(&1), "{counts:?}");
     }
 
     #[test]

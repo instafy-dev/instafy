@@ -181,11 +181,8 @@ impl OriginHttpServer {
             })
             .await;
             match swept {
-                Ok(Ok(0)) => {}
-                Ok(Ok(removed)) => {
-                    info!(removed, "removed refs left by interrupted recovery fetches")
-                }
-                Ok(Err(error)) => warn!(%error, "could not sweep interrupted recovery fetches"),
+                Ok(0) => {}
+                Ok(removed) => info!(removed, "removed refs left by interrupted recovery fetches"),
                 Err(error) => warn!(%error, "recovery fetch sweep task failed"),
             }
         }
