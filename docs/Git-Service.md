@@ -159,14 +159,20 @@ Studio picks how the Files editor saves from the space's default origin (the con
   version, exactly as before.
 - **Stateless gateway** (`stateless: true`) and **Desktop origins**: one Save (Cmd/Ctrl+S, also
   Shift+Cmd/Ctrl+S). Each save is one `/apply` manifest pinned to the origin the file was read
-  from. On the stateless gateway it carries `baseRev` (the `X-Instafy-Rev` of the read) and
-  `expected` (the read's blob id) and commits on apply; on a Desktop origin it carries `expected`
-  when the blob id is known and is published with `/git/sync {paths}`. If the file changed in
-  the space meanwhile, the save answers 409 and the edits stay in the editor with a card that
-  offers Merge or Reload. A new file stays in the browser until its first Save, and a new folder
-  is one commit of its `.instafy.keep` placeholder, which the first save into the folder
-  removes. Commit events reload the explorer at the event's commit; the editor's own saves are
-  not reloaded.
+  from, and checked the way that origin checks it, even after the default origin changed (the
+  Desktop app went offline or came online). On the stateless gateway it carries `baseRev` (the
+  `X-Instafy-Rev` of the read) and `expected` (the read's blob id) and commits on apply; on a
+  Desktop origin it carries `expected` when the blob id is known and is published with
+  `/git/sync {paths}`. If the file changed in the space meanwhile, the save answers 409 and the
+  edits stay in the editor with a card that offers Merge or Reload. An edit read before such a
+  change of origin or mode is checked once against the space's text when the file is opened: the
+  same base text needs nothing, a different one raises the card. A new file stays in the browser
+  until its first Save (which creates it on the default origin), and a new folder is one commit
+  of its `.instafy.keep` placeholder, which the first save into the folder removes. Commit events
+  reload the explorer at the event's commit; the editor's own saves are not reloaded, even when
+  their event arrives before the save's response. Unsaved edits warn when leaving Studio; inside
+  the Desktop app they do not block closing the window or quitting, because they stay on this
+  device.
 
 ### Embedded repositories and protected checkpoints
 
