@@ -27,11 +27,11 @@ export function useFileBufferDrafts({
     if (!store) {
       return;
     }
-    const wanted = new Map<string, CodeFile>();
+    const wanted = new Set<string>();
     if (enabled && projectId) {
       for (const file of files) {
         if (isFileBufferDirty(file)) {
-          wanted.set(`${FILE_BUFFER_DRAFT_PREFIX}${projectId}:${file.path}`, file);
+          wanted.add(`${FILE_BUFFER_DRAFT_PREFIX}${projectId}:${file.path}`);
         }
       }
     }
@@ -40,8 +40,10 @@ export function useFileBufferDrafts({
         store.remove(draft.key);
       }
     }
-    for (const [key, file] of wanted) {
-      store.set({ key, panel: "code", value: file.modified, base: file.generated });
+    // The guard only needs to know which files are unsaved, so the draft
+    // holds constants: typing does not republish the draft store.
+    for (const key of wanted) {
+      store.set({ key, panel: "code", value: "unsaved", base: "saved" });
     }
   }, [enabled, files, projectId, store]);
 

@@ -1684,7 +1684,8 @@ export function FilesPanel({
   });
   const saveButtonRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
-    // React Aria buttons drop aria-busy, so it is set on the element.
+    // React Aria buttons drop aria-busy, so it is set on the element (after
+    // every render, so a remounted button gets it too).
     const button = saveButtonRef.current;
     if (!button) {
       return;
@@ -1694,7 +1695,7 @@ export function FilesPanel({
     } else {
       button.removeAttribute("aria-busy");
     }
-  }, [versionedSaving]);
+  });
 
   // Cmd/Ctrl+S and Shift+Cmd/Ctrl+S: the two legacy saves, or the one Save
   // for both in the versioned modes (the browser's save dialog never opens).
