@@ -4621,12 +4621,23 @@ mod tests {
         status: u16,
         body: serde_json::Value,
     ) -> httpmock::Mock<'a> {
+        status_mock_for(server, key, "sha256:fingerprint", status, body).await
+    }
+
+    async fn status_mock_for<'a>(
+        server: &'a MockServer,
+        key: &str,
+        fingerprint: &str,
+        status: u16,
+        body: serde_json::Value,
+    ) -> httpmock::Mock<'a> {
         let key = key.to_string();
+        let fingerprint = fingerprint.to_string();
         server
             .mock_async(move |when, then| {
                 when.method(POST).path("/apply/status").json_body(json!({
                     "idempotencyKey": key,
-                    "requestFingerprint": "sha256:fingerprint",
+                    "requestFingerprint": fingerprint,
                 }));
                 then.status(status).json_body(body);
             })
@@ -4708,6 +4719,156 @@ mod tests {
             old_key.assert_hits_async(0).await;
             assert_eq!(key, origin_key);
         }
+    }
+
+    #[tokio::test]
+    async fn an_import_applied_before_the_upgrade_is_replayed_not_applied_again(
+    ) -> anyhow::Result<()> {
+        // The old controller prepared this import, sent /apply with the
+        // browser's own key and stopped before recording the outcome. The
+        // retry must find that receipt and only finish the import.
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping pre-upgrade import replay test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let user_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let origin_id = Uuid::new_v4();
+        let browser_key = format!("github-import-v1:before-upgrade-{project_id}");
+        let repo = "octocat/Hello-World";
+        let git_ref = "HEAD";
+        let source_revision = "0123456789012345678901234567890123456789";
+        let server = MockServer::start_async().await;
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "github-import-pre-upgrade-replay",
+        );
+        let origin_key =
+            github_import_origin_apply_key(&config.user_token_secret, &project_id, &browser_key);
+        let fingerprint = github_import_request_fingerprint(repo, source_revision, None);
+
+        crate::tests::ensure_test_user(&pool, &user_id).await?;
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into projects (id, owner_user_id, project_type, status)
+                     values ($1, $2, 'customer', 'active')",
+                    &[&project_id, &user_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into workspace_origins (id, project_id, mode, endpoint, protocols)
+                     values ($1, $2, 'hosted', $3, ARRAY['http']::text[])",
+                    &[&origin_id, &project_id, &server.base_url()],
+                )
+                .await?;
+            // Prepared by the old controller: no originApplyKeyVersion.
+            connection
+                .execute(
+                    "insert into github_import_operations (
+                        id, project_id, idempotency_key, repo, git_ref,
+                        target_path, status, claim_id, created_by,
+                        claim_expires_at, source_revision, prepared_json
+                     ) values (
+                        $1, $2, $3, $4, $5, null, 'pending', $6, $7,
+                        now() - interval '1 minute', $8, $9
+                     )",
+                    &[
+                        &Uuid::new_v4(),
+                        &project_id,
+                        &browser_key,
+                        &repo,
+                        &git_ref,
+                        &Uuid::new_v4(),
+                        &user_id,
+                        &source_revision,
+                        &PgJson(json!({
+                            "originId": origin_id.to_string(),
+                            "sourceRevision": source_revision,
+                            "authMode": "public",
+                            "persistentConnection": false,
+                            "userOauthFallbackEnabled": false,
+                        })),
+                    ],
+                )
+                .await?;
+        }
+
+        let derived_status =
+            status_mock_for(&server, &origin_key, &fingerprint, 404, json!({})).await;
+        let browser_status = status_mock_for(
+            &server,
+            &browser_key,
+            &fingerprint,
+            200,
+            json!({
+                "status": "succeeded", "rev": "applied-before-upgrade",
+                "fileCount": 2, "bytesWritten": 10,
+            }),
+        )
+        .await;
+        let apply = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/apply");
+                then.status(200)
+                    .json_body(json!({ "rev": "applied-again" }));
+            })
+            .await;
+        let sync = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/git/sync")
+                    .json_body_partial(r#"{ "expectedRev": "applied-before-upgrade" }"#);
+                then.status(200).json_body(json!({ "rev": "synced-rev" }));
+            })
+            .await;
+
+        let user_token = crate::auth::issue_controller_token(&config, &user_id)
+            .expect("issue controller user token")
+            .token;
+        let app = super::router().with_state(crate::tests::build_test_state(pool.clone(), config));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/import/github"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {user_token}"),
+                    )
+                    .body(Body::from(
+                        json!({
+                            "repo": format!("https://github.com/{repo}"),
+                            "ref": git_ref,
+                            "idempotencyKey": browser_key,
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["rev"], "synced-rev");
+        assert_eq!(body["fileCount"], 2);
+        derived_status.assert_async().await;
+        browser_status.assert_async().await;
+        sync.assert_async().await;
+        apply.assert_hits_async(0).await;
+
+        let connection = pool.get().await?;
+        connection
+            .execute("delete from projects where id = $1", &[&project_id])
+            .await?;
+        connection
+            .execute("delete from auth.users where id = $1", &[&user_id])
+            .await?;
+        Ok(())
     }
 
     #[tokio::test]
