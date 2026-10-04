@@ -137,6 +137,64 @@ describe("describeChangeRevertOutcome", () => {
   });
 });
 
+describe("describeChangeRevertOutcome for refused paths", () => {
+  // The path policy refuses a revert that would bring back a file the space
+  // never saves. The answer is the same on every attempt.
+  function refused(code: string, reason?: string, paths?: string[]): RevertWorkspaceGitCommitResult {
+    return {
+      ok: false,
+      conflict: false,
+      code,
+      errorInfo: { status: 422, code, reason, paths, message: "refused", routeUnavailable: false },
+    };
+  }
+
+  it("names the file rule, never says to try again, and offers the agent", () => {
+    const cases = [
+      [refused("excluded_path", "secret"), "This change can't be reverted here. Secret files stay out of the space. Ask the agent to undo it."],
+      [
+        refused("excluded_path", "secret", [".env"]),
+        "This change can't be reverted here because it would bring back .env. Secret files stay out of the space. Ask the agent to undo it.",
+      ],
+      [
+        refused("excluded_path"),
+        "This change can't be reverted here. Build output, dependency and cache folders aren't saved to the space. Ask the agent to undo it.",
+      ],
+      [
+        refused("excluded_path", "attachment"),
+        "This change can't be reverted here. Old chat upload files aren't saved to the space. Ask the agent to undo it.",
+      ],
+      [
+        refused("ignored_path"),
+        "This change can't be reverted here. Files that match .gitignore aren't saved to the space. Ask the agent to undo it.",
+      ],
+      [
+        refused("policy_rejected", "too_large"),
+        "This change can't be reverted here. Files larger than 20 MB aren't saved to the space. Ask the agent to undo it.",
+      ],
+      [
+        refused("policy_rejected"),
+        "This change can't be reverted here. This space's file rules refused one of its files. Ask the agent to undo it.",
+      ],
+      [refused("something_new"), "This change can't be reverted here. Ask the agent to undo it."],
+    ] as const;
+    for (const [result, message] of cases) {
+      const outcome = describeChangeRevertOutcome(result);
+      expect(outcome).toMatchObject({ intent: "warning", message, reverted: false, offerAgentUndo: true });
+      expect(outcome.message).not.toMatch(/try again/i);
+    }
+  });
+
+  it("keeps the Desktop origin's passing 422 retryable", () => {
+    expect(describeChangeRevertOutcome(refused("dismissal_not_applied"))).toMatchObject({
+      intent: "warning",
+      message:
+        "The revert isn't saved yet: work you removed is still on this computer's branch. Try again in a moment.",
+      offerAgentUndo: false,
+    });
+  });
+});
+
 describe("describeUnsavedChanges", () => {
   it("promises the next turn's save only for a save that failed", () => {
     expect(describeUnsavedChanges("save_failed", { unsavedWorkInHistory: false, saveVersionInChanges: true })).toBe(

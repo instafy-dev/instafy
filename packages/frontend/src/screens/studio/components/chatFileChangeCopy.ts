@@ -33,6 +33,12 @@ export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placeme
   return `These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is ${keptAs(placement)}.`;
 }
 
+// The space's file rules, in the words both the per-file reasons and a
+// refused revert use.
+const EXCLUDED_FOLDERS_RULE = "Build output, dependency and cache folders aren't saved to the space.";
+const SECRET_FILES_RULE = "Secret files stay out of the space.";
+const ATTACHMENT_FILES_RULE = "Old chat upload files aren't saved to the space.";
+
 // Why one file of the turn was left out of the saved history.
 export function describeFileNotSaved(notSaved: ChatMessageFileNotSaved, placement: UnsavedWorkPlacement): string {
   if (notSaved.reason === "conflicted") {
@@ -41,15 +47,15 @@ export function describeFileNotSaved(notSaved: ChatMessageFileNotSaved, placemen
   const reason = (() => {
     switch (notSaved.reason) {
       case "excluded":
-        return "Build output, dependency and cache folders aren't saved to the space.";
+        return EXCLUDED_FOLDERS_RULE;
       case "secret":
-        return "Secret files stay out of the space. Use Secrets for these values.";
+        return `${SECRET_FILES_RULE} Use Secrets for these values.`;
       case "ignored":
         return "This file matches .gitignore, so it isn't saved to the space.";
       case "too_large":
         return "Larger than 20 MB, so it isn't saved to the space.";
       case "attachment":
-        return "Old chat upload files aren't saved to the space.";
+        return ATTACHMENT_FILES_RULE;
       case "policy":
         return "This space's file rules refused this file.";
       case "unsupported":
@@ -84,6 +90,30 @@ export interface ChangeRevertOutcome {
   // Asking the agent is the way forward; the card offers it when the change
   // belongs to a message.
   offerAgentUndo: boolean;
+}
+
+// The file rule that refused a path a revert would bring back (a 422 from
+// the path policy), or null for any other failure. A refusal like this
+// happens again on every attempt, so the copy never says to try again.
+function refusedPathRule(code: string | null, reason: string | null): string | null {
+  switch (code) {
+    case "excluded_path":
+      if (reason === "secret") {
+        return SECRET_FILES_RULE;
+      }
+      if (reason === "attachment") {
+        return ATTACHMENT_FILES_RULE;
+      }
+      return EXCLUDED_FOLDERS_RULE;
+    case "ignored_path":
+      return "Files that match .gitignore aren't saved to the space.";
+    case "policy_rejected":
+      return reason === "too_large"
+        ? "Files larger than 20 MB aren't saved to the space."
+        : "This space's file rules refused one of its files.";
+    default:
+      return null;
+  }
 }
 
 const BUSY_MESSAGE = "The space is busy saving other changes. Try again in a moment.";
@@ -144,6 +174,12 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
       return outcome("warning", "The agent is saving right now. Try again in a moment.");
     case "not_saved":
       return outcome("error", "The revert wasn't saved to the space. Try again in a moment.");
+    case "dismissal_not_applied":
+      // A Desktop origin's 422 that clears by itself, unlike a refused path.
+      return outcome(
+        "warning",
+        "The revert isn't saved yet: work you removed is still on this computer's branch. Try again in a moment.",
+      );
     case "not_found":
     case "rev_not_found":
       return outcome(
@@ -161,6 +197,15 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
       return outcome("error", UNREACHABLE_MESSAGE);
     default:
       break;
+  }
+  const rule = refusedPathRule(code, info?.reason ?? null);
+  if (rule || status === 422) {
+    const brings = paths.length > 0 ? ` because it would bring back ${formatPathList(paths)}` : "";
+    return outcome(
+      "warning",
+      `This change can't be reverted here${brings}.${rule ? ` ${rule}` : ""} Ask the agent to undo it.`,
+      { offerAgentUndo: true },
+    );
   }
   // A plain 409 is an origin that is already writing.
   if (status === 409) {
