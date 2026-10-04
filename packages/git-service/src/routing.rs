@@ -74,6 +74,11 @@ pub fn is_exact_repo_root_delete(
     Ok(true)
 }
 
+/// Scope an ordinary token needs for a request. Any request whose path or
+/// query mentions `git-receive-pack` needs `git.write`; everything else but
+/// repository deletion needs `git.read`. The salvage credential does not use
+/// this classification: it is accepted only for
+/// [`is_exact_receive_pack_request`].
 pub fn required_scope(
     method: &Method,
     path: &str,
@@ -98,18 +103,44 @@ pub fn required_scope(
     Ok("git.read")
 }
 
-/// Check validated token claims against one request to `repo_name` that
-/// needs `required_scope` (see [`required_scope`]).
+/// Whether a request is exactly one of the two requests of a Smart HTTP
+/// push, and nothing else: the ref advertisement
+/// `GET /<repo>.git/info/refs?service=git-receive-pack` and the push
+/// `POST /<repo>.git/git-receive-pack` without a query. Shared by Git Edge and
+/// Git Shard, so both accept the salvage credential for the same requests.
 ///
-/// A push also accepts the controller's salvage credential instead of
-/// `git.write`, but only in its exact shape (see
-/// [`validate_salvage_push_claims`]). The shard then marks that push as a
-/// salvage push, which may only create salvage refs. A token that names
-/// `git.salvage` is only ever that credential: it is refused for every other
-/// request, and in any other shape, whatever else it holds.
+/// `git http-backend` serves reads for many other shapes that still mention
+/// `git-receive-pack` (an upload-pack request with that query appended, a
+/// second `service=` parameter, dumb-HTTP `HEAD` and object paths), so no
+/// looser match may stand in for this one.
+pub fn is_exact_receive_pack_request(method: &Method, path: &str, query: Option<&str>) -> bool {
+    let Some((repo_dir, endpoint)) = path.strip_prefix('/').and_then(|rest| rest.split_once('/'))
+    else {
+        return false;
+    };
+    if !parse_repo_segment(path).is_ok_and(|(parsed_dir, _)| parsed_dir == repo_dir) {
+        return false;
+    }
+    match (endpoint, query) {
+        ("info/refs", Some("service=git-receive-pack")) => *method == Method::GET,
+        ("git-receive-pack", None) => *method == Method::POST,
+        _ => false,
+    }
+}
+
+/// Check validated token claims against one request to `repo_name`.
+///
+/// An ordinary token needs the scope [`required_scope`] names. A token that
+/// names `git.salvage` is only ever the controller's salvage credential: it is
+/// accepted for the two requests of a push ([`is_exact_receive_pack_request`])
+/// and only in its exact shape ([`validate_salvage_push_claims`]), and refused
+/// for every other request whatever else it holds. The shard then marks that
+/// push as a salvage push, which may only create salvage refs.
 pub fn authorize_request_claims(
     claims: &AccessTokenClaims,
-    required_scope: &str,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
     repo_name: &str,
 ) -> Result<(), ServiceError> {
     if claims.protocol.as_deref() != Some("git") {
@@ -118,11 +149,16 @@ pub fn authorize_request_claims(
     if claims.project_id != repo_name {
         return Err(ServiceError::forbidden("project mismatch"));
     }
-    let names_salvage = claims.scopes.iter().any(|value| value == GIT_SALVAGE_SCOPE);
-    if names_salvage && required_scope == GIT_WRITE_SCOPE {
+    if claims.scopes.iter().any(|value| value == GIT_SALVAGE_SCOPE) {
+        if !is_exact_receive_pack_request(method, path, query) {
+            return Err(ServiceError::forbidden(
+                "git.salvage is accepted only for the requests of a push",
+            ));
+        }
         return validate_salvage_push_claims(claims, repo_name);
     }
-    if !names_salvage && claims.scopes.iter().any(|value| value == required_scope) {
+    let required_scope = required_scope(method, path, query)?;
+    if claims.scopes.iter().any(|value| value == required_scope) {
         return Ok(());
     }
     Err(ServiceError::forbidden(format!(
@@ -296,60 +332,167 @@ mod tests {
         }
     }
 
+    type RequestShape = (Method, String, Option<String>);
+
+    fn shape(method: Method, suffix: &str, query: Option<&str>) -> RequestShape {
+        (
+            method,
+            format!("/{PROJECT_ID}.git{suffix}"),
+            query.map(str::to_string),
+        )
+    }
+
+    /// The two requests of a push.
+    fn push_requests() -> Vec<RequestShape> {
+        vec![
+            shape(Method::GET, "/info/refs", Some("service=git-receive-pack")),
+            shape(Method::POST, "/git-receive-pack", None),
+        ]
+    }
+
+    /// Reads, including ones `git http-backend` serves although the path or
+    /// query mentions git-receive-pack, and near misses of the push requests.
+    fn other_requests() -> Vec<RequestShape> {
+        let object = "/objects/ab/cdef0123456789abcdef0123456789abcdef01";
+        let pack = "/objects/pack/pack-0123456789abcdef0123456789abcdef01234567.pack";
+        let receive = Some("service=git-receive-pack");
+        let mut requests = vec![
+            // Plain reads and deletion.
+            shape(Method::GET, "/info/refs", Some("service=git-upload-pack")),
+            shape(Method::GET, "/info/refs", None),
+            shape(Method::POST, "/git-upload-pack", None),
+            shape(Method::GET, "/HEAD", None),
+            shape(Method::GET, object, None),
+            shape(Method::DELETE, "", None),
+            // Reads that mention git-receive-pack. git http-backend routes by
+            // path and uses the last service= value.
+            shape(
+                Method::GET,
+                "/info/refs",
+                Some("service=git-receive-pack&service=git-upload-pack"),
+            ),
+            shape(
+                Method::GET,
+                "/info/refs",
+                Some("service=git-upload-pack&service=git-receive-pack"),
+            ),
+            shape(
+                Method::GET,
+                "/info/refs",
+                Some("x=service=git-receive-pack"),
+            ),
+            shape(
+                Method::GET,
+                "/info/refs",
+                Some("service=git-receive-pack&x=1"),
+            ),
+            shape(Method::POST, "/git-upload-pack", receive),
+            shape(Method::GET, "/HEAD", receive),
+            shape(Method::GET, object, receive),
+            shape(Method::GET, pack, receive),
+            shape(Method::GET, "/objects/info/packs", receive),
+            shape(Method::GET, "/objects/info/alternates", receive),
+            shape(Method::GET, "/objects/info/http-alternates", receive),
+            shape(Method::GET, "/info/refs/git-receive-pack", None),
+            shape(Method::GET, "/objects/git-receive-pack", None),
+            // Near misses of the two push requests.
+            shape(Method::POST, "/git-receive-pack", receive),
+            shape(Method::POST, "/git-receive-pack", Some("")),
+            shape(Method::GET, "/git-receive-pack", None),
+            shape(Method::PUT, "/git-receive-pack", None),
+            shape(Method::POST, "/info/refs", receive),
+            shape(Method::HEAD, "/info/refs", receive),
+            shape(Method::GET, "/info/refs", Some("SERVICE=GIT-RECEIVE-PACK")),
+            shape(Method::GET, "/info/refs", Some("service=git-receive-pack&")),
+            shape(Method::GET, "/INFO/REFS", receive),
+            shape(Method::POST, "/GIT-RECEIVE-PACK", None),
+            shape(Method::POST, "//git-receive-pack", None),
+            shape(Method::POST, "/git-receive-pack/", None),
+            shape(Method::POST, "/./git-receive-pack", None),
+            shape(Method::POST, "/x/../git-receive-pack", None),
+        ];
+        for path in [
+            format!("//{PROJECT_ID}.git/git-receive-pack"),
+            format!("/{PROJECT_ID}/git-receive-pack"),
+            format!("/x/{PROJECT_ID}.git/git-receive-pack"),
+            format!("{PROJECT_ID}.git/git-receive-pack"),
+        ] {
+            requests.push((Method::POST, path, None));
+        }
+        requests
+    }
+
     #[test]
-    fn salvage_credential_authorizes_only_pushes() {
+    fn exact_receive_pack_matcher_accepts_only_the_two_push_requests() {
+        for (method, path, query) in push_requests() {
+            assert!(
+                is_exact_receive_pack_request(&method, &path, query.as_deref()),
+                "{method} {path}?{query:?}"
+            );
+        }
+        for (method, path, query) in other_requests() {
+            assert!(
+                !is_exact_receive_pack_request(&method, &path, query.as_deref()),
+                "{method} {path}?{query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn salvage_credential_authorizes_only_the_two_push_requests() {
         let claims = salvage_claims();
         validate_salvage_push_claims(&claims, PROJECT_ID).expect("exact salvage claims");
 
-        let info_refs = format!("/{PROJECT_ID}.git/info/refs");
-        for (method, path, query) in [
-            (
-                Method::GET,
-                info_refs.clone(),
-                Some("service=git-receive-pack"),
-            ),
-            (
-                Method::POST,
-                format!("/{PROJECT_ID}.git/git-receive-pack"),
-                None,
-            ),
-        ] {
-            let scope = required_scope(&method, &path, query).unwrap();
-            assert_eq!(scope, GIT_WRITE_SCOPE);
-            authorize_request_claims(&claims, scope, PROJECT_ID)
+        for (method, path, query) in push_requests() {
+            authorize_request_claims(&claims, &method, &path, query.as_deref(), PROJECT_ID)
                 .unwrap_or_else(|error| panic!("{method} {path}: {error}"));
+            assert!(authorize_request_claims(
+                &claims,
+                &method,
+                &path,
+                query.as_deref(),
+                OTHER_PROJECT_ID
+            )
+            .is_err());
         }
-
-        // It is not a read or a deletion credential.
-        for (method, path, query) in [
-            (
-                Method::GET,
-                info_refs.clone(),
-                Some("service=git-upload-pack"),
-            ),
-            (Method::GET, info_refs, None),
-            (
-                Method::POST,
-                format!("/{PROJECT_ID}.git/git-upload-pack"),
-                None,
-            ),
-            (Method::GET, format!("/{PROJECT_ID}.git/HEAD"), None),
-            (Method::DELETE, format!("/{PROJECT_ID}.git"), None),
-        ] {
-            let scope = required_scope(&method, &path, query).unwrap();
-            assert_ne!(scope, GIT_WRITE_SCOPE);
+        // Never a read, a deletion, or a request that only mentions
+        // git-receive-pack.
+        for (method, path, query) in other_requests() {
             assert!(
-                authorize_request_claims(&claims, scope, PROJECT_ID).is_err(),
-                "salvage credential authorized {method} {path}"
+                authorize_request_claims(&claims, &method, &path, query.as_deref(), PROJECT_ID)
+                    .is_err(),
+                "salvage credential authorized {method} {path}?{query:?}"
             );
         }
-        assert!(authorize_request_claims(&claims, GIT_WRITE_SCOPE, OTHER_PROJECT_ID).is_err());
+    }
+
+    #[test]
+    fn a_token_naming_salvage_never_gets_another_scope() {
+        let mut requests = push_requests();
+        requests.extend(other_requests());
+        for scopes in [
+            vec!["git.read", GIT_SALVAGE_SCOPE],
+            vec!["git.read", GIT_WRITE_SCOPE, GIT_SALVAGE_SCOPE],
+            vec![GIT_SALVAGE_SCOPE, GIT_WRITE_SCOPE],
+            vec![GIT_DELETE_SCOPE, GIT_SALVAGE_SCOPE],
+        ] {
+            let mut claims = salvage_claims();
+            claims.scopes = scopes.iter().map(|scope| scope.to_string()).collect();
+            for (method, path, query) in &requests {
+                assert!(
+                    authorize_request_claims(&claims, method, path, query.as_deref(), PROJECT_ID)
+                        .is_err(),
+                    "{scopes:?} authorized {method} {path}?{query:?}"
+                );
+            }
+        }
     }
 
     #[test]
     fn salvage_credential_is_refused_in_any_other_shape() {
         let claims = salvage_claims();
         let binding = Some(Uuid::new_v4().to_string());
+        let push = format!("/{PROJECT_ID}.git/git-receive-pack");
         let changes: [(&str, fn(&mut AccessTokenClaims, Option<String>)); 18] = [
             ("project", |c, _| {
                 c.project_id = OTHER_PROJECT_ID.to_string()
@@ -390,31 +533,61 @@ mod tests {
                 "{label}: salvage claims were accepted"
             );
             assert!(
-                authorize_request_claims(&candidate, GIT_WRITE_SCOPE, PROJECT_ID).is_err(),
+                authorize_request_claims(&candidate, &Method::POST, &push, None, PROJECT_ID)
+                    .is_err(),
                 "{label}: push was authorized"
             );
         }
     }
 
     #[test]
-    fn read_and_write_tokens_are_authorized_as_before() {
+    fn ordinary_tokens_are_authorized_exactly_as_before() {
         let mut write = salvage_claims();
         write.sub = Uuid::new_v4().to_string();
         write.scopes = vec!["git.read".to_string(), GIT_WRITE_SCOPE.to_string()];
         write.exp = write.iat + 600;
-        authorize_request_claims(&write, GIT_WRITE_SCOPE, PROJECT_ID).unwrap();
-        authorize_request_claims(&write, "git.read", PROJECT_ID).unwrap();
-        assert!(authorize_request_claims(&write, GIT_DELETE_SCOPE, PROJECT_ID).is_err());
-        assert!(validate_salvage_push_claims(&write, PROJECT_ID).is_err());
-        assert!(authorize_request_claims(&write, GIT_WRITE_SCOPE, OTHER_PROJECT_ID).is_err());
-        let mut http = write.clone();
-        http.protocol = Some("http".to_string());
-        assert!(authorize_request_claims(&http, "git.read", PROJECT_ID).is_err());
-
         let mut read = write.clone();
         read.scopes = vec!["git.read".to_string()];
-        authorize_request_claims(&read, "git.read", PROJECT_ID).unwrap();
-        assert!(authorize_request_claims(&read, GIT_WRITE_SCOPE, PROJECT_ID).is_err());
+        let mut write_only = write.clone();
+        write_only.scopes = vec![GIT_WRITE_SCOPE.to_string()];
+
+        // The scope an ordinary token needs still comes from required_scope,
+        // for every shape, including the loose receive-pack matches.
+        let mut requests = push_requests();
+        requests.extend(other_requests());
+        for claims in [&write, &read, &write_only] {
+            for (method, path, query) in &requests {
+                let needed = required_scope(method, path, query.as_deref()).unwrap();
+                assert_eq!(
+                    authorize_request_claims(claims, method, path, query.as_deref(), PROJECT_ID)
+                        .is_ok(),
+                    claims.scopes.iter().any(|scope| scope == needed),
+                    "{:?} {method} {path}?{query:?}",
+                    claims.scopes
+                );
+            }
+        }
+        for (method, path, query) in push_requests() {
+            assert_eq!(
+                required_scope(&method, &path, query.as_deref()).unwrap(),
+                GIT_WRITE_SCOPE
+            );
+            authorize_request_claims(&write, &method, &path, query.as_deref(), PROJECT_ID).unwrap();
+            assert!(
+                authorize_request_claims(&read, &method, &path, query.as_deref(), PROJECT_ID)
+                    .is_err()
+            );
+        }
+        let upload = format!("/{PROJECT_ID}.git/git-upload-pack");
+        authorize_request_claims(&read, &Method::POST, &upload, None, PROJECT_ID).unwrap();
+        assert!(
+            authorize_request_claims(&write, &Method::POST, &upload, None, OTHER_PROJECT_ID)
+                .is_err()
+        );
+        assert!(validate_salvage_push_claims(&write, PROJECT_ID).is_err());
+        let mut http = write.clone();
+        http.protocol = Some("http".to_string());
+        assert!(authorize_request_claims(&http, &Method::POST, &upload, None, PROJECT_ID).is_err());
     }
 
     #[test]

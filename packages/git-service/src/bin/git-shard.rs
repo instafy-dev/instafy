@@ -14,8 +14,8 @@ use git_service::auth::{extract_token, token_lists_scope_unverified, TokenValida
 use git_service::config::GitShardConfig;
 use git_service::error::ServiceError;
 use git_service::events::{
-    build_push_event_payload, dispatch_push_event, is_receive_pack_request, parse_push_report,
-    prepare_push_reports_dir,
+    build_push_event_payload, created_refs_in_push_report, dispatch_push_event,
+    is_receive_pack_request, parse_push_report, prepare_push_reports_dir,
 };
 use git_service::git_http_backend::{
     run_git_http_backend, verify_backend_config, GitHttpBackendOptions, GitHttpBackendResponse,
@@ -23,9 +23,9 @@ use git_service::git_http_backend::{
 use git_service::policy::{install_shared_hooks, verify_shared_hooks};
 use git_service::repo::{delete_bare_repo, ensure_repo_exists};
 use git_service::routing::{
-    is_exact_repo_root_delete, parse_repo_segment, required_scope, validate_salvage_push_claims,
-    GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER,
-    GIT_DELETE_SCOPE, GIT_SALVAGE_SCOPE, GIT_WRITE_SCOPE,
+    is_exact_receive_pack_request, is_exact_repo_root_delete, parse_repo_segment,
+    validate_salvage_push_claims, GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED,
+    GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE, GIT_SALVAGE_SCOPE,
 };
 use runtime_contracts::{
     AccessTokenClaims, GIT_DELETE_TOKEN_SUBJECT, GIT_DELETE_TOKEN_TTL_SECONDS,
@@ -36,8 +36,9 @@ struct AppState {
     config: Arc<GitShardConfig>,
     /// Shared hooks directory written once at startup (`core.hooksPath`).
     hooks_dir: Arc<str>,
-    /// Where pushes record their ref updates; set when push events are on.
-    push_reports_dir: Option<Arc<Path>>,
+    /// Where pushes record their ref updates: every push when push events
+    /// are on, and salvage pushes always.
+    push_reports_dir: Arc<Path>,
     webhook_http: reqwest::Client,
     /// Verifies the controller credentials the shard checks itself:
     /// repository deletion and salvage pushes.
@@ -75,11 +76,7 @@ async fn main() -> anyhow::Result<()> {
         salvage_push: false,
     })?;
     info!(hooks_dir = %hooks_dir, "installed shared push policy");
-    let push_reports_dir: Option<Arc<Path>> = if config.events_webhook.is_some() {
-        Some(prepare_push_reports_dir(&config.repo_root)?.into())
-    } else {
-        None
-    };
+    let push_reports_dir: Arc<Path> = prepare_push_reports_dir(&config.repo_root)?.into();
 
     let bind_host = config.bind_host.clone();
     let bind_port = config.bind_port;
@@ -129,10 +126,17 @@ async fn handle_git(
         return handle_authorized_repository_delete(config, repo_dir).await;
     }
 
-    // A push that carries the salvage credential is checked here as well as
-    // at Git Edge, before anything else happens for it.
-    let salvage_push = required_scope(&parts.method, &path, parts.uri.query())? == GIT_WRITE_SCOPE
-        && authorize_salvage_push(&state, &parts.headers, &repo_name).await?;
+    // A request that carries the salvage credential is checked here as well
+    // as at Git Edge, before anything else happens for it.
+    let salvage = authorize_salvage_request(
+        &state,
+        &parts.method,
+        &path,
+        parts.uri.query(),
+        &parts.headers,
+        &repo_name,
+    )
+    .await?;
 
     // Ensure repo exists (optionally auto-init). This is blocking filesystem/git work.
     let repo_dir_for_init = repo_dir.clone();
@@ -140,11 +144,12 @@ async fn handle_git(
         .await
         .map_err(|error| ServiceError::internal(format!("repo init task failed: {error}")))??;
 
-    let push_report = match &state.push_reports_dir {
-        Some(dir) if is_receive_pack_request(&parts.method, &parts.uri) => {
-            create_push_report(dir).await
-        }
-        _ => None,
+    let wants_push_report = is_receive_pack_request(&parts.method, &parts.uri)
+        && (state.config.events_webhook.is_some() || salvage.is_some());
+    let push_report = if wants_push_report {
+        create_push_report(&state.push_reports_dir).await
+    } else {
+        None
     };
 
     let repo_root = state
@@ -158,7 +163,7 @@ async fn handle_git(
         hooks_dir: &state.hooks_dir,
         max_push_bytes: state.config.max_push_bytes,
         push_report: push_report.as_deref().and_then(Path::to_str),
-        salvage_push,
+        salvage_push: salvage.is_some(),
     };
 
     let backend =
@@ -175,7 +180,13 @@ async fn handle_git(
     };
 
     if let Some(report) = push_report {
-        dispatch_push_event_after_exit(&state, repo_dir, report, finished);
+        finish_push_after_exit(
+            &state,
+            repo_dir,
+            report,
+            finished,
+            salvage.map(|salvage| salvage.token_id),
+        );
     }
 
     Ok(response)
@@ -207,17 +218,20 @@ async fn remove_push_report(report: &Path) {
     }
 }
 
-/// Report a push's ref updates once `git receive-pack` has exited.
+/// Report a push's ref updates once `git receive-pack` has exited: log the
+/// refs a salvage push created (with its token id, never the token), and send
+/// the push event when events are on.
 ///
 /// `git http-backend` sends the response headers before receive-pack updates
 /// any ref. receive-pack runs `post-receive` with the refs it updated, old and
 /// new revision each, and exits after it, so the report is complete then. A
 /// refused push updates no ref and sends no event.
-fn dispatch_push_event_after_exit(
+fn finish_push_after_exit(
     state: &AppState,
     repo_dir: String,
     report: PathBuf,
     finished: oneshot::Receiver<()>,
+    salvage_token_id: Option<String>,
 ) {
     let webhook = state.config.events_webhook.clone();
     let default_branch = state.config.default_branch.clone();
@@ -228,6 +242,20 @@ fn dispatch_push_event_after_exit(
         let _ = finished.await;
         let contents = tokio::fs::read(&report).await;
         remove_push_report(&report).await;
+        if let Some(jti) = salvage_token_id.as_deref() {
+            match contents
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error}"))
+                .and_then(|contents| created_refs_in_push_report(contents))
+            {
+                Ok(created) => {
+                    info!(repo = %repo_dir, jti, created = ?created, "salvage push finished");
+                }
+                Err(error) => {
+                    warn!(?error, repo = %repo_dir, jti, "failed to read salvage push report");
+                }
+            }
+        }
         let Some(webhook) = webhook else {
             return;
         };
@@ -275,32 +303,55 @@ async fn authorize_repository_delete(
     validate_repository_delete_claims(&claims, repo_name)
 }
 
-/// Whether a push may run as a salvage push, which may only create salvage
-/// refs (see `git_service::policy::SALVAGE_PUSH_ENV`).
+/// A request the shard authorized with the controller's salvage credential.
+struct SalvageRequest {
+    /// The credential's token id (`jti`), for the audit log.
+    token_id: String,
+}
+
+/// Check a request whose bearer lists `git.salvage`.
 ///
-/// Only a bearer that lists `git.salvage` is checked here. It must verify
-/// against `GIT_JWKS_URL` and `GIT_AUDIENCE` and have the exact salvage shape
-/// for this repository, or the request is refused, so a salvage credential
-/// never pushes as an ordinary `git.write` one. Every other push is trusted to
-/// Git Edge as before and runs without the salvage flag.
-async fn authorize_salvage_push(
+/// Such a bearer is accepted only for the two requests of a push (see
+/// `is_exact_receive_pack_request`), only if it verifies against
+/// `GIT_JWKS_URL` and `GIT_AUDIENCE`, and only in the exact salvage shape for
+/// this repository. Otherwise the request is refused, so the salvage
+/// credential never reads and never pushes as an ordinary `git.write` one. A
+/// push it authorizes runs as a salvage push, which may only create salvage
+/// refs (see `git_service::policy::SALVAGE_PUSH_ENV`). Requests without it are
+/// trusted to Git Edge as before.
+async fn authorize_salvage_request(
     state: &AppState,
+    method: &axum::http::Method,
+    path: &str,
+    query: Option<&str>,
     headers: &HeaderMap,
     repo_name: &str,
-) -> Result<bool, ServiceError> {
+) -> Result<Option<SalvageRequest>, ServiceError> {
     let Ok(token) = extract_token(headers) else {
-        return Ok(false);
+        return Ok(None);
     };
     if !token_lists_scope_unverified(&token, GIT_SALVAGE_SCOPE) {
-        return Ok(false);
+        return Ok(None);
+    }
+    if !is_exact_receive_pack_request(method, path, query) {
+        return Err(ServiceError::forbidden(
+            "git.salvage is accepted only for the requests of a push",
+        ));
     }
     let claims = state
         .token_validator
         .validate(&token, Some(&state.config.audience))
         .await?;
     validate_salvage_push_claims(&claims, repo_name)?;
-    info!(repo = %repo_name, "salvage push authorized");
-    Ok(true)
+    info!(
+        repo = %repo_name,
+        jti = %claims.jti,
+        method = %method,
+        "salvage credential accepted"
+    );
+    Ok(Some(SalvageRequest {
+        token_id: claims.jti,
+    }))
 }
 
 fn validate_repository_delete_claims(
@@ -409,7 +460,9 @@ mod tests {
         AppState {
             token_validator: TokenValidator::new(http.clone(), config.jwks_url.clone()),
             hooks_dir: hooks_dir.to_str().expect("utf-8 hooks dir").into(),
-            push_reports_dir: None,
+            push_reports_dir: prepare_push_reports_dir(&config.repo_root)
+                .expect("prepare push reports dir")
+                .into(),
             config,
             webhook_http: http,
         }
@@ -570,6 +623,52 @@ mod tests {
             .await;
             assert!(
                 matches!(result, Err(ServiceError::Unauthorized(_))),
+                "{method} {uri}"
+            );
+            assert!(!repo_path.exists(), "{method} {uri} created the repository");
+        }
+
+        // Any other request with that bearer is refused before the token is
+        // even verified, including reads that mention git-receive-pack.
+        for (method, uri) in [
+            (
+                "GET",
+                format!("/{project_id}.git/info/refs?service=git-upload-pack"),
+            ),
+            (
+                "GET",
+                format!(
+                    "/{project_id}.git/info/refs?service=git-receive-pack&service=git-upload-pack"
+                ),
+            ),
+            (
+                "POST",
+                format!("/{project_id}.git/git-upload-pack?service=git-receive-pack"),
+            ),
+            (
+                "GET",
+                format!("/{project_id}.git/HEAD?service=git-receive-pack"),
+            ),
+            (
+                "GET",
+                format!("/{project_id}.git/objects/info/packs?service=git-receive-pack"),
+            ),
+            (
+                "POST",
+                format!("/{project_id}.git/git-receive-pack?service=git-receive-pack"),
+            ),
+        ] {
+            let result = handle_git(
+                State(state.clone()),
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await;
+            assert!(
+                matches!(result, Err(ServiceError::Forbidden(_))),
                 "{method} {uri}"
             );
             assert!(!repo_path.exists(), "{method} {uri} created the repository");

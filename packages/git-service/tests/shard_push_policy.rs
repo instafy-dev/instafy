@@ -265,6 +265,59 @@ impl Shard {
     fn clear_spawns(&self) {
         let _ = std::fs::remove_file(&self.spawn_log);
     }
+
+    /// Wait until the shard's log has a line containing every one of
+    /// `needles`, and return that line.
+    fn wait_for_log_line(&self, needles: &[&str]) -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let log =
+                std::fs::read_to_string(self.root.path().join("shard.log")).unwrap_or_default();
+            if let Some(line) = log
+                .lines()
+                .find(|line| needles.iter().all(|needle| line.contains(needle)))
+            {
+                return line.to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no shard log line with {needles:?}: {log}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.root.path().join("shard.log")).unwrap_or_default()
+    }
+
+    /// Send one raw HTTP request with an empty body, as Git Edge would
+    /// forward it, and return the status code and body.
+    fn http(&self, method: &str, target: &str, bearer: Option<&str>) -> (u16, Vec<u8>) {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let mut request = format!("{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        if let Some(token) = bearer {
+            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
+        }
+        request.push_str("Content-Length: 0\r\nConnection: close\r\n\r\n");
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        let head_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("an HTTP response head");
+        let head = String::from_utf8_lossy(&response[..head_end]).to_string();
+        let status = head
+            .split(' ')
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or_else(|| panic!("no status in {head:?}"));
+        (status, response[head_end + 4..].to_vec())
+    }
 }
 
 impl Drop for Shard {
@@ -1055,11 +1108,14 @@ fn salvage_credential_may_only_create_salvage_refs() {
         &[
             ("GIT_JWKS_URL", jwks.as_str()),
             ("GIT_MAX_BLOB_BYTES", "4096"),
+            ("RUST_LOG", "info"),
         ],
     );
     let client = Client::clone_from(&shard);
     let initial = client.head();
-    let token = issuer.sign(&salvage_claims(&shard.project_id));
+    let claims = salvage_claims(&shard.project_id);
+    let token_id = claims["jti"].as_str().unwrap().to_string();
+    let token = issuer.sign(&claims);
 
     let work = client.commit_file("notes/kept.md", b"kept\n", "kept");
     let salvage = salvage_ref(&work);
@@ -1077,6 +1133,12 @@ fn salvage_credential_may_only_create_salvage_refs() {
     // With it the ref is created, and only created: never moved or deleted.
     client.push_as_ok(&token, &[&format!("{work}:{salvage}")]);
     assert_eq!(shard.repo_rev(&salvage).unwrap(), work);
+    // The shard logs the token id and the refs it created, never the token.
+    shard.wait_for_log_line(&["salvage push finished", &token_id, &salvage]);
+    assert!(
+        !shard.log().contains(&token),
+        "the shard logged the salvage token"
+    );
     let later = client.commit_file("notes/later.md", b"later\n", "later");
     for refspec in [format!("+{later}:{salvage}"), format!(":{salvage}")] {
         let stderr = client.push_as_refused(&token, &[&refspec]);
@@ -1160,6 +1222,60 @@ fn salvage_credential_may_only_create_salvage_refs() {
     assert!(stderr.contains("fsck error in packed object"), "{stderr}");
     assert!(!shard.has_object(&bad));
     assert!(shard.repo_rev(&salvage_ref(&bad)).is_none());
+}
+
+#[test]
+fn salvage_credential_cannot_read() {
+    let issuer = TokenIssuer::start();
+    let jwks = issuer.jwks_url();
+    let shard = Shard::start("salvage-reads", &[("GIT_JWKS_URL", jwks.as_str())]);
+    let client = Client::clone_from(&shard);
+    let head = client.head();
+    let token = issuer.sign(&salvage_claims(&shard.project_id));
+    let repo = format!("/{}.git", shard.project_id);
+    let receive = "service=git-receive-pack";
+
+    // Every read is refused, including the shapes git http-backend serves as
+    // reads although they mention git-receive-pack.
+    for (method, target) in [
+        ("GET", format!("{repo}/info/refs?service=git-upload-pack")),
+        ("GET", format!("{repo}/info/refs")),
+        (
+            "GET",
+            format!("{repo}/info/refs?{receive}&service=git-upload-pack"),
+        ),
+        ("GET", format!("{repo}/info/refs?x={receive}")),
+        ("POST", format!("{repo}/git-upload-pack?{receive}")),
+        ("GET", format!("{repo}/HEAD?{receive}")),
+        ("GET", format!("{repo}/objects/info/packs?{receive}")),
+        (
+            "GET",
+            format!("{repo}/objects/{}/{}?{receive}", &head[..2], &head[2..]),
+        ),
+    ] {
+        let (status, body) = shard.http(method, &target, Some(&token));
+        assert_eq!(status, 403, "{method} {target}");
+        let body = String::from_utf8_lossy(&body);
+        assert!(!body.contains(&head), "{method} {target} leaked {body}");
+    }
+
+    // The same dumb read without the credential is served, so the refusal
+    // above is the salvage check, not the request shape.
+    let (status, body) = shard.http("GET", &format!("{repo}/HEAD?{receive}"), None);
+    assert_eq!(status, 200);
+    assert_eq!(
+        String::from_utf8_lossy(&body).trim(),
+        "ref: refs/heads/main"
+    );
+
+    // The ref advertisement of a push is served to it.
+    let (status, _) = shard.http("GET", &format!("{repo}/info/refs?{receive}"), Some(&token));
+    assert_eq!(status, 200);
+
+    // A clone with the credential fails.
+    let header = format!("http.extraHeader=Authorization: Bearer {token}");
+    let output = client.git(&["-c", &header, "clone", "-q", &shard.url(), "stolen"]);
+    assert!(!output.status.success(), "a salvage credential cloned");
 }
 
 #[test]
