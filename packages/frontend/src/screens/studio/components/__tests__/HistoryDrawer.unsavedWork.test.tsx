@@ -471,9 +471,34 @@ describe("HistoryDrawer: Unsaved work", () => {
     await press(row(container, RECOVERY), "unsaved-work-restore-rest");
     expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ keep: ["src/a.ts", "src/b.ts"] }));
     const status = q(container, "history-status")?.textContent ?? "";
-    expect(status).toBe("Nothing else to restore. Kept the current version of src/a.ts, src/b.ts.");
+    expect(status).toBe(
+      "Kept the current version of src/a.ts, src/b.ts. The saved version already has the rest of this work.",
+    );
     expect(status).not.toContain("Secret and ignored");
     expect(status).not.toContain("Restored as a new version");
+  });
+
+  it("never says the space has work it refused when nothing was restored", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY, { paths: [".env"] })]));
+    mocks.restoreRecovery.mockResolvedValue({
+      ok: true,
+      rev: HEAD,
+      baseRev: HEAD,
+      committed: false,
+      notRestored: [".env"],
+      refDeleted: true,
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-restore");
+    const status = q(container, "history-status")?.textContent ?? "";
+    expect(status).toBe(
+      "Not restored: .env. Secret and ignored files stay out of the space. " +
+        "The saved version already has the rest of this work.",
+    );
+    expect(status).not.toContain("already has this work");
+    expect(status).not.toContain("Nothing to restore");
   });
 
   describe("a 404 at the ref", () => {
