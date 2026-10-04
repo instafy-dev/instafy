@@ -160,6 +160,19 @@ export interface CodeFile {
   modifiedAt?: string | null;
   generated: string;
   modified: string;
+  /**
+   * Commit the read that produced `generated` was served from
+   * (`X-Instafy-Rev`, stateless gateway only). A save sends it as `baseRev`.
+   */
+  baseRev?: string | null;
+  /** Git blob id of `generated` (from the read, or computed after a save). */
+  blobOid?: string | null;
+  /** Origin that served the read; a save is pinned to it. */
+  originId?: string | null;
+  /** A buffer that was never saved (the file does not exist in the space yet). */
+  isNew?: boolean;
+  /** Epoch ms of the read that produced `generated`. */
+  readAt?: number | null;
 }
 
 export interface CodeWorkspace {
