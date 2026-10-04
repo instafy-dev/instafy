@@ -12,6 +12,14 @@ const mocks = vi.hoisted(() => ({
   readAt: vi.fn(),
   getRawUrl: vi.fn(),
   versioning: { mode: "legacy" as "legacy" | "stateless", originId: null as string | null },
+  /** What the panel asked the versioning hook for, render by render. */
+  versioningInputs: [] as Array<{ projectId?: string | null; origin?: unknown }>,
+  projectId: "space-a",
+  runtime: {
+    effectiveRuntimeId: "runtime-1",
+    desktopOrigin: null as unknown,
+    desktopOriginProjectId: null as string | null,
+  },
 }));
 
 vi.mock("../../../../sdk/instafy", () => ({
@@ -22,12 +30,13 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 vi.mock("../../../../workspace/useWorkspaceVersioning", () => ({
-  useWorkspaceVersioning: () => ({ mode: mocks.versioning.mode, originId: mocks.versioning.originId }),
+  useWorkspaceVersioning: (input: { projectId?: string | null; origin?: unknown }) => {
+    mocks.versioningInputs.push(input);
+    return { mode: mocks.versioning.mode, originId: mocks.versioning.originId };
+  },
 }));
-vi.mock("../../../../runtime/useRuntime", () => ({
-  useRuntime: () => ({ effectiveRuntimeId: "runtime-1", desktopOrigin: null }),
-}));
-vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ activeProjectId: "space-a" }) }));
+vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => mocks.runtime }));
+vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ activeProjectId: mocks.projectId }) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 vi.mock("../../../../conversations/useConversation", () => ({
   useConversation: () => ({
@@ -101,6 +110,10 @@ describe("SkillsPanel reads", () => {
     vi.clearAllMocks();
     mocks.versioning.mode = "legacy";
     mocks.versioning.originId = null;
+    mocks.versioningInputs.length = 0;
+    mocks.projectId = "space-a";
+    mocks.runtime.desktopOrigin = null;
+    mocks.runtime.desktopOriginProjectId = null;
     mocks.list.mockImplementation(async ({ path }: { path: string }) =>
       path === ".agents/skills"
         ? [{ name: "writer", path: ".agents/skills/writer", kind: "directory" }]
@@ -141,5 +154,23 @@ describe("SkillsPanel reads", () => {
     expect(mocks.listAt).toHaveBeenCalledTimes(2);
     expect(mocks.listAt).toHaveBeenLastCalledWith(expect.objectContaining({ originId: "origin-2" }));
     expect(mocks.list).not.toHaveBeenCalled();
+  });
+
+  it("never pairs a cloud space with the previous Desktop space's origin", async () => {
+    const desk = { originId: "desk-origin", endpoint: "http://desk", mode: "desktop" };
+    mocks.projectId = "desk-space";
+    mocks.runtime.desktopOrigin = desk;
+    mocks.runtime.desktopOriginProjectId = "desk-space";
+    await render();
+    expect(mocks.versioningInputs.at(-1)).toMatchObject({ projectId: "desk-space", origin: desk });
+
+    // The user opens a cloud space; the store still holds the Desktop summary.
+    mocks.versioningInputs.length = 0;
+    mocks.projectId = "space-a";
+    await render();
+    expect(mocks.versioningInputs.length).toBeGreaterThan(0);
+    for (const input of mocks.versioningInputs) {
+      expect(input).toMatchObject({ projectId: "space-a", origin: null });
+    }
   });
 });

@@ -65,7 +65,7 @@ import {
 } from "./useFilesPanelWorkspaceTree";
 import type { FilesPanelMobileView } from "../../studioFilesMobileView";
 import { getStudioWorkspaceOwnerKey, type StudioDirectoryListingListener } from "../useStudioKnownFiles";
-import { useWorkspaceVersioning } from "../../../workspace/useWorkspaceVersioning";
+import { useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import {
   filesOwnRevisions,
   isFileBufferDirty,
@@ -487,8 +487,9 @@ export function FilesPanel({
     projectCapabilitiesResolved === false || canWriteProject === false;
   // How the default origin keeps versions. Legacy (the stateful gateway, or
   // unknown) keeps today's two saves and routing; the stateless gateway and
-  // Desktop origins get one Save pinned to that origin.
-  const versioningState = useWorkspaceVersioning({ projectId: activeProjectId, origin: desktopOrigin });
+  // Desktop origins get one Save pinned to that origin. The active hook never
+  // pairs this project with the previous project's origin after a switch.
+  const versioningState = useActiveWorkspaceVersioning();
   const filesVersioning = useMemo<FilesVersioning>(
     () => ({ mode: versioningState.mode, originId: versioningState.originId }),
     [versioningState.mode, versioningState.originId],
