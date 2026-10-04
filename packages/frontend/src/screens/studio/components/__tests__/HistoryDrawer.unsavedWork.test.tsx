@@ -471,6 +471,98 @@ describe("HistoryDrawer: Unsaved work", () => {
     );
   });
 
+  describe("Use this version on Desktop", () => {
+    const desktop = () =>
+      versioning({ mode: "desktop", chromeMode: "desktop", firstPaintMode: "desktop", originMode: "desktop", stateless: false });
+    const FOLDER_BLOB = "c".repeat(40);
+
+    function conflictOn(paths: string[]) {
+      mocks.restoreRecovery.mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths }),
+        originId: "origin-1",
+        originMode: "desktop",
+      });
+    }
+
+    function folder({ dirty, present = true }: { dirty: string[]; present?: boolean }) {
+      mocks.readAt.mockImplementation(async (params: { path: string; ref?: string | null }) => {
+        if (params.ref) {
+          return { ok: true, file: { path: params.path, contentBase64: btoa("kept\n"), size: 5 } };
+        }
+        if (!present) {
+          return { ok: false, notFound: true, error: originError(404, undefined, { message: "file not found" }), originId: "origin-1", originMode: "desktop" };
+        }
+        return { ok: true, file: { path: params.path, contentBase64: btoa("local\n"), size: 6, blobOid: FOLDER_BLOB } };
+      });
+      mocks.fetchStatus.mockImplementation(async (params: { scope?: string | null }) =>
+        params.scope === undefined
+          ? { supported: true, dirtyCount: dirty.length, dirtyPaths: [], pathGroups: [] }
+          : {
+              supported: true,
+              dirtyCount: dirty.length,
+              dirtyPaths: dirty.map((path) => ({ path, code: " M" })),
+              pathGroups: [],
+              hasMoreFiles: false,
+            },
+      );
+    }
+
+    it("refuses to write over edits the folder holds outside any commit", async () => {
+      conflictOn(["src/a.ts"]);
+      folder({ dirty: ["src/a.ts"] });
+      await render(desktop());
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.fetchStatus).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "project-1", originId: "origin-1", routing: "default", scope: "src" }),
+      );
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Files on this computer have edits this restore would change: src/a.ts. Save them first.",
+      );
+      expect(q(row(container, RECOVERY), "unsaved-work-path-resolved")).toBeNull();
+    });
+
+    it("writes only over the copy it checked", async () => {
+      conflictOn(["src/a.ts"]);
+      folder({ dirty: ["src/other.ts"] });
+      mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] });
+      await render(desktop());
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.readAt).toHaveBeenCalledWith({ projectId: "project-1", originId: "origin-1", path: "src/a.ts", routing: "default" });
+      expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+      expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ expected: { "src/a.ts": FOLDER_BLOB }, baseRev: NEW_HEAD });
+    });
+
+    it("expects the file to stay absent when the folder does not have it", async () => {
+      conflictOn(["src/a.ts"]);
+      folder({ dirty: [], present: false });
+      mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] });
+      await render(desktop());
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ expected: { "src/a.ts": null } });
+    });
+
+    it("writes nothing when the folder cannot be checked", async () => {
+      conflictOn(["src/a.ts"]);
+      folder({ dirty: [] });
+      mocks.fetchStatus.mockImplementation(async (params: { scope?: string | null }) =>
+        params.scope === undefined ? { supported: true, dirtyCount: 0, dirtyPaths: [], pathGroups: [] } : null,
+      );
+      await render(desktop());
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Couldn't check this file in the folder on this computer, so nothing was saved. Try again.",
+      );
+    });
+  });
+
   it("removes for everyone after a confirm, and says when it was already gone", async () => {
     mocks.dismissRecovery.mockResolvedValue({ ok: true, dismissed: false, missing: true, originId: "origin-1", originMode: "hosted" });
     mocks.fetchRecovery.mockResolvedValueOnce(list([recoveryEntry(RECOVERY)])).mockResolvedValue(list([]));

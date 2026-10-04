@@ -13,6 +13,7 @@ import { HistoryConfirmDialog } from "./HistoryConfirmDialog";
 import {
   ALREADY_REMOVED_COPY,
   conflictedOnComputerCopy,
+  desktopFolderUncheckedCopy,
   formatFileCount,
   historyFailureCopy,
   keptOnComputerCopy,
@@ -29,6 +30,7 @@ import {
   type HistoryNotice,
   type HistoryOriginKind,
 } from "./historyCopy";
+import { checkDesktopFolderPath } from "./unsavedWorkPathChecks";
 import { formatRelativeCommitTime } from "./workspaceGitReviewShared";
 
 const LEASE_RETRY_DELAY_MS = 1_500;
@@ -263,15 +265,36 @@ export function UnsavedWorkSection({
         });
         return;
       }
+      // Desktop writes into the folder on this computer: never over edits
+      // that exist in no commit, and only over the copy just checked.
+      let expected: Record<string, string | null> | null = null;
+      if (originKind === "desktop") {
+        const folder = await checkDesktopFolderPath({ projectId, originId, path });
+        if (!folder.ok) {
+          onNotice(
+            folder.reason === "dirty"
+              ? { tone: "warning", text: restoreDirtyPathsCopy([path]) }
+              : { tone: "error", text: desktopFolderUncheckedCopy(folder.error) },
+          );
+          return;
+        }
+        expected = { [path]: folder.blobOid };
+      }
       const saved = await controllerClient.workspace.save.changes({
         projectId,
         originId,
         files,
         deletes,
         baseRev: head,
+        ...(expected ? { expected } : {}),
         leaseConflictRetryDelayMs: LEASE_RETRY_DELAY_MS,
       });
       if (!saved.ok) {
+        if (originKind === "desktop" && saved.error.code === "head_moved") {
+          // The folder's copy changed after the check.
+          onNotice({ tone: "warning", text: restoreDirtyPathsCopy([path]) });
+          return;
+        }
         if (saved.error.code === "head_moved" || saved.error.code === "path_type_conflict") {
           setConflicts((previous) =>
             previous[entry.ref]

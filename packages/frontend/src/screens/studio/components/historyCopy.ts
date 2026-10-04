@@ -309,6 +309,14 @@ export function restoreDirtyPathsCopy(paths: string[]): string {
   return `Files on this computer have edits this restore would change: ${formatPathList(paths)}. Save them first.`;
 }
 
+export const DESKTOP_FOLDER_UNCHECKED_COPY =
+  "Couldn't check this file in the folder on this computer, so nothing was saved. Try again.";
+
+/** "Use this version" on Desktop could not confirm the folder's copy is safe to replace. */
+export function desktopFolderUncheckedCopy(error: OriginError | null | undefined): string {
+  return (error ? sharedOriginErrorCopy(error, "desktop") : null) ?? DESKTOP_FOLDER_UNCHECKED_COPY;
+}
+
 export function unsavedWorkAskAgentPrompt(path: string, ref: string): string {
   return `Merge \`${path}\` from \`${ref}\` into the saved version. Read it with \`instafy git show ${ref}:${path}\`.`;
 }
