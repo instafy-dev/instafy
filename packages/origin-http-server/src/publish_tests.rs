@@ -2203,6 +2203,9 @@ fn the_spawn_rule_catches_a_module_that_runs_git_itself() {
         "fn f() {} // #[cfg(test)]\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
         "/* #[cfg(test)] */\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
         "const NOTE: &str = r#\"x #[cfg(test)]\nmod fake {\"#;\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
+        // A string holding the marker and the start of a module, closed
+        // by a later string: only masking strings keeps `wire` checked.
+        "const A: &str = \"#[cfg(test)] mod fake {\";\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\nconst B: &str = \"}\";\n",
         // Production code after an inline test module whose literals hold
         // braces.
         "#[cfg(test)]\nmod tests {\n    fn t() { let _ = \"}\"; let _ = '{'; let _ = r#\"}\"#; }\n}\nfn run() { let _ = Command::new(PROGRAM); }\n",
