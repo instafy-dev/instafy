@@ -80,6 +80,19 @@ function formatPathList(paths: readonly string[], max = 3): string {
   return `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
 }
 
+// The confirm dialog of "Revert this change". Before it offers Revert it
+// lists the files the change's saved version touched: a version can carry
+// more than this card's files (earlier work saved with it), and a revert
+// undoes all of it.
+export const REVERT_CHECKING_MESSAGE = "Checking what this change includes…";
+export const REVERT_CONFIRM_MESSAGE = "A new version that undoes it is saved on top. Nothing is removed from history.";
+export const REVERT_CHECK_FAILED_MESSAGE = "Couldn't check what this change includes. Try again.";
+
+export function describeRevertOtherWork(otherPaths: readonly string[], canAskAgent: boolean): string {
+  const undo = `This change was saved together with other work, so reverting it here would also undo ${formatPathList(otherPaths)}.`;
+  return canAskAgent ? `${undo} Ask the agent to undo just this change.` : undo;
+}
+
 export interface ChangeRevertOutcome {
   intent: "success" | "info" | "warning" | "error";
   message: string;
@@ -144,7 +157,8 @@ export function revertRetryDelayMs(result: RevertWorkspaceGitCommitResult | null
 const FALLBACK_MESSAGE = "Couldn't revert this change. Try again, or ask the agent to undo it.";
 
 // What "Revert this change" did, as one toast: the request is
-// `/git/revert-commit {commit: head, base}` for the change's canonical range.
+// `/git/revert-commit {commit: head}`, which undoes that saved version's own
+// change (against its first parent).
 export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResult | null): ChangeRevertOutcome {
   const outcome = (
     intent: ChangeRevertOutcome["intent"],
@@ -235,8 +249,8 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
   if (status === 409) {
     return outcome("warning", BUSY_MESSAGE);
   }
-  // A 400 is a change the origin cannot revert by itself, such as a merge
-  // whose first parent it does not know.
+  // A 400 is a change the origin cannot revert by itself, such as a merge,
+  // which needs a base the card does not send.
   if (status === 400) {
     return outcome("warning", "This change can't be reverted here. Ask the agent to undo it.", {
       offerAgentUndo: true,

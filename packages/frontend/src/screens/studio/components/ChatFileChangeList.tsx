@@ -20,8 +20,12 @@ import type {
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
 import {
+  REVERT_CHECK_FAILED_MESSAGE,
+  REVERT_CHECKING_MESSAGE,
+  REVERT_CONFIRM_MESSAGE,
   describeChangeRevertOutcome,
   describeFileNotSaved,
+  describeRevertOtherWork,
   describeUnsavedChanges,
   revertRetryDelayMs,
 } from "./chatFileChangeCopy";
@@ -29,6 +33,7 @@ import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./mes
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
+  fetchHistoryReview: fetchWorkspaceGitHistoryReviewFromController,
   revertPaths: revertWorkspaceGitPathsFromController,
   revertCommit: revertWorkspaceGitCommitFromController,
 } = controllerClient.workspace.git;
@@ -78,6 +83,14 @@ type ChatFileDiffStat =
   | { kind: "error"; error: string | null };
 
 type ChatFileUndoStatus = "reverted" | "removed";
+
+// What "Revert this change" would undo, checked before Revert is offered:
+// the files the change's saved version itself touched.
+type ChatChangeRevertScope =
+  | { status: "checking" }
+  | { status: "ready"; paths: string[] }
+  | { status: "other_work"; otherPaths: string[] }
+  | { status: "failed" };
 
 type ResolvedChatFileChange = {
   file: ChatMessageFileChange;
@@ -333,9 +346,10 @@ export function ChatFileChangeList({
     saveVersionInChanges: versioning.mode === "legacy",
   };
   // Every save is a version on the stateless gateway and on a Desktop origin.
-  // There the change is undone by reverting its canonical commit range as a
-  // new version, never by discarding paths. Until a probe answers, the mode
-  // is legacy and the card behaves as it always has.
+  // There the change is undone by reverting the version its save published
+  // (the canonical range's head) as a new version, never by discarding
+  // paths. Until a probe answers, the mode is legacy and the card behaves as
+  // it always has.
   const savesAreVersions = versioning.mode === "stateless" || versioning.mode === "desktop";
   const revertRange = savesAreVersions && commitRange?.source === "git" ? commitRange : null;
   const projectWriteEnabled =
@@ -357,6 +371,8 @@ export function ChatFileChangeList({
   const [revertingChange, setRevertingChange] = useState(false);
   // The files were undone by a saved revert version, not by a path discard.
   const [revertedByVersion, setRevertedByVersion] = useState(false);
+  const [revertScope, setRevertScope] = useState<ChatChangeRevertScope | null>(null);
+  const revertScopeRequestRef = useRef(0);
   // Set when the dialog closes after a revert request: focus goes back to
   // the card, never to the page body.
   const [returnFocusAfterRevert, setReturnFocusAfterRevert] = useState(false);
@@ -826,22 +842,78 @@ export function ChatFileChangeList({
   // saved) are not something a second revert can reach.
   const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange && !revertedByVersion);
 
-  // "Revert this change": a new version that undoes the run's canonical range
-  // (`{commit: head, base}`), on the origin the versioning probe described.
+  // The canonical range's head is the version this turn's save published.
+  // Its own change (against its first parent) is what the revert undoes, and
+  // it can hold more than this card's files: a save that publishes work an
+  // earlier turn could not publish carries that work too. So the dialog
+  // first lists the files that version touched, and offers Revert only when
+  // every one of them is on this card.
+  const checkRevertScope = useCallback(async () => {
+    const request = revertScopeRequestRef.current + 1;
+    revertScopeRequestRef.current = request;
+    if (!projectId || !revertRange) {
+      setRevertScope({ status: "failed" });
+      return;
+    }
+    setRevertScope({ status: "checking" });
+    const review = await fetchWorkspaceGitHistoryReviewFromController({
+      projectId,
+      commit: revertRange.head,
+      originId: versioning.originId,
+      routing: "default",
+    });
+    if (revertScopeRequestRef.current !== request) {
+      return;
+    }
+    if (!review || !review.supported || review.busy || review.error) {
+      setRevertScope({ status: "failed" });
+      return;
+    }
+    const cardPaths = new Set(uniquePaths);
+    const paths = Array.from(
+      new Set(review.entries.map((entry) => normalizeWorkspacePath(entry.path)).filter((path) => path.length > 0)),
+    );
+    const otherPaths = paths.filter((path) => !cardPaths.has(path));
+    setRevertScope(otherPaths.length > 0 ? { status: "other_work", otherPaths } : { status: "ready", paths });
+  }, [projectId, revertRange, uniquePaths, versioning.originId]);
+
+  const openRevertDialog = useCallback(() => {
+    setRevertConfirmOpen(true);
+    void checkRevertScope();
+  }, [checkRevertScope]);
+
+  const closeRevertDialog = useCallback(() => {
+    revertScopeRequestRef.current += 1;
+    setRevertConfirmOpen(false);
+  }, []);
+
+  const askAgentFromRevertDialog = useCallback(() => {
+    closeRevertDialog();
+    handleUndoRequest();
+  }, [closeRevertDialog, handleUndoRequest]);
+
+  // "Revert this change": a new version that undoes the saved version the
+  // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
+  // that commit's own change), on the origin the versioning probe described.
   // The dialog stays open, busy, until the request settles, so focus can
   // return to a control that is still there and enabled.
   const handleRevertChange = useCallback(async () => {
-    if (!projectId || !revertRange || !projectWriteEnabled || revertingChange) {
-      setRevertConfirmOpen(false);
+    if (
+      !projectId ||
+      !revertRange ||
+      !projectWriteEnabled ||
+      revertingChange ||
+      revertScope?.status !== "ready"
+    ) {
       return;
     }
+    const revertedVersionPaths = new Set(revertScope.paths);
     setRevertingChange(true);
     try {
       const revert = () =>
         revertWorkspaceGitCommitFromController({
           projectId,
           commit: revertRange.head,
-          base: revertRange.base,
           originId: versioning.originId,
           routing: "default",
           // An agent checkpoint holds the project lease briefly: retry once.
@@ -858,13 +930,16 @@ export function ChatFileChangeList({
       const outcome = describeChangeRevertOutcome(result);
       if (outcome.reverted) {
         const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));
-        // A version revert only undoes what reached the saved history. Files
-        // the turn's save left out (Not saved) and folders that are never
-        // saved stay as they are, and keep their state on the card.
+        // A version revert only undoes what that version touched. Files the
+        // turn's save left out (Not saved) and folders that are never saved
+        // stay as they are, and keep their state on the card.
         const targetPaths = pendingEntries
           .filter(
             ({ file, workspacePath }) =>
-              !left.has(workspacePath) && !file.notSaved && !isExcludedFromSpaceHistoryPath(workspacePath),
+              revertedVersionPaths.has(workspacePath) &&
+              !left.has(workspacePath) &&
+              !file.notSaved &&
+              !isExcludedFromSpaceHistoryPath(workspacePath),
           )
           .map(({ workspacePath }) => workspacePath);
         setRevertedByVersion(true);
@@ -904,6 +979,7 @@ export function ChatFileChangeList({
     projectId,
     projectWriteEnabled,
     revertRange,
+    revertScope,
     revertingChange,
     showStatus,
     totalCount,
@@ -1089,7 +1165,7 @@ export function ChatFileChangeList({
                     ref={revertChipRef}
                     type="button"
                     className={actionChipClass}
-                    onClick={() => setRevertConfirmOpen(true)}
+                    onClick={openRevertDialog}
                     disabled={revertingChange}
                     aria-busy={revertingChange || undefined}
                     title="Save a new version that undoes this change"
@@ -1354,35 +1430,53 @@ export function ChatFileChangeList({
           isKeyboardDismissDisabled={revertingChange}
           onOpenChange={(open) => {
             if (!open && !revertingChange) {
-              setRevertConfirmOpen(false);
+              closeRevertDialog();
             }
           }}
           dialogAriaLabelledBy={`${cardIdBase}-revert-title`}
           modalClassName="p-5"
         >
-          <div data-testid="chat-file-change-revert-dialog">
+          <div data-testid="chat-file-change-revert-dialog" data-state={revertScope?.status ?? "checking"}>
             <h2 id={`${cardIdBase}-revert-title`} className="text-lg font-semibold">
               Revert this change?
             </h2>
-            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-              A new version that undoes it is saved on top. Nothing is removed from history.
+            <p
+              role="status"
+              className="mt-2 text-sm text-slate-500 dark:text-slate-400"
+              data-testid="chat-file-change-revert-scope"
+            >
+              {revertScope?.status === "ready"
+                ? REVERT_CONFIRM_MESSAGE
+                : revertScope?.status === "other_work"
+                  ? describeRevertOtherWork(revertScope.otherPaths, Boolean(messageId))
+                  : revertScope?.status === "failed"
+                    ? REVERT_CHECK_FAILED_MESSAGE
+                    : REVERT_CHECKING_MESSAGE}
             </p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button
-                variant="outline"
-                autoFocus
-                isDisabled={revertingChange}
-                onPress={() => setRevertConfirmOpen(false)}
-              >
+              <Button variant="outline" autoFocus isDisabled={revertingChange} onPress={closeRevertDialog}>
                 Cancel
               </Button>
-              <Button
-                isPending={revertingChange}
-                onPress={() => void handleRevertChange()}
-                data-testid="chat-file-change-revert-confirm"
-              >
-                Revert
-              </Button>
+              {revertScope?.status === "other_work" ? (
+                messageId ? (
+                  <Button onPress={askAgentFromRevertDialog} data-testid="chat-file-change-revert-ask-agent">
+                    Ask the agent to undo it
+                  </Button>
+                ) : null
+              ) : revertScope?.status === "failed" ? (
+                <Button onPress={() => void checkRevertScope()} data-testid="chat-file-change-revert-retry-check">
+                  Try again
+                </Button>
+              ) : (
+                <Button
+                  isDisabled={revertScope?.status !== "ready"}
+                  isPending={revertingChange}
+                  onPress={() => void handleRevertChange()}
+                  data-testid="chat-file-change-revert-confirm"
+                >
+                  Revert
+                </Button>
+              )}
             </div>
           </div>
         </StudioDialogModal>

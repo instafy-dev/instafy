@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { RevertWorkspaceGitCommitResult } from "../../../../services/runtimeController/workspaceGit";
-import { describeChangeRevertOutcome, describeUnsavedChanges, revertRetryDelayMs } from "../chatFileChangeCopy";
+import {
+  describeChangeRevertOutcome,
+  describeRevertOtherWork,
+  describeUnsavedChanges,
+  revertRetryDelayMs,
+} from "../chatFileChangeCopy";
 
 function failure(
   status: number,
@@ -250,5 +255,16 @@ describe("describeUnsavedChanges", () => {
     for (const text of [legacy, stateless]) {
       expect(text).not.toMatch(/next turn|unsaved work/i);
     }
+  });
+});
+
+describe("describeRevertOtherWork", () => {
+  it("names the other files a version would undo, and the way forward", () => {
+    expect(describeRevertOtherWork(["notes/a.md"], true)).toBe(
+      "This change was saved together with other work, so reverting it here would also undo notes/a.md. Ask the agent to undo just this change.",
+    );
+    expect(describeRevertOtherWork(["a.md", "b.md", "c.md", "d.md", "e.md"], false)).toBe(
+      "This change was saved together with other work, so reverting it here would also undo a.md, b.md, c.md and 2 more.",
+    );
   });
 });

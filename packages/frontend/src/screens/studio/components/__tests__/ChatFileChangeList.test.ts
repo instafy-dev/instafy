@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   fetchWorkspaceGitDiff,
+  fetchWorkspaceGitHistoryReview,
   revertWorkspaceGitPaths,
   revertWorkspaceGitCommit,
   readWorkspaceFile,
@@ -18,6 +19,7 @@ const {
   versioningState,
 } = vi.hoisted(() => ({
   fetchWorkspaceGitDiff: vi.fn(),
+  fetchWorkspaceGitHistoryReview: vi.fn(),
   revertWorkspaceGitPaths: vi.fn(),
   revertWorkspaceGitCommit: vi.fn(),
   readWorkspaceFile: vi.fn(),
@@ -45,6 +47,7 @@ vi.mock("../../../../sdk/instafy", () => ({
       },
       git: {
         fetchDiff: fetchWorkspaceGitDiff,
+        fetchHistoryReview: fetchWorkspaceGitHistoryReview,
         revertPaths: revertWorkspaceGitPaths,
         revertCommit: revertWorkspaceGitCommit,
       },
@@ -119,6 +122,7 @@ describe("ChatFileChangeList", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     fetchWorkspaceGitDiff.mockReset();
+    fetchWorkspaceGitHistoryReview.mockReset();
     revertWorkspaceGitPaths.mockReset();
     revertWorkspaceGitCommit.mockReset();
     readWorkspaceFile.mockReset();
@@ -916,12 +920,24 @@ describe("ChatFileChangeList", () => {
     const head = "b".repeat(40);
     const gitRange = { base, head, source: "git" as const };
 
+    // The files the saved version (the range's head) itself touched.
+    function versionTouches(...paths: string[]) {
+      fetchWorkspaceGitHistoryReview.mockResolvedValue({
+        supported: true,
+        commit: head,
+        entries: paths.map((path) => ({ path, code: "M", embeddedRepoRoot: null })),
+        busy: false,
+        error: null,
+      });
+    }
+
     beforeEach(() => {
       versioningState.mode = "stateless";
       versioningState.originId = "gateway-origin";
       runtimeState.runtimeReady = true;
       runtimeState.effectiveRuntimeId = "runtime-1";
       fetchWorkspaceGitDiff.mockResolvedValue({ supported: true, diff: "", truncated: false });
+      versionTouches("src/app.ts");
     });
 
     afterEach(() => {
@@ -941,12 +957,25 @@ describe("ChatFileChangeList", () => {
       return container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert"]');
     }
 
-    async function confirmRevert() {
+    function dialog() {
+      return document.querySelector<HTMLElement>('[data-testid="chat-file-change-revert-dialog"]');
+    }
+
+    async function openRevertDialog() {
       await act(async () => {
         revertChip()?.click();
       });
+      // The dialog checks the saved version's files first.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    async function confirmRevert() {
+      await openRevertDialog();
       const confirm = document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]');
       expect(confirm).not.toBeNull();
+      expect(confirm?.disabled).toBe(false);
       await act(async () => {
         confirm?.click();
       });
@@ -1015,7 +1044,13 @@ describe("ChatFileChangeList", () => {
       expect(container.querySelector('[data-testid="chat-file-change-undo"]')).toBeNull();
     });
 
-    it("asks first, then saves a new version that undoes the canonical range", async () => {
+    it("checks the saved version's files, then saves a new version that undoes it", async () => {
+      versionTouches("src/app.ts", "src/new.ts");
+      let reviewed: (value: unknown) => void = () => {};
+      const review = new Promise((resolve) => {
+        reviewed = resolve;
+      });
+      fetchWorkspaceGitHistoryReview.mockReturnValueOnce(review);
       revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
       const commits: Event[] = [];
       const onCommit = (event: Event) => commits.push(event);
@@ -1030,11 +1065,37 @@ describe("ChatFileChangeList", () => {
         await act(async () => {
           revertChip()?.click();
         });
-        const dialog = document.querySelector('[data-testid="chat-file-change-revert-dialog"]');
-        expect(dialog?.textContent).toContain("Revert this change?");
-        expect(dialog?.textContent).toContain(
+        expect(dialog()?.textContent).toContain("Revert this change?");
+        // Revert waits until the version's files are known.
+        expect(dialog()?.getAttribute("data-state")).toBe("checking");
+        expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe("Checking what this change includes\u2026");
+        const confirm = () =>
+          document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]');
+        expect(confirm()?.disabled).toBe(true);
+        expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledWith({
+          projectId: "p1",
+          commit: head,
+          originId: "gateway-origin",
+          routing: "default",
+        });
+
+        await act(async () => {
+          reviewed({
+            supported: true,
+            commit: head,
+            entries: [
+              { path: "src/app.ts", code: "M", embeddedRepoRoot: null },
+              { path: "src/new.ts", code: "A", embeddedRepoRoot: null },
+            ],
+            busy: false,
+            error: null,
+          });
+        });
+        expect(dialog()?.getAttribute("data-state")).toBe("ready");
+        expect(dialog()?.textContent).toContain(
           "A new version that undoes it is saved on top. Nothing is removed from history.",
         );
+        expect(confirm()?.disabled).toBe(false);
         // The safe choice has focus.
         await act(async () => {
           await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1043,17 +1104,18 @@ describe("ChatFileChangeList", () => {
         expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
 
         await act(async () => {
-          document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]')?.click();
+          confirm()?.click();
         });
         await act(async () => {
           await new Promise((resolve) => setTimeout(resolve, 0));
         });
 
+        // Only the head commit is named: the origin reverts that version's
+        // own change, never a wider base..head range.
         expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
         expect(revertWorkspaceGitCommit).toHaveBeenCalledWith({
           projectId: "p1",
           commit: head,
-          base,
           originId: "gateway-origin",
           routing: "default",
           leaseConflictRetryDelayMs: 1500,
@@ -1066,6 +1128,90 @@ describe("ChatFileChangeList", () => {
       } finally {
         window.removeEventListener("instafy:workspace-commit", onCommit);
       }
+    });
+
+    it("names other work the saved version carries and offers the agent instead of Revert", async () => {
+      // An earlier turn's save could not publish; this turn's save published
+      // it together with this change, in one version.
+      versionTouches("src/app.ts", "notes/earlier.md", "docs/plan.md");
+      const requests: MessageUndoRequestDetail[] = [];
+      const listener = (event: Event) => requests.push((event as CustomEvent<MessageUndoRequestDetail>).detail);
+      window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+      try {
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange, messageId: "msg-7" });
+        await openRevertDialog();
+
+        expect(dialog()?.getAttribute("data-state")).toBe("other_work");
+        expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+          "This change was saved together with other work, so reverting it here would also undo notes/earlier.md and docs/plan.md. Ask the agent to undo just this change.",
+        );
+        expect(document.querySelector('[data-testid="chat-file-change-revert-confirm"]')).toBeNull();
+
+        await act(async () => {
+          document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-ask-agent"]')?.click();
+        });
+        expect(requests).toHaveLength(1);
+        expect(requests[0]?.messageId).toBe("msg-7");
+        expect(dialog()).toBeNull();
+        expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+      }
+    });
+
+    it("offers no Revert for a version with other work even without a message to undo", async () => {
+      versionTouches("src/app.ts", "notes/earlier.md");
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "This change was saved together with other work, so reverting it here would also undo notes/earlier.md.",
+      );
+      expect(document.querySelector('[data-testid="chat-file-change-revert-confirm"]')).toBeNull();
+      expect(document.querySelector('[data-testid="chat-file-change-revert-ask-agent"]')).toBeNull();
+    });
+
+    it("says when the check failed and lets the user check again", async () => {
+      fetchWorkspaceGitHistoryReview.mockResolvedValueOnce(null);
+      revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+
+      expect(dialog()?.getAttribute("data-state")).toBe("failed");
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "Couldn't check what this change includes. Try again.",
+      );
+      expect(document.querySelector('[data-testid="chat-file-change-revert-confirm"]')).toBeNull();
+
+      await act(async () => {
+        document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-retry-check"]')?.click();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
+      expect(dialog()?.getAttribute("data-state")).toBe("ready");
+      expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+    });
+
+    it("marks only the files the reverted version touched", async () => {
+      // The head version holds src/util.ts only; src/app.ts reached the
+      // saved history in another version this revert does not touch.
+      versionTouches("src/util.ts");
+      revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
+      await renderCard({
+        files: [fileChange("src/app.ts"), fileChange("src/util.ts")],
+        commitRange: gitRange,
+      });
+      await confirmRevert();
+
+      expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')?.textContent).toContain(
+        "Edited 2 files · 1 reverted",
+      );
+      const chipTitles = Array.from(
+        container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
+      ).map((chip) => chip.title);
+      expect(chipTitles).toEqual(["src/app.ts", "src/util.ts (reverted)"]);
     });
 
     it("does nothing when the confirmation is cancelled", async () => {
@@ -1180,6 +1326,9 @@ describe("ChatFileChangeList", () => {
     });
 
     it("marks only files that reached the saved history as reverted", async () => {
+      // Even if the version listed them, a file the turn's save left out and
+      // a file in a never-saved folder are not undone by a version revert.
+      versionTouches("src/app.ts", ".env", "tmp/out.log");
       revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
       await renderCard({
         files: [
@@ -1273,6 +1422,7 @@ describe("ChatFileChangeList", () => {
       });
 
       it("focuses the summary toggle when every file of a larger change was reverted", async () => {
+        versionTouches("src/app.ts", "src/util.ts");
         revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
         await renderCard({
           files: [fileChange("src/app.ts"), fileChange("src/util.ts")],
@@ -1305,7 +1455,11 @@ describe("ChatFileChangeList", () => {
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
       await confirmRevert();
       expect(revertWorkspaceGitCommit).toHaveBeenCalledWith(
-        expect.objectContaining({ originId: "desktop-origin", routing: "default", commit: head, base }),
+        expect.objectContaining({ originId: "desktop-origin", routing: "default", commit: head }),
+      );
+      expect(revertWorkspaceGitCommit.mock.calls[0]?.[0]).not.toHaveProperty("base");
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledWith(
+        expect.objectContaining({ originId: "desktop-origin", routing: "default", commit: head }),
       );
       expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.textContent).toContain(
         "(reverted)",

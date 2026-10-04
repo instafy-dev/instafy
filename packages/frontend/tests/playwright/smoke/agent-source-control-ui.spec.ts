@@ -170,7 +170,14 @@ test.describe("Agent + Source Control UI (opt-in)", () => {
     await expect(card.getByTestId("chat-file-change-undo")).toBeVisible();
 
     await revert.click();
-    await expect(page.getByTestId("chat-file-change-revert-dialog")).toContainText("Revert this change?");
+    const dialog = page.getByTestId("chat-file-change-revert-dialog");
+    await expect(dialog).toContainText("Revert this change?");
+    // The dialog checks which files the saved version holds before it
+    // offers Revert; the agent's version holds only this file.
+    await expect(dialog).toHaveAttribute("data-state", "ready", { timeout: 30_000 });
+    await expect(page.getByTestId("chat-file-change-revert-scope")).toHaveText(
+      "A new version that undoes it is saved on top. Nothing is removed from history."
+    );
     await page.getByTestId("chat-file-change-revert-confirm").click();
     await expect(page.getByText("Reverted. Saved as a new version.")).toBeVisible({ timeout: 60_000 });
 
