@@ -1637,19 +1637,59 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
     ("publish.rs", include_str!("publish.rs")),
     ("push.rs", include_str!("push.rs")),
     ("recovery.rs", include_str!("recovery.rs")),
+    ("recovery_view.rs", include_str!("recovery_view.rs")),
     ("stale_align.rs", include_str!("stale_align.rs")),
     ("tree_merge.rs", include_str!("tree_merge.rs")),
     ("publish_policy.rs", include_str!("publish_policy.rs")),
     ("workspace_git.rs", include_str!("workspace_git.rs")),
 ];
 
-/// Every git process in the publish modules is built by
-/// `server_git_command` (through `WorkspaceGit`), never spawned directly:
-/// no module names a `Command` type at all (however it is imported or
-/// renamed), and `process::` items are only process results, the spawned
-/// git's handle and the signals that stop it at a deadline.
-#[test]
-fn publish_modules_spawn_git_only_through_server_git_command() {
+/// Modules under `src/` written before these rules: the command builder
+/// itself, other process spawners, HTTP plumbing and test harnesses. Every
+/// other module, including any added later in any folder, must follow the
+/// rules.
+const MODULES_BEFORE_THE_RULES: &[&str] = &[
+    "apply.rs",
+    "apply_idempotency.rs",
+    "auth.rs",
+    "browser.rs",
+    "browser_approval.rs",
+    "browser_approval_tests.rs",
+    "browser_collaboration.rs",
+    "browser_screencast.rs",
+    "browser_screencast/input.rs",
+    "browser_screencast/protocol.rs",
+    "browser_screencast/stream.rs",
+    "browser_screencast/transport.rs",
+    "browser_webrtc.rs",
+    "config.rs",
+    "error.rs",
+    "git.rs",
+    "git_tokens.rs",
+    "jwks.rs",
+    "lib.rs",
+    "main.rs",
+    "paths.rs",
+    "publish_tests.rs",
+    "routes.rs",
+    "safe_fs.rs",
+    "server.rs",
+    "test_support.rs",
+    "untrusted_git.rs",
+    "workspace_fs.rs",
+    "workspace_lock.rs",
+];
+
+/// The one module that builds git commands from `server_git_command`.
+const COMMAND_BUILDER: &str = "workspace_git.rs";
+
+/// Ways the production code of module `name` could start a process other
+/// than through `WorkspaceGit`: naming a `Command` type at all (however it
+/// is imported or renamed), any `process::` item other than a spawned
+/// process's results, its handle and the signals that stop it at a
+/// deadline, calling `server_git_command` itself (only `WorkspaceGit` does,
+/// once), or naming the git program.
+fn spawn_rule_violations(name: &str, source: &str) -> Vec<String> {
     // Results of a git that was spawned, its handle, and the signals that stop
     // it at a deadline (`rustix::process`); none of them can start a process.
     const PROCESS_ITEMS: &[&str] = &[
@@ -1662,37 +1702,93 @@ fn publish_modules_spawn_git_only_through_server_git_command() {
         "Pid",
         "Signal",
     ];
-    for (name, source) in PUBLISH_MODULES {
-        let code = production_source(source);
-        for identifier in code
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .filter(|word| !word.is_empty())
-        {
-            assert!(
-                !matches!(identifier, "Command" | "CommandExt"),
-                "{name} names a process type ({identifier})"
-            );
+    let code = production_source(source);
+    let mut violations = Vec::new();
+    for identifier in code
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty())
+    {
+        if matches!(identifier, "Command" | "CommandExt") {
+            violations.push(format!("{name} names a process type ({identifier})"));
         }
-        for (index, _) in code.match_indices("process::") {
-            let rest = &code[index + "process::".len()..];
-            let items: Vec<&str> = match rest.strip_prefix('{') {
-                Some(group) => group[..group.find('}').unwrap_or(group.len())]
-                    .split(',')
-                    .map(|item| item.trim().split(' ').next().unwrap_or_default())
-                    .filter(|item| !item.is_empty())
-                    .collect(),
-                None => vec![rest
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .next()
-                    .unwrap_or_default()],
-            };
-            for item in items {
-                assert!(
-                    PROCESS_ITEMS.contains(&item),
-                    "{name} uses std::process::{item}"
-                );
+    }
+    for (index, _) in code.match_indices("process::") {
+        let rest = &code[index + "process::".len()..];
+        let items: Vec<&str> = match rest.strip_prefix('{') {
+            Some(group) => group[..group.find('}').unwrap_or(group.len())]
+                .split(',')
+                .map(|item| item.trim().split(' ').next().unwrap_or_default())
+                .filter(|item| !item.is_empty())
+                .collect(),
+            None => vec![rest
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default()],
+        };
+        for item in items {
+            if !PROCESS_ITEMS.contains(&item) {
+                violations.push(format!("{name} uses std::process::{item}"));
             }
         }
+    }
+    if name == COMMAND_BUILDER {
+        let calls = code.matches("server_git_command(").count();
+        if calls != 1 {
+            violations.push(format!(
+                "{name} calls server_git_command {calls} times instead of once"
+            ));
+        }
+    } else if code.contains("server_git_command") {
+        violations.push(format!("{name} uses server_git_command directly"));
+    }
+    if code.contains("\"git\"") {
+        violations.push(format!("{name} names the git program"));
+    }
+    violations
+}
+
+/// Uses of git newer than 2.34, of a forced update of a remote ref, or of a
+/// reset onto one, in the production code of module `name`.
+fn force_rule_violations(name: &str, source: &str) -> Vec<String> {
+    let code = production_source(source);
+    let mut violations = Vec::new();
+    for forbidden in [
+        "\"merge-tree\"",
+        "--write-tree",
+        "--object-id",
+        "--empty=",
+        "\"rebase\"",
+        "\"--force\"",
+        "\"-f\"",
+        "\"--hard\"",
+        "\"--mixed\"",
+        "\"--force-if-includes\"",
+        "\"--mirror\"",
+    ] {
+        if code.contains(forbidden) {
+            violations.push(format!("{name} uses {forbidden}"));
+        }
+    }
+    // The only lease form is create-only (`<ref>:` with no value) or
+    // pinned to an exact listed id when deleting a recovery ref.
+    for (index, _) in code.match_indices("--force-with-lease=") {
+        let tail = &code[index..code.len().min(index + 60)];
+        if !(tail.starts_with("--force-with-lease={reference}:\"")
+            || tail.starts_with("--force-with-lease={destination}:{rev}\""))
+        {
+            violations.push(format!("{name}: unexpected lease form {tail}"));
+        }
+    }
+    violations
+}
+
+/// Every git process in the publish modules is built by
+/// `server_git_command` through `WorkspaceGit`, never spawned directly.
+#[test]
+fn publish_modules_spawn_git_only_through_server_git_command() {
+    for (name, source) in PUBLISH_MODULES {
+        let violations = spawn_rule_violations(name, source);
+        assert!(violations.is_empty(), "{violations:#?}");
     }
     let workspace_git = production_source(include_str!("workspace_git.rs"));
     assert_eq!(
@@ -1707,33 +1803,116 @@ fn publish_modules_spawn_git_only_through_server_git_command() {
 #[test]
 fn publish_modules_use_only_git_2_34_and_never_force() {
     for (name, source) in PUBLISH_MODULES {
-        let code = production_source(source);
-        for forbidden in [
-            "\"merge-tree\"",
-            "--write-tree",
-            "--object-id",
-            "--empty=",
-            "\"rebase\"",
-            "\"--force\"",
-            "\"-f\"",
-            "\"--hard\"",
-            "\"--mixed\"",
-            "\"--force-if-includes\"",
-            "\"--mirror\"",
-        ] {
-            assert!(!code.contains(forbidden), "{name} uses {forbidden}");
-        }
-        // The only lease form is create-only (`<ref>:` with no value) or
-        // pinned to an exact listed id when deleting a recovery ref.
-        for (index, _) in code.match_indices("--force-with-lease=") {
-            let tail = &code[index..code.len().min(index + 60)];
-            assert!(
-                tail.starts_with("--force-with-lease={reference}:\"")
-                    || tail.starts_with("--force-with-lease={destination}:{rev}\""),
-                "{name}: unexpected lease form {tail}"
-            );
+        let violations = force_rule_violations(name, source);
+        assert!(violations.is_empty(), "{violations:#?}");
+    }
+}
+
+/// The same rules hold for every module under `src/` that is not listed in
+/// [`MODULES_BEFORE_THE_RULES`], so a new module is checked without anyone
+/// remembering to list it. Test modules (`tests.rs`, `*_tests.rs`) are not
+/// production code.
+#[test]
+fn every_module_written_after_the_rules_follows_them() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut modules = Vec::new();
+    let mut folders = vec![src.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let relative = path.strip_prefix(&src).unwrap();
+                let name = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                modules.push((name, path));
+            }
         }
     }
+    let names: Vec<&str> = modules.iter().map(|(name, _)| name.as_str()).collect();
+    for (name, _) in PUBLISH_MODULES {
+        assert!(names.contains(name), "{name} was not found under src/");
+    }
+    for name in MODULES_BEFORE_THE_RULES {
+        assert!(
+            names.contains(name),
+            "{name} no longer exists: remove it from MODULES_BEFORE_THE_RULES"
+        );
+    }
+
+    let mut checked = 0;
+    for (name, path) in &modules {
+        let file = name.rsplit('/').next().unwrap_or_default();
+        if MODULES_BEFORE_THE_RULES.contains(&name.as_str())
+            || file == "tests.rs"
+            || file.ends_with("_tests.rs")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(path).unwrap();
+        let mut violations = spawn_rule_violations(name, &source);
+        violations.extend(force_rule_violations(name, &source));
+        assert!(violations.is_empty(), "{violations:#?}");
+        checked += 1;
+    }
+    assert!(
+        checked >= PUBLISH_MODULES.len(),
+        "checked {checked} modules"
+    );
+}
+
+/// The rules catch a module that starts git itself, in each way the
+/// checks look for.
+#[test]
+fn the_spawn_rule_catches_a_module_that_runs_git_itself() {
+    for source in [
+        "fn run() { let _ = std::process::Command::new(\"git\").arg(\"status\").output(); }\n",
+        "use std::process::Command as Git;\nfn run() { let _ = Git::new(PROGRAM).output(); }\n",
+        "use std::process::{Child, Command};\n",
+        "use std::process::*;\nfn run() { let _ = Builder::new(PROGRAM); }\n",
+        "fn run() { let _ = tokio::process::Command::new(PROGRAM); }\n",
+        "use std::os::unix::process::CommandExt;\n",
+        "fn run() { let _ = std::process::exit(1); }\n",
+        "fn run() { let _ = crate::git::server_git_command().arg(\"status\").output(); }\n",
+        "fn run() { let _ = crate::git::GitProcess::new(\"git\"); }\n",
+    ] {
+        assert!(
+            !spawn_rule_violations("new_module.rs", source).is_empty(),
+            "not caught: {source}"
+        );
+    }
+    for source in [
+        "fn run(git: &WorkspaceGit<'_>) { let _ = git.run(&[\"status\"]); }\n",
+        "use std::process::{Output, Stdio};\n",
+        "// std::process::Command::new(\"git\") is never used here.\n",
+        "fn run() {}\n#[cfg(test)]\nmod tests {\n    use std::process::Command;\n}\n",
+    ] {
+        assert_eq!(
+            spawn_rule_violations("new_module.rs", source),
+            Vec::<String>::new(),
+            "{source}"
+        );
+    }
+    // Only the command builder may call server_git_command, and only once.
+    let builder = "fn spawn() { let command = server_git_command(); }\n";
+    assert!(spawn_rule_violations(COMMAND_BUILDER, builder).is_empty());
+    assert!(!spawn_rule_violations(COMMAND_BUILDER, &builder.repeat(2)).is_empty());
+    assert!(!spawn_rule_violations(COMMAND_BUILDER, "fn spawn() {}\n").is_empty());
+
+    assert!(!force_rule_violations(
+        "new_module.rs",
+        "fn push() { let _ = [\"push\", \"--force\"]; }\n"
+    )
+    .is_empty());
+    assert!(!force_rule_violations(
+        "new_module.rs",
+        "fn push(r: &str) { let _ = format!(\"--force-with-lease={r}\"); }\n"
+    )
+    .is_empty());
 }
 
 // ---------------------------------------------------------------------------
