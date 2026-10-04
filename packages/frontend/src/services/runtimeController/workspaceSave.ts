@@ -1,5 +1,6 @@
 import { runtimeControllerEnabled } from "./core";
 import {
+  originErrorFromException,
   parseOriginErrorText,
   parsePublishReport,
   type OriginError,
@@ -199,11 +200,22 @@ export async function saveWorkspaceChanges(request: WorkspaceSaveRequest): Promi
         };
       }
 
-      const response = await context.fetch("git/sync", {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify({ paths: allPaths, message: syncMessage }),
-      });
+      // From here on the apply has landed: a sync that throws (network,
+      // abort, a failed re-mint) is a sync failure, never "not applied".
+      let response: Response;
+      try {
+        response = await context.fetch("git/sync", {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ paths: allPaths, message: syncMessage }),
+        });
+      } catch (error) {
+        return {
+          kind: "sync_failed",
+          error: originErrorFromException(error),
+          appliedRev: applied.rev,
+        };
+      }
       const text = await response.text().catch(() => "");
       if (!response.ok) {
         return {

@@ -263,6 +263,35 @@ describe("saveWorkspaceChanges", () => {
     });
   });
 
+  it("reports a landed apply when the sync request throws", async () => {
+    mocks.token.mockResolvedValue(tokenFor("desk", DESKTOP, "desktop"));
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(json(200, { rev: "local-2" }))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    const result = await saveWorkspaceChanges({ projectId: "p", files: [{ path: "a", content: "a" }] });
+    expect(calls()).toHaveLength(2);
+    expect(result).toMatchObject({
+      ok: false,
+      stage: "sync",
+      applied: true,
+      appliedRev: "local-2",
+      originId: "desk",
+      error: { status: 0, code: "network_error" },
+    });
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it("reports a landed apply when the sync's token refresh throws", async () => {
+    mocks.token
+      .mockResolvedValueOnce(tokenFor("desk", DESKTOP, "desktop"))
+      .mockRejectedValueOnce(new Error("controller unreachable"));
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(json(200, { rev: "local-3" }))
+      .mockResolvedValueOnce(new Response("", { status: 401 }));
+    const result = await saveWorkspaceChanges({ projectId: "p", files: [{ path: "a", content: "a" }] });
+    expect(result).toMatchObject({ ok: false, stage: "sync", applied: true, appliedRev: "local-3" });
+  });
+
   it("reports a missing apply route without a sync", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response("", { status: 404 }));
     const result = await saveWorkspaceChanges({ projectId: "p", files: [{ path: "a", content: "a" }] });
