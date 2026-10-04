@@ -464,6 +464,56 @@ describe("FilesPanel one Save", () => {
     expect(file()).toMatchObject({ generated: "theirs", modified: "theirs", baseRev: REV_3 });
   });
 
+  it("takes its own save's commit event as its own when it arrives before the response", async () => {
+    const rev = "8".repeat(40);
+    const savedBlob = await gitBlobOid("edited");
+    const pending = deferred<ReturnType<typeof saved>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    await settle();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+    mocks.listAt.mockImplementation(async () => ({
+      ok: true,
+      entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: savedBlob }],
+      rev,
+      originId: "origin-1",
+      originMode: "hosted",
+    }));
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+    });
+    await settle();
+    expect(mocks.listAt).toHaveBeenCalledWith(expect.objectContaining({ rev }));
+    await act(async () => { pending.resolve(saved(rev)); });
+    await settle();
+    expect(staleEvents).toEqual([]);
+    expect(file()).toMatchObject({ generated: "edited", modified: "edited", baseRev: rev, blobOid: savedBlob });
+  });
+
+  it("still reports a change in the space that arrives while a save runs", async () => {
+    const rev = "9".repeat(40);
+    const pending = deferred<ReturnType<typeof failed>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    await settle();
+    mocks.listAt.mockImplementation(async () => ({
+      ok: true,
+      entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: "d".repeat(40) }],
+      rev,
+      originId: "origin-1",
+      originMode: "hosted",
+    }));
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+    });
+    await settle();
+    expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md" })]);
+    await act(async () => { pending.resolve(failed({ status: 409, code: "head_moved", head: rev, paths: ["README.md"] })); });
+    await settle();
+  });
+
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {
     await render([buffer()]);
     expect(query("files-explorer-new-file")?.disabled).toBe(false);

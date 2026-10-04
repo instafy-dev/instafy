@@ -94,6 +94,19 @@ describe("Files versioning helpers", () => {
     expect(own.has(REV)).toBe(false);
   });
 
+  it("remembers blobs this tab is saving per path for 60 seconds", () => {
+    let now = 1_000;
+    const own = createOwnRevisions(() => now);
+    own.addWrite("README.md", BLOB_A);
+    own.addWrite("README.md", null);
+    expect(own.hasWrite("README.md", BLOB_A)).toBe(true);
+    expect(own.hasWrite("README.md", BLOB_B)).toBe(false);
+    expect(own.hasWrite("other.md", BLOB_A)).toBe(false);
+    expect(own.hasWrite("README.md", null)).toBe(false);
+    now += OWN_REVISION_WINDOW_MS + 1;
+    expect(own.hasWrite("README.md", BLOB_A)).toBe(false);
+  });
+
   it("moves only the listings at the commit an own save built on to that save's commit", () => {
     const REV_2 = "2".repeat(40);
     const REV_3 = "3".repeat(40);

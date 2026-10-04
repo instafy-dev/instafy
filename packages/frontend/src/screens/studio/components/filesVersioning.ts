@@ -82,21 +82,52 @@ export function decideCachedOpen(params: {
 export interface OwnRevisions {
   add: (rev: string | null | undefined) => void;
   has: (rev: string | null | undefined) => boolean;
+  /**
+   * A blob this tab is saving at a path, registered before the request is
+   * sent: the save's commit event can arrive before its response, and a
+   * listing that shows this blob is then this tab's own edit, not a change
+   * made in the space.
+   */
+  addWrite: (path: string, blobOid: string | null | undefined) => void;
+  hasWrite: (path: string, blobOid: string | null | undefined) => boolean;
 }
 
 export const OWN_REVISION_WINDOW_MS = 60_000;
 
 export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
   const revisions = new Map<string, number>();
+  const writes = new Map<string, number>();
   const prune = () => {
     const cutoff = now() - OWN_REVISION_WINDOW_MS;
-    for (const [rev, at] of revisions) {
-      if (at < cutoff) {
-        revisions.delete(rev);
+    for (const entries of [revisions, writes]) {
+      for (const [key, at] of entries) {
+        if (at < cutoff) {
+          entries.delete(key);
+        }
       }
     }
   };
+  const writeKey = (path: string, blobOid: string | null | undefined) => {
+    const oid = blobOid?.trim();
+    return path && oid ? `${path}\u0000${oid}` : null;
+  };
   return {
+    addWrite(path, blobOid) {
+      const key = writeKey(path, blobOid);
+      if (!key) {
+        return;
+      }
+      prune();
+      writes.set(key, now());
+    },
+    hasWrite(path, blobOid) {
+      const key = writeKey(path, blobOid);
+      if (!key) {
+        return false;
+      }
+      prune();
+      return writes.has(key);
+    },
     add(rev) {
       const value = rev?.trim();
       if (!value) {

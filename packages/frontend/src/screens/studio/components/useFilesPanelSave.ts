@@ -325,6 +325,10 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       syncMessage: `Update ${path}`,
     };
 
+    // Known before the request: the commit event can arrive before the
+    // response, and its listing then shows this blob (see OwnRevisions).
+    const savedOid = await gitBlobOid(content);
+    current.ownRevisions.addWrite(path, savedOid);
     let result: WorkspaceSaveResult = await controllerClient.workspace.save.changes(request);
     if (!result.ok && result.error.code === "fetch_pending") {
       const delay = Math.min(
@@ -366,7 +370,7 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
         // folder, so trying again does not report a false conflict.
         updateBuffer(
           file,
-          { ...idsOf(file), blobOid: await gitBlobOid(content), originId: result.originId ?? originId, isNew: false },
+          { ...idsOf(file), blobOid: savedOid, originId: result.originId ?? originId, isNew: false },
           null,
         );
       }
@@ -374,7 +378,6 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       return;
     }
 
-    const savedOid = await gitBlobOid(content);
     updateBuffer(
       file,
       {

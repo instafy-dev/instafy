@@ -605,6 +605,11 @@ export function useFilesPanelWorkspaceTree({
         if (buffer?.blobOid && entry.blobOid && buffer.blobOid === entry.blobOid) {
           return;
         }
+        if (versionedHooks.ownRevisions.hasWrite(entry.path, entry.blobOid)) {
+          // This tab's own save, listed before its response arrived: the
+          // save updates the buffer itself.
+          return;
+        }
         if (dirtyFileIdsRef.current.has(entry.path)) {
           notifyStaleViewerEntry(entry, buffer?.originId ?? null);
           return;
