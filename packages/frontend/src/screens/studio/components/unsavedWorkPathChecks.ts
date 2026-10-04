@@ -44,14 +44,15 @@ export function servedFromOtherRev(servedRev: string | null | undefined, rev: st
 export type RefPathAbsence = "absent" | "moved" | "unknown";
 
 /**
- * A read of `path` at `ref` answered 404 `not_found` (callers never get here
- * for an uncoded 404 or `unsupported_entry`: listings hide symlinks and
- * submodules the same way reads do, so only the code tells them from a
- * missing path). That is a delete only when the ref still resolves and its
- * tree lacks the path: a ref that another viewer removed answers 404 for
- * every path too. A listing that shows entries proves the ref resolves; a
- * listing whose `X-Instafy-Rev` names another commit means the ref moved
- * since the list loaded.
+ * A read of `path` at `ref` answered 404 `not_found`, which origins send only
+ * for a path absent from the tree at that commit (a symlink or submodule is
+ * `unsupported_entry`, a ref that does not resolve is `rev_not_found`, and
+ * callers never get here for those or for an uncoded 404: listings hide
+ * symlinks and submodules the same way reads do, so only the code tells them
+ * from a missing path). It is still a delete only when the ref resolves and
+ * its tree lacks the path. A listing that shows entries proves the ref
+ * resolves; a listing whose `X-Instafy-Rev` names another commit means the
+ * ref moved since the list loaded.
  */
 export async function confirmPathAbsentAtRef({
   projectId,
@@ -106,6 +107,8 @@ export async function confirmPathAbsentAtRef({
 export type DesktopFolderPathCheck =
   | { ok: true; blobOid: string | null }
   | { ok: false; reason: "dirty" }
+  /** The folder holds a symlink or a nested repository at the path. */
+  | { ok: false; reason: "unsupported" }
   | { ok: false; reason: "unchecked"; error: OriginError | null };
 
 /**
@@ -134,8 +137,19 @@ export async function checkDesktopFolderPath({
     if (!blobOid) {
       return { ok: false, reason: "unchecked", error: null };
     }
-  } else if (read && read.notFound && !read.error.routeUnavailable) {
-    // Not in the folder: the write must still find it absent.
+  } else if (read && read.error.code === "unsupported_entry") {
+    // A symlink or a nested repository: never written over from here.
+    return { ok: false, reason: "unsupported" };
+  } else if (
+    read &&
+    read.notFound &&
+    !read.error.routeUnavailable &&
+    (read.error.code === "not_found" || !read.error.code)
+  ) {
+    // Not in the folder: the write must still find it absent. An uncoded 404
+    // (single-tenant origins before they code theirs) counts as absent too,
+    // because `expected: null` makes the origin refuse the write when
+    // anything, a link included, is at the path.
     blobOid = null;
   } else {
     return { ok: false, reason: "unchecked", error: read ? read.error : null };

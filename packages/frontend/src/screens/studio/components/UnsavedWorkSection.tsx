@@ -20,6 +20,7 @@ import {
   ALREADY_REMOVED_COPY,
   conflictedOnComputerCopy,
   desktopFolderUncheckedCopy,
+  desktopFolderUnsupportedEntryCopy,
   formatFileCount,
   historyFailureCopy,
   keptOnComputerCopy,
@@ -407,16 +408,18 @@ export function UnsavedWorkSection({
         }
         files = [{ path, bytes: decodeBase64(read.file.contentBase64), encoding: "binary" }];
       } else if (read.error.code === "unsupported_entry") {
-        // A symlink or submodule at the ref: reads and listings both hide it.
+        // The path is a symlink (120000) or a submodule (160000) at the ref;
+        // reads and listings both hide it, so it is never a delete.
         onNotice({ tone: "warning", text: unsavedWorkUnsupportedEntryCopy(path) });
         return;
-      } else if (read.notFound && !read.error.routeUnavailable && read.error.code !== "not_found") {
-        // An uncoded 404 cannot tell a missing path from a hidden entry
-        // (a link or a nested repository): never turn it into a delete.
-        onNotice({ tone: "warning", text: unsavedWorkUnconfirmedDeleteCopy(path) });
+      } else if (read.error.code === "rev_not_found") {
+        // The ref itself no longer resolves: removed or restored elsewhere.
+        clearConflict(entry.ref);
+        refreshAfterMove();
         return;
-      } else if (read.notFound && !read.error.routeUnavailable) {
-        // A coded not_found is a delete only when the ref still resolves without the path.
+      } else if (read.notFound && read.error.code === "not_found") {
+        // Origins answer not_found only for a path absent from the ref's
+        // tree. Still a delete only when a listing shows the ref resolves.
         const absence = await confirmPathAbsentAtRef({ projectId, originId, ref: entry.ref, rev: entry.rev, path });
         if (absence === "moved") {
           clearConflict(entry.ref);
@@ -429,6 +432,11 @@ export function UnsavedWorkSection({
           return;
         }
         deletes = [path];
+      } else if (read.notFound && !read.error.routeUnavailable && !read.error.code) {
+        // An uncoded 404 (single-tenant origins before they code theirs)
+        // cannot tell a missing path from a hidden entry: never a delete.
+        onNotice({ tone: "warning", text: unsavedWorkUnconfirmedDeleteCopy(path) });
+        return;
       } else {
         onNotice({
           tone: "error",
@@ -445,7 +453,9 @@ export function UnsavedWorkSection({
           onNotice(
             folder.reason === "dirty"
               ? { tone: "warning", text: restoreDirtyPathsCopy([path]) }
-              : { tone: "error", text: desktopFolderUncheckedCopy(folder.error) },
+              : folder.reason === "unsupported"
+                ? { tone: "warning", text: desktopFolderUnsupportedEntryCopy(path) }
+                : { tone: "error", text: desktopFolderUncheckedCopy(folder.error) },
           );
           return;
         }

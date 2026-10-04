@@ -649,6 +649,44 @@ describe("HistoryDrawer: Unsaved work", () => {
       );
     });
 
+    it("deletes on not_found once a listing shows the ref resolves without the path", async () => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: true,
+        error: originError(404, "not_found"),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      siblingsOnly();
+      mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: [] });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.listAt).toHaveBeenCalledWith(expect.objectContaining({ path: "src", ref: RECOVERY }));
+      expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ files: [], deletes: ["src/a.ts"], baseRev: NEW_HEAD });
+    });
+
+    it("refreshes instead of writing when the ref itself no longer resolves (rev_not_found)", async () => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: false,
+        error: originError(404, "rev_not_found"),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      const listsBefore = mocks.fetchRecovery.mock.calls.length;
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.listAt).not.toHaveBeenCalled();
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe("This entry changed. Refreshing.");
+      expect(q(row(container, RECOVERY), "unsaved-work-conflict")).toBeNull();
+      expect(mocks.fetchRecovery.mock.calls.length).toBe(listsBefore + 1);
+    });
+
     it("deletes a path whose whole folder the work removed", async () => {
       conflictOn(["src/old/gone.ts"]);
       mocks.readAt.mockResolvedValue({
@@ -1008,13 +1046,22 @@ describe("HistoryDrawer: Unsaved work", () => {
       });
     }
 
-    function folder({ dirty, present = true }: { dirty: string[]; present?: boolean }) {
+    function folder({
+      dirty,
+      present = true,
+      absentCode,
+    }: {
+      dirty: string[];
+      present?: boolean;
+      /** The code on the folder's 404 (none: today's single-tenant body). */
+      absentCode?: string;
+    }) {
       mocks.readAt.mockImplementation(async (params: { path: string; ref?: string | null }) => {
         if (params.ref) {
           return { ok: true, file: { path: params.path, contentBase64: btoa("kept\n"), size: 5 } };
         }
         if (!present) {
-          return { ok: false, notFound: true, error: originError(404, undefined, { message: "file not found" }), originId: "origin-1", originMode: "desktop" };
+          return { ok: false, notFound: true, error: originError(404, absentCode, { message: "file not found" }), originId: "origin-1", originMode: "desktop" };
         }
         return { ok: true, file: { path: params.path, contentBase64: btoa("local\n"), size: 6, blobOid: FOLDER_BLOB } };
       });
@@ -1059,7 +1106,7 @@ describe("HistoryDrawer: Unsaved work", () => {
       expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ expected: { "src/a.ts": FOLDER_BLOB }, baseRev: NEW_HEAD });
     });
 
-    it("expects the file to stay absent when the folder does not have it", async () => {
+    it("expects the file to stay absent on an uncoded 404 from the folder (the origin enforces it)", async () => {
       conflictOn(["src/a.ts"]);
       folder({ dirty: [], present: false });
       mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] });
@@ -1067,6 +1114,29 @@ describe("HistoryDrawer: Unsaved work", () => {
       await press(row(container, RECOVERY), "unsaved-work-restore");
       await press(row(container, RECOVERY), "unsaved-work-path-use");
       expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ expected: { "src/a.ts": null } });
+    });
+
+    it("expects the file to stay absent on a coded not_found from the folder", async () => {
+      conflictOn(["src/a.ts"]);
+      folder({ dirty: [], present: false, absentCode: "not_found" });
+      mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] });
+      await render(desktop());
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ expected: { "src/a.ts": null } });
+    });
+
+    it("never writes over a link or a nested repository in the folder", async () => {
+      conflictOn(["src/a.ts"]);
+      folder({ dirty: [], present: false, absentCode: "unsupported_entry" });
+      await render(desktop());
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "src/a.ts is a link or a nested repository in the folder on this computer, so this version can't be saved over it from here. Ask the agent instead.",
+      );
+      expect(q(row(container, RECOVERY), "unsaved-work-path-use")).not.toBeNull();
     });
 
     it("writes nothing when the folder cannot be checked", async () => {

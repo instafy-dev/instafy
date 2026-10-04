@@ -390,6 +390,11 @@ export function restoreDirtyPathsCopy(paths: string[]): string {
 export const DESKTOP_FOLDER_UNCHECKED_COPY =
   "Couldn't check this file in the folder on this computer, so nothing was saved. Try again.";
 
+/** "Use this version" on Desktop: the folder holds a link or a nested repository at the path. */
+export function desktopFolderUnsupportedEntryCopy(path: string): string {
+  return `${path} is a link or a nested repository in the folder on this computer, so this version can't be saved over it from here. Ask the agent instead.`;
+}
+
 /** "Use this version" on Desktop could not confirm the folder's copy is safe to replace. */
 export function desktopFolderUncheckedCopy(error: OriginError | null | undefined): string {
   return (error ? sharedOriginErrorCopy(error, "desktop") : null) ?? DESKTOP_FOLDER_UNCHECKED_COPY;
