@@ -18,6 +18,7 @@ pub mod publish_policy;
 mod publish_tests;
 mod push;
 pub mod recovery;
+mod recovery_view;
 pub mod routes;
 mod safe_fs;
 pub mod server;

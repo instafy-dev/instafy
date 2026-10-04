@@ -1734,6 +1734,11 @@ pub struct GitHistoryEntry {
     /// "assistant" for agent-made conflict resolutions).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_by: Option<String>,
+    /// The commit's first parent, when the listing asked for parents (a
+    /// revert of the commit undoes its change against this one). Absent for
+    /// a root commit and from listings that do not ask.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2008,8 +2013,6 @@ pub fn list_recent_commits(
     }
 
     let max_count = limit.min(25).to_string();
-    let pretty =
-        "%H%x1f%h%x1f%cI%x1f%an%x1f%ae%x1f%s%x1f%(trailers:key=Instafy-Resolved-By,valueonly)%x1e";
     let stdout = git_stdout(
         workspace_root,
         &[
@@ -2017,12 +2020,28 @@ pub fn list_recent_commits(
             "--max-count",
             max_count.as_str(),
             "--date=iso-strict",
-            &format!("--pretty=format:{pretty}"),
+            &format!("--pretty=format:{HISTORY_PRETTY}"),
         ],
         bearer_token,
     )
     .map_err(|error| OriginError::internal(error.to_string()))?;
 
+    Ok(parse_history_records(&stdout))
+}
+
+/// One history record per commit: id, short id, committer date, author
+/// name and email, subject and the `Instafy-Resolved-By` trailer, separated
+/// by 0x1f and ended by 0x1e.
+pub(crate) const HISTORY_PRETTY: &str =
+    "%H%x1f%h%x1f%cI%x1f%an%x1f%ae%x1f%s%x1f%(trailers:key=Instafy-Resolved-By,valueonly)%x1e";
+
+/// [`HISTORY_PRETTY`] with the parent ids as one more field.
+pub(crate) const HISTORY_PRETTY_WITH_PARENTS: &str =
+    "%H%x1f%h%x1f%cI%x1f%an%x1f%ae%x1f%s%x1f%(trailers:key=Instafy-Resolved-By,valueonly)%x1f%P%x1e";
+
+/// Parse `git log` output in [`HISTORY_PRETTY`] or
+/// [`HISTORY_PRETTY_WITH_PARENTS`] format.
+pub(crate) fn parse_history_records(stdout: &str) -> Vec<GitHistoryEntry> {
     let mut entries = Vec::new();
     for raw_record in stdout.split('\u{1e}') {
         let record = raw_record.trim();
@@ -2043,6 +2062,15 @@ pub fn list_recent_commits(
             .next()
             .and_then(|value| value.lines().map(str::trim).find(|line| !line.is_empty()))
             .map(str::to_string);
+        // Only a commit id: a subject can hold the separator bytes.
+        let first_parent = fields
+            .next()
+            .and_then(|parents| parents.split_whitespace().next())
+            .filter(|parent| {
+                matches!(parent.len(), 40 | 64)
+                    && parent.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .map(str::to_string);
         entries.push(GitHistoryEntry {
             commit,
             short_commit,
@@ -2051,10 +2079,10 @@ pub fn list_recent_commits(
             author_email,
             subject,
             resolved_by,
+            first_parent,
         });
     }
-
-    Ok(entries)
+    entries
 }
 
 pub fn list_commit_files(
@@ -5658,6 +5686,30 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
         assert_eq!(local, "dirty edit\n");
 
         Ok(())
+    }
+
+    #[test]
+    fn history_records_carry_a_first_parent_only_when_asked() {
+        let parent = "0123456789abcdef0123456789abcdef01234567";
+        let other = "89abcdef0123456789abcdef0123456789abcdef";
+        let with_parents = format!(
+            "c1\x1fc\x1f2026-10-04T12:00:00+00:00\x1fA\x1fa@x\x1fmerge\x1fassistant\n\x1f{parent} {other}\x1e\n\
+             c2\x1fc\x1f2026-10-04T11:00:00+00:00\x1fA\x1fa@x\x1froot\x1f\x1f\x1e\n\
+             c3\x1fc\x1f2026-10-04T10:00:00+00:00\x1fA\x1fa@x\x1fodd\x1f\x1fnot-an-id\x1e"
+        );
+        let entries = parse_history_records(&with_parents);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].first_parent.as_deref(), Some(parent));
+        assert_eq!(entries[0].resolved_by.as_deref(), Some("assistant"));
+        assert_eq!(entries[1].first_parent, None);
+        assert_eq!(entries[2].first_parent, None);
+
+        let without = "c1\x1fc\x1f2026-10-04T12:00:00+00:00\x1fA\x1fa@x\x1fsubject\x1f\x1e";
+        let entries = parse_history_records(without);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].first_parent, None);
+        let json = serde_json::to_value(&entries[0]).unwrap();
+        assert!(json.get("firstParent").is_none(), "{json}");
     }
 
     #[test]
