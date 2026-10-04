@@ -191,6 +191,7 @@ describe("FilesPanel one Save", () => {
     mocks.versioning.originId = "origin-1";
     mocks.versioning.recovery = "unknown";
     mocks.project.canWriteProject = true;
+    mocks.project.activeProjectId = "space-a";
     mocks.listAt.mockImplementation(async ({ path }: { path?: string }) => ({
       ok: true,
       entries: path === "docs"
@@ -596,6 +597,26 @@ describe("FilesPanel one Save", () => {
       undefined,
     );
     expect(file()).toMatchObject({ generated: "saved", modified: "edited", baseRev: REV_1 });
+  });
+
+  it.each([
+    ["changed in the space", { status: 409, code: "head_moved", head: REV_3, paths: ["README.md"] }, 1],
+    ["busy", { status: 409, code: "main_busy" }, 0],
+  ] as const)("shows nothing in another space for a save that failed there (%s)", async (_case, error, staleCards) => {
+    const pending = deferred<ReturnType<typeof failed>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    // The user opens another space: the Files panel of space A closes.
+    await closePanel();
+    mocks.project.activeProjectId = "space-b";
+    useWorkspaceStore.setState({ activeProjectId: "space-b" });
+    await act(async () => { pending.resolve(failed(error)); });
+    await settle();
+    expect(mocks.showStatus).not.toHaveBeenCalled();
+    // A stale card waits in space A's chat.
+    expect(staleEvents).toHaveLength(staleCards);
+    expect(staleEvents.every((event) => (event as { projectId?: string }).projectId === "space-a")).toBe(true);
   });
 
   it("starts no save from a Try again pressed after its panel closed", async () => {

@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodeFile } from "../../../../types";
+import { useWorkspaceStore } from "../../../../store";
 import { createOwnRevisions } from "../filesVersioning";
 import { SAVE_FETCH_PENDING_RETRY_CAP_MS, useFilesPanelSave, type UseFilesPanelSaveOptions } from "../useFilesPanelSave";
 
@@ -60,6 +61,8 @@ describe("useFilesPanelSave fetch_pending retry", () => {
   beforeEach(async () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    // The space whose buffers the code store holds (the save's own space).
+    useWorkspaceStore.setState({ activeProjectId: "space-a" });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);

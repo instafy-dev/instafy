@@ -310,12 +310,15 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       }
       // The panel may have closed while the save ran (a chat file surface, a
       // panel switch, another space, leaving Studio). The result is still
-      // recorded on its space's buffers. A panel that shows another space by
-      // now does not report it there.
-      const showsOtherSpace = mountedRef.current && optionsRef.current.activeProjectId !== projectId;
+      // recorded on its space's buffers. Once the user is in another space,
+      // nothing is reported there: a stale card waits in its own space's chat,
+      // and the buffer there still shows its unsaved edits.
+      const otherSpaceOpen =
+        useWorkspaceStore.getState().activeProjectId !== projectId ||
+        (mountedRef.current && optionsRef.current.activeProjectId !== projectId);
       const latest = optionsRef.current;
       const present = (copy: SaveCopy) => {
-        if (showsOtherSpace) {
+        if (otherSpaceOpen) {
           return;
         }
         if (mountedRef.current) {
