@@ -20,6 +20,7 @@ describe("Playwright gateway mode", () => {
   const original = process.env.PLAYWRIGHT_GATEWAY_MODE;
   afterEach(() => {
     playwrightTest.skip.mockReset();
+    vi.unstubAllEnvs();
     if (original === undefined) {
       delete process.env.PLAYWRIGHT_GATEWAY_MODE;
     } else {
@@ -48,12 +49,19 @@ describe("Playwright gateway mode", () => {
     await expect(assertGatewayMode(page, "p", async () => ({ statusCode: 200, payload: {} }))).rejects.toThrow(
       /answers as legacy/,
     );
-    await expect(assertGatewayMode(page, "p", async () => null)).rejects.toThrow(/unreachable/);
+    await expect(assertGatewayMode(page, "p", async () => ({ statusCode: 502, payload: null }))).rejects.toThrow(
+      /answers as unreachable/,
+    );
+    await expect(
+      assertGatewayMode(page, "p", async () => ({ tokenFailure: { reason: "mint_failed", statusCode: 503 } })),
+    ).rejects.toThrow(/default origin is unreachable\. Origin token mint failed \(503\)/);
     await expect(
       assertGatewayMode(page, "p", async () => ({ statusCode: 200, payload: { stateless: true } })),
     ).resolves.toBeUndefined();
     delete process.env.PLAYWRIGHT_GATEWAY_MODE;
-    await expect(assertGatewayMode(page, "p", async () => null)).resolves.toBeUndefined();
+    await expect(
+      assertGatewayMode(page, "p", async () => ({ tokenFailure: { reason: "unconfigured" } })),
+    ).resolves.toBeUndefined();
   });
   it("probes the default origin and fails when it gives no usable answer", async () => {
     const page = {} as Page;
@@ -64,7 +72,51 @@ describe("Playwright gateway mode", () => {
     await expect(probeGatewayMode(page, "p", async () => ({ statusCode: 502, payload: null }))).rejects.toThrow(
       /answered 502/,
     );
-    await expect(probeGatewayMode(page, "p", async () => null)).rejects.toThrow(/No origin token/);
+  });
+
+  it("says why no origin token could be minted", async () => {
+    const page = {} as Page;
+    await expect(
+      probeGatewayMode(page, "p", async () => ({ tokenFailure: { reason: "unconfigured" } })),
+    ).rejects.toThrow(/No origin token: the controller URL and service role key are required/);
+    const minted = probeGatewayMode(page, "p", async () => ({
+      tokenFailure: { reason: "mint_failed", statusCode: 401 },
+    }));
+    await expect(minted).rejects.toThrow("[gatewayMode] Origin token mint failed (401).");
+    await expect(minted).rejects.not.toThrow(/service role key/);
+    await expect(
+      probeGatewayMode(page, "p", async () => ({ tokenFailure: { reason: "mint_empty" } })),
+    ).rejects.toThrow("[gatewayMode] Origin token mint returned no endpoint or token.");
+  });
+
+  it("tells a failed mint from missing configuration through the harness probe", async () => {
+    const serviceRoleVars = [
+      "SUPABASE_SERVICE_ROLE_KEY",
+      "SERVICE_ROLE_KEY",
+      "PLAYWRIGHT_CONTROLLER_INTERNAL_TOKEN",
+      "CONTROLLER_INTERNAL_TOKEN",
+    ];
+    for (const name of serviceRoleVars) {
+      vi.stubEnv(name, "");
+    }
+    vi.stubEnv("PLAYWRIGHT_CONTROLLER_URL", "http://controller.test");
+    const answer = (statusCode: number, body: unknown) => ({
+      ok: () => statusCode >= 200 && statusCode < 300,
+      status: () => statusCode,
+      json: async () => body,
+    });
+    const post = vi.fn(async () => answer(401, null));
+    const page = { context: () => ({ request: { post } }) } as unknown as Page;
+
+    await expect(probeGatewayMode(page, "p")).rejects.toThrow(/No origin token: the controller URL and service role key/);
+    expect(post).not.toHaveBeenCalled();
+
+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "service-role-for-tests");
+    await expect(probeGatewayMode(page, "p")).rejects.toThrow("[gatewayMode] Origin token mint failed (401).");
+    expect(post).toHaveBeenCalledWith("http://controller.test/access_token", expect.anything());
+
+    post.mockResolvedValueOnce(answer(200, { endpoint: "http://origin.test" }));
+    await expect(probeGatewayMode(page, "p")).rejects.toThrow("[gatewayMode] Origin token mint returned no endpoint or token.");
   });
 
   it("skips a spec for the other mode without probing", async () => {
@@ -89,7 +141,11 @@ describe("Playwright gateway mode", () => {
     await expect(
       requireGatewayMode(page, "p", "stateless", async () => ({ statusCode: 200, payload: { stateless: true } })),
     ).resolves.toBeUndefined();
-    await expect(requireGatewayMode(page, "p", "stateless", async () => null)).rejects.toThrow(/No origin token/);
+    await expect(
+      requireGatewayMode(page, "p", "stateless", async () => ({
+        tokenFailure: { reason: "mint_failed", statusCode: 500 },
+      })),
+    ).rejects.toThrow(/Origin token mint failed \(500\)/);
     expect(playwrightTest.skip).not.toHaveBeenCalled();
   });
 });

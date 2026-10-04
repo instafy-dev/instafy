@@ -1,5 +1,5 @@
 import { test, type Page } from "@playwright/test";
-import { fetchDefaultOriginGitStatus } from "./harness.js";
+import { fetchDefaultOriginGitStatus, type OriginTokenFailure } from "./harness.js";
 
 /**
  * Which hosted gateway a Playwright run targets: `legacy` (today's stateful
@@ -61,6 +61,18 @@ export function gatewayModeFromStatus(
   return null;
 }
 
+/** Why the probe had no origin token, for an error message. */
+export function describeOriginTokenFailure(failure: OriginTokenFailure): string {
+  switch (failure.reason) {
+    case "unconfigured":
+      return "No origin token: the controller URL and service role key are required to probe the gateway.";
+    case "mint_failed":
+      return `Origin token mint failed (${failure.statusCode}).`;
+    case "mint_empty":
+      return "Origin token mint returned no endpoint or token.";
+  }
+}
+
 /**
  * Ask the project's default origin how it keeps versions (one status call).
  * Throws when the origin gives no usable answer.
@@ -71,13 +83,12 @@ export async function probeGatewayMode(
   probe: GatewayStatusProbe = fetchDefaultOriginGitStatus,
 ): Promise<GatewayMode> {
   const status = await probe(page, { projectId });
+  if ("tokenFailure" in status) {
+    throw new Error(`[gatewayMode] ${describeOriginTokenFailure(status.tokenFailure)}`);
+  }
   const mode = gatewayModeFromStatus(status);
   if (!mode) {
-    throw new Error(
-      status
-        ? `[gatewayMode] /git/status answered ${status.statusCode}.`
-        : "[gatewayMode] No origin token: the controller URL and service role key are required to probe the gateway.",
-    );
+    throw new Error(`[gatewayMode] /git/status answered ${status.statusCode}.`);
   }
   return mode;
 }
@@ -95,7 +106,14 @@ export async function assertGatewayMode(
   if (!expected) {
     return;
   }
-  const actual = gatewayModeFromStatus(await probe(page, { projectId }));
+  const status = await probe(page, { projectId });
+  if ("tokenFailure" in status) {
+    throw new Error(
+      `${GATEWAY_MODE_ENV}=${expected}, but the project's default origin is unreachable. ` +
+        describeOriginTokenFailure(status.tokenFailure),
+    );
+  }
+  const actual = gatewayModeFromStatus(status);
   if (actual !== expected) {
     throw new Error(
       `${GATEWAY_MODE_ENV}=${expected}, but the project's default origin answers as ${actual ?? "unreachable"}.`,
