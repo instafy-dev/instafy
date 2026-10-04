@@ -67,12 +67,11 @@ import type { FilesPanelMobileView } from "../../studioFilesMobileView";
 import { getStudioWorkspaceOwnerKey, type StudioDirectoryListingListener } from "../useStudioKnownFiles";
 import { useWorkspaceVersioning } from "../../../workspace/useWorkspaceVersioning";
 import {
-  createOwnRevisions,
+  filesOwnRevisions,
   isFileBufferDirty,
   isVersionedFilesMode,
   mergeNewFileBuffers,
   type FilesVersioning,
-  type OwnRevisions,
 } from "./filesVersioning";
 import type { FilesCreateVersionedOptions } from "./useFilesPanelCreateEntries";
 import { useFilesPanelSave } from "./useFilesPanelSave";
@@ -165,9 +164,6 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const EMPTY_DIRECTORY_PLACEHOLDER = ".instafy.keep";
-// Shared by every Files panel instance (main, explorer portal, chat): a
-// commit this tab wrote is not a reason for any of them to reload.
-const FILES_OWN_REVISIONS: OwnRevisions = createOwnRevisions();
 const SAVE_SHORTCUT_LABEL =
   typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? "") ? "⌘S" : "Ctrl+S";
 const INSTAFY_ROOT_ENTRY_NAMES = new Set([".agents", ".instafy", "AGENTS.md", "AGENTS.py", "INSTAFY.md"]);
@@ -500,7 +496,9 @@ export function FilesPanel({
   const versioned = isVersionedFilesMode(filesVersioning);
   const originAvailable =
     Boolean(desktopOrigin?.endpoint) && desktopOrigin?.presence?.status !== "offline";
-  const ownRevisions = FILES_OWN_REVISIONS;
+  // Shared by every Files panel instance (main, explorer portal, chat): a
+  // commit this tab wrote is not a reason for any of them to reload.
+  const ownRevisions = filesOwnRevisions();
   const { openFileTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
   const isLargeScreen = useStudioDesktopLayout();
   const touchExplorer = useTouchLikeInput() && !isLargeScreen;
@@ -838,13 +836,17 @@ export function FilesPanel({
       versioned
         ? {
             ownRevisions,
-            getBuffer: (path) => workspaceFilesRef.current.find((file) => file.id === path) ?? null,
+            // As this tab's last save left it, even before React shows it.
+            getBuffer: (path) => {
+              const buffer = workspaceFilesRef.current.find((file) => file.id === path) ?? null;
+              return buffer ? ownRevisions.latest(activeProjectId, buffer) : null;
+            },
             discardBuffers,
             writeReady: !projectWriteDisabled && originAvailable,
             onWriteFailure: presentWriteFailure,
           }
         : null,
-    [discardBuffers, originAvailable, ownRevisions, presentWriteFailure, projectWriteDisabled, versioned],
+    [activeProjectId, discardBuffers, originAvailable, ownRevisions, presentWriteFailure, projectWriteDisabled, versioned],
   );
   const dirtyFileIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {

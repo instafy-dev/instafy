@@ -10,6 +10,7 @@ import {
   isVersionedFilesMode,
   mergeNewFileBuffers,
   OWN_REVISION_WINDOW_MS,
+  savedBufferIds,
 } from "../filesVersioning";
 
 const BLOB_A = "a".repeat(40);
@@ -122,17 +123,39 @@ describe("Files versioning helpers", () => {
     expect(own.has(REV)).toBe(false);
   });
 
-  it("remembers blobs this tab is saving per path for 60 seconds", () => {
-    let now = 1_000;
-    const own = createOwnRevisions(() => now);
-    own.addWrite("README.md", BLOB_A);
-    own.addWrite("README.md", null);
+  it("counts a blob as this tab's own only while a save of it runs", () => {
+    const own = createOwnRevisions();
+    const release = own.addWrite("README.md", BLOB_A);
+    own.addWrite("README.md", null)();
     expect(own.hasWrite("README.md", BLOB_A)).toBe(true);
     expect(own.hasWrite("README.md", BLOB_B)).toBe(false);
     expect(own.hasWrite("other.md", BLOB_A)).toBe(false);
     expect(own.hasWrite("README.md", null)).toBe(false);
-    now += OWN_REVISION_WINDOW_MS + 1;
+    // A second panel saving the same bytes keeps it own until both settle.
+    const second = own.addWrite("README.md", BLOB_A);
+    release();
+    release();
+    expect(own.hasWrite("README.md", BLOB_A)).toBe(true);
+    second();
     expect(own.hasWrite("README.md", BLOB_A)).toBe(false);
+  });
+
+  it("reads a buffer the way a finished save left it until the store shows it", () => {
+    const own = createOwnRevisions();
+    const before = buffer({ generated: "saved", modified: "edited", baseRev: REV, blobOid: BLOB_A, originId: "origin-1" });
+    const after = { generated: "edited", baseRev: "2".repeat(40), blobOid: BLOB_B, originId: "origin-1", isNew: false };
+    own.noteSaved("space-a", "README.md", savedBufferIds(before), after);
+    expect(own.latest("space-b", before)).toBe(before);
+    expect(own.latest(null, before)).toBe(before);
+    expect(own.latest("space-a", before)).toMatchObject({
+      generated: "edited", baseRev: after.baseRev, blobOid: BLOB_B, originId: "origin-1", modified: "edited",
+    });
+    expect(own.latest("space-a", before).isNew).toBeUndefined();
+    // Once the store shows the save, or a newer read replaced the buffer, the
+    // store is the truth again.
+    const shown = { ...before, ...after };
+    expect(own.latest("space-a", shown)).toBe(shown);
+    expect(own.latest("space-a", before)).toBe(before);
   });
 
   it("moves only the listings at the commit an own save built on to that save's commit", () => {

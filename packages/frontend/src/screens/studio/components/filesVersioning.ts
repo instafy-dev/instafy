@@ -119,32 +119,89 @@ export function decideCachedOpen(params: {
   return dirty ? "stale" : "refetch";
 }
 
-/** Revisions this tab wrote itself, so their commit events are not reloads. */
+/** The fields a save sets on a buffer. */
+export type SavedBufferIds = {
+  generated: string;
+  baseRev: string | null;
+  blobOid: string | null;
+  originId: string | null;
+  isNew: boolean;
+};
+
+export function savedBufferIds(file: CodeFile): SavedBufferIds {
+  return {
+    generated: file.generated,
+    baseRev: file.baseRev ?? null,
+    blobOid: file.blobOid ?? null,
+    originId: file.originId ?? null,
+    isNew: file.isNew === true,
+  };
+}
+
+export function sameSavedBufferIds(left: SavedBufferIds, right: SavedBufferIds): boolean {
+  return (
+    left.generated === right.generated &&
+    left.baseRev === right.baseRev &&
+    left.blobOid === right.blobOid &&
+    left.originId === right.originId &&
+    left.isNew === right.isNew
+  );
+}
+
+function withSavedBufferIds(file: CodeFile, ids: SavedBufferIds): CodeFile {
+  const { isNew, ...rest } = ids;
+  const next: CodeFile = { ...file, ...rest };
+  if (isNew) {
+    next.isNew = true;
+  } else {
+    delete next.isNew;
+  }
+  return next;
+}
+
+/**
+ * This tab's own saves, shared by every Files panel instance (the Files tab,
+ * the explorer drawer, a chat file surface), so none of them mistakes one for
+ * a change made in the space.
+ */
 export interface OwnRevisions {
+  /** Revisions this tab wrote itself, so their commit events are not reloads. */
   add: (rev: string | null | undefined) => void;
   has: (rev: string | null | undefined) => boolean;
   /**
    * A blob this tab is saving at a path, registered before the request is
    * sent: the save's commit event can arrive before its response, and a
    * listing that shows this blob is then this tab's own edit, not a change
-   * made in the space.
+   * made in the space. Only while the save runs: the returned release is
+   * called once it settles, after which the saved buffer (or the failure)
+   * speaks for itself, and a later commit that brings the same blob back is
+   * someone else's change.
    */
-  addWrite: (path: string, blobOid: string | null | undefined) => void;
+  addWrite: (path: string, blobOid: string | null | undefined) => () => void;
   hasWrite: (path: string, blobOid: string | null | undefined) => boolean;
+  /**
+   * A finished save of `path` in `projectId`: a buffer that the code store
+   * still shows at `before` reads as `after` until the store catches up
+   * (React applies the update on its next render, and a trailing save or a
+   * commit event can come first).
+   */
+  noteSaved: (projectId: string, path: string, before: SavedBufferIds, after: SavedBufferIds) => void;
+  /** `file` as this tab's last finished save of it left it. */
+  latest: (projectId: string | null, file: CodeFile) => CodeFile;
 }
 
 export const OWN_REVISION_WINDOW_MS = 60_000;
 
 export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
   const revisions = new Map<string, number>();
+  /** Saves in flight per path and blob (two panels can save the same bytes). */
   const writes = new Map<string, number>();
+  const saved = new Map<string, { before: SavedBufferIds; after: SavedBufferIds }>();
   const prune = () => {
     const cutoff = now() - OWN_REVISION_WINDOW_MS;
-    for (const entries of [revisions, writes]) {
-      for (const [key, at] of entries) {
-        if (at < cutoff) {
-          entries.delete(key);
-        }
+    for (const [key, at] of revisions) {
+      if (at < cutoff) {
+        revisions.delete(key);
       }
     }
   };
@@ -152,22 +209,52 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
     const oid = blobOid?.trim();
     return path && oid ? `${path}\u0000${oid}` : null;
   };
+  const savedKey = (projectId: string, path: string) => `${projectId}\u0000${path}`;
   return {
     addWrite(path, blobOid) {
       const key = writeKey(path, blobOid);
       if (!key) {
-        return;
+        return () => undefined;
       }
-      prune();
-      writes.set(key, now());
+      writes.set(key, (writes.get(key) ?? 0) + 1);
+      let released = false;
+      return () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        const remaining = (writes.get(key) ?? 1) - 1;
+        if (remaining > 0) {
+          writes.set(key, remaining);
+        } else {
+          writes.delete(key);
+        }
+      };
     },
     hasWrite(path, blobOid) {
       const key = writeKey(path, blobOid);
-      if (!key) {
-        return false;
+      return key ? writes.has(key) : false;
+    },
+    noteSaved(projectId, path, before, after) {
+      if (projectId && path) {
+        saved.set(savedKey(projectId, path), { before, after });
       }
-      prune();
-      return writes.has(key);
+    },
+    latest(projectId, file) {
+      if (!projectId) {
+        return file;
+      }
+      const key = savedKey(projectId, file.path);
+      const entry = saved.get(key);
+      if (!entry) {
+        return file;
+      }
+      if (sameSavedBufferIds(savedBufferIds(file), entry.before)) {
+        return withSavedBufferIds(file, entry.after);
+      }
+      // The store shows the save now, or the buffer moved on (a newer read).
+      saved.delete(key);
+      return file;
     },
     add(rev) {
       const value = rev?.trim();
@@ -186,6 +273,20 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
       return revisions.has(value);
     },
   };
+}
+
+let sharedOwnRevisions = createOwnRevisions();
+
+/**
+ * The one record of this tab's own saves. Every Files panel instance uses it,
+ * and so does a panel mounted after a save started.
+ */
+export function filesOwnRevisions(): OwnRevisions {
+  return sharedOwnRevisions;
+}
+
+export function resetFilesOwnRevisionsForTests(): void {
+  sharedOwnRevisions = createOwnRevisions();
 }
 
 /**

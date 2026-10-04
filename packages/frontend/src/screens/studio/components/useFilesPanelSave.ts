@@ -12,8 +12,11 @@ import {
   bufferSaveOriginId,
   bufferVersioningMode,
   EMPTY_DIRECTORY_PLACEHOLDER,
+  sameSavedBufferIds,
+  savedBufferIds,
   type FilesVersioning,
   type OwnRevisions,
+  type SavedBufferIds,
 } from "./filesVersioning";
 import { raiseWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
 import {
@@ -29,23 +32,6 @@ export const SAVE_FETCH_PENDING_RETRY_CAP_MS = 5_000;
 const SAVE_FETCH_PENDING_DEFAULT_MS = 1_000;
 
 type DirectoryEntries = Record<string, ControllerWorkspaceEntry[]>;
-
-/** The buffer fields a save sets. */
-type BufferIds = {
-  generated: string;
-  baseRev: string | null;
-  blobOid: string | null;
-  originId: string | null;
-  isNew: boolean;
-};
-
-/**
- * A finished save's fields, applied on top of the store until the store
- * shows them (a trailing save can start before React re-renders). Once the
- * store has shown them, or a newer read replaced the buffer, the store is the
- * truth again.
- */
-type PendingBufferUpdate = { after: BufferIds; at: number; seen: boolean };
 
 export interface UseFilesPanelSaveOptions {
   /** Only the stateless and desktop modes save through this hook. */
@@ -90,33 +76,13 @@ function labelOf(file: Pick<CodeFile, "label" | "path">): string {
   return file.label || file.path.split("/").pop() || file.path;
 }
 
-function idsOf(file: CodeFile): BufferIds {
-  return {
-    generated: file.generated,
-    baseRev: file.baseRev ?? null,
-    blobOid: file.blobOid ?? null,
-    originId: file.originId ?? null,
-    isNew: file.isNew === true,
-  };
-}
-
 /**
  * The store still holds the buffer a save started from (same base text and
  * read ids). A save that finishes after a reload took a newer version, or
  * after the active space changed, leaves that buffer alone.
  */
 function isSameBuffer(candidate: CodeFile, file: CodeFile): boolean {
-  return candidate.id === file.id && sameIds(idsOf(candidate), idsOf(file));
-}
-
-function sameIds(left: BufferIds, right: BufferIds): boolean {
-  return (
-    left.generated === right.generated &&
-    left.baseRev === right.baseRev &&
-    left.blobOid === right.blobOid &&
-    left.originId === right.originId &&
-    left.isNew === right.isNew
-  );
+  return candidate.id === file.id && sameSavedBufferIds(savedBufferIds(candidate), savedBufferIds(file));
 }
 
 function raiseStale(
@@ -157,7 +123,6 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
   const savingRef = useRef(false);
   /** The one save queued behind the running one (its file, or the active one). */
   const trailingRef = useRef<{ fileId: string | null } | null>(null);
-  const pendingUpdatesRef = useRef(new Map<string, PendingBufferUpdate>());
   const mountedRef = useRef(true);
   const optionsRef = useRef(options);
   optionsRef.current = options;
@@ -170,33 +135,11 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     };
   }, []);
 
-  /** The store's buffer, with a finished save applied if the store lags. */
-  const effectiveBuffer = useCallback((file: CodeFile): CodeFile => {
-    const pending = pendingUpdatesRef.current.get(file.path);
-    if (!pending) {
-      return file;
-    }
-    if (sameIds(idsOf(file), pending.after)) {
-      pending.seen = true;
-      return file;
-    }
-    if (pending.seen || (file.readAt ?? 0) > pending.at) {
-      pendingUpdatesRef.current.delete(file.path);
-      return file;
-    }
-    const { isNew, ...ids } = pending.after;
-    const next: CodeFile = { ...file, ...ids };
-    if (isNew) {
-      next.isNew = true;
-    } else {
-      delete next.isNew;
-    }
-    return next;
-  }, []);
-
-  const updateBuffer = useCallback((file: CodeFile, after: BufferIds, savedText: string | null) => {
+  const updateBuffer = useCallback((projectId: string, file: CodeFile, after: SavedBufferIds, savedText: string | null) => {
     const current = optionsRef.current;
-    pendingUpdatesRef.current.set(file.path, { after, at: Date.now(), seen: false });
+    // Every panel (and a trailing save) reads the buffer this way until the
+    // store shows it.
+    current.ownRevisions.noteSaved(projectId, file.path, savedBufferIds(file), after);
     const savedAt = savedText !== null ? new Date().toISOString() : null;
     const size = savedText !== null ? new TextEncoder().encode(savedText).length : null;
     // The code store outlives this panel, so a save that finishes after the
@@ -264,7 +207,8 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     if (!current.enabled || !projectId || !storeFile || current.readOnly) {
       return;
     }
-    const file = effectiveBuffer(storeFile);
+    // A save that just finished may not be in the store yet.
+    const file = current.ownRevisions.latest(projectId, storeFile);
     const content = current.getPendingContent(storeFile);
     if (content === file.generated && file.isNew !== true) {
       return;
@@ -352,98 +296,106 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     // Known before the request: the commit event can arrive before the
     // response, and its listing then shows this blob (see OwnRevisions).
     const savedOid = await gitBlobOid(content);
-    current.ownRevisions.addWrite(path, savedOid);
-    let result: WorkspaceSaveResult = await controllerClient.workspace.save.changes(request);
-    if (!result.ok && result.error.code === "fetch_pending") {
-      const delay = Math.min(
-        result.error.retryAfterMs ?? SAVE_FETCH_PENDING_DEFAULT_MS,
-        SAVE_FETCH_PENDING_RETRY_CAP_MS,
-      );
-      await (current.wait ?? defaultWait)(Math.max(0, delay));
-      result = await controllerClient.workspace.save.changes(request);
-    }
-    if (result.ok) {
-      // Shared by every panel instance, so another panel never reloads on it.
-      current.ownRevisions.add(result.rev);
-      current.ownRevisions.add(result.report?.localRev ?? null);
-    }
-    // The panel may have closed while the save ran (a chat file surface, a
-    // panel switch). The result is still recorded and reported; only a save
-    // whose space is no longer the active one is left alone.
-    if (mountedRef.current && optionsRef.current.activeProjectId !== projectId) {
-      return;
-    }
-    const latest = optionsRef.current;
-    const present = (copy: SaveCopy) => {
-      if (mountedRef.current) {
-        latest.presentFailure(copy, retry);
+    const releaseWrite = current.ownRevisions.addWrite(path, savedOid);
+    try {
+      let result: WorkspaceSaveResult = await controllerClient.workspace.save.changes(request);
+      if (!result.ok && result.error.code === "fetch_pending") {
+        const delay = Math.min(
+          result.error.retryAfterMs ?? SAVE_FETCH_PENDING_DEFAULT_MS,
+          SAVE_FETCH_PENDING_RETRY_CAP_MS,
+        );
+        await (current.wait ?? defaultWait)(Math.max(0, delay));
+        result = await controllerClient.workspace.save.changes(request);
+      }
+      if (result.ok) {
+        // Shared by every panel instance, so another panel never reloads on it.
+        current.ownRevisions.add(result.rev);
+        current.ownRevisions.add(result.report?.localRev ?? null);
+      }
+      // The panel may have closed while the save ran (a chat file surface, a
+      // panel switch). The result is still recorded and reported; only a save
+      // whose space is no longer the active one is left alone.
+      if (mountedRef.current && optionsRef.current.activeProjectId !== projectId) {
         return;
       }
-      // Trying again needs the panel; the message still reaches the user.
-      latest.presentFailure(copy.action?.kind === "retry" ? { message: copy.message } : copy, () => undefined);
-    };
+      const latest = optionsRef.current;
+      const present = (copy: SaveCopy) => {
+        if (mountedRef.current) {
+          latest.presentFailure(copy, retry);
+          return;
+        }
+        // Trying again needs the panel; the message still reaches the user.
+        latest.presentFailure(copy.action?.kind === "retry" ? { message: copy.message } : copy, () => undefined);
+      };
 
-    if (!result.ok) {
-      const copy = describeSaveFailure({
-        error: result.error,
-        mode,
-        label,
-        unsavedWorkVisible: onDefaultOrigin && current.unsavedWorkVisible === true,
-      });
-      if (copy.staleNotice) {
-        raiseStale(projectId, file, content, originId, null);
+      if (!result.ok) {
+        const copy = describeSaveFailure({
+          error: result.error,
+          mode,
+          label,
+          unsavedWorkVisible: onDefaultOrigin && current.unsavedWorkVisible === true,
+        });
+        if (copy.staleNotice) {
+          raiseStale(projectId, file, content, originId, null);
+        }
+        if (result.applied) {
+          // The edit reached the origin (a Desktop folder) but was not
+          // published. The buffer stays unsaved (a new file stays new, even
+          // when it is empty); only its blob follows the folder, so trying
+          // again does not report a false conflict.
+          updateBuffer(
+            projectId,
+            file,
+            { ...savedBufferIds(file), blobOid: savedOid, originId: result.originId ?? originId },
+            null,
+          );
+        }
+        present(copy);
+        return;
       }
-      if (result.applied) {
-        // The edit reached the origin (a Desktop folder) but was not
-        // published. The buffer stays unsaved (a new file stays new, even
-        // when it is empty); only its blob follows the folder, so trying
-        // again does not report a false conflict.
-        updateBuffer(
-          file,
-          { ...idsOf(file), blobOid: savedOid, originId: result.originId ?? originId },
-          null,
+
+      updateBuffer(
+        projectId,
+        file,
+        {
+          generated: content,
+          baseRev: mode === "stateless" ? result.rev ?? baseRev : null,
+          blobOid: savedOid,
+          originId: result.originId || originId,
+          isNew: false,
+        },
+        content,
+      );
+      if (mode === "stateless" && onDefaultOrigin) {
+        // The explorer's listings come from this origin: those at the commit
+        // this save built on are current at the save's commit too.
+        current.directoryRevsRef.current = advanceListingRevisions(
+          current.directoryRevsRef.current,
+          result.baseRev,
+          result.rev,
         );
       }
-      present(copy);
-      return;
-    }
 
-    updateBuffer(
-      file,
-      {
-        generated: content,
-        baseRev: mode === "stateless" ? result.rev ?? baseRev : null,
-        blobOid: savedOid,
-        originId: result.originId || originId,
-        isNew: false,
-      },
-      content,
-    );
-    if (mode === "stateless" && onDefaultOrigin) {
-      // The explorer's listings come from this origin: those at the commit
-      // this save built on are current at the save's commit too.
-      current.directoryRevsRef.current = advanceListingRevisions(
-        current.directoryRevsRef.current,
-        result.baseRev,
-        result.rev,
-      );
+      if (result.conflicted.includes(path)) {
+        // Desktop: the space has a newer version. The user's bytes stay in the
+        // folder and the work is kept for History.
+        raiseStale(projectId, file, content, result.originId || originId, "desktop");
+        present({ message: staleSaveMessage(label), action: RESOLVE });
+        return;
+      }
+      if (deletesKeep) {
+        current.keepFoldersRef.current.delete(parent);
+      }
+      const rejected = result.rejected.find((entry) => entry.path === path);
+      if (rejected) {
+        present(rejectedPathCopy(rejected.reason));
+      }
+    } finally {
+      // By now the save is recorded (its revision and the saved buffer), or
+      // it failed: either way the write is no longer in flight.
+      releaseWrite();
     }
-
-    if (result.conflicted.includes(path)) {
-      // Desktop: the space has a newer version. The user's bytes stay in the
-      // folder and the work is kept for History.
-      raiseStale(projectId, file, content, result.originId || originId, "desktop");
-      present({ message: staleSaveMessage(label), action: RESOLVE });
-      return;
-    }
-    if (deletesKeep) {
-      current.keepFoldersRef.current.delete(parent);
-    }
-    const rejected = result.rejected.find((entry) => entry.path === path);
-    if (rejected) {
-      present(rejectedPathCopy(rejected.reason));
-    }
-  }, [effectiveBuffer, updateBuffer]);
+  }, [updateBuffer]);
 
   const save = useCallback(async (request?: SaveRequest) => {
     // A save starts only from a mounted panel (its editor holds the newest

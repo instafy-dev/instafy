@@ -8,6 +8,7 @@ import { FilesPanel } from "../FilesPanel";
 import { TestCodeProvider, testCodeHandle } from "./filesPanelTestCode";
 import { writeWorkspaceFileStaleNotice } from "../workspaceFileStaleNoticeStore";
 import { gitBlobOid } from "../../../../utils/gitBlobOid";
+import { resetFilesOwnRevisionsForTests } from "../filesVersioning";
 
 const REV_1 = "1".repeat(40);
 const REV_2 = "2".repeat(40);
@@ -173,6 +174,7 @@ describe("FilesPanel one Save", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    resetFilesOwnRevisionsForTests();
     // A response queued with mockResolvedValueOnce never leaks into the next test.
     mocks.saveChanges.mockReset();
     mocks.listAt.mockReset();
@@ -629,6 +631,87 @@ describe("FilesPanel one Save", () => {
     expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md" })]);
     await act(async () => { pending.resolve(failed({ status: 409, code: "head_moved", head: rev, paths: ["README.md"] })); });
     await settle();
+  });
+
+  describe("a change in the space that brings back a version this tab saved earlier", () => {
+    const REV_4 = "4".repeat(40);
+    async function saveTwiceThenRevert() {
+      await render([buffer()]);
+      await pressSave();
+      await edit("edited twice");
+      mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_3), baseRev: REV_2 });
+      await pressSave();
+      expect(file()).toMatchObject({ generated: "edited twice", baseRev: REV_3 });
+      // An agent's undo or a History revert puts the first saved version back.
+      const firstBlob = await gitBlobOid("edited");
+      mocks.listAt.mockImplementation(async () => ({
+        ok: true,
+        entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: firstBlob }],
+        rev: REV_4,
+        originId: "origin-1",
+        originMode: "hosted",
+      }));
+      mocks.readAt.mockResolvedValue({
+        ok: true,
+        file: { path: "README.md", isText: true, contentText: "edited", rev: REV_4, blobOid: firstBlob, originId: "origin-1" },
+      });
+    }
+    async function revertEvent() {
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev: REV_4 } } }));
+      });
+      await settle();
+    }
+
+    it("reads a clean file again", async () => {
+      await saveTwiceThenRevert();
+      await revertEvent();
+      expect(mocks.readAt).toHaveBeenCalledWith(expect.objectContaining({ path: "README.md", rev: REV_4 }));
+      expect(file()).toMatchObject({ generated: "edited", modified: "edited", baseRev: REV_4 });
+      expect(staleEvents).toEqual([]);
+    });
+
+    it("raises the stale card for unsaved edits", async () => {
+      await saveTwiceThenRevert();
+      await edit("edited three times");
+      await revertEvent();
+      expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md", localText: "edited three times" })]);
+      expect(file()).toMatchObject({ generated: "edited twice", modified: "edited three times", baseRev: REV_3 });
+    });
+  });
+
+  it("takes its own save as its own when the save finishes while the event's listing loads", async () => {
+    const rev = "8".repeat(40);
+    const savedBlob = await gitBlobOid("edited");
+    const pending = deferred<ReturnType<typeof saved>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    await settle();
+    const listing = deferred<unknown>();
+    mocks.listAt.mockImplementation(() => listing.promise);
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+    });
+    // The response settles the save first; the listing arrives before the
+    // panel has rendered the saved buffer.
+    await act(async () => {
+      pending.resolve(saved(rev));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      listing.resolve({
+        ok: true,
+        entries: [{ name: "README.md", path: "README.md", kind: "file", blobOid: savedBlob }],
+        rev,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      for (let tick = 0; tick < 5; tick += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    });
+    await settle();
+    expect(staleEvents).toEqual([]);
+    expect(file()).toMatchObject({ generated: "edited", modified: "edited", baseRev: rev, blobOid: savedBlob });
   });
 
   it("saves a buffer read from the gateway back to it with its revision while the Desktop is the default", async () => {
