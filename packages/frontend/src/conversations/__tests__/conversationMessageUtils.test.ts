@@ -834,6 +834,31 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
     expect(range).toEqual({ base, head, source: "git" });
   });
 
+  it("keeps the paths the turn's save selected with the canonical pair", () => {
+    // The runtime saves the files a turn listed plus every file its git
+    // status says the turn changed (installs, generators).
+    const range = extractWorkspaceCommitRangeFromMetadata({
+      artifacts: [
+        {
+          kind: "origin/apply",
+          metadata: {
+            gitRev: head,
+            gitBaseRev: base,
+            paths: ["src/app.ts", " package-lock.json ", "", 7, "src/app.ts"],
+          },
+        },
+      ],
+    });
+    expect(range).toEqual({ base, head, source: "git", savedPaths: ["src/app.ts", "package-lock.json"] });
+
+    // An apply pair is never reverted, so it carries no paths.
+    expect(
+      extractWorkspaceCommitRangeFromMetadata({
+        artifacts: [{ kind: "origin/apply", metadata: { rev: head, baseRev: base, paths: ["src/app.ts"] } }],
+      }),
+    ).toEqual({ base, head, source: "apply" });
+  });
+
   it("falls back to the apply pair but never mixes pairs", () => {
     const range = extractWorkspaceCommitRangeFromMetadata({
       artifacts: [

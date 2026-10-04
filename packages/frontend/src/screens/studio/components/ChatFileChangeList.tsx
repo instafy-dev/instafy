@@ -22,9 +22,9 @@ import { truncateMultiline } from "./chatContentHelpers";
 import {
   REVERT_CHECK_FAILED_MESSAGE,
   REVERT_CHECKING_MESSAGE,
-  REVERT_CONFIRM_MESSAGE,
   describeChangeRevertOutcome,
   describeFileNotSaved,
+  describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
   revertRetryDelayMs,
@@ -88,7 +88,9 @@ type ChatFileUndoStatus = "reverted" | "removed";
 // the files the change's saved version itself touched.
 type ChatChangeRevertScope =
   | { status: "checking" }
-  | { status: "ready"; paths: string[] }
+  // `paths` is everything the version touched; `unlistedPaths` the ones this
+  // turn saved without listing them on the card.
+  | { status: "ready"; paths: string[]; unlistedPaths: string[] }
   | { status: "other_work"; otherPaths: string[] }
   | { status: "failed" };
 
@@ -847,7 +849,8 @@ export function ChatFileChangeList({
   // it can hold more than this card's files: a save that publishes work an
   // earlier turn could not publish carries that work too. So the dialog
   // first lists the files that version touched, and offers Revert only when
-  // every one of them is on this card.
+  // every one of them is this turn's own: on the card, or among the files
+  // the turn's save selected without listing them.
   const checkRevertScope = useCallback(async () => {
     const request = revertScopeRequestRef.current + 1;
     revertScopeRequestRef.current = request;
@@ -870,11 +873,16 @@ export function ChatFileChangeList({
       return;
     }
     const cardPaths = new Set(uniquePaths);
+    const turnPaths = new Set([...uniquePaths, ...(revertRange.savedPaths ?? []).map(normalizeWorkspacePath)]);
     const paths = Array.from(
       new Set(review.entries.map((entry) => normalizeWorkspacePath(entry.path)).filter((path) => path.length > 0)),
     );
-    const otherPaths = paths.filter((path) => !cardPaths.has(path));
-    setRevertScope(otherPaths.length > 0 ? { status: "other_work", otherPaths } : { status: "ready", paths });
+    const otherPaths = paths.filter((path) => !turnPaths.has(path));
+    setRevertScope(
+      otherPaths.length > 0
+        ? { status: "other_work", otherPaths }
+        : { status: "ready", paths, unlistedPaths: paths.filter((path) => !cardPaths.has(path)) },
+    );
   }, [projectId, revertRange, uniquePaths, versioning.originId]);
 
   const openRevertDialog = useCallback(() => {
@@ -1446,7 +1454,7 @@ export function ChatFileChangeList({
               data-testid="chat-file-change-revert-scope"
             >
               {revertScope?.status === "ready"
-                ? REVERT_CONFIRM_MESSAGE
+                ? describeRevertConfirm(revertScope.unlistedPaths)
                 : revertScope?.status === "other_work"
                   ? describeRevertOtherWork(revertScope.otherPaths, Boolean(messageId))
                   : revertScope?.status === "failed"

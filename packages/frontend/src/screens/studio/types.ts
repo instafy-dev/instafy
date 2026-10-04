@@ -73,6 +73,9 @@ export interface ChatMessageCommitRange {
   // Absent on ranges built before the source was recorded; only a "git"
   // range can be reverted as a saved version.
   source?: ChatMessageCommitRangeSource;
+  // "git" ranges only: every path the turn's save selected, which includes
+  // files the turn changed without listing them (installs, generators).
+  savedPaths?: string[];
 }
 
 // Why the run that produced a message's file changes left them out of the

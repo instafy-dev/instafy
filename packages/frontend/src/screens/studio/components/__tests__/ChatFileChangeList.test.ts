@@ -1159,6 +1159,25 @@ describe("ChatFileChangeList", () => {
       }
     });
 
+    it("counts files the turn saved without listing them as its own, and names them", async () => {
+      // An install rewrote the lockfile: the turn's save selected it, but the
+      // card lists only the file the agent reported.
+      versionTouches("src/app.ts", "package-lock.json");
+      await renderCard({
+        files: [fileChange("src/app.ts")],
+        commitRange: { ...gitRange, savedPaths: ["src/app.ts", "package-lock.json"] },
+      });
+      await openRevertDialog();
+
+      expect(dialog()?.getAttribute("data-state")).toBe("ready");
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "A new version that undoes it is saved on top. Nothing is removed from history. It also undoes this turn's changes to package-lock.json.",
+      );
+      expect(
+        document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]')?.disabled,
+      ).toBe(false);
+    });
+
     it("offers no Revert for a version with other work even without a message to undo", async () => {
       versionTouches("src/app.ts", "notes/earlier.md");
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });

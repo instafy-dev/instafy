@@ -551,6 +551,20 @@ export function extractFileChangesFromMetadata(
     .filter((entry): entry is ChatMessageFileChange => entry !== null);
 }
 
+// The paths a checkpoint's save selected, as the runtime recorded them.
+function readSavedPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const paths = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry === "string" && entry.trim().length > 0) {
+      paths.add(entry.trim());
+    }
+  }
+  return Array.from(paths);
+}
+
 function gitRevString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -604,7 +618,10 @@ export function extractWorkspaceCommitRangeFromMetadata(
     const source = gitPair.base && gitPair.head ? "git" : "apply";
     const pair = source === "git" ? gitPair : applyPair;
     if (pair.base && pair.head && pair.base !== pair.head) {
-      return { base: pair.base, head: pair.head, source };
+      const savedPaths = source === "git" ? readSavedPaths(artifactMetadata["paths"]) : [];
+      return savedPaths.length > 0
+        ? { base: pair.base, head: pair.head, source, savedPaths }
+        : { base: pair.base, head: pair.head, source };
     }
   }
   return null;

@@ -86,6 +86,14 @@ function formatPathList(paths: readonly string[], max = 3): string {
 // undoes all of it.
 export const REVERT_CHECKING_MESSAGE = "Checking what this change includes…";
 export const REVERT_CONFIRM_MESSAGE = "A new version that undoes it is saved on top. Nothing is removed from history.";
+
+// Files the turn changed and saved without listing them on the card, such as
+// a lockfile an install rewrote, are undone too: the dialog names them.
+export function describeRevertConfirm(unlistedPaths: readonly string[]): string {
+  return unlistedPaths.length > 0
+    ? `${REVERT_CONFIRM_MESSAGE} It also undoes this turn's changes to ${formatPathList(unlistedPaths)}.`
+    : REVERT_CONFIRM_MESSAGE;
+}
 export const REVERT_CHECK_FAILED_MESSAGE = "Couldn't check what this change includes. Try again.";
 
 export function describeRevertOtherWork(otherPaths: readonly string[], canAskAgent: boolean): string {

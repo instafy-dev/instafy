@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { RevertWorkspaceGitCommitResult } from "../../../../services/runtimeController/workspaceGit";
 import {
   describeChangeRevertOutcome,
+  describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
   revertRetryDelayMs,
@@ -255,6 +256,17 @@ describe("describeUnsavedChanges", () => {
     for (const text of [legacy, stateless]) {
       expect(text).not.toMatch(/next turn|unsaved work/i);
     }
+  });
+});
+
+describe("describeRevertConfirm", () => {
+  it("names the files the turn saved without listing them", () => {
+    expect(describeRevertConfirm([])).toBe(
+      "A new version that undoes it is saved on top. Nothing is removed from history.",
+    );
+    expect(describeRevertConfirm(["package-lock.json", "dist/app.js"])).toBe(
+      "A new version that undoes it is saved on top. Nothing is removed from history. It also undoes this turn's changes to package-lock.json and dist/app.js.",
+    );
   });
 });
 
