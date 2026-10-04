@@ -18,16 +18,23 @@ function keptAs({ unsavedWorkInHistory }: UnsavedWorkPlacement): string {
   return unsavedWorkInHistory ? "kept under History, in Unsaved work" : "kept as unsaved work";
 }
 
-const SAVING_OFF_MESSAGE = "Saving is turned off on this space's runtime, so these changes weren't saved to the space.";
+// A turn whose save did not run. The artifact records only that no save was
+// attempted, not why: an older client's auto-save preference did this until
+// the runtime stopped honouring it, and a runtime-wide setting still can.
+// Neither the artifact nor the turn's time tells which runtime build ran it,
+// so the note describes the turn in the past tense and names no cause. A
+// space that keeps versions the old way keeps today's sentence, which also
+// stays true after a later Save version.
+const SAVE_DID_NOT_RUN_MESSAGE = "Saving was off when this turn ran, so these changes weren't saved to the space.";
+const LEGACY_SAVE_DID_NOT_RUN_MESSAGE =
+  "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.";
 
 // The message-level note when the turn's save failed or did not run.
 export function describeUnsavedChanges(reason: ChatMessageUnsavedReason, placement: UnsavedWorkPlacement): string {
   if (reason === "auto_save_off") {
-    // Only the runtime-wide setting turns saving off now. It applies to every
-    // turn, so no later turn saves these, and nothing is kept as unsaved work.
-    return placement.saveVersionInChanges
-      ? `${SAVING_OFF_MESSAGE} To save them, open Changes and use Save version.`
-      : SAVING_OFF_MESSAGE;
+    // No later turn is promised to save these, and nothing says they were
+    // kept as unsaved work.
+    return placement.saveVersionInChanges ? LEGACY_SAVE_DID_NOT_RUN_MESSAGE : SAVE_DID_NOT_RUN_MESSAGE;
   }
   // Every turn saves, so the next turn picks up what this one left behind.
   return `These changes weren't saved to the space yet. The agent saves them at its next turn, and anything left over is ${keptAs(placement)}.`;

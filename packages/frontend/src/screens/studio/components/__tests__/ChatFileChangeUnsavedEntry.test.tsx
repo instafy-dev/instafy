@@ -132,18 +132,21 @@ describe("assistant file changes and their save state", () => {
     expect(state?.getAttribute("title")).toContain("The agent saves them at its next turn");
   });
 
-  it("marks them Not saved when saving was off for the run, without promising a later save", async () => {
+  it("marks them Not saved when saving was off for the run, without naming a cause or promising a later save", async () => {
+    // A turn recorded while a user's own auto-save preference was off looks
+    // the same as one a runtime-wide setting left unsaved.
     const message = assistantTurn("disabled");
 
     await act(async () => {
       root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
     });
 
+    // Until the space's mode is known the card behaves as it does today.
     const title = container.querySelector('[data-testid="chat-file-change-unsaved"]')?.getAttribute("title");
     expect(title).toBe(
-      "Saving is turned off on this space's runtime, so these changes weren't saved to the space. To save them, open Changes and use Save version.",
+      "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.",
     );
-    expect(title).not.toContain("next turn");
+    expect(title).not.toMatch(/next turn|runtime/);
   });
 
   it("looks like a normal change when the save worked", async () => {

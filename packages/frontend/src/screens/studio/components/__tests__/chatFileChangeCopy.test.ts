@@ -244,17 +244,21 @@ describe("describeUnsavedChanges", () => {
     );
   });
 
-  it("says saving is off without promising a later save", () => {
-    // RUNTIME_GIT_SYNC_AFTER_APPLY=0 turns saving off for every turn on that
-    // runtime: no later turn saves, and nothing is kept as unsaved work.
+  it("describes a turn whose save did not run without naming a cause or promising a later save", () => {
+    // Older turns got here from a user's own auto-save preference, newer ones
+    // only from a runtime-wide setting; the artifact cannot tell which.
     const legacy = describeUnsavedChanges("auto_save_off", { unsavedWorkInHistory: false, saveVersionInChanges: true });
+    // A space that keeps versions the old way keeps today's sentence.
     expect(legacy).toBe(
-      "Saving is turned off on this space's runtime, so these changes weren't saved to the space. To save them, open Changes and use Save version.",
+      "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.",
     );
     const stateless = describeUnsavedChanges("auto_save_off", { unsavedWorkInHistory: true });
-    expect(stateless).toBe("Saving is turned off on this space's runtime, so these changes weren't saved to the space.");
+    expect(stateless).toBe("Saving was off when this turn ran, so these changes weren't saved to the space.");
+    const desktop = describeUnsavedChanges("auto_save_off", { unsavedWorkInHistory: false });
+    expect(desktop).toBe(stateless);
     for (const text of [legacy, stateless]) {
-      expect(text).not.toMatch(/next turn|unsaved work/i);
+      expect(text).toMatch(/was off when this turn ran/);
+      expect(text).not.toMatch(/runtime|turned off|next turn|unsaved work/i);
     }
   });
 });

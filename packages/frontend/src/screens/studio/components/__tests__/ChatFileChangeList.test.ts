@@ -642,9 +642,10 @@ describe("ChatFileChangeList", () => {
     expect(note?.classList.contains("sr-only")).toBe(true);
   });
 
-  it("says saving is off without promising a later save, and points at Save version", async () => {
-    // Only the runtime-wide setting turns saving off now, and it applies to
-    // every turn: the next turn does not save these either.
+  it("describes a turn whose save did not run in the past tense, without naming a cause", async () => {
+    // Older turns got here from a user's own auto-save preference, newer ones
+    // only from a runtime-wide setting. The note blames neither, and promises
+    // no later save.
     await act(async () => {
       root.render(
         createElement(ChatFileChangeList, {
@@ -657,10 +658,11 @@ describe("ChatFileChangeList", () => {
 
     const state = container.querySelector<HTMLElement>('[data-testid="chat-file-change-unsaved"]');
     expect(state?.textContent).toContain("Not saved");
+    // A space that keeps versions the old way keeps today's sentence.
     expect(state?.getAttribute("title")).toBe(
-      "Saving is turned off on this space's runtime, so these changes weren't saved to the space. To save them, open Changes and use Save version.",
+      "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.",
     );
-    expect(state?.getAttribute("title")).not.toMatch(/next turn|auto-save/i);
+    expect(state?.getAttribute("title")).not.toMatch(/next turn|runtime/i);
 
     // Where every save is a version there is no Save version to point at.
     versioningState.mode = "stateless";
@@ -674,7 +676,7 @@ describe("ChatFileChangeList", () => {
       );
     });
     expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')?.getAttribute("title")).toBe(
-      "Saving is turned off on this space's runtime, so these changes weren't saved to the space.",
+      "Saving was off when this turn ran, so these changes weren't saved to the space.",
     );
   });
 
