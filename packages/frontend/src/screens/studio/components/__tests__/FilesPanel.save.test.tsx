@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, Profiler } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodeFile } from "../../../../types";
@@ -227,6 +227,29 @@ describe("FilesPanel one Save", () => {
     expect(save?.getAttribute("aria-disabled")).toBe("true");
     await edit("edited");
     expect(saveUnavailable()).toBe(false);
+  });
+
+  it("dims a clean Save from the first frame it is shown in", async () => {
+    // Recorded as each render is committed, before the browser paints it.
+    const seen: Array<string | null> = [];
+    const record = () => {
+      const save = query("code-save-button");
+      if (save) {
+        seen.push(save.getAttribute("aria-disabled"));
+      }
+    };
+    await act(async () =>
+      root.render(
+        <TestCodeProvider initial={{ files: [buffer({ modified: "saved" })], activeFileId: "README.md" }}>
+          <Profiler id="files" onRender={record}>
+            <FilesPanel previewOwnerId={null} />
+          </Profiler>
+        </TestCodeProvider>,
+      ),
+    );
+    await settle();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((value) => value === "true")).toBe(true);
   });
 
   it("keeps both legacy saves and today's routing in legacy mode", async () => {

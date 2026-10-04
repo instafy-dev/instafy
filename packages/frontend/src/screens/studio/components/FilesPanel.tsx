@@ -1,5 +1,5 @@
 import { DARK_DIVIDER_BORDER_CLASS, DARK_DIVIDER_CLASS, DARK_PANEL_BG_CLASS, DARK_PANEL_BORDER_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
-import { ReactNode, useCallback, useEffect, useMemo, useRef, useState, type JSX, type SetStateAction } from "react";
+import { ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type JSX, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import Editor from "@monaco-editor/react";
 import type { Monaco } from "@monaco-editor/react";
@@ -1690,9 +1690,10 @@ export function FilesPanel({
   // native disabled): a save started from it with the keyboard would
   // otherwise drop focus to the page the moment the buffer turns clean.
   const nothingToSave = !activeFile || !isFileBufferDirty(activeFile);
-  useEffect(() => {
+  useLayoutEffect(() => {
     // React Aria buttons drop aria-busy and aria-disabled, so both are set on
-    // the element (after every render, so a remounted button gets them too).
+    // the element (after every render, so a remounted button gets them too),
+    // before the browser paints it: a clean Save never shows undimmed.
     const button = saveButtonRef.current;
     if (!button) {
       return;
