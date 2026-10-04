@@ -334,15 +334,20 @@ Studio picks its versioning UI per space from the project's default origin:
 - **Unsaved work** (History only): work kept on `refs/instafy/recovery/*` and
   `refs/instafy/salvage/*`, listed with `GET /git/recovery`. Restore commits it as a new version
   (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
-  version, keep the current one, or ask the agent) and finishes with a `keep` list. Remove deletes a
-  recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show
-  "Restored" once restored. The section is hidden on servers without these routes.
+  version, keep the current one, or ask the agent) and finishes with a `keep` list. "Use this
+  version" reads the file at the ref and saves it on top of the head the restore reported; a 404
+  at the ref becomes a delete only when a listing at the ref shows the ref still resolves without
+  the path. On a Desktop space it refuses a file the folder has uncommitted edits to and sends the
+  folder's current blob as `expected`. Remove deletes a recovery ref for everyone
+  (`POST /git/recovery/dismiss`); salvage refs stay and show "Restored" once restored. The section
+  is hidden on servers without these routes.
 - **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
   version (`POST /git/sync`), naming files it kept on the computer and why.
 
-The nav badge counts uncommitted changes in Changes and unsaved-work entries in History. Each
-viewer sees one chat row the first time new unsaved work appears; it is not written into the
-conversation.
+The nav badge counts uncommitted changes in Changes and unsaved-work entries in History; salvage
+entries, which cannot be removed, count only until the viewer has seen them. Each viewer sees one
+chat row the first time new unsaved work appears (opening History counts as seeing it); it is not
+written into the conversation.
 
 ## Local dev (what we should wire into `pnpm stack:up`)
 - Start `git-shard-0` + `git-edge` in Docker (compose file), storing repos in a local docker volume.
