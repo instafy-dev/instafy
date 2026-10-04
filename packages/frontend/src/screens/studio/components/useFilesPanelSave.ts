@@ -91,6 +91,15 @@ function idsOf(file: CodeFile): BufferIds {
   };
 }
 
+/**
+ * The store still holds the buffer a save started from (same base text and
+ * read ids). A save that finishes after a reload took a newer version, or
+ * after the active space changed, leaves that buffer alone.
+ */
+function isSameBuffer(candidate: CodeFile, file: CodeFile): boolean {
+  return candidate.id === file.id && sameIds(idsOf(candidate), idsOf(file));
+}
+
 function sameIds(left: BufferIds, right: BufferIds): boolean {
   return (
     left.generated === right.generated &&
@@ -180,13 +189,16 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     pendingUpdatesRef.current.set(file.path, { after, at: Date.now(), seen: false });
     const savedAt = savedText !== null ? new Date().toISOString() : null;
     const size = savedText !== null ? new TextEncoder().encode(savedText).length : null;
+    // The code store outlives this panel, so a save that finishes after the
+    // panel closed is still recorded on its buffer.
     current.updateWorkspace(
-      (workspace) => ({
-        ...workspace,
-        files: workspace.files.map((candidate) => {
-          if (candidate.id !== file.id) {
+      (workspace) => {
+        let matched = false;
+        const files = workspace.files.map((candidate) => {
+          if (!isSameBuffer(candidate, file)) {
             return candidate;
           }
+          matched = true;
           const next: CodeFile = {
             ...candidate,
             generated: after.generated,
@@ -202,12 +214,15 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
             delete next.isNew;
           }
           return next;
-        }),
-        ...(savedAt !== null ? { lastAppliedAt: savedAt } : {}),
-      }),
+        });
+        if (!matched) {
+          return workspace;
+        }
+        return { ...workspace, files, ...(savedAt !== null ? { lastAppliedAt: savedAt } : {}) };
+      },
       { recordHistory: false },
     );
-    if (savedAt === null || size === null) {
+    if (savedAt === null || size === null || !mountedRef.current) {
       return;
     }
     const parent = parentOf(file.path);
@@ -319,10 +334,26 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       await (current.wait ?? defaultWait)(Math.max(0, delay));
       result = await controllerClient.workspace.save.changes(request);
     }
-    if (!mountedRef.current) {
+    if (result.ok) {
+      // Shared by every panel instance, so another panel never reloads on it.
+      current.ownRevisions.add(result.rev);
+      current.ownRevisions.add(result.report?.localRev ?? null);
+    }
+    // The panel may have closed while the save ran (a chat file surface, a
+    // panel switch). The result is still recorded and reported; only a save
+    // whose space is no longer the active one is left alone.
+    if (mountedRef.current && optionsRef.current.activeProjectId !== projectId) {
       return;
     }
     const latest = optionsRef.current;
+    const present = (copy: SaveCopy) => {
+      if (mountedRef.current) {
+        latest.presentFailure(copy, retry);
+        return;
+      }
+      // Trying again needs the panel; the message still reaches the user.
+      latest.presentFailure(copy.action?.kind === "retry" ? { message: copy.message } : copy, () => undefined);
+    };
 
     if (!result.ok) {
       const copy = describeSaveFailure({ error: result.error, mode, label });
@@ -339,7 +370,7 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
           null,
         );
       }
-      latest.presentFailure(copy, retry);
+      present(copy);
       return;
     }
 
@@ -355,8 +386,6 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       },
       content,
     );
-    current.ownRevisions.add(result.rev);
-    current.ownRevisions.add(result.report?.localRev ?? null);
     if (mode === "stateless" && (result.originId || originId) === current.versioning.originId) {
       // The explorer's listings come from this origin: those at the commit
       // this save built on are current at the save's commit too.
@@ -371,7 +400,7 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       // Desktop: the space has a newer version. The user's bytes stay in the
       // folder and the work is kept for History.
       raiseStale(projectId, file, content, result.originId || originId, "desktop");
-      latest.presentFailure({ message: staleSaveMessage(label), action: RESOLVE }, retry);
+      present({ message: staleSaveMessage(label), action: RESOLVE });
       return;
     }
     if (deletesKeep) {
@@ -379,7 +408,7 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     }
     const rejected = result.rejected.find((entry) => entry.path === path);
     if (rejected) {
-      latest.presentFailure(rejectedPathCopy(rejected.reason), retry);
+      present(rejectedPathCopy(rejected.reason));
     }
   }, [effectiveBuffer, updateBuffer]);
 
@@ -399,16 +428,18 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       console.warn("[files-panel] save failed:", error);
       const current = optionsRef.current;
       const file = current.getActiveFile();
-      current.presentFailure(
-        describeSaveFailure({
-          error: { status: 0, code: "network_error", message: String(error), routeUnavailable: false },
-          mode: current.versioning.mode,
-          label: file ? labelOf(file) : "file",
-        }),
-        () => {
+      const copy = describeSaveFailure({
+        error: { status: 0, code: "network_error", message: String(error), routeUnavailable: false },
+        mode: current.versioning.mode,
+        label: file ? labelOf(file) : "file",
+      });
+      if (mountedRef.current) {
+        current.presentFailure(copy, () => {
           void saveRef.current();
-        },
-      );
+        });
+      } else {
+        current.presentFailure({ message: copy.message }, () => undefined);
+      }
     } finally {
       savingRef.current = false;
       trailingRef.current = false;

@@ -389,6 +389,81 @@ describe("FilesPanel one Save", () => {
     expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ deletes: ["README.md"], baseRev: REV_1 });
   });
 
+  async function closePanel() {
+    // The code store stays mounted, as in Studio when a file surface closes.
+    await act(async () =>
+      root.render(<TestCodeProvider initial={{ files: [], activeFileId: null }}>{null}</TestCodeProvider>),
+    );
+  }
+
+  it("records a save that finishes after its panel closed", async () => {
+    const rev = "6".repeat(40);
+    const pending = deferred<ReturnType<typeof saved>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    await closePanel();
+    await act(async () => { pending.resolve(saved(rev)); });
+    await settle();
+    expect(file()).toMatchObject({
+      generated: "edited",
+      modified: "edited",
+      baseRev: rev,
+      blobOid: await gitBlobOid("edited"),
+      originId: "origin-1",
+    });
+    expect(mocks.showStatus).not.toHaveBeenCalled();
+
+    // Reopened, the panel takes the save's commit event as this tab's own.
+    await act(async () =>
+      root.render(
+        <TestCodeProvider initial={{ files: [], activeFileId: null }}>
+          <FilesPanel previewOwnerId={null} />
+        </TestCodeProvider>,
+      ),
+    );
+    await settle();
+    mocks.listAt.mockClear();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+    });
+    await settle();
+    expect(mocks.listAt).not.toHaveBeenCalled();
+  });
+
+  it("reports a save that fails after its panel closed, without a retry it cannot run", async () => {
+    const pending = deferred<ReturnType<typeof failed>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    await closePanel();
+    await act(async () => { pending.resolve(failed({ status: 409, code: "main_busy" })); });
+    await settle();
+    expect(mocks.showStatus).toHaveBeenCalledWith(
+      "The space is busy saving other changes. Try again in a moment.",
+      "error",
+      8000,
+      undefined,
+    );
+    expect(file()).toMatchObject({ generated: "saved", modified: "edited", baseRev: REV_1 });
+  });
+
+  it("leaves a buffer alone when a newer read replaced it during the save", async () => {
+    const pending = deferred<ReturnType<typeof saved>>();
+    mocks.saveChanges.mockReturnValueOnce(pending.promise);
+    await render([buffer()]);
+    await act(async () => { query("code-save-button")?.click(); });
+    await act(async () =>
+      testCodeHandle.current!.updateWorkspace((current) => ({
+        ...current,
+        files: current.files.map((entry) => ({ ...entry, generated: "theirs", modified: "theirs", baseRev: REV_3, blobOid: "c".repeat(40) })),
+      })),
+    );
+    await act(async () => { pending.resolve(saved("7".repeat(40))); });
+    await settle();
+    expect(file()).toMatchObject({ generated: "theirs", modified: "theirs", baseRev: REV_3 });
+  });
+
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {
     await render([buffer()]);
     expect(query("files-explorer-new-file")?.disabled).toBe(false);
