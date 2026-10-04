@@ -760,7 +760,13 @@ struct ProjectMemoryTemplateFile {
 #[serde(rename_all = "camelCase")]
 struct ProjectMemoryManagedDefaultsState {
     version: u32,
+    /// The content the bootstrap itself last wrote to each path, by hash.
     files: BTreeMap<String, ProjectMemoryManagedDefaultsFileState>,
+    /// Template paths that exist but cannot be read (for example a symlink
+    /// in a Desktop folder), so later bootstraps leave them alone without
+    /// asking the origin again. A path leaves the list once it reads again.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    unreadable: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5952,19 +5958,26 @@ fn plan_project_memory_writes(
 
     let mut next_state_files: BTreeMap<String, ProjectMemoryManagedDefaultsFileState> =
         BTreeMap::new();
+    let mut next_unreadable = std::collections::BTreeSet::new();
     let mut files_to_write: Vec<ProjectMemoryWriteFile> = Vec::new();
 
     for template in PROJECT_MEMORY_TEMPLATE_FILES {
         let path = template.path.to_string();
-        if snapshot.is_unreadable(&path) {
+        let known_unreadable = existing_managed_state
+            .as_ref()
+            .is_some_and(|managed| managed.unreadable.contains(&path));
+        if snapshot.is_unreadable(&path) || (known_unreadable && snapshot.content(&path).is_none())
+        {
             // Present but not readable (a symlink, a non-file entry): leave
-            // it, and keep whatever baseline the state already had for it.
+            // it, keep whatever baseline the state already had for it, and
+            // remember it so later bootstraps do not ask again.
             if let Some(entry) = existing_managed_state
                 .as_ref()
                 .and_then(|managed| managed.files.get(&path))
             {
-                next_state_files.insert(path, entry.clone());
+                next_state_files.insert(path.clone(), entry.clone());
             }
+            next_unreadable.insert(path);
             continue;
         }
         let template_content = load_project_memory_template_content(&template);
@@ -6002,16 +6015,25 @@ fn plan_project_memory_writes(
                             applied_sha256: template_hash,
                         },
                     );
-                } else {
-                    // Keep existing file content (including user edits) and update managed
-                    // baseline so future template changes only auto-apply when unchanged.
+                } else if current_hash == template_hash {
+                    // Already this template: the same as a bootstrap write.
                     next_state_files.insert(
                         path,
                         ProjectMemoryManagedDefaultsFileState {
-                            applied_sha256: current_hash,
+                            applied_sha256: template_hash,
                         },
                     );
+                } else if let Some(entry) = existing_managed_state
+                    .as_ref()
+                    .and_then(|managed| managed.files.get(&path))
+                {
+                    // Edited since the bootstrap wrote it: keep the file and the
+                    // record of what the bootstrap wrote, so it is replaced only
+                    // if it returns to exactly that and the template changes.
+                    next_state_files.insert(path, entry.clone());
                 }
+                // A file the bootstrap never wrote (the user's or an import's)
+                // gets no record, so no later bootstrap ever replaces it.
             }
         }
     }
@@ -6019,6 +6041,7 @@ fn plan_project_memory_writes(
     let next_managed_state = ProjectMemoryManagedDefaultsState {
         version: 1,
         files: next_state_files,
+        unreadable: next_unreadable,
     };
     let next_state_content =
         serde_json::to_string_pretty(&next_managed_state).map_err(|error| {
@@ -6462,14 +6485,16 @@ mod project_access_tests {
 #[cfg(test)]
 mod project_memory_bootstrap_tests {
     use super::{
-        plan_project_memory_writes, project_memory_bootstrap_paths, sha256_hex,
-        PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH,
+        load_project_memory_template_content, plan_project_memory_writes,
+        project_memory_bootstrap_paths, sha256_hex, PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH,
+        PROJECT_MEMORY_TEMPLATE_FILES,
     };
     use crate::project_memory_origin::test_support::{rev_for, start, StubState};
     use crate::project_memory_origin::{
         bootstrap_write_via_origin, read_origin_snapshot, BootstrapWriteOutcome,
         OriginBootstrapTarget,
     };
+    use crate::project_memory_origin::{OriginReadFile, OriginReadSnapshot};
     use serde_json::{json, Value};
     use uuid::Uuid;
 
@@ -6477,7 +6502,8 @@ mod project_memory_bootstrap_tests {
     async fn a_newer_agents_md_saved_between_read_and_write_is_kept() {
         // The bootstrap reads AGENTS.md as missing, then someone saves their
         // own before the write lands. The conditional write is refused, and
-        // the re-read plan keeps their file and records it as the baseline.
+        // the re-read plan keeps their file and never records it as the
+        // bootstrap's own, so no later bootstrap replaces it.
         let theirs = "# Our own agent notes\n";
         let origin = start(StubState {
             rev: Some(rev_for(0)),
@@ -6531,10 +6557,28 @@ mod project_memory_bootstrap_tests {
         let managed: Value =
             serde_json::from_str(&stub.files[PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH])
                 .expect("managed state JSON");
-        assert_eq!(
-            managed["files"]["AGENTS.md"]["appliedSha256"],
-            json!(sha256_hex(theirs))
-        );
+        assert!(managed["files"].get("AGENTS.md").is_none());
+        drop(stub);
+
+        assert_later_bootstraps_change_nothing(&origin, 2).await;
+        assert_eq!(origin.state.lock().unwrap().files["AGENTS.md"], theirs);
+    }
+
+    /// The next page loads: nothing to write, no lease-taking apply.
+    async fn assert_later_bootstraps_change_nothing(
+        origin: &crate::project_memory_origin::test_support::StubOrigin,
+        applies_so_far: usize,
+    ) {
+        let files_before = origin.state.lock().unwrap().files.clone();
+        for _ in 0..2 {
+            assert!(matches!(
+                bootstrap_against(origin).await,
+                BootstrapWriteOutcome::AlreadyPresent { .. }
+            ));
+        }
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), applies_so_far);
+        assert_eq!(stub.files, files_before);
     }
 
     async fn bootstrap_against(
@@ -6601,7 +6645,133 @@ mod project_memory_bootstrap_tests {
             serde_json::from_str(&stub.files[PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH])
                 .expect("managed state JSON");
         assert!(managed["files"].get("CLAUDE.md").is_none());
+        assert!(managed["files"].get("AGENTS.md").is_none());
+        assert_eq!(managed["unreadable"], json!(["CLAUDE.md"]));
         assert_eq!(stub.files["AGENTS.md"], "# Team notes\n");
+        drop(stub);
+
+        // Later loads know the link is unreadable: no lease, no refused apply,
+        // and the team's AGENTS.md is still theirs.
+        assert_later_bootstraps_change_nothing(&origin, 2).await;
+        assert_eq!(
+            origin.state.lock().unwrap().files["AGENTS.md"],
+            "# Team notes\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_link_that_becomes_a_file_is_managed_again() {
+        // Recorded as unreadable, then replaced by a regular file of the
+        // user's: it is read again, kept, and drops off the list.
+        let origin = start(StubState {
+            unreadable: ["CLAUDE.md".to_string()].into_iter().collect(),
+            report_blobs: true,
+            check_expected: true,
+            ..StubState::default()
+        })
+        .await;
+        bootstrap_against(&origin).await;
+        {
+            let mut stub = origin.state.lock().unwrap();
+            stub.unreadable.clear();
+            stub.files
+                .insert("CLAUDE.md".to_string(), "# Our CLAUDE.md\n".to_string());
+        }
+        assert!(matches!(
+            bootstrap_against(&origin).await,
+            BootstrapWriteOutcome::Seeded { file_count: 1, .. }
+        ));
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.files["CLAUDE.md"], "# Our CLAUDE.md\n");
+        let managed: Value =
+            serde_json::from_str(&stub.files[PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH])
+                .expect("managed state JSON");
+        assert!(managed.get("unreadable").is_none());
+        assert!(managed["files"].get("CLAUDE.md").is_none());
+    }
+
+    fn snapshot_with(files: &[(&str, &str)]) -> OriginReadSnapshot {
+        let mut snapshot = OriginReadSnapshot::default();
+        for path in project_memory_bootstrap_paths() {
+            snapshot.files.insert(
+                path,
+                OriginReadFile {
+                    content: None,
+                    blob: None,
+                },
+            );
+        }
+        for (path, content) in files {
+            snapshot.files.insert(
+                path.to_string(),
+                OriginReadFile {
+                    content: Some(content.to_string()),
+                    blob: None,
+                },
+            );
+        }
+        snapshot
+    }
+
+    #[test]
+    fn only_files_still_holding_the_last_bootstrap_write_are_refreshed() {
+        let template = |path: &str| {
+            let template = PROJECT_MEMORY_TEMPLATE_FILES
+                .iter()
+                .find(|template| template.path == path)
+                .expect("template");
+            load_project_memory_template_content(template)
+        };
+        // INSTAFY.md still holds what an older bootstrap wrote; CLAUDE.md was
+        // edited after that write; AGENTS.md was never written by the
+        // bootstrap; AGENTS.py already holds the current template.
+        let older_write = "older template text\n";
+        let state = json!({
+            "version": 1,
+            "files": {
+                "INSTAFY.md": { "appliedSha256": sha256_hex(older_write) },
+                "CLAUDE.md": { "appliedSha256": sha256_hex(older_write) },
+            },
+        })
+        .to_string();
+        let agents_py = template("AGENTS.py");
+        let snapshot = snapshot_with(&[
+            (PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH, &state),
+            ("INSTAFY.md", older_write),
+            ("CLAUDE.md", "# Edited by the team\n"),
+            ("AGENTS.md", "# Team notes\n"),
+            ("AGENTS.py", &agents_py),
+        ]);
+        let writes = plan_project_memory_writes(&snapshot).expect("plan");
+        let written = |path: &str| writes.iter().find(|write| write.path == path);
+        assert_eq!(
+            written("INSTAFY.md").unwrap().content,
+            template("INSTAFY.md")
+        );
+        assert!(written("CLAUDE.md").is_none());
+        assert!(written("AGENTS.md").is_none());
+        assert!(written("AGENTS.py").is_none());
+
+        let next: Value = serde_json::from_str(
+            &written(PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH)
+                .expect("state written")
+                .content,
+        )
+        .expect("state JSON");
+        assert_eq!(
+            next["files"]["INSTAFY.md"]["appliedSha256"],
+            json!(sha256_hex(&template("INSTAFY.md")))
+        );
+        // The edit keeps the record of the bootstrap's own write, never its hash.
+        assert_eq!(
+            next["files"]["CLAUDE.md"]["appliedSha256"],
+            json!(sha256_hex(older_write))
+        );
+        assert!(next["files"].get("AGENTS.md").is_none());
+        assert_eq!(
+            next["files"]["AGENTS.py"]["appliedSha256"],
+            json!(sha256_hex(&agents_py))
+        );
     }
 
     #[tokio::test]
@@ -6633,6 +6803,11 @@ mod project_memory_bootstrap_tests {
             .iter()
             .all(|file| file["path"] != "AGENTS.md"));
         assert_eq!(stub.files["AGENTS.md"], theirs);
+        drop(stub);
+
+        // The import's AGENTS.md survives every later load too.
+        assert_later_bootstraps_change_nothing(&origin, 2).await;
+        assert_eq!(origin.state.lock().unwrap().files["AGENTS.md"], theirs);
     }
 
     #[tokio::test]
