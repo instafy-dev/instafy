@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useWorkspaceStore } from "../../store";
@@ -51,6 +51,24 @@ describe("CodeProvider updates after it unmounted", () => {
     await act(async () => update((workspace) => ({ ...workspace, summary: "remounted" })));
     expect(useWorkspaceStore.getState().state.code).toMatchObject({ summary: "remounted" });
     expect(storeFile()).toMatchObject({ generated: "edited", modified: "edited" });
+    await act(async () => root.unmount());
+  });
+
+  it("keeps an update made as soon as it left the screen, before its effects were cleaned up", async () => {
+    // Leaving Studio removes the provider in one commit; the next screen's
+    // layout effects run before the provider's passive effects are cleaned up.
+    function Left({ onLeft }: { onLeft: () => void }) {
+      useLayoutEffect(() => onLeft(), [onLeft]);
+      return null;
+    }
+    function Screen({ studio, onLeft }: { studio: boolean; onLeft: () => void }) {
+      return studio ? <CodeProvider><Capture /></CodeProvider> : <Left onLeft={onLeft} />;
+    }
+    const leave = () => update(markSaved, { recordHistory: false, keepAfterUnmount: true });
+    await act(async () => root.render(<Screen studio onLeft={leave} />));
+    await act(async () => root.render(<Screen studio={false} onLeft={leave} />));
+    expect(storeFile()).toMatchObject({ generated: "edited", modified: "edited" });
+    expect(useWorkspaceStore.getState().projects["space-a"].code.files[0]).toMatchObject({ generated: "edited" });
     await act(async () => root.unmount());
   });
 

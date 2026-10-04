@@ -6,6 +6,7 @@ import {
   useCallback,
   useRef,
   useEffect,
+  useLayoutEffect,
   type ReactNode
 } from "react";
 import type { CodeWorkspace } from "../types";
@@ -213,8 +214,11 @@ export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) 
     }
   }, [state.present, storeUpdateCode]);
 
+  // Cleared in the commit that removes the provider (leaving Studio), not
+  // after it: an update arriving between the two would otherwise be
+  // dispatched to a reducer that is already gone.
   const mountedRef = useRef(true);
-  useEffect(() => {
+  useLayoutEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;

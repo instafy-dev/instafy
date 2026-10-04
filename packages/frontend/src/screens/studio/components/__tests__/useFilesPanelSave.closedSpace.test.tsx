@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, useLayoutEffect, useRef } from "react";
+import { act, useLayoutEffect, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodeProvider, useCode } from "../../../../code/useCode";
@@ -199,10 +199,10 @@ describe("a save that outlives its space or Studio", () => {
     await saveOnceMoreOnTopOfThat();
   });
 
-  describe("when the save finishes in the moment Studio opens", () => {
+  describe("when the save finishes in the moment Studio is left or opened", () => {
     // React renders on its own schedule here, as in the browser: the save's
-    // response lands after the commit that opens Studio and before the
-    // effects that follow it.
+    // response lands after the commit that leaves or opens Studio and before
+    // the effects that follow it.
     async function onReactSchedule(run: () => void) {
       const environment = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
       environment.IS_REACT_ACT_ENVIRONMENT = false;
@@ -220,6 +220,29 @@ describe("a save that outlives its space or Studio", () => {
       useLayoutEffect(() => run(), [run]);
       return null;
     }
+
+    it("keeps the result when it arrives as Studio is left", async () => {
+      openSpaces({ "space-a": codeWith([buffer()]) }, "space-a");
+      let showStudio!: (studio: boolean) => void;
+      let onLeft: () => void = () => undefined;
+      function App() {
+        const [studio, setStudio] = useState(true);
+        showStudio = setStudio;
+        return studio ? <CodeProvider><Panel /></CodeProvider> : <OnCommit run={onLeft} />;
+      }
+      await act(async () => root.render(<App />));
+      const pending = await startSave();
+      onLeft = () => pending.resolve(saved(REV_2));
+      await onReactSchedule(() => showStudio(false));
+      expect(useWorkspaceStore.getState().state.code.files[0]).toMatchObject({
+        generated: "edited", modified: "edited", baseRev: REV_2, blobOid: await gitBlobOid("edited"),
+      });
+
+      await act(async () => showStudio(true));
+      expect(code.workspace.files[0]).toMatchObject({ generated: "edited", baseRev: REV_2 });
+      await saveAgainOnTopOfIt();
+      await saveOnceMoreOnTopOfThat();
+    });
 
     it("keeps the result when it arrives as Studio opens again", async () => {
       openSpaces({ "space-a": codeWith([buffer()]) }, "space-a");
