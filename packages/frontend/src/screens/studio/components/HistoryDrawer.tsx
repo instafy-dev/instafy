@@ -14,6 +14,7 @@ import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useProject } from "../../../projects/useProject";
 import { controllerClient, type WorkspaceGitHistoryEntry } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
+import { refreshUnsavedWork } from "../../../workspace/unsavedWorkStore";
 import type { ActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import { DesktopChangesLine } from "./DesktopChangesLine";
 import { HistoryConfirmDialog } from "./HistoryConfirmDialog";
@@ -238,11 +239,16 @@ export function HistoryDrawer({
     rowButtonsRef.current.get(commit)?.focus();
   }, [history.entries]);
 
+  // The header's Refresh reloads the whole drawer: mode, saved versions,
+  // the Desktop line and Unsaved work (no event announces new recovery refs).
   const handleRefresh = useCallback(() => {
     void versioning.refresh();
     void loadHistory();
     setStatusRefreshKey((key) => key + 1);
-  }, [loadHistory, versioning]);
+    if (ready && projectId && originId) {
+      void refreshUnsavedWork({ projectId, originId, force: true });
+    }
+  }, [loadHistory, originId, projectId, ready, versioning]);
 
   const handleShowMore = useCallback(async () => {
     if (!ready || !projectId || !originId || loadingMore) {

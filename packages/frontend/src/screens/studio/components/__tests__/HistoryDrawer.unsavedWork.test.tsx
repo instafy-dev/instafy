@@ -203,6 +203,17 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(q(container, "unsaved-work-section")).toBeNull();
   });
 
+  it("loads again with the header's Refresh", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list([]));
+    await render();
+    expect(q(container, "unsaved-work-section")).toBeNull();
+    const before = mocks.fetchRecovery.mock.calls.length;
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY)]));
+    await press(container, "source-control-refresh");
+    expect(mocks.fetchRecovery.mock.calls.length).toBe(before + 1);
+    expect(row(container, RECOVERY)).not.toBeNull();
+  });
+
   it("shows an error row with Retry when the list fails", async () => {
     mocks.fetchRecovery.mockResolvedValueOnce({
       status: "error",
