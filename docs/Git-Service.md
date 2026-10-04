@@ -169,10 +169,13 @@ Studio picks how the Files editor saves from the space's default origin (the con
   same base text needs nothing, a different one raises the card. A new file stays in the browser
   until its first Save (which creates it on the default origin), and a new folder is one commit
   of its `.instafy.keep` placeholder, which the first save into the folder removes. Commit events
-  reload the explorer at the event's commit; the editor's own saves are not reloaded, even when
-  their event arrives before the save's response. Unsaved edits warn when leaving Studio; inside
-  the Desktop app they do not block closing the window or quitting, because they stay on this
-  device.
+  reload the explorer at the event's commit; the editor's own saves, deletes and new folders are
+  not reloaded, even when their event arrives before the save's response, and every open Files
+  panel (the Files tab, the explorer drawer, a chat file surface) shows them at once. A save that
+  is still running when its panel closes, the user switches spaces or leaves Studio is still
+  recorded on the file, so the next save builds on it. Unsaved edits warn when leaving Studio;
+  inside the Desktop app they do not block closing the window or quitting, because they stay on
+  this device.
 
 ### Embedded repositories and protected checkpoints
 
