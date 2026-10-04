@@ -26,6 +26,7 @@ import {
   REVERT_CHECKING_MESSAGE,
   REVERT_RUNNING_MESSAGE,
   REVERT_STILL_RUNNING_MESSAGE,
+  REVERT_WAITING_AGAIN_MESSAGE,
   describeChangeRevertOutcome,
   describeFileNotSaved,
   describeRevertCombined,
@@ -393,9 +394,13 @@ export function ChatFileChangeList({
   const [revertedByVersion, setRevertedByVersion] = useState(false);
   const [revertScope, setRevertScope] = useState<ChatChangeRevertScope | null>(null);
   const revertScopeRequestRef = useRef(0);
-  // Counts revert requests, so an answer that arrives after the card
-  // stopped waiting is shown only while no newer revert has started.
-  const revertRequestRef = useRef(0);
+  // The revert request this card has running, settled once its answer has
+  // been shown. One at a time: a second request would only meet the first
+  // one's lease, so the card waits for the first one again instead.
+  const runningRevertRef = useRef<Promise<void> | null>(null);
+  // The dialog reopened while that request still runs, after the card had
+  // stopped waiting for it.
+  const [revertWaitingAgain, setRevertWaitingAgain] = useState(false);
   // Set when the dialog closes after a revert request: focus goes back to
   // the card, never to the page body.
   const [returnFocusAfterRevert, setReturnFocusAfterRevert] = useState(false);
@@ -951,14 +956,46 @@ export function ChatFileChangeList({
     });
   }, [changeTypeByPath, projectId, revertRange, uniquePaths, versioning.originId]);
 
+  // Waits for the running revert with the dialog busy and the chip
+  // "Reverting…", but only for REVERT_WAIT_TIMEOUT_MS. Then the card stops
+  // waiting: it says the revert may still finish and frees the chip. The
+  // request is never cancelled, and its answer is shown whenever it comes.
+  const waitForRevert = useCallback(
+    async (running: Promise<void>) => {
+      setRevertingChange(true);
+      let waitTimer: ReturnType<typeof setTimeout> | undefined;
+      const stoppedWaiting = new Promise<"timeout">((resolve) => {
+        waitTimer = setTimeout(() => resolve("timeout"), REVERT_WAIT_TIMEOUT_MS);
+      });
+      const answered = () => "answered" as const;
+      const first = await Promise.race([running.then(answered, answered), stoppedWaiting]);
+      clearTimeout(waitTimer);
+      setRevertingChange(false);
+      setRevertConfirmOpen(false);
+      setReturnFocusAfterRevert(true);
+      if (first === "timeout") {
+        showStatus(REVERT_STILL_RUNNING_MESSAGE, "warning", 9000);
+      }
+    },
+    [showStatus],
+  );
+
   const openRevertDialog = useCallback(() => {
     // The chip stays focusable while a revert runs, but opens nothing.
     if (revertingChange) {
       return;
     }
+    const running = runningRevertRef.current;
+    setRevertWaitingAgain(running !== null);
     setRevertConfirmOpen(true);
+    if (running) {
+      // The card stopped waiting for this request, but it still runs: wait
+      // for it again rather than check and offer a second revert.
+      void waitForRevert(running);
+      return;
+    }
     void checkRevertScope();
-  }, [checkRevertScope, revertingChange]);
+  }, [checkRevertScope, revertingChange, waitForRevert]);
 
   const closeRevertDialog = useCallback(() => {
     revertScopeRequestRef.current += 1;
@@ -1034,16 +1071,22 @@ export function ChatFileChangeList({
     [changeTypeByPath, handleUndoRequest, messageId, pendingEntries, pendingPaths, projectId, showStatus, totalCount],
   );
 
+  // A late answer is shown with the card as it is then, not as it was when
+  // the request started.
+  const applyRevertOutcomeRef = useRef(applyRevertOutcome);
+  useEffect(() => {
+    applyRevertOutcomeRef.current = applyRevertOutcome;
+  }, [applyRevertOutcome]);
+
   // "Revert this change": a new version that undoes the saved version the
   // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
   // that commit's own change), on the origin the versioning probe described.
   // The dialog stays open and busy while the request runs, so focus stays on
   // a control that is there; the user can close it at any time without
-  // cancelling the request. After REVERT_WAIT_TIMEOUT_MS the card stops
-  // waiting: it says the revert may still finish, frees the chip, and still
-  // shows the answer if one arrives later.
+  // cancelling the request. The answer is shown when the request settles,
+  // also after the card stopped waiting for it (see waitForRevert).
   const handleRevertChange = useCallback(async () => {
-    if (revertingChange || revertScope?.status !== "ready") {
+    if (revertingChange || runningRevertRef.current || revertScope?.status !== "ready") {
       return;
     }
     if (!canRevertChange || !projectId || !revertRange) {
@@ -1054,10 +1097,7 @@ export function ChatFileChangeList({
       setReturnFocusAfterRevert(true);
       return;
     }
-    const request = revertRequestRef.current + 1;
-    revertRequestRef.current = request;
     const revertedVersionPaths = new Set([...revertScope.paths, ...revertScope.renameSources]);
-    setRevertingChange(true);
     const revert = () =>
       revertWorkspaceGitCommitFromController({
         projectId,
@@ -1082,36 +1122,22 @@ export function ChatFileChangeList({
         return null;
       }
     })();
-    let waitTimer: ReturnType<typeof setTimeout> | undefined;
-    const stoppedWaiting = new Promise<"timeout">((resolve) => {
-      waitTimer = setTimeout(() => resolve("timeout"), REVERT_WAIT_TIMEOUT_MS);
+    const running = answer.then((result) => {
+      runningRevertRef.current = null;
+      applyRevertOutcomeRef.current(result, revertedVersionPaths);
     });
-    const first = await Promise.race([answer, stoppedWaiting]);
-    clearTimeout(waitTimer);
-    setRevertingChange(false);
-    setRevertConfirmOpen(false);
-    setReturnFocusAfterRevert(true);
-    if (first !== "timeout") {
-      applyRevertOutcome(first, revertedVersionPaths);
-      return;
-    }
-    // The request is not cancelled: the origin may still save the revert.
-    showStatus(REVERT_STILL_RUNNING_MESSAGE, "warning", 9000);
-    const late = await answer;
-    // A later revert of this change speaks for itself.
-    if (revertRequestRef.current === request) {
-      applyRevertOutcome(late, revertedVersionPaths);
-    }
+    runningRevertRef.current = running;
+    setRevertWaitingAgain(false);
+    await waitForRevert(running);
   }, [
-    applyRevertOutcome,
     canRevertChange,
     closeRevertDialog,
     projectId,
     revertRange,
     revertScope,
     revertingChange,
-    showStatus,
     versioning.originId,
+    waitForRevert,
   ]);
 
   // The dialog belongs to "Revert this change". When the change stops being
@@ -1166,7 +1192,7 @@ export function ChatFileChangeList({
 
   const revertScopeMessage = (() => {
     if (revertingChange) {
-      return REVERT_RUNNING_MESSAGE;
+      return revertWaitingAgain ? REVERT_WAITING_AGAIN_MESSAGE : REVERT_RUNNING_MESSAGE;
     }
     switch (revertScope?.status) {
       case "ready":

@@ -110,7 +110,12 @@ export const REVERT_RUNNING_MESSAGE =
 // The card stopped waiting for an answer; the request was not cancelled, so
 // the origin may still save the revert, and a late answer is still shown.
 export const REVERT_STILL_RUNNING_MESSAGE =
-  "The revert is taking longer than expected. It may still finish, so wait a moment before trying again.";
+  "The revert is taking longer than expected. It may still finish, and you'll see the result when it does.";
+// The dialog reopened while that request still runs. The card sends no
+// second revert (it would only meet the first one's lease); it waits for
+// the first one again.
+export const REVERT_WAITING_AGAIN_MESSAGE =
+  "Your earlier revert of this change is still running. Closing this doesn't stop it. You'll see the result when it's done.";
 
 export function describeRevertOtherWork(otherPaths: readonly string[], canAskAgent: boolean): string {
   const undo = `This change was saved together with other work, so reverting it here would also undo ${formatPathList(otherPaths)}.`;

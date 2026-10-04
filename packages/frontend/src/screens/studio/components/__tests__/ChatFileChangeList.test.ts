@@ -1821,7 +1821,7 @@ describe("ChatFileChangeList", () => {
           expect(dialog()).toBeNull();
           expect(showStatus).toHaveBeenCalledTimes(1);
           expect(showStatus).toHaveBeenCalledWith(
-            "The revert is taking longer than expected. It may still finish, so wait a moment before trying again.",
+            "The revert is taking longer than expected. It may still finish, and you'll see the result when it does.",
             "warning",
             9000,
           );
@@ -1841,6 +1841,199 @@ describe("ChatFileChangeList", () => {
             "src/app.ts (reverted)",
           );
           expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      // A revert the card stopped waiting for still holds the space's lease,
+      // so a second request would only fail against it. Pressing Revert this
+      // change again waits for the first one instead.
+      function revertStillRunning() {
+        let settle: (value: unknown) => void = () => {};
+        revertWorkspaceGitCommit.mockReturnValueOnce(
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+        );
+        revertWorkspaceGitCommit.mockResolvedValue({
+          ok: false,
+          conflict: false,
+          code: "lease_conflict",
+          error: "lease conflict",
+          errorInfo: { status: 409, code: "lease_conflict", message: "lease conflict", routeUnavailable: false },
+        });
+        return (value: unknown) => settle(value);
+      }
+
+      async function revertUntilTheCardStopsWaiting() {
+        await act(async () => {
+          revertChip()?.click();
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(50);
+        });
+        await act(async () => {
+          confirmButton()?.click();
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(REVERT_WAIT_TIMEOUT_MS);
+        });
+        expect(dialog()).toBeNull();
+        expect(showStatus).toHaveBeenCalledTimes(1);
+        expect(revertChip()?.textContent).toBe("Revert this change");
+      }
+
+      function scopeText() {
+        return document.querySelector('[data-testid="chat-file-change-revert-scope"]')?.textContent;
+      }
+
+      it("waits for a revert it stopped waiting for instead of sending another, and shows its answer", async () => {
+        const settle = revertStillRunning();
+        const commits: Event[] = [];
+        const onCommit = (event: Event) => commits.push(event);
+        window.addEventListener("instafy:workspace-commit", onCommit);
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          await revertUntilTheCardStopsWaiting();
+
+          // Pressed again while the first request still runs: the dialog
+          // waits for it and says so. It checks nothing and sends nothing.
+          await act(async () => {
+            revertChip()?.click();
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(50);
+          });
+          expect(dialog()).not.toBeNull();
+          expect(scopeText()).toBe(
+            "Your earlier revert of this change is still running. Closing this doesn't stop it. You'll see the result when it's done.",
+          );
+          expect(dialogButton("Close")?.disabled).toBe(false);
+          expect(confirmButton()?.getAttribute("aria-disabled")).toBe("true");
+          expect(revertChip()?.textContent).toBe("Reverting…");
+          await act(async () => {
+            confirmButton()?.click();
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(50);
+          });
+          expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(1);
+          expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+
+          // The first request saves the revert: the card says so once,
+          // marks the file and tells the space a version was saved.
+          await act(async () => {
+            settle({ ok: true, rev: "c".repeat(40), committed: true });
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(0);
+          });
+          expect(showStatus).toHaveBeenCalledTimes(2);
+          expect(showStatus).toHaveBeenLastCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+          expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
+            "src/app.ts (reverted)",
+          );
+          expect(commits).toHaveLength(1);
+          expect(dialog()).toBeNull();
+          expect(revertChip()).toBeNull();
+          expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+          expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+          window.removeEventListener("instafy:workspace-commit", onCommit);
+        }
+      });
+
+      it("stops waiting again after a while, and still shows the first revert's answer", async () => {
+        const settle = revertStillRunning();
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          await revertUntilTheCardStopsWaiting();
+
+          await act(async () => {
+            revertChip()?.click();
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(50);
+          });
+          await act(async () => {
+            dialogButton("Close")?.click();
+          });
+          expect(dialog()).toBeNull();
+          expect(revertChip()?.textContent).toBe("Reverting…");
+          expect(revertChip()?.getAttribute("aria-disabled")).toBe("true");
+
+          // The card stops waiting a second time and frees the chip again.
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(REVERT_WAIT_TIMEOUT_MS);
+          });
+          expect(showStatus).toHaveBeenCalledTimes(2);
+          expect(showStatus).toHaveBeenLastCalledWith(
+            "The revert is taking longer than expected. It may still finish, and you'll see the result when it does.",
+            "warning",
+            9000,
+          );
+          expect(revertChip()?.textContent).toBe("Revert this change");
+          expect(revertChip()?.hasAttribute("aria-disabled")).toBe(false);
+          expect(document.activeElement).toBe(revertChip());
+
+          await act(async () => {
+            settle({ ok: true, rev: "c".repeat(40), committed: true });
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(0);
+          });
+          expect(showStatus).toHaveBeenCalledTimes(3);
+          expect(showStatus).toHaveBeenLastCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+          expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
+            "src/app.ts (reverted)",
+          );
+          expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(1);
+          expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("checks and reverts as usual once a revert it stopped waiting for has answered", async () => {
+        const settle = revertStillRunning();
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          await revertUntilTheCardStopsWaiting();
+          await act(async () => {
+            settle({
+              ok: false,
+              conflict: true,
+              code: "revert_conflict",
+              errorInfo: { status: 409, code: "revert_conflict", message: "conflict", routeUnavailable: false },
+            });
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(0);
+          });
+          expect(showStatus).toHaveBeenLastCalledWith(
+            "Later changes touch the same lines, so this can't be reverted automatically.",
+            "warning",
+            6500,
+            undefined,
+          );
+
+          // Nothing runs any more: the dialog checks the version again and
+          // offers Revert.
+          await act(async () => {
+            revertChip()?.click();
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(50);
+          });
+          expect(dialog()?.getAttribute("data-state")).toBe("ready");
+          expect(scopeText()).toBe("A new version that undoes it is saved on top. Nothing is removed from history.");
+          expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
+          expect(confirmButton()?.hasAttribute("aria-disabled")).toBe(false);
         } finally {
           vi.useRealTimers();
         }
