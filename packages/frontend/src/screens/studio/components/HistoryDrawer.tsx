@@ -50,6 +50,11 @@ const HISTORY_PROBE_ERROR_COPY = "Couldn't check this space's saved versions.";
 const HISTORY_BUSY_ERROR_COPY = "The space is busy saving changes. Try Refresh in a moment.";
 const HISTORY_MORE_BUSY_COPY = "The space is busy saving changes. Try Show more again in a moment.";
 
+/** A mode probe asked from History: which control asked, and whether the last one failed. */
+type ProbeState = { running: "refresh" | "retry" | null; failed: boolean | null };
+
+const IDLE_PROBE: ProbeState = { running: null, failed: null };
+
 type HistoryListState = {
   /** `busy`: the origin answered busy before any version was shown; retrying. */
   status: "idle" | "loading" | "busy" | "ok" | "error";
@@ -117,10 +122,12 @@ export function HistoryDrawer({
   const lastHistoryLoadRef = useRef(0);
   const busyRetryRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
-  // Probes asked from here while the mode is still unknown.
-  const [probeRetry, setProbeRetry] = useState<"idle" | "running" | "answered" | "failed">("idle");
-  const probeUnanswered =
-    !ready && (probeRetry === "failed" || (probeRetry === "idle" && probeFailed));
+  // Probes asked from here while the mode is still unknown. Until one is
+  // asked (`failed: null`), the probe made on opening decides.
+  const [probe, setProbe] = useState<ProbeState>(IDLE_PROBE);
+  const probeUnanswered = !ready && (probe.failed ?? probeFailed);
+  // A Refresh while the mode is known: the button stays focusable and pending.
+  const [refreshing, setRefreshing] = useState(false);
   const focusCommitRef = useRef<string | null>(null);
   // Bumped when Show more goes away under the keyboard.
   const [headingFocusRequests, setHeadingFocusRequests] = useState(0);
@@ -227,8 +234,15 @@ export function HistoryDrawer({
   }, [cancelBusyRetry]);
 
   useEffect(() => {
-    setProbeRetry("idle");
+    setProbe(IDLE_PROBE);
   }, [originId, projectId]);
+
+  // The probe made on opening got no answer: say so where results appear.
+  useEffect(() => {
+    if (!ready && probeFailed) {
+      setNotice({ tone: "error", text: HISTORY_PROBE_ERROR_COPY });
+    }
+  }, [originId, probeFailed, projectId, ready, setNotice]);
 
   // A saved version landed somewhere: reload the list once the burst settles.
   useEffect(() => {
@@ -275,6 +289,19 @@ export function HistoryDrawer({
     }
   }, [focusSavedVersionsHeading, headingFocusRequests]);
 
+  // Retry goes away once a probe answers and the list shows: focus the heading.
+  const probeRowShownRef = useRef(false);
+  useEffect(() => {
+    if (probeUnanswered) {
+      probeRowShownRef.current = true;
+      return;
+    }
+    if (probeRowShownRef.current && ready) {
+      probeRowShownRef.current = false;
+      focusSavedVersionsHeading();
+    }
+  }, [focusSavedVersionsHeading, probeUnanswered, ready]);
+
   // Show more keeps focus on the first new row.
   useEffect(() => {
     const commit = focusCommitRef.current;
@@ -285,26 +312,46 @@ export function HistoryDrawer({
     rowButtonsRef.current.get(commit)?.focus();
   }, [history.entries]);
 
+  /** The mode is not known yet: Refresh and Retry ask the origin again. */
+  const runProbe = useCallback(
+    (source: "refresh" | "retry") => {
+      setProbe((previous) => ({ ...previous, running: source }));
+      void versioning
+        .refresh()
+        .catch(() => null)
+        .then((result) => {
+          if (!mountedRef.current) {
+            return;
+          }
+          setProbe({ running: null, failed: result === null });
+          if (result === null) {
+            // A new node each time, so a second failure is announced too.
+            setNotice({ tone: "error", text: HISTORY_PROBE_ERROR_COPY });
+          }
+        });
+    },
+    [setNotice, versioning],
+  );
+
   // The header's Refresh reloads the whole drawer: mode, saved versions,
   // the Desktop line and Unsaved work (no event announces new recovery refs).
   const handleRefresh = useCallback(() => {
     if (!ready) {
-      // The mode is not known yet: Refresh (and Retry) asks the origin again.
-      setProbeRetry("running");
-      void versioning.refresh().then((result) => {
-        if (mountedRef.current) {
-          setProbeRetry(result ? "answered" : "failed");
-        }
-      });
+      runProbe("refresh");
       return;
     }
     void versioning.refresh();
-    void loadHistory();
     setStatusRefreshKey((key) => key + 1);
-    if (ready && projectId && originId) {
+    if (projectId && originId) {
       void refreshUnsavedWork({ projectId, originId, force: true });
     }
-  }, [loadHistory, originId, projectId, ready, versioning]);
+    setRefreshing(true);
+    void loadHistory().finally(() => {
+      if (mountedRef.current) {
+        setRefreshing(false);
+      }
+    });
+  }, [loadHistory, originId, projectId, ready, runProbe, versioning]);
 
   const handleShowMore = useCallback(async () => {
     if (!ready || !projectId || !originId || loadingMore) {
@@ -474,7 +521,10 @@ export function HistoryDrawer({
               title="Refresh"
               data-testid="source-control-refresh"
               onPress={handleRefresh}
-              isDisabled={ready ? history.status === "loading" : probeRetry === "running"}
+              // The pressed control waits as pending (it keeps focus); a
+              // native disabled button would drop it.
+              isPending={ready ? refreshing : probe.running === "refresh"}
+              isDisabled={ready ? !refreshing && history.status === "loading" : probe.running === "retry"}
               className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
@@ -521,15 +571,19 @@ export function HistoryDrawer({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4" data-testid="history-scroll">
-        {!ready && probeUnanswered ? (
-          <div
-            className="flex flex-wrap items-center justify-center gap-2 px-2 py-10"
-            data-testid="history-probe-error"
-          >
-            <Text as="span" tone="muted">
-              {HISTORY_PROBE_ERROR_COPY}
-            </Text>
-            <Button variant="ghost" size="xs" radius="xl" onPress={handleRefresh} data-testid="history-probe-retry">
+        {probeUnanswered ? (
+          // The message is in the status region above; Retry stays mounted
+          // (pending) while it asks, so keyboard focus stays on it.
+          <div className="flex px-1 py-1.5" data-testid="history-probe-error">
+            <Button
+              variant="ghost"
+              size="xs"
+              radius="xl"
+              onPress={() => runProbe("retry")}
+              isPending={probe.running === "retry"}
+              isDisabled={probe.running === "refresh"}
+              data-testid="history-probe-retry"
+            >
               Retry
             </Button>
           </div>

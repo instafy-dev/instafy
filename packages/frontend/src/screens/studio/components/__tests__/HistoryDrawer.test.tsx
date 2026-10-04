@@ -193,32 +193,94 @@ describe("HistoryDrawer", () => {
     expect(container.textContent).toContain("Loading history");
     const refresh = q<HTMLButtonElement>(container, "source-control-refresh");
     expect(refresh?.disabled).toBe(false);
-    await act(async () => refresh?.click());
-    await flush();
-    expect(mocks.probe).toHaveBeenCalledTimes(1);
-    expect(mocks.fetchHistory).not.toHaveBeenCalled();
-  });
-
-  it("says when the mode probe got no answer and offers Retry", async () => {
-    await render(versioning({ resolved: false, historyReady: false }), vi.fn(), { probeFailed: true });
-    expect(q(container, "history-probe-error")?.textContent).toContain("Couldn't check this space's saved versions.");
-    expect(container.textContent).not.toContain("Loading history");
     let answer!: (value: unknown) => void;
     mocks.probe.mockReturnValueOnce(
       new Promise((resolve) => {
         answer = resolve;
       }),
     );
-    await act(async () => q<HTMLButtonElement>(container, "history-probe-retry")?.click());
+    await act(async () => refresh?.focus());
+    await act(async () => refresh?.click());
     await flush();
     expect(mocks.probe).toHaveBeenCalledTimes(1);
-    // While it asks again: the loading frame, and Refresh waits.
-    expect(container.textContent).toContain("Loading history");
-    expect(q<HTMLButtonElement>(container, "source-control-refresh")?.disabled).toBe(true);
+    expect(mocks.fetchHistory).not.toHaveBeenCalled();
+    // Pending, not natively disabled: keyboard focus stays on it.
+    expect(refresh?.disabled).toBe(false);
+    expect(refresh?.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(refresh);
     await act(async () => answer(null));
     await flush();
+    expect(document.activeElement).toBe(refresh);
+    expect(q(container, "history-status")?.textContent).toBe("Couldn't check this space's saved versions.");
+    expect(q(container, "history-probe-retry")).not.toBeNull();
+  });
+
+  it("says when the mode probe got no answer and keeps focus on Retry while it asks again", async () => {
+    const onRequestClose = vi.fn();
+    await render(versioning({ resolved: false, historyReady: false }), onRequestClose, { probeFailed: true });
+    // The message is in the polite status region; Retry sits where the list goes.
+    const status = q(container, "history-status");
+    expect(status?.textContent).toBe("Couldn't check this space's saved versions.");
     expect(q(container, "history-probe-error")).not.toBeNull();
+    expect(container.textContent).not.toContain("Loading history");
+    const retry = q<HTMLButtonElement>(container, "history-probe-retry");
+    let answer!: (value: unknown) => void;
+    mocks.probe.mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    await act(async () => retry?.focus());
+    await act(async () => retry?.click());
+    await flush();
+    expect(mocks.probe).toHaveBeenCalledTimes(1);
+    // While it asks again, Retry stays (pending) and keeps keyboard focus.
+    expect(q(container, "history-probe-retry")).toBe(retry);
+    expect(retry?.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(retry);
+    const firstMessage = status?.firstElementChild;
+    await act(async () => answer(null));
+    await flush();
+    expect(document.activeElement).toBe(retry);
+    // Announced again: a new node with the same message.
+    expect(status?.textContent).toBe("Couldn't check this space's saved versions.");
+    expect(status?.firstElementChild).not.toBe(firstMessage);
     expect(mocks.fetchHistory).not.toHaveBeenCalled();
+
+    // An answer: the list replaces Retry and focus lands on Saved versions.
+    mocks.probe.mockResolvedValueOnce({ mode: "stateless" });
+    await act(async () => retry?.click());
+    await flush();
+    await act(async () =>
+      root.render(<HistoryDrawer versioning={versioning()} onRequestClose={onRequestClose} probeFailed />),
+    );
+    await flush();
+    expect(q(container, "history-probe-retry")).toBeNull();
+    const heading = Array.from(container.querySelectorAll("h3")).find((item) => item.textContent === "Saved versions");
+    expect(document.activeElement).toBe(heading);
+    expect(q(container, "history-status")?.textContent).toBe("");
+  });
+
+  it("keeps focus on Refresh while it reloads an empty list", async () => {
+    mocks.fetchHistory.mockResolvedValueOnce(null);
+    await render();
+    expect(q(container, "history-error")?.textContent).toBe("Couldn't load saved versions. Try Refresh.");
+    let answer!: (value: unknown) => void;
+    mocks.fetchHistory.mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    const refresh = q<HTMLButtonElement>(container, "source-control-refresh");
+    await act(async () => refresh?.focus());
+    await act(async () => refresh?.click());
+    await flush();
+    expect(refresh?.disabled).toBe(false);
+    expect(document.activeElement).toBe(refresh);
+    await act(async () => answer(page([historyEntry(1)])));
+    await flush();
+    expect(document.activeElement).toBe(refresh);
+    expect(refresh?.getAttribute("aria-disabled")).toBeNull();
   });
 
   it("loads one page from the pinned default origin and never polls", async () => {
