@@ -7,6 +7,7 @@ import type { CodeFile } from "../../../../types";
 import { FilesPanel } from "../FilesPanel";
 import { TestCodeProvider, testCodeHandle } from "./filesPanelTestCode";
 import { writeWorkspaceFileStaleNotice } from "../workspaceFileStaleNoticeStore";
+import { gitBlobOid } from "../../../../utils/gitBlobOid";
 
 const REV_1 = "1".repeat(40);
 const REV_2 = "2".repeat(40);
@@ -326,6 +327,66 @@ describe("FilesPanel one Save", () => {
       expected: { "docs/a.md": null },
       baseRev: REV_1,
     }));
+  });
+
+  async function deleteFromExplorer(testId: string) {
+    const row = query(testId);
+    expect(row).not.toBeNull();
+    await act(async () => {
+      row!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+    });
+    const menuDelete = document.querySelector<HTMLButtonElement>('[data-testid="files-explorer-menu-delete"]');
+    expect(menuDelete).not.toBeNull();
+    await act(async () => { menuDelete!.click(); });
+    await settle();
+  }
+
+  it("deletes a file it just saved on top of its own save's revision", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    await render([buffer()]);
+    await pressSave();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+    mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_3), baseRev: REV_2, saved: [] });
+    await deleteFromExplorer("files-entry-README-md");
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+    // The folder was listed at REV_1; the save moved main to REV_2 with only
+    // this edit, so the delete is checked against REV_2 and the saved blob.
+    expect(mocks.saveChanges.mock.calls[1][0]).toEqual({
+      projectId: "space-a",
+      originId: "origin-1",
+      deletes: ["README.md"],
+      baseRev: REV_2,
+      expected: { "README.md": await gitBlobOid("edited") },
+    });
+  });
+
+  it("deletes a folder with a file it just saved into it on top of that save's revision", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mocks.listAt.mockImplementation(async ({ path }: { path?: string }) => ({
+      ok: true,
+      entries: path === "docs"
+        ? [{ name: ".instafy.keep", path: "docs/.instafy.keep", kind: "file" }]
+        : [{ name: "docs", path: "docs", kind: "directory" }],
+      rev: REV_1,
+      originId: "origin-1",
+      originMode: "hosted",
+    }));
+    mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_2), saved: ["docs/a.md", "docs/.instafy.keep"] });
+    await render([buffer({ id: "docs/a.md", path: "docs/a.md", label: "a.md", directory: "docs", generated: "", modified: "hi", isNew: true, baseRev: null, blobOid: null })]);
+    await pressSave();
+    mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_3), baseRev: REV_2, saved: [] });
+    await deleteFromExplorer("files-entry-docs");
+    expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ deletes: ["docs"], baseRev: REV_2 });
+  });
+
+  it("keeps a listing's revision when the save built on a newer commit", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    // Main had moved to REV_2 (someone else's change) when this save landed.
+    mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_3), baseRev: REV_2 });
+    await render([buffer()]);
+    await pressSave();
+    await deleteFromExplorer("files-entry-README-md");
+    expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ deletes: ["README.md"], baseRev: REV_1 });
   });
 
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {

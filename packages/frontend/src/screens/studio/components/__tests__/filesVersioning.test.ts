@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CodeFile } from "../../../../types";
 import {
+  advanceListingRevisions,
   createOwnRevisions,
   decideCachedOpen,
   isFileBufferDirty,
@@ -91,6 +92,17 @@ describe("Files versioning helpers", () => {
     expect(own.has("other")).toBe(false);
     now += OWN_REVISION_WINDOW_MS + 1;
     expect(own.has(REV)).toBe(false);
+  });
+
+  it("moves only the listings at the commit an own save built on to that save's commit", () => {
+    const REV_2 = "2".repeat(40);
+    const REV_3 = "3".repeat(40);
+    const revs = { "": REV, docs: REV, src: REV_2, empty: null };
+    expect(advanceListingRevisions(revs, REV, REV_3)).toEqual({ "": REV_3, docs: REV_3, src: REV_2, empty: null });
+    expect(revs[""]).toBe(REV);
+    expect(advanceListingRevisions(revs, REV_3, REV_2)).toBe(revs);
+    expect(advanceListingRevisions(revs, null, REV_3)).toBe(revs);
+    expect(advanceListingRevisions(revs, REV, REV)).toBe(revs);
   });
 
   it("adds never-saved buffers to their listed folder only", () => {

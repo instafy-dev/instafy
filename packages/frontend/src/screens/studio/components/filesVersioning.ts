@@ -116,6 +116,36 @@ export function createOwnRevisions(now: () => number = Date.now): OwnRevisions {
   };
 }
 
+/**
+ * After this tab's own commit `rev`, made on top of `parentRev`, every folder
+ * that was listed at `parentRev` is current at `rev` too: the commit holds
+ * only this tab's change, which the panel already shows. A later delete, new
+ * file or folder then sends the newer revision instead of one that its own
+ * commit moved past. Folders listed at any other revision keep theirs, so a
+ * folder delete still expands at what the user actually saw.
+ */
+export function advanceListingRevisions(
+  revs: Record<string, string | null>,
+  parentRev: string | null | undefined,
+  rev: string | null | undefined,
+): Record<string, string | null> {
+  const from = parentRev?.trim();
+  const to = rev?.trim();
+  if (!from || !to || from === to) {
+    return revs;
+  }
+  let next = revs;
+  for (const [path, listed] of Object.entries(revs)) {
+    if (listed === from) {
+      if (next === revs) {
+        next = { ...revs };
+      }
+      next[path] = to;
+    }
+  }
+  return next;
+}
+
 function parentOf(path: string): string {
   const index = path.lastIndexOf("/");
   return index > 0 ? path.slice(0, index) : "";

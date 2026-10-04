@@ -7,7 +7,12 @@ import {
 } from "../../../sdk/instafy";
 import type { CodeFile, CodeWorkspace } from "../../../types";
 import { gitBlobOid } from "../../../utils/gitBlobOid";
-import { EMPTY_DIRECTORY_PLACEHOLDER, type FilesVersioning, type OwnRevisions } from "./filesVersioning";
+import {
+  advanceListingRevisions,
+  EMPTY_DIRECTORY_PLACEHOLDER,
+  type FilesVersioning,
+  type OwnRevisions,
+} from "./filesVersioning";
 import { raiseWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
 import {
   describeSaveFailure,
@@ -352,6 +357,15 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     );
     current.ownRevisions.add(result.rev);
     current.ownRevisions.add(result.report?.localRev ?? null);
+    if (mode === "stateless" && (result.originId || originId) === current.versioning.originId) {
+      // The explorer's listings come from this origin: those at the commit
+      // this save built on are current at the save's commit too.
+      current.directoryRevsRef.current = advanceListingRevisions(
+        current.directoryRevsRef.current,
+        result.baseRev,
+        result.rev,
+      );
+    }
 
     if (result.conflicted.includes(path)) {
       // Desktop: the space has a newer version. The user's bytes stay in the

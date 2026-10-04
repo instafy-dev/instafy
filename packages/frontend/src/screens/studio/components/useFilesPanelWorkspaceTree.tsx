@@ -11,6 +11,7 @@ import type { OpenTextFileOptions, ViewerState } from "./useFilesPanelViewerStat
 import type { StudioDirectoryListingListener } from "../useStudioKnownFiles";
 import type { CodeFile } from "../../../types";
 import {
+  advanceListingRevisions,
   EMPTY_DIRECTORY_PLACEHOLDER,
   isVersionedFilesMode,
   LEGACY_FILES_VERSIONING,
@@ -903,6 +904,9 @@ export function useFilesPanelWorkspaceTree({
         return false;
       }
       hooks.ownRevisions.add(result.rev);
+      if (versionedMode === "stateless") {
+        directoryRevsRef.current = advanceListingRevisions(directoryRevsRef.current, result.baseRev, result.rev);
+      }
       hooks.discardBuffers(normalizedPath);
       if (entry.kind === "directory") {
         for (const folder of Array.from(keepFoldersRef.current)) {

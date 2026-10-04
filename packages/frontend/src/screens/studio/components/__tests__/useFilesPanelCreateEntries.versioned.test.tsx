@@ -99,7 +99,7 @@ describe("useFilesPanelCreateEntries in the versioned modes", () => {
   });
 
   it("creates a folder as one placeholder commit on the parent listing's rev", async () => {
-    mocks.saveChanges.mockResolvedValue({ ok: true, rev: REV_2, originId: "origin-1" });
+    mocks.saveChanges.mockResolvedValue({ ok: true, rev: REV_2, baseRev: REV_1, originId: "origin-1" });
     await act(async () => root.render(<Harness />));
     await act(async () => latest?.setCreateFolderState({ parentPath: "", draft: "docs", busy: false }));
     await act(async () => latest?.handleCommitCreateFolder());
@@ -112,6 +112,8 @@ describe("useFilesPanelCreateEntries in the versioned modes", () => {
       baseRev: REV_1,
     });
     expect(hooks.ownRevisions.has(REV_2)).toBe(true);
+    // The parent listing is current at the folder's own commit.
+    expect(hooks.directoryRevsRef.current[""]).toBe(REV_2);
     expect(hooks.keepFoldersRef.current.has("docs")).toBe(true);
     expect(latest?.createFolderState).toBeNull();
   });

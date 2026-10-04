@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { controllerClient, type ControllerWorkspaceEntry } from "../../../sdk/instafy";
 import {
+  advanceListingRevisions,
   isVersionedFilesMode,
   LEGACY_FILES_VERSIONING,
   type FilesVersioning,
@@ -408,6 +409,13 @@ export function useFilesPanelCreateEntries({
           return;
         }
         versionedHooks.ownRevisions.add(result.rev);
+        if (versionedMode === "stateless") {
+          versionedHooks.directoryRevsRef.current = advanceListingRevisions(
+            versionedHooks.directoryRevsRef.current,
+            result.baseRev,
+            result.rev,
+          );
+        }
         versionedHooks.keepFoldersRef.current.add(folderPath);
       } else {
         const response = await controllerClient.workspace.files.write({
