@@ -63,9 +63,9 @@ export function genericSaveMessage(label: string): string {
 
 /**
  * What the failed write was. A save keeps the user's edits, so its copy says
- * so; deleting a file or creating a folder has no edits to keep.
+ * so; deleting, creating a folder or changing a setting has no edits to keep.
  */
-export type SaveCopyOperation = "save" | "delete" | "create";
+export type SaveCopyOperation = "save" | "delete" | "create" | "update";
 
 function trimSentence(value: string): string {
   return value.trim().replace(/[.\s]+$/, "");
@@ -142,6 +142,9 @@ export function describeSaveFailure(params: {
       if (operation === "create") {
         return { message: `"${label}" already exists in the space. Refresh the folder.` };
       }
+      if (operation === "update") {
+        return { message: `"${label}" changed in the space. Refresh and try again.` };
+      }
       return { message: staleSaveMessage(label), action: RESOLVE_ACTION, staleNotice: true };
     case "main_busy":
       return { message: SAVE_COPY.mainBusy, action: RETRY_ACTION };
@@ -188,6 +191,9 @@ export function describeSaveFailure(params: {
   }
   if (operation === "create") {
     return { message: `Couldn't create "${label}".` };
+  }
+  if (operation === "update") {
+    return { message: `Couldn't update "${label}".` };
   }
   return { message: genericSaveMessage(label) };
 }

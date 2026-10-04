@@ -136,6 +136,10 @@ describe("workspace save copy", () => {
     expect(describeOp({ status: 400 }, "delete").message).toBe('Couldn\'t delete "docs".');
     expect(describeOp({ status: 400 }, "create").message).toBe('Couldn\'t create "docs".');
     expect(describeOp({ code: "main_busy" }, "delete").action?.kind).toBe("retry");
+    const update = (patch: Partial<OriginError>) =>
+      describeSaveFailure({ error: error(patch), mode: "stateless", label: "Docs skill", operation: "update" });
+    expect(update({ code: "head_moved" }).message).toBe('"Docs skill" changed in the space. Refresh and try again.');
+    expect(update({ status: 400 }).message).toBe('Couldn\'t update "Docs skill".');
   });
 
   it("keeps the copy free of em dashes", () => {
