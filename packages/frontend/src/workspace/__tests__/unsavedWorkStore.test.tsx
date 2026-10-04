@@ -10,12 +10,14 @@ vi.mock("../../sdk/instafy", () => ({
 }));
 
 import {
+  getUnsavedWorkConflicts,
   getUnsavedWorkSnapshot,
   patchUnsavedWorkEntries,
   pendingUnsavedWorkEntries,
   refreshUnsavedWork,
   resetUnsavedWorkStoreForTests,
   UNSAVED_WORK_FOCUS_REFRESH_MS,
+  updateUnsavedWorkConflicts,
   useUnsavedWork,
   type UseUnsavedWorkResult,
 } from "../unsavedWorkStore";
@@ -130,6 +132,31 @@ describe("unsaved work store", () => {
     expect(getUnsavedWorkSnapshot("p", "o").entries.map((item) => item.ref)).toEqual([
       "refs/instafy/salvage/gateway/b",
     ]);
+  });
+
+  it("keeps restore choices while the entry still names the same work", async () => {
+    const kept = entry("refs/instafy/recovery/o/kept");
+    const moved = entry("refs/instafy/recovery/o/moved-ref");
+    const gone = entry("refs/instafy/recovery/o/gone-ref-x");
+    mocks.fetchRecovery.mockResolvedValueOnce(ok([kept, moved, gone]));
+    await refreshUnsavedWork({ projectId: "p", originId: "o" });
+    for (const item of [kept, moved, gone]) {
+      updateUnsavedWorkConflicts("p", "o", (current) => ({
+        ...current,
+        [item.ref]: { rev: item.rev, head: null, paths: ["a.txt"], resolutions: { "a.txt": "keep" } },
+      }));
+    }
+    expect(Object.keys(getUnsavedWorkConflicts("p", "o"))).toHaveLength(3);
+    // Another project or origin has none.
+    expect(getUnsavedWorkConflicts("p", "other")).toEqual({});
+
+    mocks.fetchRecovery.mockResolvedValueOnce(ok([kept, { ...moved, rev: "f".repeat(40) }]));
+    await refreshUnsavedWork({ projectId: "p", originId: "o", force: true });
+    expect(Object.keys(getUnsavedWorkConflicts("p", "o"))).toEqual([kept.ref]);
+
+    mocks.fetchRecovery.mockResolvedValueOnce({ status: "unsupported", entries: [], originId: "o", originMode: "desktop" });
+    await refreshUnsavedWork({ projectId: "p", originId: "o", force: true });
+    expect(getUnsavedWorkConflicts("p", "o")).toEqual({});
   });
 });
 

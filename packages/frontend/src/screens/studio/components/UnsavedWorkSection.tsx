@@ -8,7 +8,12 @@ import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import { controllerClient, type OriginApplyFile, type WorkspaceRecoveryEntry } from "../../../sdk/instafy";
 import { decodeBase64 } from "../../../services/runtimeController/workspaceUtils";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
-import { patchUnsavedWorkEntries, useUnsavedWork } from "../../../workspace/unsavedWorkStore";
+import {
+  patchUnsavedWorkEntries,
+  useUnsavedWork,
+  useUnsavedWorkConflicts,
+  type UnsavedWorkPathChoice,
+} from "../../../workspace/unsavedWorkStore";
 import { HistoryConfirmDialog } from "./HistoryConfirmDialog";
 import {
   ALREADY_REMOVED_COPY,
@@ -35,15 +40,6 @@ import { checkDesktopFolderPath, confirmPathAbsentAtRef } from "./unsavedWorkPat
 import { formatRelativeCommitTime } from "./workspaceGitReviewShared";
 
 const LEASE_RETRY_DELAY_MS = 1_500;
-
-type PathResolution = "use" | "keep";
-
-type RestoreConflict = {
-  /** `main` when the restore refused; per-file saves build on it. */
-  head: string | null;
-  paths: string[];
-  resolutions: Record<string, PathResolution>;
-};
 
 /**
  * Unsaved work kept on recovery and salvage refs. Hidden while empty or
@@ -82,7 +78,8 @@ export function UnsavedWorkSection({
   const { openGitReviewTab, requestUrlPush } = useWorkspaceTabs();
   const unsavedWork = useUnsavedWork({ projectId, originId, enabled: true, mountRefresh: "force" });
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [conflicts, setConflicts] = useState<Record<string, RestoreConflict>>({});
+  // Shared with every mount: choices survive the drawer closing and reopening.
+  const [conflicts, setConflicts] = useUnsavedWorkConflicts(projectId, originId);
   const [pendingRemove, setPendingRemove] = useState<WorkspaceRecoveryEntry | null>(null);
   const sectionLabelId = useId();
   const pathIdPrefix = useId();
@@ -103,16 +100,19 @@ export function UnsavedWorkSection({
     [onBusyChange],
   );
 
-  const clearConflict = useCallback((ref: string) => {
-    setConflicts((previous) => {
-      if (!(ref in previous)) {
-        return previous;
-      }
-      const next = { ...previous };
-      delete next[ref];
-      return next;
-    });
-  }, []);
+  const clearConflict = useCallback(
+    (ref: string) => {
+      setConflicts((previous) => {
+        if (!(ref in previous)) {
+          return previous;
+        }
+        const next = { ...previous };
+        delete next[ref];
+        return next;
+      });
+    },
+    [setConflicts],
+  );
 
   const refreshAfterMove = useCallback(() => {
     onNotice({ tone: "info", text: RECOVERY_REF_MOVED_COPY });
@@ -165,6 +165,7 @@ export function UnsavedWorkSection({
           setConflicts((previous) => ({
             ...previous,
             [entry.ref]: {
+              rev: entry.rev,
               head: error.head ?? baseRev,
               paths: error.paths && error.paths.length > 0 ? error.paths : entry.paths,
               resolutions: {},
@@ -191,7 +192,19 @@ export function UnsavedWorkSection({
           onNotice({ tone: "error", text: historyFailureCopy(error, originKind, "Couldn't restore this work.") });
       }
     },
-    [clearConflict, headRev, onCommitted, onNotice, onReloadHistory, originId, originKind, projectId, refresh, refreshAfterMove],
+    [
+      clearConflict,
+      headRev,
+      onCommitted,
+      onNotice,
+      onReloadHistory,
+      originId,
+      originKind,
+      projectId,
+      refresh,
+      refreshAfterMove,
+      setConflicts,
+    ],
   );
 
   const remove = useCallback(
@@ -223,22 +236,25 @@ export function UnsavedWorkSection({
     [clearConflict, onNotice, originId, originKind, projectId, refresh, refreshAfterMove],
   );
 
-  const resolvePath = useCallback((ref: string, path: string, resolution: PathResolution, head?: string | null) => {
-    setConflicts((previous) => {
-      const conflict = previous[ref];
-      if (!conflict) {
-        return previous;
-      }
-      return {
-        ...previous,
-        [ref]: {
-          ...conflict,
-          head: head === undefined ? conflict.head : head,
-          resolutions: { ...conflict.resolutions, [path]: resolution },
-        },
-      };
-    });
-  }, []);
+  const resolvePath = useCallback(
+    (ref: string, path: string, resolution: UnsavedWorkPathChoice, head?: string | null) => {
+      setConflicts((previous) => {
+        const conflict = previous[ref];
+        if (!conflict) {
+          return previous;
+        }
+        return {
+          ...previous,
+          [ref]: {
+            ...conflict,
+            head: head === undefined ? conflict.head : head,
+            resolutions: { ...conflict.resolutions, [path]: resolution },
+          },
+        };
+      });
+    },
+    [setConflicts],
+  );
 
   /**
    * "Use this version": read the kept file at the ref (into memory only,
@@ -359,6 +375,7 @@ export function UnsavedWorkSection({
       refresh,
       refreshAfterMove,
       resolvePath,
+      setConflicts,
     ],
   );
 
@@ -412,7 +429,8 @@ export function UnsavedWorkSection({
         Unsaved work
       </Text>
       {entries.map((entry) => {
-        const conflict = conflicts[entry.ref] ?? null;
+        const stored = conflicts[entry.ref];
+        const conflict = stored && stored.rev === entry.rev ? stored : null;
         const title = unsavedWorkTitle(entry.kind);
         const meta = [entry.date ? formatRelativeCommitTime(entry.date) : null, formatFileCount(entry.paths.length)]
           .filter((part): part is string => Boolean(part))

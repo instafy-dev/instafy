@@ -558,6 +558,58 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.openConversationTab).toHaveBeenCalledWith("conversation-1");
   });
 
+  describe("choices across closing the drawer", () => {
+    function conflictOnThree() {
+      mocks.restoreRecovery.mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["src/a.ts", "src/b.ts", "src/c.ts"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    }
+
+    async function openDrawer(onRequestClose: () => void) {
+      await act(async () => root.render(<HistoryDrawer versioning={versioning()} onRequestClose={onRequestClose} />));
+      await flush();
+    }
+
+    async function chooseThenAsk() {
+      // The host unmounts the drawer when it closes, as StudioLayout does.
+      const close = vi.fn(() => root.render(null));
+      conflictOnThree();
+      await openDrawer(close);
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      const paths = Array.from(row(container, RECOVERY).querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path"]'));
+      await press(paths[0]!, "unsaved-work-path-keep");
+      await press(paths[1]!, "unsaved-work-path-ask");
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(q(container, "source-control-drawer")).toBeNull();
+      return close;
+    }
+
+    it("keeps the per-file choices when asking the agent closes the drawer", async () => {
+      const close = await chooseThenAsk();
+      await openDrawer(close);
+      const conflict = q(row(container, RECOVERY), "unsaved-work-conflict");
+      expect(conflict).not.toBeNull();
+      const resolved = Array.from(conflict!.querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path-resolved"]'));
+      expect(resolved.map((item) => item.closest('[data-testid="unsaved-work-path"]')?.getAttribute("data-path"))).toEqual([
+        "src/a.ts",
+      ]);
+      expect(resolved[0]?.textContent).toContain("Kept current");
+      expect(conflict!.querySelectorAll('[data-testid="unsaved-work-path-use"]')).toHaveLength(2);
+      expect(mocks.restoreRecovery).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops the choices when the entry now holds other work", async () => {
+      const close = await chooseThenAsk();
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY, { rev: "9".repeat(40) })]));
+      await openDrawer(close);
+      expect(q(row(container, RECOVERY), "unsaved-work-conflict")).toBeNull();
+    });
+  });
+
   it("offers Remove instead of Restore the rest for a conflict entry", async () => {
     mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(CONFLICT, { kind: "conflict", paths: ["src/a.ts"] })]));
     mocks.restoreRecovery.mockResolvedValueOnce({

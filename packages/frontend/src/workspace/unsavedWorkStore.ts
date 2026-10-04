@@ -56,6 +56,9 @@ function notify(): void {
 
 function writeSnapshot(key: string, snapshot: UnsavedWorkSnapshot): UnsavedWorkSnapshot {
   snapshots.set(key, snapshot);
+  if (snapshot.status === "ok" || snapshot.status === "unsupported") {
+    pruneConflicts(key, snapshot.entries);
+  }
   notify();
   return snapshot;
 }
@@ -188,12 +191,113 @@ export function patchUnsavedWorkEntries(
   writeSnapshot(key, { ...current, entries: update(current.entries) });
 }
 
+// ---------------------------------------------------------------------------
+// Restore conflicts in progress
+// ---------------------------------------------------------------------------
+
+export type UnsavedWorkPathChoice = "use" | "keep";
+
+/** A restore that refused, and the per-file choices made since. */
+export interface UnsavedWorkConflict {
+  /** The entry's rev the restore was for; a moved ref drops the choices. */
+  rev: string;
+  /** `main` when the restore refused; per-file saves build on it. */
+  head: string | null;
+  paths: string[];
+  resolutions: Record<string, UnsavedWorkPathChoice>;
+}
+
+export type UnsavedWorkConflicts = Readonly<Record<string, UnsavedWorkConflict>>;
+
+const EMPTY_CONFLICTS: UnsavedWorkConflicts = Object.freeze({});
+const conflictStates = new Map<string, UnsavedWorkConflicts>();
+
+/**
+ * Per-file choices live here, not in the drawer, so they survive the drawer
+ * closing (asking the agent about one file opens the chat) and reopening.
+ */
+export function getUnsavedWorkConflicts(
+  projectId: string | null | undefined,
+  originId: string | null | undefined,
+): UnsavedWorkConflicts {
+  if (!projectId || !originId) {
+    return EMPTY_CONFLICTS;
+  }
+  return conflictStates.get(storeKey(projectId, originId)) ?? EMPTY_CONFLICTS;
+}
+
+export function updateUnsavedWorkConflicts(
+  projectId: string | null | undefined,
+  originId: string | null | undefined,
+  update: (current: UnsavedWorkConflicts) => UnsavedWorkConflicts,
+): void {
+  if (!projectId || !originId) {
+    return;
+  }
+  const key = storeKey(projectId, originId);
+  const current = conflictStates.get(key) ?? EMPTY_CONFLICTS;
+  const next = update(current);
+  if (next === current) {
+    return;
+  }
+  if (Object.keys(next).length === 0) {
+    conflictStates.delete(key);
+  } else {
+    conflictStates.set(key, next);
+  }
+  notify();
+}
+
+/** Drop choices for entries that left the list or now point at other work. */
+function pruneConflicts(key: string, entries: WorkspaceRecoveryEntry[]): void {
+  const current = conflictStates.get(key);
+  if (!current) {
+    return;
+  }
+  const revs = new Map(entries.map((entry) => [entry.ref, entry.rev]));
+  const next: Record<string, UnsavedWorkConflict> = {};
+  let changed = false;
+  for (const [ref, conflict] of Object.entries(current)) {
+    if (revs.get(ref) === conflict.rev) {
+      next[ref] = conflict;
+    } else {
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return;
+  }
+  if (Object.keys(next).length === 0) {
+    conflictStates.delete(key);
+  } else {
+    conflictStates.set(key, next);
+  }
+}
+
 export function resetUnsavedWorkStoreForTests(): void {
   snapshots.clear();
   inflight.clear();
   latestSeq.clear();
+  conflictStates.clear();
   fetchSeq = 0;
   notify();
+}
+
+/** The restore conflicts in progress for one origin, shared by every mount. */
+export function useUnsavedWorkConflicts(
+  projectId: string | null | undefined,
+  originId: string | null | undefined,
+): [UnsavedWorkConflicts, (update: (current: UnsavedWorkConflicts) => UnsavedWorkConflicts) => void] {
+  const project = projectId?.trim() || null;
+  const origin = originId?.trim() || null;
+  const getSnapshot = useCallback(() => getUnsavedWorkConflicts(project, origin), [project, origin]);
+  const conflicts = useSyncExternalStore(subscribeUnsavedWork, getSnapshot, getSnapshot);
+  const update = useCallback(
+    (change: (current: UnsavedWorkConflicts) => UnsavedWorkConflicts) =>
+      updateUnsavedWorkConflicts(project, origin, change),
+    [project, origin],
+  );
+  return [conflicts, update];
 }
 
 export interface UseUnsavedWorkResult extends UnsavedWorkSnapshot {
