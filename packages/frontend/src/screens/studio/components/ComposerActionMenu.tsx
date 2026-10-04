@@ -74,6 +74,7 @@ function ActionRow({
   testId,
   disabled = false,
   hoverTitle,
+  detail,
 }: {
   icon: ReactNode;
   title: string;
@@ -87,6 +88,8 @@ function ActionRow({
    * wrapper instead.
    */
   hoverTitle?: string;
+  /** A short second line under the title, such as why the row is off. */
+  detail?: string;
 }) {
   const row = (
     <Button
@@ -96,7 +99,7 @@ function ActionRow({
       radius="xl"
       onPress={onPress}
       isDisabled={disabled}
-      className="h-11 w-full justify-start px-2.5 text-left"
+      className={`${detail ? "min-h-11 py-1.5" : "h-11"} w-full justify-start px-2.5 text-left`}
       data-testid={testId}
     >
       <span className="flex w-full items-center gap-3">
@@ -104,9 +107,14 @@ function ActionRow({
           {icon}
         </span>
         <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
-          <Text as="span" variant="bodyStrong" tone="primary" className="truncate text-sm">
-            {title}
-          </Text>
+          <span className="flex min-w-0 flex-col">
+            <Text as="span" variant="bodyStrong" tone="primary" className="truncate text-sm">
+              {title}
+            </Text>
+            {detail ? (
+              <span className="text-xs font-normal text-slate-500 dark:text-slate-400">{detail}</span>
+            ) : null}
+          </span>
           {end ? <span className="flex-none text-slate-400 dark:text-slate-500">{end}</span> : null}
         </span>
       </span>
@@ -136,6 +144,7 @@ export function ComposerActionMenu({
   stashDisabled = false,
   onUploadImage,
   uploadImageDisabled = false,
+  uploadImageUnavailableReason = null,
   onInsertSuggestion,
   onStartVoiceInput,
   voiceInputDisabled = false,
@@ -176,6 +185,8 @@ export function ComposerActionMenu({
   // composer passes each handler only while it applies.
   onUploadImage?: () => void;
   uploadImageDisabled?: boolean;
+  /** Shown under "Upload image", which is then off, when this server can't store attachments. */
+  uploadImageUnavailableReason?: string | null;
   onInsertSuggestion?: () => void;
   onStartVoiceInput?: () => void;
   voiceInputDisabled?: boolean;
@@ -343,7 +354,9 @@ export function ComposerActionMenu({
                   closeMenu();
                   onUploadImage();
                 }}
-                disabled={uploadImageDisabled}
+                disabled={uploadImageDisabled || Boolean(uploadImageUnavailableReason)}
+                detail={uploadImageUnavailableReason ?? undefined}
+                hoverTitle={uploadImageUnavailableReason ?? undefined}
                 testId="composer-action-menu-upload-image"
               />
             ) : null}

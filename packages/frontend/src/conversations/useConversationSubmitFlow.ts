@@ -52,8 +52,13 @@ import {
   patchConversationMessageMetadata,
   resolveSubmittedImageFiles,
   sleep,
-  uploadConversationImageAttachments,
+  uploadConversationAttachments,
 } from "./conversationSubmitHelpers";
+import {
+  ChatAttachmentUploadError,
+  describeChatAttachmentUploadError,
+  isChatAttachmentUploadError,
+} from "../lib/chatAttachments";
 import { withRuntimeExpectations } from "./conversationRuntimeExpectations";
 import {
   activeGoalPromptMetadata,
@@ -403,7 +408,9 @@ export function useConversationSubmitFlow({
       }
       const conversation = ensureConversation();
       const requestedConversationId = conversationId ?? conversation.localId;
-      const sourceConversation =
+      // Rebound below once an attachment upload has created the conversation
+      // on the controller, so the rest of this send reuses that conversation.
+      let sourceConversation =
         conversations.find(
           (entry) =>
             entry.localId === requestedConversationId ||
@@ -595,6 +602,68 @@ export function useConversationSubmitFlow({
           { commandExecution: true },
         );
       }
+      const imageFiles = resolveSubmittedImageFiles(options?.imageFile, options?.imageFiles);
+      const attachmentFiles = [
+        ...imageFiles,
+        ...(options?.textFiles ?? []).filter((file): file is File => file instanceof File),
+      ];
+
+      if (attachmentFiles.length > 0) {
+        // Attachments are stored in the conversation's own Storage folder, and
+        // Storage refuses a folder whose conversation does not exist yet, so a
+        // new chat is created on the controller first. Nothing is shown or
+        // sent until every attachment is stored: a failure leaves no message
+        // behind and the composer gets the draft back (useChatSubmitDispatch).
+        const failSend = (failure: ChatAttachmentUploadError): never => {
+          if (!options?.callerReportsAttachmentErrors) {
+            showStatus(`Your message wasn't sent. ${failure.message}`, "error", 6000);
+          }
+          throw failure;
+        };
+        let attachmentConversationId: string | null = null;
+        try {
+          attachmentConversationId = await ensureControllerConversationId(
+            projectId,
+            targetConversation,
+          );
+        } catch (error) {
+          console.warn("Failed to create the conversation for attachments", error);
+        }
+        if (!attachmentConversationId) {
+          return failSend(
+            new ChatAttachmentUploadError("Couldn't start this chat. Try again in a moment."),
+          );
+        }
+        const conversationWithController = {
+          ...targetConversation,
+          controllerId: attachmentConversationId,
+        };
+        if (sourceConversation.localId === targetConversation.localId) {
+          sourceConversation = conversationWithController;
+          displayConversationControllerId = attachmentConversationId;
+        }
+        targetConversation = conversationWithController;
+
+        let attachments: Awaited<ReturnType<typeof uploadConversationAttachments>>;
+        try {
+          attachments = await uploadConversationAttachments({
+            projectId,
+            conversationId: attachmentConversationId,
+            files: attachmentFiles,
+          });
+        } catch (error) {
+          return failSend(
+            isChatAttachmentUploadError(error)
+              ? error
+              : new ChatAttachmentUploadError(describeChatAttachmentUploadError(error)),
+          );
+        }
+        promptMetadata = {
+          ...(promptMetadata ?? {}),
+          attachments,
+        };
+      }
+
       const shouldAttemptAutoTitle = shouldAutoTitleConversation(targetConversation, trimmed);
       const userMessage = createConversationMessage(
         "user",
@@ -606,40 +675,14 @@ export function useConversationSubmitFlow({
       // failed run, and only for a run it started (useRunFailureAutoRetry).
       rememberPromptSentFromThisPage(userMessage);
       appendMessages(displayConversationId, [userMessage]);
+      if (attachmentFiles.length > 0) {
+        options?.onAttachmentsStored?.();
+      }
       // What the list will hold once this message lands; null for a chat whose
       // history lives on the controller.
       const autoTitleOpeningMessage = shouldAttemptAutoTitle
         ? getOpeningUserMessage({ ...targetConversation, messages: [...targetConversation.messages, userMessage] })
         : null;
-
-      const imageFiles = resolveSubmittedImageFiles(options?.imageFile, options?.imageFiles);
-
-      if (imageFiles.length > 0) {
-        try {
-          const { runtimeId } = resolveRuntimeTarget(targetConversation);
-          const attachments = await uploadConversationImageAttachments({
-            projectId,
-            runtimeId,
-            imageFiles,
-          });
-
-          promptMetadata = {
-            ...(promptMetadata ?? {}),
-            attachments,
-          };
-
-          patchConversationMessageMetadata(
-            updateMessage,
-            displayConversationId,
-            userMessage.id,
-            promptMetadata,
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          showStatus(`Image upload failed: ${message}`, "error", 5000);
-          return;
-        }
-      }
 
       const configuredAgentHandles =
         options?.agentHandles
@@ -688,7 +731,7 @@ export function useConversationSubmitFlow({
           ? decideTopLevelAgentCollaborationModes({
               prompt: trimmed,
               explicitHandles: explicitTopLevelAgentHandles,
-              hasAttachments: imageFiles.length > 0,
+              hasAttachments: attachmentFiles.length > 0,
               hasTerminalIntent: Boolean(terminalRequest),
             })
           : {};

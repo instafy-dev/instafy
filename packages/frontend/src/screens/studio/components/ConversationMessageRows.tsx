@@ -17,7 +17,7 @@ import { ChatBubbleRow } from "./ChatBubbleRow";
 import type { ChatSpeakerMarker } from "./chatSpeakerMarker";
 import {
   AssistantMessageEntry,
-  extractImageAttachments,
+  extractChatAttachments,
   UserMessageBubble,
 } from "./ChatMessageEntries";
 import {
@@ -297,7 +297,7 @@ export function ConversationMessageRows({
           message.role === "assistant" &&
           shouldShowAssistantIdentityForMessage(message, previousAssistantHandle, runAgentHandleByRunId);
         const trimmedContent = message.content.trim();
-        const hasImageAttachments = extractImageAttachments(message).length > 0;
+        const hasImageAttachments = extractChatAttachments(message).length > 0;
         const hasFileChanges = Array.isArray(message.files) && message.files.length > 0;
         const groupIdentity =
           message.role === "assistant"

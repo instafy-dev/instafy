@@ -1,7 +1,12 @@
-import { controllerClient } from "../sdk/instafy";
+import {
+  ChatAttachmentUploadError,
+  describeChatAttachmentUploadError,
+  removeChatAttachments,
+  uploadChatAttachment,
+  type ChatStorageAttachment,
+} from "../lib/chatAttachments";
+import { seedChatAttachmentPreview } from "../lib/chatAttachmentPreviews";
 import type { ChatMessage } from "../screens/studio/types";
-
-const { applyChanges: applyWorkspaceChangesViaOrigin } = controllerClient.workspace.origin;
 
 export function detectClientTimezone(): string {
   try {
@@ -95,64 +100,18 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
 
+/** The longest attachment `fileName` a message records. */
+export const CHAT_UPLOAD_FILE_NAME_MAX_LENGTH = 80;
+
 export function sanitizeChatUploadFileName(rawName: string): string {
   const trimmed = rawName.trim();
   if (!trimmed) {
     return "image";
   }
   const cleaned = trimmed.replace(/[/\\?%*:|"<>]/g, "-").replace(/\s+/g, "-");
-  return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
-}
-
-export function mimeTypeToExtension(mimeType: string): string {
-  const normalized = (mimeType ?? "").trim().toLowerCase();
-  switch (normalized) {
-    case "image/jpeg":
-      return "jpg";
-    case "image/png":
-      return "png";
-    case "image/webp":
-      return "webp";
-    case "image/gif":
-      return "gif";
-    case "image/svg+xml":
-      return "svg";
-    default:
-      return "img";
-  }
-}
-
-export function shouldRetryChatImageUploadError(message: string): boolean {
-  const lower = (message ?? "").toLowerCase();
-  if (
-    lower.includes("failed to fetch") ||
-    lower.includes("networkerror") ||
-    lower.includes("load failed") ||
-    lower.includes("gateway timeout") ||
-    lower.includes("timed out") ||
-    lower.includes("timeout") ||
-    lower.includes("aborterror")
-  ) {
-    return true;
-  }
-  const match = lower.match(/origin apply failed \((\d+)\)/);
-  if (match) {
-    const status = Number(match[1]);
-    if (status === 408 || status === 429 || (status >= 500 && status <= 599)) {
-      return true;
-    }
-  }
-  return (
-    lower.includes("no origin available") ||
-    lower.includes("origin is offline") ||
-    lower.includes("failed to obtain origin token") ||
-    lower.includes("project lock acquisition failed") ||
-    lower.includes("project lock renewal failed") ||
-    lower.includes("workspace lease acquisition failed") ||
-    lower.includes("workspace lease renewal failed") ||
-    lower.includes("runtime is unavailable") ||
-    lower.includes("runtime_not_ready")
-  );
+  return cleaned.length > CHAT_UPLOAD_FILE_NAME_MAX_LENGTH
+    ? cleaned.slice(0, CHAT_UPLOAD_FILE_NAME_MAX_LENGTH)
+    : cleaned;
 }
 
 export function resolveSubmittedImageFiles(imageFile?: File | null, imageFiles?: File[]) {
@@ -190,81 +149,78 @@ export function patchConversationMessageMetadata(
   });
 }
 
-export async function uploadConversationImageAttachments(args: {
-  projectId: string;
-  runtimeId: string | null;
-  imageFiles: File[];
-}) {
-  const { projectId, runtimeId, imageFiles } = args;
-  const attachments: Array<{
-    kind: "image";
-    workspacePath: string;
-    fileName: string;
-    mimeType: string | null;
-    sizeBytes: number;
-  }> = [];
+/** At most this many of a message's attachments upload at once. */
+export const CHAT_ATTACHMENT_UPLOAD_CONCURRENCY = 3;
 
-  for (const imageFile of imageFiles) {
-    const safeName = sanitizeChatUploadFileName(imageFile.name || "image");
-    const ext = safeName.includes(".") ? "" : mimeTypeToExtension(imageFile.type);
-    const fileName = ext ? `${safeName}.${ext}` : safeName;
-    const uploadId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const workspacePath = `chat-upload-${Date.now()}-${uploadId}-${fileName}`;
-
-    const bytes = new Uint8Array(await imageFile.arrayBuffer());
-    const uploadDeadline = Date.now() + 60_000;
-    let uploadAttempt = 0;
-    let result = await applyWorkspaceChangesViaOrigin({
-      projectId,
-      files: [
-        {
-          path: workspacePath,
-          bytes,
-          encoding: "binary",
-        },
-      ],
-      deletes: [],
-      runtimeId,
-      preferRuntime: runtimeId,
-      accessToken: null,
-    });
-    while (!result.ok && Date.now() < uploadDeadline) {
-      const errorMessage = result.error ?? "Failed to upload image.";
-      if (!shouldRetryChatImageUploadError(errorMessage)) {
-        break;
+/**
+ * Runs `run` over `items`, at most `limit` at a time, in order. After the
+ * first failure no further item starts; those that did not run are left out
+ * of the results.
+ */
+async function settleInTurn<T, R>(
+  items: T[],
+  limit: number,
+  run: (item: T) => Promise<R>,
+): Promise<Array<PromiseSettledResult<R> | undefined>> {
+  const results: Array<PromiseSettledResult<R> | undefined> = new Array(items.length).fill(undefined);
+  let next = 0;
+  let failed = false;
+  const worker = async () => {
+    while (!failed && next < items.length) {
+      const index = next;
+      next += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await run(items[index]) };
+      } catch (reason) {
+        failed = true;
+        results[index] = { status: "rejected", reason };
       }
-      uploadAttempt += 1;
-      await sleep(Math.min(500 * uploadAttempt, 2_000));
-      result = await applyWorkspaceChangesViaOrigin({
-        projectId,
-        files: [
-          {
-            path: workspacePath,
-            bytes,
-            encoding: "binary",
-          },
-        ],
-        deletes: [],
-        runtimeId,
-        preferRuntime: runtimeId,
-        accessToken: null,
-      });
     }
-    if (!result.ok) {
-      throw new Error(result.error ?? "Failed to upload image.");
-    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  return results;
+}
 
-    attachments.push({
-      kind: "image",
-      workspacePath,
-      fileName,
-      mimeType: imageFile.type || null,
-      sizeBytes: imageFile.size,
-    });
+/**
+ * Stores a message's attachments in its conversation's Storage folder with the
+ * person's session and returns their message metadata, in order. The
+ * conversation must already exist on the controller. When any upload fails,
+ * the ones that succeeded are removed again and a ChatAttachmentUploadError
+ * with plain copy is thrown, so a message is sent with all of its attachments
+ * or not at all. Stored images are kept as local previews, so the sender's
+ * own message shows them without downloading them again.
+ */
+export async function uploadConversationAttachments(args: {
+  projectId: string;
+  conversationId: string;
+  files: File[];
+}): Promise<ChatStorageAttachment[]> {
+  const { projectId, conversationId, files } = args;
+  const results = await settleInTurn(files, CHAT_ATTACHMENT_UPLOAD_CONCURRENCY, (file) =>
+    uploadChatAttachment({
+      projectId,
+      conversationId,
+      file,
+      fileName: sanitizeChatUploadFileName(file.name || "attachment"),
+    }),
+  );
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result?.status === "rejected",
+  );
+  if (failure || results.some((result) => result === undefined)) {
+    await removeChatAttachments(
+      results.flatMap((result) => (result?.status === "fulfilled" ? [result.value.storagePath] : [])),
+    );
+    const reason: unknown = failure?.reason;
+    throw reason instanceof ChatAttachmentUploadError
+      ? reason
+      : new ChatAttachmentUploadError(describeChatAttachmentUploadError(reason), { cause: reason });
   }
-
+  const attachments = results.map((result) => (result as PromiseFulfilledResult<ChatStorageAttachment>).value);
+  attachments.forEach((attachment, index) => {
+    if (attachment.kind === "image") {
+      seedChatAttachmentPreview(attachment.storagePath, files[index]);
+    }
+  });
   return attachments;
 }

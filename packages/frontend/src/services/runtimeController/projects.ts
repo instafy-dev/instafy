@@ -60,6 +60,12 @@ export interface ControllerProjectSummary extends ProjectIdentity {
   canWrite?: boolean;
   canShare?: boolean;
   canManage?: boolean;
+  /**
+   * Whether chat attachments can be stored: `storage` when the private
+   * bucket answers, `none` on an install without Storage. Only the
+   * single-space summary reports it.
+   */
+  attachments?: "storage" | "none" | string | null;
 }
 
 export type ControllerProjectListResult =

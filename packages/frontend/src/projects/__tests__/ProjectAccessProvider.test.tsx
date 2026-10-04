@@ -22,10 +22,14 @@ const mocks = vi.hoisted(() => ({
   // remembered, so a test can empty the active project and the URL.
   activeProjectId: "11111111-1111-4111-8111-111111111111",
   locationSearch: "?projectId=11111111-1111-4111-8111-111111111111",
+  // Mutable per test: a self-hosted app built without Supabase.
+  hasSupabaseConfig: true,
 }));
 
 vi.mock("../../lib/supabaseClient", () => ({
-  hasSupabaseConfig: true,
+  get hasSupabaseConfig() {
+    return mocks.hasSupabaseConfig;
+  },
 }));
 
 vi.mock("../../sdk/instafy", () => ({
@@ -100,6 +104,7 @@ function AccessProbe() {
       data-initialized={String(access.projectInitialized)}
       data-pending={String(access.projectAccessPending)}
       data-provision-failed={String(access.projectProvisionFailed)}
+      data-attachments={access.chatAttachments ?? "unknown"}
     />
   );
 }
@@ -373,6 +378,43 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-resolved")).toBe("true");
     expect(probe?.getAttribute("data-write")).toBe("true");
     expect(mocks.setProjectName).not.toHaveBeenCalledWith(PROJECT_ID, "Fresh space");
+  });
+
+  it("reports whether the space can store chat attachments, and refreshes it", async () => {
+    mocks.getSummaryResult
+      .mockResolvedValueOnce({ ...summaryFor("admin"), summary: { ...summaryFor("admin").summary, attachments: "none" } })
+      .mockResolvedValueOnce({ ...summaryFor("admin"), summary: { ...summaryFor("admin").summary, attachments: "storage" } });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    await vi.waitFor(() => expect(probe?.getAttribute("data-attachments")).toBe("none"));
+
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, { detail: { projectId: PROJECT_ID } }));
+    });
+    await vi.waitFor(() => expect(probe?.getAttribute("data-attachments")).toBe("storage"));
+  });
+
+  it("turns attachments off in an app without a Supabase configuration", async () => {
+    mocks.hasSupabaseConfig = false;
+    try {
+      mocks.getSummaryResult.mockResolvedValue({
+        ...summaryFor("admin"),
+        summary: { ...summaryFor("admin").summary, attachments: "storage" },
+      });
+      await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+      const probe = container.querySelector('[data-testid="access-probe"]');
+      await vi.waitFor(() => expect(probe?.getAttribute("data-attachments")).toBe("none"));
+    } finally {
+      mocks.hasSupabaseConfig = true;
+    }
+  });
+
+  it("leaves attachments on while an older controller says nothing about them", async () => {
+    mocks.getSummaryResult.mockResolvedValue(summaryFor("admin"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    await vi.waitFor(() => expect(probe?.getAttribute("data-resolved")).toBe("true"));
+    expect(probe?.getAttribute("data-attachments")).toBe("unknown");
   });
 
   it("demotes a live project after a targeted controller invalidation", async () => {
