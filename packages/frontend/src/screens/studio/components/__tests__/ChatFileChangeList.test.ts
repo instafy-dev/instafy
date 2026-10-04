@@ -1342,11 +1342,14 @@ describe("ChatFileChangeList", () => {
     }
 
     it("checks again once while the space is still loading, then offers Revert", async () => {
-      fetchWorkspaceGitHistoryReview.mockResolvedValueOnce(reviewStillLoading(5));
+      // Long enough that the dialog is still checking when first looked at,
+      // even on a busy test machine.
+      fetchWorkspaceGitHistoryReview.mockResolvedValueOnce(reviewStillLoading(300));
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
       await openRevertDialog();
 
       // Still checking while it waits for the gateway.
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(1);
       expect(dialog()?.getAttribute("data-state")).toBe("checking");
       await waitForDialogState("ready");
 
