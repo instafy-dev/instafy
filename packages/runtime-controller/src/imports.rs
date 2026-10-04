@@ -11,6 +11,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
+use hmac::{Hmac, Mac};
 use once_cell::sync::Lazy;
 use reqwest::multipart::Part;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,8 @@ use zip::write::{FileOptions, ZipWriter};
 use zip::ZipArchive;
 
 use crate::auth::{authenticate_request, claims_have_scopes, RequestContext};
+use crate::author_identity::{author_claims_for_user, AuthorClaims};
+use crate::config::AppConfig;
 use crate::device_auth::{
     load_user_github_access_token, resolve_github_device_auth_session,
     GithubDeviceAuthSessionResolution,
@@ -40,7 +43,7 @@ use crate::origins::{
     resolve_accessible_origin_for_protocol_with_hosted_fallback,
     resolve_origin_proxy_upstream_endpoint, LeaseAcquireOutcome, WorkspaceOriginRecord,
 };
-use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
+use crate::tokens::{mint_scoped_token_with_author, ScopedTokenRequest};
 use crate::{
     bad_request, ensure_project_write_access, forbidden, internal_error, load_project_record,
     not_found, too_many_requests, unauthorized, ApiError, AppState, ProjectRecord,
@@ -74,6 +77,20 @@ const GITHUB_IMPORT_WORKSPACE_LEASE_SECONDS: i64 = GITHUB_IMPORT_ORIGIN_TOKEN_TT
 const GITHUB_IMPORT_APPLY_TOKEN_TTL_SECONDS: i64 = 180;
 const GITHUB_IMPORT_STATUS_TOKEN_TTL_SECONDS: i64 = 60;
 const GITHUB_IMPORT_SYNC_TOKEN_TTL_SECONDS: i64 = 300;
+/// Extra scope on every origin token an import mints, next to `fs.write`.
+/// It marks a controller-run import: an origin honours `idempotencyKey`
+/// (and accepts an apply without `baseRev`) only for such a token. It is not
+/// a scope `POST /origin/access-token` grants, so a browser cannot mint it.
+/// Origins that predate it ignore it: they only check that `fs.write` is
+/// present.
+pub(crate) const WORKSPACE_IMPORT_SCOPE: &str = "workspace.import";
+/// Domain label of the import apply key (see
+/// [`github_import_origin_apply_key`]).
+const IMPORT_APPLY_KEY_DOMAIN_LABEL: &[u8] = b"instafy:import-apply-key:v1\0";
+const IMPORT_APPLY_KEY_PREFIX: &str = "imp:";
+/// Recorded in the prepared state of imports keyed with
+/// [`github_import_origin_apply_key`].
+const ORIGIN_APPLY_KEY_VERSION: u32 = 1;
 
 static GITHUB_IMPORT_ADMISSION: Lazy<Semaphore> = Lazy::new(|| {
     let permits = std::env::var("CONTROLLER_GITHUB_IMPORT_MAX_CONCURRENT")
@@ -184,6 +201,12 @@ struct GithubImportPreparedState {
     user_oauth_fallback_enabled: bool,
     #[serde(default)]
     integration_updated_at: Option<DateTime<Utc>>,
+    /// Which idempotency key the origin was given for this import:
+    /// [`ORIGIN_APPLY_KEY_VERSION`] for the `imp:` HMAC key. Absent for
+    /// imports prepared by a controller that sent the browser's own key, so
+    /// a retry after the upgrade also looks that receipt up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_apply_key_version: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -1564,6 +1587,7 @@ async fn import_github_project(
                 user_oauth_fallback_enabled: resolved_github_auth.fallback_policy_after_import
                     == ProjectGithubAuthPolicy::Automatic,
                 integration_updated_at: project_github_integration.updated_at,
+                origin_apply_key_version: Some(ORIGIN_APPLY_KEY_VERSION),
             };
             prepare_github_import_operation(
                 &state,
@@ -1634,8 +1658,13 @@ async fn import_github_project(
                 let prepared = prepared_state
                     .as_ref()
                     .ok_or_else(|| internal_error("GitHub import was not prepared"))?;
+                let mut origin_key = github_import_origin_apply_key(
+                    &state.config.user_token_secret,
+                    &project_uuid,
+                    &idempotency_key,
+                );
                 if operation_prepared.is_some() {
-                    match query_prepared_origin_apply_status(
+                    let (origin_status, status_key) = query_prepared_origin_apply_status(
                         &state,
                         &project_uuid,
                         &user_id,
@@ -1645,8 +1674,8 @@ async fn import_github_project(
                         &idempotency_key,
                         prepared,
                     )
-                    .await?
-                    {
+                    .await?;
+                    match origin_status {
                         OriginApplyStatus::Succeeded {
                             rev,
                             file_count,
@@ -1688,7 +1717,9 @@ async fn import_github_project(
                         // a crashed stale claim. Re-entering /apply with the
                         // same key/fingerprint lets origin either replay,
                         // serialize behind the live worker, or recover it.
-                        OriginApplyStatus::Pending | OriginApplyStatus::Missing => {}
+                        OriginApplyStatus::Pending | OriginApplyStatus::Missing => {
+                            origin_key = status_key;
+                        }
                     }
                 }
 
@@ -1725,6 +1756,7 @@ async fn import_github_project(
                             user_oauth_fallback_enabled: auth.fallback_policy_after_import
                                 == ProjectGithubAuthPolicy::Automatic,
                             integration_updated_at: current_integration.updated_at,
+                            origin_apply_key_version: prepared.origin_apply_key_version,
                         };
                         update_github_import_prepared_auth(
                             &state,
@@ -1746,6 +1778,7 @@ async fn import_github_project(
                     target_path.as_deref(),
                     resolved_github_auth.token.as_deref(),
                     &idempotency_key,
+                    &origin_key,
                     &operation_claim_id,
                     &effective_prepared,
                     mutation_started_for_work.as_ref(),
@@ -1950,16 +1983,43 @@ async fn load_prepared_github_import_origin(
     Ok(origin)
 }
 
+/// The idempotency key an origin sees for an import: `imp:` and the hex
+/// HMAC-SHA256, keyed by the controller's `USER_TOKEN_SECRET`, of the domain
+/// label, the project id and the browser's key. The browser's key stays in
+/// `github_import_operations` for replay lookups and never reaches an origin
+/// or git history, and nobody without the secret can compute a key that
+/// matches a real import's. 68 characters from the origin's key charset.
+fn github_import_origin_apply_key(
+    secret: &str,
+    project_id: &Uuid,
+    idempotency_key: &str,
+) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(IMPORT_APPLY_KEY_DOMAIN_LABEL);
+    mac.update(project_id.to_string().as_bytes());
+    mac.update(b"\0");
+    mac.update(idempotency_key.as_bytes());
+    format!(
+        "{IMPORT_APPLY_KEY_PREFIX}{}",
+        hex::encode(mac.finalize().into_bytes())
+    )
+}
+
+/// The origin token of one import step: `fs.write` plus
+/// [`WORKSPACE_IMPORT_SCOPE`], bound to the import's lease. `author` is set
+/// on the apply token only, the one that creates the import's commit.
 fn mint_github_import_origin_token(
-    state: &AppState,
+    config: &AppConfig,
     project_id: &Uuid,
     user_id: &Uuid,
     lease_id: &Uuid,
     origin: &WorkspaceOriginRecord,
     ttl_seconds: i64,
+    author: Option<AuthorClaims>,
 ) -> Result<String, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token(
-        &state.config,
+    mint_scoped_token_with_author(
+        config,
         ScopedTokenRequest {
             audience: origin.id.to_string(),
             subject: user_id.to_string(),
@@ -1967,12 +2027,13 @@ fn mint_github_import_origin_token(
             origin_id: Some(origin.id.to_string()),
             runtime_id: None,
             protocol: Some("http".to_string()),
-            scopes: vec!["fs.write".to_string()],
+            scopes: vec!["fs.write".to_string(), WORKSPACE_IMPORT_SCOPE.to_string()],
             lease_id: Some(lease_id.to_string()),
             run_id: None,
             prefer_runtime: None,
             ttl_seconds: Some(ttl_seconds),
         },
+        author,
     )
     .map(|token| token.token)
 }
@@ -1986,32 +2047,101 @@ async fn query_prepared_origin_apply_status(
     target_path: Option<&str>,
     idempotency_key: &str,
     prepared: &GithubImportPreparedState,
-) -> Result<OriginApplyStatus, (StatusCode, Json<ApiError>)> {
+) -> Result<(OriginApplyStatus, String), (StatusCode, Json<ApiError>)> {
     let origin = load_prepared_github_import_origin(state, project_id, prepared).await?;
     let scoped_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_STATUS_TOKEN_TTL_SECONDS,
+        None,
     )?;
     let request_fingerprint =
         github_import_request_fingerprint(canonical_repo, &prepared.source_revision, target_path);
+    let origin_key = github_import_origin_apply_key(
+        &state.config.user_token_secret,
+        project_id,
+        idempotency_key,
+    );
+    // Prepared by a controller that gave the origin the browser's own key:
+    // its receipt, if any, is filed under that key.
+    let legacy_key = prepared
+        .origin_apply_key_version
+        .is_none()
+        .then_some(idempotency_key);
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
+    lookup_origin_apply_status(
+        &state.http_client,
+        &origin_base,
+        host_override.as_deref(),
+        &scoped_token,
+        &origin_key,
+        legacy_key,
+        &request_fingerprint,
+    )
+    .await
+}
+
+/// Look an apply receipt up under `origin_key`, and when that finds nothing,
+/// under `legacy_key` too (an import prepared before the keys were derived).
+/// Returns the status and the key a re-entered `/apply` must use: the legacy
+/// key when only it has a receipt, so the origin replays or recovers that
+/// apply instead of applying the import a second time.
+async fn lookup_origin_apply_status(
+    http_client: &reqwest::Client,
+    origin_base: &str,
+    host_override: Option<&str>,
+    bearer_token: &str,
+    origin_key: &str,
+    legacy_key: Option<&str>,
+    request_fingerprint: &str,
+) -> Result<(OriginApplyStatus, String), (StatusCode, Json<ApiError>)> {
+    let status = request_origin_apply_status(
+        http_client,
+        origin_base,
+        host_override,
+        bearer_token,
+        origin_key,
+        request_fingerprint,
+    )
+    .await?;
+    let Some(legacy_key) = legacy_key.filter(|_| status == OriginApplyStatus::Missing) else {
+        return Ok((status, origin_key.to_string()));
+    };
+    match request_origin_apply_status(
+        http_client,
+        origin_base,
+        host_override,
+        bearer_token,
+        legacy_key,
+        request_fingerprint,
+    )
+    .await?
+    {
+        OriginApplyStatus::Missing => Ok((OriginApplyStatus::Missing, origin_key.to_string())),
+        found => Ok((found, legacy_key.to_string())),
+    }
+}
+
+async fn request_origin_apply_status(
+    http_client: &reqwest::Client,
+    origin_base: &str,
+    host_override: Option<&str>,
+    bearer_token: &str,
+    origin_key: &str,
+    request_fingerprint: &str,
+) -> Result<OriginApplyStatus, (StatusCode, Json<ApiError>)> {
     let status_url = format!("{}/apply/status", origin_base.trim_end_matches('/'));
-    let mut request = state
-        .http_client
+    let mut request = http_client
         .post(status_url)
-        .bearer_auth(&scoped_token)
+        .bearer_auth(bearer_token)
         .json(&json!({
-            "idempotencyKey": idempotency_key,
+            "idempotencyKey": origin_key,
             "requestFingerprint": request_fingerprint,
         }));
-    if let Some(host) = host_override
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
+    if let Some(host) = host_override.filter(|value| !value.trim().is_empty()) {
         request = request.header("host", host);
     }
 
@@ -2089,6 +2219,7 @@ async fn import_github_zip_and_apply(
     target_path: Option<&str>,
     github_token: Option<&str>,
     idempotency_key: &str,
+    origin_key: &str,
     claim_id: &Uuid,
     prepared_state: &GithubImportPreparedState,
     mutation_started: &AtomicBool,
@@ -2128,13 +2259,15 @@ async fn import_github_zip_and_apply(
     }
 
     let origin = load_prepared_github_import_origin(state, project_id, prepared_state).await?;
+    let author = author_claims_for_user(&state.config, &state.pool, project_id, user_id).await;
     let scoped_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_APPLY_TOKEN_TTL_SECONDS,
+        author,
     )?;
 
     let canonical_repo = format!("{owner}/{repo}");
@@ -2152,7 +2285,7 @@ async fn import_github_zip_and_apply(
         lease_id,
         &prepared_archive.files,
         Some(commit_message.clone()),
-        Some(idempotency_key),
+        Some(origin_key),
         Some(&request_fingerprint),
     );
     let manifest_json = serde_json::to_vec(&manifest)
@@ -2268,12 +2401,13 @@ async fn import_github_zip_and_apply(
         .await?;
 
     let sync_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_SYNC_TOKEN_TTL_SECONDS,
+        None,
     )?;
     let synced_rev = sync_origin_git_after_apply(
         &state.http_client,
@@ -2313,12 +2447,13 @@ async fn resume_applied_github_import(
         ));
     }
     let scoped_token = mint_github_import_origin_token(
-        state,
+        &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_SYNC_TOKEN_TTL_SECONDS,
+        None,
     )?;
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
     let commit_message = format!(
@@ -3248,16 +3383,19 @@ fn github_import_archive_limits() -> GithubImportArchiveLimits {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_bounded_mutating_origin_request,
-        github_import_operation_can_retry_without_admission, github_import_request_fingerprint,
-        github_import_role_can_write, normalize_github_import_idempotency_key, parse_github_ref,
-        parse_github_repo, parse_import_target_path, parse_origin_apply_status_response,
-        read_github_zipball_body, repack_github_zip, repack_github_zip_with_limits,
+        build_origin_manifest, execute_bounded_mutating_origin_request,
+        github_import_operation_can_retry_without_admission, github_import_origin_apply_key,
+        github_import_request_fingerprint, github_import_role_can_write,
+        lookup_origin_apply_status, mint_github_import_origin_token,
+        normalize_github_import_idempotency_key, parse_github_ref, parse_github_repo,
+        parse_import_target_path, parse_origin_apply_status_response, read_github_zipball_body,
+        repack_github_zip, repack_github_zip_with_limits, request_origin_apply_status,
         resolve_github_import_auth, resolve_project_github_auth_policy,
         sync_origin_git_after_apply, GithubImportArchiveLimits, GithubImportAuthSource,
-        OriginApplyStatus, ProjectGithubAuthPolicy, GITHUB_IMPORT_RATE_WINDOW_SECONDS,
-        GITHUB_IMPORT_WORKSPACE_BUSY_MESSAGE, ORIGIN_GIT_REMOTE_NOT_CONFIGURED,
-        ORIGIN_RESPONSE_MAX_BYTES,
+        GithubImportPreparedState, OriginApplyStatus, ProjectGithubAuthPolicy,
+        GITHUB_IMPORT_RATE_WINDOW_SECONDS, GITHUB_IMPORT_WORKSPACE_BUSY_MESSAGE,
+        ORIGIN_APPLY_KEY_VERSION, ORIGIN_GIT_REMOTE_NOT_CONFIGURED, ORIGIN_RESPONSE_MAX_BYTES,
+        WORKSPACE_IMPORT_SCOPE,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -4286,6 +4424,451 @@ mod tests {
         mock.assert_async().await;
         assert!(error.ambiguous);
         assert!(mutation_may_be_in_flight.load(Ordering::Acquire));
+    }
+
+    const IMPORT_KEY_SECRET: &str = "inert-import-key-secret-0123456789abcdef";
+
+    fn import_project_id() -> Uuid {
+        Uuid::parse_str("6f1c2a8e-0b5d-4c3e-9a7f-2d4e6b8c0a1f").unwrap()
+    }
+
+    fn jwt_payload(token: &str) -> serde_json::Value {
+        use base64::Engine as _;
+        let payload = token.split('.').nth(1).expect("JWT payload segment");
+        serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload)
+                .expect("base64url payload"),
+        )
+        .expect("JSON payload")
+    }
+
+    #[test]
+    fn import_apply_key_is_a_keyed_hmac_never_the_browser_key() {
+        let browser_key = "github-import-v1:abc";
+        let key =
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &import_project_id(), browser_key);
+        // Known answer: HMAC-SHA256(secret, "instafy:import-apply-key:v1\0" project "\0" key).
+        assert_eq!(
+            key,
+            "imp:5a93abc186d7cf6bf1ebb2ae927ea341e0f7b32ca21aa991e59eeceea843403c"
+        );
+        assert_eq!(key.len(), 68);
+        assert!(!key.contains("github-import"));
+        // Fits the origin's idempotency-key rule (<= 256 of [A-Za-z0-9:._-]).
+        assert!(key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'-')));
+
+        assert_eq!(
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &import_project_id(), browser_key),
+            key
+        );
+        assert_ne!(
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &Uuid::new_v4(), browser_key),
+            key
+        );
+        assert_ne!(
+            github_import_origin_apply_key(
+                IMPORT_KEY_SECRET,
+                &import_project_id(),
+                "github-import-v1:abd"
+            ),
+            key
+        );
+        assert_ne!(
+            github_import_origin_apply_key(
+                "another-inert-import-key-secret-0123456789",
+                &import_project_id(),
+                browser_key
+            ),
+            key
+        );
+
+        let manifest = build_origin_manifest(
+            &import_project_id(),
+            &Uuid::new_v4(),
+            &[],
+            Some("instafy: import octocat/hello-world@0123456789ab".to_string()),
+            Some(&key),
+            Some("sha256:fingerprint"),
+        );
+        assert_eq!(manifest["idempotencyKey"], key.as_str());
+        assert!(!manifest.to_string().contains(browser_key));
+    }
+
+    #[test]
+    fn import_origin_tokens_carry_the_import_scope_and_only_the_apply_names_an_author() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "github-import-origin-token",
+        );
+        let user_id = Uuid::new_v4();
+        let origin = crate::origins::WorkspaceOriginRecord {
+            id: Uuid::new_v4(),
+            project_id: import_project_id(),
+            mode: crate::origins::OriginMode::Hosted,
+            endpoint: "http://127.0.0.1:9".to_string(),
+            protocols: vec!["http".to_string()],
+            region: None,
+            device_id: None,
+            metadata: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let author = crate::author_identity::AuthorClaims {
+            name: "Ada Lovelace".to_string(),
+            email: "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev".to_string(),
+        };
+        let apply = mint_github_import_origin_token(
+            &config,
+            &import_project_id(),
+            &user_id,
+            &Uuid::new_v4(),
+            &origin,
+            180,
+            Some(author.clone()),
+        )
+        .expect("mint import apply token");
+        let payload = jwt_payload(&apply);
+        assert_eq!(
+            payload["scopes"],
+            json!(["fs.write", WORKSPACE_IMPORT_SCOPE])
+        );
+        assert_eq!(payload["author_email"], author.email.as_str());
+        assert_eq!(payload["author_name"], "Ada Lovelace");
+        assert!(!payload["author_email"]
+            .as_str()
+            .unwrap()
+            .contains(&user_id.to_string()));
+
+        let status = mint_github_import_origin_token(
+            &config,
+            &import_project_id(),
+            &user_id,
+            &Uuid::new_v4(),
+            &origin,
+            60,
+            None,
+        )
+        .expect("mint import status token");
+        let payload = jwt_payload(&status);
+        assert_eq!(
+            payload["scopes"],
+            json!(["fs.write", WORKSPACE_IMPORT_SCOPE])
+        );
+        assert!(payload.get("author_email").is_none());
+        assert!(payload.get("author_name").is_none());
+    }
+
+    #[tokio::test]
+    async fn apply_status_queries_send_the_derived_key_not_the_browser_key() {
+        let browser_key = "github-import-v1:status-query";
+        let origin_key =
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &import_project_id(), browser_key);
+        let server = MockServer::start_async().await;
+        let missing = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/apply/status")
+                    .header("authorization", "Bearer import-token")
+                    .json_body(json!({
+                        "idempotencyKey": origin_key,
+                        "requestFingerprint": "sha256:fingerprint",
+                    }));
+                then.status(404).json_body(json!({ "error": "not found" }));
+            })
+            .await;
+
+        let status = request_origin_apply_status(
+            &reqwest::Client::new(),
+            &server.base_url(),
+            None,
+            "import-token",
+            &origin_key,
+            "sha256:fingerprint",
+        )
+        .await
+        .expect("apply status");
+        missing.assert_async().await;
+        assert!(matches!(status, OriginApplyStatus::Missing));
+    }
+
+    #[test]
+    fn imports_prepared_before_the_derived_key_are_marked_legacy() {
+        let legacy: GithubImportPreparedState = serde_json::from_value(json!({
+            "originId": Uuid::new_v4().to_string(),
+            "sourceRevision": "0123456789012345678901234567890123456789",
+            "authMode": "public",
+            "persistentConnection": false,
+            "userOauthFallbackEnabled": false,
+        }))
+        .expect("pre-upgrade prepared state");
+        assert_eq!(legacy.origin_apply_key_version, None);
+
+        let current = GithubImportPreparedState {
+            origin_apply_key_version: Some(ORIGIN_APPLY_KEY_VERSION),
+            ..legacy
+        };
+        let stored = serde_json::to_value(&current).expect("serialize");
+        assert_eq!(stored["originApplyKeyVersion"], 1);
+    }
+
+    async fn status_mock<'a>(
+        server: &'a MockServer,
+        key: &str,
+        status: u16,
+        body: serde_json::Value,
+    ) -> httpmock::Mock<'a> {
+        status_mock_for(server, key, "sha256:fingerprint", status, body).await
+    }
+
+    async fn status_mock_for<'a>(
+        server: &'a MockServer,
+        key: &str,
+        fingerprint: &str,
+        status: u16,
+        body: serde_json::Value,
+    ) -> httpmock::Mock<'a> {
+        let key = key.to_string();
+        let fingerprint = fingerprint.to_string();
+        server
+            .mock_async(move |when, then| {
+                when.method(POST).path("/apply/status").json_body(json!({
+                    "idempotencyKey": key,
+                    "requestFingerprint": fingerprint,
+                }));
+                then.status(status).json_body(body);
+            })
+            .await
+    }
+
+    async fn lookup(
+        server: &MockServer,
+        origin_key: &str,
+        legacy: Option<&str>,
+    ) -> (OriginApplyStatus, String) {
+        lookup_origin_apply_status(
+            &reqwest::Client::new(),
+            &server.base_url(),
+            None,
+            "import-token",
+            origin_key,
+            legacy,
+            "sha256:fingerprint",
+        )
+        .await
+        .expect("lookup")
+    }
+
+    #[tokio::test]
+    async fn a_legacy_import_receipt_is_found_under_the_browser_key() {
+        let browser_key = "github-import-v1:prepared-before-upgrade";
+        let origin_key =
+            github_import_origin_apply_key(IMPORT_KEY_SECRET, &import_project_id(), browser_key);
+        let succeeded = json!({
+            "status": "succeeded", "rev": "legacy-rev", "fileCount": 3, "bytesWritten": 42,
+        });
+
+        // Applied by the old controller under the browser key: replayed, not
+        // applied again.
+        let server = MockServer::start_async().await;
+        let new_key = status_mock(&server, &origin_key, 404, json!({})).await;
+        let old_key = status_mock(&server, browser_key, 200, succeeded.clone()).await;
+        let (status, key) = lookup(&server, &origin_key, Some(browser_key)).await;
+        new_key.assert_async().await;
+        old_key.assert_async().await;
+        assert_eq!(
+            status,
+            OriginApplyStatus::Succeeded {
+                rev: "legacy-rev".to_string(),
+                file_count: 3,
+                bytes_written: 42,
+            }
+        );
+        assert_eq!(key, browser_key);
+
+        // Still pending under the browser key: re-enter /apply with that key.
+        let server = MockServer::start_async().await;
+        status_mock(&server, &origin_key, 404, json!({})).await;
+        status_mock(&server, browser_key, 200, json!({ "status": "pending" })).await;
+        let (status, key) = lookup(&server, &origin_key, Some(browser_key)).await;
+        assert_eq!(status, OriginApplyStatus::Pending);
+        assert_eq!(key, browser_key);
+
+        // Missing under both: apply with the derived key.
+        let server = MockServer::start_async().await;
+        status_mock(&server, &origin_key, 404, json!({})).await;
+        let old_key = status_mock(&server, browser_key, 404, json!({})).await;
+        let (status, key) = lookup(&server, &origin_key, Some(browser_key)).await;
+        old_key.assert_async().await;
+        assert_eq!(status, OriginApplyStatus::Missing);
+        assert_eq!(key, origin_key);
+
+        // Found under the derived key, or prepared with it: the browser key
+        // is never sent.
+        for (new_status, new_body, legacy) in [
+            (200, succeeded.clone(), Some(browser_key)),
+            (404, json!({}), None),
+        ] {
+            let server = MockServer::start_async().await;
+            status_mock(&server, &origin_key, new_status, new_body).await;
+            let old_key = status_mock(&server, browser_key, 200, succeeded.clone()).await;
+            let (_, key) = lookup(&server, &origin_key, legacy).await;
+            old_key.assert_hits_async(0).await;
+            assert_eq!(key, origin_key);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_import_applied_before_the_upgrade_is_replayed_not_applied_again(
+    ) -> anyhow::Result<()> {
+        // The old controller prepared this import, sent /apply with the
+        // browser's own key and stopped before recording the outcome. The
+        // retry must find that receipt and only finish the import.
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping pre-upgrade import replay test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let user_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let origin_id = Uuid::new_v4();
+        let browser_key = format!("github-import-v1:before-upgrade-{project_id}");
+        let repo = "octocat/Hello-World";
+        let git_ref = "HEAD";
+        let source_revision = "0123456789012345678901234567890123456789";
+        let server = MockServer::start_async().await;
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "github-import-pre-upgrade-replay",
+        );
+        let origin_key =
+            github_import_origin_apply_key(&config.user_token_secret, &project_id, &browser_key);
+        let fingerprint = github_import_request_fingerprint(repo, source_revision, None);
+
+        crate::tests::ensure_test_user(&pool, &user_id).await?;
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into projects (id, owner_user_id, project_type, status)
+                     values ($1, $2, 'customer', 'active')",
+                    &[&project_id, &user_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into workspace_origins (id, project_id, mode, endpoint, protocols)
+                     values ($1, $2, 'hosted', $3, ARRAY['http']::text[])",
+                    &[&origin_id, &project_id, &server.base_url()],
+                )
+                .await?;
+            // Prepared by the old controller: no originApplyKeyVersion.
+            connection
+                .execute(
+                    "insert into github_import_operations (
+                        id, project_id, idempotency_key, repo, git_ref,
+                        target_path, status, claim_id, created_by,
+                        claim_expires_at, source_revision, prepared_json
+                     ) values (
+                        $1, $2, $3, $4, $5, null, 'pending', $6, $7,
+                        now() - interval '1 minute', $8, $9
+                     )",
+                    &[
+                        &Uuid::new_v4(),
+                        &project_id,
+                        &browser_key,
+                        &repo,
+                        &git_ref,
+                        &Uuid::new_v4(),
+                        &user_id,
+                        &source_revision,
+                        &PgJson(json!({
+                            "originId": origin_id.to_string(),
+                            "sourceRevision": source_revision,
+                            "authMode": "public",
+                            "persistentConnection": false,
+                            "userOauthFallbackEnabled": false,
+                        })),
+                    ],
+                )
+                .await?;
+        }
+
+        let derived_status =
+            status_mock_for(&server, &origin_key, &fingerprint, 404, json!({})).await;
+        let browser_status = status_mock_for(
+            &server,
+            &browser_key,
+            &fingerprint,
+            200,
+            json!({
+                "status": "succeeded", "rev": "applied-before-upgrade",
+                "fileCount": 2, "bytesWritten": 10,
+            }),
+        )
+        .await;
+        let apply = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/apply");
+                then.status(200)
+                    .json_body(json!({ "rev": "applied-again" }));
+            })
+            .await;
+        let sync = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/git/sync")
+                    .json_body_partial(r#"{ "expectedRev": "applied-before-upgrade" }"#);
+                then.status(200).json_body(json!({ "rev": "synced-rev" }));
+            })
+            .await;
+
+        let user_token = crate::auth::issue_controller_token(&config, &user_id)
+            .expect("issue controller user token")
+            .token;
+        let app = super::router().with_state(crate::tests::build_test_state(pool.clone(), config));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/import/github"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {user_token}"),
+                    )
+                    .body(Body::from(
+                        json!({
+                            "repo": format!("https://github.com/{repo}"),
+                            "ref": git_ref,
+                            "idempotencyKey": browser_key,
+                        })
+                        .to_string(),
+                    ))?,
+            )
+            .await?;
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["rev"], "synced-rev");
+        assert_eq!(body["fileCount"], 2);
+        derived_status.assert_async().await;
+        browser_status.assert_async().await;
+        sync.assert_async().await;
+        apply.assert_hits_async(0).await;
+
+        let connection = pool.get().await?;
+        connection
+            .execute("delete from projects where id = $1", &[&project_id])
+            .await?;
+        connection
+            .execute("delete from auth.users where id = $1", &[&user_id])
+            .await?;
+        Ok(())
     }
 
     #[tokio::test]

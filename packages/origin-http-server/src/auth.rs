@@ -390,6 +390,68 @@ mod tests {
         assert!(origin_jwks.decoding_key(None).is_some());
     }
 
+    fn claims_test_config(multi_tenant: bool, project_id: Uuid) -> ServerConfig {
+        ServerConfig {
+            project_id,
+            origin_id: Uuid::new_v4(),
+            workspace_root: std::path::PathBuf::from("/tmp"),
+            git_remote_url: None,
+            git_remote_base_url: None,
+            git_branch: "main".into(),
+            git_remote_name: "origin".into(),
+            git_author_name: "Instafy".into(),
+            git_author_email: "instafy@example.invalid".into(),
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            controller_base_url: "http://127.0.0.1:1/".parse().expect("base url"),
+            controller_internal_token: None,
+            controller_token_source: None,
+            jwks_url: "http://127.0.0.1:1/jwks".parse().expect("jwks url"),
+            skip_auth: false,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(30),
+            max_archive_bytes: 1024,
+            staging_base: None,
+            multi_tenant,
+            hosted_checkout: false,
+        }
+    }
+
+    #[test]
+    fn controller_import_scope_and_author_claims_are_accepted_and_ignored() {
+        // The controller adds `workspace.import` to import tokens and
+        // `author_name` / `author_email` to users' workspace-write tokens.
+        // An origin that does not use them must accept such a token exactly
+        // as before: the scope check is a subset check and unknown claims
+        // are ignored.
+        let project_id = Uuid::new_v4();
+        for multi_tenant in [false, true] {
+            let config = claims_test_config(multi_tenant, project_id);
+            let origin_id = if multi_tenant {
+                hosted_origin_id_for_project(&project_id)
+            } else {
+                config.origin_id
+            };
+            let claims: OriginClaims = serde_json::from_value(json!({
+                "aud": origin_id.to_string(),
+                "sub": Uuid::new_v4().to_string(),
+                "project_id": project_id.to_string(),
+                "origin_id": origin_id.to_string(),
+                "protocol": "http",
+                "scopes": ["fs.write", "workspace.import"],
+                "lease_id": Uuid::new_v4().to_string(),
+                "iat": 0i64,
+                "exp": i64::MAX,
+                "jti": Uuid::new_v4().to_string(),
+                "author_name": "Ada Lovelace",
+                "author_email": "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev",
+            }))
+            .expect("claims with the new fields deserialize");
+            validate_claims(&config, &["fs.write"], &claims).expect("fs.write still authorizes");
+            assert!(validate_claims(&config, &["fs.read"], &claims).is_err());
+        }
+    }
+
     #[test]
     fn origin_token_algorithm_is_pinned_to_eddsa() {
         assert!(validate_origin_token_algorithm(Algorithm::EdDSA).is_ok());

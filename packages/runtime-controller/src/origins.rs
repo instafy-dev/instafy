@@ -3767,6 +3767,7 @@ fn classify_canonical_origin_proxy_request(
                 || normalized == "git/diff"
                 || normalized == "git/history"
                 || normalized == "git/history/review"
+                || normalized == "git/recovery"
             {
                 Ok(ORIGIN_PROXY_READ_SCOPES)
             } else {
@@ -3774,7 +3775,13 @@ fn classify_canonical_origin_proxy_request(
             }
         }
         Method::POST => {
-            if normalized == "apply" || normalized == "git/sync" || normalized == "git/revert" {
+            if normalized == "apply"
+                || normalized == "git/sync"
+                || normalized == "git/revert"
+                || normalized == "git/revert-commit"
+                || normalized == "git/recovery/restore"
+                || normalized == "git/recovery/dismiss"
+            {
                 Ok(ORIGIN_PROXY_WRITE_SCOPES)
             } else if normalized == "browser/webrtc/offer" {
                 Ok(ORIGIN_PROXY_BROWSER_VIEW_SCOPES)
@@ -3793,6 +3800,43 @@ fn classify_canonical_origin_proxy_request(
             Json(ApiError::new("method not allowed")),
         )),
     }
+}
+
+/// Request header naming the client build that made a proxied request. The
+/// origin only logs it (diagnostics). The proxy also uses it as a gate:
+/// `POST git/revert-commit` is forwarded only with a valid label (see
+/// [`ensure_origin_proxy_client_label`]). It never grants access: the token
+/// checks still apply to every route.
+const INSTAFY_CLIENT_HEADER: &str = "x-instafy-client";
+const INSTAFY_CLIENT_HEADER_MAX_BYTES: usize = 64;
+
+/// The `X-Instafy-Client` value to forward, if it is a short token such as
+/// `web/1.2.3`. Anything else is dropped rather than relayed into origin logs.
+fn forwardable_instafy_client(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(INSTAFY_CLIENT_HEADER)?.to_str().ok()?.trim();
+    let safe = !value.is_empty()
+        && value.len() <= INSTAFY_CLIENT_HEADER_MAX_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/' | b'+')
+        });
+    safe.then_some(value)
+}
+
+/// `POST git/revert-commit` is forwarded only for a request carrying a valid
+/// `X-Instafy-Client` label. Today's gateway serves it with a working-copy
+/// revert that browsers never reached before; only clients built for the
+/// stateless gateway send the label and offer Revert, so nothing else
+/// changes. Without the label the route answers 404 like any unlisted one.
+fn ensure_origin_proxy_client_label(
+    method: &Method,
+    path: &CanonicalOriginProxyPath,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let requires_label = *method == Method::POST && path.normalized == "git/revert-commit";
+    if requires_label && forwardable_instafy_client(headers).is_none() {
+        return Err(not_found("origin path not found"));
+    }
+    Ok(())
 }
 
 fn origin_proxy_request_body_limit(method: &Method, path: &str) -> usize {
@@ -4181,6 +4225,7 @@ async fn proxy_origin_request(
     let method = request.method().clone();
     let canonical_path = canonical_origin_proxy_path(suffix)?;
     let required_scopes = classify_canonical_origin_proxy_request(&method, &canonical_path)?;
+    ensure_origin_proxy_client_label(&method, &canonical_path, request.headers())?;
     let is_webrtc_capabilities =
         method == Method::GET && canonical_path.normalized == "browser/capabilities";
     let is_webrtc_offer =
@@ -4267,6 +4312,9 @@ async fn proxy_origin_request(
         .and_then(|value| value.to_str().ok())
     {
         builder = builder.header("if-none-match", value);
+    }
+    if let Some(value) = forwardable_instafy_client(&headers) {
+        builder = builder.header(INSTAFY_CLIENT_HEADER, value);
     }
 
     if is_webrtc_capabilities || is_webrtc_offer {
@@ -5333,6 +5381,205 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
     }
 
     #[test]
+    fn classify_origin_proxy_request_allows_exact_recovery_and_revert_routes() {
+        for (method, path, scopes) in [
+            (Method::GET, "/git/recovery", ORIGIN_PROXY_READ_SCOPES),
+            (Method::HEAD, "/git/recovery", ORIGIN_PROXY_READ_SCOPES),
+            (
+                Method::POST,
+                "/git/revert-commit",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+            (
+                Method::POST,
+                "/git/recovery/restore",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+            (
+                Method::POST,
+                "/git/recovery/dismiss",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+            // Encoded spellings canonicalize to the same exact routes.
+            (
+                Method::POST,
+                "/git/recovery/%72estore",
+                ORIGIN_PROXY_WRITE_SCOPES,
+            ),
+        ] {
+            assert_eq!(
+                classify_origin_proxy_request(&method, path).expect(path),
+                scopes,
+                "{method} {path}"
+            );
+        }
+
+        for (method, path) in [
+            // Writes never pass as reads, and the list is not a write.
+            (Method::GET, "/git/recovery/restore"),
+            (Method::GET, "/git/recovery/dismiss"),
+            (Method::GET, "/git/revert-commit"),
+            (Method::POST, "/git/recovery"),
+            // Nearby paths stay closed.
+            (Method::GET, "/git/recovery/x"),
+            (Method::GET, "/git/recoveryx"),
+            (Method::POST, "/git/recovery/restore/x"),
+            (Method::POST, "/git/recovery/dismiss/x"),
+            (Method::POST, "/git/recovery/x"),
+            (Method::POST, "/git/revert-commit/x"),
+            (Method::POST, "/git/revert-commits"),
+            (Method::POST, "/git/flush"),
+            (Method::POST, "/git/flush/resume"),
+        ] {
+            assert!(
+                classify_origin_proxy_request(&method, path).is_err(),
+                "{method} {path} must not be proxyable"
+            );
+        }
+        for method in [Method::PUT, Method::DELETE, Method::PATCH] {
+            assert!(classify_origin_proxy_request(&method, "/git/recovery/dismiss").is_err());
+        }
+    }
+
+    #[test]
+    fn origin_proxy_forwards_ref_and_rev_reads_and_drops_the_token() {
+        let reference = format!("refs/instafy/recovery/{}/n", Uuid::new_v4());
+        let rev = "0123456789abcdef0123456789abcdef01234567";
+        let raw_query = format!("ref={}&rev={rev}&token=t", reference.replace('/', "%2F"));
+        for route in [
+            "/files/src/app.ts",
+            "/raw/src/app.ts",
+            "/entries",
+            "/git/diff",
+        ] {
+            let path = canonical_origin_proxy_path(route).expect("safe read route");
+            assert_eq!(
+                classify_canonical_origin_proxy_request(&Method::GET, &path).expect(route),
+                ORIGIN_PROXY_READ_SCOPES
+            );
+            for query in [
+                raw_query.clone(),
+                format!("ref={reference}&rev={rev}&token=t"),
+            ] {
+                let (token, forwarded) = split_origin_proxy_query(Some(&query));
+                assert_eq!(token.as_deref(), Some("t"));
+                let upstream = build_origin_proxy_upstream_url(
+                    "http://10.99.0.80:8788",
+                    &path,
+                    forwarded.as_deref(),
+                )
+                .expect("upstream URL");
+                let pairs = upstream
+                    .query_pairs()
+                    .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    pairs,
+                    vec![
+                        ("ref".to_string(), reference.clone()),
+                        ("rev".to_string(), rev.to_string()),
+                    ],
+                    "{route}?{query}"
+                );
+                assert!(!upstream.as_str().contains("token"));
+            }
+        }
+    }
+
+    #[test]
+    fn revert_commit_is_proxied_only_for_labelled_clients() {
+        let revert = canonical_origin_proxy_path("/git/revert-commit").unwrap();
+        let mut headers = HeaderMap::new();
+        let refused = ensure_origin_proxy_client_label(&Method::POST, &revert, &headers)
+            .expect_err("unlabelled revert-commit must not be forwarded");
+        assert_eq!(refused.0, StatusCode::NOT_FOUND);
+
+        headers.insert(INSTAFY_CLIENT_HEADER, "web/1.2.3".parse().unwrap());
+        assert!(ensure_origin_proxy_client_label(&Method::POST, &revert, &headers).is_ok());
+        headers.insert(INSTAFY_CLIENT_HEADER, "web 1.2.3".parse().unwrap());
+        assert!(ensure_origin_proxy_client_label(&Method::POST, &revert, &headers).is_err());
+
+        // Nothing else needs the label.
+        let unlabelled = HeaderMap::new();
+        for (method, path) in [
+            (Method::POST, "/apply"),
+            (Method::POST, "/git/sync"),
+            (Method::POST, "/git/revert"),
+            (Method::POST, "/git/recovery/restore"),
+            (Method::GET, "/git/recovery"),
+            (Method::GET, "/git/history"),
+        ] {
+            let path = canonical_origin_proxy_path(path).unwrap();
+            assert!(ensure_origin_proxy_client_label(&method, &path, &unlabelled).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_proxy_route_forwards_revert_commit_only_for_labelled_clients() {
+        use tower::ServiceExt;
+        // No database or origin is reached: an unlabelled request stops at
+        // the gate (404), a labelled one goes on to the token check (401).
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )
+        .expect("connection manager");
+        let pool = bb8::Pool::builder().max_size(1).build_unchecked(manager);
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "revert-commit-label-gate",
+        );
+        let app = router().with_state(crate::tests::build_test_state(pool, config));
+        let origin_id = Uuid::new_v4();
+        let request = |label: Option<&str>, path: &str| {
+            let mut builder = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/origin/{origin_id}/{path}"))
+                .header("content-type", "application/json");
+            if let Some(label) = label {
+                builder = builder.header(INSTAFY_CLIENT_HEADER, label);
+            }
+            builder.body(axum::body::Body::from("{}")).expect("request")
+        };
+        for (label, path, expected) in [
+            (None, "git/revert-commit", StatusCode::NOT_FOUND),
+            (
+                Some("web 1.2.3"),
+                "git/revert-commit",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Some("web/1.2.3"),
+                "git/revert-commit",
+                StatusCode::UNAUTHORIZED,
+            ),
+            // Other write routes need no label.
+            (None, "git/recovery/restore", StatusCode::UNAUTHORIZED),
+            (None, "apply", StatusCode::UNAUTHORIZED),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(label, path))
+                .await
+                .expect("proxy response");
+            assert_eq!(response.status(), expected, "{label:?} {path}");
+        }
+    }
+
+    #[test]
+    fn origin_proxy_forwards_only_a_short_client_label() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(forwardable_instafy_client(&headers), None);
+        headers.insert(INSTAFY_CLIENT_HEADER, "web/1.2.3+abc".parse().unwrap());
+        assert_eq!(forwardable_instafy_client(&headers), Some("web/1.2.3+abc"));
+        for rejected in ["", "web 1.2", "web;rm", &"x".repeat(65)] {
+            headers.insert(INSTAFY_CLIENT_HEADER, rejected.parse().unwrap());
+            assert_eq!(forwardable_instafy_client(&headers), None, "{rejected:?}");
+        }
+    }
+
+    #[test]
     fn origin_proxy_path_rejects_traversal_and_ambiguous_encodings() {
         for path in [
             "/raw/../metadata",
@@ -5602,6 +5849,83 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         assert_eq!(
             normalize_origin_access_scopes("http", &["browser.admin".to_string()]),
             Err("unsupported scope requested")
+        );
+    }
+
+    #[test]
+    fn only_a_persons_own_write_token_names_an_author() {
+        let user = Uuid::new_v4();
+        let person = RequestContext {
+            user_id: Some(user),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        assert_eq!(origin_token_author_user(&person, true, user), Some(user));
+        // Read-only or browser-only tokens never carry an author.
+        assert_eq!(origin_token_author_user(&person, false, user), None);
+        // The subject must be the person who asked.
+        assert_eq!(
+            origin_token_author_user(&person, true, Uuid::new_v4()),
+            None
+        );
+
+        // A job token authenticates as its run's user (user_id is set), but
+        // agent work keeps the runtime's identity.
+        let job = RequestContext {
+            user_id: Some(user),
+            is_service_role: false,
+            scoped_claims: Some(AccessTokenClaims {
+                aud: Uuid::new_v4().to_string(),
+                sub: user.to_string(),
+                project_id: Uuid::new_v4().to_string(),
+                origin_id: None,
+                runtime_id: Some(Uuid::new_v4().to_string()),
+                protocol: None,
+                scopes: vec![JOB_ORIGIN_TOKEN_MINT_SCOPE.to_string()],
+                lease_id: None,
+                runtime_generation: None,
+                run_id: Some(Uuid::new_v4().to_string()),
+                iat: 0,
+                exp: i64::MAX,
+                jti: Uuid::new_v4().to_string(),
+                prefer_runtime: None,
+                actor_label: None,
+                browser_session_id: None,
+            }),
+        };
+        assert_eq!(origin_token_author_user(&job, true, user), None);
+
+        // Service role: the subject may be a lease holder or the service
+        // runtime user (configured, stale or recovered); never an author.
+        for user_id in [None, Some(user)] {
+            let service = RequestContext {
+                user_id,
+                is_service_role: true,
+                scoped_claims: None,
+            };
+            assert_eq!(origin_token_author_user(&service, true, user), None);
+        }
+    }
+
+    #[test]
+    fn browser_access_tokens_cannot_request_the_import_scope() {
+        // Only the controller's own import mints `workspace.import`; an
+        // origin honours idempotency keys and the baseRev exemption for it.
+        for scopes in [
+            vec![crate::imports::WORKSPACE_IMPORT_SCOPE.to_string()],
+            vec![
+                "fs.write".to_string(),
+                crate::imports::WORKSPACE_IMPORT_SCOPE.to_string(),
+            ],
+        ] {
+            assert_eq!(
+                normalize_origin_access_scopes("http", &scopes),
+                Err("unsupported scope requested")
+            );
+        }
+        assert_eq!(
+            normalize_origin_access_scopes("http", &["fs.write".to_string()]),
+            Ok(vec!["fs.write".to_string()])
         );
     }
 
@@ -6786,6 +7110,22 @@ async fn load_browser_actor_label(
     Ok(label)
 }
 
+/// Whom a workspace-write origin token names as its author: only a person
+/// who made this request with their own session and is the token's subject.
+/// Job and agent tokens (scoped claims) keep the runtime's own identity.
+/// Service-role calls, whose subject can be a lease holder, the service
+/// runtime user or one recovered by address, are attributed to nobody.
+fn origin_token_author_user(
+    context: &RequestContext,
+    write_scope: bool,
+    subject_user: Uuid,
+) -> Option<Uuid> {
+    if !write_scope || context.scoped_claims.is_some() || context.is_service_role {
+        return None;
+    }
+    context.user_id.filter(|user| *user == subject_user)
+}
+
 fn is_supported_origin_access_scope(scope: &str) -> bool {
     matches!(
         scope,
@@ -7670,6 +8010,18 @@ pub(crate) async fn post_access_token(
     } else {
         None
     };
+    let author = match origin_token_author_user(&context, lease_required, subject_user) {
+        Some(author_user) => {
+            crate::author_identity::author_claims_for_user(
+                &state.config,
+                &state.pool,
+                &project_id,
+                &author_user,
+            )
+            .await
+        }
+        None => None,
+    };
 
     let scoped_token = mint_scoped_token_with_browser_actor(
         &state.config,
@@ -7689,6 +8041,7 @@ pub(crate) async fn post_access_token(
         validated_runtime_generation,
         browser_actor_label,
         browser_session_id,
+        author,
     )?;
 
     record_access_grant(

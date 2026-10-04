@@ -530,6 +530,10 @@ pub struct AppConfig {
     pub git_remote_public_base_url: Option<String>,
     pub git_shards: Vec<String>,
     pub hosted_origin_endpoint: Option<String>,
+    /// `INSTAFY_AUTHOR_PSEUDONYM_KEYS`: versioned keys for the per-space
+    /// author pseudonyms signed into users' workspace-write tokens. `None`
+    /// (unset) mints no author claims, so origins keep their own identity.
+    pub author_pseudonym_keys: Option<crate::author_identity::AuthorPseudonymKeyring>,
     #[allow(dead_code)]
     pub(crate) browser_turn_rest: Option<crate::browser_turn::BrowserTurnRestConfig>,
     pub sandbox_credit_seed_amount: i32,
@@ -771,6 +775,12 @@ impl AppConfig {
         ) {
             warn!("{warning}");
         }
+        // Checked with the other secrets, before any network IO: a malformed
+        // keyring (including one that is not UTF-8) refuses to start, a
+        // missing one only warns.
+        let author_pseudonym_keys = crate::author_identity::resolve_author_pseudonym_keys_env(
+            std::env::var(crate::author_identity::AUTHOR_PSEUDONYM_KEYS_ENV),
+        )?;
 
         let port = std::env::var("PORT")
             .ok()
@@ -1355,6 +1365,7 @@ impl AppConfig {
             git_remote_public_base_url,
             git_shards,
             hosted_origin_endpoint,
+            author_pseudonym_keys,
             browser_turn_rest,
             sandbox_credit_seed_amount,
             sandbox_credit_seed_limit,
