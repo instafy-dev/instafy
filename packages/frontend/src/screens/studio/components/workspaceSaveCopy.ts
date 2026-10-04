@@ -48,6 +48,7 @@ export const SAVE_COPY = Object.freeze({
     "Not saved yet: work you removed is still on this computer's branch. Try again in a moment.",
   desktopStaleDescription:
     "It changed in the space while you edited. Your version is still in the folder on this computer. Merge keeps both; Reload uses the space's version.",
+  desktopReloadFailed: "Couldn't replace the folder's copy with the space's version. Try again in a moment.",
 });
 
 /** `"README.md" changed while you were editing. Your edits are kept.` */

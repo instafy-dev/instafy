@@ -248,6 +248,8 @@ import { useChatVoiceComposerController } from "./useChatVoiceComposerController
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
 import { mergeMentionableMembers } from "./mentionableMembers";
 import { sendWorkspaceFileStaleMerge } from "./workspaceFileStaleMerge";
+import { prepareStaleWorkspaceFileReload } from "./workspaceFileStaleReload";
+import { SAVE_COPY } from "./workspaceSaveCopy";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
@@ -1156,7 +1158,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const [workspaceFileStaleNotice, setWorkspaceFileStaleNotice] = useState<WorkspaceFileStaleNotice | null>(() =>
     resolveVisibleWorkspaceFileStaleNotice(readWorkspaceFileStaleNotice()),
   );
-  const [workspaceFileStaleBusy, setWorkspaceFileStaleBusy] = useState<null | "merge">(null);
+  const [workspaceFileStaleBusy, setWorkspaceFileStaleBusy] = useState<null | "merge" | "reload">(null);
   const [workspaceFileStaleError, setWorkspaceFileStaleError] = useState<string | null>(null);
   const [imageLightbox, setImageLightbox] = useState<ImageLightboxState | null>(null);
   const [sendingAttachment, setSendingAttachment] = useState(false);
@@ -1222,6 +1224,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         baseText?: string | null;
         localText?: string | null;
         detectedAt?: number | null;
+        variant?: string | null;
+        originId?: string | null;
       }>;
       const detail = custom.detail ?? null;
       if (!detail || typeof detail.path !== "string" || detail.path.trim().length === 0) {
@@ -1256,6 +1260,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         baseText,
         localText,
         detectedAt,
+        ...(detail.variant === "desktop" ? { variant: "desktop" as const } : {}),
+        ...(typeof detail.originId === "string" && detail.originId ? { originId: detail.originId } : {}),
       });
     };
     window.addEventListener("instafy:workspace-file-stale", handler as EventListener);
@@ -1368,10 +1374,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     writeWorkspaceFileStaleNotice(null);
   }, []);
 
-  const handleWorkspaceFileStaleReload = useCallback(() => {
+  const handleWorkspaceFileStaleReload = useCallback(async () => {
     const notice = workspaceFileStaleNotice;
     if (!notice || typeof window === "undefined") {
       return;
+    }
+    if (notice.variant === "desktop") {
+      // A Desktop save left the user's version in the folder: discard that
+      // copy first, so the reload reads the space's version.
+      setWorkspaceFileStaleBusy("reload");
+      setWorkspaceFileStaleError(null);
+      const prepared = await prepareStaleWorkspaceFileReload(notice, notice.projectId ?? activeProjectId ?? null);
+      setWorkspaceFileStaleBusy(null);
+      if (!prepared) {
+        setWorkspaceFileStaleError(SAVE_COPY.desktopReloadFailed);
+        return;
+      }
     }
 
     const detail = {
