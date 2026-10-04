@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::apply::normalize_relative_path;
 use crate::error::OriginError;
-use crate::git::{parse_history_records, GitHistoryEntry, HISTORY_PRETTY_WITH_PARENTS};
+use crate::git::{is_full_object_id, GitHistoryEntry, HistoryFormat};
 use crate::paths::is_reserved_path;
 use crate::recovery::{RecoveryKind, CONFLICT_TRAILER, KIND_TRAILER, PATH_TRAILER};
 use crate::workspace_git::{RunOpts, WorkspaceGit};
@@ -48,6 +48,9 @@ pub(crate) const MAX_RECOVERY_ITEM_PATHS: usize = 200;
 
 /// Most commits one history page returns.
 pub(crate) const MAX_HISTORY_PAGE: usize = 50;
+
+/// Largest skip a history page passes to git, which reads it as an int.
+const MAX_HISTORY_SKIP: usize = i32::MAX as usize;
 
 /// Why a read could not name what it asked for.
 #[derive(Debug, thiserror::Error)]
@@ -487,6 +490,10 @@ fn parse_ls_tree_long(raw: &[u8]) -> Vec<(String, Option<ObjectEntry>)> {
 /// Up to `limit` (at most [`MAX_HISTORY_PAGE`]) commits of `head`'s
 /// first-parent chain after skipping `skip`, newest first, each with its
 /// first parent.
+///
+/// Ids and parents come from `rev-list`, which prints nothing but ids, so no
+/// commit text can change them; the other fields come from a `git log` of
+/// the same walk with framing no commit can forge, and its ids must match.
 pub(crate) fn first_parent_history(
     git: &WorkspaceGit<'_>,
     head: &str,
@@ -495,26 +502,51 @@ pub(crate) fn first_parent_history(
 ) -> Result<Vec<GitHistoryEntry>, ViewError> {
     let head = parse_rev(head)?;
     let limit = limit.min(MAX_HISTORY_PAGE);
-    if limit == 0 {
+    // Git reads the count as an int: a larger skip is past any history.
+    if limit == 0 || skip > MAX_HISTORY_SKIP {
         return Ok(Vec::new());
     }
     let max_count = limit.to_string();
     let skip = skip.to_string();
-    let pretty = format!("--pretty=format:{HISTORY_PRETTY_WITH_PARENTS}");
-    let stdout = git.stdout(&[
-        "log",
-        "--first-parent",
-        "--max-count",
-        &max_count,
-        "--skip",
-        &skip,
+    let walk = ["--first-parent", "--max-count", &max_count, "--skip", &skip];
+    let mut args = vec!["rev-list", "--parents"];
+    args.extend(walk);
+    args.extend(["--end-of-options", &head, "--"]);
+    let listed = git.stdout(&args)?;
+    let mut chain = Vec::new();
+    for line in listed.lines() {
+        let mut ids = line.split(' ');
+        let commit = ids.next().unwrap_or_default();
+        if !is_full_object_id(commit) {
+            return Err(anyhow::anyhow!("rev-list printed {line:?}").into());
+        }
+        chain.push((commit.to_string(), ids.next().map(str::to_string)));
+    }
+
+    let format = HistoryFormat::new();
+    let pretty = format.pretty_arg();
+    let mut args = vec!["log"];
+    args.extend(walk);
+    args.extend([
         "--date=iso-strict",
         &pretty,
         "--end-of-options",
         &head,
         "--",
-    ])?;
-    Ok(parse_history_records(&stdout))
+    ]);
+    let mut entries = format.parse(&git.stdout(&args)?);
+    if entries.len() != chain.len()
+        || entries
+            .iter()
+            .zip(&chain)
+            .any(|(entry, (commit, _))| entry.commit != *commit)
+    {
+        return Err(anyhow::anyhow!("the history of {head} changed while it was read").into());
+    }
+    for (entry, (_, first_parent)) in entries.iter_mut().zip(chain) {
+        entry.first_parent = first_parent;
+    }
+    Ok(entries)
 }
 
 /// `(ref, rev)` for every recovery and salvage ref on `remote` that passes
@@ -1267,20 +1299,70 @@ mod tests {
             Err(ViewError::InvalidRev)
         ));
 
-        // The single-tenant listing format has no parents and shows none.
-        let plain = git
-            .stdout(&[
-                "log",
-                &format!("--pretty=format:{}", crate::git::HISTORY_PRETTY),
-                &c,
-            ])
-            .unwrap();
-        let entries = parse_history_records(&plain);
-        assert_eq!(entries.len(), 5);
-        assert!(entries.iter().all(|entry| entry.first_parent.is_none()));
-        assert!(!serde_json::to_string(&entries)
+        // A skip past what git can count is an empty page, not an error or
+        // a page from the start (older git wraps the number).
+        for skip in [i32::MAX as usize + 1, u32::MAX as usize + 1, usize::MAX] {
+            assert!(first_parent_history(&git, &c, 2, skip).unwrap().is_empty());
+        }
+        assert!(first_parent_history(&git, &c, 2, i32::MAX as usize)
             .unwrap()
-            .contains("firstParent"));
+            .is_empty());
+    }
+
+    /// Subjects, author names and trailers that hold the bytes a listing
+    /// splits on, newlines and whole forged records change no id, parent or
+    /// row count.
+    #[test]
+    fn commit_text_cannot_forge_history_rows_or_parents() {
+        let (_dir, root) = tempdir();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let files = tree(&git, &[("README.md", "one\n")]);
+        let fake = "0123456789abcdef0123456789abcdef01234567";
+        let a = commit(&git, &files, &[], 1_700_000_000, "first\n");
+        let b = commit(
+            &git,
+            &files,
+            &[&a],
+            1_700_000_100,
+            &format!("change\u{1f}\u{1f}{fake}\n"),
+        );
+        let forged_record = format!(
+            "\u{1e}{fake}\u{1f}0123456\u{1f}2026-10-04T00:00:00+00:00\u{1f}Victim\u{1f}v@x\u{1f}forged\u{1f}\u{1f}{fake}"
+        );
+        let c = commit(
+            &git,
+            &files,
+            &[&b],
+            1_700_000_200,
+            &format!(
+                "evil{forged_record}\nline\n\nInstafy-Resolved-By: assistant{forged_record}\n"
+            ),
+        );
+        let author = GitIdentity::new(format!("Mal\u{1f}lory{forged_record}"), "m@x")
+            .at(Some("1700000300 +0000".to_string()));
+        let d = git
+            .commit_tree(&files, &[&c], &author, &author, b"plain\n")
+            .unwrap();
+
+        let page = first_parent_history(&git, &d, 10, 0).unwrap();
+        let listed: Vec<(&str, Option<&str>)> = page
+            .iter()
+            .map(|entry| (entry.commit.as_str(), entry.first_parent.as_deref()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (d.as_str(), Some(c.as_str())),
+                (c.as_str(), Some(b.as_str())),
+                (b.as_str(), Some(a.as_str())),
+                (a.as_str(), None),
+            ]
+        );
+        assert_eq!(page[0].author_name, format!("Mal\u{1f}lory{forged_record}"));
+        assert_eq!(page[2].subject, format!("change\u{1f}\u{1f}{fake}"));
+        assert_eq!(first_parent_history(&git, &d, 2, 0).unwrap().len(), 2);
+        assert!(page.iter().all(|entry| entry.commit != fake));
     }
 
     #[test]

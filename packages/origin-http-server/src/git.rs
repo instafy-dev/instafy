@@ -2013,6 +2013,7 @@ pub fn list_recent_commits(
     }
 
     let max_count = limit.min(25).to_string();
+    let format = HistoryFormat::new();
     let stdout = git_stdout(
         workspace_root,
         &[
@@ -2020,69 +2021,98 @@ pub fn list_recent_commits(
             "--max-count",
             max_count.as_str(),
             "--date=iso-strict",
-            &format!("--pretty=format:{HISTORY_PRETTY}"),
+            &format.pretty_arg(),
         ],
         bearer_token,
     )
     .map_err(|error| OriginError::internal(error.to_string()))?;
 
-    Ok(parse_history_records(&stdout))
+    Ok(format.parse(&stdout))
 }
 
-/// One history record per commit: id, short id, committer date, author
-/// name and email, subject and the `Instafy-Resolved-By` trailer, separated
-/// by 0x1f and ended by 0x1e.
-pub(crate) const HISTORY_PRETTY: &str =
-    "%H%x1f%h%x1f%cI%x1f%an%x1f%ae%x1f%s%x1f%(trailers:key=Instafy-Resolved-By,valueonly)%x1e";
+/// The `git log` format of one history listing: per commit the id, short
+/// id, committer date, author name and email, subject and the
+/// `Instafy-Resolved-By` trailer.
+///
+/// Commit text can hold any byte but NUL, separator bytes included, so the
+/// field and record separators carry a random token made for this one
+/// listing: no commit written before it can contain them, and no text can
+/// split a record or add one. The id comes first and must be a commit id.
+pub(crate) struct HistoryFormat {
+    field: String,
+    record: String,
+    token: String,
+}
 
-/// [`HISTORY_PRETTY`] with the parent ids as one more field.
-pub(crate) const HISTORY_PRETTY_WITH_PARENTS: &str =
-    "%H%x1f%h%x1f%cI%x1f%an%x1f%ae%x1f%s%x1f%(trailers:key=Instafy-Resolved-By,valueonly)%x1f%P%x1e";
+impl HistoryFormat {
+    const FIELDS: usize = 7;
 
-/// Parse `git log` output in [`HISTORY_PRETTY`] or
-/// [`HISTORY_PRETTY_WITH_PARENTS`] format.
-pub(crate) fn parse_history_records(stdout: &str) -> Vec<GitHistoryEntry> {
-    let mut entries = Vec::new();
-    for raw_record in stdout.split('\u{1e}') {
-        let record = raw_record.trim();
-        if record.is_empty() {
-            continue;
+    pub(crate) fn new() -> Self {
+        let token = Uuid::new_v4().simple().to_string();
+        Self {
+            field: format!("\u{1f}{token}\u{1f}"),
+            record: format!("\u{1e}{token}\u{1e}"),
+            token,
         }
-        let mut fields = record.split('\u{1f}');
-        let commit = match fields.next().map(str::trim) {
-            Some(value) if !value.is_empty() => value.to_string(),
-            _ => continue,
-        };
-        let short_commit = fields.next().map(str::trim).unwrap_or("").to_string();
-        let committed_at = fields.next().map(str::trim).unwrap_or("").to_string();
-        let author_name = fields.next().map(str::trim).unwrap_or("").to_string();
-        let author_email = fields.next().map(str::trim).unwrap_or("").to_string();
-        let subject = fields.next().map(str::trim).unwrap_or("").to_string();
-        let resolved_by = fields
-            .next()
-            .and_then(|value| value.lines().map(str::trim).find(|line| !line.is_empty()))
-            .map(str::to_string);
-        // Only a commit id: a subject can hold the separator bytes.
-        let first_parent = fields
-            .next()
-            .and_then(|parents| parents.split_whitespace().next())
-            .filter(|parent| {
-                matches!(parent.len(), 40 | 64)
-                    && parent.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-            .map(str::to_string);
-        entries.push(GitHistoryEntry {
-            commit,
-            short_commit,
-            committed_at,
-            author_name,
-            author_email,
-            subject,
-            resolved_by,
-            first_parent,
-        });
     }
-    entries
+
+    /// The `--pretty=format:` argument.
+    pub(crate) fn pretty_arg(&self) -> String {
+        let field = format!("%x1f{}%x1f", self.token);
+        let record = format!("%x1e{}%x1e", self.token);
+        let fields = [
+            "%H",
+            "%h",
+            "%cI",
+            "%an",
+            "%ae",
+            "%s",
+            "%(trailers:key=Instafy-Resolved-By,valueonly)",
+        ];
+        format!("--pretty=format:{}{record}", fields.join(&field))
+    }
+
+    /// Parse the output of `git log` run with [`Self::pretty_arg`]. A record
+    /// with the wrong number of fields, or whose first field is not a commit
+    /// id, is left out. Entries never carry a first parent.
+    pub(crate) fn parse(&self, stdout: &str) -> Vec<GitHistoryEntry> {
+        let mut entries = Vec::new();
+        for raw_record in stdout.split(self.record.as_str()) {
+            let record = raw_record.trim();
+            if record.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = record.split(self.field.as_str()).collect();
+            if fields.len() != Self::FIELDS {
+                continue;
+            }
+            let commit = fields[0].trim();
+            if !is_full_object_id(commit) {
+                continue;
+            }
+            let resolved_by = fields[6]
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_string);
+            entries.push(GitHistoryEntry {
+                commit: commit.to_string(),
+                short_commit: fields[1].trim().to_string(),
+                committed_at: fields[2].trim().to_string(),
+                author_name: fields[3].trim().to_string(),
+                author_email: fields[4].trim().to_string(),
+                subject: fields[5].trim().to_string(),
+                resolved_by,
+                first_parent: None,
+            });
+        }
+        entries
+    }
+}
+
+/// A full 40- or 64-digit hex object id.
+pub(crate) fn is_full_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn list_commit_files(
@@ -5688,28 +5718,96 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
         Ok(())
     }
 
+    /// Commit text can hold any byte but NUL, including the separator bytes
+    /// the listing once split on: it can neither add a row, nor change a
+    /// field of its own or another commit, and the single-tenant listing
+    /// never carries a first parent.
     #[test]
-    fn history_records_carry_a_first_parent_only_when_asked() {
-        let parent = "0123456789abcdef0123456789abcdef01234567";
-        let other = "89abcdef0123456789abcdef0123456789abcdef";
-        let with_parents = format!(
-            "c1\x1fc\x1f2026-10-04T12:00:00+00:00\x1fA\x1fa@x\x1fmerge\x1fassistant\n\x1f{parent} {other}\x1e\n\
-             c2\x1fc\x1f2026-10-04T11:00:00+00:00\x1fA\x1fa@x\x1froot\x1f\x1f\x1e\n\
-             c3\x1fc\x1f2026-10-04T10:00:00+00:00\x1fA\x1fa@x\x1fodd\x1f\x1fnot-an-id\x1e"
-        );
-        let entries = parse_history_records(&with_parents);
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].first_parent.as_deref(), Some(parent));
-        assert_eq!(entries[0].resolved_by.as_deref(), Some("assistant"));
-        assert_eq!(entries[1].first_parent, None);
-        assert_eq!(entries[2].first_parent, None);
+    fn history_rows_cannot_be_forged_by_commit_text() {
+        use crate::workspace_git::{GitIdentity, WorkspaceGit};
+        let sandbox = tempdir().unwrap();
+        let ws = sandbox.path().join("workspace");
+        fs::create_dir_all(&ws).unwrap();
+        crate::test_support::init_workspace_repo(&ws);
+        let git = WorkspaceGit::new(&ws, None);
+        let tree = git.empty_tree().unwrap();
+        let fake = "0123456789abcdef0123456789abcdef01234567";
+        let who = |name: &str| GitIdentity::new(name, "someone@instafy.dev");
+        let root = git
+            .commit_tree(&tree, &[], &who("Root"), &who("Root"), b"root\n")
+            .unwrap();
+        let shifted = git
+            .commit_tree(
+                &tree,
+                &[&root],
+                &who(&format!("Mal\u{1f}lory\u{1e}{fake}")),
+                &who("Committer"),
+                format!("change\u{1f}\u{1f}{fake}\n").as_bytes(),
+            )
+            .unwrap();
+        let injected = git
+            .commit_tree(
+                &tree,
+                &[&shifted],
+                &who("Plain"),
+                &who("Committer"),
+                format!(
+                    "evil\u{1e}{fake}\u{1f}0123456\u{1f}2026-10-04T00:00:00+00:00\u{1f}Victim\u{1f}\
+                     victim@x\u{1f}forged\u{1f}\u{1f}{fake}\nmore\n\n\
+                     Instafy-Resolved-By: assistant\u{1e}{fake}\u{1f}x\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        git.update_ref("refs/heads/main", &injected, None, "test")
+            .unwrap();
 
-        let without = "c1\x1fc\x1f2026-10-04T12:00:00+00:00\x1fA\x1fa@x\x1fsubject\x1f\x1e";
-        let entries = parse_history_records(without);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].first_parent, None);
-        let json = serde_json::to_value(&entries[0]).unwrap();
-        assert!(json.get("firstParent").is_none(), "{json}");
+        let entries = list_recent_commits(&ws, 10, None).unwrap();
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.commit.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![injected.as_str(), shifted.as_str(), root.as_str()]
+        );
+        for entry in &entries {
+            let field = |format: &str| {
+                crate::test_support::ig(
+                    &ws,
+                    &["log", "-1", &format!("--format={format}"), &entry.commit],
+                )
+                .trim()
+                .to_string()
+            };
+            assert_eq!(entry.short_commit, field("%h"));
+            assert_eq!(entry.committed_at, field("%cI"));
+            assert_eq!(entry.author_name, field("%an"));
+            assert_eq!(entry.author_email, field("%ae"));
+            assert_eq!(entry.subject, field("%s"));
+            let resolved = field("%(trailers:key=Instafy-Resolved-By,valueonly)");
+            assert_eq!(
+                entry.resolved_by.as_deref(),
+                resolved
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+            );
+            assert_eq!(entry.first_parent, None);
+        }
+        assert_eq!(entries[1].author_name, format!("Mal\u{1f}lory\u{1e}{fake}"));
+
+        // An ordinary commit serializes exactly as before.
+        let json = serde_json::to_value(&entries).unwrap();
+        assert!(!json.to_string().contains("firstParent"), "{json}");
+        assert_eq!(
+            json[2],
+            serde_json::json!({
+                "commit": root,
+                "shortCommit": entries[2].short_commit,
+                "committedAt": entries[2].committed_at,
+                "authorName": "Root",
+                "authorEmail": "someone@instafy.dev",
+                "subject": "root",
+            })
+        );
     }
 
     #[test]
