@@ -25,7 +25,7 @@ use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::config::{AppConfig, PgPool};
+use crate::config::{AppConfig, PgPool, DEFAULT_SERVICE_RUNTIME_USER_EMAIL};
 
 /// Environment variable holding the keyring: comma-separated
 /// `v<version>:<base64 key>` entries, for example `v1:<key>,v2:<key>`.
@@ -236,6 +236,20 @@ fn base32_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// Resolve the keyring from the environment variable's raw lookup: a value
+/// that is not valid UTF-8 is malformed (refused), not unset.
+pub fn resolve_author_pseudonym_keys_env(
+    value: Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<AuthorPseudonymKeyring>> {
+    match value {
+        Ok(raw) => resolve_author_pseudonym_keys(Some(&raw)),
+        Err(std::env::VarError::NotPresent) => resolve_author_pseudonym_keys(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "{AUTHOR_PSEUDONYM_KEYS_ENV} is not valid UTF-8; it must look like v1:<base64 key>"
+        ),
+    }
+}
+
 /// Resolve the keyring at startup. A malformed value refuses to start, so a
 /// typo fails loudly. An unset or blank one only warns: tokens then carry no
 /// author and every save keeps its origin's own git identity, which is safe
@@ -265,16 +279,55 @@ pub fn resolve_author_pseudonym_keys(
     }
 }
 
+/// Unicode format characters (general category Cf): zero-width, soft hyphen,
+/// bidirectional embeddings, overrides and isolates, tags. They render
+/// invisible or reorder text in `git log` and History.
+fn is_format_character(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// What git strips from both ends of an identity name ("crud"); a name of
+/// nothing else makes git refuse the commit.
+fn is_git_crud(ch: char) -> bool {
+    (ch as u32) <= 0x20 || matches!(ch, '.' | ',' | ':' | ';' | '<' | '>' | '"' | '\\' | '\'')
+}
+
 /// The name written as a commit's author: `profiles.full_name` with control
-/// characters and angle brackets removed, whitespace collapsed and at most
-/// 64 bytes, or "Instafy user". A name that contains `@` is not used, so an
+/// characters, angle brackets and Unicode format characters (zero-width,
+/// bidirectional controls) removed, whitespace collapsed, at most 64 bytes,
+/// and git's own end stripping applied; "Instafy user" when nothing is left.
+/// A name with `@` (or a full-width or small look-alike) is not used, so an
 /// email address typed as a name never reaches history.
 pub fn author_display_name(full_name: Option<&str>) -> String {
     let cleaned = full_name
         .unwrap_or_default()
         .chars()
+        .filter(|ch| !is_format_character(*ch))
         .map(|ch| {
-            if ch.is_control() || matches!(ch, '<' | '>') {
+            if ch.is_control() || matches!(ch, '<' | '>' | '\u{2028}' | '\u{2029}') {
                 ' '
             } else {
                 ch
@@ -282,14 +335,14 @@ pub fn author_display_name(full_name: Option<&str>) -> String {
         })
         .collect::<String>();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() || collapsed.contains('@') {
+    if collapsed.contains(['@', '\u{FF20}', '\u{FE6B}']) {
         return AUTHOR_FALLBACK_NAME.to_string();
     }
     let mut end = MAX_DISPLAY_NAME_BYTES.min(collapsed.len());
     while !collapsed.is_char_boundary(end) {
         end -= 1;
     }
-    let bounded = collapsed[..end].trim();
+    let bounded = collapsed[..end].trim_matches(is_git_crud);
     if bounded.is_empty() {
         AUTHOR_FALLBACK_NAME.to_string()
     } else {
@@ -297,22 +350,46 @@ pub fn author_display_name(full_name: Option<&str>) -> String {
     }
 }
 
-/// `profiles.full_name` only. The account email is never a fallback.
-async fn load_author_full_name(pool: &PgPool, user_id: &Uuid) -> anyhow::Result<Option<String>> {
+/// The service runtime user's address, as the controller resolves it.
+fn service_runtime_user_email() -> String {
+    std::env::var("SERVICE_RUNTIME_USER_EMAIL")
+        .ok()
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_SERVICE_RUNTIME_USER_EMAIL.to_string())
+}
+
+/// `Some(profiles.full_name)` for an existing account that is not the
+/// service runtime user (whatever `SERVICE_RUNTIME_USER_ID` says, which can
+/// be unset or stale); `None` for anything else. The account email is only
+/// compared, never used as a name.
+async fn load_person_full_name(
+    pool: &PgPool,
+    user_id: &Uuid,
+) -> anyhow::Result<Option<Option<String>>> {
     let connection = pool.get().await?;
     let row = connection
         .query_opt(
-            "select full_name from profiles where user_id = $1 limit 1",
-            &[user_id],
+            "select p.full_name,
+                    lower(coalesce(u.email, '')) = $2 as is_service_runtime_user
+             from auth.users u
+             left join profiles p on p.user_id = u.id
+             where u.id = $1
+             limit 1",
+            &[user_id, &service_runtime_user_email()],
         )
         .await?;
-    Ok(row.and_then(|row| row.get::<_, Option<String>>("full_name")))
+    Ok(row
+        .filter(|row| !row.get::<_, bool>("is_service_runtime_user"))
+        .map(|row| row.get::<_, Option<String>>("full_name")))
 }
 
-/// The author claims for a workspace-write token whose subject is
-/// `user_id`, or `None` when no keyring is configured or the subject is the
-/// controller's service runtime user (not a person). A profile lookup
-/// failure falls back to the default display name, so it never blocks a save.
+/// The author claims for a workspace-write token whose subject `user_id`
+/// is a person, or `None` when no keyring is configured, the subject is the
+/// service runtime user (configured or found by its address), or the account
+/// does not exist. Callers decide whether the token is a person's at all
+/// (never a job, agent or service-role token). A lookup failure mints no
+/// author (the origin keeps its own identity), so it never blocks a save.
 pub async fn author_claims_for_user(
     config: &AppConfig,
     pool: &PgPool,
@@ -323,15 +400,16 @@ pub async fn author_claims_for_user(
     if config.service_runtime_user_id == Some(*user_id) {
         return None;
     }
-    let full_name = match load_author_full_name(pool, user_id).await {
-        Ok(name) => name,
+    let full_name = match load_person_full_name(pool, user_id).await {
+        Ok(Some(full_name)) => full_name,
+        Ok(None) => return None,
         Err(error) => {
             warn!(
                 project_id = %project_id,
                 error = %error,
-                "failed to load the author display name; using the default"
+                "failed to check the author of a workspace-write token; minting none"
             );
-            None
+            return None;
         }
     };
     Some(AuthorClaims {
@@ -487,6 +565,65 @@ mod tests {
         // A typo fails loudly.
         assert!(resolve_author_pseudonym_keys(Some("v1:short")).is_err());
         assert!(resolve_author_pseudonym_keys(Some(KEY_V1)).is_err());
+    }
+
+    #[test]
+    fn display_names_git_would_refuse_or_that_hide_text_fall_back() {
+        // git strips these from both ends and refuses a name of nothing else.
+        for crud_only in ["'", ";", "\"\"", "...", ".", ",:;", " ' . ' ", "\\"] {
+            assert_eq!(
+                author_display_name(Some(crud_only)),
+                AUTHOR_FALLBACK_NAME,
+                "{crud_only:?}"
+            );
+        }
+        assert_eq!(author_display_name(Some("'Ada'")), "Ada");
+        assert_eq!(author_display_name(Some("Ada Lovelace.")), "Ada Lovelace");
+        assert_eq!(author_display_name(Some("O'Neil")), "O'Neil");
+
+        // Bidirectional controls, zero-width and other format characters.
+        assert_eq!(author_display_name(Some("\u{202E}evil")), "evil");
+        assert_eq!(author_display_name(Some("\u{2066}Ada\u{2069}")), "Ada");
+        assert_eq!(
+            author_display_name(Some("A\u{200B}d\u{200D}a\u{FEFF}")),
+            "Ada"
+        );
+        assert_eq!(author_display_name(Some("\u{00AD}")), AUTHOR_FALLBACK_NAME);
+        assert_eq!(
+            author_display_name(Some("\u{E0041}\u{E0042}")),
+            AUTHOR_FALLBACK_NAME
+        );
+        assert_eq!(
+            author_display_name(Some("Ada\u{2028}Lovelace\u{2029}")),
+            "Ada Lovelace"
+        );
+
+        // `@` look-alikes count as an address.
+        for address in ["ada\u{FF20}example.com", "ada\u{FE6B}example.com"] {
+            assert_eq!(author_display_name(Some(address)), AUTHOR_FALLBACK_NAME);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keyring_that_is_not_utf8_is_malformed_not_unset() {
+        use std::os::unix::ffi::OsStringExt;
+        let not_unicode = std::ffi::OsString::from_vec(b"v1:\xff".to_vec());
+        let error =
+            resolve_author_pseudonym_keys_env(Err(std::env::VarError::NotUnicode(not_unicode)))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("not valid UTF-8"), "{error}");
+        assert!(
+            resolve_author_pseudonym_keys_env(Err(std::env::VarError::NotPresent))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            resolve_author_pseudonym_keys_env(Ok(format!("v1:{KEY_V1}")))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

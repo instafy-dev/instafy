@@ -30,6 +30,11 @@ test("validates keyrings the way the controller does", () => {
     `v1:${KEY},v1:${NEXT_KEY}`,
     `v1:${KEY},v2:${KEY}`,
     `v1:${KEY.slice(0, -1)}`,
+    // Non-canonical: the last character carries bits the key does not have.
+    `v1:${KEY.slice(0, -2)}F=`,
+    Array.from({ length: 65 }, (_, index) =>
+      `v${index + 1}:${Buffer.alloc(32, index + 1).toString("base64")}`
+    ).join(","),
     `v1:${Buffer.alloc(16, 1).toString("base64")}`,
     `v1:${Buffer.alloc(65, 1).toString("base64")}`,
     "v1:not*base64",

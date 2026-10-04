@@ -776,11 +776,10 @@ impl AppConfig {
             warn!("{warning}");
         }
         // Checked with the other secrets, before any network IO: a malformed
-        // keyring refuses to start, a missing one only warns.
-        let author_pseudonym_keys = crate::author_identity::resolve_author_pseudonym_keys(
-            std::env::var(crate::author_identity::AUTHOR_PSEUDONYM_KEYS_ENV)
-                .ok()
-                .as_deref(),
+        // keyring (including one that is not UTF-8) refuses to start, a
+        // missing one only warns.
+        let author_pseudonym_keys = crate::author_identity::resolve_author_pseudonym_keys_env(
+            std::env::var(crate::author_identity::AUTHOR_PSEUDONYM_KEYS_ENV),
         )?;
 
         let port = std::env::var("PORT")

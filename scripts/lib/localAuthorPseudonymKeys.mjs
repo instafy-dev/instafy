@@ -6,6 +6,7 @@ import path from "node:path";
 // author_identity.rs): `v<version>:<base64 key of 32 to 64 bytes>`.
 const MIN_KEY_BYTES = 32;
 const MAX_KEY_BYTES = 64;
+const MAX_ENTRIES = 64;
 const ENTRY_PATTERN = /^v[1-9][0-9]{0,3}:([A-Za-z0-9+/]+={0,2})$/;
 
 /** Whether `raw` is a keyring the controller would accept. */
@@ -14,7 +15,7 @@ export function isValidAuthorPseudonymKeys(raw) {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
-  if (entries.length === 0) {
+  if (entries.length === 0 || entries.length > MAX_ENTRIES) {
     return false;
   }
   const versions = new Set();
@@ -26,6 +27,11 @@ export function isValidAuthorPseudonymKeys(raw) {
     }
     const version = entry.slice(0, entry.indexOf(":"));
     const key = Buffer.from(match[1], "base64");
+    // The controller's decoder accepts only canonical padded base64: no
+    // stray bits in the last character.
+    if (key.toString("base64") !== match[1]) {
+      return false;
+    }
     // One key per version, and a new version needs a new key.
     if (versions.has(version) || keys.has(key.toString("hex"))) {
       return false;

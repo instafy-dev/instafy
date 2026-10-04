@@ -17142,6 +17142,420 @@ async fn project_memory_bootstrap_writes_to_an_origin_without_read_state_as_befo
     Ok(())
 }
 
+const AUTHOR_TEST_KEYRING: &str = "v1:ERERERERERERERERERERERERERERERERERERERERERE=";
+
+/// A project whose owner holds a workspace lease, with an online cloud
+/// runtime and an origin bound to it (HTTP and WebDAV).
+struct AuthorTestSpace {
+    project_id: Uuid,
+    owner_user_id: Uuid,
+    runtime_id: Uuid,
+    runtime_lease_id: Uuid,
+    origin_id: Uuid,
+}
+
+async fn insert_author_test_space(
+    pool: &PgPool,
+    full_name: &str,
+) -> anyhow::Result<AuthorTestSpace> {
+    let space = AuthorTestSpace {
+        project_id: Uuid::new_v4(),
+        owner_user_id: Uuid::new_v4(),
+        runtime_id: Uuid::new_v4(),
+        runtime_lease_id: Uuid::new_v4(),
+        origin_id: Uuid::new_v4(),
+    };
+    insert_bootstrap_project(
+        pool,
+        &space.project_id,
+        &space.owner_user_id,
+        Some(full_name),
+    )
+    .await?;
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "INSERT INTO runtimes
+               (id, project_id, provider, status, idle_ttl_seconds, last_seen_at)
+             VALUES ($1, $2, 'instafy-cloud', 'ready', 600, now())",
+            &[&space.runtime_id, &space.project_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "INSERT INTO runtime_leases
+               (id, project_id, runtime_id, status, requested_at, launched_at)
+             VALUES ($1, $2, $3, 'active', now(), now())",
+            &[
+                &space.runtime_lease_id,
+                &space.project_id,
+                &space.runtime_id,
+            ],
+        )
+        .await?;
+    connection
+        .execute(
+            "UPDATE runtimes SET active_lease_id = $2 WHERE id = $1",
+            &[&space.runtime_id, &space.runtime_lease_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "INSERT INTO workspace_origins (id, project_id, mode, endpoint, protocols)
+             VALUES ($1, $2, 'desktop', 'https://origin', ARRAY['http', 'webdav']::text[])",
+            &[&space.origin_id, &space.project_id],
+        )
+        .await?;
+    let protocols = vec!["http".to_string(), "webdav".to_string()];
+    connection
+        .execute(
+            "INSERT INTO origin_instances
+               (id, project_id, runtime_id, lease_id, origin_id, required,
+                mode, status, endpoint, protocols, metadata)
+             VALUES
+               ($1, $2, $3, $4, $5, true, 'hosted', 'online',
+                'https://origin', $6::text[], '{}'::jsonb)",
+            &[
+                &Uuid::new_v4(),
+                &space.project_id,
+                &space.runtime_id,
+                &space.runtime_lease_id,
+                &space.origin_id,
+                &protocols,
+            ],
+        )
+        .await?;
+    Ok(space)
+}
+
+async fn mint_origin_token_payload(
+    state: &AppState,
+    bearer: &str,
+    request: AccessTokenRequest,
+) -> anyhow::Result<serde_json::Value> {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {bearer}"))?,
+    );
+    let response = post_access_token(
+        axum::extract::State(state.clone()),
+        headers,
+        AxumJson(request),
+    )
+    .await
+    .map_err(|(status, AxumJson(error))| {
+        anyhow::anyhow!("access token refused ({status}): {}", error.message)
+    })?;
+    let token = response
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("access token response omitted token"))?;
+    Ok(jwt_payload(token))
+}
+
+fn origin_token_request(
+    space: &AuthorTestSpace,
+    scopes: &[&str],
+    lease_id: Option<Uuid>,
+    with_origin: bool,
+) -> AccessTokenRequest {
+    AccessTokenRequest {
+        project_id: space.project_id.to_string(),
+        protocol: Some("http".to_string()),
+        scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+        origin_id: with_origin.then(|| space.origin_id.to_string()),
+        prefer_hosted: None,
+        prefer_runtime: None,
+        lease_id: lease_id.map(|lease| lease.to_string()),
+        browser_session_id: None,
+    }
+}
+
+#[tokio::test]
+async fn post_access_token_authors_only_a_persons_own_write_token() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping origin token author test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = insert_author_test_space(&pool, "Ada Lovelace").await?;
+    let lease_id = match acquire_lease(
+        &pool,
+        &space.project_id,
+        Some(&space.owner_user_id),
+        None,
+        300,
+        None,
+    )
+    .await?
+    {
+        LeaseAcquireOutcome::Granted(record) | LeaseAcquireOutcome::Renewed(record) => record.id,
+        other => panic!("expected a workspace lease, got {other:?}"),
+    };
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "origin-token-author",
+    );
+    let keyring = crate::author_identity::AuthorPseudonymKeyring::parse(AUTHOR_TEST_KEYRING)?;
+    config.author_pseudonym_keys = Some(keyring.clone());
+    let user_session = crate::auth::issue_controller_token(&config, &space.owner_user_id)
+        .expect("issue user session token")
+        .token;
+    let state = build_test_state(pool.clone(), config);
+
+    // The person's own write token on their lease names them.
+    let payload = mint_origin_token_payload(
+        &state,
+        &user_session,
+        origin_token_request(&space, &["fs.write"], Some(lease_id), true),
+    )
+    .await?;
+    assert_eq!(payload["author_name"], "Ada Lovelace");
+    assert_eq!(
+        payload["author_email"],
+        keyring
+            .pseudonym(&space.project_id, &space.owner_user_id)
+            .as_str()
+    );
+
+    // Read-only: no author.
+    let payload = mint_origin_token_payload(
+        &state,
+        &user_session,
+        origin_token_request(&space, &["fs.read"], None, true),
+    )
+    .await?;
+    assert!(payload.get("author_email").is_none());
+    assert!(payload.get("author_name").is_none());
+
+    // The service role writing on that person's lease: attributed to nobody.
+    let payload = mint_origin_token_payload(
+        &state,
+        "service-role-token",
+        origin_token_request(&space, &["fs.write"], Some(lease_id), true),
+    )
+    .await?;
+    assert_eq!(payload["sub"], space.owner_user_id.to_string().as_str());
+    assert!(payload.get("author_email").is_none());
+    assert!(payload.get("author_name").is_none());
+
+    cleanup_origin_project(&pool, &space.project_id).await?;
+    cleanup_test_user(&pool, &space.owner_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_access_token_never_authors_a_job_token() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping job token author test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = insert_author_test_space(&pool, "Ada Lovelace").await?;
+    let run_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "INSERT INTO runs (id, project_id, run_type, status, progress, progress_stage)
+                 VALUES ($1, $2, 'prompt', 'queued', 0, 'agent:queued')",
+                &[&run_id, &space.project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO agent_jobs (
+                     id, project_id, run_id, status, payload, priority,
+                     leased_by_runtime_id, leased_at, lease_expires_at
+                 ) VALUES ($1, $2, $3, 'leased', $4, 10, $5, now(), now() + interval '10 minutes')",
+                &[
+                    &job_id,
+                    &space.project_id,
+                    &run_id,
+                    &PgJson(json!({
+                        "user_id": space.owner_user_id,
+                        "writeIntent": true,
+                    })),
+                    &space.runtime_id,
+                ],
+            )
+            .await?;
+    }
+    let lease_metadata = json!({
+        "jobId": job_id,
+        "runId": run_id,
+        "runtimeId": space.runtime_id,
+    });
+    let lease_id = match acquire_lease(
+        &pool,
+        &space.project_id,
+        Some(&space.owner_user_id),
+        Some(&space.runtime_id),
+        300,
+        Some(&lease_metadata),
+    )
+    .await?
+    {
+        LeaseAcquireOutcome::Granted(record) | LeaseAcquireOutcome::Renewed(record) => record.id,
+        other => panic!("expected a job workspace lease, got {other:?}"),
+    };
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "job-token-author",
+    );
+    config.author_pseudonym_keys = Some(crate::author_identity::AuthorPseudonymKeyring::parse(
+        AUTHOR_TEST_KEYRING,
+    )?);
+    // The run's job token: it authenticates as the run's user, yet agent work
+    // keeps the runtime's own identity.
+    let job_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: space.runtime_id.to_string(),
+            subject: space.owner_user_id.to_string(),
+            project_id: space.project_id.to_string(),
+            origin_id: None,
+            runtime_id: Some(space.runtime_id.to_string()),
+            protocol: None,
+            scopes: vec![
+                crate::origins::JOB_ORIGIN_TOKEN_MINT_SCOPE.to_string(),
+                crate::origins::JOB_TOKEN_SEPARATED_SCOPE.to_string(),
+            ],
+            lease_id: Some(space.runtime_lease_id.to_string()),
+            run_id: Some(run_id.to_string()),
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|(status, AxumJson(error))| {
+        anyhow::anyhow!("mint job token ({status}): {}", error.message)
+    })?
+    .token;
+    let state = build_test_state(pool.clone(), config);
+
+    let payload = mint_origin_token_payload(
+        &state,
+        &job_token,
+        origin_token_request(&space, &["fs.write"], Some(lease_id), false),
+    )
+    .await?;
+    assert_eq!(payload["scopes"], json!(["fs.write"]));
+    assert_eq!(payload["run_id"], run_id.to_string().as_str());
+    assert!(payload.get("author_email").is_none());
+    assert!(payload.get("author_name").is_none());
+
+    cleanup_origin_project(&pool, &space.project_id).await?;
+    cleanup_test_user(&pool, &space.owner_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_access_token_never_authors_the_service_runtime_user() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping service user author test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let space = insert_author_test_space(&pool, "Ada Lovelace").await?;
+    let service_email = crate::config::DEFAULT_SERVICE_RUNTIME_USER_EMAIL;
+    let (service_user_id, inserted_service_user) = {
+        let connection = pool.get().await?;
+        match connection
+            .query_opt(
+                "SELECT id FROM auth.users WHERE lower(email) = lower($1) LIMIT 1",
+                &[&service_email],
+            )
+            .await?
+        {
+            Some(row) => (row.get::<_, Uuid>("id"), false),
+            None => {
+                let id = Uuid::new_v4();
+                connection
+                    .execute(
+                        "INSERT INTO auth.users (
+                             instance_id, id, aud, role, email, encrypted_password,
+                             email_confirmed_at, raw_app_meta_data, raw_user_meta_data,
+                             is_super_admin, created_at, updated_at
+                         ) VALUES (
+                             $1, $2, 'authenticated', 'authenticated', $3, 'test-secret',
+                             now(), '{}'::jsonb, '{}'::jsonb, false, now(), now()
+                         )",
+                        &[&Uuid::nil(), &id, &service_email],
+                    )
+                    .await?;
+                (id, true)
+            }
+        }
+    };
+    // A lease with no person behind it, written through an origin the
+    // service role may use without a runtime binding.
+    let unbound_origin_id = Uuid::new_v4();
+    pool.get()
+        .await?
+        .execute(
+            "INSERT INTO workspace_origins (id, project_id, mode, endpoint, protocols)
+             VALUES ($1, $2, 'desktop', 'https://origin', ARRAY['http']::text[])",
+            &[&unbound_origin_id, &space.project_id],
+        )
+        .await?;
+    let lease_id = match acquire_fresh_lease(&pool, &space.project_id, None, None, 300, None)
+        .await?
+    {
+        LeaseAcquireOutcome::Granted(record) | LeaseAcquireOutcome::Renewed(record) => record.id,
+        other => panic!("expected a userless workspace lease, got {other:?}"),
+    };
+
+    let keyring = crate::author_identity::AuthorPseudonymKeyring::parse(AUTHOR_TEST_KEYRING)?;
+    for configured in [Some(Uuid::new_v4()), None, Some(service_user_id)] {
+        // Stale, unset or correct SERVICE_RUNTIME_USER_ID: the service-role
+        // mint resolves the real service user and never names an author.
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "service-user-author",
+        );
+        config.service_runtime_user_id = configured;
+        config.author_pseudonym_keys = Some(keyring.clone());
+        let state = build_test_state(pool.clone(), config.clone());
+        let mut request = origin_token_request(&space, &["fs.write"], Some(lease_id), false);
+        request.origin_id = Some(unbound_origin_id.to_string());
+        let payload = mint_origin_token_payload(&state, "service-role-token", request).await?;
+        assert_eq!(payload["sub"], service_user_id.to_string().as_str());
+        assert!(payload.get("author_email").is_none(), "{configured:?}");
+        assert!(payload.get("author_name").is_none(), "{configured:?}");
+
+        // Even asked directly, the service user (found by its address when
+        // the configured id is stale or unset) gets no pseudonym.
+        assert!(crate::author_identity::author_claims_for_user(
+            &config,
+            &pool,
+            &space.project_id,
+            &service_user_id
+        )
+        .await
+        .is_none());
+        // Nor does an id with no account behind it.
+        assert!(crate::author_identity::author_claims_for_user(
+            &config,
+            &pool,
+            &space.project_id,
+            &Uuid::new_v4()
+        )
+        .await
+        .is_none());
+    }
+
+    cleanup_origin_project(&pool, &space.project_id).await?;
+    cleanup_test_user(&pool, &space.owner_user_id).await?;
+    if inserted_service_user {
+        cleanup_test_user(&pool, &service_user_id).await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn record_commit_receipt_persists_payload() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {

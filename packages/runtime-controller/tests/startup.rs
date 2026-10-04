@@ -567,6 +567,27 @@ fn startup_refuses_malformed_author_pseudonym_keys_without_echoing_them() {
     requests.assert_hits(0);
 }
 
+#[cfg(unix)]
+#[test]
+fn startup_refuses_author_pseudonym_keys_that_are_not_utf8() {
+    // Not unset: a value that cannot be read is a malformed one.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let result = run_controller(&server, |command| {
+        command.env(
+            "INSTAFY_AUTHOR_PSEUDONYM_KEYS",
+            OsStr::from_bytes(b"v1:\xffq7Zmarker"),
+        );
+    });
+    assert_normal_error(&result, "INSTAFY_AUTHOR_PSEUDONYM_KEYS is not valid UTF-8");
+    assert!(!result.output.contains("q7Zmarker"));
+    requests.assert_hits(0);
+}
+
 #[test]
 fn startup_accepts_author_pseudonym_keys_without_echoing_them() {
     let server = MockServer::start();

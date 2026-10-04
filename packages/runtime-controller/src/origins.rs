@@ -5751,6 +5751,61 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
     }
 
     #[test]
+    fn only_a_persons_own_write_token_names_an_author() {
+        let user = Uuid::new_v4();
+        let person = RequestContext {
+            user_id: Some(user),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        assert_eq!(origin_token_author_user(&person, true, user), Some(user));
+        // Read-only or browser-only tokens never carry an author.
+        assert_eq!(origin_token_author_user(&person, false, user), None);
+        // The subject must be the person who asked.
+        assert_eq!(
+            origin_token_author_user(&person, true, Uuid::new_v4()),
+            None
+        );
+
+        // A job token authenticates as its run's user (user_id is set), but
+        // agent work keeps the runtime's identity.
+        let job = RequestContext {
+            user_id: Some(user),
+            is_service_role: false,
+            scoped_claims: Some(AccessTokenClaims {
+                aud: Uuid::new_v4().to_string(),
+                sub: user.to_string(),
+                project_id: Uuid::new_v4().to_string(),
+                origin_id: None,
+                runtime_id: Some(Uuid::new_v4().to_string()),
+                protocol: None,
+                scopes: vec![JOB_ORIGIN_TOKEN_MINT_SCOPE.to_string()],
+                lease_id: None,
+                runtime_generation: None,
+                run_id: Some(Uuid::new_v4().to_string()),
+                iat: 0,
+                exp: i64::MAX,
+                jti: Uuid::new_v4().to_string(),
+                prefer_runtime: None,
+                actor_label: None,
+                browser_session_id: None,
+            }),
+        };
+        assert_eq!(origin_token_author_user(&job, true, user), None);
+
+        // Service role: the subject may be a lease holder or the service
+        // runtime user (configured, stale or recovered); never an author.
+        for user_id in [None, Some(user)] {
+            let service = RequestContext {
+                user_id,
+                is_service_role: true,
+                scoped_claims: None,
+            };
+            assert_eq!(origin_token_author_user(&service, true, user), None);
+        }
+    }
+
+    #[test]
     fn browser_access_tokens_cannot_request_the_import_scope() {
         // Only the controller's own import mints `workspace.import`; an
         // origin honours idempotency keys and the baseRev exemption for it.
@@ -6953,6 +7008,22 @@ async fn load_browser_actor_label(
     Ok(label)
 }
 
+/// Whom a workspace-write origin token names as its author: only a person
+/// who made this request with their own session and is the token's subject.
+/// Job and agent tokens (scoped claims) keep the runtime's own identity.
+/// Service-role calls, whose subject can be a lease holder, the service
+/// runtime user or one recovered by address, are attributed to nobody.
+fn origin_token_author_user(
+    context: &RequestContext,
+    write_scope: bool,
+    subject_user: Uuid,
+) -> Option<Uuid> {
+    if !write_scope || context.scoped_claims.is_some() || context.is_service_role {
+        return None;
+    }
+    context.user_id.filter(|user| *user == subject_user)
+}
+
 fn is_supported_origin_access_scope(scope: &str) -> bool {
     matches!(
         scope,
@@ -7837,19 +7908,17 @@ pub(crate) async fn post_access_token(
     } else {
         None
     };
-    // Saves made with a person's workspace-write token are authored by that
-    // person's pseudonym in this space. Job tokens keep the runtime's own
-    // identity, and the service runtime user is not a person.
-    let author = if job_capability.is_none() && lease_required {
-        crate::author_identity::author_claims_for_user(
-            &state.config,
-            &state.pool,
-            &project_id,
-            &subject_user,
-        )
-        .await
-    } else {
-        None
+    let author = match origin_token_author_user(&context, lease_required, subject_user) {
+        Some(author_user) => {
+            crate::author_identity::author_claims_for_user(
+                &state.config,
+                &state.pool,
+                &project_id,
+                &author_user,
+            )
+            .await
+        }
+        None => None,
     };
 
     let scoped_token = mint_scoped_token_with_browser_actor(
