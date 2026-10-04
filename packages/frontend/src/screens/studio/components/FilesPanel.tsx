@@ -58,9 +58,25 @@ import {
 } from "./useFilesPanelViewerState";
 import { resolveViewerStateWithoutActiveFile } from "./filesPanelViewerSync";
 import { FilesExplorerTree } from "./FilesExplorerTree";
-import { type DirectoryEntries, useFilesPanelWorkspaceTree } from "./useFilesPanelWorkspaceTree";
+import {
+  type DirectoryEntries,
+  type FilesTreeVersionedOptions,
+  useFilesPanelWorkspaceTree,
+} from "./useFilesPanelWorkspaceTree";
 import type { FilesPanelMobileView } from "../../studioFilesMobileView";
 import { getStudioWorkspaceOwnerKey, type StudioDirectoryListingListener } from "../useStudioKnownFiles";
+import { useWorkspaceVersioning } from "../../../workspace/useWorkspaceVersioning";
+import {
+  createOwnRevisions,
+  isFileBufferDirty,
+  isVersionedFilesMode,
+  mergeNewFileBuffers,
+  type FilesVersioning,
+  type OwnRevisions,
+} from "./filesVersioning";
+import type { FilesCreateVersionedOptions } from "./useFilesPanelCreateEntries";
+import { useFilesPanelSave } from "./useFilesPanelSave";
+import { SAVE_COPY, type SaveCopy } from "./workspaceSaveCopy";
 
 const ignoreEmbeddedNavigation = () => {};
 
@@ -149,6 +165,8 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 const EMPTY_DIRECTORY_PLACEHOLDER = ".instafy.keep";
+const SAVE_SHORTCUT_LABEL =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform ?? "") ? "⌘S" : "Ctrl+S";
 const INSTAFY_ROOT_ENTRY_NAMES = new Set([".agents", ".instafy", "AGENTS.md", "AGENTS.py", "INSTAFY.md"]);
 
 function normalizePath(path: string): string {
@@ -468,6 +486,22 @@ export function FilesPanel({
   const { activeProjectId, projectCapabilitiesResolved, canWriteProject } = useProject();
   const projectWriteDisabled =
     projectCapabilitiesResolved === false || canWriteProject === false;
+  // How the default origin keeps versions. Legacy (the stateful gateway, or
+  // unknown) keeps today's two saves and routing; the stateless gateway and
+  // Desktop origins get one Save pinned to that origin.
+  const versioningState = useWorkspaceVersioning({ projectId: activeProjectId, origin: desktopOrigin });
+  const filesVersioning = useMemo<FilesVersioning>(
+    () => ({ mode: versioningState.mode, originId: versioningState.originId }),
+    [versioningState.mode, versioningState.originId],
+  );
+  const versioned = isVersionedFilesMode(filesVersioning);
+  const originAvailable =
+    Boolean(desktopOrigin?.endpoint) && desktopOrigin?.presence?.status !== "offline";
+  const ownRevisionsRef = useRef<OwnRevisions | null>(null);
+  if (!ownRevisionsRef.current) {
+    ownRevisionsRef.current = createOwnRevisions();
+  }
+  const ownRevisions = ownRevisionsRef.current;
   const { openFileTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
   const isLargeScreen = useStudioDesktopLayout();
   const touchExplorer = useTouchLikeInput() && !isLargeScreen;
@@ -741,12 +775,78 @@ export function FilesPanel({
   const dirtyFileIds = useMemo(() => {
     const ids = new Set<string>();
     workspace.files.forEach((file) => {
-      if (file.modified !== file.generated) {
+      if (isFileBufferDirty(file)) {
         ids.add(file.id);
       }
     });
     return ids;
   }, [workspace.files]);
+  const workspaceFilesRef = useRef(workspace.files);
+  workspaceFilesRef.current = workspace.files;
+  const activeFileRef = useRef(activeFile);
+  activeFileRef.current = activeFile;
+  // Writes need a ready runtime in legacy mode; in the versioned modes they
+  // go to the default origin, so they need that origin and write access.
+  const writeReady = versioned ? originAvailable : runtimeReady;
+
+  const presentWriteFailure = useCallback(
+    (copy: SaveCopy, retry: () => void) => {
+      const action = copy.action;
+      const onAction =
+        action?.kind === "resolve"
+          ? () => {
+              requestUrlPush();
+              openPanelTab("chat", { activate: true });
+            }
+          : action?.kind === "open_secrets"
+            ? () => {
+                requestUrlPush();
+                openPanelTab("secrets", { activate: true });
+              }
+            : action?.kind === "retry"
+              ? retry
+              : null;
+      showStatus(
+        copy.message,
+        "error",
+        8000,
+        action && onAction ? { actionLabel: action.label, onAction } : undefined,
+      );
+    },
+    [openPanelTab, requestUrlPush, showStatus],
+  );
+
+  const discardBuffers = useCallback(
+    (path: string) => {
+      const prefix = `${path}/`;
+      updateWorkspace(
+        (current) => {
+          const files = current.files.filter((file) => file.path !== path && !file.path.startsWith(prefix));
+          if (files.length === current.files.length) {
+            return current;
+          }
+          const activeKept = files.some((file) => file.id === current.activeFileId);
+          return { ...current, files, activeFileId: activeKept ? current.activeFileId : null };
+        },
+        { recordHistory: false },
+      );
+    },
+    [updateWorkspace],
+  );
+
+  const treeVersionedOptions = useMemo<FilesTreeVersionedOptions | null>(
+    () =>
+      versioned
+        ? {
+            ownRevisions,
+            getBuffer: (path) => workspaceFilesRef.current.find((file) => file.id === path) ?? null,
+            discardBuffers,
+            writeReady: !projectWriteDisabled && originAvailable,
+            onWriteFailure: presentWriteFailure,
+          }
+        : null,
+    [discardBuffers, originAvailable, ownRevisions, presentWriteFailure, projectWriteDisabled, versioned],
+  );
   const dirtyFileIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     dirtyFileIdsRef.current = dirtyFileIds;
@@ -783,6 +883,8 @@ export function FilesPanel({
     renderDirectoryStatus,
     getDirectoryLoadingLabel,
     resolveCreateEntryParentPath,
+    directoryRevsRef,
+    keepFoldersRef,
   } = useFilesPanelWorkspaceTree({
     activeFilePath,
     activeFileDraftRef,
@@ -812,12 +914,16 @@ export function FilesPanel({
     workspaceOwnerKey,
     onDirectoryEntriesLoaded,
     readOnly: projectWriteDisabled,
+    versioning: filesVersioning,
+    versionedOptions: treeVersionedOptions,
   });
 
   const refreshActiveFileVersionStatus = useCallback(
     async (path: string | null) => {
       const normalizedPath = normalizePath(path ?? "");
-      if (!activeProjectId || !runtimeReady || !normalizedPath) {
+      // The per-file "has version changes" flag belongs to Save version; the
+      // versioned modes save every edit as a version and never ask for it.
+      if (versioned || !activeProjectId || !runtimeReady || !normalizedPath) {
         setActiveFileHasVersionChanges(null);
         return;
       }
@@ -841,7 +947,7 @@ export function FilesPanel({
         status.dirtyPaths.some((entry) => normalizePath(entry.path) === normalizedPath),
       );
     },
-    [activeProjectId, effectiveRuntimeId, runtimeReady],
+    [activeProjectId, effectiveRuntimeId, runtimeReady, versioned],
   );
 
   useEffect(() => {
@@ -1099,6 +1205,7 @@ export function FilesPanel({
     updateWorkspace,
     workspaceFiles: workspace.files,
     activeFilePathRef,
+    versioning: filesVersioning,
   });
 
   const embeddedOpenRef = useRef(openFileFromEvent);
@@ -1168,6 +1275,59 @@ export function FilesPanel({
     workspace.files.length,
   ]);
 
+  const createVersionedOptions = useMemo<FilesCreateVersionedOptions | null>(
+    () =>
+      versioned
+        ? {
+            ownRevisions,
+            directoryRevsRef,
+            directoryEntriesRef,
+            keepFoldersRef,
+            hasBuffer: (path) => workspaceFilesRef.current.some((file) => file.id === path),
+            createBuffer: (path) => {
+              const label = path.split("/").pop() ?? path;
+              updateWorkspace(
+                (current) =>
+                  current.files.some((file) => file.id === path)
+                    ? current
+                    : {
+                        ...current,
+                        files: [
+                          ...current.files,
+                          {
+                            id: path,
+                            path,
+                            label,
+                            directory: getParentPath(path),
+                            kind: "file",
+                            mimeType: null,
+                            size: 0,
+                            modifiedAt: null,
+                            generated: "",
+                            modified: "",
+                            isNew: true,
+                            originId: filesVersioning.originId,
+                          },
+                        ],
+                      },
+                { recordHistory: false },
+              );
+            },
+            onWriteFailure: presentWriteFailure,
+          }
+        : null,
+    [
+      directoryEntriesRef,
+      directoryRevsRef,
+      filesVersioning.originId,
+      keepFoldersRef,
+      ownRevisions,
+      presentWriteFailure,
+      updateWorkspace,
+      versioned,
+    ],
+  );
+
   const {
     createFileState,
     createFileInputRef,
@@ -1205,6 +1365,8 @@ export function FilesPanel({
     setMobileView,
     clearExplorerMenu: () => setExplorerMenu(null),
     readOnly: projectWriteDisabled,
+    versioning: filesVersioning,
+    versionedOptions: createVersionedOptions,
   });
 
   const handleSelectMarkdownSection = useCallback(
@@ -1357,12 +1519,34 @@ export function FilesPanel({
     updateWorkspace,
   ]);
 
+  // A buffer read from another origin (a Desktop folder that is offline now)
+  // is never written through legacy routing, which would send it elsewhere.
+  const legacySaveBlockedByOrigin = useCallback(() => {
+    const bufferOrigin = activeFile?.originId ?? null;
+    if (!bufferOrigin || bufferOrigin === filesVersioning.originId) {
+      return false;
+    }
+    showStatus(SAVE_COPY.desktopUnreachable, "error", 6500);
+    return true;
+  }, [activeFile?.originId, filesVersioning.originId, showStatus]);
+
+  // Every legacy save asks the probe to look again: the gateway may have
+  // switched to saving every edit as a version.
+  const noteLegacySave = useCallback(() => {
+    if (filesVersioning.originId) {
+      controllerClient.workspace.versioning.noteSignal(filesVersioning.originId, "legacy_saved");
+    }
+  }, [filesVersioning.originId]);
+
   const handleSaveDraft = useCallback(async () => {
     if (!activeProjectId || !activeFile || projectWriteDisabled) {
       return;
     }
     const pendingContent = getPendingActiveFileContent() ?? activeFile.modified;
     if (saveMode || pendingContent === activeFile.generated) {
+      return;
+    }
+    if (legacySaveBlockedByOrigin()) {
       return;
     }
     setSaveMode("draft");
@@ -1375,11 +1559,14 @@ export function FilesPanel({
       showStatus(message, "error", 4500);
     } finally {
       setSaveMode(null);
+      noteLegacySave();
     }
   }, [
     activeFile,
     activeProjectId,
     getPendingActiveFileContent,
+    legacySaveBlockedByOrigin,
+    noteLegacySave,
     refreshActiveFileVersionStatus,
     projectWriteDisabled,
     saveMode,
@@ -1397,6 +1584,9 @@ export function FilesPanel({
     const pendingContent = getPendingActiveFileContent() ?? activeFile.modified;
     const hasUnsavedEdits = pendingContent !== activeFile.generated;
     if (!hasUnsavedEdits && activeFileHasVersionChanges === false) {
+      return;
+    }
+    if (legacySaveBlockedByOrigin()) {
       return;
     }
     setSaveMode("version");
@@ -1458,6 +1648,7 @@ export function FilesPanel({
       showStatus(message, "error", 4500);
     } finally {
       setSaveMode(null);
+      noteLegacySave();
     }
   }, [
     activeFile,
@@ -1465,6 +1656,8 @@ export function FilesPanel({
     activeFileHasVersionChanges,
     effectiveRuntimeId,
     getPendingActiveFileContent,
+    legacySaveBlockedByOrigin,
+    noteLegacySave,
     openChanges,
     projectWriteDisabled,
     saveMode,
@@ -1472,8 +1665,41 @@ export function FilesPanel({
     writeActiveFileToWorkspace
   ]);
 
-  saveDraftShortcutHandlerRef.current = handleSaveDraft;
-  saveVersionShortcutHandlerRef.current = handleSaveVersion;
+  const { save: handleSave, saving: versionedSaving } = useFilesPanelSave({
+    enabled: versioned,
+    versioning: filesVersioning,
+    activeProjectId,
+    readOnly: projectWriteDisabled,
+    originAvailable,
+    getActiveFile: () => activeFileRef.current,
+    getPendingContent: (file) =>
+      file.id === activeFileRef.current?.id ? getPendingActiveFileContent() ?? file.modified : file.modified,
+    updateWorkspace,
+    directoryRevsRef,
+    keepFoldersRef,
+    loadDirectory,
+    setDirectoryEntries,
+    ownRevisions,
+    presentFailure: presentWriteFailure,
+  });
+  const saveButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    // React Aria buttons drop aria-busy, so it is set on the element.
+    const button = saveButtonRef.current;
+    if (!button) {
+      return;
+    }
+    if (versionedSaving) {
+      button.setAttribute("aria-busy", "true");
+    } else {
+      button.removeAttribute("aria-busy");
+    }
+  }, [versionedSaving]);
+
+  // Cmd/Ctrl+S and Shift+Cmd/Ctrl+S: the two legacy saves, or the one Save
+  // for both in the versioned modes (the browser's save dialog never opens).
+  saveDraftShortcutHandlerRef.current = versioned ? handleSave : handleSaveDraft;
+  saveVersionShortcutHandlerRef.current = versioned ? handleSave : handleSaveVersion;
 
   const handleChangeActiveFile = useCallback(
     (value: string | undefined) => {
@@ -1499,6 +1725,11 @@ export function FilesPanel({
   }, [normalizedRootPath]);
 
   const normalizedSearch = searchTerm.trim().toLowerCase();
+  // Never-saved files keep their explorer row until their first Save.
+  const explorerEntries = useMemo(
+    () => (versioned ? mergeNewFileBuffers(directoryEntries, workspace.files, sortEntries) : directoryEntries),
+    [directoryEntries, versioned, workspace.files],
+  );
 
   const searchResults = useMemo(() => {
     if (!normalizedSearch) {
@@ -1511,7 +1742,7 @@ export function FilesPanel({
         return;
       }
       visited.add(path);
-      const entries = directoryEntries[path];
+      const entries = explorerEntries[path];
       if (!entries) {
         return;
       }
@@ -1527,13 +1758,13 @@ export function FilesPanel({
     };
     traverse(normalizedRootPath);
     return results;
-  }, [directoryEntries, normalizedRootPath, normalizedSearch]);
+  }, [explorerEntries, normalizedRootPath, normalizedSearch]);
 
   const activePath = viewerState.entry?.path ?? activeFile?.path ?? null;
 
   const rootDirectoryStatus = directoryStatus[normalizedRootPath];
   const showRootDirectoryErrorCard = workspaceBrowseReady && rootDirectoryStatus === "error";
-  const rootEntries = directoryEntries[normalizedRootPath] ?? [];
+  const rootEntries = explorerEntries[normalizedRootPath] ?? [];
   const rootLoadingLabel = getDirectoryLoadingLabel(normalizedRootPath);
   const showCenteredRootLoading =
     !showRootDirectoryErrorCard &&
@@ -1621,7 +1852,7 @@ export function FilesPanel({
               title="New file"
               data-testid="files-explorer-new-file"
               onPress={() => void handleStartCreateFile(resolveCreateEntryParentPath())}
-              isDisabled={projectWriteDisabled || !runtimeReady || createFileState?.busy === true || createFolderState?.busy === true}
+              isDisabled={projectWriteDisabled || !writeReady || createFileState?.busy === true || createFolderState?.busy === true}
               className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <PagePlus className="h-4 w-4" aria-hidden="true" />
@@ -1831,7 +2062,7 @@ export function FilesPanel({
         ) : (
             <FilesExplorerTree
               rootPath={normalizedRootPath}
-              entriesMap={directoryEntries}
+              entriesMap={explorerEntries}
               expandedDirectories={expandedDirectories}
               expandedMarkdownPaths={expandedMarkdownPaths}
               markdownOutlines={markdownOutlines}
@@ -1896,7 +2127,7 @@ export function FilesPanel({
                     setExplorerMenu(null);
                     void handleStartCreateFile(explorerMenu.targetPath);
                   }}
-                  isDisabled={projectWriteDisabled || !runtimeReady || createFileState?.busy === true || createFolderState?.busy === true}
+                  isDisabled={projectWriteDisabled || !writeReady || createFileState?.busy === true || createFolderState?.busy === true}
                   data-testid="files-explorer-menu-new-file"
                 >
                   <PagePlus className="h-4 w-4" aria-hidden="true" />
@@ -1912,7 +2143,7 @@ export function FilesPanel({
                     setExplorerMenu(null);
                     void handleStartCreateFolder(explorerMenu.targetPath);
                   }}
-                  isDisabled={projectWriteDisabled || !runtimeReady || createFileState?.busy === true || createFolderState?.busy === true}
+                  isDisabled={projectWriteDisabled || !writeReady || createFileState?.busy === true || createFolderState?.busy === true}
                   data-testid="files-explorer-menu-new-folder"
                 >
                   <FolderPlus className="h-4 w-4" aria-hidden="true" />
@@ -1966,7 +2197,7 @@ export function FilesPanel({
                           void handleDeleteExplorerEntry(deleteTarget);
                         }
                       }}
-                      isDisabled={projectWriteDisabled || !runtimeReady}
+                      isDisabled={projectWriteDisabled || !writeReady}
                       data-testid="files-explorer-menu-delete"
                     >
                       <Trash className="h-4 w-4" aria-hidden="true" />
@@ -2105,43 +2336,65 @@ export function FilesPanel({
                   </IconButton>
                 )
               ) : null}
-              <IconButton
-                onPress={handleSaveDraft}
-                isDisabled={projectWriteDisabled || activeFile.modified === activeFile.generated}
-                variant="outline"
-                size="sm"
-                radius="full"
-                data-testid="code-save-draft-button"
-                aria-label={saveMode === "draft" ? "Saving draft" : "Save draft"}
-                title={saveMode === "draft" ? "Saving draft…" : "Save draft"}
-                className={saveMode === "draft" ? "pointer-events-none opacity-80" : undefined}
-              >
-                {saveMode === "draft" ? (
-                  <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
-                ) : (
-                  <FloppyDisk className="h-4 w-4" aria-hidden="true" />
-                )}
-              </IconButton>
-              <IconButton
-                onPress={handleSaveVersion}
-                isDisabled={
-                  projectWriteDisabled ||
-                  (activeFile.modified === activeFile.generated && activeFileHasVersionChanges === false)
-                }
-                variant="primary"
-                size="sm"
-                radius="full"
-                data-testid="code-save-button"
-                aria-label={saveMode === "version" ? "Saving version" : "Save version"}
-                title={saveMode === "version" ? "Saving version…" : "Save version"}
-                className={saveMode === "version" ? "pointer-events-none opacity-90" : undefined}
-              >
-                {saveMode === "version" ? (
-                  <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
-                ) : (
-                  <CloudUpload className="h-4 w-4" aria-hidden="true" />
-                )}
-              </IconButton>
+              {versioned ? (
+                <IconButton
+                  ref={saveButtonRef}
+                  onPress={() => void handleSave()}
+                  isDisabled={projectWriteDisabled || !originAvailable || !isFileBufferDirty(activeFile)}
+                  variant="primary"
+                  size="sm"
+                  radius="full"
+                  data-testid="code-save-button"
+                  aria-label={versionedSaving ? "Saving" : "Save"}
+                  title={`Save (${SAVE_SHORTCUT_LABEL})`}
+                >
+                  {versionedSaving ? (
+                    <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <CloudUpload className="h-4 w-4" aria-hidden="true" />
+                  )}
+                </IconButton>
+              ) : (
+                <>
+                  <IconButton
+                    onPress={handleSaveDraft}
+                    isDisabled={projectWriteDisabled || activeFile.modified === activeFile.generated}
+                    variant="outline"
+                    size="sm"
+                    radius="full"
+                    data-testid="code-save-draft-button"
+                    aria-label={saveMode === "draft" ? "Saving draft" : "Save draft"}
+                    title={saveMode === "draft" ? "Saving draft…" : "Save draft"}
+                    className={saveMode === "draft" ? "pointer-events-none opacity-80" : undefined}
+                  >
+                    {saveMode === "draft" ? (
+                      <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <FloppyDisk className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </IconButton>
+                  <IconButton
+                    onPress={handleSaveVersion}
+                    isDisabled={
+                      projectWriteDisabled ||
+                      (activeFile.modified === activeFile.generated && activeFileHasVersionChanges === false)
+                    }
+                    variant="primary"
+                    size="sm"
+                    radius="full"
+                    data-testid="code-save-button"
+                    aria-label={saveMode === "version" ? "Saving version" : "Save version"}
+                    title={saveMode === "version" ? "Saving version…" : "Save version"}
+                    className={saveMode === "version" ? "pointer-events-none opacity-90" : undefined}
+                  >
+                    {saveMode === "version" ? (
+                      <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <CloudUpload className="h-4 w-4" aria-hidden="true" />
+                    )}
+                  </IconButton>
+                </>
+              )}
             </div>
           ) : (
             <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2">
@@ -2158,14 +2411,18 @@ export function FilesPanel({
       fileViewerReturnTarget,
       handleOpenChat,
       handleMobileViewerBack,
+      handleSave,
       handleSaveDraft,
       handleSaveVersion,
       isLargeScreen,
       mobileView,
+      originAvailable,
       projectWriteDisabled,
       showExplorerInline,
       activeFileHasVersionChanges,
       saveMode,
+      versioned,
+      versionedSaving,
       viewerState,
       markdownView,
       setMarkdownView
