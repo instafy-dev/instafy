@@ -60,7 +60,13 @@ vi.mock("../../../../sdk/instafy", () => ({
 }));
 
 import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
-import { HISTORY_COMMIT_DEBOUNCE_MS, HISTORY_FOCUS_REFRESH_MS, HistoryDrawer } from "../HistoryDrawer";
+import {
+  HISTORY_BUSY_RETRIES,
+  HISTORY_BUSY_RETRY_MS,
+  HISTORY_COMMIT_DEBOUNCE_MS,
+  HISTORY_FOCUS_REFRESH_MS,
+  HistoryDrawer,
+} from "../HistoryDrawer";
 
 function hex(seed: number): string {
   return seed.toString(16).padStart(40, "0");
@@ -244,6 +250,61 @@ describe("HistoryDrawer", () => {
     await flush();
     expect(container.querySelectorAll('[data-testid="source-control-history-entry"]')).toHaveLength(22);
     expect(q(container, "history-show-more")).toBeNull();
+  });
+
+  describe("a busy origin", () => {
+    const busyPage = () => page([], { busy: true });
+
+    it("is not an empty history: it says it is checking and asks again", async () => {
+      vi.useFakeTimers();
+      mocks.fetchHistory.mockResolvedValueOnce(busyPage()).mockResolvedValue(page([historyEntry(1)]));
+      await render(desktop());
+      expect(q(container, "history-empty")).toBeNull();
+      expect(q(container, "history-busy")?.textContent).toBe("Checking saved versions…");
+      expect(mocks.fetchHistory).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        vi.advanceTimersByTime(HISTORY_BUSY_RETRY_MS);
+      });
+      await flush();
+      expect(mocks.fetchHistory).toHaveBeenCalledTimes(2);
+      expect(container.querySelectorAll('[data-testid="source-control-history-entry"]')).toHaveLength(1);
+      expect(q(container, "history-busy")).toBeNull();
+    });
+
+    it("stops after a few tries and points at Refresh", async () => {
+      vi.useFakeTimers();
+      mocks.fetchHistory.mockResolvedValue(busyPage());
+      await render(desktop());
+      for (let i = 0; i < HISTORY_BUSY_RETRIES; i += 1) {
+        await act(async () => {
+          vi.advanceTimersByTime(HISTORY_BUSY_RETRY_MS);
+        });
+        await flush();
+      }
+      expect(mocks.fetchHistory).toHaveBeenCalledTimes(HISTORY_BUSY_RETRIES + 1);
+      expect(q(container, "history-error")?.textContent).toBe("The space is busy saving changes. Try Refresh in a moment.");
+      expect(q(container, "history-empty")).toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+      });
+      await flush();
+      expect(mocks.fetchHistory).toHaveBeenCalledTimes(HISTORY_BUSY_RETRIES + 1);
+      expect(q<HTMLButtonElement>(container, "source-control-refresh")?.disabled).toBe(false);
+    });
+
+    it("keeps Show more when a later page answers busy", async () => {
+      const first = Array.from({ length: 20 }, (_, index) => historyEntry(index + 1));
+      mocks.fetchHistory.mockResolvedValueOnce(page(first, { hasMore: true }));
+      await render();
+      mocks.fetchHistory.mockResolvedValueOnce(busyPage());
+      await act(async () => q<HTMLButtonElement>(container, "history-show-more")?.click());
+      await flush();
+      expect(q(container, "history-show-more")).not.toBeNull();
+      expect(container.querySelectorAll('[data-testid="source-control-history-entry"]')).toHaveLength(20);
+      expect(q(container, "history-status")?.textContent).toBe(
+        "The space is busy saving changes. Try Show more again in a moment.",
+      );
+    });
   });
 
   it("shows no Show more for a short page (a Desktop origin capped at 12)", async () => {

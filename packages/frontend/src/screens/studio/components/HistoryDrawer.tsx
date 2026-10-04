@@ -32,14 +32,21 @@ import { formatRelativeCommitTime, parseSavedVersionSubject } from "./workspaceG
 export const HISTORY_PAGE_SIZE = 20;
 export const HISTORY_COMMIT_DEBOUNCE_MS = 750;
 export const HISTORY_FOCUS_REFRESH_MS = 60_000;
+/** A busy origin (an apply or sync holds its lock) is asked again this often, a few times. */
+export const HISTORY_BUSY_RETRY_MS = 1_500;
+export const HISTORY_BUSY_RETRIES = 3;
 const LEASE_RETRY_DELAY_MS = 1_500;
 const WORKSPACE_COMMIT_EVENT = "instafy:workspace-commit";
 
 const HISTORY_LOAD_ERROR_COPY = "Couldn't load saved versions. Try Refresh.";
 const HISTORY_MORE_ERROR_COPY = "Couldn't load more saved versions. Try again.";
+const HISTORY_BUSY_COPY = "Checking saved versions…";
+const HISTORY_BUSY_ERROR_COPY = "The space is busy saving changes. Try Refresh in a moment.";
+const HISTORY_MORE_BUSY_COPY = "The space is busy saving changes. Try Show more again in a moment.";
 
 type HistoryListState = {
-  status: "idle" | "loading" | "ok" | "error";
+  /** `busy`: the origin answered busy before any version was shown; retrying. */
+  status: "idle" | "loading" | "busy" | "ok" | "error";
   entries: WorkspaceGitHistoryEntry[];
   hasMore: boolean;
   error: string | null;
@@ -93,15 +100,24 @@ export function HistoryDrawer({
   const [statusRefreshKey, setStatusRefreshKey] = useState(0);
   const historySeqRef = useRef(0);
   const lastHistoryLoadRef = useRef(0);
+  const busyRetryRef = useRef<number | null>(null);
   const focusCommitRef = useRef<string | null>(null);
   const rowButtonsRef = useRef(new Map<string, HTMLButtonElement>());
 
+  const cancelBusyRetry = useCallback(() => {
+    if (busyRetryRef.current !== null) {
+      window.clearTimeout(busyRetryRef.current);
+      busyRetryRef.current = null;
+    }
+  }, []);
+
   /** Load the first page; resolves to the newest saved version (`main`). */
   const loadHistory = useCallback(
-    async (options?: { silent?: boolean }): Promise<string | null> => {
+    async (options?: { silent?: boolean; busyAttempt?: number }): Promise<string | null> => {
       if (!ready || !projectId || !originId) {
         return null;
       }
+      cancelBusyRetry();
       const seq = ++historySeqRef.current;
       if (!options?.silent) {
         setHistory((previous) => ({ ...previous, status: previous.entries.length > 0 ? previous.status : "loading" }));
@@ -118,7 +134,21 @@ export function HistoryDrawer({
         return null;
       }
       if (page.busy) {
-        setHistory((previous) => ({ ...previous, status: previous.status === "loading" ? "ok" : previous.status }));
+        // Busy is not empty: keep what is shown (or a busy frame) and ask again.
+        const attempt = options?.busyAttempt ?? 0;
+        if (attempt < HISTORY_BUSY_RETRIES) {
+          setHistory((previous) =>
+            previous.entries.length > 0 ? previous : { ...previous, status: "busy", error: null },
+          );
+          busyRetryRef.current = window.setTimeout(() => {
+            busyRetryRef.current = null;
+            void loadHistoryRef.current({ silent: true, busyAttempt: attempt + 1 });
+          }, HISTORY_BUSY_RETRY_MS);
+        } else {
+          setHistory((previous) =>
+            previous.entries.length > 0 ? previous : { ...previous, status: "error", error: HISTORY_BUSY_ERROR_COPY },
+          );
+        }
         return null;
       }
       if (!page.supported) {
@@ -142,7 +172,7 @@ export function HistoryDrawer({
       });
       return page.entries[0]?.commit ?? null;
     },
-    [originId, projectId, ready],
+    [cancelBusyRetry, originId, projectId, ready],
   );
 
   const loadHistoryRef = useRef(loadHistory);
@@ -151,6 +181,7 @@ export function HistoryDrawer({
   // Opening (or a new project or origin): one load, no timer.
   useEffect(() => {
     historySeqRef.current += 1;
+    cancelBusyRetry();
     setHistory(EMPTY_HISTORY);
     setExpanded(new Set());
     setNotice(null);
@@ -159,7 +190,9 @@ export function HistoryDrawer({
     }
     // The Desktop line checks its own count when it mounts.
     void loadHistoryRef.current();
-  }, [originId, projectId, ready]);
+  }, [cancelBusyRetry, originId, projectId, ready]);
+
+  useEffect(() => cancelBusyRetry, [cancelBusyRetry]);
 
   // A saved version landed somewhere: reload the list once the burst settles.
   useEffect(() => {
@@ -223,6 +256,11 @@ export function HistoryDrawer({
       .catch(() => null);
     setLoadingMore(false);
     if (seq !== historySeqRef.current) {
+      return;
+    }
+    if (page?.busy) {
+      // Older versions are still there: keep Show more and say why nothing came.
+      setNotice({ tone: "info", text: HISTORY_MORE_BUSY_COPY });
       return;
     }
     if (!page || page.error || !page.supported) {
@@ -469,6 +507,10 @@ export function HistoryDrawer({
               {history.status === "loading" && entries.length === 0 ? (
                 <Text tone="muted" className="px-1 py-3">
                   Loading saved versions…
+                </Text>
+              ) : history.status === "busy" && entries.length === 0 ? (
+                <Text tone="muted" className="px-1 py-3" data-testid="history-busy">
+                  {HISTORY_BUSY_COPY}
                 </Text>
               ) : entries.length === 0 && history.status === "ok" ? (
                 <Text tone="muted" className="px-1 py-3" data-testid="history-empty">
