@@ -168,6 +168,28 @@ impl OriginHttpServer {
             }
         }
 
+        if !self.config.multi_tenant
+            && crate::git::instafy_git_dir(&self.config.workspace_root).is_dir()
+        {
+            // Fetch namespaces a call that died left behind keep recovery
+            // commits reachable for good; remove the stale ones.
+            let root = self.config.workspace_root.clone();
+            let swept = tokio::task::spawn_blocking(move || {
+                crate::recovery_view::sweep_stale_fetches(&crate::workspace_git::WorkspaceGit::new(
+                    &root, None,
+                ))
+            })
+            .await;
+            match swept {
+                Ok(Ok(0)) => {}
+                Ok(Ok(removed)) => {
+                    info!(removed, "removed refs left by interrupted recovery fetches")
+                }
+                Ok(Err(error)) => warn!(%error, "could not sweep interrupted recovery fetches"),
+                Err(error) => warn!(%error, "recovery fetch sweep task failed"),
+            }
+        }
+
         let token_validator =
             TokenValidator::new(self.http_client.clone(), self.config.jwks_url.clone());
 

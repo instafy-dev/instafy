@@ -1250,6 +1250,32 @@ async fn n14_desktop_saves_keep_their_author_and_are_never_flushed() {
     );
 }
 
+/// Starting the origin removes fetch namespaces that a recovery read which
+/// died left in the checkout, and keeps a recent one a running call may own.
+#[tokio::test(flavor = "multi_thread")]
+async fn starting_removes_stale_recovery_fetch_refs() {
+    let sc = Scenario::new(Options::default());
+    let head = ig(&sc.ws, &["rev-parse", "HEAD"]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let stale = "refs/instafy/fetched/1000-0123456789abcdef0123456789abcdef/0".to_string();
+    let live = format!("refs/instafy/fetched/{now}-fedcba9876543210fedcba9876543210/0");
+    for name in [&stale, &live] {
+        ig(&sc.ws, &["update-ref", name, &head]);
+    }
+    let mut server = crate::server::OriginHttpServer::new(sc.config.clone()).unwrap();
+    server.start().await.unwrap();
+    let left: Vec<String> = sc
+        .local_refs("refs/instafy/fetched/")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    server.stop().await.unwrap();
+    assert_eq!(left, vec![live]);
+}
+
 /// 14b: a hosted stop without a write credential parks unsaved work locally.
 #[tokio::test]
 async fn n14b_hosted_shutdown_parks_unsaved_work_locally() {

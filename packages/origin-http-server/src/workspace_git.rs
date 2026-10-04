@@ -345,6 +345,17 @@ impl<'a> WorkspaceGit<'a> {
                 command.env("GIT_HTTP_LOW_SPEED_TIME", seconds.to_string());
             }
         }
+        if args.first() == Some(&"fetch") {
+            // Keep every fetched pack instead of unpacking small ones into
+            // loose objects, which git writes commit first: a fetch stopped
+            // partway could then leave a commit without its tree. A pack is
+            // invisible until its index is in place.
+            command
+                .arg("-c")
+                .arg("fetch.unpackLimit=1")
+                .arg("-c")
+                .arg("transfer.unpackLimit=1");
+        }
         if let Some(index) = opts.index_file {
             command.env("GIT_INDEX_FILE", index);
         }
