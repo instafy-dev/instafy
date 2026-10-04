@@ -19,7 +19,7 @@ vi.mock("../../../../workspace/useActiveWorkspaceVersioning", () => ({
   useActiveWorkspaceVersioning: () => mocks.versioning,
 }));
 
-import { markUnsavedWorkSeen } from "../../../../workspace/unsavedWorkSeen";
+import { markUnsavedWorkSeen, resetUnsavedWorkSeenForTests } from "../../../../workspace/unsavedWorkSeen";
 import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
 import { useUnsavedWorkNotice, type UnsavedWorkNotice } from "../useUnsavedWorkNotice";
 
@@ -74,6 +74,7 @@ describe("useUnsavedWorkNotice", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     resetUnsavedWorkStoreForTests();
+    resetUnsavedWorkSeenForTests();
     window.localStorage.clear();
     mocks.versioning = { projectId: "project-1", originId: "origin-1", historyReady: true };
     mocks.fetchRecovery.mockReset();
@@ -121,6 +122,27 @@ describe("useUnsavedWorkNotice", () => {
     // Another viewer on this browser has not seen it.
     await render("user-2");
     expect(notice?.count).toBe(2);
+  });
+
+  it("still hides for this session when the browser refuses to store what was seen", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("The operation is insecure.", "SecurityError");
+    });
+    try {
+      await render();
+      expect(notice?.count).toBe(2);
+      await act(async () => notice?.onDismiss());
+      expect(notice).toBeNull();
+      expect(window.localStorage.getItem("instafy.unsavedWork.seen.project-1.user-1")).toBeNull();
+
+      // Open History retires the row the same way.
+      await render("user-2");
+      expect(notice?.count).toBe(2);
+      await act(async () => notice?.onOpenHistory());
+      expect(notice).toBeNull();
+    } finally {
+      setItem.mockRestore();
+    }
   });
 
   it("Open History marks the entries seen and opens the drawer", async () => {

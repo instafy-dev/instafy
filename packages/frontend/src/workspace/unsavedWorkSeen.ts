@@ -66,20 +66,46 @@ function trimSeenKeys(keys: string[]): string[] {
   return keys.filter((key) => kept.has(key));
 }
 
+/**
+ * Marks this tab made that storage refused to keep (blocked site data, a
+ * full quota, a locked-down webview), per project and viewer. Reads merge
+ * them in, so Dismiss and History still retire what was seen for the rest of
+ * the session.
+ */
+const seenInMemory = new Map<string, string[]>();
+
+function readStoredSeen(storageKey: string): string[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+/** Stored keys first, then the ones only this tab holds, oldest first. */
+function seenKeys(storageKey: string): string[] {
+  const stored = readStoredSeen(storageKey);
+  const memory = seenInMemory.get(storageKey) ?? [];
+  if (memory.length === 0) {
+    return stored;
+  }
+  const storedSet = new Set(stored);
+  return [...stored, ...memory.filter((key) => !storedSet.has(key))];
+}
+
 export function readUnsavedWorkSeen(
   projectId: string | null | undefined,
   userId: string | null | undefined,
 ): Set<string> {
-  if (!projectId || !userId || typeof window === "undefined") {
+  if (!projectId || !userId) {
     return new Set();
   }
-  try {
-    const raw = window.localStorage.getItem(seenStorageKey(projectId, userId));
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []);
-  } catch (_error) {
-    return new Set();
-  }
+  return new Set(seenKeys(seenStorageKey(projectId, userId)));
 }
 
 export function markUnsavedWorkSeen(
@@ -87,22 +113,31 @@ export function markUnsavedWorkSeen(
   userId: string | null | undefined,
   keys: string[],
 ): Set<string> {
-  const seen = readUnsavedWorkSeen(projectId, userId);
   if (!projectId || !userId || keys.length === 0) {
-    return seen;
+    return readUnsavedWorkSeen(projectId, userId);
   }
+  const storageKey = seenStorageKey(projectId, userId);
+  const seen = new Set(seenKeys(storageKey));
   for (const key of keys) {
     seen.delete(key);
     seen.add(key);
   }
   const kept = trimSeenKeys(Array.from(seen));
+  // In memory first, so the marks hold for this session whatever storage does.
+  seenInMemory.set(storageKey, kept);
   try {
-    window.localStorage.setItem(seenStorageKey(projectId, userId), JSON.stringify(kept));
+    window.localStorage.setItem(storageKey, JSON.stringify(kept));
+    seenInMemory.delete(storageKey);
   } catch (_error) {
-    // Storage can be unavailable (private windows); the row then shows again next visit.
+    // Storage can be unavailable (private windows, blocked site data): the
+    // marks last for this session and the row shows again next visit.
   }
   notifySeen();
   return new Set(kept);
+}
+
+export function resetUnsavedWorkSeenForTests(): void {
+  seenInMemory.clear();
 }
 
 /** The entries this viewer has seen, kept current across every hook that marks them. */
