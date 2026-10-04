@@ -383,7 +383,7 @@ describe("HistoryDrawer", () => {
     await confirmRevert();
     const status = q(container, "history-status");
     expect(status?.textContent).toContain(copy);
-    expect(status?.textContent).not.toContain("—");
+    expect(status?.textContent).not.toContain("\u2014");
     const ask = q<HTMLButtonElement>(container, "history-revert-ask-agent");
     expect(ask !== null).toBe(offersAgent);
     if (ask) {

@@ -70,7 +70,7 @@ describe("UnsavedWorkSystemRow", () => {
     expect(single).toContain("It&#x27;s kept in History, under Unsaved work, until someone restores or removes it.");
     expect(single).toContain("Open History");
     expect(single).toContain("Dismiss");
-    expect(single).not.toContain("—");
+    expect(single).not.toContain("\u2014");
 
     expect(unsavedWorkNoticeDescription(3)).toBe(
       "3 entries are kept in History, under Unsaved work, until someone restores or removes them.",
