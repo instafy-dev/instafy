@@ -1377,6 +1377,35 @@ describe("ChatFileChangeList", () => {
       expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
     });
 
+    it("closes the dialog and returns focus to the card when the change stops being revertable", async () => {
+      const props = { files: [fileChange("src/app.ts")], commitRange: gitRange, messageId: "msg-7" };
+      await renderCard(props);
+      revertChip()?.focus();
+      await openRevertDialog();
+      expect(dialog()?.getAttribute("data-state")).toBe("ready");
+
+      // A re-probe answers that the space keeps versions the old way.
+      versioningState.mode = "legacy";
+      await renderCard(props);
+
+      expect(dialog()).toBeNull();
+      expect(revertChip()).toBeNull();
+      expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+      expect(document.activeElement).not.toBe(document.body);
+      expect(container.contains(document.activeElement)).toBe(true);
+
+      // The same when write access is re-resolving.
+      versioningState.mode = "stateless";
+      await renderCard(props);
+      await openRevertDialog();
+      expect(dialog()?.getAttribute("data-state")).toBe("ready");
+      projectAccessState.projectCapabilitiesResolved = false;
+      await renderCard(props);
+      expect(dialog()).toBeNull();
+      expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+      expect(container.contains(document.activeElement)).toBe(true);
+    });
+
     it("offers to ask the agent when later changes conflict", async () => {
       revertWorkspaceGitCommit.mockResolvedValue({
         ok: false,

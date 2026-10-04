@@ -937,13 +937,15 @@ export function ChatFileChangeList({
   // The dialog stays open, busy, until the request settles, so focus can
   // return to a control that is still there and enabled.
   const handleRevertChange = useCallback(async () => {
-    if (
-      !projectId ||
-      !revertRange ||
-      !projectWriteEnabled ||
-      revertingChange ||
-      revertScope?.status !== "ready"
-    ) {
+    if (revertingChange || revertScope?.status !== "ready") {
+      return;
+    }
+    if (!canRevertChange || !projectId || !revertRange) {
+      // The change stopped being revertable here while the dialog was open
+      // (the space's mode or write access changed): close it rather than
+      // leave a Revert that does nothing.
+      closeRevertDialog();
+      setReturnFocusAfterRevert(true);
       return;
     }
     const revertedVersionPaths = new Set(revertScope.paths);
@@ -1010,13 +1012,14 @@ export function ChatFileChangeList({
       setReturnFocusAfterRevert(true);
     }
   }, [
+    canRevertChange,
     changeTypeByPath,
+    closeRevertDialog,
     handleUndoRequest,
     messageId,
     pendingEntries,
     pendingPaths,
     projectId,
-    projectWriteEnabled,
     revertRange,
     revertScope,
     revertingChange,
@@ -1024,6 +1027,17 @@ export function ChatFileChangeList({
     totalCount,
     versioning.originId,
   ]);
+
+  // The dialog belongs to "Revert this change". When the change stops being
+  // revertable while it is open (a re-probe answers that the space keeps
+  // versions the old way, or write access is re-resolving), the chip behind
+  // it is gone: close the dialog and return focus to the card.
+  useEffect(() => {
+    if (revertConfirmOpen && !canRevertChange && !revertingChange) {
+      closeRevertDialog();
+      setReturnFocusAfterRevert(true);
+    }
+  }, [canRevertChange, closeRevertDialog, revertConfirmOpen, revertingChange]);
 
   // After a revert the dialog's own button is gone and the Revert chip may be
   // too (every file reverted). Focus lands on the chip when it is still
