@@ -4,10 +4,14 @@ import {
   getCachedWorkspaceVersioning,
   knownRecoverySupport,
   storeWorkspaceVersioning,
+  versioningSignalSnapshot,
+  versioningSignalsChangedSince,
+  versioningSignalsContradict,
   VERSIONING_STALE_MS,
   type OriginVersioning,
   type VersioningMode,
   type VersioningOriginMode,
+  type VersioningSignalSnapshot,
 } from "./workspaceVersioningCache";
 
 export {
@@ -49,7 +53,17 @@ export interface ProbeWorkspaceVersioningParams {
   maxAgeMs?: number;
 }
 
-const inFlight = new Map<string, Promise<OriginVersioning | null>>();
+type PendingProbe = {
+  promise: Promise<OriginVersioning | null>;
+  seq: number;
+  /** Signal counts when the probe started. */
+  signals: VersioningSignalSnapshot;
+};
+
+const inFlight = new Map<string, PendingProbe>();
+/** The newest probe started per key; an older probe never overwrites its answer. */
+const latestProbe = new Map<string, number>();
+let probeSeq = 0;
 
 export function versioningOriginMode(mode: string | null | undefined): VersioningOriginMode {
   const normalized = (mode ?? "").trim().toLowerCase();
@@ -96,11 +110,17 @@ export async function probeWorkspaceVersioning(
 
   const key = `${projectId}:${originId}:${originMode}`;
   const pending = inFlight.get(key);
-  if (pending) {
-    return pending;
+  // Join a probe on the wire only when no signal arrived since it started:
+  // its answer may be older than the response that contradicted the cache.
+  if (pending && !versioningSignalsChangedSince(originId, pending.signals)) {
+    return pending.promise;
   }
 
-  const run = async (): Promise<OriginVersioning> => {
+  const seq = ++probeSeq;
+  latestProbe.set(key, seq);
+  const signals = versioningSignalSnapshot(originId);
+
+  const run = async (): Promise<OriginVersioning | null> => {
     let mode = modeForOrigin(originMode);
     let stateless = false;
     if (mode === null) {
@@ -114,26 +134,39 @@ export async function probeWorkspaceVersioning(
       stateless = status?.stateless === true;
       mode = stateless ? "stateless" : "legacy";
     }
+    if (latestProbe.get(key) !== seq) {
+      // A newer probe started (a signal arrived meanwhile): its answer wins.
+      const newer = inFlight.get(key);
+      return newer && newer.seq !== seq
+        ? newer.promise
+        : getCachedWorkspaceVersioning(projectId, originId);
+    }
+    const current = getCachedWorkspaceVersioning(projectId, originId);
     return storeWorkspaceVersioning({
       projectId,
       originId,
       originMode,
       mode,
       stateless,
-      recovery: cached?.recovery ?? knownRecoverySupport(originId),
+      recovery: current?.recovery ?? cached?.recovery ?? knownRecoverySupport(originId),
       checkedAt: Date.now(),
-      stale: false,
+      // A signal that arrived while this probe was on the wire and disagrees
+      // with its answer keeps the entry stale, so it is probed again.
+      stale: versioningSignalsContradict(originId, signals, mode),
     });
   };
 
   const promise = run().finally(() => {
-    inFlight.delete(key);
+    if (inFlight.get(key)?.seq === seq) {
+      inFlight.delete(key);
+    }
   });
-  inFlight.set(key, promise);
+  inFlight.set(key, { promise, seq, signals });
   return promise;
 }
 
 /** Test hook: forget probes still on the wire. */
 export function resetWorkspaceVersioningProbesForTests(): void {
   inFlight.clear();
+  latestProbe.clear();
 }

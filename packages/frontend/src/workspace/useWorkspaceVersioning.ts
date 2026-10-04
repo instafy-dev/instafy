@@ -93,13 +93,13 @@ export function useWorkspaceVersioning({
     void probe(false);
   }, [probe]);
 
-  // A response contradicted the cached mode: probe again at once.
-  const stale = entry?.stale === true;
+  // A response contradicted the cached mode: probe again at once. Keyed on
+  // the entry itself, so an answer that is stale again probes again.
   useEffect(() => {
-    if (stale) {
+    if (entry?.stale) {
       void probe(true);
     }
-  }, [stale, probe]);
+  }, [entry, probe]);
 
   // Focus and stream reconnects re-check results older than 60 s.
   useEffect(() => {

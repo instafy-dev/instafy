@@ -27,6 +27,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   resetWorkspaceVersioningCacheForTests();
   resetWorkspaceVersioningProbesForTests();
+  mocks.status.mockReset();
   mocks.status.mockResolvedValue(statusResult());
 });
 
@@ -193,6 +194,91 @@ describe("contradicting responses", () => {
     noteVersioningSignal("gateway", "stateless");
     expect(getCachedWorkspaceVersioning("p1", "gateway")?.stale).toBe(true);
     expect(getCachedWorkspaceVersioning("p2", "gateway")?.stale).toBe(true);
+  });
+});
+
+describe("signals that arrive while a probe is on the wire", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  it("a forced re-probe after a signal does not join the older probe, whose answer cannot win", async () => {
+    await probeWorkspaceVersioning({ projectId: "p", origin: gateway });
+    const older = deferred<unknown>();
+    mocks.status.mockReturnValueOnce(older.promise);
+    const first = probeWorkspaceVersioning({ projectId: "p", origin: gateway, force: true });
+
+    noteVersioningSignal("gateway", "committed");
+    expect(getCachedWorkspaceVersioning("p", "gateway")?.stale).toBe(true);
+
+    mocks.status.mockResolvedValueOnce(statusResult({ stateless: true }));
+    const second = await probeWorkspaceVersioning({ projectId: "p", origin: gateway, force: true });
+    expect(mocks.status).toHaveBeenCalledTimes(3);
+    expect(second).toMatchObject({ mode: "stateless", stale: false });
+
+    older.resolve(statusResult());
+    await first;
+    expect(getCachedWorkspaceVersioning("p", "gateway")).toMatchObject({ mode: "stateless", stale: false });
+  });
+
+  it("an older probe that answers first does not store over the newer one", async () => {
+    await probeWorkspaceVersioning({ projectId: "p", origin: gateway });
+    const older = deferred<unknown>();
+    const newer = deferred<unknown>();
+    mocks.status.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+    const first = probeWorkspaceVersioning({ projectId: "p", origin: gateway, force: true });
+    noteVersioningSignal("gateway", "stateless");
+    const second = probeWorkspaceVersioning({ projectId: "p", origin: gateway, force: true });
+
+    older.resolve(statusResult());
+    newer.resolve(statusResult({ stateless: true }));
+    expect(await first).toMatchObject({ mode: "stateless" });
+    expect(await second).toMatchObject({ mode: "stateless", stale: false });
+    expect(getCachedWorkspaceVersioning("p", "gateway")).toMatchObject({ mode: "stateless", stale: false });
+  });
+
+  it("a signal during the very first probe keeps a legacy answer stale", async () => {
+    const pending = deferred<unknown>();
+    mocks.status.mockReturnValueOnce(pending.promise);
+    const first = probeWorkspaceVersioning({ projectId: "p", origin: gateway });
+    noteVersioningSignal("gateway", "committed");
+    pending.resolve(statusResult());
+    expect(await first).toMatchObject({ mode: "legacy", stale: true });
+
+    mocks.status.mockResolvedValueOnce(statusResult({ stateless: true }));
+    expect(await probeWorkspaceVersioning({ projectId: "p", origin: gateway })).toMatchObject({ mode: "stateless", stale: false });
+  });
+
+  it("a signal that agrees with the answer does not mark it stale", async () => {
+    const pending = deferred<unknown>();
+    mocks.status.mockReturnValueOnce(pending.promise);
+    const first = probeWorkspaceVersioning({ projectId: "p", origin: gateway });
+    noteVersioningSignal("gateway", "committed");
+    pending.resolve(statusResult({ stateless: true }));
+    expect(await first).toMatchObject({ mode: "stateless", stale: false });
+  });
+
+  it("a legacy-mode save during a probe always asks again", async () => {
+    const pending = deferred<unknown>();
+    mocks.status.mockReturnValueOnce(pending.promise);
+    const first = probeWorkspaceVersioning({ projectId: "p", origin: gateway });
+    noteVersioningSignal("gateway", "legacy_saved");
+    pending.resolve(statusResult({ stateless: true }));
+    expect(await first).toMatchObject({ mode: "stateless", stale: true });
+  });
+
+  it("probes without a new signal still join the one on the wire", async () => {
+    const pending = deferred<unknown>();
+    mocks.status.mockReturnValueOnce(pending.promise);
+    const first = probeWorkspaceVersioning({ projectId: "p", origin: gateway });
+    const second = probeWorkspaceVersioning({ projectId: "p", origin: gateway, force: true });
+    pending.resolve(statusResult());
+    expect(await second).toBe(await first);
+    expect(mocks.status).toHaveBeenCalledTimes(1);
   });
 });
 

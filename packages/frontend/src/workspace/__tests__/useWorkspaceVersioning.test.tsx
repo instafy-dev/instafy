@@ -120,6 +120,22 @@ describe("useWorkspaceVersioning", () => {
     expect(latest).toMatchObject({ mode: "stateless", resolved: true });
   });
 
+  it("probes again when a contradicting response arrives during the first probe", async () => {
+    let resolveStatus: (value: unknown) => void = () => {};
+    mocks.status.mockReturnValueOnce(new Promise((resolve) => { resolveStatus = resolve; }));
+    await render({ projectId: "p", origin: gateway });
+    mocks.status.mockResolvedValue(statusResult(true));
+
+    await act(async () => {
+      noteVersioningSignal("gateway", "committed");
+    });
+    resolveStatus(statusResult());
+    await flush();
+
+    expect(mocks.status).toHaveBeenCalledTimes(2);
+    expect(latest).toMatchObject({ mode: "stateless", resolved: true });
+  });
+
   it("re-checks on focus and stream reconnect only when the result is older than 60 s", async () => {
     const start = Date.now();
     const now = vi.spyOn(Date, "now").mockReturnValue(start);

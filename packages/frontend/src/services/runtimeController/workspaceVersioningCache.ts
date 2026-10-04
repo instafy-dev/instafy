@@ -65,6 +65,45 @@ const STATELESS_SIGNALS: ReadonlySet<VersioningSignal> = new Set([
 const entries = new Map<string, OriginVersioning>();
 /** Recovery support learned before any probe stored an entry for the origin. */
 const recoveryByOrigin = new Map<string, RecoverySupport>();
+
+/**
+ * Counts of mode signals per origin, bumped even when no entry exists yet,
+ * so a probe that was on the wire when a signal arrived can tell that its
+ * answer may be older than the signal.
+ */
+export interface VersioningSignalSnapshot {
+  stateless: number;
+  legacySaved: number;
+}
+const signalCounts = new Map<string, VersioningSignalSnapshot>();
+
+/** The signal counts for an origin right now (a probe takes one when it starts). */
+export function versioningSignalSnapshot(originId: string): VersioningSignalSnapshot {
+  const counts = signalCounts.get(originId);
+  return { stateless: counts?.stateless ?? 0, legacySaved: counts?.legacySaved ?? 0 };
+}
+
+/** Any mode signal arrived for the origin since `since` was taken. */
+export function versioningSignalsChangedSince(originId: string, since: VersioningSignalSnapshot): boolean {
+  const now = versioningSignalSnapshot(originId);
+  return now.stateless !== since.stateless || now.legacySaved !== since.legacySaved;
+}
+
+/**
+ * A signal that arrived since `since` contradicts a probe answer of `mode`:
+ * any legacy-mode save, or a stateless signal against a `legacy` answer.
+ */
+export function versioningSignalsContradict(
+  originId: string,
+  since: VersioningSignalSnapshot,
+  mode: VersioningMode,
+): boolean {
+  const now = versioningSignalSnapshot(originId);
+  return (
+    now.legacySaved !== since.legacySaved ||
+    (now.stateless !== since.stateless && mode === "legacy")
+  );
+}
 const listeners = new Set<() => void>();
 
 function cacheKey(projectId: string, originId: string): string {
@@ -134,6 +173,13 @@ export function noteVersioningSignal(
       }
     }
   } else {
+    const counts = versioningSignalSnapshot(id);
+    if (signal === "legacy_saved") {
+      counts.legacySaved += 1;
+    } else {
+      counts.stateless += 1;
+    }
+    signalCounts.set(id, counts);
     for (const [key, entry] of entries) {
       if (entry.originId !== id || entry.stale) {
         continue;
@@ -192,5 +238,6 @@ function writeLastVersioningMode(projectId: string, mode: VersioningMode): void 
 export function resetWorkspaceVersioningCacheForTests(): void {
   entries.clear();
   recoveryByOrigin.clear();
+  signalCounts.clear();
   listeners.clear();
 }
