@@ -22,7 +22,7 @@ use crate::push::{clear_push_hook, set_push_hook, PushHookAction};
 use crate::recovery::{
     LOCAL_RECOVERY_DISMISSED_ROOT, LOCAL_RECOVERY_PUSHED_ROOT, LOCAL_RECOVERY_ROOT,
 };
-use crate::test_support::{git_in, git_output, ig};
+use crate::test_support::{git_in, git_output, ig, install_shard_hook};
 use crate::workspace_git::GitIdentity;
 
 const README: &str = "one\ntwo\nthree\nfour\nfive\n";
@@ -335,27 +335,6 @@ fn write(dir: &Path, path: &str, bytes: &[u8]) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(target, bytes).unwrap();
-}
-
-fn install_shard_hook(remote: &Path, env: &[(&str, &str)]) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let hooks = remote.join("hooks");
-    fs::create_dir_all(&hooks).unwrap();
-    let real = hooks.join("update.shard");
-    fs::write(
-        &real,
-        git_service::policy::render_update_hook("main").unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut wrapper = String::from("#!/bin/sh\n");
-    for (key, value) in env {
-        wrapper.push_str(&format!("export {key}='{value}'\n"));
-    }
-    wrapper.push_str(&format!("exec '{}' \"$@\"\n", real.display()));
-    let update = hooks.join("update");
-    fs::write(&update, wrapper).unwrap();
-    fs::set_permissions(&update, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 struct PushHookGuard;

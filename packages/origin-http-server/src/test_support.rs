@@ -227,3 +227,26 @@ fn edit_commit(ws: &Path, parent: Option<&str>, edit: impl FnOnce(&[(&str, &str)
         ],
     )
 }
+
+/// Install the shard's update hook in the bare repository `remote`, with
+/// `env` exported for it (policy settings such as `GIT_DENY_PATHS`).
+pub(crate) fn install_shard_hook(remote: &Path, env: &[(&str, &str)]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let hooks = remote.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let real = hooks.join("update.shard");
+    std::fs::write(
+        &real,
+        git_service::policy::render_update_hook("main").unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut wrapper = String::from("#!/bin/sh\n");
+    for (key, value) in env {
+        wrapper.push_str(&format!("export {key}='{value}'\n"));
+    }
+    wrapper.push_str(&format!("exec '{}' \"$@\"\n", real.display()));
+    let update = hooks.join("update");
+    std::fs::write(&update, wrapper).unwrap();
+    std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
