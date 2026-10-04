@@ -1,3 +1,4 @@
+import { useMemo, useSyncExternalStore } from "react";
 import type { WorkspaceRecoveryEntry } from "../sdk/instafy";
 
 /**
@@ -9,6 +10,32 @@ import type { WorkspaceRecoveryEntry } from "../sdk/instafy";
 const SEEN_STORAGE_PREFIX = "instafy.unsavedWork.seen.";
 /** Keep the newest keys only; recovery refs are short-lived. */
 const SEEN_LIMIT = 200;
+
+const seenListeners = new Set<() => void>();
+let seenVersion = 0;
+
+/** Called whenever this browser marks entries seen (the badge and the row follow). */
+export function subscribeUnsavedWorkSeen(listener: () => void): () => void {
+  seenListeners.add(listener);
+  return () => {
+    seenListeners.delete(listener);
+  };
+}
+
+function notifySeen(): void {
+  seenVersion += 1;
+  for (const listener of Array.from(seenListeners)) {
+    try {
+      listener();
+    } catch (error) {
+      console.warn("[unsaved-work] seen listener failed:", error);
+    }
+  }
+}
+
+function getSeenVersion(): number {
+  return seenVersion;
+}
 
 function seenStorageKey(projectId: string, userId: string): string {
   return `${SEEN_STORAGE_PREFIX}${projectId}.${userId}`;
@@ -54,5 +81,18 @@ export function markUnsavedWorkSeen(
   } catch (_error) {
     // Storage can be unavailable (private windows); the row then shows again next visit.
   }
+  notifySeen();
   return new Set(kept);
+}
+
+/** The entries this viewer has seen, kept current across every hook that marks them. */
+export function useUnsavedWorkSeen(
+  projectId: string | null | undefined,
+  userId: string | null | undefined,
+): Set<string> {
+  const version = useSyncExternalStore(subscribeUnsavedWorkSeen, getSeenVersion, getSeenVersion);
+  return useMemo(() => {
+    void version;
+    return readUnsavedWorkSeen(projectId, userId);
+  }, [projectId, userId, version]);
 }

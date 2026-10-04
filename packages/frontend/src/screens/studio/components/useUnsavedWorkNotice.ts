@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
-import { markUnsavedWorkSeen, readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../workspace/unsavedWorkSeen";
+import { markUnsavedWorkSeen, unsavedWorkSeenKey, useUnsavedWorkSeen } from "../../../workspace/unsavedWorkSeen";
 import { collectRecoveryRefs } from "../../../workspace/unsavedWorkSignals";
 import { pendingUnsavedWorkEntries, useUnsavedWork } from "../../../workspace/unsavedWorkStore";
 
@@ -31,12 +31,9 @@ export function useUnsavedWorkNotice({
   const projectId = versioning.projectId;
   const enabled = versioning.historyReady;
   const unsavedWork = useUnsavedWork({ projectId, originId: versioning.originId, enabled });
-  const [seen, setSeen] = useState(() => readUnsavedWorkSeen(projectId, userId));
+  // Shared: History marks the entries it shows as seen too.
+  const seen = useUnsavedWorkSeen(projectId, userId);
   const { refresh } = unsavedWork;
-
-  useEffect(() => {
-    setSeen(readUnsavedWorkSeen(projectId, userId));
-  }, [projectId, userId]);
 
   // New recovery refs on finished turns: list again. The first look at the
   // transcript is covered by the load on mount.
@@ -61,7 +58,7 @@ export function useUnsavedWorkNotice({
   }, [enabled, seen, unsavedWork.entries, unsavedWork.status]);
 
   const markSeen = useCallback(() => {
-    setSeen(markUnsavedWorkSeen(projectId, userId, unseen.map(unsavedWorkSeenKey)));
+    markUnsavedWorkSeen(projectId, userId, unseen.map(unsavedWorkSeenKey));
   }, [projectId, unseen, userId]);
 
   const openHistory = useCallback(() => {

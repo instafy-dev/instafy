@@ -19,6 +19,7 @@ vi.mock("../../../../workspace/useActiveWorkspaceVersioning", () => ({
   useActiveWorkspaceVersioning: () => mocks.versioning,
 }));
 
+import { markUnsavedWorkSeen } from "../../../../workspace/unsavedWorkSeen";
 import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
 import { useUnsavedWorkNotice, type UnsavedWorkNotice } from "../useUnsavedWorkNotice";
 
@@ -130,6 +131,18 @@ describe("useUnsavedWorkNotice", () => {
     await act(async () => notice?.onOpenHistory());
     window.removeEventListener("instafy:open-source-control", listener);
     expect(opened).toEqual([{ projectId: "project-1" }]);
+    expect(notice).toBeNull();
+  });
+
+  it("goes away when History shows the entries to this viewer", async () => {
+    await render();
+    expect(notice?.count).toBe(2);
+    await act(async () => {
+      markUnsavedWorkSeen("project-1", "user-1", [
+        `refs/instafy/recovery/o/a@${"a".repeat(40)}`,
+        `refs/instafy/recovery/o/b@${"a".repeat(40)}`,
+      ]);
+    });
     expect(notice).toBeNull();
   });
 

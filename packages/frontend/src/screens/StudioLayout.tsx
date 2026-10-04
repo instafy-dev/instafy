@@ -1171,6 +1171,7 @@ function StudioLayoutInner() {
     chromeMode: workspaceVersioning.chromeMode,
     historyReady: workspaceVersioning.historyReady,
     originId: workspaceVersioning.originId,
+    userId: currentUserId,
   });
 
     useEffect(() => {

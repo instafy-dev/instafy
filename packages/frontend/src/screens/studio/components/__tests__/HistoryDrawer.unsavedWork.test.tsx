@@ -28,6 +28,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../../../projects/useProject", () => ({
   useProject: () => mocks.project,
 }));
+vi.mock("../../../../providers/AuthProvider", () => ({
+  useAuth: () => ({ user: { id: "user-1" } }),
+}));
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({
     activeConversationId: "conversation-1",
@@ -60,6 +63,7 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 
+import { readUnsavedWorkSeen } from "../../../../workspace/unsavedWorkSeen";
 import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
 import { HistoryDrawer } from "../HistoryDrawer";
 
@@ -168,6 +172,7 @@ describe("HistoryDrawer: Unsaved work", () => {
     mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY)]));
     mocks.probe.mockResolvedValue(null);
     resetUnsavedWorkStoreForTests();
+    window.localStorage.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -195,6 +200,15 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.fetchRecovery).toHaveBeenCalledWith({ projectId: "project-1", originId: "origin-1" });
     expect(q(container, "unsaved-work-section")).toBeNull();
     expect(q(container, "unsaved-work-error")).toBeNull();
+  });
+
+  it("counts the entries it shows as seen by this viewer", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY), recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+    expect(readUnsavedWorkSeen("project-1", "user-1").size).toBe(0);
+    await render();
+    const seen = readUnsavedWorkSeen("project-1", "user-1");
+    expect(seen.has(`${RECOVERY}@${"a".repeat(40)}`)).toBe(true);
+    expect(seen.has(`${SALVAGE}@${"a".repeat(40)}`)).toBe(true);
   });
 
   it("is hidden while empty", async () => {

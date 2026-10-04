@@ -27,6 +27,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../../../projects/useProject", () => ({
   useProject: () => mocks.project,
 }));
+vi.mock("../../../../providers/AuthProvider", () => ({
+  useAuth: () => ({ user: { id: "user-1" } }),
+}));
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({
     activeConversationId: "conversation-1",

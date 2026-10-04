@@ -19,6 +19,7 @@ vi.mock("../../sdk/instafy", () => ({
   },
 }));
 
+import { markUnsavedWorkSeen, unsavedWorkSeenKey } from "../../workspace/unsavedWorkSeen";
 import { resetUnsavedWorkStoreForTests } from "../../workspace/unsavedWorkStore";
 import {
   unsavedWorkBadgeLabel,
@@ -78,6 +79,7 @@ describe("useWorkspaceVersioningBadge", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     resetUnsavedWorkStoreForTests();
+    window.localStorage.clear();
     mocks.fetchStatus.mockReset();
     mocks.fetchRecovery.mockReset();
     mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyCount: 2, dirtyPaths: [], pathGroups: [] });
@@ -130,6 +132,25 @@ describe("useWorkspaceVersioningBadge", () => {
     await render({ ...base, chromeMode: "desktop", historyReady: true });
     expect(mocks.fetchStatus).not.toHaveBeenCalled();
     expect(badge()?.textContent).toBe("0");
+  });
+
+  it("stops counting salvage once this viewer has seen it, and only salvage", async () => {
+    const unpublished = recovery("refs/instafy/recovery/o/a");
+    const salvage = recovery("refs/instafy/salvage/gateway/b", { kind: "salvage", dismissible: false });
+    mocks.fetchRecovery.mockResolvedValue({ status: "ok", entries: [unpublished, salvage], originId: "origin-1", originMode: "hosted" });
+    await render({ ...base, chromeMode: "stateless", historyReady: true, userId: "user-1" });
+    expect(badge()?.textContent).toBe("2");
+
+    // Seen on the chat row or in History: the salvage entry no longer counts.
+    await act(async () => {
+      markUnsavedWorkSeen("project-1", "user-1", [unsavedWorkSeenKey(salvage), unsavedWorkSeenKey(unpublished)]);
+    });
+    expect(badge()?.textContent).toBe("1");
+    expect(badge()?.getAttribute("data-label")).toBe("1 unsaved work entry");
+
+    // Another viewer has not seen it.
+    await render({ ...base, chromeMode: "stateless", historyReady: true, userId: "user-2" });
+    expect(badge()?.textContent).toBe("2");
   });
 
   it("labels several entries in the plural", () => {

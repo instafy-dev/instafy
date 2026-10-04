@@ -8,6 +8,7 @@ import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import { controllerClient, type OriginApplyFile, type WorkspaceRecoveryEntry } from "../../../sdk/instafy";
 import { decodeBase64 } from "../../../services/runtimeController/workspaceUtils";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
+import { markUnsavedWorkSeen, readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../workspace/unsavedWorkSeen";
 import {
   patchUnsavedWorkEntries,
   useUnsavedWork,
@@ -80,6 +81,7 @@ export function UnsavedWorkSection({
   onAskAgent,
   onReloadHistory,
   onFocusFallback,
+  userId = null,
 }: {
   projectId: string;
   originId: string;
@@ -97,6 +99,8 @@ export function UnsavedWorkSection({
   onReloadHistory: () => Promise<string | null>;
   /** Focus a stable place when nothing in this section can take focus. */
   onFocusFallback?: () => void;
+  /** The viewer: entries shown here count as seen (no chat row, no salvage badge). */
+  userId?: string | null;
 }) {
   const { openGitReviewTab, requestUrlPush } = useWorkspaceTabs();
   const unsavedWork = useUnsavedWork({ projectId, originId, enabled: true, mountRefresh: "force" });
@@ -475,6 +479,19 @@ export function UnsavedWorkSection({
   );
 
   const entries = useMemo(() => unsavedWork.entries, [unsavedWork.entries]);
+
+  // This viewer has now seen these entries: the one-time chat row skips them,
+  // and salvage (which cannot be removed) stops counting on the badge.
+  useEffect(() => {
+    if (!userId || unsavedWork.status !== "ok" || entries.length === 0) {
+      return;
+    }
+    const seen = readUnsavedWorkSeen(projectId, userId);
+    const fresh = entries.map(unsavedWorkSeenKey).filter((key) => !seen.has(key));
+    if (fresh.length > 0) {
+      markUnsavedWorkSeen(projectId, userId, fresh);
+    }
+  }, [entries, projectId, unsavedWork.status, userId]);
 
   if (unsavedWork.status === "error") {
     return (

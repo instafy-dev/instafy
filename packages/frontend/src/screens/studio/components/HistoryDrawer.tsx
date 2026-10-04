@@ -12,6 +12,7 @@ import {
 import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useProject } from "../../../projects/useProject";
+import { useAuth } from "../../../providers/AuthProvider";
 import { controllerClient, type WorkspaceGitHistoryEntry } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { refreshUnsavedWork } from "../../../workspace/unsavedWorkStore";
@@ -89,6 +90,7 @@ export function HistoryDrawer({
   probeFailed?: boolean;
 }) {
   const { projectCapabilitiesResolved, canWriteProject } = useProject();
+  const { user } = useAuth();
   const canWrite = projectCapabilitiesResolved === true && canWriteProject === true;
   const { activeConversationId, createConversation, setConversationDraft } = useConversations();
   const { openConversationTab, openGitReviewTab, requestUrlPush } = useWorkspaceTabs();
@@ -568,6 +570,7 @@ export function HistoryDrawer({
                 onAskAgent={askAgent}
                 onReloadHistory={() => loadHistory({ silent: true })}
                 onFocusFallback={focusSavedVersionsHeading}
+                userId={user?.id ?? null}
               />
             ) : null}
 
