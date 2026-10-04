@@ -91,7 +91,7 @@ describe("Files buffers as Studio drafts", () => {
   });
 
   it("never blocks closing the Desktop app for kept file buffers", async () => {
-    const shell = window as typeof window & { instafyDesktop?: unknown };
+    const shell = window as unknown as { instafyDesktop?: unknown };
     shell.instafyDesktop = {};
     try {
       // The app's bridge exists from the first render on.
