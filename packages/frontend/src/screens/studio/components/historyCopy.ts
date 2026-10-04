@@ -329,17 +329,21 @@ export function unsavedWorkUnconfirmedDeleteCopy(path: string): string {
  * for (the server reports them in `notRestored` too); only the rest of
  * `notRestored` were refused as secret or ignored. `committed: false` means
  * no version was made: the saved version already held everything that could
- * be restored, so the copy says what was left out first and then that the
- * rest is already there (never that the space has the refused files).
+ * be restored, so the copy says what was left out first (never that the
+ * space has the refused files). `entryPaths` is every path the entry holds,
+ * or null when that is not known (a conflict entry lists only its conflicted
+ * paths): the copy speaks of "the rest" only when there was one.
  */
 export function restoreSuccessCopy({
   committed,
   notRestored,
   kept = [],
+  entryPaths = null,
 }: {
   committed: boolean | null | undefined;
   notRestored: string[];
   kept?: string[];
+  entryPaths?: string[] | null;
 }): string {
   const keptSet = new Set(kept);
   const keptPaths = Array.from(keptSet);
@@ -356,6 +360,15 @@ export function restoreSuccessCopy({
   }
   if (leftOut.length === 0) {
     return "Nothing to restore. The saved version already has this work.";
+  }
+  const leftOutSet = new Set([...keptPaths, ...refused]);
+  const known = entryPaths && entryPaths.length > 0 ? entryPaths : null;
+  if (!known) {
+    return [...leftOut, "Nothing else to restore."].join(" ");
+  }
+  if (known.every((path) => leftOutSet.has(path))) {
+    // The entry held only what was left out: there is no rest to speak of.
+    return leftOut.join(" ");
   }
   return [...leftOut, "The saved version already has the rest of this work."].join(" ");
 }

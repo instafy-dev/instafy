@@ -254,6 +254,8 @@ export function UnsavedWorkSection({
             committed: result.committed,
             notRestored: result.notRestored,
             kept: options.keep ?? [],
+            // A conflict entry lists only its conflicted paths, not all it holds.
+            entryPaths: entry.kind === "conflict" ? null : entry.paths,
           }),
         });
         clearConflict(entry.ref);

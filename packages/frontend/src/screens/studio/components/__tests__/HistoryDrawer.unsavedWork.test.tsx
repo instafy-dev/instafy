@@ -444,7 +444,7 @@ describe("HistoryDrawer: Unsaved work", () => {
     );
   });
 
-  it("says nothing was restored when every conflicted file was kept and nothing else is left", async () => {
+  it("names only the kept files when the entry held nothing else", async () => {
     mocks.restoreRecovery
       .mockResolvedValueOnce({
         ok: false,
@@ -471,11 +471,58 @@ describe("HistoryDrawer: Unsaved work", () => {
     await press(row(container, RECOVERY), "unsaved-work-restore-rest");
     expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ keep: ["src/a.ts", "src/b.ts"] }));
     const status = q(container, "history-status")?.textContent ?? "";
-    expect(status).toBe(
-      "Kept the current version of src/a.ts, src/b.ts. The saved version already has the rest of this work.",
-    );
+    // The entry held only these two files: there is no rest to speak of.
+    expect(status).toBe("Kept the current version of src/a.ts, src/b.ts.");
     expect(status).not.toContain("Secret and ignored");
     expect(status).not.toContain("Restored as a new version");
+  });
+
+  it("says the saved version has the rest when the entry held more than the kept files", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY, { paths: ["src/a.ts", "src/b.ts", "src/c.ts"] })]));
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["src/a.ts"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: false,
+        notRestored: ["src/a.ts"],
+        refDeleted: true,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-restore");
+    await press(row(container, RECOVERY), "unsaved-work-path-keep");
+    await press(row(container, RECOVERY), "unsaved-work-restore-rest");
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Kept the current version of src/a.ts. The saved version already has the rest of this work.",
+    );
+  });
+
+  it("claims no rest for a conflict entry, whose list names only its conflicted files", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(CONFLICT, { kind: "conflict", paths: [".env"] })]));
+    mocks.restoreRecovery.mockResolvedValue({
+      ok: true,
+      rev: HEAD,
+      baseRev: HEAD,
+      committed: false,
+      notRestored: [".env"],
+      refDeleted: true,
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, CONFLICT), "unsaved-work-restore");
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Not restored: .env. Secret and ignored files stay out of the space. Nothing else to restore.",
+    );
   });
 
   it("never says the space has work it refused when nothing was restored", async () => {
@@ -493,11 +540,9 @@ describe("HistoryDrawer: Unsaved work", () => {
     await render();
     await press(row(container, RECOVERY), "unsaved-work-restore");
     const status = q(container, "history-status")?.textContent ?? "";
-    expect(status).toBe(
-      "Not restored: .env. Secret and ignored files stay out of the space. " +
-        "The saved version already has the rest of this work.",
-    );
-    expect(status).not.toContain("already has this work");
+    // .env was all the entry held: nothing else is claimed.
+    expect(status).toBe("Not restored: .env. Secret and ignored files stay out of the space.");
+    expect(status).not.toContain("already has");
     expect(status).not.toContain("Nothing to restore");
   });
 

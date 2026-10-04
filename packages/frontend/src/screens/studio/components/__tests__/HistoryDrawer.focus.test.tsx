@@ -327,9 +327,8 @@ describe("HistoryDrawer: keyboard focus under latency", () => {
       await until(() => row(FIRST) === null, "the row to go");
       await settle();
       expect(document.activeElement).toBe(q(row(SECOND), "unsaved-work-review"));
-      expect(status()).toBe(
-        "Kept the current version of src/a.ts, src/b.ts. The saved version already has the rest of this work.",
-      );
+      // The entry held only these two files: there is no rest to speak of.
+      expect(status()).toBe("Kept the current version of src/a.ts, src/b.ts.");
     });
 
     it("Cancel on the per-file choices lands on the row's Restore", async () => {
