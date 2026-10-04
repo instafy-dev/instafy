@@ -92,42 +92,47 @@ export function DesktopChangesLine({
     setSaving(true);
     onBusyChange(true);
     try {
-      const result = await controllerClient.workspace.git.syncToRemote({
-        projectId,
-        originId,
-        routing: "default",
-        message: DESKTOP_SAVE_MESSAGE,
-        leaseConflictRetryDelayMs: LEASE_RETRY_DELAY_MS,
-      });
+      const result = await controllerClient.workspace.git
+        .syncToRemote({
+          projectId,
+          originId,
+          routing: "default",
+          message: DESKTOP_SAVE_MESSAGE,
+          leaseConflictRetryDelayMs: LEASE_RETRY_DELAY_MS,
+        })
+        .catch(() => null);
       if (!result?.ok) {
+        // A refusal can still change the folder (not_saved commits the files
+        // locally before the push fails): the count below is checked again.
         onNotice({ tone: "error", text: desktopSaveFailureCopy(result?.errorInfo ?? null) });
-        return;
-      }
-      const conflicted = result.report?.conflictedPaths ?? [];
-      const rejected = result.report?.rejectedPaths ?? [];
-      const savedCount = Math.max(0, shown - conflicted.length - rejected.length);
-      const sentences: string[] = [];
-      if (savedCount > 0 && result.committed !== false) {
-        sentences.push(desktopSavedCopy(savedCount));
-      }
-      if (conflicted.length > 0) {
-        sentences.push(conflictedOnComputerCopy(conflicted));
-      }
-      sentences.push(...keptOnComputerCopy(rejected));
-      if (sentences.length === 0) {
-        sentences.push(DESKTOP_NOTHING_TO_SAVE_COPY);
-      }
-      onNotice({
-        tone: conflicted.length > 0 || rejected.length > 0 ? "warning" : "success",
-        text: sentences.join(" "),
-      });
-      if (result.committed !== false) {
-        onCommitted(result.rev ?? null);
+      } else {
+        const conflicted = result.report?.conflictedPaths ?? [];
+        const rejected = result.report?.rejectedPaths ?? [];
+        const savedCount = Math.max(0, shown - conflicted.length - rejected.length);
+        const sentences: string[] = [];
+        if (savedCount > 0 && result.committed !== false) {
+          sentences.push(desktopSavedCopy(savedCount));
+        }
+        if (conflicted.length > 0) {
+          sentences.push(conflictedOnComputerCopy(conflicted));
+        }
+        sentences.push(...keptOnComputerCopy(rejected));
+        if (sentences.length === 0) {
+          sentences.push(DESKTOP_NOTHING_TO_SAVE_COPY);
+        }
+        onNotice({
+          tone: conflicted.length > 0 || rejected.length > 0 ? "warning" : "success",
+          text: sentences.join(" "),
+        });
+        if (result.committed !== false) {
+          onCommitted(result.rev ?? null);
+        }
       }
     } finally {
       setSaving(false);
       onBusyChange(false);
     }
+    // Whatever the answer: the line shows what the folder holds now.
     await check();
     setSettledSaves((value) => value + 1);
   }, [canWrite, check, onBusyChange, onCommitted, onNotice, originId, projectId, saving]);

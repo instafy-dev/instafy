@@ -661,6 +661,47 @@ describe("HistoryDrawer", () => {
       expect(mocks.fetchStatus.mock.calls.length).toBeGreaterThanOrEqual(2);
     });
 
+    it("checks the folder again after a not_saved refusal, which can leave it clean", async () => {
+      // not_saved commits the files on this computer, then the push fails.
+      mocks.fetchStatus
+        .mockResolvedValueOnce({ supported: true, dirtyCount: 2, dirtyPaths: [], pathGroups: [] })
+        .mockResolvedValue({ supported: true, dirtyCount: 0, dirtyPaths: [], pathGroups: [] });
+      mocks.syncToRemote.mockResolvedValue({
+        ok: false,
+        errorInfo: {
+          status: 409,
+          code: "not_saved",
+          message: "not saved",
+          routeUnavailable: false,
+          report: { failure: "the push was rejected" },
+        },
+      });
+      await render(desktop());
+      expect(q(container, "desktop-changes-line")?.textContent).toContain("2 files changed outside Studio");
+      await act(async () => q<HTMLButtonElement>(container, "desktop-save-as-version")?.click());
+      await flush();
+      expect(mocks.fetchStatus).toHaveBeenCalledTimes(2);
+      expect(q(container, "desktop-changes-line")).toBeNull();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Not saved: the push was rejected. The work is kept under History, in Unsaved work.",
+      );
+    });
+
+    it("keeps the count current after any other refusal", async () => {
+      mocks.fetchStatus
+        .mockResolvedValueOnce({ supported: true, dirtyCount: 2, dirtyPaths: [], pathGroups: [] })
+        .mockResolvedValue({ supported: true, dirtyCount: 3, dirtyPaths: [], pathGroups: [] });
+      mocks.syncToRemote.mockResolvedValue({
+        ok: false,
+        errorInfo: { status: 409, code: "lease_conflict", message: "leased", routeUnavailable: false },
+      });
+      await render(desktop());
+      await act(async () => q<HTMLButtonElement>(container, "desktop-save-as-version")?.click());
+      await flush();
+      expect(q(container, "desktop-changes-line")?.textContent).toContain("3 files changed outside Studio");
+      expect(q(container, "history-status")?.textContent).toBe("The agent is saving right now. Try again in a moment.");
+    });
+
     it("reports a Desktop not_saved refusal", async () => {
       mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyCount: 1, dirtyPaths: [], pathGroups: [] });
       mocks.syncToRemote.mockResolvedValue({
