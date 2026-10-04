@@ -13,9 +13,10 @@ pub const GIT_DELETE_TOKEN_SUBJECT: &str = "instafy-controller";
 pub const GIT_DELETE_TOKEN_TTL_SECONDS: i64 = 60;
 
 /// Writing work salvaged from retired workspace copies is another exact
-/// controller-to-service capability. A push carrying it may only create refs
-/// under `refs/instafy/salvage/gateway/`; it can never update or delete a ref,
-/// and it grants no read or ordinary write access.
+/// controller-to-service capability. Git Edge and Git Shard accept it only for
+/// the two requests of a push, and that push may only create refs under
+/// `refs/instafy/salvage/gateway/`. It can never update or delete a ref, fetch
+/// an object, or write like `git.write`.
 pub const GIT_SALVAGE_SCOPE: &str = "git.salvage";
 pub const GIT_SALVAGE_TOKEN_SUBJECT: &str = "instafy-controller-salvage";
 pub const GIT_SALVAGE_TOKEN_TTL_SECONDS: i64 = 120;
