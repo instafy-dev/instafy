@@ -4,6 +4,8 @@ import type { ChatMessage } from "../../screens/studio/types";
 import { shouldDisplayChatMessage } from "../../screens/studio/components/chatMessagePresentation";
 import { resolveThreadRunStatusFromMessages } from "../../screens/studio/components/threadPreviewHelpers";
 import {
+  attachUnsavedPathsToFileChanges,
+  extractUnsavedPathsFromMetadata,
   extractUnsavedReasonFromMetadata,
   extractWorkspaceCommitRangeFromMetadata,
   mapControllerMessageToChat,
@@ -828,7 +830,8 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
       ],
     });
 
-    expect(range).toEqual({ base, head });
+    // The canonical pair is the only one a saved-version revert may use.
+    expect(range).toEqual({ base, head, source: "git" });
   });
 
   it("falls back to the apply pair but never mixes pairs", () => {
@@ -842,7 +845,9 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
       ],
     });
 
-    expect(range).toEqual({ base, head });
+    // The apply pair can be a runtime checkout's own commits, so it is
+    // marked as such and never offered as a revert.
+    expect(range).toEqual({ base, head, source: "apply" });
   });
 
   it("rejects non-commit revs such as apply timestamps", () => {
@@ -868,7 +873,7 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
       ],
     });
 
-    expect(range).toEqual({ base: newerBase, head: newerHead });
+    expect(range).toEqual({ base: newerBase, head: newerHead, source: "git" });
 
     expect(
       extractWorkspaceCommitRangeFromMetadata({
@@ -948,7 +953,7 @@ describe("extractWorkspaceCommitRangeFromMetadata", () => {
       createdAt: "2026-07-07T00:00:00.000Z",
     });
 
-    expect(mapped.commitRange).toEqual({ base, head });
+    expect(mapped.commitRange).toEqual({ base, head, source: "git" });
   });
 });
 
@@ -1058,6 +1063,16 @@ describe("extractUnsavedReasonFromMetadata", () => {
     ).toBeNull();
   });
 
+  it("does not mark the whole message unsaved for a partial save", () => {
+    // A partial save published most files; the ones it left out are marked
+    // one by one from conflictedPaths and rejectedPaths instead.
+    expect(
+      extractUnsavedReasonFromMetadata({
+        artifacts: [originApply("partial", { conflictedPaths: ["notes.md"] })],
+      }),
+    ).toBeNull();
+  });
+
   it("follows the newest apply artifact when a retried run appends another", () => {
     expect(
       extractUnsavedReasonFromMetadata({ artifacts: [originApply("failed"), originApply("synced")] }),
@@ -1111,5 +1126,135 @@ describe("extractUnsavedReasonFromMetadata", () => {
     // A copy without files keeps the existing files and their save state.
     const incomingWithoutFiles = createMessage({ id: "m", timestamp: 2, files: null, unsavedReason: null });
     expect(mergeAndSortMessages([existing, incomingWithoutFiles])[0]?.unsavedReason).toBe("save_failed");
+  });
+});
+
+describe("extractUnsavedPathsFromMetadata", () => {
+  // The per-path fields of the runtime's origin/apply artifact
+  // (runtime-agent jobs/mod.rs, origin_apply_artifact; save_report.rs).
+  function originApply(extra: Record<string, unknown>) {
+    return {
+      kind: "origin/apply",
+      metadata: { originId: "origin-1", gitSyncStatus: "partial", conflictedPaths: [], rejectedPaths: [], ...extra },
+    };
+  }
+
+  it("reads conflicted paths and rejected paths with their reasons", () => {
+    expect(
+      extractUnsavedPathsFromMetadata({
+        artifacts: [
+          originApply({
+            conflictedPaths: ["src/app.ts"],
+            rejectedPaths: [
+              { path: ".env", reason: "secret", keptSavedVersion: false },
+              { path: "assets/video.mp4", reason: "too_large", keptSavedVersion: true },
+              { path: "dist/out.js", reason: "excluded", keptSavedVersion: false },
+              { path: "debug.log", reason: "ignored", keptSavedVersion: false },
+              { path: "chat/upload.png", reason: "attachment", keptSavedVersion: false },
+              { path: "rules.bin", reason: "policy", keptSavedVersion: false },
+              { path: "vendor/lib", reason: "unsupported", keptSavedVersion: false },
+            ],
+          }),
+        ],
+      }),
+    ).toEqual([
+      { path: "src/app.ts", reason: "conflicted", keptSavedVersion: true },
+      { path: ".env", reason: "secret", keptSavedVersion: false },
+      { path: "assets/video.mp4", reason: "too_large", keptSavedVersion: true },
+      { path: "dist/out.js", reason: "excluded", keptSavedVersion: false },
+      { path: "debug.log", reason: "ignored", keptSavedVersion: false },
+      { path: "chat/upload.png", reason: "attachment", keptSavedVersion: false },
+      { path: "rules.bin", reason: "policy", keptSavedVersion: false },
+      { path: "vendor/lib", reason: "unsupported", keptSavedVersion: false },
+    ]);
+  });
+
+  it("keeps a rejected path whose origin gave no reason, and one entry per path", () => {
+    expect(
+      extractUnsavedPathsFromMetadata({
+        artifacts: [
+          originApply({
+            conflictedPaths: ["./notes.md", "notes.md"],
+            rejectedPaths: [
+              { path: "notes.md", reason: "secret" },
+              { path: "/data/raw.csv", reason: "" },
+              { path: "odd.bin", reason: "something-new", kept_saved_version: true },
+              "plain.txt",
+              { reason: "secret" },
+            ],
+          }),
+        ],
+      }),
+    ).toEqual([
+      { path: "notes.md", reason: "conflicted", keptSavedVersion: true },
+      { path: "data/raw.csv", reason: "unknown", keptSavedVersion: false },
+      { path: "odd.bin", reason: "unknown", keptSavedVersion: true },
+      { path: "plain.txt", reason: "unknown", keptSavedVersion: false },
+    ]);
+  });
+
+  it("reads the turn's own save, not a command lane's or an older one", () => {
+    expect(
+      extractUnsavedPathsFromMetadata({
+        artifacts: [
+          originApply({ conflictedPaths: ["old.md"] }),
+          originApply({ conflictedPaths: ["new.md"] }),
+          originApply({ conflictedPaths: ["skills/x/SKILL.md"], lane: "skills/import" }),
+        ],
+      }).map((entry) => entry.path),
+    ).toEqual(["new.md"]);
+    expect(extractUnsavedPathsFromMetadata({ artifacts: [{ kind: "apply/files", files: [] }] })).toEqual([]);
+    expect(extractUnsavedPathsFromMetadata(null)).toEqual([]);
+  });
+
+  it("marks only the matching file changes", () => {
+    const file = (path: string) => ({
+      path,
+      workspacePath: path,
+      label: path,
+      changeType: "changed" as const,
+      lineRanges: [],
+    });
+    const files = [file("src/app.ts"), { ...file("./README.md"), workspacePath: "README.md" }];
+    const marked = attachUnsavedPathsToFileChanges(files, [
+      { path: "README.md", reason: "ignored", keptSavedVersion: false },
+      { path: "elsewhere.md", reason: "conflicted", keptSavedVersion: true },
+    ]);
+    expect(marked[0]).toBe(files[0]);
+    expect(marked[1]?.notSaved).toEqual({ reason: "ignored", keptSavedVersion: false });
+    expect(attachUnsavedPathsToFileChanges(files, [])).toBe(files);
+  });
+
+  it("is attached to the files of mapped chat messages", () => {
+    const mapped = mapControllerMessageToChat({
+      id: "15151515-1515-1515-1515-151515151515",
+      conversationId: "44444444-4444-4444-4444-444444444444",
+      projectId: "55555555-5555-5555-5555-555555555555",
+      sessionId: null,
+      createdBy: null,
+      promptId: null,
+      runId: null,
+      role: "assistant",
+      content: "Edited two files.",
+      metadata: {
+        artifacts: [
+          {
+            kind: "apply/files",
+            files: [
+              { path: "src/app.ts", change: { type: "changed" } },
+              { path: ".env", change: { type: "created" } },
+            ],
+          },
+          originApply({ rejectedPaths: [{ path: ".env", reason: "secret", keptSavedVersion: false }] }),
+        ],
+      },
+      createdAt: "2026-10-04T10:00:00.000Z",
+    });
+
+    expect(mapped.unsavedReason).toBeNull();
+    expect(mapped.files?.map((entry) => [entry.path, entry.notSaved ?? null])).toEqual([
+      ["src/app.ts", null],
+      [".env", { reason: "secret", keptSavedVersion: false }],
+    ]);
   });
 });
