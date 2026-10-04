@@ -1247,6 +1247,34 @@ describe("ChatFileChangeList", () => {
       expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
     });
 
+    it("moves focus to Cancel, never onto Revert, when Try again finds the change revertable", async () => {
+      // The origin was busy saving the first time, then answers.
+      fetchWorkspaceGitHistoryReview.mockResolvedValueOnce(null);
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+
+      const retry = document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-retry-check"]');
+      expect(retry).not.toBeNull();
+      await act(async () => {
+        retry?.focus();
+      });
+      expect(document.activeElement).toBe(retry);
+      await act(async () => {
+        retry?.click();
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(dialog()?.getAttribute("data-state")).toBe("ready");
+      const confirm = document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]');
+      // Revert is its own button, not the Try again button relabelled.
+      expect(confirm).not.toBe(retry);
+      expect(document.activeElement).not.toBe(confirm);
+      expect(document.activeElement?.textContent).toBe("Cancel");
+      expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+    });
+
     it("marks only the files the reverted version touched", async () => {
       // The head version holds src/util.ts only; src/app.ts reached the
       // saved history in another version this revert does not touch.

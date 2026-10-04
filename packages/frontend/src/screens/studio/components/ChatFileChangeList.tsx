@@ -381,6 +381,9 @@ export function ChatFileChangeList({
   const cardRef = useRef<HTMLDivElement | null>(null);
   const revertChipRef = useRef<HTMLButtonElement | null>(null);
   const summaryToggleRef = useRef<HTMLButtonElement | null>(null);
+  // The dialog's safe choice: focus goes back here whenever the control
+  // that had it is replaced (Try again becomes Revert once a check passes).
+  const revertCancelRef = useRef<HTMLButtonElement | null>(null);
   const cardIdBase = useId();
 
   const resolvedFiles = useMemo(() => resolveUniqueChatFileChanges(files), [files]);
@@ -900,6 +903,14 @@ export function ChatFileChangeList({
     handleUndoRequest();
   }, [closeRevertDialog, handleUndoRequest]);
 
+  // Try again is replaced by Revert (or by the agent offer) when the check
+  // answers. Focus moves to Cancel first, so a second Enter can never land
+  // on a Revert the user did not move to.
+  const retryRevertScopeCheck = useCallback(() => {
+    revertCancelRef.current?.focus();
+    void checkRevertScope();
+  }, [checkRevertScope]);
+
   // "Revert this change": a new version that undoes the saved version the
   // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
   // that commit's own change), on the origin the versioning probe described.
@@ -1018,6 +1029,20 @@ export function ChatFileChangeList({
           : cardRef.current?.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]');
     target?.focus();
   }, [returnFocusAfterRevert, revertConfirmOpen]);
+
+  // While the dialog is open its action button is swapped as the check
+  // answers. Focus never stays on the page body behind the dialog: it goes
+  // to Cancel, the safe choice.
+  useLayoutEffect(() => {
+    if (!revertConfirmOpen || typeof document === "undefined") {
+      return;
+    }
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) {
+      return;
+    }
+    revertCancelRef.current?.focus();
+  }, [revertConfirmOpen, revertScope?.status]);
 
   const conversationalUndoChip = messageId ? (
     <button
@@ -1469,21 +1494,34 @@ export function ChatFileChangeList({
                     : REVERT_CHECKING_MESSAGE}
             </p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button variant="outline" autoFocus isDisabled={revertingChange} onPress={closeRevertDialog}>
+              <Button
+                ref={revertCancelRef}
+                variant="outline"
+                autoFocus
+                isDisabled={revertingChange}
+                onPress={closeRevertDialog}
+              >
                 Cancel
               </Button>
+              {/* Each action has its own key, so React never reuses one
+                  button's node (and its focus) for another action. */}
               {revertScope?.status === "other_work" ? (
                 messageId ? (
-                  <Button onPress={askAgentFromRevertDialog} data-testid="chat-file-change-revert-ask-agent">
+                  <Button
+                    key="ask"
+                    onPress={askAgentFromRevertDialog}
+                    data-testid="chat-file-change-revert-ask-agent"
+                  >
                     Ask the agent to undo it
                   </Button>
                 ) : null
               ) : revertScope?.status === "failed" ? (
-                <Button onPress={() => void checkRevertScope()} data-testid="chat-file-change-revert-retry-check">
+                <Button key="retry" onPress={retryRevertScopeCheck} data-testid="chat-file-change-revert-retry-check">
                   Try again
                 </Button>
               ) : (
                 <Button
+                  key="revert"
                   isDisabled={revertScope?.status !== "ready"}
                   isPending={revertingChange}
                   onPress={() => void handleRevertChange()}
