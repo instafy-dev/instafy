@@ -319,9 +319,10 @@ impl<'a> WorkspaceGit<'a> {
                     command.env_remove(key);
                 }
                 if let Some(objects) = self.quarantine {
-                    command
-                        .env("GIT_OBJECT_DIRECTORY", objects)
-                        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", git_dir.join("objects"));
+                    command.env("GIT_OBJECT_DIRECTORY", objects).env(
+                        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                        quoted_alternate(&git_dir.join("objects"))?,
+                    );
                 }
                 if network {
                     if let Some(token) = self.token {
@@ -819,6 +820,29 @@ fn open_bare_repository(git_dir: &Path) -> Result<WorkspaceDir> {
     Ok(repository)
 }
 
+/// `path` as one entry of `GIT_ALTERNATE_OBJECT_DIRECTORIES`. Git splits
+/// that list on `:` (`;` on Windows) and C-unquotes an entry that starts
+/// with `"`, so the path is always quoted: a `:` in a self-hoster's root
+/// must not split it. A path with control bytes is refused.
+fn quoted_alternate(path: &Path) -> Result<OsString> {
+    let text = path
+        .to_str()
+        .with_context(|| format!("the repository path {path:?} is not UTF-8"))?;
+    if text.chars().any(char::is_control) {
+        bail!("the repository path {path:?} holds a control character");
+    }
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        if matches!(character, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    Ok(OsString::from(quoted))
+}
+
 /// Create one directory, readable only by the server's user. Fails when the
 /// name exists in any form, a link included.
 fn create_private_dir(path: &Path) -> std::io::Result<()> {
@@ -1250,8 +1274,14 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::under("")
+        }
+
+        /// The fixture inside a folder named `name` ("" for none).
+        fn under(name: &str) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().canonicalize().unwrap();
+            let root = dir.path().canonicalize().unwrap().join(name);
+            std::fs::create_dir_all(&root).unwrap();
             let canonical = root.join("canonical.git");
             git_in(
                 &root,
@@ -1568,6 +1598,39 @@ mod tests {
             break;
         }
         assert!(found, "no child was read before its parent");
+    }
+
+    /// Git splits the alternates list on `:`: a mirror under a folder
+    /// whose name holds one still lends its objects to the quarantine.
+    #[test]
+    fn a_quarantine_works_under_a_path_with_a_colon() {
+        let fixture = Fixture::under("instafy:data \"x\" \\y");
+        let git = fixture.git();
+        let main = fixture.main();
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let staged = git.with_quarantine(&quarantine);
+        let commit = commit_in(&staged, &main, "notes.md", b"kept\n");
+        let result = push(
+            &staged,
+            &fixture.url(),
+            &[format!("{commit}:refs/heads/main")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result.class, PushClass::Pushed);
+        assert_eq!(quarantine.promote(&git).unwrap(), 3);
+        assert_eq!(git.commit_id(&commit).unwrap(), Some(commit.clone()));
+
+        // A control character cannot be quoted for git: refused.
+        let fixture = Fixture::under("line\nbreak");
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let error = fixture
+            .git()
+            .with_quarantine(&quarantine)
+            .run(&["rev-parse", "HEAD"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("control character"), "{error}");
     }
 
     #[test]
