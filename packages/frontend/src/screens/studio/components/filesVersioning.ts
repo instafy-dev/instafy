@@ -226,7 +226,10 @@ function parentOf(path: string): string {
 /**
  * Show never-saved file buffers in their folder's listing, so a new file
  * keeps its row (with the unsaved dot) across reloads until its first Save.
- * Folders that were never listed are left alone.
+ * A new file in a folder that is not in the space yet ("notes/todo.md")
+ * also keeps that folder's row: the folder is added to every listed parent
+ * that lacks it, with a listing of its own. A folder that is in the space
+ * but was never listed is left alone; it is listed when it is opened.
  */
 export function mergeNewFileBuffers(
   directoryEntries: Record<string, ControllerWorkspaceEntry[]>,
@@ -234,29 +237,44 @@ export function mergeNewFileBuffers(
   sortEntries: (entries: ControllerWorkspaceEntry[]) => ControllerWorkspaceEntry[],
 ): Record<string, ControllerWorkspaceEntry[]> {
   let next = directoryEntries;
+  const writable = () => {
+    if (next === directoryEntries) {
+      next = { ...directoryEntries };
+    }
+    return next;
+  };
+  /** Add `entry` to `parent`'s listing; true when it was not there. */
+  const ensure = (parent: string, entry: ControllerWorkspaceEntry): boolean => {
+    const entries = next[parent];
+    if (!entries || entries.some((candidate) => candidate.path === entry.path)) {
+      return false;
+    }
+    writable()[parent] = sortEntries([...entries, entry]);
+    return true;
+  };
   for (const file of files) {
     if (file.isNew !== true) {
       continue;
     }
-    const parent = parentOf(file.path);
-    const entries = next[parent];
-    if (!entries || entries.some((entry) => entry.path === file.path)) {
-      continue;
+    const segments = file.path.split("/");
+    let parent = "";
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const folder = parent ? `${parent}/${segments[index]}` : segments[index];
+      const added = ensure(parent, { name: segments[index], path: folder, kind: "directory" });
+      if (added && !next[folder]) {
+        // Not in the space yet: it holds only new buffers.
+        writable()[folder] = [];
+      }
+      parent = folder;
     }
-    if (next === directoryEntries) {
-      next = { ...directoryEntries };
-    }
-    next[parent] = sortEntries([
-      ...entries,
-      {
-        name: file.label || file.path.split("/").pop() || file.path,
-        path: file.path,
-        kind: "file",
-        size: null,
-        modified: null,
-        mimeType: file.mimeType ?? null,
-      },
-    ]);
+    ensure(parentOf(file.path), {
+      name: file.label || segments[segments.length - 1] || file.path,
+      path: file.path,
+      kind: "file",
+      size: null,
+      modified: null,
+      mimeType: file.mimeType ?? null,
+    });
   }
   return next;
 }

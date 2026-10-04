@@ -160,4 +160,22 @@ describe("Files versioning helpers", () => {
     expect(merged.lib).toBeUndefined();
     expect(mergeNewFileBuffers(listing, [], sort as never)).toBe(listing);
   });
+
+  it("keeps the folders of a new file that are not in the space yet", () => {
+    const sort = (entries: { name: string }[]) => [...entries].sort((a, b) => a.name.localeCompare(b.name));
+    const listing = {
+      "": [{ name: "README.md", path: "README.md", kind: "file" as const }, { name: "src", path: "src", kind: "directory" as const }],
+    };
+    const created = (path: string) =>
+      buffer({ id: path, path, label: path.split("/").pop()!, isNew: true, generated: "", modified: "" });
+    const merged = mergeNewFileBuffers(listing, [created("notes/deep/todo.md")], sort as never);
+    expect(merged[""].map((entry) => [entry.path, entry.kind])).toEqual([
+      ["notes", "directory"], ["README.md", "file"], ["src", "directory"],
+    ]);
+    expect(merged.notes.map((entry) => entry.path)).toEqual(["notes/deep"]);
+    expect(merged["notes/deep"].map((entry) => entry.path)).toEqual(["notes/deep/todo.md"]);
+    expect(listing[""]).toHaveLength(2);
+    // A folder that is in the space but was never listed is listed when opened.
+    expect(mergeNewFileBuffers(listing, [created("src/new.ts")], sort as never).src).toBeUndefined();
+  });
 });

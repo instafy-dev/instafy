@@ -745,6 +745,40 @@ describe("FilesPanel one Save", () => {
     );
   });
 
+  it("keeps a new file in a new folder in the explorer after a reload", async () => {
+    mocks.listAt.mockImplementation(async ({ path }: { path?: string }) => ({
+      ok: true,
+      // The folder is not in the space: its listing answers 404, an empty folder.
+      entries: path ? [] : [{ name: "README.md", path: "README.md", kind: "file", blobOid: BLOB_A }],
+      rev: REV_1,
+      originId: "origin-1",
+      originMode: "hosted",
+    }));
+    await render([buffer({ modified: "saved" })]);
+    await act(async () => { query("files-explorer-new-file")?.click(); });
+    const input = container.querySelector<HTMLInputElement>('[data-testid="files-explorer-create-file-input"]');
+    expect(input).not.toBeNull();
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setValue.call(input, "notes/todo.md");
+      input!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await settle();
+    expect(query("files-entry-notes")).not.toBeNull();
+    expect(query("files-entry-notes-todo-md")).not.toBeNull();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev: "5".repeat(40) } } }));
+    });
+    await settle();
+    expect(mocks.listAt).toHaveBeenCalledWith(expect.objectContaining({ rev: "5".repeat(40) }));
+    expect(query("files-entry-notes")).not.toBeNull();
+    expect(query("files-entry-notes-todo-md")).not.toBeNull();
+    expect(testCodeHandle.current!.workspace.files.find((entry) => entry.path === "notes/todo.md")?.isNew).toBe(true);
+  });
+
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {
     await render([buffer()]);
     expect(query("files-explorer-new-file")?.disabled).toBe(false);
