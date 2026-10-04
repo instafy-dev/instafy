@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { CodeWorkspace } from "../types";
 import { createDefaultCodeWorkspace, cloneCodeWorkspace } from "./defaults";
+import { keepSavedVersionIds } from "./savedVersionIds";
 import { useWorkspaceStore } from "../store";
 
 type UpdateWorkspaceFn = (current: CodeWorkspace) => CodeWorkspace;
@@ -88,7 +89,7 @@ function reducer(state: CodeHistoryState, action: CodeAction): CodeHistoryState 
       return {
         ...state,
         past: state.past.slice(0, state.past.length - 1),
-        present: previous,
+        present: keepSavedVersionIds(previous, state.present),
         future: [cloneCodeWorkspace(state.present), ...state.future]
       };
     }
@@ -100,7 +101,7 @@ function reducer(state: CodeHistoryState, action: CodeAction): CodeHistoryState 
       return {
         ...state,
         past: [...state.past, cloneCodeWorkspace(state.present)],
-        present: next,
+        present: keepSavedVersionIds(next, state.present),
         future: rest
       };
     }
