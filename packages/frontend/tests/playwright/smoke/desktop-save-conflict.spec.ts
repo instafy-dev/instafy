@@ -124,11 +124,14 @@ test.describe.serial("Desktop saves and the Desktop line", () => {
     // The folder is shared across serial tests, so other leftovers may count too.
     await expect(line).toContainText(/\d+ files? changed outside Studio/, { timeout: 60_000 });
 
-    await page.getByTestId("desktop-save-as-version").click();
+    await page.getByTestId("desktop-save-as-version").focus();
+    await page.keyboard.press("Enter");
     await expect(page.getByTestId("history-status")).toContainText(/Saved \d+ files? as a version\./, {
       timeout: 120_000,
     });
     await expect(line).toHaveCount(0, { timeout: 30_000 });
+    // The pressed button went away with the line: focus stays in the drawer.
+    await expect(drawer.getByRole("heading", { name: "Saved versions" })).toBeFocused();
     await assertGitRemoteFileText(page, fileName, {
       projectId,
       expectedText: `from the terminal ${unique}`,

@@ -115,9 +115,11 @@ test.describe("History UI (stateless gateway)", () => {
     await openHistory(page);
     await refreshHistory(page);
     await expect(historyRows(page)).toHaveCount(20, { timeout: 30_000 });
-    await page.getByTestId("history-show-more").click();
+    await page.getByTestId("history-show-more").focus();
+    await page.keyboard.press("Enter");
     await expect.poll(async () => await historyRows(page).count(), { timeout: 30_000 }).toBeGreaterThan(20);
     await expect(historyRows(page).nth(20).getByTestId("source-control-history-review")).toBeFocused();
+    await expect(page.getByTestId("history-status")).toHaveText(/^Loaded \d+ more saved versions?\.$/);
   });
 
   test("Revert saves a new version that undoes the chosen one", async ({ page }) => {
@@ -224,19 +226,33 @@ test.describe("History UI (stateless gateway)", () => {
     await openHistory(page);
     await refreshHistory(page);
     const row = unsavedRow(page, kept.ref);
+    const pathRow = row.locator(`[data-testid="unsaved-work-path"][data-path="${filePath}"]`);
+    const status = page.getByTestId("history-status");
+
+    // Cancel backs out without restoring, and focus returns to Restore.
+    await row.getByTestId("unsaved-work-restore").click();
+    await expect(status).toHaveText("Not restored yet: 1 file changed since this work was kept.", {
+      timeout: 60_000,
+    });
+    await expect(pathRow.getByTestId("unsaved-work-path-use")).toBeFocused();
+    await row.getByTestId("unsaved-work-conflict-cancel").focus();
+    await page.keyboard.press("Enter");
+    await expect(row.getByTestId("unsaved-work-conflict")).toHaveCount(0);
+    await expect(row.getByTestId("unsaved-work-restore")).toBeFocused();
+    await expect(status).toHaveText("Restore cancelled. Nothing was changed.");
+
     await row.getByTestId("unsaved-work-restore").click();
     await expect(row.getByTestId("unsaved-work-conflict")).toContainText(
       "These files changed since this work was kept. Choose a version for each:",
       { timeout: 60_000 },
     );
-    const pathRow = row.locator(`[data-testid="unsaved-work-path"][data-path="${filePath}"]`);
     await pathRow.getByTestId("unsaved-work-path-use").click();
     await expect(pathRow.getByTestId("unsaved-work-path-resolved")).toContainText("Saved this version", {
       timeout: 60_000,
     });
     await row.getByTestId("unsaved-work-restore-rest").click();
     // The only kept file is already saved, so the rest adds no version.
-    await expect(page.getByTestId("history-status")).toContainText(
+    await expect(status).toContainText(
       "Nothing to restore. The saved version already has this work.",
       { timeout: 60_000 },
     );
