@@ -22,8 +22,19 @@ vi.mock("../LegacyChangesDrawer", () => ({
   LegacyChangesDrawer: () => <div data-testid="legacy-body" />,
 }));
 vi.mock("../HistoryDrawer", () => ({
-  HistoryDrawer: ({ versioning }: { versioning: { historyReady: boolean; chromeMode: string } }) => (
-    <div data-testid="history-body" data-ready={String(versioning.historyReady)} data-mode={versioning.chromeMode} />
+  HistoryDrawer: ({
+    versioning,
+    probeFailed,
+  }: {
+    versioning: { historyReady: boolean; chromeMode: string };
+    probeFailed?: boolean;
+  }) => (
+    <div
+      data-testid="history-body"
+      data-ready={String(versioning.historyReady)}
+      data-mode={versioning.chromeMode}
+      data-probe-failed={String(probeFailed === true)}
+    />
   ),
 }));
 
@@ -118,5 +129,24 @@ describe("SourceControlDrawer switch", () => {
     await act(async () => answer(status()));
     await flush();
     expect(container.querySelector('[data-testid="legacy-body"]')).not.toBeNull();
+  });
+
+  it("tells History when the probe made on opening got no answer", async () => {
+    window.localStorage.setItem("instafy.versioning.mode.project-1", "stateless");
+    mocks.origin = { originId: "gateway", mode: "hosted" };
+    let fail!: (reason: unknown) => void;
+    mocks.status.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        fail = reject;
+      }),
+    );
+    await render();
+    const history = () => container.querySelector('[data-testid="history-body"]');
+    expect(history()?.getAttribute("data-ready")).toBe("false");
+    expect(history()?.getAttribute("data-probe-failed")).toBe("false");
+    await act(async () => fail(new TypeError("Failed to fetch")));
+    await flush();
+    expect(history()?.getAttribute("data-ready")).toBe("false");
+    expect(history()?.getAttribute("data-probe-failed")).toBe("true");
   });
 });

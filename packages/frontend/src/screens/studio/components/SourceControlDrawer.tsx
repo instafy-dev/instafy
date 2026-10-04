@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { GitReviewMode } from "../../../workspace/gitReviewTypes";
 import { isHistoryMode, useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import { HistoryDrawer } from "./HistoryDrawer";
@@ -26,13 +26,27 @@ export function SourceControlDrawer({
   const versioning = useActiveWorkspaceVersioning();
   const refreshRef = useRef(versioning.refresh);
   refreshRef.current = versioning.refresh;
+  const originIdRef = useRef(versioning.originId);
+  originIdRef.current = versioning.originId;
+  // Whether the probe made on opening got an answer, for the origin it asked.
+  const [openProbe, setOpenProbe] = useState<{ originId: string | null; answered: boolean } | null>(null);
 
   useEffect(() => {
-    void refreshRef.current();
+    let active = true;
+    const originId = originIdRef.current;
+    void refreshRef.current().then((result) => {
+      if (active) {
+        setOpenProbe({ originId, answered: result !== null });
+      }
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   if (isHistoryMode(versioning.chromeMode)) {
-    return <HistoryDrawer versioning={versioning} onRequestClose={onRequestClose} />;
+    const probeFailed = openProbe !== null && !openProbe.answered && openProbe.originId === versioning.originId;
+    return <HistoryDrawer versioning={versioning} onRequestClose={onRequestClose} probeFailed={probeFailed} />;
   }
   return <LegacyChangesDrawer onRequestClose={onRequestClose} openRequest={openRequest} />;
 }

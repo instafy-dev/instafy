@@ -42,6 +42,7 @@ const WORKSPACE_COMMIT_EVENT = "instafy:workspace-commit";
 const HISTORY_LOAD_ERROR_COPY = "Couldn't load saved versions. Try Refresh.";
 const HISTORY_MORE_ERROR_COPY = "Couldn't load more saved versions. Try again.";
 const HISTORY_BUSY_COPY = "Checking saved versions…";
+const HISTORY_PROBE_ERROR_COPY = "Couldn't check this space's saved versions.";
 const HISTORY_BUSY_ERROR_COPY = "The space is busy saving changes. Try Refresh in a moment.";
 const HISTORY_MORE_BUSY_COPY = "The space is busy saving changes. Try Show more again in a moment.";
 
@@ -77,9 +78,12 @@ function eventTargetsProject(event: Event, projectId: string): boolean {
 export function HistoryDrawer({
   versioning,
   onRequestClose,
+  probeFailed = false,
 }: {
   versioning: ActiveWorkspaceVersioning;
   onRequestClose?: () => void;
+  /** The mode probe made when the drawer opened got no answer. */
+  probeFailed?: boolean;
 }) {
   const { projectCapabilitiesResolved, canWriteProject } = useProject();
   const canWrite = projectCapabilitiesResolved === true && canWriteProject === true;
@@ -102,6 +106,11 @@ export function HistoryDrawer({
   const historySeqRef = useRef(0);
   const lastHistoryLoadRef = useRef(0);
   const busyRetryRef = useRef<number | null>(null);
+  const mountedRef = useRef(true);
+  // Probes asked from here while the mode is still unknown.
+  const [probeRetry, setProbeRetry] = useState<"idle" | "running" | "answered" | "failed">("idle");
+  const probeUnanswered =
+    !ready && (probeRetry === "failed" || (probeRetry === "idle" && probeFailed));
   const focusCommitRef = useRef<string | null>(null);
   const rowButtonsRef = useRef(new Map<string, HTMLButtonElement>());
 
@@ -195,6 +204,17 @@ export function HistoryDrawer({
 
   useEffect(() => cancelBusyRetry, [cancelBusyRetry]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    setProbeRetry("idle");
+  }, [originId, projectId]);
+
   // A saved version landed somewhere: reload the list once the burst settles.
   useEffect(() => {
     if (!ready || !projectId || typeof window === "undefined") {
@@ -242,6 +262,16 @@ export function HistoryDrawer({
   // The header's Refresh reloads the whole drawer: mode, saved versions,
   // the Desktop line and Unsaved work (no event announces new recovery refs).
   const handleRefresh = useCallback(() => {
+    if (!ready) {
+      // The mode is not known yet: Refresh (and Retry) asks the origin again.
+      setProbeRetry("running");
+      void versioning.refresh().then((result) => {
+        if (mountedRef.current) {
+          setProbeRetry(result ? "answered" : "failed");
+        }
+      });
+      return;
+    }
     void versioning.refresh();
     void loadHistory();
     setStatusRefreshKey((key) => key + 1);
@@ -409,7 +439,7 @@ export function HistoryDrawer({
               title="Refresh"
               data-testid="source-control-refresh"
               onPress={handleRefresh}
-              isDisabled={!ready || history.status === "loading"}
+              isDisabled={ready ? history.status === "loading" : probeRetry === "running"}
               className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
@@ -454,7 +484,19 @@ export function HistoryDrawer({
           ) : null}
         </div>
 
-        {!ready ? (
+        {!ready && probeUnanswered ? (
+          <div
+            className="flex flex-wrap items-center justify-center gap-2 px-2 py-10"
+            data-testid="history-probe-error"
+          >
+            <Text as="span" tone="muted">
+              {HISTORY_PROBE_ERROR_COPY}
+            </Text>
+            <Button variant="ghost" size="xs" radius="xl" onPress={handleRefresh} data-testid="history-probe-retry">
+              Retry
+            </Button>
+          </div>
+        ) : !ready ? (
           <div className="flex items-center justify-center px-2 py-10">
             <Text tone="muted">Loading history…</Text>
           </div>

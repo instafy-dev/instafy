@@ -153,8 +153,14 @@ describe("HistoryDrawer", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function render(state: ActiveWorkspaceVersioning = versioning(), onRequestClose = vi.fn()) {
-    await act(async () => root.render(<HistoryDrawer versioning={state} onRequestClose={onRequestClose} />));
+  async function render(
+    state: ActiveWorkspaceVersioning = versioning(),
+    onRequestClose = vi.fn(),
+    extra: { probeFailed?: boolean } = {},
+  ) {
+    await act(async () =>
+      root.render(<HistoryDrawer versioning={state} onRequestClose={onRequestClose} {...extra} />),
+    );
     await flush();
   }
 
@@ -177,6 +183,39 @@ describe("HistoryDrawer", () => {
     expect(q(container, "source-control-drawer")?.getAttribute("data-mode")).toBe("history");
     expect(mocks.fetchHistory).not.toHaveBeenCalled();
     expect(mocks.fetchStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps Refresh usable while the mode is unknown", async () => {
+    await render(versioning({ resolved: false, historyReady: false }));
+    expect(container.textContent).toContain("Loading history");
+    const refresh = q<HTMLButtonElement>(container, "source-control-refresh");
+    expect(refresh?.disabled).toBe(false);
+    await act(async () => refresh?.click());
+    await flush();
+    expect(mocks.probe).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchHistory).not.toHaveBeenCalled();
+  });
+
+  it("says when the mode probe got no answer and offers Retry", async () => {
+    await render(versioning({ resolved: false, historyReady: false }), vi.fn(), { probeFailed: true });
+    expect(q(container, "history-probe-error")?.textContent).toContain("Couldn't check this space's saved versions.");
+    expect(container.textContent).not.toContain("Loading history");
+    let answer!: (value: unknown) => void;
+    mocks.probe.mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    await act(async () => q<HTMLButtonElement>(container, "history-probe-retry")?.click());
+    await flush();
+    expect(mocks.probe).toHaveBeenCalledTimes(1);
+    // While it asks again: the loading frame, and Refresh waits.
+    expect(container.textContent).toContain("Loading history");
+    expect(q<HTMLButtonElement>(container, "source-control-refresh")?.disabled).toBe(true);
+    await act(async () => answer(null));
+    await flush();
+    expect(q(container, "history-probe-error")).not.toBeNull();
+    expect(mocks.fetchHistory).not.toHaveBeenCalled();
   });
 
   it("loads one page from the pinned default origin and never polls", async () => {
