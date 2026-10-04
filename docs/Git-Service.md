@@ -321,6 +321,29 @@ while Git Edge still accepts the credential: roll Git Edge back first, or stop m
   goes to a recovery ref (`refs/instafy/recovery/<origin id>/<name>`) for the user or the agent.
 - No global merge queue service; the git ref update is the serialization point.
 
+## History in Studio
+
+Studio picks its versioning UI per space from the project's default origin:
+
+- **Changes** (a cloud space on the stateful gateway, and any space whose mode is not known yet):
+  the working-tree drawer with Save version and Discard, unchanged.
+- **History** (a cloud space whose gateway answers `/git/status` with `stateless: true`, and every
+  Desktop space): saved versions read from the default origin, 20 per page with Show more where
+  the origin pages history. Each version can be reviewed or reverted; Revert saves a new version
+  that undoes it (`POST /git/revert-commit {commit, base}`) and never rewrites history.
+- **Unsaved work** (History only): work kept on `refs/instafy/recovery/*` and
+  `refs/instafy/salvage/*`, listed with `GET /git/recovery`. Restore commits it as a new version
+  (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
+  version, keep the current one, or ask the agent) and finishes with a `keep` list. Remove deletes a
+  recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show
+  "Restored" once restored. The section is hidden on servers without these routes.
+- **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
+  version (`POST /git/sync`), naming files it kept on the computer and why.
+
+The nav badge counts uncommitted changes in Changes and unsaved-work entries in History. Each
+viewer sees one chat row the first time new unsaved work appears; it is not written into the
+conversation.
+
 ## Local dev (what we should wire into `pnpm stack:up`)
 - Start `git-shard-0` + `git-edge` in Docker (compose file), storing repos in a local docker volume.
 - Dev convenience: `git-shard` can auto-init and seed `<project_id>.git` on first access (`GIT_AUTO_INIT=1`).
