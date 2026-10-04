@@ -1,9 +1,11 @@
 import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
 import { Fragment, useCallback, useEffect, useId, useMemo, useState } from "react";
-import { Eye, NavArrowRight, OpenNewWindow, Undo, WarningTriangle } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Eye, NavArrowRight, OpenNewWindow, Undo, UndoCircle, WarningTriangle } from "iconoir-react";
+import { Button, IconButton } from "../../../components/Button";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { useStatus } from "../../../status/useStatus";
 import { controllerClient } from "../../../sdk/instafy";
+import { WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS } from "../../../services/runtimeController/workspaceSave";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -17,12 +19,13 @@ import type {
   ChatMessageUnsavedReason,
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
-import { describeFileNotSaved, describeUnsavedChanges } from "./chatFileChangeCopy";
+import { describeChangeRevertOutcome, describeFileNotSaved, describeUnsavedChanges } from "./chatFileChangeCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
   revertPaths: revertWorkspaceGitPathsFromController,
+  revertCommit: revertWorkspaceGitCommitFromController,
 } = controllerClient.workspace.git;
 const { read: readWorkspaceFileFromController } = controllerClient.workspace.files;
 
@@ -305,7 +308,8 @@ export function ChatFileChangeList({
   // Identity of the chat message these changes belong to. When present, the
   // Undo chip becomes a conversational affordance (#165): it asks the agent to
   // undo that message's change instead of silently reverting files. Without it
-  // the chip falls back to the legacy file revert.
+  // the chip falls back to the legacy file revert on a space that keeps
+  // versions the old way, and to "Revert this change" alone elsewhere.
   messageId?: string | null;
   messageTimestamp?: number | null;
 }) {
@@ -321,6 +325,12 @@ export function ChatFileChangeList({
     unsavedWorkInHistory:
       versioning.mode === "stateless" || (versioning.mode === "desktop" && versioning.recovery === "supported"),
   };
+  // Every save is a version on the stateless gateway and on a Desktop origin.
+  // There the change is undone by reverting its canonical commit range as a
+  // new version, never by discarding paths. Until a probe answers, the mode
+  // is legacy and the card behaves as it always has.
+  const savesAreVersions = versioning.mode === "stateless" || versioning.mode === "desktop";
+  const revertRange = savesAreVersions && commitRange?.source === "git" ? commitRange : null;
   const projectWriteEnabled =
     projectAccess?.projectCapabilitiesResolved === true &&
     projectAccess.canWriteProject === true;
@@ -336,6 +346,10 @@ export function ChatFileChangeList({
   );
   const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
   const [openNotSavedNotes, setOpenNotSavedNotes] = useState<Record<string, boolean>>({});
+  const [revertConfirmOpen, setRevertConfirmOpen] = useState(false);
+  const [revertingChange, setRevertingChange] = useState(false);
+  // The files were undone by a saved revert version, not by a path discard.
+  const [revertedByVersion, setRevertedByVersion] = useState(false);
   const cardIdBase = useId();
 
   const resolvedFiles = useMemo(() => resolveUniqueChatFileChanges(files), [files]);
@@ -794,6 +808,84 @@ export function ChatFileChangeList({
     return () => window.clearTimeout(timer);
   }, [undoRequestPending]);
 
+  const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange);
+
+  // "Revert this change": a new version that undoes the run's canonical range
+  // (`{commit: head, base}`), on the origin the versioning probe described.
+  const handleRevertChange = useCallback(async () => {
+    setRevertConfirmOpen(false);
+    if (!projectId || !revertRange || !projectWriteEnabled || revertingChange) {
+      return;
+    }
+    setRevertingChange(true);
+    try {
+      const result = await revertWorkspaceGitCommitFromController({
+        projectId,
+        commit: revertRange.head,
+        base: revertRange.base,
+        originId: versioning.originId,
+        routing: "default",
+        // An agent checkpoint holds the project lease briefly: retry once.
+        leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
+      });
+      const outcome = describeChangeRevertOutcome(result);
+      if (outcome.reverted) {
+        const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));
+        const targetPaths = pendingPaths.filter((path) => !left.has(path));
+        setRevertedByVersion(true);
+        setUndoStatusByPath((prev) => {
+          const next = { ...prev };
+          for (const path of targetPaths) {
+            // Reverting a run that created a file removes it again.
+            next[path] = changeTypeByPath[path] === "created" ? "removed" : "reverted";
+          }
+          return next;
+        });
+        if (targetPaths.length === pendingPaths.length && totalCount > 1) {
+          setRailExpanded(false);
+        }
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
+        }
+      }
+      const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
+      showStatus(
+        outcome.message,
+        outcome.intent,
+        askAgent ? 9000 : outcome.intent === "success" || outcome.intent === "info" ? 4000 : 6500,
+        askAgent ? { actionLabel: "Ask the agent to undo it", onAction: askAgent } : undefined,
+      );
+    } finally {
+      setRevertingChange(false);
+    }
+  }, [
+    changeTypeByPath,
+    handleUndoRequest,
+    messageId,
+    pendingPaths,
+    projectId,
+    projectWriteEnabled,
+    revertRange,
+    revertingChange,
+    showStatus,
+    totalCount,
+    versioning.originId,
+  ]);
+
+  const conversationalUndoChip = messageId ? (
+    <button
+      type="button"
+      className={actionUndoChipClass}
+      onClick={handleUndoRequest}
+      disabled={undoRequestPending}
+      title="Ask the agent to undo this change"
+      data-testid="chat-file-change-undo"
+    >
+      <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+      <span>{undoRequestPending ? "Undo…" : "Undo"}</span>
+    </button>
+  ) : null;
+
   return (
     <div className="mt-2 text-sm" data-testid="chat-file-change-summary">
       {/* Chips and their actions flow as one row: actions follow the chips after a thin
@@ -925,19 +1017,27 @@ export function ChatFileChangeList({
               <Eye className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
               <span>Review changes</span>
             </button>
-            {projectWriteEnabled ? (
+            {projectWriteEnabled && savesAreVersions ? (
+              <>
+                {conversationalUndoChip}
+                {canRevertChange ? (
+                  <button
+                    type="button"
+                    className={actionChipClass}
+                    onClick={() => setRevertConfirmOpen(true)}
+                    disabled={revertingChange}
+                    aria-busy={revertingChange || undefined}
+                    title="Save a new version that undoes this change"
+                    data-testid="chat-file-change-revert"
+                  >
+                    <UndoCircle className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+                    <span>{revertingChange ? "Reverting…" : "Revert this change"}</span>
+                  </button>
+                ) : null}
+              </>
+            ) : projectWriteEnabled ? (
               messageId ? (
-                <button
-                  type="button"
-                  className={actionUndoChipClass}
-                  onClick={handleUndoRequest}
-                  disabled={undoRequestPending}
-                  title="Ask the agent to undo this change"
-                  data-testid="chat-file-change-undo"
-                >
-                  <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
-                  <span>{undoRequestPending ? "Undo…" : "Undo"}</span>
-                </button>
+                conversationalUndoChip
               ) : (
                 // Legacy fallback for surfaces that render changes without a
                 // message identity: reverting files is all "undo" can mean here.
@@ -1052,7 +1152,13 @@ export function ChatFileChangeList({
                         ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200"
                         : "border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200",
                     ].join(" ")}
-                    title={undoStatus === "removed" ? "Removed from workspace" : "Reverted to git HEAD"}
+                    title={
+                      revertedByVersion
+                        ? "Undone by a new saved version"
+                        : undoStatus === "removed"
+                          ? "Removed from workspace"
+                          : "Reverted to git HEAD"
+                    }
                   >
                     {undoStatus === "removed" ? "Removed" : "Reverted"}
                   </span>
@@ -1070,7 +1176,7 @@ export function ChatFileChangeList({
                 >
                   <OpenNewWindow className="h-3 w-3 text-slate-500 dark:text-slate-400" aria-hidden="true" />
                 </IconButton>
-                {!isReverted && projectWriteEnabled ? (
+                {!isReverted && projectWriteEnabled && !savesAreVersions ? (
                   <>
                     <span className="mx-0.5 h-3.5 w-px shrink-0 bg-slate-200 dark:bg-white/[0.08]" aria-hidden="true" />
                     {/* Direct file revert stays available from the file card,
@@ -1174,6 +1280,37 @@ export function ChatFileChangeList({
           </div>
         );
       })}
+
+      {revertConfirmOpen ? (
+        <StudioDialogModal
+          isOpen
+          isDismissable
+          onOpenChange={(open) => {
+            if (!open) {
+              setRevertConfirmOpen(false);
+            }
+          }}
+          dialogAriaLabelledBy={`${cardIdBase}-revert-title`}
+          modalClassName="p-5"
+        >
+          <div data-testid="chat-file-change-revert-dialog">
+            <h2 id={`${cardIdBase}-revert-title`} className="text-lg font-semibold">
+              Revert this change?
+            </h2>
+            <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+              A new version that undoes it is saved on top. Nothing is removed from history.
+            </p>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <Button variant="outline" autoFocus onPress={() => setRevertConfirmOpen(false)}>
+                Cancel
+              </Button>
+              <Button onPress={() => void handleRevertChange()} data-testid="chat-file-change-revert-confirm">
+                Revert
+              </Button>
+            </div>
+          </div>
+        </StudioDialogModal>
+      ) : null}
     </div>
   );
 }
