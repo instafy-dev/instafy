@@ -397,7 +397,9 @@ export function UnsavedWorkSection({
                   radius="xl"
                   isPending={busyKey === `${entry.ref}:restore`}
                   isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:restore`)}
-                  onPress={() => void runAction(`${entry.ref}:restore`, () => restore(entry))}
+                  onPress={() =>
+                    void runAction(`${entry.ref}:restore`, () => restore(entry, { head: conflict?.head ?? null }))
+                  }
                   data-testid="unsaved-work-restore"
                 >
                   Restore
