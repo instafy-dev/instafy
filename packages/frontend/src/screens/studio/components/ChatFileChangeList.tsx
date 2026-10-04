@@ -1077,19 +1077,19 @@ export function ChatFileChangeList({
             const notSavedReason =
               file.notSaved && !isReverted ? describeFileNotSaved(file.notSaved, unsavedWorkPlacement) : null;
             const notSavedNoteOpen = Boolean(openNotSavedNotes[workspacePath]);
-            return (
-              <Fragment key={workspacePath}>
+            const fileChipClass = cardOpen
+              ? isReverted
+                ? chipFileRevertedActiveClass
+                : chipFileActiveClass
+              : isReverted
+                ? chipFileRevertedClass
+                : chipFileClass;
+            const fileChip = (
               <button
                 type="button"
-                className={
-                  cardOpen
-                    ? isReverted
-                      ? chipFileRevertedActiveClass
-                      : chipFileActiveClass
-                    : isReverted
-                      ? chipFileRevertedClass
-                      : chipFileClass
-                }
+                // In a group with its save state the chip may shrink, so its
+                // label truncates instead of pushing the state to a new line.
+                className={notSavedReason ? `${fileChipClass} min-w-0` : fileChipClass}
                 onClick={() => toggleFileCard(workspacePath)}
                 title={isReverted ? `${workspacePath} (reverted)` : workspacePath}
                 aria-expanded={cardOpen}
@@ -1110,9 +1110,17 @@ export function ChatFileChangeList({
                   />
                 ) : null}
               </button>
-              {/* This file's own save state sits right after its chip, as
-                  glyph and words; a tap opens the reason under the row. */}
-              {notSavedReason ? (
+            );
+            if (!notSavedReason) {
+              return <Fragment key={workspacePath}>{fileChip}</Fragment>;
+            }
+            // This file's own save state sits right after its chip, as glyph
+            // and words; a tap opens the reason under the row. The two wrap
+            // as one unit, so on a narrow rail the state never starts the
+            // next line, where it would read as the next file's.
+            return (
+              <span key={workspacePath} className="inline-flex min-w-0 max-w-full items-center gap-x-1.5">
+                {fileChip}
                 <button
                   type="button"
                   className={unsavedStateClass}
@@ -1128,8 +1136,7 @@ export function ChatFileChangeList({
                   <span>Not saved</span>
                   <span className="sr-only">{`: ${chipLabel}`}</span>
                 </button>
-              ) : null}
-              </Fragment>
+              </span>
             );
           })}
           </span>

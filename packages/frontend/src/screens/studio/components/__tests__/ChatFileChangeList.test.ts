@@ -784,6 +784,38 @@ describe("ChatFileChangeList", () => {
     expect(container.textContent).not.toMatch(/\u2014/);
   });
 
+  it("wraps a file's Not saved state together with its chip, never onto the next line alone", async () => {
+    // At phone width a state that wrapped by itself would start the next
+    // line and read as the next file's.
+    const files = [
+      fileChange("src/app.ts"),
+      { ...fileChange("package.json"), notSaved: { reason: "conflicted" as const, keptSavedVersion: true } },
+      fileChange("README.md"),
+    ];
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: null }));
+    });
+
+    const state = container.querySelector<HTMLElement>('[data-testid="chat-file-change-not-saved-chip"]');
+    const group = state?.parentElement;
+    expect(group?.tagName).toBe("SPAN");
+    expect(group?.className.split(" ")).toEqual(expect.arrayContaining(["inline-flex", "min-w-0", "max-w-full"]));
+    expect(group?.className).not.toContain("wrap");
+    const chip = state?.previousElementSibling as HTMLElement | null;
+    expect(chip?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+    expect(chip?.title).toBe("package.json");
+    // The chip may shrink and truncate inside the group instead of
+    // overflowing the rail.
+    expect(chip?.className.split(" ")).toContain("min-w-0");
+    expect(group?.children).toHaveLength(2);
+
+    // Files without a save state are not wrapped.
+    const plain = Array.from(
+      container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
+    ).find((node) => node.title === "README.md");
+    expect(plain?.parentElement?.className).toBe("contents");
+  });
+
   it("words every reason a save can leave a file out for", async () => {
     const reasons = [
       ["excluded", "Build output, dependency and cache folders aren't saved to the space."],
