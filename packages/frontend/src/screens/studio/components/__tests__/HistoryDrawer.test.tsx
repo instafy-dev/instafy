@@ -261,6 +261,23 @@ describe("HistoryDrawer", () => {
     expect(q(container, "history-status")?.textContent).toBe("");
   });
 
+  it("describes Retry with the failure it retries, also after a repeated failure", async () => {
+    await render(versioning({ resolved: false, historyReady: false }), vi.fn(), { probeFailed: true });
+    const retry = q<HTMLButtonElement>(container, "history-probe-retry");
+    const description = () => {
+      const ids = retry?.getAttribute("aria-describedby")?.split(/\s+/).filter(Boolean) ?? [];
+      return ids.map((id) => document.getElementById(id)?.textContent ?? "").join(" ");
+    };
+    expect(description()).toBe("Couldn't check this space's saved versions.");
+    // A second failure posts a new message node: Retry still points at it.
+    mocks.probe.mockResolvedValueOnce(null);
+    await act(async () => retry?.focus());
+    await act(async () => retry?.click());
+    await flush();
+    expect(q(container, "history-probe-retry")).toBe(retry);
+    expect(description()).toBe("Couldn't check this space's saved versions.");
+  });
+
   it("keeps focus on Refresh while it reloads an empty list", async () => {
     mocks.fetchHistory.mockResolvedValueOnce(null);
     await render();

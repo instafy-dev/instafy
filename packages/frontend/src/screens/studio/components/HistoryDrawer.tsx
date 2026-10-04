@@ -109,6 +109,7 @@ export function HistoryDrawer({
   const ready = versioning.historyReady && projectId !== null && originId !== null;
   const originKind: HistoryOriginKind = versioning.chromeMode === "desktop" ? "desktop" : "stateless";
   const savedVersionsLabelId = useId();
+  const statusTextId = useId();
 
   const [history, setHistory] = useState<HistoryListState>(EMPTY_HISTORY);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -559,7 +560,13 @@ export function HistoryDrawer({
       <div role="status" aria-live="polite" data-testid="history-status" className="shrink-0 px-5">
         {notice ? (
           <div key={notice.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
-            <Text as="span" variant="body" tone="inherit" className={NOTICE_TONE_CLASS[notice.tone]}>
+            <Text
+              as="span"
+              id={statusTextId}
+              variant="body"
+              tone="inherit"
+              className={NOTICE_TONE_CLASS[notice.tone]}
+            >
               {notice.text}
             </Text>
             {notice.action ? (
@@ -579,8 +586,9 @@ export function HistoryDrawer({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4" data-testid="history-scroll">
         {probeUnanswered ? (
-          // The message is in the status region above; Retry stays mounted
-          // (pending) while it asks, so keyboard focus stays on it.
+          // The message is in the status region above, and Retry is
+          // described by it; Retry stays mounted (pending) while it asks, so
+          // keyboard focus stays on it.
           <div className="flex px-1 py-1.5" data-testid="history-probe-error">
             <Button
               variant="ghost"
@@ -589,6 +597,7 @@ export function HistoryDrawer({
               onPress={() => runProbe("retry")}
               isPending={probe.running === "retry"}
               isDisabled={probe.running === "refresh"}
+              aria-describedby={notice?.text === HISTORY_PROBE_ERROR_COPY ? statusTextId : undefined}
               data-testid="history-probe-retry"
             >
               Retry
