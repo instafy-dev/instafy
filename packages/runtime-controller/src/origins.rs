@@ -7670,6 +7670,20 @@ pub(crate) async fn post_access_token(
     } else {
         None
     };
+    // Saves made with a person's workspace-write token are authored by that
+    // person's pseudonym in this space. Job tokens keep the runtime's own
+    // identity, and the service runtime user is not a person.
+    let author = if job_capability.is_none() && lease_required {
+        crate::author_identity::author_claims_for_user(
+            &state.config,
+            &state.pool,
+            &project_id,
+            &subject_user,
+        )
+        .await
+    } else {
+        None
+    };
 
     let scoped_token = mint_scoped_token_with_browser_actor(
         &state.config,
@@ -7689,6 +7703,7 @@ pub(crate) async fn post_access_token(
         validated_runtime_generation,
         browser_actor_label,
         browser_session_id,
+        author,
     )?;
 
     record_access_grant(

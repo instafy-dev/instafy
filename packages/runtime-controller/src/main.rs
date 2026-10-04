@@ -19,6 +19,7 @@ mod agent_write_scopes;
 mod ai_agents;
 mod ai_metering;
 mod auth;
+mod author_identity;
 mod automations;
 mod billing;
 mod browser_profile;

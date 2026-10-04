@@ -530,6 +530,10 @@ pub struct AppConfig {
     pub git_remote_public_base_url: Option<String>,
     pub git_shards: Vec<String>,
     pub hosted_origin_endpoint: Option<String>,
+    /// `INSTAFY_AUTHOR_PSEUDONYM_KEYS`: versioned keys for the per-space
+    /// author pseudonyms signed into users' workspace-write tokens. Required
+    /// with `hosted_origin_endpoint`; `None` mints no author claims.
+    pub author_pseudonym_keys: Option<crate::author_identity::AuthorPseudonymKeyring>,
     #[allow(dead_code)]
     pub(crate) browser_turn_rest: Option<crate::browser_turn::BrowserTurnRestConfig>,
     pub sandbox_credit_seed_amount: i32,
@@ -771,6 +775,14 @@ impl AppConfig {
         ) {
             warn!("{warning}");
         }
+        // Checked with the other secrets, before any network IO: a hosted
+        // gateway without the keyring could not attribute cloud saves.
+        let author_pseudonym_keys = crate::author_identity::resolve_author_pseudonym_keys(
+            std::env::var(crate::author_identity::AUTHOR_PSEUDONYM_KEYS_ENV)
+                .ok()
+                .as_deref(),
+            read_first_env(&["HOSTED_ORIGIN_ENDPOINT"]).is_some(),
+        )?;
 
         let port = std::env::var("PORT")
             .ok()
@@ -1355,6 +1367,7 @@ impl AppConfig {
             git_remote_public_base_url,
             git_shards,
             hosted_origin_endpoint,
+            author_pseudonym_keys,
             browser_turn_rest,
             sandbox_credit_seed_amount,
             sandbox_credit_seed_limit,

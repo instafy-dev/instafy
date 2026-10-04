@@ -233,6 +233,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         git_remote_public_base_url: None,
         git_shards: vec![],
         hosted_origin_endpoint: None,
+        author_pseudonym_keys: None,
         browser_turn_rest: None,
         sandbox_credit_seed_amount: 25,
         sandbox_credit_seed_limit: 25,
