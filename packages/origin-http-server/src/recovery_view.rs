@@ -37,8 +37,11 @@ pub(crate) const SALVAGE_GATEWAY_ROOT: &str = "refs/instafy/salvage/gateway";
 /// The branch every read without `rev` or `ref` shows.
 pub(crate) const MAIN_REF: &str = "refs/heads/main";
 
-/// Longest last component of a ref a client may name: one file name.
-const MAX_REF_NAME_BYTES: usize = 255;
+/// Longest name of a recovery ref (after its origin id): one file name.
+const MAX_RECOVERY_NAME_BYTES: usize = 255;
+
+/// Longest name of a salvage ref, as the shard allows.
+const MAX_SALVAGE_NAME_BYTES: usize = 100;
 
 /// Most items one recovery listing returns, newest first.
 pub(crate) const MAX_RECOVERY_ITEMS: usize = 100;
@@ -132,30 +135,36 @@ pub(crate) struct RecoveryRef {
 }
 
 impl RecoveryRef {
-    /// Check `name` against the rule without running git: the namespace, a
-    /// lower-case hyphenated origin id for recovery refs, and a last
-    /// component of `[0-9A-Za-z._-]` that `git check-ref-format` would also
-    /// accept (no leading `.`, no `..`, no trailing `.` or `.lock`, the
-    /// latter in any letter case so it cannot alias a lock file on a
-    /// case-insensitive disk).
+    /// Check `name` against the rule without running git:
+    ///
+    /// - a recovery ref is `refs/instafy/recovery/<lower-case hyphenated
+    ///   origin id>/<name>`, where `<name>` is up to 255 bytes of
+    ///   `[0-9A-Za-z._-]` that `git check-ref-format` would also accept (no
+    ///   leading `.`, no `..`, no trailing `.` or `.lock`, the latter in any
+    ///   letter case so it cannot alias a lock file on a case-insensitive
+    ///   disk);
+    /// - a salvage ref is `refs/instafy/salvage/gateway/<name>` under the
+    ///   rule the shard holds salvage refs to: up to 100 bytes of
+    ///   `[0-9a-z._-]` starting with `[0-9a-z]`, with no `..` and no trailing
+    ///   `.` or `.lock`.
     pub(crate) fn parse(name: &str) -> Result<Self, ViewError> {
         let recovery_prefix = format!("{RECOVERY_REF_ROOT}/");
         let salvage_prefix = format!("{SALVAGE_GATEWAY_ROOT}/");
-        let (source, last) = if let Some(rest) = name.strip_prefix(&recovery_prefix) {
+        let source = if let Some(rest) = name.strip_prefix(&recovery_prefix) {
             let (origin, last) = rest.split_once('/').ok_or(ViewError::InvalidRef)?;
-            if !is_lower_case_uuid(origin) {
+            if !is_lower_case_uuid(origin) || !is_valid_recovery_name(last) {
                 return Err(ViewError::InvalidRef);
             }
             let origin = Uuid::parse_str(origin).map_err(|_| ViewError::InvalidRef)?;
-            (RefSource::Recovery { origin }, last)
+            RefSource::Recovery { origin }
         } else if let Some(last) = name.strip_prefix(&salvage_prefix) {
-            (RefSource::Salvage, last)
+            if !is_valid_salvage_name(last) {
+                return Err(ViewError::InvalidRef);
+            }
+            RefSource::Salvage
         } else {
             return Err(ViewError::InvalidRef);
         };
-        if !is_valid_last_component(last) {
-            return Err(ViewError::InvalidRef);
-        }
         Ok(Self {
             name: name.to_string(),
             source,
@@ -201,9 +210,9 @@ fn is_lower_case_uuid(value: &str) -> bool {
         })
 }
 
-fn is_valid_last_component(name: &str) -> bool {
+fn is_valid_recovery_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= MAX_REF_NAME_BYTES
+        && name.len() <= MAX_RECOVERY_NAME_BYTES
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
@@ -211,6 +220,20 @@ fn is_valid_last_component(name: &str) -> bool {
         && !name.ends_with('.')
         && !name.contains("..")
         && !name.to_ascii_lowercase().ends_with(".lock")
+}
+
+/// The shard's rule for the name of a salvage ref.
+fn is_valid_salvage_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_SALVAGE_NAME_BYTES
+        && matches!(bytes[0], b'0'..=b'9' | b'a'..=b'z')
+        && bytes
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'.' | b'_' | b'-'))
+        && !name.contains("..")
+        && !name.ends_with('.')
+        && !name.ends_with(".lock")
 }
 
 /// A commit id a client sends (`?rev=`, `baseRev`, a listed `rev`): exactly
@@ -449,6 +472,10 @@ pub(crate) fn read_blob_at(
 /// `path` as `normalize_relative_path` writes it, or an error: reads take
 /// paths in that form only, so one path never names two entries.
 fn checked_path(path: &str) -> Result<String, ViewError> {
+    // Git takes paths as arguments, which cannot hold a NUL.
+    if path.contains('\0') {
+        return Err(ViewError::InvalidPath);
+    }
     match normalize_relative_path(path) {
         Some(normalized) if normalized == path => Ok(normalized),
         _ => Err(ViewError::InvalidPath),
@@ -1068,16 +1095,19 @@ mod tests {
             }
         );
         assert!(parsed.dismissible());
+        let longest_salvage = format!("refs/instafy/salvage/gateway/{}", "a".repeat(100));
         for salvage in [
             "refs/instafy/salvage/gateway/node-1.local-0123abcd",
-            "refs/instafy/salvage/gateway/-leading-dash",
+            "refs/instafy/salvage/gateway/0-leading-digit",
             "refs/instafy/salvage/gateway/a_b.c",
+            &longest_salvage,
         ] {
             let parsed = RecoveryRef::parse(salvage).unwrap();
             assert!(parsed.is_salvage() && !parsed.dismissible(), "{salvage}");
         }
 
-        let long = format!("refs/instafy/salvage/gateway/{}", "a".repeat(256));
+        let long = format!("refs/instafy/recovery/{ORIGIN}/{}", "a".repeat(256));
+        let long_salvage = format!("refs/instafy/salvage/gateway/{}", "a".repeat(101));
         let upper = format!("refs/instafy/recovery/{}/name", ORIGIN.to_ascii_uppercase());
         for rejected in [
             "",
@@ -1116,6 +1146,12 @@ mod tests {
             "refs/instafy/salvage/gateway/a\nb",
             " refs/instafy/salvage/gateway/name",
             &long,
+            // Salvage names follow the shard's stricter rule.
+            &long_salvage,
+            "refs/instafy/salvage/gateway/-leading-dash",
+            "refs/instafy/salvage/gateway/_leading-underscore",
+            "refs/instafy/salvage/gateway/NODE-1-0123ABCD",
+            "refs/instafy/salvage/gateway/node-1-0123ABCD",
         ] {
             assert!(
                 matches!(RecoveryRef::parse(rejected), Err(ViewError::InvalidRef)),
@@ -1132,8 +1168,9 @@ mod tests {
         for name in [
             format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab"),
             "refs/instafy/salvage/gateway/node-1.local-0123abcd".to_string(),
-            "refs/instafy/salvage/gateway/-x".to_string(),
-            format!("refs/instafy/salvage/gateway/{}", "a".repeat(255)),
+            format!("refs/instafy/recovery/{ORIGIN}/-x"),
+            format!("refs/instafy/recovery/{ORIGIN}/{}", "a".repeat(255)),
+            format!("refs/instafy/salvage/gateway/{}", "a".repeat(100)),
         ] {
             assert_eq!(RecoveryRef::validate(&git, &name).unwrap().as_str(), name);
         }
@@ -1368,6 +1405,8 @@ mod tests {
             ));
 
             for invalid in [
+                "README\0.md",
+                "src\0/lib.rs",
                 "/README.md",
                 "./README.md",
                 "src/",
