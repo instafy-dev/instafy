@@ -334,6 +334,28 @@ describe("HistoryDrawer", () => {
       expect(q<HTMLButtonElement>(container, "source-control-refresh")?.disabled).toBe(false);
     });
 
+    it("stops asking once the drawer closes while the first load is out", async () => {
+      vi.useFakeTimers();
+      let answer!: (value: unknown) => void;
+      mocks.fetchHistory.mockReturnValueOnce(
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      );
+      mocks.fetchHistory.mockResolvedValue(busyPage());
+      await render(desktop());
+      expect(mocks.fetchHistory).toHaveBeenCalledTimes(1);
+      // The host unmounts the drawer on close; the load then answers busy.
+      await act(async () => root.render(null));
+      await act(async () => answer(busyPage()));
+      await flush();
+      await act(async () => {
+        vi.advanceTimersByTime(HISTORY_BUSY_RETRY_MS * (HISTORY_BUSY_RETRIES + 2));
+      });
+      await flush();
+      expect(mocks.fetchHistory).toHaveBeenCalledTimes(1);
+    });
+
     it("keeps Show more when a later page answers busy", async () => {
       const first = Array.from({ length: 20 }, (_, index) => historyEntry(index + 1));
       mocks.fetchHistory.mockResolvedValueOnce(page(first, { hasMore: true }));

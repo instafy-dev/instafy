@@ -147,7 +147,9 @@ export function HistoryDrawer({
       const page = await controllerClient.workspace.git
         .fetchHistory({ projectId, originId, routing: "default", limit: HISTORY_PAGE_SIZE })
         .catch(() => null);
-      if (seq !== historySeqRef.current) {
+      // A newer load, or the drawer closed while this one was out: drop it,
+      // and never arm a busy retry for a drawer that is gone.
+      if (seq !== historySeqRef.current || !mountedRef.current) {
         return null;
       }
       lastHistoryLoadRef.current = Date.now();
@@ -214,14 +216,15 @@ export function HistoryDrawer({
     void loadHistoryRef.current();
   }, [cancelBusyRetry, originId, projectId, ready, setNotice]);
 
-  useEffect(() => cancelBusyRetry, [cancelBusyRetry]);
-
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // Loads still out when the drawer closes answer into nothing.
+      historySeqRef.current += 1;
+      cancelBusyRetry();
     };
-  }, []);
+  }, [cancelBusyRetry]);
 
   useEffect(() => {
     setProbeRetry("idle");
