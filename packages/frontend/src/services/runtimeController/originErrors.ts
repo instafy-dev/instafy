@@ -289,6 +289,17 @@ export function isLeaseConflictMessage(message: string | null | undefined): bool
   return typeof message === "string" && LEASE_CONFLICT_PATTERN.test(message);
 }
 
+const LEASE_HOLDER_PATTERN = /(currently leased by )(.+?)( until |$)/i;
+
+/**
+ * Drop the holder from the controller's lease refusal ("project currently
+ * leased by <user id> until <time>"), so another member's id never reaches
+ * an error message, a toast or a log.
+ */
+export function redactLeaseHolder(message: string): string {
+  return message.replace(LEASE_HOLDER_PATTERN, "$1another session$3");
+}
+
 /**
  * Parse an error answer from its status, body text and headers. Never throws.
  */

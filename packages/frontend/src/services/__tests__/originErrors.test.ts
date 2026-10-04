@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   originErrorFromException,
   parseOriginError,
+  redactLeaseHolder,
   parseOriginErrorText,
   parsePublishReport,
   parseRetryAfterMs,
@@ -212,5 +213,15 @@ describe("helpers", () => {
       code: "network_error",
       message: "Failed to fetch",
     });
+  });
+});
+
+describe("redactLeaseHolder", () => {
+  it("drops the holder and keeps the rest", () => {
+    expect(redactLeaseHolder("project currently leased by 0f8b2c1e-1111-4222-8333-444455556666 until 2026-10-04T10:00:00Z")).toBe(
+      "project currently leased by another session until 2026-10-04T10:00:00Z",
+    );
+    expect(redactLeaseHolder("currently leased by someone")).toBe("currently leased by another session");
+    expect(redactLeaseHolder("db down")).toBe("db down");
   });
 });

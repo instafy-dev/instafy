@@ -11,6 +11,7 @@ import {
   isLeaseConflictMessage,
   leaseConflictError,
   originErrorFromException,
+  redactLeaseHolder,
   type OriginError,
 } from "./originErrors";
 import { acquireWorkspaceLease, releaseWorkspaceLease } from "./workspaceLeases";
@@ -186,7 +187,8 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function leaseFailure(error: unknown): OriginError {
+/** Map a failed lease acquisition; a lease held by someone else becomes `lease_conflict`. */
+export function originErrorFromLeaseFailure(error: unknown): OriginError {
   const status = error instanceof ControllerApiError ? error.status : 0;
   const message = error instanceof Error ? error.message : String(error);
   if (status === 409 || isLeaseConflictMessage(message)) {
@@ -195,7 +197,7 @@ function leaseFailure(error: unknown): OriginError {
   return {
     status,
     code: "lease_failed",
-    message,
+    message: redactLeaseHolder(message),
     routeUnavailable: false,
   };
 }
@@ -242,7 +244,7 @@ export async function withWorkspaceWriteLease<T>(
       try {
         leaseId = (await acquire()).leaseId;
       } catch (error) {
-        const mapped = leaseFailure(error);
+        const mapped = originErrorFromLeaseFailure(error);
         const retryDelay = options.leaseConflictRetryDelayMs;
         if (mapped.code !== "lease_conflict" || !retryDelay || retryDelay <= 0) {
           return failure("lease", mapped);
@@ -251,7 +253,7 @@ export async function withWorkspaceWriteLease<T>(
         try {
           leaseId = (await acquire()).leaseId;
         } catch (retryError) {
-          return failure("lease", leaseFailure(retryError));
+          return failure("lease", originErrorFromLeaseFailure(retryError));
         }
       }
       acquiredLeaseId = leaseId;
