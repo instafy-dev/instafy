@@ -35,6 +35,7 @@ import { PersonalPreferencesSettings } from "./PersonalPreferencesSettings";
 import { PersonalAppearanceSettings } from "./PersonalAppearanceSettings";
 import { PersonalAdvancedSettings } from "./PersonalAdvancedSettings";
 import { SettingsSection } from "./SettingsSection";
+import { describeProjectMemoryBootstrapResult } from "./projectMemoryBootstrapStatus";
 import { TeamProfileSettings } from "./TeamProfileSettings";
 import { useSettingsOrganization } from "./useSettingsOrganization";
 import { useWorkspaceControls } from "../workspaceControls";
@@ -1293,23 +1294,13 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
         throw new Error("Unable to reach project defaults service.");
       }
 
-      if (result.seeded) {
-        showStatus(
-          `Defaults refreshed${result.fileCount > 0 ? ` (${result.fileCount} ${result.fileCount === 1 ? "file" : "files"})` : ""}.`,
-          "success",
-          3500,
-        );
-        if (typeof window !== "undefined") {
-          window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
-        }
-      } else if (result.reason === "already-present") {
-        showStatus("No default files changed.", "info", 3000);
-      } else if (result.reason === "workspace-busy") {
-        showStatus("Workspace is busy. Retry in a moment.", "warning", 3500);
-      } else if (result.reason === "no-origin") {
-        showStatus("Start or connect a runtime before refreshing defaults.", "warning", 3500);
-      } else {
+      const status = describeProjectMemoryBootstrapResult(result, "refresh-defaults");
+      if (!status) {
         throw new Error(result.reason ?? "Unable to refresh project defaults.");
+      }
+      showStatus(status.message, status.intent, status.duration);
+      if (status.committed && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to refresh project defaults.";

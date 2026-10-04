@@ -20,6 +20,7 @@ import {
 import { useStatus } from "../../../status/useStatus";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
+import { describeProjectMemoryBootstrapResult } from "./projectMemoryBootstrapStatus";
 import { SkillsDiscoverySection } from "./SkillsDiscoverySection";
 import { SkillsImportModal } from "./SkillsImportModal";
 import { SettingsShell, type SettingsCategory } from "./SettingsShell";
@@ -825,23 +826,15 @@ export function SkillsPanel() {
         throw new Error("Unable to reach project bootstrap service.");
       }
 
-      if (result.seeded) {
-        showStatus(
-          `Installed ${result.fileCount} default ${result.fileCount === 1 ? "skill" : "skills"}.`,
-          "success",
-          3000,
-        );
-        if (typeof window !== "undefined") {
-          window.dispatchEvent(
-            new CustomEvent("instafy:workspace-commit", { detail: { projectId } }),
-          );
-        }
-      } else if (result.reason === "already-present") {
-        showStatus("Default skills are already installed.", "info", 3000);
-      } else if (result.reason === "workspace-busy") {
-        showStatus("Workspace is busy. Retry in a moment.", "warning", 3500);
-      } else {
+      const status = describeProjectMemoryBootstrapResult(result, "install-default-skills");
+      if (!status) {
         throw new Error(result.reason ?? "Unable to install default skills.");
+      }
+      showStatus(status.message, status.intent, status.duration);
+      if (status.committed && typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("instafy:workspace-commit", { detail: { projectId } }),
+        );
       }
 
       await loadSkills();
