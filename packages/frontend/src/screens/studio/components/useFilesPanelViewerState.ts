@@ -526,6 +526,9 @@ export function useFilesPanelViewerState({
             (existingModified !== null && existingModified.length === 0 && expectedSize > 0)));
 
       let shouldForceFetch = options?.localBuffer ? false : options?.forceFetch ?? computedShouldForceFetch;
+      // A dirty buffer without usable read ids is read once and kept: the
+      // read only tells whether its base text is still the space's version.
+      let verifyDraft = false;
       if (versioned && existing && !options?.localBuffer) {
         if (existing.isNew === true) {
           // A buffer that was never saved is not in the space: only an
@@ -538,7 +541,8 @@ export function useFilesPanelViewerState({
             mode: versioning.mode,
             originId: pinnedOriginId,
           });
-          shouldForceFetch = decision === "refetch";
+          shouldForceFetch = decision === "refetch" || decision === "verify";
+          verifyDraft = decision === "verify";
           if (decision === "stale") {
             raiseStaleBuffer(existing, entry);
           }
@@ -598,6 +602,14 @@ export function useFilesPanelViewerState({
             // Still not in the space: keep showing the new buffer.
             shouldForceFetch = false;
           }
+          if (!result && verifyDraft && existing) {
+            // The draft is shown either way; only a file that is gone from
+            // the space means its base changed.
+            if (read && !read.ok && read.notFound) {
+              raiseStaleBuffer(existing, entry);
+            }
+            shouldForceFetch = false;
+          }
         } else {
           result = await controllerClient.workspace.files.read({
             projectId: activeProjectId,
@@ -638,7 +650,11 @@ export function useFilesPanelViewerState({
               }
             : null;
 
-          if (versioned && options?.preserveDraft && existing && isFileBufferDirty(existing)) {
+          const keepDraft = options?.preserveDraft === true || verifyDraft;
+          // The draft takes this read's ids only when the read shows that the
+          // space still holds the text the draft started from.
+          let adoptReadIds = false;
+          if (versioned && keepDraft && existing && isFileBufferDirty(existing)) {
             // The draft keeps the ids it was read at; a newer version in the
             // space is reported instead of being taken in silently.
             const decision = decideCachedOpen({
@@ -647,7 +663,9 @@ export function useFilesPanelViewerState({
               mode: versioning.mode,
               originId: pinnedOriginId,
             });
-            if (decision === "stale") {
+            if (decision === "verify" && textContent === existing.generated) {
+              adoptReadIds = true;
+            } else if (decision === "verify" || decision === "stale") {
               raiseStaleBuffer(existing, entry);
             }
           }
@@ -671,10 +689,10 @@ export function useFilesPanelViewerState({
                 ...(readIds ?? {}),
               };
               const draft = current.files.find(file => file.id === entry.path);
-              if (options?.preserveDraft && draft && draft.modified !== draft.generated) {
+              if (keepDraft && draft && draft.modified !== draft.generated) {
                 nextFile.generated = draft.generated;
                 nextFile.modified = draft.modified;
-                if (readIds) {
+                if (readIds && !(adoptReadIds && draft.generated === textContent)) {
                   nextFile.baseRev = draft.baseRev ?? null;
                   nextFile.blobOid = draft.blobOid ?? null;
                   nextFile.originId = draft.originId ?? null;

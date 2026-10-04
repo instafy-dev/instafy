@@ -67,7 +67,7 @@ export function bufferVersioningMode(
   return file.baseRev ? "stateless" : "desktop";
 }
 
-export type CachedOpenDecision = "reuse" | "refetch" | "stale";
+export type CachedOpenDecision = "reuse" | "refetch" | "stale" | "verify";
 
 /**
  * What to do when a file that already has a buffer is opened again
@@ -80,16 +80,18 @@ export type CachedOpenDecision = "reuse" | "refetch" | "stale";
  * | clean  | different, or the buffer lacks its read ids      | refetch |
  * | dirty  | equal                                            | reuse   |
  * | dirty  | different                                        | stale   |
- * | dirty  | the buffer lacks its read ids                    | stale   |
+ * | dirty  | the buffer lacks its read ids                    | verify  |
  *
  * A buffer "lacks its read ids" when, on the stateless gateway, it has no
  * `baseRev` (a save could not be checked against newer versions), or, on a
  * Desktop origin, no `blobOid`, or when it was read from another origin than
  * the one the panel reads now (its ids say nothing about this origin's
- * version). When either blob id is missing otherwise the
- * two cannot be compared: a clean buffer is fetched again and a dirty one is
- * kept (its save still sends `baseRev`, so it cannot overwrite a newer
- * version). A new, never-saved buffer is always reused.
+ * version). `verify` reads the file once: when the space still holds the
+ * buffer's base text, the draft takes that read's ids and nothing is shown;
+ * otherwise the stale notice is raised. When either blob id is missing
+ * otherwise the two cannot be compared: a clean buffer is fetched again and a
+ * dirty one is kept (its save still sends `baseRev`, so it cannot overwrite a
+ * newer version). A new, never-saved buffer is always reused.
  */
 export function decideCachedOpen(params: {
   cached: Pick<CodeFile, "modified" | "generated" | "isNew" | "blobOid" | "baseRev" | "originId">;
@@ -106,7 +108,7 @@ export function decideCachedOpen(params: {
   const otherOrigin = Boolean(cached.originId && params.originId && cached.originId !== params.originId);
   const lacksReadIds = otherOrigin || (mode === "stateless" ? !cached.baseRev : !cached.blobOid);
   if (lacksReadIds) {
-    return dirty ? "stale" : "refetch";
+    return dirty ? "verify" : "refetch";
   }
   if (!listingBlobOid || !cached.blobOid) {
     return dirty ? "reuse" : "refetch";

@@ -147,11 +147,47 @@ describe("useFilesPanelViewerState in the versioned modes", () => {
     expect(readWorkspaceFileStaleNotice()?.path).toBe("README.md");
   });
 
-  it("raises the stale notice for a dirty buffer that was read without a rev", async () => {
-    await render({ workspaceFiles: [cached({ modified: "edited", baseRev: null })] });
+  it("keeps a dirty buffer read without a rev silently when the space still holds its base text", async () => {
+    workspace = { ...workspace, files: [cached({ modified: "edited", baseRev: null })] };
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue(
+      readOk({ contentText: "saved", blobOid: BLOB_A, rev: REV_2 }),
+    );
+    await render({ workspaceFiles: workspace.files });
     await open(entry("README.md", BLOB_A));
-    expect(controllerClient.workspace.files.readAt).not.toHaveBeenCalled();
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledExactlyOnceWith({
+      projectId: "space-a", path: "README.md", routing: "default", originId: "origin-1",
+    });
+    expect(staleEvents).toHaveLength(0);
+    expect(workspace.files[0]).toMatchObject({
+      generated: "saved", modified: "edited", baseRev: REV_2, blobOid: BLOB_A, originId: "origin-1",
+    });
+    // With its ids now known, the next open reuses it without a read or a notice.
+    await render({ workspaceFiles: workspace.files });
+    await open(entry("README.md", BLOB_A));
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledTimes(1);
+    expect(staleEvents).toHaveLength(0);
+  });
+
+  it("raises the stale notice for a dirty buffer read without a rev when the space holds other text", async () => {
+    workspace = { ...workspace, files: [cached({ modified: "edited", baseRev: null })] };
+    await render({ workspaceFiles: workspace.files });
+    await open(entry("README.md", BLOB_A));
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledTimes(1);
     expect(staleEvents).toHaveLength(1);
+    expect(workspace.files[0]).toMatchObject({ generated: "saved", modified: "edited", baseRev: null, blobOid: BLOB_A });
+  });
+
+  it("keeps a dirty buffer without a notice when its read fails", async () => {
+    workspace = { ...workspace, files: [cached({ modified: "edited", baseRev: null })] };
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue({
+      ok: false, notFound: false, originId: "origin-1", originMode: "hosted",
+      error: { status: 502, code: "canonical_unreachable", message: "down", routeUnavailable: false },
+    });
+    await render({ workspaceFiles: workspace.files });
+    await open(entry("README.md", BLOB_A));
+    expect(staleEvents).toHaveLength(0);
+    expect(current.viewerState.mode).toBe("text");
+    expect(workspace.files[0]).toMatchObject({ generated: "saved", modified: "edited" });
   });
 
   it("reads a clean buffer from another origin again from the origin read now", async () => {

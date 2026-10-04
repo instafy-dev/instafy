@@ -19,6 +19,7 @@ import {
   type OwnRevisions,
 } from "./filesVersioning";
 import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./workspaceSaveCopy";
+import { gitBlobOid } from "../../../utils/gitBlobOid";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -611,6 +612,11 @@ export function useFilesPanelWorkspaceTree({
           return;
         }
         if (dirtyFileIdsRef.current.has(entry.path)) {
+          if (buffer && !buffer.blobOid && entry.blobOid && (await gitBlobOid(buffer.generated)) === entry.blobOid) {
+            // Read without a blob id (before a mode change): the space still
+            // holds the text the edits started from, so nothing changed.
+            return;
+          }
           notifyStaleViewerEntry(entry, buffer?.originId ?? null);
           return;
         }

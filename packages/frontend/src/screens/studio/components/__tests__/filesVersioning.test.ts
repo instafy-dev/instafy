@@ -69,9 +69,9 @@ describe("Files versioning helpers", () => {
       expect(desktop({ blobOid: BLOB_A, modified: "edit" }, BLOB_B)).toBe("stale");
     });
 
-    it("raises the stale notice for a dirty buffer without its read ids", () => {
-      expect(stateless({ blobOid: BLOB_A, modified: "edit" }, BLOB_A)).toBe("stale");
-      expect(desktop({ baseRev: REV, modified: "edit" }, BLOB_A)).toBe("stale");
+    it("reads a dirty buffer without its read ids once to check its base text", () => {
+      expect(stateless({ blobOid: BLOB_A, modified: "edit" }, BLOB_A)).toBe("verify");
+      expect(desktop({ baseRev: REV, modified: "edit" }, BLOB_A)).toBe("verify");
     });
 
     it("never copies the listing rev and always reuses a new buffer", () => {
@@ -84,7 +84,7 @@ describe("Files versioning helpers", () => {
       const open = (cached: Partial<CodeFile>) =>
         decideCachedOpen({ cached: buffer(cached), listingBlobOid: BLOB_A, mode: "desktop", originId: "desktop-1" });
       expect(open(fromGateway)).toBe("refetch");
-      expect(open({ ...fromGateway, modified: "edit" })).toBe("stale");
+      expect(open({ ...fromGateway, modified: "edit" })).toBe("verify");
       expect(open({ ...fromGateway, originId: "desktop-1" })).toBe("reuse");
     });
 

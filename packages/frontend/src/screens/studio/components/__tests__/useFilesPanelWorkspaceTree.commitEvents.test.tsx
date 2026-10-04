@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerWorkspaceEntry } from "../../../../sdk/instafy";
 import type { CodeFile } from "../../../../types";
 import { createOwnRevisions } from "../filesVersioning";
+import { gitBlobOid } from "../../../../utils/gitBlobOid";
 import { useFilesPanelWorkspaceTree, type FilesTreeVersionedOptions } from "../useFilesPanelWorkspaceTree";
 
 const { list, listAt, saveChanges } = vi.hoisted(() => ({
@@ -156,6 +157,35 @@ describe("Files tree in the versioned modes", () => {
     await commitEvent("3".repeat(40));
     expect(openTextFile).not.toHaveBeenCalled();
     expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md", originId: "origin-1" })]);
+  });
+
+  it("raises no notice for a dirty buffer without a blob id while the space holds its base text", async () => {
+    // Hashing runs on real timers.
+    vi.useRealTimers();
+    const settle = () =>
+      act(async () => {
+        for (let tick = 0; tick < 10; tick += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      });
+    const dispatch = async (rev: string) => {
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId: "space-a", data: { rev } } }));
+      });
+      await settle();
+    };
+    const savedBlob = (await gitBlobOid("saved")) ?? undefined;
+    expect(savedBlob).toBeDefined();
+    listAt.mockImplementation(async () => listing([file("README.md", savedBlob)]));
+    await render();
+    await settle();
+    options.dirtyFileIdsRef.current = new Set(["README.md"]);
+    buffers["README.md"] = { id: "README.md", path: "README.md", label: "README.md", generated: "saved", modified: "edited" };
+    await dispatch(REV_2);
+    expect(staleEvents).toHaveLength(0);
+    listAt.mockImplementation(async () => listing([file("README.md", BLOB_B)]));
+    await dispatch("4".repeat(40));
+    expect(staleEvents).toEqual([expect.objectContaining({ path: "README.md" })]);
   });
 
   it("retries a listing unpinned when the origin does not know the commit", async () => {
