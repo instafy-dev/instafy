@@ -210,6 +210,14 @@ describe("useFilesPanelViewerState in the versioned modes", () => {
     expect(options.setActiveFile).toHaveBeenCalledWith("README.md");
   });
 
+  it("opens a just-created local buffer without fetching it", async () => {
+    await render({ workspaceFiles: [] });
+    await open(entry("new.md"), { localBuffer: true });
+    expect(controllerClient.workspace.files.readAt).not.toHaveBeenCalled();
+    expect(options.setActiveFile).toHaveBeenCalledWith("new.md");
+    expect(current.viewerState.mode).toBe("text");
+  });
+
   it("pins raw URLs to the default origin", async () => {
     vi.mocked(controllerClient.workspace.files.getRawUrl).mockResolvedValue("https://example.test/raw");
     await render();

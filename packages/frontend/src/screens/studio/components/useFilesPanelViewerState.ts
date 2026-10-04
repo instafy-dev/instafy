@@ -149,6 +149,8 @@ export interface OpenTextFileOptions {
   preserveDraft?: boolean;
   /** Read at this commit (a commit event's rev); retried unpinned if unknown. */
   rev?: string | null;
+  /** The buffer was just created locally (a new file): never fetch it. */
+  localBuffer?: boolean;
 }
 
 function createEntryFromWorkspaceFile(file: CodeFile): ControllerWorkspaceEntry {
@@ -523,8 +525,8 @@ export function useFilesPanelViewerState({
             (existingGenerated !== null && existingGenerated.length === 0 && expectedSize > 0) ||
             (existingModified !== null && existingModified.length === 0 && expectedSize > 0)));
 
-      let shouldForceFetch = options?.forceFetch ?? computedShouldForceFetch;
-      if (versioned && existing) {
+      let shouldForceFetch = options?.localBuffer ? false : options?.forceFetch ?? computedShouldForceFetch;
+      if (versioned && existing && !options?.localBuffer) {
         if (existing.isNew === true) {
           // Never fetch a buffer that was never saved: the space has no file yet.
           shouldForceFetch = false;
