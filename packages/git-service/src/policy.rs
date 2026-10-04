@@ -53,13 +53,21 @@ pub const RECOVERY_REF_ROOT: &str = "refs/instafy/recovery";
 
 /// Refs at or under this name hold work salvaged from retired workspaces,
 /// which may be the only copy of it. A push may not create, move or delete
-/// them unless the shard set [`SALVAGE_PUSH_ENV`] for that request.
+/// them unless the shard set [`SALVAGE_PUSH_ENV`] for that request, and even
+/// then it may only create refs under [`SALVAGE_GATEWAY_REF_ROOT`].
 pub const SALVAGE_REF_ROOT: &str = "refs/instafy/salvage";
 
-/// Hook environment flag that lets one push change refs under
-/// [`SALVAGE_REF_ROOT`]. Only the shard sets hook environment, never from a
-/// request header, and no request path sets this flag yet, so every push that
-/// touches a salvage ref is refused.
+/// A salvage push may create `<root>/<name>`, where the name uses only
+/// lower-case `[0-9a-z._-]`. Lower case keeps two salvage refs from naming the
+/// same file on a case-insensitive filesystem.
+pub const SALVAGE_GATEWAY_REF_ROOT: &str = "refs/instafy/salvage/gateway";
+
+/// Hook environment flag that marks one push as a salvage push. The shard sets
+/// it only for a request whose bearer is the controller's exact `git.salvage`
+/// credential for that repository, never from a request header. Such a push
+/// may only create refs under [`SALVAGE_GATEWAY_REF_ROOT`]; any other ref
+/// update in it is refused. Without the flag every change to a salvage ref is
+/// refused.
 pub const SALVAGE_PUSH_ENV: &str = "INSTAFY_GIT_SALVAGE_PUSH";
 
 /// Hook environment variable naming the file where `post-receive` appends the
@@ -89,7 +97,12 @@ pub fn render_update_hook(default_branch: &str) -> Result<String> {
         }
         deny_cases.push_str(&format!("    {entry}/*|*/{entry}/*) return 0 ;;\n"));
     }
-    for root in [INSTAFY_REF_ROOT, RECOVERY_REF_ROOT, SALVAGE_REF_ROOT] {
+    for root in [
+        INSTAFY_REF_ROOT,
+        RECOVERY_REF_ROOT,
+        SALVAGE_REF_ROOT,
+        SALVAGE_GATEWAY_REF_ROOT,
+    ] {
         // The hook compares ref names with these in lower case.
         if !is_literal_pattern(root) || root != root.to_ascii_lowercase() {
             bail!("ref root {root:?} is not a plain lower-case ref name");
@@ -98,6 +111,7 @@ pub fn render_update_hook(default_branch: &str) -> Result<String> {
     let instafy_ref_root = INSTAFY_REF_ROOT;
     let recovery_ref_root = RECOVERY_REF_ROOT;
     let salvage_ref_root = SALVAGE_REF_ROOT;
+    let salvage_gateway_ref_root = SALVAGE_GATEWAY_REF_ROOT;
     let salvage_push_env = SALVAGE_PUSH_ENV;
 
     Ok(format!(
@@ -116,6 +130,7 @@ main_ref="refs/heads/{default_branch}"
 instafy_root="{instafy_ref_root}"
 salvage_root="{salvage_ref_root}"
 recovery_ref_pattern='^{recovery_ref_root}/[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}/[0-9A-Za-z._-]+$'
+salvage_ref_pattern='^{salvage_gateway_ref_root}/[0-9a-z._-]+$'
 ascii_ref_pattern='^[!-~]+$'
 
 is_zero() {{
@@ -150,6 +165,24 @@ if [[ "$folded_ref" == "$salvage_root" || "$folded_ref" == "$salvage_root/"* ]] 
   && [[ "${{{salvage_push_env}:-}}" != "1" ]]; then
   echo "instafy: '$refname' holds salvaged work and cannot be changed by a push" >&2
   exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# A salvage push may only create salvage refs: {salvage_gateway_ref_root}/<name>
+# with a lower-case name, never updating or deleting one. Every other ref
+# update in the same push is refused. Paths and sizes are still checked below.
+# ---------------------------------------------------------------------------
+salvage_push=0
+if [[ "${{{salvage_push_env}:-}}" == "1" ]]; then
+  if [[ ! "$refname" =~ $salvage_ref_pattern ]]; then
+    echo "instafy: a salvage push may only create {salvage_gateway_ref_root}/<name> refs, not '$refname'" >&2
+    exit 1
+  fi
+  if ! is_zero "$oldrev" || is_zero "$newrev"; then
+    echo "instafy: '$refname' holds salvaged work; a salvage push may only create it" >&2
+    exit 1
+  fi
+  salvage_push=1
 fi
 
 if [[ "${{GIT_POLICY_DISABLED:-0}}" == "1" ]]; then
@@ -189,11 +222,13 @@ if is_zero "$newrev"; then
 fi
 
 # ---------------------------------------------------------------------------
-# A push may create or move only recovery refs under refs/instafy/. Any other
-# name there could block them (a ref named refs/instafy/recovery, say) or
-# alias one on a case-insensitive filesystem.
+# A push may create or move only recovery refs under refs/instafy/, and a
+# salvage push its salvage refs. Any other name there could block them (a ref
+# named refs/instafy/recovery, say) or alias one on a case-insensitive
+# filesystem.
 # ---------------------------------------------------------------------------
-if [[ "$folded_ref" == "$instafy_root/"* && ! "$refname" =~ $recovery_ref_pattern ]]; then
+if [[ "$salvage_push" != "1" && "$folded_ref" == "$instafy_root/"* \
+  && ! "$refname" =~ $recovery_ref_pattern ]]; then
   echo "instafy: '$refname' is not a recovery ref ({recovery_ref_root}/<origin id>/<name>)" >&2
   exit 1
 fi
@@ -755,6 +790,42 @@ mod tests {
             self.run(refname, old, new, env)
                 .unwrap_or_else(|| panic!("{refname} {old}..{new} was accepted"))
         }
+
+        fn accepts_with(&self, refname: &str, old: &str, new: &str, env: &[(&str, &str)]) {
+            if let Some(stderr) = self.run(refname, old, new, env) {
+                panic!("{refname} {old}..{new} was refused: {stderr}");
+            }
+        }
+
+        /// A commit on top of main that adds one file.
+        fn commit_adding(&self, path: &str, contents: &[u8]) -> String {
+            let file = self.root.join("blob");
+            std::fs::write(&file, contents).unwrap();
+            let blob = self.git(&["hash-object", "-w", file.to_str().unwrap()]);
+            let index = self.root.join("index");
+            let _ = std::fs::remove_file(&index);
+            let output = std::process::Command::new("git")
+                .args(["update-index", "--add", "--cacheinfo"])
+                .arg(format!("100644,{blob},{path}"))
+                .env("GIT_DIR", &self.git_dir)
+                .env("GIT_INDEX_FILE", &index)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "update-index {path}");
+            let tree = std::process::Command::new("git")
+                .arg("write-tree")
+                .env("GIT_DIR", &self.git_dir)
+                .env("GIT_INDEX_FILE", &index)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(tree.status.success(), "write-tree {path}");
+            let tree = String::from_utf8(tree.stdout).unwrap().trim().to_string();
+            self.git(&["commit-tree", "-p", &self.main, "-m", path, &tree])
+        }
     }
 
     impl Drop for HookRepo {
@@ -871,5 +942,143 @@ mod tests {
         repo.set_ignorecase(false);
         repo.accepts("refs/heads/caf\u{e9}", ZERO, child);
         repo.accepts("refs/heads/ma\u{212a}e", ZERO, child);
+    }
+
+    const SALVAGE_PUSH: (&str, &str) = (SALVAGE_PUSH_ENV, "1");
+    const POLICY_DISABLED: (&str, &str) = ("GIT_POLICY_DISABLED", "1");
+
+    #[test]
+    fn salvage_push_may_only_create_salvage_refs() {
+        let repo = HookRepo::new("salvage-push");
+        repo.set_ignorecase(false);
+        let (main, child) = (repo.main.as_str(), repo.child.as_str());
+        let salvage = "refs/instafy/salvage/gateway/node-1.a_b-abcdef12";
+        let salvage_envs: [&[(&str, &str)]; 2] =
+            [&[SALVAGE_PUSH], &[SALVAGE_PUSH, POLICY_DISABLED]];
+
+        for env in salvage_envs {
+            repo.accepts_with(salvage, ZERO, child, env);
+        }
+
+        // A salvage ref is never updated, moved or deleted, even by a
+        // salvage push and with the policy switched off.
+        for env in salvage_envs {
+            for (old, new) in [(main, child), (child, main), (child, ZERO)] {
+                let stderr = repo.refuses(salvage, old, new, env);
+                assert!(
+                    stderr.contains(&format!(
+                        "instafy: '{salvage}' holds salvaged work; a salvage push may only create it"
+                    )),
+                    "{old}..{new}: {stderr}"
+                );
+            }
+        }
+
+        // Every other ref update in a salvage push is refused, including ones
+        // an ordinary push may make.
+        let recovery = "refs/instafy/recovery/5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a/x";
+        for env in salvage_envs {
+            for (refname, old, new) in [
+                ("refs/heads/main", main, child),
+                ("refs/heads/main", main, ZERO),
+                ("refs/heads/feature", ZERO, child),
+                ("refs/heads/feature", child, ZERO),
+                ("refs/tags/v1", ZERO, child),
+                (recovery, ZERO, child),
+                (recovery, child, ZERO),
+                ("refs/instafy/notes", ZERO, child),
+                ("refs/instafy/salvage", ZERO, child),
+                ("refs/instafy/salvage/gateway", ZERO, child),
+                ("refs/instafy/salvage/gateway/", ZERO, child),
+                ("refs/instafy/salvage/gateway/a/b", ZERO, child),
+                ("refs/instafy/salvage/other/x", ZERO, child),
+                ("refs/instafy/salvage/x", ZERO, child),
+                ("refs/instafy/SALVAGE/gateway/x", ZERO, child),
+                ("refs/INSTAFY/salvage/gateway/x", ZERO, child),
+                ("refs/instafy/salvage/Gateway/x", ZERO, child),
+                ("refs/instafy/salvage/gateway/Node-1", ZERO, child),
+                ("refs/instafy/salvage/gateway/node 1", ZERO, child),
+                ("refs/instafy/salvage/gateway/node+1", ZERO, child),
+            ] {
+                let stderr = repo.refuses(refname, old, new, env);
+                assert!(
+                    stderr.contains(&format!(
+                        "instafy: a salvage push may only create \
+                         {SALVAGE_GATEWAY_REF_ROOT}/<name> refs, not '{refname}'"
+                    )),
+                    "{refname} {old}..{new}: {stderr}"
+                );
+            }
+        }
+
+        // Outside a salvage push the ordinary rules apply, and salvage refs
+        // stay closed. Only the exact flag value marks a salvage push.
+        repo.accepts("refs/heads/main", main, child);
+        repo.accepts(recovery, ZERO, child);
+        for env in [
+            &[][..],
+            &[(SALVAGE_PUSH_ENV, "true")][..],
+            &[(SALVAGE_PUSH_ENV, "")][..],
+        ] {
+            let stderr = repo.refuses(salvage, ZERO, child, env);
+            assert!(
+                stderr.contains(&format!(
+                    "instafy: '{salvage}' holds salvaged work and cannot be changed by a push"
+                )),
+                "{env:?}: {stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn salvage_push_still_checks_commits_paths_and_sizes() {
+        let repo = HookRepo::new("salvage-paths");
+        let salvage = "refs/instafy/salvage/gateway/node-1-abcdef12";
+
+        let vendored = repo.commit_adding("node_modules/pkg/index.js", b"x\n");
+        let stderr = repo.refuses(salvage, ZERO, &vendored, &[SALVAGE_PUSH]);
+        assert!(
+            stderr.contains("instafy: blocked path 'node_modules/pkg/index.js'"),
+            "{stderr}"
+        );
+
+        let archive = repo.commit_adding("assets/archive.zip", b"zip\n");
+        let stderr = repo.refuses(
+            salvage,
+            ZERO,
+            &archive,
+            &[SALVAGE_PUSH, ("GIT_DENY_PATHS", "*.zip")],
+        );
+        assert!(
+            stderr.contains("instafy: blocked path 'assets/archive.zip'"),
+            "{stderr}"
+        );
+
+        let big = repo.commit_adding("assets/big.bin", &[7u8; 8192]);
+        let stderr = repo.refuses(
+            salvage,
+            ZERO,
+            &big,
+            &[SALVAGE_PUSH, ("GIT_MAX_BLOB_BYTES", "4096")],
+        );
+        assert!(
+            stderr.contains("instafy: file too large 'assets/big.bin' (8192 bytes > 4096)"),
+            "{stderr}"
+        );
+
+        let tree = repo.git(&["rev-parse", &format!("{}^{{tree}}", repo.main)]);
+        let stderr = repo.refuses(salvage, ZERO, &tree, &[SALVAGE_PUSH]);
+        assert!(
+            stderr.contains(&format!("instafy: '{salvage}' must point to a commit")),
+            "{stderr}"
+        );
+
+        let kept = repo.commit_adding("notes/kept.md", b"kept\n");
+        repo.accepts_with(
+            salvage,
+            ZERO,
+            &kept,
+            &[SALVAGE_PUSH, ("GIT_MAX_BLOB_BYTES", "4096")],
+        );
     }
 }
