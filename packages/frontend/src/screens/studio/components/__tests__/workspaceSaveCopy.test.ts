@@ -144,6 +144,6 @@ describe("workspace save copy", () => {
 
   it("keeps the copy free of em dashes", () => {
     const source = readFileSync(fileURLToPath(new URL("../workspaceSaveCopy.ts", import.meta.url)), "utf8");
-    expect(source).not.toContain("—");
+    expect(source).not.toContain("\u2014");
   });
 });

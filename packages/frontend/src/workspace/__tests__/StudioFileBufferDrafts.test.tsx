@@ -87,6 +87,6 @@ describe("Files buffers as Studio drafts", () => {
     expect(dialog()?.textContent).toContain("You have unsaved edits in 2 files. They stay on this device until you save.");
     const buttons = Array.from(container.querySelectorAll("button")).map((button) => button.textContent);
     expect(buttons).toEqual(["Keep editing", "Leave"]);
-    expect(dialog()?.textContent).not.toContain("—");
+    expect(dialog()?.textContent).not.toContain("\u2014");
   });
 });

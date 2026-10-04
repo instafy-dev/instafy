@@ -44,6 +44,6 @@ describe("workspace file stale card", () => {
     expect(markup).toContain(
       "It changed in the space while you edited. Your version is still in the folder on this computer. Merge keeps both; Reload uses the space&#x27;s version.",
     );
-    expect(markup).not.toContain("—");
+    expect(markup).not.toContain("\u2014");
   });
 });
