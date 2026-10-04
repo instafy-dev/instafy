@@ -108,7 +108,12 @@ export function LegacyChangesDrawer({
       setArrivalDone(true);
       return undefined;
     }
-    const done = () => setArrivalDone(true);
+    // Focus moved on (not the window losing focus, which keeps the title active).
+    const done = () => {
+      if (document.activeElement !== title) {
+        setArrivalDone(true);
+      }
+    };
     title.addEventListener("blur", done);
     return () => title.removeEventListener("blur", done);
   }, [arrivalNote, titleId]);

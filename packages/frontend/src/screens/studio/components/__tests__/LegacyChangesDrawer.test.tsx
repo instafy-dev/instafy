@@ -206,6 +206,24 @@ describe("LegacyChangesDrawer project access", () => {
       expect(container.textContent).not.toContain("instead of History");
     });
 
+    it("keeps the note when only the window loses focus", async () => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      await act(async () => {
+        root.render(<LegacyChangesDrawer arrivalNotice="This space shows Changes instead of History." />);
+      });
+      await flushAsyncWork();
+      const heading = title();
+      expect(document.activeElement).toBe(heading);
+      // Switching to another app blurs the title but leaves it the active element.
+      await act(async () => {
+        heading?.dispatchEvent(new FocusEvent("blur"));
+      });
+      await flushAsyncWork();
+      expect(document.activeElement).toBe(heading);
+      expect(heading?.getAttribute("tabindex")).toBe("-1");
+      expect(container.textContent).toContain("This space shows Changes instead of History.");
+    });
+
     it("leaves focus where the person put it", async () => {
       const outside = document.createElement("button");
       document.body.appendChild(outside);
