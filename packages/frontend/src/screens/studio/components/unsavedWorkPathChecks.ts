@@ -26,6 +26,18 @@ function baseName(path: string): string {
 }
 
 /**
+ * Whether a read or listing at a ref was served from another commit than
+ * the row's `rev`, meaning the ref moved since the list loaded. Origins
+ * answer `?ref=` reads and listings with `X-Instafy-Rev` set to the ref's
+ * tip, or with no header at all (never `main`'s rev), so a missing header
+ * never counts as moved.
+ */
+export function servedFromOtherRev(servedRev: string | null | undefined, rev: string): boolean {
+  const served = servedRev?.trim();
+  return Boolean(served) && served !== rev;
+}
+
+/**
  * What a ref holds at a path whose read answered 404: `absent` (the kept
  * work deletes it), `moved` (the ref no longer names `rev`) or `unknown`.
  */
@@ -63,7 +75,7 @@ export async function confirmPathAbsentAtRef({
   if (!listing || !listing.ok) {
     return "unknown";
   }
-  if (listing.rev && listing.rev !== rev) {
+  if (servedFromOtherRev(listing.rev, rev)) {
     return "moved";
   }
   if (listing.entries.length > 0) {
@@ -82,7 +94,7 @@ export async function confirmPathAbsentAtRef({
   if (!root || !root.ok) {
     return "unknown";
   }
-  if (root.rev && root.rev !== rev) {
+  if (servedFromOtherRev(root.rev, rev)) {
     return "moved";
   }
   return root.entries.length > 0 ? "absent" : "unknown";

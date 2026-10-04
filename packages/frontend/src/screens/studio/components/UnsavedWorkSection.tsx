@@ -40,7 +40,7 @@ import {
   type HistoryOriginKind,
 } from "./historyCopy";
 import { PROGRAMMATIC_FOCUS_CLASS, restoreLostFocus } from "./historyFocus";
-import { checkDesktopFolderPath, confirmPathAbsentAtRef } from "./unsavedWorkPathChecks";
+import { checkDesktopFolderPath, confirmPathAbsentAtRef, servedFromOtherRev } from "./unsavedWorkPathChecks";
 import { formatRelativeCommitTime } from "./workspaceGitReviewShared";
 
 const LEASE_RETRY_DELAY_MS = 1_500;
@@ -358,7 +358,7 @@ export function UnsavedWorkSection({
       let files: OriginApplyFile[] = [];
       let deletes: string[] = [];
       if (read.ok) {
-        if (read.file.rev && read.file.rev !== entry.rev) {
+        if (servedFromOtherRev(read.file.rev, entry.rev)) {
           // The ref holds newer work than the row the person chose from.
           clearConflict(entry.ref);
           refreshAfterMove();

@@ -590,6 +590,87 @@ describe("HistoryDrawer: Unsaved work", () => {
     });
   });
 
+  // Origins answer `?ref=` with X-Instafy-Rev set to the ref's tip, or with
+  // no header: another commit means the ref moved, no header means nothing.
+  describe("X-Instafy-Rev at the ref", () => {
+    const savedOk = { ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] };
+
+    function conflictOn(paths: string[]) {
+      mocks.restoreRecovery.mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    }
+
+    function readAnswers(rev: string | null) {
+      mocks.readAt.mockResolvedValue({
+        ok: true,
+        file: { path: "src/a.ts", contentBase64: btoa("kept\n"), size: 5, rev },
+      });
+    }
+
+    function goneAtRef(listingRev: string | null) {
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: true,
+        error: originError(404, "not_found"),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      mocks.listAt.mockResolvedValue({
+        ok: true,
+        entries: [{ name: "b.ts", path: "src/b.ts", kind: "file" }],
+        rev: listingRev,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    }
+
+    async function useVersion() {
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+    }
+
+    it("writes the file when the read carries no header", async () => {
+      conflictOn(["src/a.ts"]);
+      readAnswers(null);
+      mocks.saveChanges.mockResolvedValue(savedOk);
+      await useVersion();
+      expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+      expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ deletes: [], baseRev: NEW_HEAD });
+      expect(q(container, "history-status")?.textContent).toBe("Saved this version of src/a.ts.");
+    });
+
+    it("writes the file when the read names the row's commit", async () => {
+      conflictOn(["src/a.ts"]);
+      readAnswers("a".repeat(40));
+      mocks.saveChanges.mockResolvedValue(savedOk);
+      await useVersion();
+      expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+    });
+
+    it("deletes the path when the listing that proves it gone carries no header", async () => {
+      conflictOn(["src/a.ts"]);
+      goneAtRef(null);
+      mocks.saveChanges.mockResolvedValue(savedOk);
+      await useVersion();
+      expect(mocks.saveChanges.mock.calls[0]?.[0]).toMatchObject({ files: [], deletes: ["src/a.ts"] });
+    });
+
+    it("refreshes instead of deleting when the listing names another commit", async () => {
+      conflictOn(["src/a.ts"]);
+      goneAtRef("9".repeat(40));
+      await useVersion();
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe("This entry changed. Refreshing.");
+      expect(q(row(container, RECOVERY), "unsaved-work-conflict")).toBeNull();
+    });
+  });
+
   it("offers ask-the-agent per file with the ref to read from", async () => {
     mocks.restoreRecovery.mockResolvedValueOnce({
       ok: false,
