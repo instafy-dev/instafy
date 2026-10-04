@@ -291,6 +291,66 @@ describe("default routing", () => {
   });
 });
 
+describe("default-routed sync and path revert use the shared write lease", () => {
+  const holder = "0f8b2c1e-1111-4222-8333-444455556666";
+  const leaseRefusal = () =>
+    new ControllerApiError({
+      status: 409,
+      message: `project currently leased by ${holder} until 2026-10-04T10:00:00Z`,
+      code: null,
+      details: null,
+    });
+
+  it.each([
+    ["sync", () => syncWorkspaceGitToRemoteFromController({ projectId: "p", originId: "desk", routing: "default" })],
+    ["path revert", () => revertWorkspaceGitPathsFromController({ projectId: "p", paths: ["a"], originId: "desk", routing: "default" })],
+  ])("%s maps a lease held by someone else to lease_conflict without the holder id", async (_label, run) => {
+    mocks.acquire.mockRejectedValue(leaseRefusal());
+    const result = await run();
+    expect(result).toMatchObject({ ok: false, conflict: false, errorInfo: { status: 409, code: "lease_conflict" } });
+    expect(JSON.stringify(result)).not.toContain(holder);
+    expect(fetch).not.toHaveBeenCalled();
+    for (const call of vi.mocked(console.warn).mock.calls) {
+      expect(JSON.stringify(call)).not.toContain(holder);
+    }
+  });
+
+  it.each([
+    ["sync", () => syncWorkspaceGitToRemoteFromController({ projectId: "p", routing: "default" })],
+    ["path revert", () => revertWorkspaceGitPathsFromController({ projectId: "p", paths: ["a"], routing: "default" })],
+  ])("%s reports a failed mint as token_unavailable and releases the lease", async (_label, run) => {
+    mocks.token.mockResolvedValue(null);
+    const result = await run();
+    expect(result).toMatchObject({ ok: false, errorInfo: { code: "token_unavailable" }, error: "failed to obtain origin token" });
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["sync", "git/sync", () => syncWorkspaceGitToRemoteFromController({ projectId: "p", routing: "default" })],
+    ["path revert", "git/revert", () => revertWorkspaceGitPathsFromController({ projectId: "p", paths: ["a"], routing: "default" })],
+  ])("%s never follows a 401 re-mint to another origin", async (_label, path, run) => {
+    mocks.token
+      .mockResolvedValueOnce(token({ originId: "desk", endpoint: "https://controller.test/origin/desk" }))
+      .mockResolvedValueOnce(token({ originId: "gateway", endpoint: ENDPOINT, token: "other" }));
+    fetchMock().mockResolvedValueOnce(new Response("", { status: 401 })).mockResolvedValue(json(200, { rev: "x" }));
+    const result = await run();
+    const urls = fetchMock().mock.calls.map(([url]) => String(url));
+    expect(urls).toEqual([`https://controller.test/origin/desk/${path}`]);
+    expect(mocks.token.mock.calls[1][0]).toMatchObject({ originId: "desk", leaseId: "lease-1", forceRefresh: true });
+    expect(result?.ok).toBe(false);
+  });
+
+  it("keeps the pin and the lease when a 401 re-mint returns the same origin", async () => {
+    mocks.token
+      .mockResolvedValueOnce(token({ originId: "desk", endpoint: "https://controller.test/origin/desk", token: "stale" }))
+      .mockResolvedValueOnce(token({ originId: "desk", endpoint: "https://controller.test/origin/desk", token: "fresh" }));
+    fetchMock().mockResolvedValueOnce(new Response("", { status: 401 })).mockResolvedValueOnce(json(200, { rev: "x" }));
+    const result = await syncWorkspaceGitToRemoteFromController({ projectId: "p", routing: "default" });
+    expect(result).toMatchObject({ ok: true, rev: "x", originId: "desk", leaseId: "lease-1" });
+    expect((lastRequest().init.headers as Record<string, string>).authorization).toBe("Bearer fresh");
+  });
+});
+
 describe("revertWorkspaceGitCommitFromController", () => {
   it.each([undefined, "legacy"] as const)(
     "legacy mode (routing %s) never issues a revert-commit request",

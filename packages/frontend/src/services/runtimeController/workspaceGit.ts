@@ -749,7 +749,13 @@ export interface SyncWorkspaceGitParams {
   leaseId?: string | null;
   leaseSeconds?: number;
   retainLease?: boolean;
+  /**
+   * `default` runs through the shared write-lease helper: one origin (a
+   * retried token never moves the write), typed lease and token errors.
+   */
   routing?: WorkspaceOriginRouting;
+  /** Default routing only: retry a lease held by someone else once after this delay. */
+  leaseConflictRetryDelayMs?: number | null;
 }
 
 export interface SyncWorkspaceGitResult {
@@ -770,6 +776,114 @@ export interface SyncWorkspaceGitResult {
   originEndpoint?: string | null;
 }
 
+type OriginCallMeta = {
+  leaseId: string | null;
+  originId: string | null;
+  originMode: string | null;
+  endpoint: string | null;
+};
+
+function buildSyncResult(captured: CapturedOriginResponse, meta: OriginCallMeta): SyncWorkspaceGitResult {
+  if (!captured.ok) {
+    const errorInfo = parseOriginErrorText(captured.status, captured.text, captured.headers);
+    return {
+      ok: false,
+      conflict: captured.status === 409,
+      leaseId: meta.leaseId,
+      originId: meta.originId,
+      originMode: meta.originMode,
+      originEndpoint: meta.endpoint,
+      error: `origin git sync failed (${captured.status}): ${captured.text}`,
+      errorInfo,
+      report: errorInfo.report ?? null,
+    };
+  }
+
+  const payload = parseJsonRecord(captured.text);
+  const result: SyncWorkspaceGitResult = {
+    ok: true,
+    rev: typeof payload?.rev === "string" ? payload.rev : null,
+    conflict: false,
+    leaseId: meta.leaseId,
+    originId: meta.originId,
+    originMode: meta.originMode,
+    originEndpoint: meta.endpoint,
+  };
+  const baseRev =
+    typeof payload?.baseRev === "string"
+      ? payload.baseRev
+      : typeof payload?.base_rev === "string"
+        ? payload.base_rev
+        : null;
+  if (baseRev) {
+    result.baseRev = baseRev;
+  }
+  if (typeof payload?.committed === "boolean") {
+    result.committed = payload.committed;
+  }
+  const report = parsePublishReport(payload);
+  if (report) {
+    result.report = report;
+  }
+  return result;
+}
+
+/**
+ * Run a default-routed write (`git/sync`, `git/revert`) through the shared
+ * lease helper and capture the answer. Lease and token failures come back as
+ * typed errors; the lease holder's id is never kept.
+ */
+async function postDefaultRoutedWrite(
+  params: {
+    projectId: string;
+    originId?: string | null;
+    runtimeId?: string | null;
+    accessToken?: string | null;
+    leaseId?: string | null;
+    leaseSeconds?: number;
+    retainLease?: boolean;
+    leaseConflictRetryDelayMs?: number | null;
+  },
+  path: string,
+  body: unknown,
+): Promise<
+  | { ok: true; captured: CapturedOriginResponse; meta: OriginCallMeta }
+  | { ok: false; error: OriginError; meta: OriginCallMeta }
+> {
+  const outcome = await withWorkspaceWriteLease(
+    {
+      projectId: params.projectId,
+      originId: params.originId ?? null,
+      runtimeId: params.runtimeId ?? null,
+      accessToken: params.accessToken ?? null,
+      leaseId: params.leaseId ?? null,
+      leaseSeconds: params.leaseSeconds,
+      retainLease: params.retainLease === true,
+      leaseConflictRetryDelayMs: params.leaseConflictRetryDelayMs ?? null,
+    },
+    async (context) =>
+      captureOriginResponse(
+        await context.fetch(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(body),
+        }),
+      ),
+  );
+  const meta: OriginCallMeta = {
+    leaseId: outcome.leaseId || null,
+    originId: outcome.originId || null,
+    originMode: outcome.originMode || null,
+    endpoint: outcome.endpoint || null,
+  };
+  return outcome.ok
+    ? { ok: true, captured: outcome.value, meta }
+    : { ok: false, error: outcome.error, meta };
+}
+
 export async function syncWorkspaceGitToRemoteFromController(
   params: SyncWorkspaceGitParams,
 ): Promise<SyncWorkspaceGitResult | null> {
@@ -780,6 +894,39 @@ export async function syncWorkspaceGitToRemoteFromController(
   const projectId = params.projectId.trim();
   if (!projectId) {
     return null;
+  }
+
+  // Always send a message: origins older than the plain-subject publish
+  // (the stateful gateway, older Desktop apps) otherwise write a subject
+  // that names the user into permanent history.
+  const message =
+    typeof params.message === "string" && params.message.trim().length > 0
+      ? params.message.trim()
+      : DEFAULT_SYNC_MESSAGE;
+  const paths =
+    Array.isArray(params.paths) && params.paths.length > 0
+      ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
+      : undefined;
+  const body: Record<string, unknown> = { message };
+  if (paths && paths.length > 0) {
+    body.paths = paths;
+  }
+
+  if (params.routing === "default") {
+    const posted = await postDefaultRoutedWrite({ ...params, projectId }, "git/sync", body);
+    if (!posted.ok) {
+      return {
+        ok: false,
+        conflict: false,
+        leaseId: posted.meta.leaseId,
+        originId: posted.meta.originId,
+        originMode: posted.meta.originMode,
+        originEndpoint: posted.meta.endpoint,
+        error: posted.error.message,
+        errorInfo: posted.error,
+      };
+    }
+    return buildSyncResult(posted.captured, posted.meta);
   }
 
   const runtimeHint = params.runtimeId ?? null;
@@ -801,22 +948,6 @@ export async function syncWorkspaceGitToRemoteFromController(
       leaseIdForRelease = leaseId;
     } else {
       leaseIdForRelease = leaseId;
-    }
-
-    // Always send a message: origins older than the plain-subject publish
-    // (the stateful gateway, older Desktop apps) otherwise write a subject
-    // that names the user into permanent history.
-    const message =
-      typeof params.message === "string" && params.message.trim().length > 0
-        ? params.message.trim()
-        : DEFAULT_SYNC_MESSAGE;
-    const paths =
-      Array.isArray(params.paths) && params.paths.length > 0
-        ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
-        : undefined;
-    const body: Record<string, unknown> = { message };
-    if (paths && paths.length > 0) {
-      body.paths = paths;
     }
 
     const request = await fetchWorkspaceOriginGitResponse(
@@ -851,52 +982,12 @@ export async function syncWorkspaceGitToRemoteFromController(
     }
 
     const { endpoint, originToken, response } = request;
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const message = `origin git sync failed (${response.status}): ${text}`;
-      const errorInfo = parseOriginErrorText(response.status, text, response.headers);
-      return {
-        ok: false,
-        conflict: response.status === 409,
-        leaseId: leaseId ?? null,
-        originId: originToken.originId ?? null,
-        originMode: originToken.mode ?? null,
-        originEndpoint: endpoint,
-        error: message,
-        errorInfo,
-        report: errorInfo.report ?? null,
-      };
-    }
-
-    const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    const rev = typeof payload?.rev === "string" ? payload.rev : null;
-    const result: SyncWorkspaceGitResult = {
-      ok: true,
-      rev,
-      conflict: false,
+    return buildSyncResult(await captureOriginResponse(response), {
       leaseId: leaseId ?? null,
       originId: originToken.originId ?? null,
       originMode: originToken.mode ?? null,
-      originEndpoint: endpoint,
-    };
-    const baseRev =
-      typeof payload?.baseRev === "string"
-        ? payload.baseRev
-        : typeof payload?.base_rev === "string"
-          ? payload.base_rev
-          : null;
-    if (baseRev) {
-      result.baseRev = baseRev;
-    }
-    if (typeof payload?.committed === "boolean") {
-      result.committed = payload.committed;
-    }
-    const report = parsePublishReport(payload);
-    if (report) {
-      result.report = report;
-    }
-    return result;
+      endpoint,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] syncWorkspaceGitToRemote error:", message);
@@ -921,8 +1012,44 @@ export interface RevertWorkspaceGitResult {
   error?: string;
   errorInfo?: OriginError;
   leaseId?: string | null;
+  originId?: string | null;
   originMode?: string | null;
   originEndpoint?: string | null;
+}
+
+function buildRevertPathsResult(
+  captured: CapturedOriginResponse,
+  meta: OriginCallMeta,
+): RevertWorkspaceGitResult {
+  if (!captured.ok) {
+    const errorInfo = parseOriginErrorText(captured.status, captured.text, captured.headers);
+    if (errorInfo.code === "not_supported") {
+      // Only the stateless gateway refuses path discards outright.
+      noteVersioningSignal(meta.originId, "not_supported");
+    }
+    return {
+      ok: false,
+      conflict: captured.status === 409,
+      leaseId: meta.leaseId,
+      originMode: meta.originMode,
+      originEndpoint: meta.endpoint,
+      error: `origin git revert failed (${captured.status}): ${captured.text}`,
+      errorInfo,
+    };
+  }
+
+  const payload = parseJsonRecord(captured.text);
+  const reverted = Array.isArray(payload?.reverted) ? (payload?.reverted as string[]) : null;
+  const removed = Array.isArray(payload?.removed) ? (payload?.removed as string[]) : null;
+  return {
+    ok: true,
+    reverted,
+    removed,
+    conflict: false,
+    leaseId: meta.leaseId,
+    originMode: meta.originMode,
+    originEndpoint: meta.endpoint,
+  };
 }
 
 export async function revertWorkspaceGitPathsFromController(params: {
@@ -934,7 +1061,10 @@ export async function revertWorkspaceGitPathsFromController(params: {
   leaseId?: string | null;
   leaseSeconds?: number;
   retainLease?: boolean;
+  /** `default` runs through the shared write-lease helper (one origin, typed errors). */
   routing?: WorkspaceOriginRouting;
+  /** Default routing only: retry a lease held by someone else once after this delay. */
+  leaseConflictRetryDelayMs?: number | null;
 }): Promise<RevertWorkspaceGitResult | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -943,6 +1073,28 @@ export async function revertWorkspaceGitPathsFromController(params: {
   const projectId = params.projectId.trim();
   if (!projectId) {
     return null;
+  }
+
+  const paths = Array.isArray(params.paths)
+    ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
+    : [];
+  const body = { paths };
+
+  if (params.routing === "default") {
+    const posted = await postDefaultRoutedWrite({ ...params, projectId }, "git/revert", body);
+    if (!posted.ok) {
+      return {
+        ok: false,
+        conflict: false,
+        leaseId: posted.meta.leaseId,
+        originId: posted.meta.originId,
+        originMode: posted.meta.originMode,
+        originEndpoint: posted.meta.endpoint,
+        error: posted.error.message,
+        errorInfo: posted.error,
+      };
+    }
+    return { ...buildRevertPathsResult(posted.captured, posted.meta), originId: posted.meta.originId };
   }
 
   const runtimeHint = params.runtimeId ?? null;
@@ -965,11 +1117,6 @@ export async function revertWorkspaceGitPathsFromController(params: {
     } else {
       leaseIdForRelease = leaseId;
     }
-
-    const paths = Array.isArray(params.paths)
-      ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
-      : [];
-    const body = { paths };
 
     const request = await fetchWorkspaceOriginGitResponse(
       {
@@ -1003,38 +1150,12 @@ export async function revertWorkspaceGitPathsFromController(params: {
     }
 
     const { endpoint, originToken, response } = request;
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const message = `origin git revert failed (${response.status}): ${text}`;
-      const errorInfo = parseOriginErrorText(response.status, text, response.headers);
-      if (errorInfo.code === "not_supported") {
-        // Only the stateless gateway refuses path discards outright.
-        noteVersioningSignal(originToken.originId, "not_supported");
-      }
-      return {
-        ok: false,
-        conflict: response.status === 409,
-        leaseId: leaseId ?? null,
-        originMode: originToken.mode ?? null,
-        originEndpoint: endpoint,
-        error: message,
-        errorInfo,
-      };
-    }
-
-    const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    const reverted = Array.isArray(payload?.reverted) ? (payload?.reverted as string[]) : null;
-    const removed = Array.isArray(payload?.removed) ? (payload?.removed as string[]) : null;
-    return {
-      ok: true,
-      reverted,
-      removed,
-      conflict: false,
+    return buildRevertPathsResult(await captureOriginResponse(response), {
       leaseId: leaseId ?? null,
+      originId: originToken.originId ?? null,
       originMode: originToken.mode ?? null,
-      originEndpoint: endpoint,
-    };
+      endpoint,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] revertWorkspaceGitPaths error:", message);
