@@ -1,5 +1,5 @@
 import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
-import { Fragment, useCallback, useEffect, useId, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Eye, NavArrowRight, OpenNewWindow, Undo, UndoCircle, WarningTriangle } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
@@ -357,6 +357,12 @@ export function ChatFileChangeList({
   const [revertingChange, setRevertingChange] = useState(false);
   // The files were undone by a saved revert version, not by a path discard.
   const [revertedByVersion, setRevertedByVersion] = useState(false);
+  // Set when the dialog closes after a revert request: focus goes back to
+  // the card, never to the page body.
+  const [returnFocusAfterRevert, setReturnFocusAfterRevert] = useState(false);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const revertChipRef = useRef<HTMLButtonElement | null>(null);
+  const summaryToggleRef = useRef<HTMLButtonElement | null>(null);
   const cardIdBase = useId();
 
   const resolvedFiles = useMemo(() => resolveUniqueChatFileChanges(files), [files]);
@@ -820,9 +826,11 @@ export function ChatFileChangeList({
 
   // "Revert this change": a new version that undoes the run's canonical range
   // (`{commit: head, base}`), on the origin the versioning probe described.
+  // The dialog stays open, busy, until the request settles, so focus can
+  // return to a control that is still there and enabled.
   const handleRevertChange = useCallback(async () => {
-    setRevertConfirmOpen(false);
     if (!projectId || !revertRange || !projectWriteEnabled || revertingChange) {
+      setRevertConfirmOpen(false);
       return;
     }
     setRevertingChange(true);
@@ -874,6 +882,8 @@ export function ChatFileChangeList({
       );
     } finally {
       setRevertingChange(false);
+      setRevertConfirmOpen(false);
+      setReturnFocusAfterRevert(true);
     }
   }, [
     changeTypeByPath,
@@ -888,6 +898,31 @@ export function ChatFileChangeList({
     totalCount,
     versioning.originId,
   ]);
+
+  // After a revert the dialog's own button is gone and the Revert chip may be
+  // too (every file reverted). Focus lands on the chip when it is still
+  // there, else on the summary toggle, else on the first file chip.
+  useLayoutEffect(() => {
+    if (!returnFocusAfterRevert || revertConfirmOpen) {
+      return;
+    }
+    setReturnFocusAfterRevert(false);
+    if (typeof document === "undefined") {
+      return;
+    }
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) {
+      return;
+    }
+    const chip = revertChipRef.current;
+    const target =
+      chip?.isConnected && !chip.disabled
+        ? chip
+        : summaryToggleRef.current?.isConnected
+          ? summaryToggleRef.current
+          : cardRef.current?.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]');
+    target?.focus();
+  }, [returnFocusAfterRevert, revertConfirmOpen]);
 
   const conversationalUndoChip = messageId ? (
     <button
@@ -904,12 +939,13 @@ export function ChatFileChangeList({
   ) : null;
 
   return (
-    <div className="mt-2 text-sm" data-testid="chat-file-change-summary">
+    <div ref={cardRef} className="mt-2 text-sm" data-testid="chat-file-change-summary">
       {/* Chips and their actions flow as one row: actions follow the chips after a thin
           divider (no far-right gap on single-file rails) and wrap together on narrow widths. */}
       <div className="flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-1.5">
           {showSummaryToggle ? (
             <button
+              ref={summaryToggleRef}
               type="button"
               className={summaryToggleClass}
               onClick={() => setRailExpanded((value) => !value)}
@@ -1039,6 +1075,7 @@ export function ChatFileChangeList({
                 {conversationalUndoChip}
                 {canRevertChange ? (
                   <button
+                    ref={revertChipRef}
                     type="button"
                     className={actionChipClass}
                     onClick={() => setRevertConfirmOpen(true)}
@@ -1301,9 +1338,11 @@ export function ChatFileChangeList({
       {revertConfirmOpen ? (
         <StudioDialogModal
           isOpen
-          isDismissable
+          // Busy while the request runs: it closes when the request settles.
+          isDismissable={!revertingChange}
+          isKeyboardDismissDisabled={revertingChange}
           onOpenChange={(open) => {
-            if (!open) {
+            if (!open && !revertingChange) {
               setRevertConfirmOpen(false);
             }
           }}
@@ -1318,10 +1357,19 @@ export function ChatFileChangeList({
               A new version that undoes it is saved on top. Nothing is removed from history.
             </p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button variant="outline" autoFocus onPress={() => setRevertConfirmOpen(false)}>
+              <Button
+                variant="outline"
+                autoFocus
+                isDisabled={revertingChange}
+                onPress={() => setRevertConfirmOpen(false)}
+              >
                 Cancel
               </Button>
-              <Button onPress={() => void handleRevertChange()} data-testid="chat-file-change-revert-confirm">
+              <Button
+                isPending={revertingChange}
+                onPress={() => void handleRevertChange()}
+                data-testid="chat-file-change-revert-confirm"
+              >
                 Revert
               </Button>
             </div>

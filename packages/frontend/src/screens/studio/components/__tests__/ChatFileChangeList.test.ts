@@ -1179,6 +1179,79 @@ describe("ChatFileChangeList", () => {
       expect(revertChip()).not.toBeNull();
     });
 
+    describe("keyboard focus after a revert", () => {
+      function confirmButton() {
+        return document.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-revert-confirm"]');
+      }
+
+      async function pressRevertAndConfirm() {
+        revertChip()?.focus();
+        await act(async () => {
+          revertChip()?.click();
+        });
+        await waitFor(50);
+        await act(async () => {
+          confirmButton()?.click();
+        });
+      }
+
+      it("keeps the dialog open and busy while the request runs, then focuses the card", async () => {
+        let settle: (value: unknown) => void = () => {};
+        revertWorkspaceGitCommit.mockReturnValue(
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+        );
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        await pressRevertAndConfirm();
+
+        // Focus stays inside the open dialog instead of falling to the page.
+        const dialog = document.querySelector('[data-testid="chat-file-change-revert-dialog"]');
+        expect(dialog).not.toBeNull();
+        expect(dialog?.contains(document.activeElement)).toBe(true);
+        expect(confirmButton()?.getAttribute("aria-disabled")).toBe("true");
+
+        await act(async () => {
+          settle({ ok: true, rev: "c".repeat(40), committed: true });
+        });
+        await waitFor(0);
+
+        // The only file is reverted, so the action row is gone: focus lands
+        // on the file chip, never on the body.
+        expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
+        expect(revertChip()).toBeNull();
+        expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+      });
+
+      it("returns focus to Revert this change when the revert fails", async () => {
+        revertWorkspaceGitCommit.mockResolvedValue({
+          ok: false,
+          conflict: true,
+          code: "revert_conflict",
+          errorInfo: { status: 409, code: "revert_conflict", message: "conflict", routeUnavailable: false },
+        });
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        await pressRevertAndConfirm();
+        await waitFor(0);
+
+        expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
+        expect(document.activeElement).toBe(revertChip());
+        expect(revertChip()?.disabled).toBe(false);
+      });
+
+      it("focuses the summary toggle when every file of a larger change was reverted", async () => {
+        revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: "c".repeat(40), committed: true });
+        await renderCard({
+          files: [fileChange("src/app.ts"), fileChange("src/util.ts")],
+          commitRange: gitRange,
+        });
+        await pressRevertAndConfirm();
+        await waitFor(0);
+
+        expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-toggle-files");
+      });
+    });
+
     it("leaves the files as they were when there was nothing to revert", async () => {
       revertWorkspaceGitCommit.mockResolvedValue({ ok: true, rev: head, committed: false });
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
