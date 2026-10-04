@@ -104,6 +104,14 @@ export function describeRevertConfirm(unlistedPaths: readonly string[]): string 
 }
 export const REVERT_CHECK_FAILED_MESSAGE = "Couldn't check what this change includes. Try again.";
 
+// While the revert request runs. Closing the dialog does not cancel it.
+export const REVERT_RUNNING_MESSAGE =
+  "Reverting… Closing this doesn't stop it. You'll see the result when it's done.";
+// The card stopped waiting for an answer; the request was not cancelled, so
+// the origin may still save the revert, and a late answer is still shown.
+export const REVERT_STILL_RUNNING_MESSAGE =
+  "The revert is taking longer than expected. It may still finish, so wait a moment before trying again.";
+
 export function describeRevertOtherWork(otherPaths: readonly string[], canAskAgent: boolean): string {
   const undo = `This change was saved together with other work, so reverting it here would also undo ${formatPathList(otherPaths)}.`;
   return canAskAgent ? `${undo} Ask the agent to undo just this change.` : undo;

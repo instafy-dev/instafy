@@ -6,6 +6,7 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { useStatus } from "../../../status/useStatus";
 import { controllerClient } from "../../../sdk/instafy";
 import { WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS } from "../../../services/runtimeController/workspaceSave";
+import type { RevertWorkspaceGitCommitResult } from "../../../services/runtimeController/workspaceGit";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -23,6 +24,8 @@ import {
   REVERT_CHECK_FAILED_MESSAGE,
   REVERT_CHECK_STILL_LOADING_MESSAGE,
   REVERT_CHECKING_MESSAGE,
+  REVERT_RUNNING_MESSAGE,
+  REVERT_STILL_RUNNING_MESSAGE,
   describeChangeRevertOutcome,
   describeFileNotSaved,
   describeRevertCombined,
@@ -113,6 +116,11 @@ const MAX_FILES_EXPANDED_BY_DEFAULT = 4;
 // Brief lockout after dispatching a conversational undo request so a double
 // click cannot fire two requests; the composer chain serializes the rest.
 const UNDO_REQUEST_COOLDOWN_MS = 2500;
+
+// How long "Revert this change" waits for the origin before it stops
+// waiting (the request itself is never cancelled). The longest normal
+// answer is a lease retry, a gateway fetch, a 5 s wait and a second try.
+export const REVERT_WAIT_TIMEOUT_MS = 45_000;
 
 const chipBaseClass =
   "inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border px-2.5 text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950 disabled:pointer-events-none disabled:opacity-45";
@@ -383,6 +391,9 @@ export function ChatFileChangeList({
   const [revertedByVersion, setRevertedByVersion] = useState(false);
   const [revertScope, setRevertScope] = useState<ChatChangeRevertScope | null>(null);
   const revertScopeRequestRef = useRef(0);
+  // Counts revert requests, so an answer that arrives after the card
+  // stopped waiting is shown only while no newer revert has started.
+  const revertRequestRef = useRef(0);
   // Set when the dialog closes after a revert request: focus goes back to
   // the card, never to the page body.
   const [returnFocusAfterRevert, setReturnFocusAfterRevert] = useState(false);
@@ -921,14 +932,28 @@ export function ChatFileChangeList({
   }, [projectId, revertRange, uniquePaths, versioning.originId]);
 
   const openRevertDialog = useCallback(() => {
+    // The chip stays focusable while a revert runs, but opens nothing.
+    if (revertingChange) {
+      return;
+    }
     setRevertConfirmOpen(true);
     void checkRevertScope();
-  }, [checkRevertScope]);
+  }, [checkRevertScope, revertingChange]);
 
   const closeRevertDialog = useCallback(() => {
     revertScopeRequestRef.current += 1;
     setRevertConfirmOpen(false);
   }, []);
+
+  // Closing the dialog never cancels a revert that is already running: the
+  // request keeps going, the chip says "Reverting…", and the result shows
+  // as a toast when it settles. Focus goes back to the card.
+  const dismissRevertDialog = useCallback(() => {
+    closeRevertDialog();
+    if (revertingChange) {
+      setReturnFocusAfterRevert(true);
+    }
+  }, [closeRevertDialog, revertingChange]);
 
   const askAgentFromRevertDialog = useCallback(() => {
     closeRevertDialog();
@@ -943,43 +968,10 @@ export function ChatFileChangeList({
     void checkRevertScope();
   }, [checkRevertScope]);
 
-  // "Revert this change": a new version that undoes the saved version the
-  // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
-  // that commit's own change), on the origin the versioning probe described.
-  // The dialog stays open, busy, until the request settles, so focus can
-  // return to a control that is still there and enabled.
-  const handleRevertChange = useCallback(async () => {
-    if (revertingChange || revertScope?.status !== "ready") {
-      return;
-    }
-    if (!canRevertChange || !projectId || !revertRange) {
-      // The change stopped being revertable here while the dialog was open
-      // (the space's mode or write access changed): close it rather than
-      // leave a Revert that does nothing.
-      closeRevertDialog();
-      setReturnFocusAfterRevert(true);
-      return;
-    }
-    const revertedVersionPaths = new Set(revertScope.paths);
-    setRevertingChange(true);
-    try {
-      const revert = () =>
-        revertWorkspaceGitCommitFromController({
-          projectId,
-          commit: revertRange.head,
-          originId: versioning.originId,
-          routing: "default",
-          // An agent checkpoint holds the project lease briefly: retry once.
-          leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
-        });
-      let result = await revert();
-      // A gateway still fetching the space's history asks for a moment.
-      // Nothing was committed, so one retry after that delay is safe.
-      const retryDelay = revertRetryDelayMs(result);
-      if (retryDelay !== null) {
-        await new Promise((resolve) => setTimeout(resolve, retryDelay));
-        result = await revert();
-      }
+  // What a revert answered: mark the files it undid and say so. Also runs
+  // for an answer that arrives after the card stopped waiting for it.
+  const applyRevertOutcome = useCallback(
+    (result: RevertWorkspaceGitCommitResult | null, revertedVersionPaths: ReadonlySet<string>) => {
       const outcome = describeChangeRevertOutcome(result);
       if (outcome.reverted) {
         const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));
@@ -1018,25 +1010,87 @@ export function ChatFileChangeList({
         askAgent ? 9000 : outcome.intent === "success" || outcome.intent === "info" ? 4000 : 6500,
         askAgent ? { actionLabel: "Ask the agent to undo it", onAction: askAgent } : undefined,
       );
-    } finally {
-      setRevertingChange(false);
-      setRevertConfirmOpen(false);
+    },
+    [changeTypeByPath, handleUndoRequest, messageId, pendingEntries, pendingPaths, projectId, showStatus, totalCount],
+  );
+
+  // "Revert this change": a new version that undoes the saved version the
+  // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
+  // that commit's own change), on the origin the versioning probe described.
+  // The dialog stays open and busy while the request runs, so focus stays on
+  // a control that is there; the user can close it at any time without
+  // cancelling the request. After REVERT_WAIT_TIMEOUT_MS the card stops
+  // waiting: it says the revert may still finish, frees the chip, and still
+  // shows the answer if one arrives later.
+  const handleRevertChange = useCallback(async () => {
+    if (revertingChange || revertScope?.status !== "ready") {
+      return;
+    }
+    if (!canRevertChange || !projectId || !revertRange) {
+      // The change stopped being revertable here while the dialog was open
+      // (the space's mode or write access changed): close it rather than
+      // leave a Revert that does nothing.
+      closeRevertDialog();
       setReturnFocusAfterRevert(true);
+      return;
+    }
+    const request = revertRequestRef.current + 1;
+    revertRequestRef.current = request;
+    const revertedVersionPaths = new Set(revertScope.paths);
+    setRevertingChange(true);
+    const revert = () =>
+      revertWorkspaceGitCommitFromController({
+        projectId,
+        commit: revertRange.head,
+        originId: versioning.originId,
+        routing: "default",
+        // An agent checkpoint holds the project lease briefly: retry once.
+        leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
+      });
+    const answer = (async () => {
+      try {
+        let result = await revert();
+        // A gateway still fetching the space's history asks for a moment.
+        // Nothing was committed, so one retry after that delay is safe.
+        const retryDelay = revertRetryDelayMs(result);
+        if (retryDelay !== null) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          result = await revert();
+        }
+        return result;
+      } catch {
+        return null;
+      }
+    })();
+    let waitTimer: ReturnType<typeof setTimeout> | undefined;
+    const stoppedWaiting = new Promise<"timeout">((resolve) => {
+      waitTimer = setTimeout(() => resolve("timeout"), REVERT_WAIT_TIMEOUT_MS);
+    });
+    const first = await Promise.race([answer, stoppedWaiting]);
+    clearTimeout(waitTimer);
+    setRevertingChange(false);
+    setRevertConfirmOpen(false);
+    setReturnFocusAfterRevert(true);
+    if (first !== "timeout") {
+      applyRevertOutcome(first, revertedVersionPaths);
+      return;
+    }
+    // The request is not cancelled: the origin may still save the revert.
+    showStatus(REVERT_STILL_RUNNING_MESSAGE, "warning", 9000);
+    const late = await answer;
+    // A later revert of this change speaks for itself.
+    if (revertRequestRef.current === request) {
+      applyRevertOutcome(late, revertedVersionPaths);
     }
   }, [
+    applyRevertOutcome,
     canRevertChange,
-    changeTypeByPath,
     closeRevertDialog,
-    handleUndoRequest,
-    messageId,
-    pendingEntries,
-    pendingPaths,
     projectId,
     revertRange,
     revertScope,
     revertingChange,
     showStatus,
-    totalCount,
     versioning.originId,
   ]);
 
@@ -1091,6 +1145,9 @@ export function ChatFileChangeList({
   }, [revertConfirmOpen, revertScope?.status]);
 
   const revertScopeMessage = (() => {
+    if (revertingChange) {
+      return REVERT_RUNNING_MESSAGE;
+    }
     switch (revertScope?.status) {
       case "ready":
         return describeRevertConfirm(revertScope.unlistedPaths);
@@ -1265,9 +1322,11 @@ export function ChatFileChangeList({
                   <button
                     ref={revertChipRef}
                     type="button"
-                    className={actionChipClass}
+                    // Not `disabled` while a revert runs: focus can rest here
+                    // after the dialog is closed, and a press opens nothing.
+                    className={revertingChange ? `${actionChipClass} opacity-45` : actionChipClass}
                     onClick={openRevertDialog}
-                    disabled={revertingChange}
+                    aria-disabled={revertingChange || undefined}
                     aria-busy={revertingChange || undefined}
                     title="Save a new version that undoes this change"
                     data-testid="chat-file-change-revert"
@@ -1526,12 +1585,12 @@ export function ChatFileChangeList({
       {revertConfirmOpen ? (
         <StudioDialogModal
           isOpen
-          // Busy while the request runs: it closes when the request settles.
-          isDismissable={!revertingChange}
-          isKeyboardDismissDisabled={revertingChange}
+          // Escape, a click outside and Close all work while a revert runs;
+          // none of them cancels it (see dismissRevertDialog).
+          isDismissable
           onOpenChange={(open) => {
-            if (!open && !revertingChange) {
-              closeRevertDialog();
+            if (!open) {
+              dismissRevertDialog();
             }
           }}
           dialogAriaLabelledBy={`${cardIdBase}-revert-title`}
@@ -1549,14 +1608,9 @@ export function ChatFileChangeList({
               {revertScopeMessage}
             </p>
             <div className="mt-5 flex flex-wrap justify-end gap-2">
-              <Button
-                ref={revertCancelRef}
-                variant="outline"
-                autoFocus
-                isDisabled={revertingChange}
-                onPress={closeRevertDialog}
-              >
-                Cancel
+              <Button ref={revertCancelRef} variant="outline" autoFocus onPress={dismissRevertDialog}>
+                {/* Nothing is cancelled once the request is on its way. */}
+                {revertingChange ? "Close" : "Cancel"}
               </Button>
               {/* Each action has its own key, so React never reuses one
                   button's node (and its focus) for another action. */}

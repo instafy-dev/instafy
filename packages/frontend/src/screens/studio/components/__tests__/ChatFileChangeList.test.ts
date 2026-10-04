@@ -84,7 +84,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   }),
 }));
 
-import { ChatFileChangeList, resolveUniqueChatFileChanges } from "../ChatFileChangeList";
+import { ChatFileChangeList, REVERT_WAIT_TIMEOUT_MS, resolveUniqueChatFileChanges } from "../ChatFileChangeList";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "../messageUndoRequest";
 import type { ChatMessageFileChange } from "../../types";
 
@@ -1638,6 +1638,156 @@ describe("ChatFileChangeList", () => {
         expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
         expect(document.activeElement).toBe(revertChip());
         expect(revertChip()?.disabled).toBe(false);
+      });
+
+      function dialogButton(label: string) {
+        return Array.from(
+          document.querySelectorAll<HTMLButtonElement>('[data-testid="chat-file-change-revert-dialog"] button'),
+        ).find((button) => button.textContent === label);
+      }
+
+      it("lets the user close the dialog while the revert runs, without cancelling it", async () => {
+        let settle: (value: unknown) => void = () => {};
+        revertWorkspaceGitCommit.mockReturnValue(
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+        );
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        await pressRevertAndConfirm();
+
+        // The dialog says what closing it does, and Cancel becomes Close.
+        expect(document.querySelector('[data-testid="chat-file-change-revert-scope"]')?.textContent).toBe(
+          "Reverting… Closing this doesn't stop it. You'll see the result when it's done.",
+        );
+        expect(dialogButton("Cancel")).toBeUndefined();
+        const close = dialogButton("Close");
+        expect(close?.disabled).toBe(false);
+        await act(async () => {
+          close?.click();
+        });
+
+        expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
+        // The chip carries the running revert and keeps focus; pressing it
+        // opens nothing and sends nothing.
+        expect(revertChip()?.textContent).toBe("Reverting…");
+        expect(revertChip()?.getAttribute("aria-disabled")).toBe("true");
+        expect(document.activeElement).toBe(revertChip());
+        await act(async () => {
+          revertChip()?.click();
+        });
+        expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
+        expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(1);
+        expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+        expect(showStatus).not.toHaveBeenCalled();
+
+        // The request was never cancelled: its result still shows.
+        await act(async () => {
+          settle({ ok: true, rev: "c".repeat(40), committed: true });
+        });
+        await waitFor(0);
+        expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+        expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
+          "src/app.ts (reverted)",
+        );
+        expect(document.activeElement?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+      });
+
+      it("closes on Escape while the revert runs", async () => {
+        let settle: (value: unknown) => void = () => {};
+        revertWorkspaceGitCommit.mockReturnValue(
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+        );
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        await pressRevertAndConfirm();
+
+        await act(async () => {
+          document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        });
+        expect(document.querySelector('[data-testid="chat-file-change-revert-dialog"]')).toBeNull();
+        expect(revertChip()?.textContent).toBe("Reverting…");
+        expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+
+        await act(async () => {
+          settle({
+            ok: false,
+            conflict: true,
+            code: "revert_conflict",
+            errorInfo: { status: 409, code: "revert_conflict", message: "conflict", routeUnavailable: false },
+          });
+        });
+        await waitFor(0);
+        expect(showStatus).toHaveBeenCalledWith(
+          "Later changes touch the same lines, so this can't be reverted automatically.",
+          "warning",
+          6500,
+          undefined,
+        );
+        expect(revertChip()?.textContent).toBe("Revert this change");
+        expect(revertChip()?.hasAttribute("aria-disabled")).toBe(false);
+      });
+
+      it("stops waiting after a while and still shows the answer when it comes", async () => {
+        let settle: (value: unknown) => void = () => {};
+        revertWorkspaceGitCommit.mockReturnValue(
+          new Promise((resolve) => {
+            settle = resolve;
+          }),
+        );
+        await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          revertChip()?.focus();
+          await act(async () => {
+            revertChip()?.click();
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(50);
+          });
+          expect(dialog()?.getAttribute("data-state")).toBe("ready");
+          await act(async () => {
+            confirmButton()?.click();
+          });
+
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(REVERT_WAIT_TIMEOUT_MS - 1000);
+          });
+          expect(dialog()).not.toBeNull();
+          expect(showStatus).not.toHaveBeenCalled();
+
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(1000);
+          });
+          // The card stops waiting: the dialog closes, the chip is free again,
+          // and the toast says the revert may still finish.
+          expect(dialog()).toBeNull();
+          expect(showStatus).toHaveBeenCalledTimes(1);
+          expect(showStatus).toHaveBeenCalledWith(
+            "The revert is taking longer than expected. It may still finish, so wait a moment before trying again.",
+            "warning",
+            9000,
+          );
+          expect(revertChip()?.textContent).toBe("Revert this change");
+          expect(document.activeElement).toBe(revertChip());
+
+          // The answer arrives later and is still shown.
+          await act(async () => {
+            settle({ ok: true, rev: "c".repeat(40), committed: true });
+          });
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(0);
+          });
+          expect(showStatus).toHaveBeenCalledTimes(2);
+          expect(showStatus).toHaveBeenLastCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+          expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')?.getAttribute("title")).toBe(
+            "src/app.ts (reverted)",
+          );
+          expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
       });
 
       it("focuses the summary toggle when every file of a larger change was reverted", async () => {
