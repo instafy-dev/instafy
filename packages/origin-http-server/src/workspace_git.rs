@@ -881,18 +881,66 @@ impl Quarantine {
     }
 
     /// Move every object written here into the bare repository `git` works
-    /// in, never replacing an object it already has. Loose objects go first,
-    /// then packs with each index last, so the repository never sees a pack
-    /// it cannot read. Returns how many files were moved. Call it only after
-    /// the push that needed the objects succeeded, and before any local ref
-    /// is set to them.
+    /// in, never replacing an object it already has, and returns how many
+    /// files were moved. Call it only after the push that needed the
+    /// objects succeeded, and before any local ref is set to them.
+    ///
+    /// Objects move in an order that keeps the rule "a commit in the
+    /// repository has everything it names": loose blobs and trees, then
+    /// packs (each index after its pack), then loose commits with every
+    /// parent before its children, then anything else. A promotion that
+    /// stops partway (a full disk, a stop) leaves commits out, never their
+    /// trees, so a reader that finds a commit can read all of it, and a
+    /// later promotion of the same quarantine finishes the job.
     pub(crate) fn promote(&self, git: &WorkspaceGit<'_>) -> Result<usize> {
         let Layout::Bare { git_dir } = git.layout else {
             bail!("only a bare repository takes quarantined objects");
         };
         open_bare_repository(git_dir)?;
         let target = git_dir.join("objects");
+        let (loose, mut packs) = self.contents()?;
+
+        // Each object's type, read through the quarantine.
+        let staged = WorkspaceGit::bare(git_dir, None).with_quarantine(self);
+        let ids: Vec<String> = loose.iter().map(|(id, _)| id.clone()).collect();
+        let kinds = staged.object_sizes(&ids)?;
+        let mut contents = Vec::new();
+        let mut commits = Vec::new();
+        let mut others = Vec::new();
+        for (object, kind) in loose.into_iter().zip(kinds) {
+            match kind.as_ref().map(|(kind, _)| kind.as_str()) {
+                Some("blob") => contents.push((0, object)),
+                Some("tree") => contents.push((1, object)),
+                Some("commit") => commits.push(object),
+                _ => others.push(object),
+            }
+        }
+        contents.sort_by_key(|(rank, _)| *rank);
+        let commits = parents_first(&staged, commits)?;
+
         let mut moved = 0usize;
+        for (_, (id, path)) in contents {
+            moved += usize::from(move_loose_object(&target, &id, &path)?);
+        }
+        if !packs.is_empty() {
+            let pack_dir = target.join("pack");
+            ensure_object_dir(&pack_dir)?;
+            // An index makes git look for its pack: move it last.
+            packs.sort_by_key(|name| (name.ends_with(".idx"), name.clone()));
+            for name in packs {
+                let from = self.objects.join("pack").join(&name);
+                moved += usize::from(move_object(&from, &pack_dir.join(&name))?);
+            }
+        }
+        for (id, path) in commits.into_iter().chain(others) {
+            moved += usize::from(move_loose_object(&target, &id, &path)?);
+        }
+        Ok(moved)
+    }
+
+    /// The loose objects (`(id, file)`) and pack file names written here.
+    fn contents(&self) -> Result<(Vec<(String, PathBuf)>, Vec<String>)> {
+        let mut loose = Vec::new();
         let mut packs = Vec::new();
         for entry in std::fs::read_dir(&self.objects)
             .with_context(|| format!("failed to read quarantine {:?}", self.objects))?
@@ -915,32 +963,70 @@ impl Quarantine {
             if name.len() != 2 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 continue;
             }
-            let fan_out = target.join(&name);
-            ensure_object_dir(&fan_out)?;
             for file in std::fs::read_dir(entry.path())? {
                 let file = file?;
                 let file_name = file.file_name().to_string_lossy().to_string();
-                let loose = matches!(file_name.len(), 38 | 62)
+                let is_object = matches!(file_name.len(), 38 | 62)
                     && file_name.bytes().all(|byte| byte.is_ascii_hexdigit());
-                if loose && file.file_type()?.is_file() {
-                    moved += usize::from(move_object(&file.path(), &fan_out.join(&file_name))?);
+                if is_object && file.file_type()?.is_file() {
+                    loose.push((format!("{name}{file_name}"), file.path()));
                 }
             }
         }
-        if !packs.is_empty() {
-            let pack_dir = target.join("pack");
-            ensure_object_dir(&pack_dir)?;
-            // An index makes git look for its pack: move it last.
-            packs.sort_by_key(|name| (name.ends_with(".idx"), name.clone()));
-            for name in packs {
-                moved += usize::from(move_object(
-                    &self.objects.join("pack").join(&name),
-                    &pack_dir.join(&name),
-                )?);
-            }
-        }
-        Ok(moved)
+        Ok((loose, packs))
     }
+}
+
+/// Move the loose object `id` (at `path`) into the objects directory
+/// `target`. Returns whether it was new there.
+fn move_loose_object(target: &Path, id: &str, path: &Path) -> Result<bool> {
+    let fan_out = target.join(&id[..2]);
+    ensure_object_dir(&fan_out)?;
+    move_object(path, &fan_out.join(&id[2..]))
+}
+
+/// `commits` (loose quarantined commits, `(id, file)`) ordered so that every
+/// commit comes after the parents among them.
+fn parents_first(
+    staged: &WorkspaceGit<'_>,
+    commits: Vec<(String, PathBuf)>,
+) -> Result<Vec<(String, PathBuf)>> {
+    if commits.len() < 2 {
+        return Ok(commits);
+    }
+    let ids: Vec<String> = commits.iter().map(|(id, _)| id.clone()).collect();
+    let objects = staged.read_objects(&ids)?;
+    let mut waiting: Vec<((String, PathBuf), Vec<String>)> = commits
+        .into_iter()
+        .zip(objects)
+        .map(|(commit, object)| {
+            let header_end = object
+                .data
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .unwrap_or(object.data.len());
+            let parents = String::from_utf8_lossy(&object.data[..header_end])
+                .lines()
+                .filter_map(|line| line.strip_prefix("parent "))
+                .map(|parent| parent.trim().to_string())
+                .filter(|parent| ids.contains(parent))
+                .collect();
+            (commit, parents)
+        })
+        .collect();
+    let mut ordered: Vec<(String, PathBuf)> = Vec::with_capacity(waiting.len());
+    while !waiting.is_empty() {
+        let ready = waiting.iter().position(|(_, parents)| {
+            parents
+                .iter()
+                .all(|parent| ordered.iter().any(|(id, _)| id == parent))
+        });
+        let Some(ready) = ready else {
+            bail!("quarantined commits name each other as parents");
+        };
+        ordered.push(waiting.remove(ready).0);
+    }
+    Ok(ordered)
 }
 
 impl Drop for Quarantine {
@@ -1381,6 +1467,107 @@ mod tests {
             "kept"
         );
         assert_eq!(fixture.main(), commit);
+    }
+
+    /// The quarantine's fan-out directories in the order a directory read
+    /// lists them: the order a promotion that ignored object types followed.
+    fn read_dir_order(quarantine: &Quarantine) -> Vec<String> {
+        std::fs::read_dir(quarantine.objects_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.len() == 2)
+            .collect()
+    }
+
+    /// A promotion that stops partway (here a fan-out directory that cannot
+    /// be made, standing in for a full disk) never leaves a commit in the
+    /// mirror without its tree, or without a parent quarantined with it,
+    /// whatever order the quarantine's directories are read in; promoting
+    /// again finishes.
+    #[test]
+    fn a_promotion_that_stops_partway_never_leaves_a_commit_without_its_objects() {
+        let fixture = Fixture::new();
+        let git = fixture.git();
+        let main = fixture.main();
+        let objects = fixture.mirror.join("objects");
+        let prefix = |id: &str| id[..2].to_string();
+
+        // A commit whose fan-out is read before its tree's; the tree's
+        // fan-out cannot be made.
+        let mut found = false;
+        for attempt in 0..1000 {
+            let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+            let staged = git.with_quarantine(&quarantine);
+            let content = format!("v{attempt}\n");
+            let commit = commit_in(&staged, &main, "notes.md", content.as_bytes());
+            let tree = staged.tree_id(&commit).unwrap();
+            let (tree_at, commit_at) = (prefix(&tree), prefix(&commit));
+            let order = read_dir_order(&quarantine);
+            let position = |name: &String| order.iter().position(|entry| entry == name);
+            if tree_at == commit_at
+                || objects.join(&tree_at).exists()
+                || position(&commit_at) > position(&tree_at)
+            {
+                continue;
+            }
+            std::fs::write(objects.join(&tree_at), b"").unwrap();
+            assert!(quarantine.promote(&git).is_err());
+            assert!(
+                git.commit_id(&commit).unwrap().is_none(),
+                "the commit reached the mirror before its tree"
+            );
+            std::fs::remove_file(objects.join(&tree_at)).unwrap();
+            quarantine.promote(&git).unwrap();
+            assert_eq!(git.commit_id(&commit).unwrap(), Some(commit.clone()));
+            assert!(git.test(&["cat-file", "-e", &tree]).unwrap());
+            found = true;
+            break;
+        }
+        assert!(found, "no commit was read before its tree");
+
+        // A child whose fan-out is read before its quarantined parent's;
+        // the parent's fan-out cannot be made.
+        let main = fixture.main();
+        let mut found = false;
+        for attempt in 0..1000 {
+            let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+            let staged = git.with_quarantine(&quarantine);
+            let parent = commit_in(&staged, &main, "a.md", format!("a{attempt}\n").as_bytes());
+            let child = commit_in(&staged, &parent, "b.md", format!("b{attempt}\n").as_bytes());
+            let others = [
+                staged.tree_id(&parent).unwrap(),
+                staged.tree_id(&child).unwrap(),
+                staged
+                    .stdout(&["rev-parse", &format!("{child}:a.md")])
+                    .unwrap(),
+                staged
+                    .stdout(&["rev-parse", &format!("{child}:b.md")])
+                    .unwrap(),
+                child.clone(),
+            ];
+            let (parent_at, child_at) = (prefix(&parent), prefix(&child));
+            let order = read_dir_order(&quarantine);
+            let position = |name: &String| order.iter().position(|entry| entry == name);
+            if others.iter().any(|id| prefix(id) == parent_at)
+                || objects.join(&parent_at).exists()
+                || position(&child_at) > position(&parent_at)
+            {
+                continue;
+            }
+            std::fs::write(objects.join(&parent_at), b"").unwrap();
+            assert!(quarantine.promote(&git).is_err());
+            assert!(
+                git.commit_id(&child).unwrap().is_none(),
+                "the child reached the mirror before its parent"
+            );
+            std::fs::remove_file(objects.join(&parent_at)).unwrap();
+            quarantine.promote(&git).unwrap();
+            assert_eq!(git.commit_id(&child).unwrap(), Some(child.clone()));
+            assert_eq!(git.commit_id(&parent).unwrap(), Some(parent.clone()));
+            found = true;
+            break;
+        }
+        assert!(found, "no child was read before its parent");
     }
 
     #[test]
