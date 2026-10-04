@@ -37,6 +37,8 @@ import {
 import { focusLastConversationTab } from "../utils/chatUi.js";
 import { openSidebarSecondaryItem } from "../utils/sidebar.js";
 
+const PAUSED_STATUS = /^(Paused|Resume)$/;
+
 const ENABLED =
   (process.env.PLAYWRIGHT_ELECTRON_PERSONAL_BROWSER_AGENT_TURN ?? "").trim() === "1";
 
@@ -707,7 +709,9 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     const personal = page.getByTestId("personal-browser-surface");
     await expect(personal).toBeVisible({ timeout: 30_000 });
     const personalStatus = page.getByTestId("personal-browser-agent-status");
-    await expect(personalStatus).toHaveText("Paused", { timeout: 60_000 });
+    // A paused, ready Personal Browser offers Resume in the status slot (#391);
+    // while it is still settling the same slot reads Paused.
+    await expect(personalStatus).toHaveText(PAUSED_STATUS, { timeout: 60_000 });
     const fixtureUrl = `${personalBrowserFixture.origin}/personal-browser-release-proof`;
     const personalAddress = page.getByTestId("personal-browser-address");
     await expect(personalAddress).toBeEnabled();
@@ -981,7 +985,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     // second Personal task must be blocked locally instead of falling back to
     // Shared Browser or a managed runtime.
     await page.getByRole("button", { name: "Pause agent control" }).click();
-    await expect(personalStatus).toHaveText("Paused", { timeout: 60_000 });
+    await expect(personalStatus).toHaveText(PAUSED_STATUS, { timeout: 60_000 });
     await expect
       .poll(
         async () => {
