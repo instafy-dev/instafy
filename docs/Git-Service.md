@@ -173,7 +173,11 @@ Studio picks how the Files editor saves from the space's default origin (the con
   not reloaded, even when their event arrives before the save's response, and every open Files
   panel (the Files tab, the explorer drawer, a chat file surface) shows them at once. A save that
   is still running when its panel closes, the user switches spaces or leaves Studio is still
-  recorded on the file, so the next save builds on it. Unsaved edits warn when leaving Studio;
+  recorded on the file, also when the user comes back before it finishes, so the next save builds
+  on it. A save that fails once the user is in another space or has left Studio shows no message:
+  the file keeps its unsaved edits, and when the file changed in the space its card waits in that
+  space's chat. A file read again after a save shows what the space holds then, even when that is
+  the text the save started from. Unsaved edits warn when leaving Studio;
   inside the Desktop app they do not block closing the window or quitting, because they stay on
   this device.
 
