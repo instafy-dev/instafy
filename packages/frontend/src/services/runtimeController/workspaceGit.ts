@@ -736,6 +736,9 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
   }
 }
 
+/** Neutral subject for a sync without a caller message; never omitted. */
+export const DEFAULT_SYNC_MESSAGE = "instafy: sync";
+
 export interface SyncWorkspaceGitParams {
   projectId: string;
   message?: string | null;
@@ -746,10 +749,6 @@ export interface SyncWorkspaceGitParams {
   leaseId?: string | null;
   leaseSeconds?: number;
   retainLease?: boolean;
-  /**
-   * `default` routing also stops sending the legacy "instafy: sync" message
-   * when none is given, so the origin writes its own plain subject.
-   */
   routing?: WorkspaceOriginRouting;
 }
 
@@ -804,17 +803,18 @@ export async function syncWorkspaceGitToRemoteFromController(
       leaseIdForRelease = leaseId;
     }
 
-    const explicitMessage =
+    // Always send a message: origins older than the plain-subject publish
+    // (the stateful gateway, older Desktop apps) otherwise write a subject
+    // that names the user into permanent history.
+    const message =
       typeof params.message === "string" && params.message.trim().length > 0
         ? params.message.trim()
-        : null;
-    const message =
-      explicitMessage ?? (params.routing === "default" ? null : "instafy: sync");
+        : DEFAULT_SYNC_MESSAGE;
     const paths =
       Array.isArray(params.paths) && params.paths.length > 0
         ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
         : undefined;
-    const body: Record<string, unknown> = message ? { message } : {};
+    const body: Record<string, unknown> = { message };
     if (paths && paths.length > 0) {
       body.paths = paths;
     }

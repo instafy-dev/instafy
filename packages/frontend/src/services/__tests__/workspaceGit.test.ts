@@ -244,7 +244,7 @@ describe("default routing", () => {
     expect(mocks.token.mock.calls[1][0]).not.toHaveProperty("preferHosted");
   });
 
-  it("sync omits the legacy message and parses a Desktop publish report", async () => {
+  it("sync never omits the message and parses a Desktop publish report", async () => {
     fetchMock().mockResolvedValue(
       json(200, {
         rev: "p",
@@ -259,10 +259,20 @@ describe("default routing", () => {
       }),
     );
     const result = await syncWorkspaceGitToRemoteFromController({ projectId: "p", originId: "desk", routing: "default" });
-    expect(lastRequest().init.body).toBe("{}");
+    // Older origins would otherwise write a subject naming the user.
+    expect(JSON.parse(String(lastRequest().init.body))).toEqual({ message: "instafy: sync" });
     expect(mocks.token.mock.calls[0][0]).not.toHaveProperty("preferHosted");
     expect(result).toMatchObject({ ok: true, rev: "p", baseRev: "r" });
     expect(result?.report).toMatchObject({ gitSyncStatus: "partial", conflictedPaths: ["b.md"], recoveryRef: "refs/instafy/recovery/o/n" });
+  });
+
+  it.each([undefined, null, "", "   "])("sync with message %j still sends a non-empty message", async (message) => {
+    fetchMock().mockResolvedValue(json(200, { rev: "m" }));
+    await syncWorkspaceGitToRemoteFromController({ projectId: "p", originId: "desk", message, paths: ["a"], routing: "default" });
+    const body = JSON.parse(String(lastRequest().init.body)) as { message?: unknown };
+    expect(typeof body.message).toBe("string");
+    expect(String(body.message).trim().length).toBeGreaterThan(0);
+    expect(body).toEqual({ message: "instafy: sync", paths: ["a"] });
   });
 
   it("sync reads the stateless answer", async () => {
