@@ -269,14 +269,27 @@ export async function withWorkspaceWriteLease<T>(
       accessToken,
     };
 
-    const minted = await requestOriginAccessToken(mintParams);
+    const tokenUnavailable: OriginError = {
+      status: 0,
+      code: "token_unavailable",
+      message: "failed to obtain origin token",
+      routeUnavailable: false,
+    };
+    let minted: OriginAccessTokenResponse | null;
+    try {
+      minted = await requestOriginAccessToken(mintParams);
+    } catch (error) {
+      // A mint that throws (controller error, network, abort) is a token
+      // failure like a refused one; the lease is still released below.
+      return failure(
+        "token",
+        error instanceof Error && error.name === "AbortError"
+          ? originErrorFromException(error)
+          : tokenUnavailable,
+      );
+    }
     if (!minted) {
-      return failure("token", {
-        status: 0,
-        code: "token_unavailable",
-        message: "failed to obtain origin token",
-        routeUnavailable: false,
-      });
+      return failure("token", tokenUnavailable);
     }
     let token: OriginAccessTokenResponse = minted;
     const adoptToken = (next: OriginAccessTokenResponse) => {

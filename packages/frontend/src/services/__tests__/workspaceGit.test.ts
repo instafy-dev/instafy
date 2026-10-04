@@ -336,8 +336,44 @@ describe("default-routed sync and path revert use the shared write lease", () =>
     const result = await run();
     const urls = fetchMock().mock.calls.map(([url]) => String(url));
     expect(urls).toEqual([`https://controller.test/origin/desk/${path}`]);
+    expect(JSON.parse(String(lastRequest().init.body))).toEqual(
+      path === "git/sync" ? { message: "instafy: sync" } : { paths: ["a"] },
+    );
     expect(mocks.token.mock.calls[1][0]).toMatchObject({ originId: "desk", leaseId: "lease-1", forceRefresh: true });
     expect(result?.ok).toBe(false);
+  });
+
+  const throwingMintCases = [
+    ["sync, unpinned", () => syncWorkspaceGitToRemoteFromController({ projectId: "p", routing: "default" }), true],
+    ["sync, pinned", () => syncWorkspaceGitToRemoteFromController({ projectId: "p", originId: "desk", routing: "default" }), true],
+    ["sync, caller-held lease", () => syncWorkspaceGitToRemoteFromController({ projectId: "p", leaseId: "held", routing: "default" }), false],
+    ["path revert, unpinned", () => revertWorkspaceGitPathsFromController({ projectId: "p", paths: ["a"], routing: "default" }), true],
+    ["path revert, pinned", () => revertWorkspaceGitPathsFromController({ projectId: "p", paths: ["a"], originId: "desk", routing: "default" }), true],
+    ["path revert, caller-held lease", () => revertWorkspaceGitPathsFromController({ projectId: "p", paths: ["a"], leaseId: "held", routing: "default" }), false],
+  ] as const;
+
+  it.each(throwingMintCases)("%s resolves a throwing first mint as token_unavailable", async (_label, run, acquires) => {
+    mocks.token.mockRejectedValue(new Error("request origin access token failed (503)"));
+    const result = await run();
+    expect(result).toMatchObject({ ok: false, conflict: false, errorInfo: { status: 0, code: "token_unavailable" } });
+    expect(fetch).not.toHaveBeenCalled();
+    if (acquires) {
+      expect(mocks.release).toHaveBeenCalledOnce();
+      expect(mocks.release).toHaveBeenCalledWith(expect.objectContaining({ leaseId: "lease-1" }));
+    } else {
+      expect(mocks.acquire).not.toHaveBeenCalled();
+      expect(mocks.release).not.toHaveBeenCalled();
+      expect(mocks.token.mock.calls[0][0]).toMatchObject({ leaseId: "held" });
+    }
+  });
+
+  it("maps an aborted first mint to timeout", async () => {
+    const abort = new Error("aborted");
+    abort.name = "AbortError";
+    mocks.token.mockRejectedValue(abort);
+    const result = await syncWorkspaceGitToRemoteFromController({ projectId: "p", routing: "default" });
+    expect(result).toMatchObject({ ok: false, errorInfo: { code: "timeout" } });
+    expect(mocks.release).toHaveBeenCalledOnce();
   });
 
   it("keeps the pin and the lease when a 401 re-mint returns the same origin", async () => {
@@ -348,6 +384,18 @@ describe("default-routed sync and path revert use the shared write lease", () =>
     const result = await syncWorkspaceGitToRemoteFromController({ projectId: "p", routing: "default" });
     expect(result).toMatchObject({ ok: true, rev: "x", originId: "desk", leaseId: "lease-1" });
     expect((lastRequest().init.headers as Record<string, string>).authorization).toBe("Bearer fresh");
+    for (const [, init] of fetchMock().mock.calls) {
+      expect(JSON.parse(String(init?.body))).toEqual({ message: "instafy: sync" });
+    }
+  });
+
+  it("unpinned default sync sends the message, with and without paths", async () => {
+    fetchMock().mockResolvedValue(json(200, { rev: "m", baseRev: "m", committed: false }));
+    await syncWorkspaceGitToRemoteFromController({ projectId: "p", routing: "default" });
+    expect(mocks.token.mock.calls[0][0]).toMatchObject({ originId: null });
+    expect(JSON.parse(String(lastRequest().init.body))).toEqual({ message: "instafy: sync" });
+    await syncWorkspaceGitToRemoteFromController({ projectId: "p", paths: ["a.md"], message: "  ", routing: "default" });
+    expect(JSON.parse(String(lastRequest().init.body))).toEqual({ message: "instafy: sync", paths: ["a.md"] });
   });
 });
 

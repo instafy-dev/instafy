@@ -1,6 +1,7 @@
 import { normalizeOriginEndpointForClient, runtimeControllerEnabled } from "./core";
 import { logControllerRequestError } from "./logging";
 import {
+  originErrorFromException,
   parseOriginErrorText,
   parsePublishReport,
   readOriginPathList,
@@ -834,6 +835,36 @@ function buildSyncResult(captured: CapturedOriginResponse, meta: OriginCallMeta)
  * typed errors; the lease holder's id is never kept.
  */
 async function postDefaultRoutedWrite(
+  params: {
+    projectId: string;
+    originId?: string | null;
+    runtimeId?: string | null;
+    accessToken?: string | null;
+    leaseId?: string | null;
+    leaseSeconds?: number;
+    retainLease?: boolean;
+    leaseConflictRetryDelayMs?: number | null;
+  },
+  path: string,
+  body: unknown,
+): Promise<
+  | { ok: true; captured: CapturedOriginResponse; meta: OriginCallMeta }
+  | { ok: false; error: OriginError; meta: OriginCallMeta }
+> {
+  try {
+    return await postDefaultRoutedWriteUnchecked(params, path, body);
+  } catch (error) {
+    // The helper resolves every failure it knows; this keeps the exported
+    // calls from ever rejecting.
+    return {
+      ok: false,
+      error: originErrorFromException(error),
+      meta: { leaseId: params.leaseId ?? null, originId: params.originId ?? null, originMode: null, endpoint: null },
+    };
+  }
+}
+
+async function postDefaultRoutedWriteUnchecked(
   params: {
     projectId: string;
     originId?: string | null;

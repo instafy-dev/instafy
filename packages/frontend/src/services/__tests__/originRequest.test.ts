@@ -171,6 +171,15 @@ describe("withWorkspaceWriteLease", () => {
     expect(mocks.release).toHaveBeenCalledOnce();
   });
 
+  it("resolves a mint that throws as a token failure and releases the lease", async () => {
+    mocks.token.mockRejectedValue(new Error("request origin access token failed (503)"));
+    const run = vi.fn();
+    const result = await withWorkspaceWriteLease({ projectId: "p", originId: "origin-1" }, run);
+    expect(result).toMatchObject({ ok: false, stage: "token", error: { code: "token_unavailable" }, leaseId: "lease-1" });
+    expect(run).not.toHaveBeenCalled();
+    expect(mocks.release).toHaveBeenCalledOnce();
+  });
+
   it("maps a request that throws and releases the lease", async () => {
     const result = await withWorkspaceWriteLease({ projectId: "p" }, async () => {
       throw new TypeError("Failed to fetch");
