@@ -336,21 +336,29 @@ Studio picks its versioning UI per space from the project's default origin:
   (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
   version, keep the current one, or ask the agent) and finishes with a `keep` list, or Cancel,
   which closes the choices and restores nothing else (the only way out for salvage). "Use this
-  version" reads the file at the ref and saves it on top of the head the restore reported. A 404
-  coded `not_found` at the ref becomes a delete only when a listing at the ref shows the ref still
-  resolves without the path; an uncoded 404, or `unsupported_entry` for a symlink or submodule
-  (which reads and listings both hide), writes nothing. Reads and listings at a ref carry
-  `X-Instafy-Rev` set to the ref's tip, or no header; another commit means the entry moved and the
-  list reloads, and a missing header never does. On a Desktop space it refuses a file the folder
-  has uncommitted edits to and sends the folder's current blob as `expected`. Remove deletes a
-  recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show "Restored"
-  once restored. The section is hidden on servers without these routes.
+  version" reads the file at the ref and saves it on top of the head the restore reported. A read
+  answers 404 `not_found` only when the path is absent from the tree at that commit,
+  `unsupported_entry` when the path is a symlink or submodule (which reads and listings both
+  hide), and `rev_not_found` when the ref no longer resolves. `not_found` at the ref becomes a
+  delete only when a listing at the ref shows the ref still resolves without the path;
+  `unsupported_entry` and an uncoded 404 write nothing, and `rev_not_found` reloads the list.
+  Reads and listings at a ref carry `X-Instafy-Rev` set to the ref's tip, or no header; another
+  commit means the entry moved and the list reloads, and a missing header never does. On a
+  Desktop space it refuses a file the folder has uncommitted edits to, writes nothing over a
+  symlink or nested repository in the folder (`unsupported_entry`), and sends the folder's current
+  blob as `expected` (none when the folder lacks the path, which the origin enforces). Remove
+  deletes a recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show
+  "Restored" once restored. The section is hidden on servers without these routes.
 - **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
   version (`POST /git/sync`), naming files it kept on the computer and why.
 
+When a mode check swaps one drawer for the other while it has keyboard focus, the new drawer's
+title takes focus and says which one the space uses; a space only ever shown as Changes never
+sees this.
+
 The nav badge counts uncommitted changes in Changes and unsaved-work entries in History; salvage
-entries, which cannot be removed, count only until the viewer has seen them (newer recovery
-entries never push a seen salvage entry out). Each viewer sees one chat row the first time new
+entries (by their kind, whatever the ref's letter case), which cannot be removed, count only until
+the viewer has seen them (newer recovery entries never push a seen salvage entry out). Each viewer sees one chat row the first time new
 unsaved work appears (opening History counts as seeing it); it is not written into the
 conversation. What a viewer has seen lives in the browser's storage, and in memory for the session
 when the browser refuses storage.
