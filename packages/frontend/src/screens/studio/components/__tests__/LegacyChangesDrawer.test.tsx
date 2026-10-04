@@ -187,6 +187,12 @@ describe("LegacyChangesDrawer project access", () => {
     });
 
     it("takes the focus History dropped and says why, until focus moves on", async () => {
+      // As in Studio: the drawer mounts first, and the note follows once
+      // the swap is known to have dropped focus.
+      await act(async () => {
+        root.render(<LegacyChangesDrawer />);
+      });
+      await flushAsyncWork();
       (document.activeElement as HTMLElement | null)?.blur();
       await act(async () => {
         root.render(<LegacyChangesDrawer arrivalNotice="This space shows Changes instead of History." />);
