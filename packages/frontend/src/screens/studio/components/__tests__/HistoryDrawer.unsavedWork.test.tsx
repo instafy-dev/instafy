@@ -63,7 +63,7 @@ vi.mock("../../../../sdk/instafy", () => ({
   },
 }));
 
-import { readUnsavedWorkSeen } from "../../../../workspace/unsavedWorkSeen";
+import { readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../../workspace/unsavedWorkSeen";
 import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
 import { HistoryDrawer } from "../HistoryDrawer";
 
@@ -203,12 +203,15 @@ describe("HistoryDrawer: Unsaved work", () => {
   });
 
   it("counts the entries it shows as seen by this viewer", async () => {
-    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY), recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+    const recovery = recoveryEntry(RECOVERY);
+    const salvage = recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false });
+    mocks.fetchRecovery.mockResolvedValue(list([recovery, salvage]));
     expect(readUnsavedWorkSeen("project-1", "user-1").size).toBe(0);
     await render();
     const seen = readUnsavedWorkSeen("project-1", "user-1");
-    expect(seen.has(`${RECOVERY}@${"a".repeat(40)}`)).toBe(true);
-    expect(seen.has(`${SALVAGE}@${"a".repeat(40)}`)).toBe(true);
+    expect(seen.size).toBe(2);
+    expect(seen.has(unsavedWorkSeenKey(recovery))).toBe(true);
+    expect(seen.has(unsavedWorkSeenKey(salvage))).toBe(true);
   });
 
   it("is hidden while empty", async () => {

@@ -172,6 +172,23 @@ describe("useWorkspaceVersioningBadge", () => {
     expect(badge()?.textContent).toBe("0");
   });
 
+  it("knows salvage by its kind, whatever the ref's letter case", async () => {
+    // The git service treats salvage refs in any letter case.
+    const salvage = recovery("refs/instafy/Salvage/gateway/b", { kind: "salvage", dismissible: false });
+    mocks.fetchRecovery.mockResolvedValue({ status: "ok", entries: [salvage], originId: "origin-1", originMode: "hosted" });
+    await render({ ...base, chromeMode: "stateless", historyReady: true, userId: "user-1" });
+    await act(async () => {
+      markUnsavedWorkSeen("project-1", "user-1", [unsavedWorkSeenKey(salvage)]);
+    });
+    expect(badge()?.textContent).toBe("0");
+    await act(async () => {
+      for (let index = 0; index < 250; index += 1) {
+        markUnsavedWorkSeen("project-1", "user-1", [`refs/instafy/recovery/o/run-${index}@${"a".repeat(40)}`]);
+      }
+    });
+    expect(badge()?.textContent).toBe("0");
+  });
+
   it("labels several entries in the plural", () => {
     expect(unsavedWorkBadgeLabel(3)).toBe("3 unsaved work entries");
   });

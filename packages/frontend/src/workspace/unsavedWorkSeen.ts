@@ -14,9 +14,12 @@ const SEEN_LIMIT = 200;
  * Salvage refs are kept for good and cannot be removed, and only being seen
  * stops them counting on the badge: newer recovery keys never push them out.
  * They have a cap of their own (one gateway salvage per space in practice).
+ * A salvage key is marked by the entry's kind, never by the ref's spelling
+ * (the git service treats salvage refs in any letter case). Git ref names
+ * cannot contain ":", so no recovery key starts with this marker.
  */
 const SALVAGE_SEEN_LIMIT = 100;
-const SALVAGE_REF_PREFIX = "refs/instafy/salvage/";
+const SALVAGE_KEY_MARKER = "salvage:";
 
 const seenListeners = new Set<() => void>();
 let seenVersion = 0;
@@ -49,12 +52,13 @@ function seenStorageKey(projectId: string, userId: string): string {
 }
 
 /** A moved ref (new work kept under the same name) counts as new. */
-export function unsavedWorkSeenKey(entry: Pick<WorkspaceRecoveryEntry, "ref" | "rev">): string {
-  return `${entry.ref}@${entry.rev}`;
+export function unsavedWorkSeenKey(entry: Pick<WorkspaceRecoveryEntry, "ref" | "rev" | "kind">): string {
+  const key = `${entry.ref}@${entry.rev}`;
+  return entry.kind === "salvage" ? `${SALVAGE_KEY_MARKER}${key}` : key;
 }
 
 function isSalvageSeenKey(key: string): boolean {
-  return key.startsWith(SALVAGE_REF_PREFIX);
+  return key.startsWith(SALVAGE_KEY_MARKER);
 }
 
 /** The newest keys of each kind, in their original order. */
