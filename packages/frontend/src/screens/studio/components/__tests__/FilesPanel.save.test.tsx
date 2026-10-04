@@ -164,6 +164,10 @@ describe("FilesPanel one Save", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    // A response queued with mockResolvedValueOnce never leaks into the next test.
+    mocks.saveChanges.mockReset();
+    mocks.listAt.mockReset();
+    mocks.readAt.mockReset();
     mocks.editorCommands.length = 0;
     staleEvents.length = 0;
     writeWorkspaceFileStaleNotice(null);
@@ -637,6 +641,61 @@ describe("FilesPanel one Save", () => {
       mocks.saveChanges.mockResolvedValue(desktopSaved());
       await pressSave();
       expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({ expected: { "README.md": await gitBlobOid("edited") } });
+    });
+  });
+
+  describe("an empty new file that reached the Desktop folder but was not published", () => {
+    const EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+    const newFile = () =>
+      buffer({ id: "new.md", path: "new.md", label: "new.md", generated: "", modified: "", isNew: true, baseRev: null, blobOid: null });
+    const appliedNotPublished = () => ({
+      ...failed({ status: 503, code: "not_saved", report: { failure: "the remote refused the push" } }),
+      stage: "sync",
+      originMode: "desktop",
+      applied: true,
+    });
+
+    beforeEach(() => {
+      mocks.versioning.mode = "desktop";
+      mocks.listAt.mockImplementation(async () => ({
+        ok: true,
+        entries: [{ name: "new.md", path: "new.md", kind: "file", blobOid: EMPTY_BLOB }],
+        rev: null,
+        originId: "origin-1",
+        originMode: "desktop",
+      }));
+    });
+
+    it("stays unsaved and is saved again against the folder's blob", async () => {
+      mocks.saveChanges.mockResolvedValueOnce(appliedNotPublished());
+      await render([newFile()]);
+      await pressSave();
+      expect(mocks.saveChanges.mock.calls[0][0]).toMatchObject({ expected: { "new.md": null } });
+      expect(file()).toMatchObject({ generated: "", modified: "", isNew: true, blobOid: EMPTY_BLOB });
+      expect(query("code-save-button")?.disabled).toBe(false);
+      mocks.saveChanges.mockResolvedValueOnce({
+        ...saved(REV_2), originMode: "desktop", committed: false, via: "sync", saved: ["new.md"],
+      });
+      await pressSave();
+      expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+      expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({
+        files: [{ path: "new.md", content: "", encoding: "utf8" }],
+        expected: { "new.md": EMPTY_BLOB },
+      });
+      expect(file().isNew).toBeUndefined();
+    });
+
+    it("is deleted from the folder, not only dropped here", async () => {
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.saveChanges.mockResolvedValueOnce(appliedNotPublished());
+      await render([newFile()]);
+      await pressSave();
+      mocks.saveChanges.mockResolvedValueOnce({ ...saved(REV_2), originMode: "desktop", via: "sync", saved: [] });
+      await deleteFromExplorer("files-entry-new-md");
+      expect(mocks.saveChanges.mock.calls[1][0]).toMatchObject({
+        deletes: ["new.md"],
+        expected: { "new.md": EMPTY_BLOB },
+      });
     });
   });
 

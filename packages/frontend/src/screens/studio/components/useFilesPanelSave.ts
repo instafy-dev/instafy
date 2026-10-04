@@ -316,8 +316,10 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       }
     }
 
+    // A new file must not exist yet, unless an earlier save already wrote
+    // it to the folder on this computer (its blob is then known).
     const expected: Record<string, string | null> | null =
-      file.isNew === true ? { [path]: null } : blobOid ? { [path]: blobOid } : null;
+      blobOid ? { [path]: blobOid } : file.isNew === true ? { [path]: null } : null;
     const keepPath = parent ? `${parent}/${EMPTY_DIRECTORY_PLACEHOLDER}` : EMPTY_DIRECTORY_PLACEHOLDER;
     // The explorer lists the default origin, so only a save there can
     // replace that origin's folder placeholder.
@@ -373,11 +375,12 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
       }
       if (result.applied) {
         // The edit reached the origin (a Desktop folder) but was not
-        // published. The buffer stays unsaved; only its blob follows the
-        // folder, so trying again does not report a false conflict.
+        // published. The buffer stays unsaved (a new file stays new, even
+        // when it is empty); only its blob follows the folder, so trying
+        // again does not report a false conflict.
         updateBuffer(
           file,
-          { ...idsOf(file), blobOid: savedOid, originId: result.originId ?? originId, isNew: false },
+          { ...idsOf(file), blobOid: savedOid, originId: result.originId ?? originId },
           null,
         );
       }

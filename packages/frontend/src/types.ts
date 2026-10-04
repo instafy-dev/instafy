@@ -169,7 +169,11 @@ export interface CodeFile {
   blobOid?: string | null;
   /** Origin that served the read; a save is pinned to it. */
   originId?: string | null;
-  /** A buffer that was never saved (the file does not exist in the space yet). */
+  /**
+   * A buffer that was never saved as a version (the file is not in the space
+   * yet). On a Desktop origin an earlier save may already have written it to
+   * the folder without publishing it; `blobOid` is then that folder blob.
+   */
   isNew?: boolean;
   /** Epoch ms of the read that produced `generated`. */
   readAt?: number | null;

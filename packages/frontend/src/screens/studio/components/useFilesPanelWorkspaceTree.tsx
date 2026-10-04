@@ -860,7 +860,8 @@ export function useFilesPanelWorkspaceTree({
    * Versioned-mode delete: one manifest pinned to the default origin. On the
    * stateless gateway it carries the parent listing's rev as `baseRev` (a
    * directory delete needs it) and, for a file, the listed blob as
-   * `expected`. A buffer that was never saved is only dropped locally.
+   * `expected`. A buffer that was never written anywhere is only dropped
+   * locally.
    * Returns false when nothing was deleted (the failure is already shown).
    */
   const deleteVersionedEntry = useCallback(
@@ -872,7 +873,9 @@ export function useFilesPanelWorkspaceTree({
       if (!activeProjectId) {
         return false;
       }
-      if (entry.kind === "file" && hooks.getBuffer(normalizedPath)?.isNew === true) {
+      const buffer = entry.kind === "file" ? hooks.getBuffer(normalizedPath) : null;
+      if (buffer?.isNew === true && !buffer.blobOid) {
+        // Never written anywhere: dropping the buffer is the delete.
         hooks.discardBuffers(normalizedPath);
         return true;
       }
