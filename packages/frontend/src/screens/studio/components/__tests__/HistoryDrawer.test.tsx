@@ -399,6 +399,8 @@ describe("HistoryDrawer", () => {
     await act(async () => q<HTMLButtonElement>(container, "source-control-history-revert")?.click());
     const dialog = q(document.body, "history-revert-dialog");
     expect(dialog?.textContent).toContain("Revert this version?");
+    // The dialog names the version it reverts.
+    expect(q(document.body, "history-revert-dialog-detail")?.textContent).toBe(`Update file-1.txt (${hex(1).slice(0, 8)})`);
     expect(dialog?.textContent).toContain("A new version that undoes it is saved on top. Nothing is removed from history.");
     // React Aria moves focus into the dialog after it mounts.
     await act(async () => {

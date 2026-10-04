@@ -41,6 +41,13 @@ import { formatRelativeCommitTime } from "./workspaceGitReviewShared";
 
 const LEASE_RETRY_DELAY_MS = 1_500;
 
+/** "5 minutes ago · 2 files" */
+function unsavedWorkMetaLine(entry: WorkspaceRecoveryEntry): string {
+  return [entry.date ? formatRelativeCommitTime(entry.date) : null, formatFileCount(entry.paths.length)]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
+}
+
 /**
  * Unsaved work kept on recovery and salvage refs. Hidden while empty or
  * when the server has no recovery route; an error row (never hidden) when
@@ -82,7 +89,7 @@ export function UnsavedWorkSection({
   const [conflicts, setConflicts] = useUnsavedWorkConflicts(projectId, originId);
   const [pendingRemove, setPendingRemove] = useState<WorkspaceRecoveryEntry | null>(null);
   const sectionLabelId = useId();
-  const pathIdPrefix = useId();
+  const rowIdPrefix = useId();
   const locked = disabled || busyKey !== null;
   const { refresh } = unsavedWork;
 
@@ -428,13 +435,14 @@ export function UnsavedWorkSection({
       <Text as="h3" id={sectionLabelId} variant="caption" tone="muted" className="px-1 py-1.5 font-medium">
         Unsaved work
       </Text>
-      {entries.map((entry) => {
+      {entries.map((entry, entryIndex) => {
         const stored = conflicts[entry.ref];
         const conflict = stored && stored.rev === entry.rev ? stored : null;
         const title = unsavedWorkTitle(entry.kind);
-        const meta = [entry.date ? formatRelativeCommitTime(entry.date) : null, formatFileCount(entry.paths.length)]
-          .filter((part): part is string => Boolean(part))
-          .join(" · ");
+        const meta = unsavedWorkMetaLine(entry);
+        // Rows share titles by kind: the actions name their row by title and meta.
+        const rowId = `${rowIdPrefix}-${entryIndex}`;
+        const rowDescription = `${rowId}-title ${rowId}-meta`;
         const allResolved =
           conflict !== null && conflict.paths.every((path) => conflict.resolutions[path] !== undefined);
         const keptPaths = conflict
@@ -450,9 +458,11 @@ export function UnsavedWorkSection({
           >
             <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
               <div className="min-w-0">
-                <div className="text-sm font-medium text-slate-800 dark:text-slate-100">{title}</div>
+                <div id={`${rowId}-title`} className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                  {title}
+                </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <span>{meta}</span>
+                  <span id={`${rowId}-meta`}>{meta}</span>
                   {entry.restoredRev ? (
                     <Badge tone="neutral" data-testid="unsaved-work-restored">
                       Restored
@@ -465,6 +475,7 @@ export function UnsavedWorkSection({
                   variant="ghost"
                   size="sm"
                   radius="xl"
+                  aria-describedby={rowDescription}
                   onPress={() => openReview(entry)}
                   data-testid="unsaved-work-review"
                 >
@@ -479,6 +490,7 @@ export function UnsavedWorkSection({
                     radius="xl"
                     isPending={busyKey === `${entry.ref}:restore`}
                     isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:restore`)}
+                    aria-describedby={rowDescription}
                     onPress={() => void runAction(`${entry.ref}:restore`, () => restore(entry))}
                     data-testid="unsaved-work-restore"
                   >
@@ -492,6 +504,7 @@ export function UnsavedWorkSection({
                     radius="xl"
                     isPending={busyKey === `${entry.ref}:remove`}
                     isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:remove`)}
+                    aria-describedby={rowDescription}
                     onPress={() => setPendingRemove(entry)}
                     data-testid="unsaved-work-remove"
                   >
@@ -511,7 +524,7 @@ export function UnsavedWorkSection({
                 </Text>
                 <ul className="mt-1 flex flex-col gap-1">
                   {conflict.paths.map((path, index) => {
-                    const pathId = `${pathIdPrefix}-${index}`;
+                    const pathId = `${rowId}-path-${index}`;
                     const resolution = conflict.resolutions[path];
                     const pathBusy = busyKey === `${entry.ref}:${path}`;
                     return (
@@ -585,6 +598,7 @@ export function UnsavedWorkSection({
                         size="sm"
                         radius="xl"
                         isDisabled={!canWrite || locked || !entry.dismissible}
+                        aria-describedby={rowDescription}
                         onPress={() => setPendingRemove(entry)}
                         data-testid="unsaved-work-finish-remove"
                       >
@@ -597,6 +611,7 @@ export function UnsavedWorkSection({
                         radius="xl"
                         isPending={busyKey === `${entry.ref}:rest`}
                         isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:rest`)}
+                        aria-describedby={rowDescription}
                         onPress={() =>
                           void runAction(`${entry.ref}:rest`, () =>
                             restore(entry, { keep: keptPaths, head: conflict.head }),
@@ -618,6 +633,7 @@ export function UnsavedWorkSection({
       <HistoryConfirmDialog
         isOpen={pendingRemove !== null}
         title={REMOVE_DIALOG.title}
+        detail={pendingRemove ? `${unsavedWorkTitle(pendingRemove.kind)}, ${unsavedWorkMetaLine(pendingRemove)}` : null}
         body={REMOVE_DIALOG.body}
         cancelLabel={REMOVE_DIALOG.cancel}
         confirmLabel={REMOVE_DIALOG.confirm}

@@ -100,7 +100,12 @@ export function HistoryDrawer({
   const [history, setHistory] = useState<HistoryListState>(EMPTY_HISTORY);
   const [loadingMore, setLoadingMore] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [notice, setNotice] = useState<HistoryNotice | null>(null);
+  // Each message gets a new node, so a repeated text ("Removed.") is announced again.
+  const [notice, setNoticeState] = useState<(HistoryNotice & { id: number }) | null>(null);
+  const noticeSeqRef = useRef(0);
+  const setNotice = useCallback((next: HistoryNotice | null) => {
+    setNoticeState(next ? { ...next, id: ++noticeSeqRef.current } : null);
+  }, []);
   const [pendingRevert, setPendingRevert] = useState<WorkspaceGitHistoryEntry | null>(null);
   const [revertingCommit, setRevertingCommit] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -202,7 +207,7 @@ export function HistoryDrawer({
     }
     // The Desktop line checks its own count when it mounts.
     void loadHistoryRef.current();
-  }, [cancelBusyRetry, originId, projectId, ready]);
+  }, [cancelBusyRetry, originId, projectId, ready, setNotice]);
 
   useEffect(() => cancelBusyRetry, [cancelBusyRetry]);
 
@@ -318,7 +323,7 @@ export function HistoryDrawer({
       entries: [...previous.entries, ...fresh],
       hasMore: page.hasMore === true,
     }));
-  }, [history.entries, loadingMore, originId, projectId, ready]);
+  }, [history.entries, loadingMore, originId, projectId, ready, setNotice]);
 
   const handleCommitted = useCallback(
     (rev: string | null) => {
@@ -416,7 +421,7 @@ export function HistoryDrawer({
         setStatusRefreshKey((key) => key + 1);
       }
     },
-    [askAgent, canWrite, handleCommitted, originId, originKind, projectId, ready],
+    [askAgent, canWrite, handleCommitted, originId, originKind, projectId, ready, setNotice],
   );
 
   const toggleExpanded = useCallback((commit: string) => {
@@ -476,7 +481,7 @@ export function HistoryDrawer({
           (or the Show more button) that caused it. */}
       <div role="status" aria-live="polite" data-testid="history-status" className="shrink-0 px-5">
         {notice ? (
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
+          <div key={notice.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
             <Text as="span" variant="body" tone="inherit" className={NOTICE_TONE_CLASS[notice.tone]}>
               {notice.text}
             </Text>
@@ -712,6 +717,11 @@ export function HistoryDrawer({
       <HistoryConfirmDialog
         isOpen={pendingRevert !== null}
         title={REVERT_DIALOG.title}
+        detail={
+          pendingRevert
+            ? `${parseSavedVersionSubject(pendingRevert.subject).summary} (${pendingRevert.shortCommit})`
+            : null
+        }
         body={REVERT_DIALOG.body}
         cancelLabel={REVERT_DIALOG.cancel}
         confirmLabel={REVERT_DIALOG.confirm}

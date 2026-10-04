@@ -834,6 +834,82 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(container.querySelector('[data-testid="unsaved-work-entry"]')).toBeNull();
   });
 
+  describe("for assistive technology", () => {
+    const SECOND = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-3";
+
+    function described(element: Element | null): string {
+      const ids = element?.getAttribute("aria-describedby")?.split(/\s+/).filter(Boolean) ?? [];
+      return ids.map((id) => document.getElementById(id)?.textContent ?? "").join(" ");
+    }
+
+    it("names the row each action belongs to", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY), recoveryEntry(SECOND, { paths: ["src/c.ts"] })]));
+      await render();
+      for (const [ref, count] of [
+        [RECOVERY, "2 files"],
+        [SECOND, "1 file"],
+      ] as const) {
+        for (const action of ["unsaved-work-review", "unsaved-work-restore", "unsaved-work-remove"]) {
+          const text = described(q(row(container, ref), action));
+          expect(text).toContain("Agent work that couldn't be saved");
+          expect(text).toContain(count);
+        }
+      }
+    });
+
+    it("keeps per-file descriptions apart when two rows are in conflict", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY), recoveryEntry(SECOND, { paths: ["src/c.ts"] })]));
+      mocks.restoreRecovery
+        .mockResolvedValueOnce({
+          ok: false,
+          stage: "response",
+          error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["src/a.ts"] }),
+          originId: "origin-1",
+          originMode: "hosted",
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          stage: "response",
+          error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["src/c.ts"] }),
+          originId: "origin-1",
+          originMode: "hosted",
+        });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, SECOND), "unsaved-work-restore");
+      expect(described(q(row(container, RECOVERY), "unsaved-work-path-use"))).toBe("src/a.ts");
+      expect(described(q(row(container, SECOND), "unsaved-work-path-use"))).toBe("src/c.ts");
+      const ids = Array.from(container.querySelectorAll("[id]"), (element) => element.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it("names the entry in the Remove dialog", async () => {
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-remove");
+      expect(q(document.body, "unsaved-work-remove-dialog-detail")?.textContent).toContain(
+        "Agent work that couldn't be saved, ",
+      );
+      expect(q(document.body, "unsaved-work-remove-dialog-detail")?.textContent).toContain("2 files");
+    });
+
+    it("announces a repeated message again", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(RECOVERY), recoveryEntry(SECOND)]));
+      mocks.dismissRecovery.mockResolvedValue({ ok: true, dismissed: true, missing: false, originId: "origin-1", originMode: "hosted" });
+      await render();
+      mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+      await press(row(container, RECOVERY), "unsaved-work-remove");
+      await press(document.body, "unsaved-work-remove-dialog-confirm");
+      const status = q(container, "history-status")!;
+      expect(status.textContent).toBe("Removed.");
+      const first = status.firstElementChild;
+      await press(row(container, SECOND), "unsaved-work-remove");
+      await press(document.body, "unsaved-work-remove-dialog-confirm");
+      expect(status.textContent).toBe("Removed.");
+      // A new node, so the live region speaks again.
+      expect(status.firstElementChild).not.toBe(first);
+    });
+  });
+
   it("disables Restore and Remove for a viewer but keeps Review", async () => {
     mocks.project = { activeProjectId: "project-1", projectCapabilitiesResolved: true, canWriteProject: false };
     await render();
