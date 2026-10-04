@@ -34,6 +34,8 @@ import {
   UNSAVED_WORK_READ_FAILED_COPY,
   unsavedWorkAskAgentPrompt,
   unsavedWorkTitle,
+  unsavedWorkUnconfirmedDeleteCopy,
+  unsavedWorkUnsupportedEntryCopy,
   keptPathCopy,
   savedPathVersionCopy,
   type HistoryNotice,
@@ -365,8 +367,17 @@ export function UnsavedWorkSection({
           return;
         }
         files = [{ path, bytes: decodeBase64(read.file.contentBase64), encoding: "binary" }];
+      } else if (read.error.code === "unsupported_entry") {
+        // A symlink or submodule at the ref: reads and listings both hide it.
+        onNotice({ tone: "warning", text: unsavedWorkUnsupportedEntryCopy(path) });
+        return;
+      } else if (read.notFound && !read.error.routeUnavailable && read.error.code !== "not_found") {
+        // An uncoded 404 cannot tell a missing path from a hidden entry
+        // (a link or a nested repository): never turn it into a delete.
+        onNotice({ tone: "warning", text: unsavedWorkUnconfirmedDeleteCopy(path) });
+        return;
       } else if (read.notFound && !read.error.routeUnavailable) {
-        // A 404 is a delete only when the ref still resolves without the path.
+        // A coded not_found is a delete only when the ref still resolves without the path.
         const absence = await confirmPathAbsentAtRef({ projectId, originId, ref: entry.ref, rev: entry.rev, path });
         if (absence === "moved") {
           clearConflict(entry.ref);

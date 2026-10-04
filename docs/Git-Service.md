@@ -335,12 +335,15 @@ Studio picks its versioning UI per space from the project's default origin:
   `refs/instafy/salvage/*`, listed with `GET /git/recovery`. Restore commits it as a new version
   (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
   version, keep the current one, or ask the agent) and finishes with a `keep` list. "Use this
-  version" reads the file at the ref and saves it on top of the head the restore reported; a 404
-  at the ref becomes a delete only when a listing at the ref shows the ref still resolves without
-  the path. On a Desktop space it refuses a file the folder has uncommitted edits to and sends the
-  folder's current blob as `expected`. Remove deletes a recovery ref for everyone
-  (`POST /git/recovery/dismiss`); salvage refs stay and show "Restored" once restored. The section
-  is hidden on servers without these routes.
+  version" reads the file at the ref and saves it on top of the head the restore reported. A 404
+  coded `not_found` at the ref becomes a delete only when a listing at the ref shows the ref still
+  resolves without the path; an uncoded 404, or `unsupported_entry` for a symlink or submodule
+  (which reads and listings both hide), writes nothing. Reads and listings at a ref carry
+  `X-Instafy-Rev` set to the ref's tip, or no header; another commit means the entry moved and the
+  list reloads, and a missing header never does. On a Desktop space it refuses a file the folder
+  has uncommitted edits to and sends the folder's current blob as `expected`. Remove deletes a
+  recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show "Restored"
+  once restored. The section is hidden on servers without these routes.
 - **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
   version (`POST /git/sync`), naming files it kept on the computer and why.
 

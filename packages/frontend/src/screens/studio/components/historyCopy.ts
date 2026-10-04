@@ -299,6 +299,16 @@ export const UNSAVED_WORK_ERROR_COPY = "Couldn't check for unsaved work.";
 export const UNSAVED_WORK_READ_FAILED_COPY =
   "Couldn't read this file from the unsaved work, so nothing was saved. Refreshing.";
 
+/** "Use this version" on a path the ref holds as a symlink or submodule. */
+export function unsavedWorkUnsupportedEntryCopy(path: string): string {
+  return `${path} is a link or a nested repository in this unsaved work, so it can't be saved from here. Ask the agent instead.`;
+}
+
+/** "Use this version" got a 404 that does not say the path is gone (an older origin). */
+export function unsavedWorkUnconfirmedDeleteCopy(path: string): string {
+  return `Couldn't tell whether this unsaved work deletes ${path}, so nothing was saved. Ask the agent instead.`;
+}
+
 /**
  * A finished restore. `kept` are the paths the person chose "Keep current"
  * for (the server reports them in `notRestored` too); only the rest of

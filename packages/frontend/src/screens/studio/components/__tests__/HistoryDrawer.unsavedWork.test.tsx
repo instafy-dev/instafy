@@ -556,6 +556,51 @@ describe("HistoryDrawer: Unsaved work", () => {
       expect(q(container, "history-status")?.textContent).toContain("Couldn't read this file from the unsaved work.");
     });
 
+    // Listings hide symlinks and submodules just as reads do, so a sibling
+    // listing without the name proves nothing for these answers.
+    const siblingsOnly = () =>
+      mocks.listAt.mockResolvedValue(listing([{ name: "b.ts", path: "src/b.ts", kind: "file" }]));
+
+    it("is not a delete when the ref holds a link or a nested repository there", async () => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: true,
+        error: originError(404, "unsupported_entry"),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      siblingsOnly();
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "src/a.ts is a link or a nested repository in this unsaved work, so it can't be saved from here. Ask the agent instead.",
+      );
+      // The choice stays open.
+      expect(q(row(container, RECOVERY), "unsaved-work-path-use")).not.toBeNull();
+    });
+
+    it("is not a delete on a 404 that does not say the path is gone", async () => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: true,
+        error: originError(404, undefined, { message: "file not found" }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      siblingsOnly();
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Couldn't tell whether this unsaved work deletes src/a.ts, so nothing was saved. Ask the agent instead.",
+      );
+    });
+
     it("deletes a path whose whole folder the work removed", async () => {
       conflictOn(["src/old/gone.ts"]);
       mocks.readAt.mockResolvedValue({

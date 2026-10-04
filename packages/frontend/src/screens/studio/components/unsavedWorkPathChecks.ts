@@ -44,11 +44,14 @@ export function servedFromOtherRev(servedRev: string | null | undefined, rev: st
 export type RefPathAbsence = "absent" | "moved" | "unknown";
 
 /**
- * A read of `path` at `ref` answered 404. That is a delete only when the
- * ref still resolves and its tree lacks the path: a ref that another viewer
- * removed answers 404 for every path too. A listing that shows entries
- * proves the ref resolves; a listing whose `X-Instafy-Rev` names another
- * commit means the ref moved since the list loaded.
+ * A read of `path` at `ref` answered 404 `not_found` (callers never get here
+ * for an uncoded 404 or `unsupported_entry`: listings hide symlinks and
+ * submodules the same way reads do, so only the code tells them from a
+ * missing path). That is a delete only when the ref still resolves and its
+ * tree lacks the path: a ref that another viewer removed answers 404 for
+ * every path too. A listing that shows entries proves the ref resolves; a
+ * listing whose `X-Instafy-Rev` names another commit means the ref moved
+ * since the list loaded.
  */
 export async function confirmPathAbsentAtRef({
   projectId,
@@ -82,7 +85,7 @@ export async function confirmPathAbsentAtRef({
     const listed = listing.entries.some(
       (entry) => entry.name === name || baseName(normalizePath(entry.path)) === name,
     );
-    // Listed after all (a folder now, or hidden from reads): not a plain delete.
+    // Listed after all (a folder now): not a plain delete.
     return listed ? "unknown" : "absent";
   }
   if (!parent) {
