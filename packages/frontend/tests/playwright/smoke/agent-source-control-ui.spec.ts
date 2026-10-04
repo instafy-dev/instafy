@@ -115,7 +115,9 @@ test.describe("Agent + Source Control UI (opt-in)", () => {
     });
 
     const card = page.getByTestId("chat-file-change-summary").last();
-    await expect(card.getByTestId("chat-file-change-file-chip")).toContainText(filePath.split("/").pop() ?? filePath);
+    // Chip labels are middle-truncated past 28 characters, and this name is
+    // longer: the full path is the chip's title.
+    await expect(card.locator(`[data-testid="chat-file-change-file-chip"][title="${filePath}"]`)).toBeVisible();
     if (declaredGatewayMode() === "legacy") {
       // The stateful gateway keeps today's card: no saved-version revert.
       await expect(card.getByTestId("chat-file-change-revert")).toHaveCount(0);
