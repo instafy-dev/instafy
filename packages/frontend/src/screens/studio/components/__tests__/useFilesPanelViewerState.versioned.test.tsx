@@ -202,12 +202,34 @@ describe("useFilesPanelViewerState in the versioned modes", () => {
     expect(staleEvents).toHaveLength(1);
   });
 
-  it("never fetches a new buffer that was never saved", async () => {
+  it("never fetches a never-saved buffer when opening it or keeping its draft", async () => {
     await render({ workspaceFiles: [cached({ isNew: true, generated: "", modified: "", blobOid: null, baseRev: null })] });
-    await open(entry("README.md"), { forceFetch: true });
+    await open(entry("README.md"));
+    await open(entry("README.md"), { forceFetch: true, preserveDraft: true });
     expect(controllerClient.workspace.files.readAt).not.toHaveBeenCalled();
     expect(current.viewerState.mode).toBe("text");
     expect(options.setActiveFile).toHaveBeenCalledWith("README.md");
+  });
+
+  it("on Reload keeps a never-saved buffer that is still not in the space", async () => {
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue({
+      ok: false, notFound: true, originId: "origin-1", originMode: "hosted",
+      error: { status: 404, message: "not found", routeUnavailable: false },
+    });
+    workspace = { ...workspace, files: [cached({ isNew: true, generated: "", modified: "draft", blobOid: null, baseRev: null })] };
+    await render({ workspaceFiles: workspace.files });
+    await open(entry("README.md"), { forceFetch: true });
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledTimes(1);
+    expect(current.viewerState.mode).toBe("text");
+    expect(workspace.files[0]).toMatchObject({ isNew: true, modified: "draft" });
+  });
+
+  it("on Reload takes the space's version of a file that appeared there", async () => {
+    workspace = { ...workspace, files: [cached({ isNew: true, generated: "", modified: "draft", blobOid: null, baseRev: null })] };
+    await render({ workspaceFiles: workspace.files });
+    await open(entry("README.md"), { forceFetch: true });
+    expect(workspace.files[0]).toMatchObject({ generated: "server text", modified: "server text", baseRev: REV_2 });
+    expect(workspace.files[0].isNew).toBeUndefined();
   });
 
   it("opens a just-created local buffer without fetching it", async () => {

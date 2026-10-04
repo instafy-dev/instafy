@@ -528,8 +528,9 @@ export function useFilesPanelViewerState({
       let shouldForceFetch = options?.localBuffer ? false : options?.forceFetch ?? computedShouldForceFetch;
       if (versioned && existing && !options?.localBuffer) {
         if (existing.isNew === true) {
-          // Never fetch a buffer that was never saved: the space has no file yet.
-          shouldForceFetch = false;
+          // A buffer that was never saved is not in the space: only an
+          // explicit reload (no draft to keep) asks whether it appeared there.
+          shouldForceFetch = options?.forceFetch === true && options?.preserveDraft !== true;
         } else if (options?.forceFetch === undefined) {
           const decision = decideCachedOpen({
             cached: existing,
@@ -546,6 +547,26 @@ export function useFilesPanelViewerState({
       let textContent: string | null = shouldForceFetch ? null : existingGenerated;
       let mimeType = entry.mimeType ?? existing?.mimeType ?? null;
       let size = entry.size ?? existing?.size ?? null;
+      const reuseBuffer = () =>
+        updateWorkspace(
+          (current) => !request.isCurrent() ? current : ({
+            ...current,
+            activeFileId: entry.path,
+            files: current.files.map((file) =>
+              file.id === entry.path
+                ? {
+                    ...file,
+                    label: entry.name,
+                    directory: getParentPath(entry.path),
+                    mimeType: entry.mimeType ?? file.mimeType ?? null,
+                    size: entry.size ?? file.size ?? null,
+                    modifiedAt: entry.modified ?? file.modifiedAt ?? null,
+                  }
+                : file,
+            ),
+          }),
+          { recordHistory: false },
+        );
 
       if (shouldForceFetch) {
         let result: ControllerWorkspaceFileContent | null;
@@ -572,6 +593,10 @@ export function useFilesPanelViewerState({
             return;
           }
           result = read?.ok ? read.file : null;
+          if (!result && existing?.isNew === true && read && !read.ok && read.notFound) {
+            // Still not in the space: keep showing the new buffer.
+            shouldForceFetch = false;
+          }
         } else {
           result = await controllerClient.workspace.files.read({
             projectId: activeProjectId,
@@ -580,12 +605,13 @@ export function useFilesPanelViewerState({
           });
           if (!request.isCurrent()) return;
         }
-        if (!result) {
+        if (!result && !shouldForceFetch) {
+          reuseBuffer();
+        } else if (!result) {
           setViewerState({ mode: "error", entry, error: "Unable to load file content." });
           showStatus("Unable to load file content.", "error");
           return;
-        }
-        if (!result.isText) {
+        } else if (!result.isText) {
           const rawUrl = await controllerClient.workspace.files.getRawUrl(
             rawUrlRequest(activeProjectId, entry.path, pinnedRev),
           );
@@ -598,89 +624,72 @@ export function useFilesPanelViewerState({
           });
           rememberBinaryPreviewRequest(previewScopeKey, "unsupported", entry);
           return;
-        }
-        textContent = result.contentText ?? "";
-        mimeType = result.mimeType ?? entry.mimeType ?? null;
-        size = result.size ?? entry.size ?? null;
-        const readIds = versioned
-          ? {
-              baseRev: result.rev ?? null,
-              blobOid: result.blobOid ?? null,
-              originId: result.originId ?? pinnedOriginId ?? null,
-              readAt: Date.now(),
-            }
-          : null;
-
-        if (versioned && options?.preserveDraft && existing && isFileBufferDirty(existing)) {
-          // The draft keeps the ids it was read at; a newer version in the
-          // space is reported instead of being taken in silently.
-          const decision = decideCachedOpen({
-            cached: existing,
-            listingBlobOid: readIds?.blobOid,
-            mode: versioning.mode,
-          });
-          if (decision === "stale") {
-            raiseStaleBuffer(existing, entry);
-          }
-        }
-
-        updateWorkspace(
-          (current) => {
-            if (!request.isCurrent()) return current;
-            const filtered = current.files.filter((file) => file.id !== entry.path);
-            const directory = getParentPath(entry.path);
-            const nextFile: CodeFile = {
-              id: entry.path,
-              path: entry.path,
-              label: entry.name,
-              directory,
-              kind: "file",
-              mimeType: mimeType ?? null,
-              size,
-              modifiedAt: entry.modified ?? null,
-              generated: textContent ?? "",
-              modified: textContent ?? "",
-              ...(readIds ?? {}),
-            };
-            const draft = current.files.find(file => file.id === entry.path);
-            if (options?.preserveDraft && draft && draft.modified !== draft.generated) {
-              nextFile.generated = draft.generated;
-              nextFile.modified = draft.modified;
-              if (readIds) {
-                nextFile.baseRev = draft.baseRev ?? null;
-                nextFile.blobOid = draft.blobOid ?? null;
-                nextFile.originId = draft.originId ?? null;
-                nextFile.readAt = draft.readAt ?? null;
+        } else {
+          textContent = result.contentText ?? "";
+          mimeType = result.mimeType ?? entry.mimeType ?? null;
+          size = result.size ?? entry.size ?? null;
+          const readIds = versioned
+            ? {
+                baseRev: result.rev ?? null,
+                blobOid: result.blobOid ?? null,
+                originId: result.originId ?? pinnedOriginId ?? null,
+                readAt: Date.now(),
               }
+            : null;
+
+          if (versioned && options?.preserveDraft && existing && isFileBufferDirty(existing)) {
+            // The draft keeps the ids it was read at; a newer version in the
+            // space is reported instead of being taken in silently.
+            const decision = decideCachedOpen({
+              cached: existing,
+              listingBlobOid: readIds?.blobOid,
+              mode: versioning.mode,
+            });
+            if (decision === "stale") {
+              raiseStaleBuffer(existing, entry);
             }
-            return {
-              ...current,
-              files: [...filtered, nextFile],
-              activeFileId: entry.path,
-            };
-          },
-          { recordHistory: false },
-        );
+          }
+
+          updateWorkspace(
+            (current) => {
+              if (!request.isCurrent()) return current;
+              const filtered = current.files.filter((file) => file.id !== entry.path);
+              const directory = getParentPath(entry.path);
+              const nextFile: CodeFile = {
+                id: entry.path,
+                path: entry.path,
+                label: entry.name,
+                directory,
+                kind: "file",
+                mimeType: mimeType ?? null,
+                size,
+                modifiedAt: entry.modified ?? null,
+                generated: textContent ?? "",
+                modified: textContent ?? "",
+                ...(readIds ?? {}),
+              };
+              const draft = current.files.find(file => file.id === entry.path);
+              if (options?.preserveDraft && draft && draft.modified !== draft.generated) {
+                nextFile.generated = draft.generated;
+                nextFile.modified = draft.modified;
+                if (readIds) {
+                  nextFile.baseRev = draft.baseRev ?? null;
+                  nextFile.blobOid = draft.blobOid ?? null;
+                  nextFile.originId = draft.originId ?? null;
+                  nextFile.readAt = draft.readAt ?? null;
+                }
+              }
+              return {
+                ...current,
+                files: [...filtered, nextFile],
+                activeFileId: entry.path,
+              };
+            },
+            { recordHistory: false },
+          );
+        }
       } else {
-        updateWorkspace(
-          (current) => !request.isCurrent() ? current : ({
-            ...current,
-            activeFileId: entry.path,
-            files: current.files.map((file) =>
-              file.id === entry.path
-                ? {
-                    ...file,
-                    label: entry.name,
-                    directory: getParentPath(entry.path),
-                    mimeType: entry.mimeType ?? file.mimeType ?? null,
-                    size: entry.size ?? file.size ?? null,
-                    modifiedAt: entry.modified ?? file.modifiedAt ?? null,
-                  }
-                : file,
-            ),
-          }),
-          { recordHistory: false },
-        );
+        reuseBuffer();
       }
 
       setActiveFile(entry.path);
