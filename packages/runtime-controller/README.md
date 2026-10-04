@@ -55,6 +55,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/projects/:id/git/access_token` | Mint project Git tokens. `git.delete` is a 60-second, service-auth-only, single-scope cleanup capability. |
 |  |  | Controller no longer serves `/fs/*`; clients should use project origin endpoints (`/entries`, `/files`, `/raw`). |
 | POST | `/projects/:id/origin/presence/beat` | Project-scoped presence updates from an origin. |
+| ANY | `/origin/:originId/*path` | Proxy to a workspace origin for an exact allowlist of routes, with the origin access token's scopes: reads (`entries`, `files/*`, `raw/*`, `git/status`, `git/diff`, `git/history`, `git/history/review`, `git/recovery`) and writes (`apply`, `git/sync`, `git/revert`, `git/revert-commit`, `git/recovery/restore`, `git/recovery/dismiss`). `POST git/revert-commit` is forwarded only when the request sends an `X-Instafy-Client` label such as `web/1.2.3` (letters, digits and `. _ - / +`, at most 64 bytes); without it the route answers 404, so a client that offers Revert must send the header. The label is otherwise diagnostics only. |
 | GET | `/operator/credential-encryption/census` | Service-role only. Read-only count of stored secrets per table by the key that opens them. See [Rotating the credential encryption key](#rotating-the-credential-encryption-key). |
 | POST | `/operator/credential-encryption/reencrypt` | Service-role only. Rewrites stored secrets still under a previous key with the primary key. |
 

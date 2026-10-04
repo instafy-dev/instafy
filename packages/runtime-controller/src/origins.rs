@@ -3803,7 +3803,10 @@ fn classify_canonical_origin_proxy_request(
 }
 
 /// Request header naming the client build that made a proxied request. The
-/// origin only logs it (diagnostics); it never affects authorization.
+/// origin only logs it (diagnostics). The proxy also uses it as a gate:
+/// `POST git/revert-commit` is forwarded only with a valid label (see
+/// [`ensure_origin_proxy_client_label`]). It never grants access: the token
+/// checks still apply to every route.
 const INSTAFY_CLIENT_HEADER: &str = "x-instafy-client";
 const INSTAFY_CLIENT_HEADER_MAX_BYTES: usize = 64;
 
@@ -5508,6 +5511,59 @@ MCowBQYDK2VwAyEAFQAEX0aYqix3VQUBg05FFISGxhx2Ry93VE51GzM5iXA=
         ] {
             let path = canonical_origin_proxy_path(path).unwrap();
             assert!(ensure_origin_proxy_client_label(&method, &path, &unlabelled).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_proxy_route_forwards_revert_commit_only_for_labelled_clients() {
+        use tower::ServiceExt;
+        // No database or origin is reached: an unlabelled request stops at
+        // the gate (404), a labelled one goes on to the token check (401).
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )
+        .expect("connection manager");
+        let pool = bb8::Pool::builder().max_size(1).build_unchecked(manager);
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "revert-commit-label-gate",
+        );
+        let app = router().with_state(crate::tests::build_test_state(pool, config));
+        let origin_id = Uuid::new_v4();
+        let request = |label: Option<&str>, path: &str| {
+            let mut builder = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/origin/{origin_id}/{path}"))
+                .header("content-type", "application/json");
+            if let Some(label) = label {
+                builder = builder.header(INSTAFY_CLIENT_HEADER, label);
+            }
+            builder.body(axum::body::Body::from("{}")).expect("request")
+        };
+        for (label, path, expected) in [
+            (None, "git/revert-commit", StatusCode::NOT_FOUND),
+            (
+                Some("web 1.2.3"),
+                "git/revert-commit",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                Some("web/1.2.3"),
+                "git/revert-commit",
+                StatusCode::UNAUTHORIZED,
+            ),
+            // Other write routes need no label.
+            (None, "git/recovery/restore", StatusCode::UNAUTHORIZED),
+            (None, "apply", StatusCode::UNAUTHORIZED),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(label, path))
+                .await
+                .expect("proxy response");
+            assert_eq!(response.status(), expected, "{label:?} {path}");
         }
     }
 
