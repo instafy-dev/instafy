@@ -1755,6 +1755,182 @@ mod tests {
         assert!(Quarantine::create_in(Path::new("relative")).is_err());
     }
 
+    /// Each file git would read to find another repository's objects or
+    /// history, and each link or wrong type where git reads refs, objects
+    /// or config, stops every command in the repository.
+    #[cfg(unix)]
+    #[test]
+    fn every_redirect_link_or_wrong_type_in_a_bare_repository_is_refused() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let elsewhere = fixture.root.join("elsewhere.git");
+        WorkspaceGit::init_bare(&elsewhere).unwrap();
+        let swap_for_link = |repository: &Path, name: &str| {
+            let path = repository.join(name);
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+            symlink(elsewhere.join(name), &path).unwrap();
+        };
+        type Setup<'s> = Box<dyn Fn(&Path) + 's>;
+        let cases: Vec<(&str, Setup<'_>, &str)> = vec![
+            (
+                "commondir",
+                Box::new(|repository: &Path| {
+                    std::fs::write(repository.join("commondir"), "../elsewhere.git\n").unwrap()
+                }),
+                "\"commondir\"",
+            ),
+            (
+                "grafts",
+                Box::new(|repository: &Path| {
+                    std::fs::create_dir_all(repository.join("info")).unwrap();
+                    std::fs::write(repository.join("info/grafts"), "").unwrap();
+                }),
+                "\"info/grafts\"",
+            ),
+            (
+                "alternates",
+                Box::new(|repository: &Path| {
+                    std::fs::write(repository.join("objects/info/alternates"), "/x\n").unwrap()
+                }),
+                "\"objects/info/alternates\"",
+            ),
+            (
+                "linked HEAD",
+                Box::new(|repository: &Path| swap_for_link(repository, "HEAD")),
+                "\"HEAD\" in bare repository",
+            ),
+            (
+                "linked config",
+                Box::new(|repository: &Path| swap_for_link(repository, "config")),
+                "\"config\" in bare repository",
+            ),
+            (
+                "linked packed-refs",
+                Box::new(|repository: &Path| {
+                    std::fs::write(elsewhere.join("packed-refs"), "").unwrap();
+                    std::fs::write(repository.join("packed-refs"), "").unwrap();
+                    swap_for_link(repository, "packed-refs");
+                }),
+                "\"packed-refs\" in bare repository",
+            ),
+            (
+                "linked refs",
+                Box::new(|repository: &Path| swap_for_link(repository, "refs")),
+                "\"refs\" in bare repository",
+            ),
+            (
+                "objects is a file",
+                Box::new(|repository: &Path| {
+                    std::fs::remove_dir_all(repository.join("objects")).unwrap();
+                    std::fs::write(repository.join("objects"), "").unwrap();
+                }),
+                "\"objects\" in bare repository",
+            ),
+            (
+                "HEAD is a folder",
+                Box::new(|repository: &Path| {
+                    std::fs::remove_file(repository.join("HEAD")).unwrap();
+                    std::fs::create_dir(repository.join("HEAD")).unwrap();
+                }),
+                "\"HEAD\" in bare repository",
+            ),
+        ];
+        for (index, (label, setup, expected)) in cases.iter().enumerate() {
+            let repository = fixture.root.join(format!("case-{index}.git"));
+            WorkspaceGit::init_bare(&repository).unwrap();
+            WorkspaceGit::bare(&repository, None)
+                .run(&["rev-parse", "--git-dir"])
+                .unwrap();
+            setup(&repository);
+            let error = WorkspaceGit::bare(&repository, None)
+                .run(&["rev-parse", "--git-dir"])
+                .err()
+                .unwrap_or_else(|| panic!("{label}: not refused"))
+                .to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+    }
+
+    /// Ignore and attribute files in the server user's home never change
+    /// what a bare repository's commands see.
+    #[test]
+    fn a_bare_repository_ignores_the_server_users_git_files() {
+        let fixture = Fixture::new();
+        let home = fixture.root.join("home");
+        std::fs::create_dir_all(home.join("git")).unwrap();
+        std::fs::write(home.join("git/ignore"), "b.txt\n").unwrap();
+        std::fs::write(home.join("git/attributes"), "*.md -diff\n").unwrap();
+        let env = || -> Vec<(&'static str, OsString)> {
+            vec![
+                ("XDG_CONFIG_HOME", home.clone().into_os_string()),
+                ("HOME", home.clone().into_os_string()),
+            ]
+        };
+        let work_tree = fixture.root.join("ignore-check");
+        std::fs::create_dir_all(&work_tree).unwrap();
+        let ignored = fixture
+            .git()
+            .with_work_tree(&work_tree)
+            .run_opts(
+                &["check-ignore", "--no-index", "-z", "--stdin"],
+                &RunOpts {
+                    stdin: Some(b"b.txt\0"),
+                    env: env(),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(ignored.status.code(), Some(1), "{ignored:?}");
+        assert!(ignored.stdout.is_empty(), "{ignored:?}");
+        let attributes = fixture
+            .git()
+            .stdout_opts(
+                &["check-attr", "--all", "--", "README.md"],
+                &RunOpts {
+                    env: env(),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(attributes, "");
+
+        // The same files do reach a git that is not pinned, so the test
+        // would see them.
+        let plain = git_output_env(
+            &work_tree,
+            &[
+                "--git-dir",
+                fixture.mirror.to_str().unwrap(),
+                "--work-tree",
+                ".",
+                "check-ignore",
+                "--no-index",
+                "b.txt",
+            ],
+            &home,
+        );
+        assert_eq!(String::from_utf8_lossy(&plain.stdout).trim(), "b.txt");
+    }
+
+    /// Plain git in `dir` with the given home, outside the server's handle.
+    fn git_output_env(dir: &Path, args: &[&str], home: &Path) -> std::process::Output {
+        std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("XDG_CONFIG_HOME", home)
+            .env("HOME", home)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
     /// A wrapper around git that records each command line and the
     /// `GIT_CONFIG_*` entries it was given, for the current thread only.
     struct RecordingGit {
