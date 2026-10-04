@@ -1373,6 +1373,67 @@ export async function listWorkspaceEntries(
   }
 }
 
+/**
+ * `GET /git/status?limit=1` on the project's default origin (no preferred
+ * runtime), as the Studio's versioning probe asks it. The stateless gateway
+ * answers `stateless: true`; anything else is the stateful gateway or a
+ * Desktop origin. Returns the HTTP status and parsed body, or null when no
+ * token could be minted.
+ */
+export async function fetchDefaultOriginGitStatus(
+  page: Page,
+  options: { projectId: string }
+): Promise<{ statusCode: number; payload: Record<string, unknown> | null } | null> {
+  const controllerUrl = resolveControllerUrl();
+  const serviceRole = resolveServiceRoleKey();
+  if (!controllerUrl || !serviceRole) {
+    return null;
+  }
+  const token = await requestOriginAccessToken(page, {
+    controllerUrl,
+    serviceRole,
+    projectId: options.projectId,
+    scopes: ["fs.read"],
+  });
+  if (!token) {
+    return null;
+  }
+  const base = `${token.endpoint.replace(/\/+$/, "")}/`;
+  const url = new URL("git/status", base);
+  url.searchParams.set("limit", "1");
+  const parse = (body: string): Record<string, unknown> | null => {
+    try {
+      const parsed = body ? (JSON.parse(body) as unknown) : null;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  if (shouldResolveLocalTunnelHost(url.hostname)) {
+    const port = resolveUrlPort(url);
+    const resolveTarget = `${url.hostname}:${port}:${resolveLocalTunnelIngressIp()}`;
+    const { statusCode, body } = runCurlWithHttpStatus([
+      "--insecure",
+      "--resolve",
+      resolveTarget,
+      "--header",
+      `Host: ${url.hostname}`,
+      "--header",
+      `authorization: Bearer ${token.token}`,
+      "--header",
+      "accept: application/json",
+      url.toString(),
+    ]);
+    return { statusCode, payload: parse(body) };
+  }
+  const response = await page.context().request.get(url.toString(), {
+    headers: { authorization: `Bearer ${token.token}`, accept: "application/json" },
+  });
+  return { statusCode: response.status(), payload: parse(await response.text().catch(() => "")) };
+}
+
 export async function fetchWorkspaceRawText(
   page: Page,
   rawPath: string,
