@@ -332,6 +332,20 @@ describe("HistoryDrawer: keyboard focus under latency", () => {
       );
     });
 
+    it("Cancel on the per-file choices lands on the row's Restore", async () => {
+      mocks.restoreRecovery.mockImplementation(() => later(conflict(["src/a.ts", "src/b.ts"]), 20));
+      await openWithRows();
+      await pressFocused(q(row(FIRST), "unsaved-work-restore"), "Restore");
+      await until(() => pathItems(FIRST).length === 2, "the per-file choices");
+      await settle(30);
+
+      await pressFocused(q(row(FIRST), "unsaved-work-conflict-cancel"), "Cancel");
+      await until(() => q(row(FIRST), "unsaved-work-conflict") === null, "the choices to close");
+      await settle();
+      expect(document.activeElement).toBe(q(row(FIRST), "unsaved-work-restore"));
+      expect(status()).toBe("Restore cancelled. Nothing was changed.");
+    });
+
     it("Use this version lands on the next file once the save answers", async () => {
       mocks.restoreRecovery.mockImplementation(() => later(conflict(["src/a.ts", "src/b.ts"]), 20));
       mocks.readAt.mockImplementation(() =>

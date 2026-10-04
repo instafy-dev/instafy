@@ -300,6 +300,13 @@ export function restoreConflictNoticeCopy(count: number): string {
 }
 
 export const NO_UNSAVED_WORK_COPY = "No unsaved work.";
+
+/** Cancel on the per-file choices: nothing more is restored. */
+export function restoreCancelledCopy(savedSome: boolean): string {
+  return savedSome
+    ? "Restore cancelled. Files you already saved with Use this version stay saved."
+    : "Restore cancelled. Nothing was changed.";
+}
 export const RECOVERY_REF_MOVED_COPY = "This entry changed. Refreshing.";
 export const ALREADY_REMOVED_COPY = "Already removed.";
 export const REMOVED_COPY = "Removed.";

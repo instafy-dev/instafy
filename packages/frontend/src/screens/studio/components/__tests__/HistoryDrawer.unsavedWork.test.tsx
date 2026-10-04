@@ -812,6 +812,65 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.restoreRecovery).toHaveBeenCalledTimes(1);
   });
 
+  describe("Cancel on the per-file choices", () => {
+    function conflictOn(paths: string[]) {
+      mocks.restoreRecovery.mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    }
+
+    it("backs out of a salvage restore, which has no Remove", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+      conflictOn(["src/a.ts", "src/b.ts"]);
+      await render();
+      await press(row(container, SALVAGE), "unsaved-work-restore");
+      const entry = row(container, SALVAGE);
+      expect(q(entry, "unsaved-work-restore")).toBeNull();
+      expect(q(entry, "unsaved-work-remove")).toBeNull();
+      const cancel = q<HTMLButtonElement>(entry, "unsaved-work-conflict-cancel");
+      expect(cancel?.textContent).toBe("Cancel");
+      const describedBy = cancel?.getAttribute("aria-describedby")?.split(/\s+/) ?? [];
+      expect(describedBy.map((id) => document.getElementById(id)?.textContent).join(" ")).toContain(
+        "Archived from the old file server",
+      );
+
+      await act(async () => cancel!.focus());
+      await act(async () => cancel!.click());
+      await flush();
+      expect(q(row(container, SALVAGE), "unsaved-work-conflict")).toBeNull();
+      // Focus goes back to the row's Restore, and the result is announced.
+      expect(document.activeElement).toBe(q(row(container, SALVAGE), "unsaved-work-restore"));
+      expect(q(container, "history-status")?.textContent).toBe("Restore cancelled. Nothing was changed.");
+      expect(mocks.restoreRecovery).toHaveBeenCalledTimes(1);
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+
+      // Closing and opening History does not bring the choices back.
+      await act(async () => root.render(null));
+      await render();
+      expect(q(row(container, SALVAGE), "unsaved-work-conflict")).toBeNull();
+      expect(q(row(container, SALVAGE), "unsaved-work-restore")).not.toBeNull();
+    });
+
+    it("says that a file already saved stays saved", async () => {
+      conflictOn(["src/a.ts", "src/b.ts"]);
+      mocks.readAt.mockResolvedValue({ ok: true, file: { path: "src/a.ts", contentBase64: btoa("kept\n"), size: 5 } });
+      mocks.saveChanges.mockResolvedValue({ ok: true, rev: "1".repeat(40), committed: true, conflicted: [], rejected: [], saved: ["src/a.ts"] });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      const paths = Array.from(row(container, RECOVERY).querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path"]'));
+      await press(paths[0]!, "unsaved-work-path-use");
+      await press(row(container, RECOVERY), "unsaved-work-conflict-cancel");
+      expect(q(row(container, RECOVERY), "unsaved-work-conflict")).toBeNull();
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Restore cancelled. Files you already saved with Use this version stay saved.",
+      );
+    });
+  });
+
   it("offers Remove instead of Restore the rest for a conflict entry", async () => {
     mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(CONFLICT, { kind: "conflict", paths: ["src/a.ts"] })]));
     mocks.restoreRecovery.mockResolvedValueOnce({

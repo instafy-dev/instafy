@@ -29,6 +29,7 @@ import {
   REMOVE_DIALOG,
   REMOVED_COPY,
   RESTORE_CONFLICT_INTRO,
+  restoreCancelledCopy,
   restoreConflictNoticeCopy,
   restoreDirtyPathsCopy,
   restoreSuccessCopy,
@@ -54,6 +55,8 @@ type FocusRequest =
   | { kind: "path"; ref: string; path: string }
   | { kind: "conflict"; ref: string }
   | { kind: "row"; ref: string; index: number }
+  /** The conflict panel closed: back to the row's Restore. */
+  | { kind: "restore"; ref: string }
   /** The error row's Retry gave way to the list (or to nothing). */
   | { kind: "section" };
 
@@ -157,6 +160,9 @@ export function UnsavedWorkSection({
     } else if (request.kind === "row") {
       const row = rowOf(request.ref) ?? rows[Math.min(request.index, rows.length - 1)] ?? null;
       moved = restoreLostFocus(byTestId(row, "unsaved-work-review"));
+    } else if (request.kind === "restore") {
+      const row = rowOf(request.ref);
+      moved = restoreLostFocus(byTestId(row, "unsaved-work-restore"), byTestId(row, "unsaved-work-review"));
     } else {
       const row = rowOf(request.ref);
       const items = Array.from(row?.querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path"]') ?? []);
@@ -204,6 +210,16 @@ export function UnsavedWorkSection({
       });
     },
     [setConflicts],
+  );
+
+  /** Close the per-file choices without restoring; files already saved stay saved. */
+  const cancelConflict = useCallback(
+    (ref: string, savedSome: boolean) => {
+      requestFocus({ kind: "restore", ref });
+      clearConflict(ref);
+      onNotice({ tone: "info", text: restoreCancelledCopy(savedSome) });
+    },
+    [clearConflict, onNotice, requestFocus],
   );
 
   const refreshAfterMove = useCallback(() => {
@@ -731,41 +747,52 @@ export function UnsavedWorkSection({
                     );
                   })}
                 </ul>
-                {allResolved ? (
-                  <div className="mt-2">
-                    {entry.kind === "conflict" ? (
-                      // A conflict entry holds only these files: nothing is left to restore.
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        radius="xl"
-                        isDisabled={!canWrite || locked || !entry.dismissible}
-                        aria-describedby={rowDescription}
-                        onPress={() => setPendingRemove(entry)}
-                        data-testid="unsaved-work-finish-remove"
-                      >
-                        Remove
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        radius="xl"
-                        isPending={busyKey === `${entry.ref}:rest`}
-                        isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:rest`)}
-                        aria-describedby={rowDescription}
-                        onPress={() =>
-                          void runAction(`${entry.ref}:rest`, () =>
-                            restore(entry, { keep: keptPaths, head: conflict.head }),
-                          )
-                        }
-                        data-testid="unsaved-work-restore-rest"
-                      >
-                        Restore the rest
-                      </Button>
-                    )}
-                  </div>
-                ) : null}
+                <div className="mt-2 flex flex-wrap items-center gap-1">
+                  {!allResolved ? null : entry.kind === "conflict" ? (
+                    // A conflict entry holds only these files: nothing is left to restore.
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      radius="xl"
+                      isDisabled={!canWrite || locked || !entry.dismissible}
+                      aria-describedby={rowDescription}
+                      onPress={() => setPendingRemove(entry)}
+                      data-testid="unsaved-work-finish-remove"
+                    >
+                      Remove
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      radius="xl"
+                      isPending={busyKey === `${entry.ref}:rest`}
+                      isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:rest`)}
+                      aria-describedby={rowDescription}
+                      onPress={() =>
+                        void runAction(`${entry.ref}:rest`, () =>
+                          restore(entry, { keep: keptPaths, head: conflict.head }),
+                        )
+                      }
+                      data-testid="unsaved-work-restore-rest"
+                    >
+                      Restore the rest
+                    </Button>
+                  )}
+                  {/* The way out without restoring: salvage cannot be removed,
+                      and the choices outlive closing the drawer. */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    radius="xl"
+                    isDisabled={locked}
+                    aria-describedby={rowDescription}
+                    onPress={() => cancelConflict(entry.ref, Object.values(conflict.resolutions).includes("use"))}
+                    data-testid="unsaved-work-conflict-cancel"
+                  >
+                    Cancel
+                  </Button>
+                </div>
               </div>
             ) : null}
           </div>
