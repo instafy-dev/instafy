@@ -1082,7 +1082,7 @@ fn salvage_credential_may_only_create_salvage_refs() {
         let stderr = client.push_as_refused(&token, &[&refspec]);
         assert!(
             stderr.contains(&format!(
-                "instafy: '{salvage}' holds salvaged work; a salvage push may only create it"
+                "instafy: salvage push refused: '{salvage}' holds salvaged work and may only be created"
             )),
             "{refspec}: {stderr}"
         );
@@ -1108,7 +1108,7 @@ fn salvage_credential_may_only_create_salvage_refs() {
     for refname in ["refs/heads/main", "refs/heads/feature", recovery.as_str()] {
         assert!(
             stderr.contains(&format!(
-                "instafy: a salvage push may only create refs/instafy/salvage/gateway/<name> refs, not '{refname}'"
+                "instafy: salvage push refused: only refs/instafy/salvage/gateway/<name> refs may be created, not '{refname}'"
             )),
             "{refname}: {stderr}"
         );
@@ -1117,6 +1117,22 @@ fn salvage_credential_may_only_create_salvage_refs() {
     assert!(shard.repo_rev("refs/heads/feature").is_none());
     assert!(shard.repo_rev(&recovery).is_none());
     assert_eq!(shard.repo_rev(&next).unwrap(), later);
+
+    // A name too long for a ref file is refused by the hook with a clear,
+    // permanent message, not by a failure to lock the ref.
+    let too_long = format!(
+        "refs/instafy/salvage/gateway/{}-{}",
+        "n".repeat(300),
+        &later[..8]
+    );
+    let stderr = client.push_as_refused(&token, &[&format!("{later}:{too_long}")]);
+    assert!(
+        stderr.contains(&format!(
+            "instafy: salvage push refused: '{too_long}' is not a valid salvage ref name"
+        )),
+        "{stderr}"
+    );
+    assert!(shard.repo_rev(&too_long).is_none());
 
     // Path, size and object checks still apply.
     client.git_ok(&["reset", "-q", "--hard", &initial]);

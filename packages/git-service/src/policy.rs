@@ -57,10 +57,18 @@ pub const RECOVERY_REF_ROOT: &str = "refs/instafy/recovery";
 /// then it may only create refs under [`SALVAGE_GATEWAY_REF_ROOT`].
 pub const SALVAGE_REF_ROOT: &str = "refs/instafy/salvage";
 
-/// A salvage push may create `<root>/<name>`, where the name uses only
-/// lower-case `[0-9a-z._-]`. Lower case keeps two salvage refs from naming the
-/// same file on a case-insensitive filesystem.
+/// A salvage push may create `<root>/<name>` (see [`is_salvage_ref_name`]).
 pub const SALVAGE_GATEWAY_REF_ROOT: &str = "refs/instafy/salvage/gateway";
+
+/// Longest salvage ref name, the part after [`SALVAGE_GATEWAY_REF_ROOT`]`/`.
+/// It leaves room for the loose ref file and its `.lock` on filesystems that
+/// limit a file name to 255 bytes.
+pub const SALVAGE_REF_NAME_MAX_LEN: usize = 100;
+
+/// Every hook refusal that is specific to a salvage push starts with this.
+/// Such a refusal is permanent: pushing the same ref again cannot succeed.
+/// Path and size refusals keep their ordinary messages.
+pub const SALVAGE_PUSH_REFUSED: &str = "instafy: salvage push refused:";
 
 /// Hook environment flag that marks one push as a salvage push. The shard sets
 /// it only for a request whose bearer is the controller's exact `git.salvage`
@@ -69,6 +77,32 @@ pub const SALVAGE_GATEWAY_REF_ROOT: &str = "refs/instafy/salvage/gateway";
 /// update in it is refused. Without the flag every change to a salvage ref is
 /// refused.
 pub const SALVAGE_PUSH_ENV: &str = "INSTAFY_GIT_SALVAGE_PUSH";
+
+/// Whether a salvage push may create `refname`:
+/// `refs/instafy/salvage/gateway/<name>`, where the name starts with
+/// `[0-9a-z]`, continues with `[0-9a-z._-]`, has at most
+/// [`SALVAGE_REF_NAME_MAX_LEN`] characters, and is a name git accepts (no
+/// `..`, no trailing `.` or `.lock`). Lower case keeps two salvage refs from
+/// naming the same file on a case-insensitive filesystem. The rendered hook
+/// applies the same rule.
+pub fn is_salvage_ref_name(refname: &str) -> bool {
+    let Some(name) = refname
+        .strip_prefix(SALVAGE_GATEWAY_REF_ROOT)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= SALVAGE_REF_NAME_MAX_LEN
+        && matches!(bytes[0], b'0'..=b'9' | b'a'..=b'z')
+        && bytes
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'.' | b'_' | b'-'))
+        && !name.contains("..")
+        && !name.ends_with('.')
+        && !name.ends_with(".lock")
+}
 
 /// Hook environment variable naming the file where `post-receive` appends the
 /// refs one push updated, as `<old> <new> <ref>` lines (see
@@ -113,6 +147,15 @@ pub fn render_update_hook(default_branch: &str) -> Result<String> {
     let salvage_ref_root = SALVAGE_REF_ROOT;
     let salvage_gateway_ref_root = SALVAGE_GATEWAY_REF_ROOT;
     let salvage_push_env = SALVAGE_PUSH_ENV;
+    let salvage_name_max_len = SALVAGE_REF_NAME_MAX_LEN;
+    let salvage_name_tail_max = SALVAGE_REF_NAME_MAX_LEN - 1;
+    let salvage_refused = SALVAGE_PUSH_REFUSED;
+    if !salvage_refused
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b':' | b'.'))
+    {
+        bail!("salvage refusal marker {salvage_refused:?} is not plain text");
+    }
 
     Ok(format!(
         r#"#!/usr/bin/env bash
@@ -130,7 +173,8 @@ main_ref="refs/heads/{default_branch}"
 instafy_root="{instafy_ref_root}"
 salvage_root="{salvage_ref_root}"
 recovery_ref_pattern='^{recovery_ref_root}/[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}/[0-9A-Za-z._-]+$'
-salvage_ref_pattern='^{salvage_gateway_ref_root}/[0-9a-z._-]+$'
+salvage_gateway_root="{salvage_gateway_ref_root}"
+salvage_name_pattern='^[0-9a-z][0-9a-z._-]{{0,{salvage_name_tail_max}}}$'
 ascii_ref_pattern='^[!-~]+$'
 
 is_zero() {{
@@ -169,17 +213,25 @@ fi
 
 # ---------------------------------------------------------------------------
 # A salvage push may only create salvage refs: {salvage_gateway_ref_root}/<name>
-# with a lower-case name, never updating or deleting one. Every other ref
-# update in the same push is refused. Paths and sizes are still checked below.
+# with a lower-case name of at most {salvage_name_max_len} characters, never
+# updating or deleting one. Every other ref update in the same push is
+# refused. These refusals are permanent and share one prefix. Paths and sizes
+# are still checked below, on the net change against main.
 # ---------------------------------------------------------------------------
 salvage_push=0
 if [[ "${{{salvage_push_env}:-}}" == "1" ]]; then
-  if [[ ! "$refname" =~ $salvage_ref_pattern ]]; then
-    echo "instafy: a salvage push may only create {salvage_gateway_ref_root}/<name> refs, not '$refname'" >&2
+  if [[ "$refname" != "$salvage_gateway_root/"* ]]; then
+    echo "{salvage_refused} only {salvage_gateway_ref_root}/<name> refs may be created, not '$refname'" >&2
+    exit 1
+  fi
+  salvage_name="${{refname#"$salvage_gateway_root/"}}"
+  if [[ ! "$salvage_name" =~ $salvage_name_pattern || "$salvage_name" == *..* \
+    || "$salvage_name" == *. || "$salvage_name" == *.lock ]]; then
+    echo "{salvage_refused} '$refname' is not a valid salvage ref name ([0-9a-z] then [0-9a-z._-], at most {salvage_name_max_len} characters)" >&2
     exit 1
   fi
   if ! is_zero "$oldrev" || is_zero "$newrev"; then
-    echo "instafy: '$refname' holds salvaged work; a salvage push may only create it" >&2
+    echo "{salvage_refused} '$refname' holds salvaged work and may only be created" >&2
     exit 1
   fi
   salvage_push=1
@@ -967,7 +1019,7 @@ mod tests {
                 let stderr = repo.refuses(salvage, old, new, env);
                 assert!(
                     stderr.contains(&format!(
-                        "instafy: '{salvage}' holds salvaged work; a salvage push may only create it"
+                        "{SALVAGE_PUSH_REFUSED} '{salvage}' holds salvaged work and may only be created"
                     )),
                     "{old}..{new}: {stderr}"
                 );
@@ -989,26 +1041,65 @@ mod tests {
                 ("refs/instafy/notes", ZERO, child),
                 ("refs/instafy/salvage", ZERO, child),
                 ("refs/instafy/salvage/gateway", ZERO, child),
-                ("refs/instafy/salvage/gateway/", ZERO, child),
-                ("refs/instafy/salvage/gateway/a/b", ZERO, child),
                 ("refs/instafy/salvage/other/x", ZERO, child),
                 ("refs/instafy/salvage/x", ZERO, child),
                 ("refs/instafy/SALVAGE/gateway/x", ZERO, child),
                 ("refs/INSTAFY/salvage/gateway/x", ZERO, child),
                 ("refs/instafy/salvage/Gateway/x", ZERO, child),
-                ("refs/instafy/salvage/gateway/Node-1", ZERO, child),
-                ("refs/instafy/salvage/gateway/node 1", ZERO, child),
-                ("refs/instafy/salvage/gateway/node+1", ZERO, child),
             ] {
                 let stderr = repo.refuses(refname, old, new, env);
                 assert!(
                     stderr.contains(&format!(
-                        "instafy: a salvage push may only create \
-                         {SALVAGE_GATEWAY_REF_ROOT}/<name> refs, not '{refname}'"
+                        "{SALVAGE_PUSH_REFUSED} only {SALVAGE_GATEWAY_REF_ROOT}/<name> refs \
+                         may be created, not '{refname}'"
                     )),
                     "{refname} {old}..{new}: {stderr}"
                 );
             }
+        }
+
+        // Names under the salvage root follow one exact rule, refused with a
+        // clear message rather than a failure to lock the ref.
+        let too_long = format!(
+            "{SALVAGE_GATEWAY_REF_ROOT}/{}",
+            "a".repeat(SALVAGE_REF_NAME_MAX_LEN + 1)
+        );
+        let invalid_names = [
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/a/b"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/Node-1"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/node 1"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/node+1"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/-node"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/.node"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/_node"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/a..b"),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/a."),
+            format!("{SALVAGE_GATEWAY_REF_ROOT}/a.lock"),
+            too_long,
+        ];
+        for refname in &invalid_names {
+            assert!(!is_salvage_ref_name(refname), "{refname}");
+            let stderr = repo.refuses(refname, ZERO, child, &[SALVAGE_PUSH]);
+            assert!(
+                stderr.contains(&format!(
+                    "{SALVAGE_PUSH_REFUSED} '{refname}' is not a valid salvage ref name"
+                )),
+                "{refname}: {stderr}"
+            );
+        }
+        let longest = format!(
+            "{SALVAGE_GATEWAY_REF_ROOT}/{}",
+            "a".repeat(SALVAGE_REF_NAME_MAX_LEN)
+        );
+        for refname in [
+            longest.as_str(),
+            "refs/instafy/salvage/gateway/0",
+            "refs/instafy/salvage/gateway/a.locks",
+            "refs/instafy/salvage/gateway/n.a_b-c",
+        ] {
+            assert!(is_salvage_ref_name(refname), "{refname}");
+            repo.accepts_with(refname, ZERO, child, &[SALVAGE_PUSH]);
         }
 
         // Outside a salvage push the ordinary rules apply, and salvage refs
@@ -1027,6 +1118,62 @@ mod tests {
                 )),
                 "{env:?}: {stderr}"
             );
+        }
+    }
+
+    #[test]
+    fn salvage_ref_name_rule_matches_the_hook() {
+        let repo = HookRepo::new("salvage-names");
+        repo.set_ignorecase(false);
+        let child = repo.child.clone();
+        let mut names = vec![
+            String::new(),
+            "a".to_string(),
+            "9".to_string(),
+            "node-1-abcdef12".to_string(),
+            "host.example.test-0123abcd".to_string(),
+            "a_b".to_string(),
+            "a-".to_string(),
+            "a_".to_string(),
+            "a.b.c".to_string(),
+            "a..b".to_string(),
+            "a.".to_string(),
+            "a.lock".to_string(),
+            "a.lock.b".to_string(),
+            "-a".to_string(),
+            ".a".to_string(),
+            "_a".to_string(),
+            "A".to_string(),
+            "aB".to_string(),
+            "a/b".to_string(),
+            "a b".to_string(),
+            "a~b".to_string(),
+            "a@b".to_string(),
+        ];
+        for len in [
+            SALVAGE_REF_NAME_MAX_LEN - 1,
+            SALVAGE_REF_NAME_MAX_LEN,
+            SALVAGE_REF_NAME_MAX_LEN + 1,
+            255,
+        ] {
+            names.push("b".repeat(len));
+        }
+        for name in names {
+            let refname = format!("{SALVAGE_GATEWAY_REF_ROOT}/{name}");
+            let hook_accepts = repo.run(&refname, ZERO, &child, &[SALVAGE_PUSH]).is_none();
+            assert_eq!(
+                hook_accepts,
+                is_salvage_ref_name(&refname),
+                "{refname:?}: the hook and is_salvage_ref_name disagree"
+            );
+        }
+        for other in [
+            "refs/instafy/salvage/gateway",
+            "refs/instafy/salvage/a",
+            "refs/heads/a",
+            "refs/INSTAFY/salvage/gateway/a",
+        ] {
+            assert!(!is_salvage_ref_name(other), "{other}");
         }
     }
 
