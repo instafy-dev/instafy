@@ -1,4 +1,6 @@
 import {
+  ControllerApiError,
+  readControllerApiError,
   readControllerError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
@@ -90,12 +92,15 @@ export async function acquireWorkspaceLease(
   });
 
   if (!response.ok) {
-    const message = await readControllerError(
-      response,
-      "project lock acquisition failed",
-      requestContext,
+    // Same message as before; the status lets callers tell a lease held by
+    // someone else (409) from other failures.
+    throw new ControllerApiError(
+      await readControllerApiError(
+        response,
+        "project lock acquisition failed",
+        requestContext,
+      ),
     );
-    throw new Error(message);
   }
 
   const payload = (await response.json()) as Record<string, unknown>;
