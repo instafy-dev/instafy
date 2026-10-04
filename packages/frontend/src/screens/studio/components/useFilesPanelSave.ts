@@ -287,10 +287,16 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
 
     if (mode === "stateless") {
       if (file.isNew === true) {
+        // The listing that showed the path free (listing the folder also
+        // tells whether it holds the placeholder). A folder that is not in
+        // the space yet has no revision of its own, so the nearest listed
+        // parent folder's revision stands for it.
+        const listedRev = (folder: string): string | null =>
+          current.directoryRevsRef.current[folder] || (folder ? listedRev(parentOf(folder)) : null);
         baseRev = current.directoryRevsRef.current[parent] ?? null;
         if (!baseRev) {
           await current.loadDirectory(parent, { force: true });
-          baseRev = current.directoryRevsRef.current[parent] ?? null;
+          baseRev = listedRev(parent);
         }
       } else {
         baseRev = file.baseRev ?? null;

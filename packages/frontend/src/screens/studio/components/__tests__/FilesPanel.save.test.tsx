@@ -779,6 +779,26 @@ describe("FilesPanel one Save", () => {
     expect(testCodeHandle.current!.workspace.files.find((entry) => entry.path === "notes/todo.md")?.isNew).toBe(true);
   });
 
+  it("saves a new file in a new folder on the nearest listed folder's revision", async () => {
+    mocks.listAt.mockImplementation(async ({ path }: { path?: string }) => ({
+      ok: true,
+      entries: path ? [] : [{ name: "README.md", path: "README.md", kind: "file", blobOid: BLOB_A }],
+      // A folder that is not in the space answers without a revision.
+      rev: path ? null : REV_1,
+      originId: "origin-1",
+      originMode: "hosted",
+    }));
+    await render([
+      buffer({ id: "notes/todo.md", path: "notes/todo.md", label: "todo.md", directory: "notes", generated: "", modified: "hi", isNew: true, baseRev: null, blobOid: null }),
+    ]);
+    await pressSave();
+    expect(mocks.saveChanges).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      files: [{ path: "notes/todo.md", content: "hi", encoding: "utf8" }],
+      baseRev: REV_1,
+      expected: { "notes/todo.md": null },
+    }));
+  });
+
   it("allows writes without a ready runtime in the stateless mode, not in legacy", async () => {
     await render([buffer()]);
     expect(query("files-explorer-new-file")?.disabled).toBe(false);
