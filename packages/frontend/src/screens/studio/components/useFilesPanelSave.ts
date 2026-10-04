@@ -5,6 +5,8 @@ import {
   type WorkspaceSaveRequest,
   type WorkspaceSaveResult,
 } from "../../../sdk/instafy";
+import type { UpdateWorkspaceOptions } from "../../../code/useCode";
+import { useWorkspaceStore } from "../../../store";
 import type { CodeFile, CodeWorkspace } from "../../../types";
 import { gitBlobOid } from "../../../utils/gitBlobOid";
 import {
@@ -46,9 +48,10 @@ export interface UseFilesPanelSaveOptions {
   getFile: (fileId: string) => CodeFile | null;
   /** The newest text of the active buffer (the editor's value when mounted). */
   getPendingContent: (file: CodeFile) => string;
+  /** The open space's code (the code provider's update). */
   updateWorkspace: (
     updater: (current: CodeWorkspace) => CodeWorkspace,
-    options?: { recordHistory?: boolean },
+    options?: UpdateWorkspaceOptions,
   ) => void;
   directoryRevsRef: MutableRefObject<Record<string, string | null>>;
   keepFoldersRef: MutableRefObject<Set<string>>;
@@ -143,39 +146,43 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     current.ownRevisions.noteSaved(projectId, file.path, savedBufferIds(file), after);
     const savedAt = saved?.at ?? null;
     const size = saved?.size ?? null;
-    // The code store outlives this panel, so a save that finishes after the
-    // panel closed is still recorded on its buffer.
-    current.updateWorkspace(
-      (workspace) => {
-        let matched = false;
-        const files = workspace.files.map((candidate) => {
-          if (!isSameBuffer(candidate, file)) {
-            return candidate;
-          }
-          matched = true;
-          const next: CodeFile = {
-            ...candidate,
-            generated: after.generated,
-            modified: candidate.modified === candidate.generated ? after.generated : candidate.modified,
-            baseRev: after.baseRev,
-            blobOid: after.blobOid,
-            originId: after.originId,
-            ...(savedAt !== null && size !== null ? { modifiedAt: savedAt, size } : {}),
-          };
-          if (after.isNew) {
-            next.isNew = true;
-          } else {
-            delete next.isNew;
-          }
-          return next;
-        });
-        if (!matched) {
-          return workspace;
+    const update = (workspace: CodeWorkspace): CodeWorkspace => {
+      let matched = false;
+      const files = workspace.files.map((candidate) => {
+        if (!isSameBuffer(candidate, file)) {
+          return candidate;
         }
-        return { ...workspace, files, ...(savedAt !== null ? { lastAppliedAt: savedAt } : {}) };
-      },
-      { recordHistory: false },
-    );
+        matched = true;
+        const next: CodeFile = {
+          ...candidate,
+          generated: after.generated,
+          modified: candidate.modified === candidate.generated ? after.generated : candidate.modified,
+          baseRev: after.baseRev,
+          blobOid: after.blobOid,
+          originId: after.originId,
+          ...(savedAt !== null && size !== null ? { modifiedAt: savedAt, size } : {}),
+        };
+        if (after.isNew) {
+          next.isNew = true;
+        } else {
+          delete next.isNew;
+        }
+        return next;
+      });
+      if (!matched) {
+        return workspace;
+      }
+      return { ...workspace, files, ...(savedAt !== null ? { lastAppliedAt: savedAt } : {}) };
+    };
+    // The buffers outlive this panel, and the save is recorded wherever its
+    // space's buffers are now: the open space's in the code provider (which
+    // passes the update to the store when Studio closed meanwhile), another
+    // space's in the store, until the user goes back to it.
+    if (useWorkspaceStore.getState().activeProjectId === projectId) {
+      current.updateWorkspace(update, { recordHistory: false, keepAfterUnmount: true });
+    } else {
+      useWorkspaceStore.getState().updateProjectCode(projectId, update);
+    }
   }, []);
 
   const runSave = useCallback(async (fileId: string | null) => {
@@ -302,13 +309,15 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
         current.ownRevisions.add(result.report?.localRev ?? null);
       }
       // The panel may have closed while the save ran (a chat file surface, a
-      // panel switch). The result is still recorded and reported; only a save
-      // whose space is no longer the active one is left alone.
-      if (mountedRef.current && optionsRef.current.activeProjectId !== projectId) {
-        return;
-      }
+      // panel switch, another space, leaving Studio). The result is still
+      // recorded on its space's buffers. A panel that shows another space by
+      // now does not report it there.
+      const showsOtherSpace = mountedRef.current && optionsRef.current.activeProjectId !== projectId;
       const latest = optionsRef.current;
       const present = (copy: SaveCopy) => {
+        if (showsOtherSpace) {
+          return;
+        }
         if (mountedRef.current) {
           latest.presentFailure(copy, retry);
           return;

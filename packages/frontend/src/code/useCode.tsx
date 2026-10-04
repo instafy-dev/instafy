@@ -15,9 +15,18 @@ import { useWorkspaceStore } from "../store";
 
 type UpdateWorkspaceFn = (current: CodeWorkspace) => CodeWorkspace;
 
+export interface UpdateWorkspaceOptions {
+  recordHistory?: boolean;
+  /**
+   * When the provider has unmounted (Studio closed while a save ran), apply
+   * the update to the persisted store instead, so the buffers keep it.
+   */
+  keepAfterUnmount?: boolean;
+}
+
 interface CodeContextValue {
   workspace: CodeWorkspace;
-  updateWorkspace: (updater: UpdateWorkspaceFn, options?: { recordHistory?: boolean }) => void;
+  updateWorkspace: (updater: UpdateWorkspaceFn, options?: UpdateWorkspaceOptions) => void;
   replaceWorkspace: (snapshot: CodeWorkspace, options?: { resetHistory?: boolean; setInitial?: boolean }) => void;
   setActiveFile: (fileId: string | null) => void;
   updateFileContent: (fileId: string, value: string) => void;
@@ -188,8 +197,22 @@ export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) 
     storeUpdateCode(() => cloneCodeWorkspace(state.present));
   }, [state.present, storeUpdateCode]);
 
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const updateWorkspace = useCallback(
-    (updater: UpdateWorkspaceFn, options?: { recordHistory?: boolean }) => {
+    (updater: UpdateWorkspaceFn, options?: UpdateWorkspaceOptions) => {
+      if (!mountedRef.current && options?.keepAfterUnmount) {
+        // No reducer to apply it to, and the next provider starts from the
+        // store: the update goes there.
+        useWorkspaceStore.getState().updateCode((code) => (code ? updater(cloneCodeWorkspace(code)) : code));
+        return;
+      }
       dispatch({
         type: "APPLY",
         updater,

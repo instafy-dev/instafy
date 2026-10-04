@@ -9,6 +9,7 @@ import { TestCodeProvider, testCodeHandle } from "./filesPanelTestCode";
 import { writeWorkspaceFileStaleNotice } from "../workspaceFileStaleNoticeStore";
 import { gitBlobOid } from "../../../../utils/gitBlobOid";
 import { resetFilesOwnRevisionsForTests } from "../filesVersioning";
+import { useWorkspaceStore } from "../../../../store";
 
 const REV_1 = "1".repeat(40);
 const REV_2 = "2".repeat(40);
@@ -175,6 +176,8 @@ describe("FilesPanel one Save", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
     resetFilesOwnRevisionsForTests();
+    // The space the code store holds, as Studio keeps it for the open space.
+    useWorkspaceStore.setState({ activeProjectId: "space-a" });
     // A response queued with mockResolvedValueOnce never leaks into the next test.
     mocks.saveChanges.mockReset();
     mocks.listAt.mockReset();

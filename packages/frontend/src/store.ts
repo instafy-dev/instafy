@@ -135,6 +135,15 @@ export interface SessionStore {
     updater: (deployment: SiteBuilderState["deployment"]) => SiteBuilderState["deployment"]
   ) => void;
   updateCode: (updater: (code: SiteBuilderState["code"]) => SiteBuilderState["code"]) => void;
+  /**
+   * Update the code of a space that is not the open one (a save that finished
+   * after the user switched spaces). The open space's code belongs to its
+   * CodeProvider, which writes it through `updateCode`.
+   */
+  updateProjectCode: (
+    projectId: string,
+    updater: (code: SiteBuilderState["code"]) => SiteBuilderState["code"],
+  ) => void;
   updateVersionControl: (
     updater: (versionControl: SiteBuilderState["versionControl"]) => SiteBuilderState["versionControl"]
   ) => void;
@@ -364,6 +373,23 @@ export const useWorkspaceStore = create<SessionStore>()(
       projects: {
         ...store.projects,
         [store.activeProjectId]: clone(nextState)
+      }
+    });
+  },
+  updateProjectCode: (projectId, updater) => {
+    const store = get();
+    const project = store.projects[projectId];
+    if (!project || projectId === store.activeProjectId) {
+      return;
+    }
+    const nextCode = updater(clone(project.code));
+    if (JSON.stringify(project.code) === JSON.stringify(nextCode)) {
+      return;
+    }
+    set({
+      projects: {
+        ...store.projects,
+        [projectId]: clone({ ...project, code: nextCode })
       }
     });
   },
