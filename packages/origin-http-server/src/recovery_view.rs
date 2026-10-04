@@ -20,7 +20,9 @@
 
 use axum::http::StatusCode;
 use chrono::{FixedOffset, SecondsFormat, TimeZone as _};
-use git_service::policy::{RECOVERY_REF_ROOT, SALVAGE_REF_ROOT};
+use git_service::policy::{
+    is_salvage_ref_name, RECOVERY_REF_ROOT, SALVAGE_GATEWAY_REF_ROOT, SALVAGE_REF_ROOT,
+};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -31,17 +33,11 @@ use crate::paths::is_reserved_path;
 use crate::recovery::{RecoveryKind, CONFLICT_TRAILER, KIND_TRAILER, PATH_TRAILER};
 use crate::workspace_git::{RunOpts, WorkspaceGit};
 
-/// Where salvaged work from retired gateway working copies lives.
-pub(crate) const SALVAGE_GATEWAY_ROOT: &str = "refs/instafy/salvage/gateway";
-
 /// The branch every read without `rev` or `ref` shows.
 pub(crate) const MAIN_REF: &str = "refs/heads/main";
 
 /// Longest name of a recovery ref (after its origin id): one file name.
 const MAX_RECOVERY_NAME_BYTES: usize = 255;
-
-/// Longest name of a salvage ref, as the shard allows.
-const MAX_SALVAGE_NAME_BYTES: usize = 100;
 
 /// Most items one recovery listing returns, newest first.
 pub(crate) const MAX_RECOVERY_ITEMS: usize = 100;
@@ -149,7 +145,7 @@ impl RecoveryRef {
     ///   `.` or `.lock`.
     pub(crate) fn parse(name: &str) -> Result<Self, ViewError> {
         let recovery_prefix = format!("{RECOVERY_REF_ROOT}/");
-        let salvage_prefix = format!("{SALVAGE_GATEWAY_ROOT}/");
+        let salvage_prefix = format!("{SALVAGE_GATEWAY_REF_ROOT}/");
         let source = if let Some(rest) = name.strip_prefix(&recovery_prefix) {
             let (origin, last) = rest.split_once('/').ok_or(ViewError::InvalidRef)?;
             if !is_lower_case_uuid(origin) || !is_valid_recovery_name(last) {
@@ -157,8 +153,9 @@ impl RecoveryRef {
             }
             let origin = Uuid::parse_str(origin).map_err(|_| ViewError::InvalidRef)?;
             RefSource::Recovery { origin }
-        } else if let Some(last) = name.strip_prefix(&salvage_prefix) {
-            if !is_valid_salvage_name(last) {
+        } else if name.starts_with(&salvage_prefix) {
+            // The shard's own rule for salvage ref names.
+            if !is_salvage_ref_name(name) {
                 return Err(ViewError::InvalidRef);
             }
             RefSource::Salvage
@@ -220,20 +217,6 @@ fn is_valid_recovery_name(name: &str) -> bool {
         && !name.ends_with('.')
         && !name.contains("..")
         && !name.to_ascii_lowercase().ends_with(".lock")
-}
-
-/// The shard's rule for the name of a salvage ref.
-fn is_valid_salvage_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    !bytes.is_empty()
-        && bytes.len() <= MAX_SALVAGE_NAME_BYTES
-        && matches!(bytes[0], b'0'..=b'9' | b'a'..=b'z')
-        && bytes
-            .iter()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'.' | b'_' | b'-'))
-        && !name.contains("..")
-        && !name.ends_with('.')
-        && !name.ends_with(".lock")
 }
 
 /// A commit id a client sends (`?rev=`, `baseRev`, a listed `rev`): exactly
