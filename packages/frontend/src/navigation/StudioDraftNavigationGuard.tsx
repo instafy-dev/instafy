@@ -4,6 +4,7 @@ import { useBlocker } from "react-router-dom";
 import { Button } from "../components/Button";
 import { StudioDialogModal } from "../components/aria/StudioModal";
 import { isFileBufferDraftKey, useStudioDraftSnapshot, useStudioDraftStore } from "../workspace/StudioDrafts";
+import { isDesktopShell } from "../lib/desktopShell";
 
 const runImmediately = (action: () => void) => action();
 const NavigationContext = createContext(runImmediately);
@@ -32,12 +33,18 @@ export function StudioDraftNavigationGuard({ children }: { children: ReactNode }
     else action();
   }, [store]);
   const hasWork = drafts.length > 0 || protections.length > 0;
+  // Unsaved Files buffers stay on this device, so leaving does not discard them.
+  const fileDraftCount = drafts.filter(item => isFileBufferDraftKey(item.key)).length;
+  const onlyFileBuffers = !protections.length && fileDraftCount > 0 && fileDraftCount === drafts.length;
+  // In the Desktop app a blocked unload silently cancels closing the window or
+  // quitting (no dialog is shown there), so kept file buffers never block it.
+  const blocksUnload = hasWork && !(onlyFileBuffers && isDesktopShell());
   useEffect(() => {
-    if (!hasWork) return;
+    if (!blocksUnload) return;
     const beforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [hasWork]);
+  }, [blocksUnload]);
   const stay = () => {
     setPending(null);
     if (blocker.state === "blocked") blocker.reset();
@@ -57,9 +64,6 @@ export function StudioDraftNavigationGuard({ children }: { children: ReactNode }
     setPending(null);
   };
   const busy = protections.some(item => !item.discard);
-  // Unsaved Files buffers stay on this device, so leaving does not discard them.
-  const fileDraftCount = drafts.filter(item => isFileBufferDraftKey(item.key)).length;
-  const onlyFileBuffers = !protections.length && fileDraftCount > 0 && fileDraftCount === drafts.length;
   useNativeBackButtonAction(Boolean(pending) || blocker.state === "blocked", stay, 300);
   return <NavigationContext.Provider value={run}>
     {children}

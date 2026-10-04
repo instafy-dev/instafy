@@ -89,4 +89,24 @@ describe("Files buffers as Studio drafts", () => {
     expect(buttons).toEqual(["Keep editing", "Leave"]);
     expect(dialog()?.textContent).not.toContain("\u2014");
   });
+
+  it("never blocks closing the Desktop app for kept file buffers", async () => {
+    const shell = window as typeof window & { instafyDesktop?: unknown };
+    shell.instafyDesktop = {};
+    try {
+      // The app's bridge exists from the first render on.
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await act(async () => root.render(<RouterProvider router={router} />));
+      expect(keys).toHaveLength(2);
+      const unload = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(unload);
+      expect(unload.defaultPrevented).toBe(false);
+      // Leaving Studio inside the app still asks.
+      await act(async () => router.navigate("/home"));
+      expect(dialog()?.textContent).toContain("You have unsaved edits in 2 files.");
+    } finally {
+      delete shell.instafyDesktop;
+    }
+  });
 });
