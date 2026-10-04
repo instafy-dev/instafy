@@ -1330,6 +1330,17 @@ describe("ChatFileChangeList", () => {
       };
     }
 
+    // Polls instead of sleeping a fixed time, so a busy test machine cannot
+    // make a short Retry-After look like a missing retry.
+    async function waitForDialogState(state: string) {
+      const started = Date.now();
+      while (dialog()?.getAttribute("data-state") !== state && Date.now() - started < 2000) {
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+      }
+    }
+
     it("checks again once while the space is still loading, then offers Revert", async () => {
       fetchWorkspaceGitHistoryReview.mockResolvedValueOnce(reviewStillLoading(5));
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
@@ -1337,9 +1348,7 @@ describe("ChatFileChangeList", () => {
 
       // Still checking while it waits for the gateway.
       expect(dialog()?.getAttribute("data-state")).toBe("checking");
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 30));
-      });
+      await waitForDialogState("ready");
 
       expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
       expect(fetchWorkspaceGitHistoryReview.mock.calls[1]?.[0]).toEqual(fetchWorkspaceGitHistoryReview.mock.calls[0]?.[0]);
@@ -1353,9 +1362,7 @@ describe("ChatFileChangeList", () => {
       fetchWorkspaceGitHistoryReview.mockResolvedValue(reviewStillLoading(5));
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
       await openRevertDialog();
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 30));
-      });
+      await waitForDialogState("failed");
 
       expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
       expect(dialog()?.getAttribute("data-state")).toBe("failed");
