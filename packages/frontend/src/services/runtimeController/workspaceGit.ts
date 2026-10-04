@@ -1,11 +1,23 @@
 import { normalizeOriginEndpointForClient, runtimeControllerEnabled } from "./core";
 import { logControllerRequestError } from "./logging";
 import {
-  requestOriginAccessToken,
-  type OriginAccessTokenResponse,
-  type RequestOriginAccessTokenParams,
-} from "./origins";
+  originErrorFromException,
+  parseOriginErrorText,
+  parsePublishReport,
+  readOriginPathList,
+  type OriginError,
+  type OriginPublishReport,
+} from "./originErrors";
+import {
+  fetchWithOriginToken,
+  originHeaders,
+  originRoutingTokenParams,
+  withWorkspaceWriteLease,
+  type WorkspaceOriginRouting,
+} from "./originRequest";
+import { requestOriginAccessToken } from "./origins";
 import { acquireWorkspaceLease, releaseWorkspaceLease, type WorkspaceLease } from "./workspaceLeases";
+import { noteVersioningSignal } from "./workspaceVersioningCache";
 
 const WORKSPACE_GIT_STATUS_TIMEOUT_MS = 15_000;
 const TRANSIENT_BUSY_STATUS_PATTERN = /workspace is busy applying\/syncing changes/i;
@@ -32,6 +44,8 @@ export interface WorkspaceGitStatus {
   pageOffset?: number;
   pageLimit?: number;
   hasMoreFiles?: boolean;
+  /** The origin keeps no working copy: every save is already a version. */
+  stateless?: boolean;
   busy?: boolean;
   error?: string | null;
 }
@@ -54,50 +68,30 @@ export interface WorkspaceGitHistoryEntry {
   subject: string;
   /** Value of the Instafy-Resolved-By trailer (e.g. "assistant"). */
   resolvedBy?: string | null;
+  /** First parent of the commit (newer origins); the revert base for merges. */
+  firstParent?: string | null;
+  /** Who made the version, decided by the origin (newer origins only). */
+  actor?: WorkspaceGitHistoryActor | null;
 }
+
+export type WorkspaceGitHistoryActor = "user" | "service" | "external";
 
 export interface WorkspaceGitHistory {
   supported: boolean;
   entries: WorkspaceGitHistoryEntry[];
   branch?: string | null;
   headRef?: string | null;
+  /** The origin says (or a full page suggests) that older versions exist. */
+  hasMore?: boolean;
   busy?: boolean;
   error?: string | null;
 }
 
-type OriginGitFetchResult = {
-  endpoint: string;
-  originToken: OriginAccessTokenResponse;
-  response: Response;
-};
+const fetchWorkspaceOriginGitResponse = fetchWithOriginToken;
 
-async function fetchWorkspaceOriginGitResponse(
-  tokenParams: RequestOriginAccessTokenParams,
-  execute: (
-    originToken: OriginAccessTokenResponse,
-    endpoint: string,
-  ) => Promise<Response>,
-): Promise<OriginGitFetchResult | null> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const originToken = await requestOriginAccessToken({
-      ...tokenParams,
-      forceRefresh: attempt > 0,
-    });
-
-    if (!originToken) {
-      return null;
-    }
-
-    const endpoint = normalizeOriginEndpointForClient(originToken.endpoint);
-    const response = await execute(originToken, endpoint);
-    if (response.status === 401 && attempt === 0) {
-      continue;
-    }
-
-    return { endpoint, originToken, response };
-  }
-
-  return null;
+/** Legacy git calls prefer the hosted gateway; default routing pins the default origin. */
+function gitRouting(routing: WorkspaceOriginRouting | undefined) {
+  return originRoutingTokenParams(routing, { preferHosted: true });
 }
 
 export interface WorkspaceGitHistoryReview {
@@ -120,6 +114,13 @@ export async function fetchWorkspaceGitStatusFromController(params: {
   scope?: string | null;
   limit?: number;
   offset?: number;
+  routing?: WorkspaceOriginRouting;
+  /**
+   * Report a `stateless: true` answer to the versioning cache (default). The
+   * capability probe turns this off: it stores its own answer, and its own
+   * response must not count as a signal that arrived while it was running.
+   */
+  noteVersioningSignals?: boolean;
 }): Promise<WorkspaceGitStatus | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -138,7 +139,7 @@ export async function fetchWorkspaceGitStatusFromController(params: {
         projectId,
         protocol: "http",
         scopes: ["fs.read"],
-        preferHosted: true,
+        ...gitRouting(params.routing),
         originId: params.originId ?? null,
         accessToken: params.accessToken ?? null,
       },
@@ -163,10 +164,7 @@ export async function fetchWorkspaceGitStatusFromController(params: {
             : null;
 
         return await fetch(url.toString(), {
-          headers: {
-            authorization: `Bearer ${originToken.token}`,
-            accept: "application/json",
-          },
+          headers: originHeaders(originToken.token, { accept: "application/json" }),
           cache: "no-store",
           signal: abortController?.signal,
         }).finally(() => {
@@ -180,7 +178,7 @@ export async function fetchWorkspaceGitStatusFromController(params: {
     if (!request) {
       return null;
     }
-    const { response } = request;
+    const { response, originToken: statusToken } = request;
 
     if (response.status === 404) {
       return {
@@ -282,6 +280,10 @@ export async function fetchWorkspaceGitStatusFromController(params: {
         : null;
     const busy = isTransientWorkspaceBusyError(payloadError);
     const error = busy ? null : payloadError;
+    const stateless = payload.stateless === true;
+    if (stateless && params.noteVersioningSignals !== false) {
+      noteVersioningSignal(statusToken.originId, "stateless");
+    }
 
     return {
       supported,
@@ -292,6 +294,7 @@ export async function fetchWorkspaceGitStatusFromController(params: {
       pageOffset,
       pageLimit,
       hasMoreFiles,
+      stateless,
       busy,
       error,
     };
@@ -344,12 +347,23 @@ export async function fetchWorkspaceGitStatusFromController(params: {
   }
 }
 
+/** Legacy origins serve at most 12 history entries; newer ones up to 50. */
+const LEGACY_HISTORY_LIMIT_MAX = 12;
+const DEFAULT_HISTORY_LIMIT_MAX = 50;
+
+function parseHistoryActor(value: unknown): WorkspaceGitHistoryActor | null {
+  return value === "user" || value === "service" || value === "external" ? value : null;
+}
+
 export async function fetchWorkspaceGitHistoryFromController(params: {
   projectId: string;
   accessToken?: string | null;
   runtimeId?: string | null;
   originId?: string | null;
   limit?: number;
+  /** Entries to skip (paging); sent only when positive. */
+  skip?: number;
+  routing?: WorkspaceOriginRouting;
 }): Promise<WorkspaceGitHistory | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -360,34 +374,34 @@ export async function fetchWorkspaceGitHistoryFromController(params: {
     return null;
   }
 
+  const limitMax =
+    params.routing === "default" ? DEFAULT_HISTORY_LIMIT_MAX : LEGACY_HISTORY_LIMIT_MAX;
+  const requestedLimit =
+    typeof params.limit === "number" && Number.isFinite(params.limit) && params.limit > 0
+      ? Math.max(1, Math.min(limitMax, Math.floor(params.limit)))
+      : null;
+
   try {
     const request = await fetchWorkspaceOriginGitResponse(
       {
         projectId,
         protocol: "http",
         scopes: ["fs.read"],
-        preferHosted: true,
+        ...gitRouting(params.routing),
         originId: params.originId ?? null,
         accessToken: params.accessToken ?? null,
       },
       async (originToken, endpoint) => {
         const url = new URL(`${endpoint}/git/history`);
-        if (
-          typeof params.limit === "number" &&
-          Number.isFinite(params.limit) &&
-          params.limit > 0
-        ) {
-          url.searchParams.set(
-            "limit",
-            String(Math.max(1, Math.min(12, Math.floor(params.limit)))),
-          );
+        if (requestedLimit !== null) {
+          url.searchParams.set("limit", String(requestedLimit));
+        }
+        if (typeof params.skip === "number" && Number.isFinite(params.skip) && params.skip > 0) {
+          url.searchParams.set("skip", String(Math.floor(params.skip)));
         }
 
         return await fetch(url.toString(), {
-          headers: {
-            authorization: `Bearer ${originToken.token}`,
-            accept: "application/json",
-          },
+          headers: originHeaders(originToken.token, { accept: "application/json" }),
           cache: "no-store",
         });
       },
@@ -447,7 +461,29 @@ export async function fetchWorkspaceGitHistoryFromController(params: {
       if (!commit || !shortCommit || !subject) {
         return acc;
       }
-      acc.push({ commit, shortCommit, committedAt, authorName, authorEmail, subject, resolvedBy });
+      const historyEntry: WorkspaceGitHistoryEntry = {
+        commit,
+        shortCommit,
+        committedAt,
+        authorName,
+        authorEmail,
+        subject,
+        resolvedBy,
+      };
+      const firstParent =
+        typeof record?.firstParent === "string" && record.firstParent.trim().length > 0
+          ? record.firstParent.trim()
+          : typeof record?.first_parent === "string" && record.first_parent.trim().length > 0
+            ? record.first_parent.trim()
+            : null;
+      if (firstParent) {
+        historyEntry.firstParent = firstParent;
+      }
+      const actor = parseHistoryActor(record?.actor);
+      if (actor) {
+        historyEntry.actor = actor;
+      }
+      acc.push(historyEntry);
       return acc;
     }, []);
     const payloadError =
@@ -464,8 +500,17 @@ export async function fetchWorkspaceGitHistoryFromController(params: {
           : null;
     const busy = isTransientWorkspaceBusyError(payloadError);
     const error = busy ? null : payloadError;
+    const serverHasMore =
+      typeof payload.hasMore === "boolean"
+        ? payload.hasMore
+        : typeof payload.has_more === "boolean"
+          ? payload.has_more
+          : null;
+    // Until origins report `hasMore`, a full page means there may be more.
+    const hasMore =
+      serverHasMore ?? (requestedLimit !== null && entriesRaw.length >= requestedLimit);
 
-    return { supported, entries, branch, headRef, busy, error };
+    return { supported, entries, branch, headRef, hasMore, busy, error };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] fetchWorkspaceGitHistory error:", message);
@@ -497,9 +542,12 @@ export async function fetchWorkspaceGitDiffFromController(params: {
   // When set, the origin diffs base→commit (or base→worktree) tree-to-tree,
   // which renders real edit diffs on snapshot-history origins.
   base?: string | null;
+  /** Read objects from this recovery or salvage ref (newer origins). */
+  ref?: string | null;
   accessToken?: string | null;
   runtimeId?: string | null;
   originId?: string | null;
+  routing?: WorkspaceOriginRouting;
 }): Promise<WorkspaceGitDiff | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -517,7 +565,7 @@ export async function fetchWorkspaceGitDiffFromController(params: {
         projectId,
         protocol: "http",
         scopes: ["fs.read"],
-        preferHosted: true,
+        ...gitRouting(params.routing),
         originId: params.originId ?? null,
         accessToken: params.accessToken ?? null,
       },
@@ -530,12 +578,12 @@ export async function fetchWorkspaceGitDiffFromController(params: {
         if (typeof params.base === "string" && params.base.trim().length > 0) {
           url.searchParams.set("base", params.base.trim());
         }
+        if (typeof params.ref === "string" && params.ref.trim().length > 0) {
+          url.searchParams.set("ref", params.ref.trim());
+        }
 
         return await fetch(url.toString(), {
-          headers: {
-            authorization: `Bearer ${originToken.token}`,
-            accept: "application/json",
-          },
+          headers: originHeaders(originToken.token, { accept: "application/json" }),
           cache: "no-store",
         });
       },
@@ -595,9 +643,12 @@ export async function fetchWorkspaceGitDiffFromController(params: {
 export async function fetchWorkspaceGitHistoryReviewFromController(params: {
   projectId: string;
   commit: string;
+  /** Read objects from this recovery or salvage ref (newer origins). */
+  ref?: string | null;
   accessToken?: string | null;
   runtimeId?: string | null;
   originId?: string | null;
+  routing?: WorkspaceOriginRouting;
 }): Promise<WorkspaceGitHistoryReview | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -614,7 +665,7 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
       projectId,
       protocol: "http",
       scopes: ["fs.read"],
-      preferHosted: true,
+      ...gitRouting(params.routing),
       originId: params.originId ?? null,
       accessToken: params.accessToken ?? null,
     });
@@ -626,12 +677,12 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
     const endpoint = normalizeOriginEndpointForClient(originToken.endpoint);
     const url = new URL(`${endpoint}/git/history/review`);
     url.searchParams.set("commit", commit);
+    if (typeof params.ref === "string" && params.ref.trim().length > 0) {
+      url.searchParams.set("ref", params.ref.trim());
+    }
 
     const response = await fetch(url.toString(), {
-      headers: {
-        authorization: `Bearer ${originToken.token}`,
-        accept: "application/json",
-      },
+      headers: originHeaders(originToken.token, { accept: "application/json" }),
       cache: "no-store",
     });
 
@@ -692,6 +743,9 @@ export async function fetchWorkspaceGitHistoryReviewFromController(params: {
   }
 }
 
+/** Neutral subject for a sync without a caller message; never omitted. */
+export const DEFAULT_SYNC_MESSAGE = "instafy: sync";
+
 export interface SyncWorkspaceGitParams {
   projectId: string;
   message?: string | null;
@@ -702,16 +756,169 @@ export interface SyncWorkspaceGitParams {
   leaseId?: string | null;
   leaseSeconds?: number;
   retainLease?: boolean;
+  /**
+   * `default` runs through the shared write-lease helper: one origin (a
+   * retried token never moves the write), typed lease and token errors.
+   */
+  routing?: WorkspaceOriginRouting;
+  /** Default routing only: retry a lease held by someone else once after this delay. */
+  leaseConflictRetryDelayMs?: number | null;
 }
 
 export interface SyncWorkspaceGitResult {
   ok: boolean;
   rev?: string | null;
+  /** `main` before this sync, when the origin reports it. */
+  baseRev?: string | null;
+  /** Present only on origins that say whether a commit was made. */
+  committed?: boolean;
+  /** Desktop and runtime origins: what was published and what was kept aside. */
+  report?: OriginPublishReport | null;
   conflict?: boolean;
   error?: string;
+  errorInfo?: OriginError;
   leaseId?: string | null;
+  originId?: string | null;
   originMode?: string | null;
   originEndpoint?: string | null;
+}
+
+type OriginCallMeta = {
+  leaseId: string | null;
+  originId: string | null;
+  originMode: string | null;
+  endpoint: string | null;
+};
+
+function buildSyncResult(captured: CapturedOriginResponse, meta: OriginCallMeta): SyncWorkspaceGitResult {
+  if (!captured.ok) {
+    const errorInfo = parseOriginErrorText(captured.status, captured.text, captured.headers);
+    return {
+      ok: false,
+      conflict: captured.status === 409,
+      leaseId: meta.leaseId,
+      originId: meta.originId,
+      originMode: meta.originMode,
+      originEndpoint: meta.endpoint,
+      error: `origin git sync failed (${captured.status}): ${captured.text}`,
+      errorInfo,
+      report: errorInfo.report ?? null,
+    };
+  }
+
+  const payload = parseJsonRecord(captured.text);
+  const result: SyncWorkspaceGitResult = {
+    ok: true,
+    rev: typeof payload?.rev === "string" ? payload.rev : null,
+    conflict: false,
+    leaseId: meta.leaseId,
+    originId: meta.originId,
+    originMode: meta.originMode,
+    originEndpoint: meta.endpoint,
+  };
+  const baseRev =
+    typeof payload?.baseRev === "string"
+      ? payload.baseRev
+      : typeof payload?.base_rev === "string"
+        ? payload.base_rev
+        : null;
+  if (baseRev) {
+    result.baseRev = baseRev;
+  }
+  if (typeof payload?.committed === "boolean") {
+    result.committed = payload.committed;
+  }
+  const report = parsePublishReport(payload);
+  if (report) {
+    result.report = report;
+  }
+  return result;
+}
+
+/**
+ * Run a default-routed write (`git/sync`, `git/revert`) through the shared
+ * lease helper and capture the answer. Lease and token failures come back as
+ * typed errors; the lease holder's id is never kept.
+ */
+async function postDefaultRoutedWrite(
+  params: {
+    projectId: string;
+    originId?: string | null;
+    runtimeId?: string | null;
+    accessToken?: string | null;
+    leaseId?: string | null;
+    leaseSeconds?: number;
+    retainLease?: boolean;
+    leaseConflictRetryDelayMs?: number | null;
+  },
+  path: string,
+  body: unknown,
+): Promise<
+  | { ok: true; captured: CapturedOriginResponse; meta: OriginCallMeta }
+  | { ok: false; error: OriginError; meta: OriginCallMeta }
+> {
+  try {
+    return await postDefaultRoutedWriteUnchecked(params, path, body);
+  } catch (error) {
+    // The helper resolves every failure it knows; this keeps the exported
+    // calls from ever rejecting.
+    return {
+      ok: false,
+      error: originErrorFromException(error),
+      meta: { leaseId: params.leaseId ?? null, originId: params.originId ?? null, originMode: null, endpoint: null },
+    };
+  }
+}
+
+async function postDefaultRoutedWriteUnchecked(
+  params: {
+    projectId: string;
+    originId?: string | null;
+    runtimeId?: string | null;
+    accessToken?: string | null;
+    leaseId?: string | null;
+    leaseSeconds?: number;
+    retainLease?: boolean;
+    leaseConflictRetryDelayMs?: number | null;
+  },
+  path: string,
+  body: unknown,
+): Promise<
+  | { ok: true; captured: CapturedOriginResponse; meta: OriginCallMeta }
+  | { ok: false; error: OriginError; meta: OriginCallMeta }
+> {
+  const outcome = await withWorkspaceWriteLease(
+    {
+      projectId: params.projectId,
+      originId: params.originId ?? null,
+      runtimeId: params.runtimeId ?? null,
+      accessToken: params.accessToken ?? null,
+      leaseId: params.leaseId ?? null,
+      leaseSeconds: params.leaseSeconds,
+      retainLease: params.retainLease === true,
+      leaseConflictRetryDelayMs: params.leaseConflictRetryDelayMs ?? null,
+    },
+    async (context) =>
+      captureOriginResponse(
+        await context.fetch(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(body),
+        }),
+      ),
+  );
+  const meta: OriginCallMeta = {
+    leaseId: outcome.leaseId || null,
+    originId: outcome.originId || null,
+    originMode: outcome.originMode || null,
+    endpoint: outcome.endpoint || null,
+  };
+  return outcome.ok
+    ? { ok: true, captured: outcome.value, meta }
+    : { ok: false, error: outcome.error, meta };
 }
 
 export async function syncWorkspaceGitToRemoteFromController(
@@ -724,6 +931,39 @@ export async function syncWorkspaceGitToRemoteFromController(
   const projectId = params.projectId.trim();
   if (!projectId) {
     return null;
+  }
+
+  // Always send a message: origins older than the plain-subject publish
+  // (the stateful gateway, older Desktop apps) otherwise write a subject
+  // that names the user into permanent history.
+  const message =
+    typeof params.message === "string" && params.message.trim().length > 0
+      ? params.message.trim()
+      : DEFAULT_SYNC_MESSAGE;
+  const paths =
+    Array.isArray(params.paths) && params.paths.length > 0
+      ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
+      : undefined;
+  const body: Record<string, unknown> = { message };
+  if (paths && paths.length > 0) {
+    body.paths = paths;
+  }
+
+  if (params.routing === "default") {
+    const posted = await postDefaultRoutedWrite({ ...params, projectId }, "git/sync", body);
+    if (!posted.ok) {
+      return {
+        ok: false,
+        conflict: false,
+        leaseId: posted.meta.leaseId,
+        originId: posted.meta.originId,
+        originMode: posted.meta.originMode,
+        originEndpoint: posted.meta.endpoint,
+        error: posted.error.message,
+        errorInfo: posted.error,
+      };
+    }
+    return buildSyncResult(posted.captured, posted.meta);
   }
 
   const runtimeHint = params.runtimeId ?? null;
@@ -747,25 +987,12 @@ export async function syncWorkspaceGitToRemoteFromController(
       leaseIdForRelease = leaseId;
     }
 
-    const message =
-      typeof params.message === "string" && params.message.trim().length > 0
-        ? params.message.trim()
-        : "instafy: sync";
-    const paths =
-      Array.isArray(params.paths) && params.paths.length > 0
-        ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
-        : undefined;
-    const body: Record<string, unknown> = { message };
-    if (paths && paths.length > 0) {
-      body.paths = paths;
-    }
-
     const request = await fetchWorkspaceOriginGitResponse(
       {
         projectId,
         protocol: "http",
         scopes: ["fs.write"],
-        preferHosted: true,
+        ...gitRouting(params.routing),
         originId: params.originId ?? null,
         leaseId,
         accessToken: params.accessToken ?? null,
@@ -778,11 +1005,10 @@ export async function syncWorkspaceGitToRemoteFromController(
 
         return await fetch(`${endpoint}/git/sync`, {
           method: "POST",
-          headers: {
-            authorization: `Bearer ${originToken.token}`,
+          headers: originHeaders(originToken.token, {
             "content-type": "application/json",
             accept: "application/json",
-          },
+          }),
           body: JSON.stringify(body),
         });
       },
@@ -793,30 +1019,12 @@ export async function syncWorkspaceGitToRemoteFromController(
     }
 
     const { endpoint, originToken, response } = request;
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const message = `origin git sync failed (${response.status}): ${text}`;
-      return {
-        ok: false,
-        conflict: response.status === 409,
-        leaseId: leaseId ?? null,
-        originMode: originToken.mode ?? null,
-        originEndpoint: endpoint,
-        error: message,
-      };
-    }
-
-    const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    const rev = typeof payload?.rev === "string" ? payload.rev : null;
-    return {
-      ok: true,
-      rev,
-      conflict: false,
+    return buildSyncResult(await captureOriginResponse(response), {
       leaseId: leaseId ?? null,
+      originId: originToken.originId ?? null,
       originMode: originToken.mode ?? null,
-      originEndpoint: endpoint,
-    };
+      endpoint,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] syncWorkspaceGitToRemote error:", message);
@@ -839,9 +1047,46 @@ export interface RevertWorkspaceGitResult {
   removed?: string[] | null;
   conflict?: boolean;
   error?: string;
+  errorInfo?: OriginError;
   leaseId?: string | null;
+  originId?: string | null;
   originMode?: string | null;
   originEndpoint?: string | null;
+}
+
+function buildRevertPathsResult(
+  captured: CapturedOriginResponse,
+  meta: OriginCallMeta,
+): RevertWorkspaceGitResult {
+  if (!captured.ok) {
+    const errorInfo = parseOriginErrorText(captured.status, captured.text, captured.headers);
+    if (errorInfo.code === "not_supported") {
+      // Only the stateless gateway refuses path discards outright.
+      noteVersioningSignal(meta.originId, "not_supported");
+    }
+    return {
+      ok: false,
+      conflict: captured.status === 409,
+      leaseId: meta.leaseId,
+      originMode: meta.originMode,
+      originEndpoint: meta.endpoint,
+      error: `origin git revert failed (${captured.status}): ${captured.text}`,
+      errorInfo,
+    };
+  }
+
+  const payload = parseJsonRecord(captured.text);
+  const reverted = Array.isArray(payload?.reverted) ? (payload?.reverted as string[]) : null;
+  const removed = Array.isArray(payload?.removed) ? (payload?.removed as string[]) : null;
+  return {
+    ok: true,
+    reverted,
+    removed,
+    conflict: false,
+    leaseId: meta.leaseId,
+    originMode: meta.originMode,
+    originEndpoint: meta.endpoint,
+  };
 }
 
 export async function revertWorkspaceGitPathsFromController(params: {
@@ -853,6 +1098,10 @@ export async function revertWorkspaceGitPathsFromController(params: {
   leaseId?: string | null;
   leaseSeconds?: number;
   retainLease?: boolean;
+  /** `default` runs through the shared write-lease helper (one origin, typed errors). */
+  routing?: WorkspaceOriginRouting;
+  /** Default routing only: retry a lease held by someone else once after this delay. */
+  leaseConflictRetryDelayMs?: number | null;
 }): Promise<RevertWorkspaceGitResult | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -861,6 +1110,28 @@ export async function revertWorkspaceGitPathsFromController(params: {
   const projectId = params.projectId.trim();
   if (!projectId) {
     return null;
+  }
+
+  const paths = Array.isArray(params.paths)
+    ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
+    : [];
+  const body = { paths };
+
+  if (params.routing === "default") {
+    const posted = await postDefaultRoutedWrite({ ...params, projectId }, "git/revert", body);
+    if (!posted.ok) {
+      return {
+        ok: false,
+        conflict: false,
+        leaseId: posted.meta.leaseId,
+        originId: posted.meta.originId,
+        originMode: posted.meta.originMode,
+        originEndpoint: posted.meta.endpoint,
+        error: posted.error.message,
+        errorInfo: posted.error,
+      };
+    }
+    return { ...buildRevertPathsResult(posted.captured, posted.meta), originId: posted.meta.originId };
   }
 
   const runtimeHint = params.runtimeId ?? null;
@@ -884,17 +1155,12 @@ export async function revertWorkspaceGitPathsFromController(params: {
       leaseIdForRelease = leaseId;
     }
 
-    const paths = Array.isArray(params.paths)
-      ? params.paths.map((path) => String(path)).filter((path) => path.trim().length > 0)
-      : [];
-    const body = { paths };
-
     const request = await fetchWorkspaceOriginGitResponse(
       {
         projectId,
         protocol: "http",
         scopes: ["fs.write"],
-        preferHosted: true,
+        ...gitRouting(params.routing),
         originId: params.originId ?? null,
         leaseId,
         accessToken: params.accessToken ?? null,
@@ -907,11 +1173,10 @@ export async function revertWorkspaceGitPathsFromController(params: {
 
         return await fetch(`${endpoint}/git/revert`, {
           method: "POST",
-          headers: {
-            authorization: `Bearer ${originToken.token}`,
+          headers: originHeaders(originToken.token, {
             "content-type": "application/json",
             accept: "application/json",
-          },
+          }),
           body: JSON.stringify(body),
         });
       },
@@ -922,32 +1187,12 @@ export async function revertWorkspaceGitPathsFromController(params: {
     }
 
     const { endpoint, originToken, response } = request;
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const message = `origin git revert failed (${response.status}): ${text}`;
-      return {
-        ok: false,
-        conflict: response.status === 409,
-        leaseId: leaseId ?? null,
-        originMode: originToken.mode ?? null,
-        originEndpoint: endpoint,
-        error: message,
-      };
-    }
-
-    const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    const reverted = Array.isArray(payload?.reverted) ? (payload?.reverted as string[]) : null;
-    const removed = Array.isArray(payload?.removed) ? (payload?.removed as string[]) : null;
-    return {
-      ok: true,
-      reverted,
-      removed,
-      conflict: false,
+    return buildRevertPathsResult(await captureOriginResponse(response), {
       leaseId: leaseId ?? null,
+      originId: originToken.originId ?? null,
       originMode: originToken.mode ?? null,
-      originEndpoint: endpoint,
-    };
+      endpoint,
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] revertWorkspaceGitPaths error:", message);
@@ -967,21 +1212,100 @@ export async function revertWorkspaceGitPathsFromController(params: {
 export interface RevertWorkspaceGitCommitResult {
   ok: boolean;
   rev?: string | null;
+  baseRev?: string | null;
+  /**
+   * False when the change was already undone and nothing was committed.
+   * Absent when the origin does not say (older origins).
+   */
+  committed?: boolean;
+  /** Desktop and runtime origins answer with a publish report. */
+  report?: OriginPublishReport | null;
   conflict?: boolean;
+  code?: string;
+  paths?: string[];
+  /** The controller or origin has no revert route yet. */
+  routeUnavailable?: boolean;
   error?: string;
+  errorInfo?: OriginError;
+  originId?: string | null;
   originMode?: string | null;
   originEndpoint?: string | null;
+}
+
+export const REVERT_ROUTE_UNAVAILABLE_MESSAGE =
+  "Reverting isn't available on this server yet. Ask the agent to undo it instead.";
+
+/**
+ * What legacy mode answers. Reverting never worked against the stateful
+ * gateway (the request could not get a write token), and it stays that way:
+ * legacy callers get the same failure without any request being made.
+ */
+const LEGACY_REVERT_UNAVAILABLE_ERROR = "failed to obtain origin token";
+
+type CapturedOriginResponse = {
+  ok: boolean;
+  status: number;
+  text: string;
+  headers: Headers;
+};
+
+async function captureOriginResponse(response: Response): Promise<CapturedOriginResponse> {
+  const text = await response.text().catch(() => "");
+  return { ok: response.ok, status: response.status, text, headers: response.headers };
+}
+
+function parseJsonRecord(text: string): Record<string, unknown> | null {
+  if (!text) {
+    return null;
+  }
+  try {
+    const value = JSON.parse(text) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function readPayloadString(
+  payload: Record<string, unknown> | null,
+  ...keys: string[]
+): string | null {
+  if (!payload) {
+    return null;
+  }
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
 }
 
 /**
  * Forward-revert a commit that already landed on canonical main. History is
  * never rewritten; the origin creates and pushes a new revert commit.
+ *
+ * Only the `stateless` and `desktop` modes revert, and they call this with
+ * `routing: "default"`. Legacy routing (the stateful gateway, the default
+ * for older callers) makes no request at all and answers as it always has.
+ *
+ * The write token needs a project lease, so one is acquired for the call and
+ * released after it. `base` (the first parent) lets newer origins revert a
+ * merge; it is only sent when given.
  */
 export async function revertWorkspaceGitCommitFromController(params: {
   projectId: string;
   commit: string;
+  base?: string | null;
   accessToken?: string | null;
   originId?: string | null;
+  runtimeId?: string | null;
+  /** Must be `default`; anything else never reaches the origin. */
+  routing?: WorkspaceOriginRouting;
+  leaseConflictRetryDelayMs?: number | null;
 }): Promise<RevertWorkspaceGitCommitResult | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -993,60 +1317,496 @@ export async function revertWorkspaceGitCommitFromController(params: {
     return null;
   }
 
+  if (params.routing !== "default") {
+    return {
+      ok: false,
+      conflict: false,
+      routeUnavailable: true,
+      code: "not_supported",
+      error: LEGACY_REVERT_UNAVAILABLE_ERROR,
+      errorInfo: {
+        status: 0,
+        code: "not_supported",
+        message: "reverting a saved version is not available in this mode",
+        routeUnavailable: true,
+      },
+    };
+  }
+
+  const body: Record<string, unknown> = { commit };
+  const base = typeof params.base === "string" ? params.base.trim() : "";
+  if (base) {
+    body.base = base;
+  }
+
   try {
-    const request = await fetchWorkspaceOriginGitResponse(
+    const outcome = await withWorkspaceWriteLease(
       {
         projectId,
-        protocol: "http",
-        scopes: ["fs.write"],
-        preferHosted: true,
         originId: params.originId ?? null,
-        leaseId: null,
+        runtimeId: params.runtimeId ?? null,
         accessToken: params.accessToken ?? null,
+        leaseConflictRetryDelayMs: params.leaseConflictRetryDelayMs ?? null,
       },
-      async (originToken, endpoint) => {
-        return await fetch(`${endpoint}/git/revert-commit`, {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${originToken.token}`,
-            "content-type": "application/json",
-            accept: "application/json",
-          },
-          body: JSON.stringify({ commit }),
-        });
-      },
+      async (context) =>
+        captureOriginResponse(
+          await context.fetch("git/revert-commit", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              accept: "application/json",
+            },
+            body: JSON.stringify(body),
+          }),
+        ),
     );
 
-    if (!request) {
-      throw new Error("failed to obtain origin token");
-    }
-
-    const { endpoint, originToken, response } = request;
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const message = `origin git revert-commit failed (${response.status}): ${text}`;
+    if (!outcome.ok) {
       return {
         ok: false,
-        conflict: response.status === 409,
-        originMode: originToken.mode ?? null,
-        originEndpoint: endpoint,
-        error: message,
+        conflict: false,
+        code: outcome.error.code,
+        error: outcome.error.message,
+        errorInfo: outcome.error,
+        originId: outcome.originId,
+        originMode: outcome.originMode,
+        originEndpoint: outcome.endpoint,
       };
     }
 
-    const payload = (await response.json().catch(() => null)) as Record<string, unknown> | null;
-    const rev = typeof payload?.rev === "string" ? payload.rev : null;
-    return {
+    const { value: captured, originId, originMode, endpoint } = outcome;
+    if (!captured.ok) {
+      const errorInfo = parseOriginErrorText(captured.status, captured.text, captured.headers);
+      const result: RevertWorkspaceGitCommitResult = {
+        ok: false,
+        conflict: captured.status === 409,
+        routeUnavailable: errorInfo.routeUnavailable,
+        error: errorInfo.routeUnavailable
+          ? REVERT_ROUTE_UNAVAILABLE_MESSAGE
+          : `origin git revert-commit failed (${captured.status}): ${captured.text}`,
+        errorInfo,
+        report: errorInfo.report ?? null,
+        originId,
+        originMode,
+        originEndpoint: endpoint,
+      };
+      if (errorInfo.code) {
+        result.code = errorInfo.code;
+      }
+      if (errorInfo.paths) {
+        result.paths = errorInfo.paths;
+      }
+      return result;
+    }
+
+    const payload = parseJsonRecord(captured.text);
+    const report = parsePublishReport(payload);
+    const result: RevertWorkspaceGitCommitResult = {
       ok: true,
-      rev,
+      rev: readPayloadString(payload, "rev"),
       conflict: false,
-      originMode: originToken.mode ?? null,
+      originId,
+      originMode,
       originEndpoint: endpoint,
     };
+    const baseRev = readPayloadString(payload, "baseRev", "base_rev");
+    if (baseRev) {
+      result.baseRev = baseRev;
+    }
+    if (typeof payload?.committed === "boolean") {
+      result.committed = payload.committed;
+      if (payload.committed) {
+        noteVersioningSignal(originId, "committed");
+      }
+    } else if (report?.gitSyncStatus === "unchanged") {
+      result.committed = false;
+    }
+    if (report) {
+      result.report = report;
+    }
+    return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] revertWorkspaceGitCommit error:", message);
     return { ok: false, conflict: false, error: message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Unsaved work (recovery and salvage refs)
+// ---------------------------------------------------------------------------
+
+export type WorkspaceRecoveryKind = "conflict" | "unpublished" | "unsaved" | "stale" | "salvage";
+
+export interface WorkspaceRecoveryEntry {
+  ref: string;
+  rev: string;
+  kind: WorkspaceRecoveryKind | (string & Record<never, never>);
+  subject: string;
+  date: string | null;
+  /** The origin that kept the work, when the ref names one. */
+  origin: string | null;
+  /** For `conflict` entries only the conflicted paths; otherwise every path. */
+  paths: string[];
+  /** Merge base with `main`: the base for review and restore diffs. */
+  base: string | null;
+  /** Salvage entries are permanent and cannot be removed. */
+  dismissible: boolean;
+  /** Set when `main` already holds a restore of this entry (salvage refs stay). */
+  restoredRev?: string | null;
+}
+
+export type WorkspaceRecoveryList =
+  | {
+      status: "ok";
+      entries: WorkspaceRecoveryEntry[];
+      originId: string | null;
+      originMode: string | null;
+    }
+  | {
+      /** No recovery route on this controller or origin (older servers). */
+      status: "unsupported";
+      entries: [];
+      originId: string | null;
+      originMode: string | null;
+    }
+  | {
+      status: "error";
+      entries: [];
+      error: OriginError;
+      originId: string | null;
+      originMode: string | null;
+    };
+
+const SALVAGE_REF_PREFIX = "refs/instafy/salvage/";
+
+function parseRecoveryEntry(value: unknown): WorkspaceRecoveryEntry | null {
+  const record =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const ref = readPayloadString(record, "ref");
+  const rev = readPayloadString(record, "rev");
+  if (!record || !ref || !rev) {
+    return null;
+  }
+  const isSalvage = ref.startsWith(SALVAGE_REF_PREFIX);
+  const entry: WorkspaceRecoveryEntry = {
+    ref,
+    rev,
+    kind: readPayloadString(record, "kind") ?? (isSalvage ? "salvage" : "unpublished"),
+    subject: readPayloadString(record, "subject") ?? "",
+    date: readPayloadString(record, "date", "committedAt", "committed_at"),
+    origin: readPayloadString(record, "origin", "originId", "origin_id"),
+    paths: readOriginPathList(record.paths),
+    base: readPayloadString(record, "base"),
+    dismissible:
+      typeof record.dismissible === "boolean" ? record.dismissible : !isSalvage,
+  };
+  const restoredRev = readPayloadString(record, "restoredRev", "restored_rev");
+  if (restoredRev) {
+    entry.restoredRev = restoredRev;
+  }
+  return entry;
+}
+
+/**
+ * List unsaved work kept on recovery and salvage refs. A 404 (an older
+ * controller or origin without the route) is `unsupported`, never an error.
+ */
+export async function fetchWorkspaceRecoveryFromController(params: {
+  projectId: string;
+  originId?: string | null;
+  accessToken?: string | null;
+}): Promise<WorkspaceRecoveryList | null> {
+  if (!runtimeControllerEnabled) {
+    return null;
+  }
+  const projectId = params.projectId.trim();
+  if (!projectId) {
+    return null;
+  }
+
+  let originId: string | null = params.originId?.trim() || null;
+  let originMode: string | null = null;
+  try {
+    const request = await fetchWorkspaceOriginGitResponse(
+      {
+        projectId,
+        protocol: "http",
+        scopes: ["fs.read"],
+        originId,
+        accessToken: params.accessToken ?? null,
+      },
+      async (originToken, endpoint) =>
+        await fetch(`${endpoint}/git/recovery`, {
+          headers: originHeaders(originToken.token, { accept: "application/json" }),
+          cache: "no-store",
+        }),
+    );
+    if (!request) {
+      return {
+        status: "error",
+        entries: [],
+        error: {
+          status: 0,
+          code: "token_unavailable",
+          message: "failed to obtain origin token",
+          routeUnavailable: false,
+        },
+        originId,
+        originMode,
+      };
+    }
+    originId = request.originToken.originId ?? originId;
+    originMode = request.originToken.mode ?? null;
+    const captured = await captureOriginResponse(request.response);
+    if (captured.status === 404) {
+      noteVersioningSignal(originId, "recovery_unsupported");
+      return { status: "unsupported", entries: [], originId, originMode };
+    }
+    if (!captured.ok) {
+      return {
+        status: "error",
+        entries: [],
+        error: parseOriginErrorText(captured.status, captured.text, captured.headers),
+        originId,
+        originMode,
+      };
+    }
+    let payload: unknown = null;
+    try {
+      payload = captured.text ? (JSON.parse(captured.text) as unknown) : null;
+    } catch (_error) {
+      payload = null;
+    }
+    const rawEntries = Array.isArray(payload)
+      ? payload
+      : payload && typeof payload === "object" && Array.isArray((payload as Record<string, unknown>).entries)
+        ? ((payload as Record<string, unknown>).entries as unknown[])
+        : null;
+    if (!rawEntries) {
+      return {
+        status: "error",
+        entries: [],
+        error: {
+          status: captured.status,
+          message: "unexpected recovery list response",
+          routeUnavailable: false,
+        },
+        originId,
+        originMode,
+      };
+    }
+    noteVersioningSignal(originId, "recovery_supported");
+    const entries = rawEntries
+      .map(parseRecoveryEntry)
+      .filter((entry): entry is WorkspaceRecoveryEntry => entry !== null);
+    return { status: "ok", entries, originId, originMode };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn("[runtime-controller] fetchWorkspaceRecovery error:", message);
+    return {
+      status: "error",
+      entries: [],
+      error: {
+        status: 0,
+        code: error instanceof Error && error.name === "AbortError" ? "timeout" : "network_error",
+        message,
+        routeUnavailable: false,
+      },
+      originId,
+      originMode,
+    };
+  }
+}
+
+export interface WorkspaceRecoveryWriteFailure {
+  ok: false;
+  /** `lease`/`token`: before the request; `request`: no answer; `response`: an error answer. */
+  stage: "lease" | "token" | "request" | "response";
+  error: OriginError;
+  originId: string | null;
+  originMode: string | null;
+}
+
+export interface RestoreWorkspaceRecoveryParams {
+  projectId: string;
+  ref: string;
+  /** The tip the user saw; a moved ref answers 409 `recovery_ref_moved`. */
+  rev?: string | null;
+  /** Newest known `main`, for the gateway's compare-and-swap. */
+  baseRev?: string | null;
+  /** Paths to leave as they are on `main` (reported back in `notRestored`). */
+  keep?: string[] | null;
+  originId?: string | null;
+  runtimeId?: string | null;
+  accessToken?: string | null;
+  leaseConflictRetryDelayMs?: number | null;
+}
+
+export type RestoreWorkspaceRecoveryResult =
+  | {
+      ok: true;
+      rev: string | null;
+      baseRev: string | null;
+      committed: boolean | null;
+      notRestored: string[];
+      refDeleted: boolean;
+      originId: string;
+      originMode: string;
+    }
+  | WorkspaceRecoveryWriteFailure;
+
+export interface DismissWorkspaceRecoveryParams {
+  projectId: string;
+  ref: string;
+  rev: string;
+  originId?: string | null;
+  runtimeId?: string | null;
+  accessToken?: string | null;
+  leaseConflictRetryDelayMs?: number | null;
+}
+
+export type DismissWorkspaceRecoveryResult =
+  | {
+      ok: true;
+      dismissed: boolean;
+      /** The ref was already gone. */
+      missing: boolean;
+      originId: string;
+      originMode: string;
+    }
+  | WorkspaceRecoveryWriteFailure;
+
+async function postRecoveryWrite(
+  params: {
+    projectId: string;
+    originId?: string | null;
+    runtimeId?: string | null;
+    accessToken?: string | null;
+    leaseConflictRetryDelayMs?: number | null;
+  },
+  path: string,
+  body: Record<string, unknown>,
+): Promise<
+  | { ok: true; payload: Record<string, unknown> | null; originId: string; originMode: string }
+  | WorkspaceRecoveryWriteFailure
+> {
+  const outcome = await withWorkspaceWriteLease(
+    {
+      projectId: params.projectId.trim(),
+      originId: params.originId ?? null,
+      runtimeId: params.runtimeId ?? null,
+      accessToken: params.accessToken ?? null,
+      leaseConflictRetryDelayMs: params.leaseConflictRetryDelayMs ?? null,
+    },
+    async (context) =>
+      captureOriginResponse(
+        await context.fetch(path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(body),
+        }),
+      ),
+  );
+  if (!outcome.ok) {
+    return {
+      ok: false,
+      stage: outcome.stage,
+      error: outcome.error,
+      originId: outcome.originId,
+      originMode: outcome.originMode,
+    };
+  }
+  const captured = outcome.value;
+  if (!captured.ok) {
+    return {
+      ok: false,
+      stage: "response",
+      error: parseOriginErrorText(captured.status, captured.text, captured.headers),
+      originId: outcome.originId,
+      originMode: outcome.originMode,
+    };
+  }
+  return {
+    ok: true,
+    payload: parseJsonRecord(captured.text),
+    originId: outcome.originId,
+    originMode: outcome.originMode,
+  };
+}
+
+/** Restore unsaved work onto `main` as a new version. */
+export async function restoreWorkspaceRecoveryFromController(
+  params: RestoreWorkspaceRecoveryParams,
+): Promise<RestoreWorkspaceRecoveryResult | null> {
+  if (!runtimeControllerEnabled) {
+    return null;
+  }
+  const ref = params.ref.trim();
+  if (!params.projectId.trim() || !ref) {
+    return null;
+  }
+  const body: Record<string, unknown> = { ref };
+  const rev = params.rev?.trim();
+  if (rev) {
+    body.rev = rev;
+  }
+  const baseRev = params.baseRev?.trim();
+  if (baseRev) {
+    body.baseRev = baseRev;
+  }
+  const keep = Array.from(
+    new Set((params.keep ?? []).map((path) => String(path).trim()).filter((path) => path.length > 0)),
+  );
+  if (keep.length > 0) {
+    body.keep = keep;
+  }
+
+  const result = await postRecoveryWrite(params, "git/recovery/restore", body);
+  if (!result.ok) {
+    return result;
+  }
+  const payload = result.payload;
+  return {
+    ok: true,
+    rev: readPayloadString(payload, "rev"),
+    baseRev: readPayloadString(payload, "baseRev", "base_rev"),
+    committed: typeof payload?.committed === "boolean" ? payload.committed : null,
+    notRestored: readOriginPathList(payload?.notRestored ?? payload?.not_restored),
+    refDeleted: payload?.refDeleted === true || payload?.ref_deleted === true,
+    originId: result.originId,
+    originMode: result.originMode,
+  };
+}
+
+/** Remove unsaved work for everyone in the space. Salvage refs refuse (409 `salvage_ref_kept`). */
+export async function dismissWorkspaceRecoveryFromController(
+  params: DismissWorkspaceRecoveryParams,
+): Promise<DismissWorkspaceRecoveryResult | null> {
+  if (!runtimeControllerEnabled) {
+    return null;
+  }
+  const ref = params.ref.trim();
+  const rev = params.rev.trim();
+  if (!params.projectId.trim() || !ref || !rev) {
+    return null;
+  }
+  const result = await postRecoveryWrite(params, "git/recovery/dismiss", { ref, rev });
+  if (!result.ok) {
+    return result;
+  }
+  const payload = result.payload;
+  const missing = payload?.missing === true;
+  return {
+    ok: true,
+    dismissed: typeof payload?.dismissed === "boolean" ? payload.dismissed : !missing,
+    missing,
+    originId: result.originId,
+    originMode: result.originMode,
+  };
 }
