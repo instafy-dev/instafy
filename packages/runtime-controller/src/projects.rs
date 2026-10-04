@@ -5660,8 +5660,13 @@ async fn bootstrap_project_memory(
         .map_err(|error| internal_error(format!("failed to finalize authorization: {error}")))?;
 
     let actor_user_id = context.user_id.or(project.owner_user_id);
+    // Only a person who made this request authors the commit; a service-role
+    // call keeps the origin's own identity even though it writes as the owner.
+    let author_user_id = context.user_id.filter(|_| !context.is_service_role);
     let (ok, outcome) =
-        match bootstrap_project_memory_scaffold(&state, &project_id, actor_user_id).await {
+        match bootstrap_project_memory_scaffold(&state, &project_id, actor_user_id, author_user_id)
+            .await
+        {
             Ok(outcome) => (true, outcome),
             Err((_status, Json(api_error))) => {
                 tracing::warn!(
@@ -5694,6 +5699,7 @@ async fn bootstrap_project_memory_scaffold(
     state: &AppState,
     project_id: &Uuid,
     actor_user_id: Option<Uuid>,
+    author_user_id: Option<Uuid>,
 ) -> Result<BootstrapProjectMemoryOutcome, (StatusCode, Json<ApiError>)> {
     let actor_user_id = actor_user_id.or(state.config.service_runtime_user_id);
     let Some(origin_subject) = actor_user_id else {
@@ -5724,7 +5730,7 @@ async fn bootstrap_project_memory_scaffold(
     let read_token =
         mint_project_memory_read_token(state, project_id, &origin.id, &token_subject, 180)?;
     let paths = project_memory_bootstrap_paths();
-    let first = read_origin_snapshot(
+    let Some(first) = read_origin_snapshot(
         &OriginBootstrapTarget {
             http: &state.http_client,
             endpoint: &endpoint,
@@ -5734,7 +5740,13 @@ async fn bootstrap_project_memory_scaffold(
         &read_token,
         &paths,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(BootstrapProjectMemoryOutcome {
+            reason: Some("workspace-busy".to_string()),
+            ..BootstrapProjectMemoryOutcome::default()
+        });
+    };
 
     if plan_project_memory_writes(&first)?.is_empty() {
         return Ok(BootstrapProjectMemoryOutcome {
@@ -5779,14 +5791,19 @@ async fn bootstrap_project_memory_scaffold(
         let apply_result: Result<BootstrapProjectMemoryOutcome, (StatusCode, Json<ApiError>)> =
             async {
                 // A person's bootstrap is authored by their pseudonym in this
-                // space; the service runtime user keeps the origin's identity.
-                let author = author_claims_for_user(
-                    &task_state.config,
-                    &task_state.pool,
-                    &task_project_id,
-                    &origin_subject,
-                )
-                .await;
+                // space; anything else keeps the origin's own identity.
+                let author = match author_user_id {
+                    Some(author_user_id) => {
+                        author_claims_for_user(
+                            &task_state.config,
+                            &task_state.pool,
+                            &task_project_id,
+                            &author_user_id,
+                        )
+                        .await
+                    }
+                    None => None,
+                };
                 let write_token = mint_scoped_token_with_author(
                     &task_state.config,
                     ScopedTokenRequest {
@@ -5846,6 +5863,10 @@ async fn bootstrap_project_memory_scaffold(
                     }
                     BootstrapWriteOutcome::WorkspaceBusy => BootstrapProjectMemoryOutcome {
                         reason: Some("workspace-busy".to_string()),
+                        ..BootstrapProjectMemoryOutcome::default()
+                    },
+                    BootstrapWriteOutcome::Conflict => BootstrapProjectMemoryOutcome {
+                        reason: Some("conflict".to_string()),
                         ..BootstrapProjectMemoryOutcome::default()
                     },
                 })
@@ -5935,6 +5956,17 @@ fn plan_project_memory_writes(
 
     for template in PROJECT_MEMORY_TEMPLATE_FILES {
         let path = template.path.to_string();
+        if snapshot.is_unreadable(&path) {
+            // Present but not readable (a symlink, a non-file entry): leave
+            // it, and keep whatever baseline the state already had for it.
+            if let Some(entry) = existing_managed_state
+                .as_ref()
+                .and_then(|managed| managed.files.get(&path))
+            {
+                next_state_files.insert(path, entry.clone());
+            }
+            continue;
+        }
         let template_content = load_project_memory_template_content(&template);
         let template_hash = sha256_hex(&template_content);
         let tracked_hash = existing_managed_state
@@ -5995,9 +6027,10 @@ fn plan_project_memory_writes(
             ))
         })?;
     let next_state_content = format!("{next_state_content}\n");
-    let should_write_state = existing_state_file_content
-        .map(|current| current != next_state_content)
-        .unwrap_or(true);
+    let should_write_state = !snapshot.is_unreadable(PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH)
+        && existing_state_file_content
+            .map(|current| current != next_state_content)
+            .unwrap_or(true);
     if should_write_state {
         files_to_write.push(ProjectMemoryWriteFile {
             path: PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH.to_string(),
@@ -6464,7 +6497,8 @@ mod project_memory_bootstrap_tests {
         let paths = project_memory_bootstrap_paths();
         let first = read_origin_snapshot(&target, "read-token", &paths)
             .await
-            .expect("first read");
+            .expect("first read")
+            .expect("revision served");
         let first_plan = plan_project_memory_writes(&first).expect("first plan");
         assert!(first_plan.iter().any(|write| write.path == "AGENTS.md"));
 
@@ -6503,6 +6537,120 @@ mod project_memory_bootstrap_tests {
         );
     }
 
+    async fn bootstrap_against(
+        origin: &crate::project_memory_origin::test_support::StubOrigin,
+    ) -> BootstrapWriteOutcome {
+        let http = reqwest::Client::new();
+        let target = OriginBootstrapTarget {
+            http: &http,
+            endpoint: &origin.endpoint,
+            origin_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+        };
+        let paths = project_memory_bootstrap_paths();
+        let first = read_origin_snapshot(&target, "read-token", &paths)
+            .await
+            .expect("first read")
+            .expect("revision served");
+        bootstrap_write_via_origin(
+            &target,
+            "read-token",
+            "write-token",
+            Uuid::new_v4(),
+            &paths,
+            first,
+            plan_project_memory_writes,
+        )
+        .await
+        .expect("bootstrap")
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_claude_md_is_left_alone_and_the_rest_is_seeded() {
+        // A Desktop folder with CLAUDE.md -> AGENTS.md: the no-follow read is
+        // a 404 without a blob, and the origin refuses `null` for the link.
+        // The retry must skip it (no write, no baseline) instead of reporting
+        // workspace-busy forever.
+        let origin = start(StubState {
+            files: [("AGENTS.md".to_string(), "# Team notes\n".to_string())]
+                .into_iter()
+                .collect(),
+            unreadable: ["CLAUDE.md".to_string()].into_iter().collect(),
+            report_blobs: true,
+            check_expected: true,
+            ..StubState::default()
+        })
+        .await;
+
+        let BootstrapWriteOutcome::Seeded { file_count, .. } = bootstrap_against(&origin).await
+        else {
+            panic!("expected the retry to seed every readable template");
+        };
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), 2);
+        assert_eq!(stub.applies[0]["expected"]["CLAUDE.md"], Value::Null);
+        assert!(stub.applies[1]["expected"].get("CLAUDE.md").is_none());
+        assert!(stub.applies[1]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file["path"] != "CLAUDE.md" && file["path"] != "AGENTS.md"));
+        assert!(stub.unreadable_writes.is_empty());
+        assert!(file_count > 20);
+        let managed: Value =
+            serde_json::from_str(&stub.files[PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH])
+                .expect("managed state JSON");
+        assert!(managed["files"].get("CLAUDE.md").is_none());
+        assert_eq!(stub.files["AGENTS.md"], "# Team notes\n");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_space_keeps_a_file_saved_between_read_and_write() {
+        // A fresh Desktop folder or a gateway space with no main yet: every
+        // read is a 404, so no blob or revision is ever reported, yet the
+        // write still says each path must be absent.
+        let theirs = "# Imported AGENTS.md\n";
+        let origin = start(StubState {
+            check_expected: true,
+            concurrent_write: Some(("AGENTS.md".to_string(), theirs.to_string())),
+            ..StubState::default()
+        })
+        .await;
+        assert!(matches!(
+            bootstrap_against(&origin).await,
+            BootstrapWriteOutcome::Seeded { .. }
+        ));
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), 2);
+        assert!(stub
+            .applies
+            .iter()
+            .all(|manifest| manifest.get("baseRev").is_none()));
+        assert_eq!(stub.applies[0]["expected"]["AGENTS.md"], Value::Null);
+        assert!(stub.applies[1]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file["path"] != "AGENTS.md"));
+        assert_eq!(stub.files["AGENTS.md"], theirs);
+    }
+
+    #[tokio::test]
+    async fn an_origin_that_ignores_expected_is_seeded_as_before() {
+        // Today's gateway: no headers and `expected` is ignored.
+        let origin = start(StubState::default()).await;
+        let BootstrapWriteOutcome::Seeded { file_count, .. } = bootstrap_against(&origin).await
+        else {
+            panic!("expected a seeded bootstrap");
+        };
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), 1);
+        assert!(stub.applies[0].get("baseRev").is_none());
+        let expected = stub.applies[0]["expected"].as_object().unwrap();
+        assert_eq!(expected.len(), file_count);
+        assert!(expected.values().all(Value::is_null));
+    }
+
     #[tokio::test]
     async fn an_up_to_date_space_writes_nothing() {
         let origin = start(StubState {
@@ -6521,7 +6669,8 @@ mod project_memory_bootstrap_tests {
         let paths = project_memory_bootstrap_paths();
         let first = read_origin_snapshot(&target, "read-token", &paths)
             .await
-            .expect("first read");
+            .expect("first read")
+            .expect("revision served");
         bootstrap_write_via_origin(
             &target,
             "read-token",
@@ -6536,7 +6685,8 @@ mod project_memory_bootstrap_tests {
 
         let second = read_origin_snapshot(&target, "read-token", &paths)
             .await
-            .expect("second read");
+            .expect("second read")
+            .expect("revision served");
         assert!(plan_project_memory_writes(&second)
             .expect("second plan")
             .is_empty());

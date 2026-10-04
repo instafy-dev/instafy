@@ -1,22 +1,26 @@
 //! Origin I/O of the project-memory bootstrap.
 //!
 //! The bootstrap reads the managed files, decides what to write and applies
-//! it with `autoCommitAfterApply`. Against an origin that reports what it
-//! served, the write is conditional:
+//! it with `autoCommitAfterApply`. The write is conditional:
 //!
 //! - every read after the one that first reports `X-Instafy-Rev` is pinned to
 //!   that revision with `?rev=`, and the apply carries it as `baseRev`;
-//! - the apply carries `expected`: for each written path, the
-//!   `X-Instafy-Blob` its read returned, or `null` when the read was a 404
-//!   (the path must still be absent).
+//! - the apply carries `expected`: for each written path, `null` when its
+//!   read was a 404 (the path must still be absent), or the `X-Instafy-Blob`
+//!   the read returned. A path read without a blob id gets no condition.
 //!
-//! A 409 means the space moved since the read: read, plan and write once
-//! more; a second 409 reports `workspace-busy`. An origin that reports
-//! neither header predates conditional writes: it gets the unconditional
-//! manifest it always got (logged once per origin), and never fails for the
-//! missing headers.
+//! Origins that predate `expected` ignore it (the hosted gateway drops it and
+//! older Desktop builds do not know the field), so they keep getting the
+//! write they always got, and the bootstrap never fails for missing headers.
+//!
+//! A 409 whose code says the space moved since the read (`head_moved`,
+//! `main_busy`, `path_type_conflict`) means: read, plan and write once more.
+//! A path that 409 names and that still reads as missing exists but cannot
+//! be read (a symlink, a non-file entry): the retry leaves it alone. A second
+//! such 409 reports `workspace-busy`, or `conflict` when it names exactly the
+//! paths of the first. Any other 409 is an error, as before.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Cursor, Write};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration as StdDuration;
@@ -44,6 +48,8 @@ pub(crate) const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
 const BOOTSTRAP_COMMIT_MESSAGE: &str = "instafy: bootstrap project memory";
 /// One write, and one more after a conflict.
 const BOOTSTRAP_WRITE_ATTEMPTS: usize = 2;
+/// 409 codes that mean the space moved since the bootstrap read it.
+const RETRYABLE_CONFLICT_CODES: [&str; 3] = ["head_moved", "main_busy", "path_type_conflict"];
 /// Bound on the origins remembered for the once-per-origin log line.
 const MAX_REMEMBERED_LEGACY_ORIGINS: usize = 4_096;
 
@@ -69,6 +75,9 @@ pub(crate) struct OriginReadFile {
 pub(crate) struct OriginReadSnapshot {
     pub(crate) rev: Option<String>,
     pub(crate) files: BTreeMap<String, OriginReadFile>,
+    /// Paths that read as missing although the origin reported them as
+    /// present when it refused a write: never write them or record them.
+    pub(crate) unreadable: BTreeSet<String>,
 }
 
 impl OriginReadSnapshot {
@@ -78,21 +87,20 @@ impl OriginReadSnapshot {
             .and_then(|file| file.content.as_deref())
     }
 
+    pub(crate) fn is_unreadable(&self, path: &str) -> bool {
+        self.unreadable.contains(path)
+    }
+
     /// Whether the origin reported what it served: a revision, or the blob
-    /// of a file it returned. Origins that do neither predate conditional
-    /// writes.
+    /// of a file it returned (only for the once-per-origin log line).
     fn reports_read_state(&self) -> bool {
         self.rev.is_some() || self.files.values().any(|file| file.blob.is_some())
     }
 
-    /// The `expected` map for `writes`: the blob each path was read with, or
-    /// `None` (must not exist) for a path that was absent. A path served
-    /// without a blob id gets no condition. Empty for an origin that reports
-    /// nothing, which then receives an unconditional manifest.
+    /// The `expected` map for `writes`: `None` (must not exist) for a path
+    /// that read as missing, or the blob a path was read with. A path served
+    /// without a blob id gets no condition.
     fn expected_for(&self, writes: &[ProjectMemoryWriteFile]) -> BTreeMap<String, Option<String>> {
-        if !self.reports_read_state() {
-            return BTreeMap::new();
-        }
         writes
             .iter()
             .filter_map(|write| {
@@ -123,20 +131,47 @@ pub(crate) enum BootstrapWriteOutcome {
     },
     /// Nothing to write, or the origin found the content already there.
     AlreadyPresent { rev: Option<String> },
-    /// The origin refused both writes as stale.
+    /// The origin refused both writes as stale, or no longer served the
+    /// revision the reads were pinned to: worth trying again later.
     WorkspaceBusy,
+    /// The origin refused both writes for exactly the same paths: retrying
+    /// will not help.
+    Conflict,
 }
 
 /// Read `paths` in order, pinning every read after the first that reports a
-/// revision to that revision.
+/// revision to that revision. If the origin no longer serves that revision,
+/// start over once from an unpinned read; `None` when that happens again.
 pub(crate) async fn read_origin_snapshot(
     target: &OriginBootstrapTarget<'_>,
     token: &str,
     paths: &[String],
-) -> ApiResult<OriginReadSnapshot> {
+) -> ApiResult<Option<OriginReadSnapshot>> {
+    for _ in 0..2 {
+        if let Some(snapshot) = read_pinned_snapshot(target, token, paths).await? {
+            return Ok(Some(snapshot));
+        }
+        tracing::info!(
+            project_id = %target.project_id,
+            origin_id = %target.origin_id,
+            "origin no longer serves the revision a project memory read was pinned to"
+        );
+    }
+    Ok(None)
+}
+
+async fn read_pinned_snapshot(
+    target: &OriginBootstrapTarget<'_>,
+    token: &str,
+    paths: &[String],
+) -> ApiResult<Option<OriginReadSnapshot>> {
     let mut snapshot = OriginReadSnapshot::default();
     for path in paths {
-        let read = origin_read_text_file(target, token, path, snapshot.rev.as_deref()).await?;
+        let Some(read) =
+            origin_read_text_file(target, token, path, snapshot.rev.as_deref()).await?
+        else {
+            return Ok(None);
+        };
         if snapshot.rev.is_none() {
             snapshot.rev = read.rev;
         }
@@ -148,7 +183,7 @@ pub(crate) async fn read_origin_snapshot(
             },
         );
     }
-    Ok(snapshot)
+    Ok(Some(snapshot))
 }
 
 /// Write what `plan` derives from `first`; on a 409, re-read `paths`
@@ -166,9 +201,22 @@ where
     F: Fn(&OriginReadSnapshot) -> ApiResult<Vec<ProjectMemoryWriteFile>>,
 {
     let mut snapshot = first;
+    let mut refused: Option<BTreeSet<String>> = None;
     for attempt in 0..BOOTSTRAP_WRITE_ATTEMPTS {
-        if attempt > 0 {
-            snapshot = read_origin_snapshot(target, read_token, paths).await?;
+        if let Some(refused_paths) = refused.as_ref() {
+            let Some(reread) = read_origin_snapshot(target, read_token, paths).await? else {
+                return Ok(BootstrapWriteOutcome::WorkspaceBusy);
+            };
+            snapshot = reread;
+            // Named by the refusal yet still read as missing: the path exists
+            // but cannot be read, so writing it can only be refused again.
+            snapshot.unreadable = refused_paths
+                .iter()
+                .filter(|path| {
+                    snapshot.files.contains_key(*path) && snapshot.content(path).is_none()
+                })
+                .cloned()
+                .collect();
         }
         note_unreported_read_state(target, &snapshot);
         let writes = plan(&snapshot)?;
@@ -188,13 +236,17 @@ where
                     rev,
                 })
             }
-            ApplyAttempt::Conflict => {
+            ApplyAttempt::Conflict { paths: conflicted } => {
                 tracing::info!(
                     project_id = %target.project_id,
                     origin_id = %target.origin_id,
                     attempt = attempt + 1,
                     "origin refused a project memory write made from a stale read"
                 );
+                if !conflicted.is_empty() && refused.as_ref() == Some(&conflicted) {
+                    return Ok(BootstrapWriteOutcome::Conflict);
+                }
+                refused = Some(conflicted);
             }
         }
     }
@@ -206,7 +258,8 @@ enum ApplyAttempt {
         rev: Option<String>,
         committed: Option<bool>,
     },
-    Conflict,
+    /// A 409 saying the space moved since the read, with the paths it named.
+    Conflict { paths: BTreeSet<String> },
 }
 
 async fn post_bootstrap_apply(
@@ -263,11 +316,13 @@ async fn post_bootstrap_apply(
     .map_err(|error| internal_error(format!("origin apply request failed: {error}")))?;
 
     let status = response.status();
-    if status == reqwest::StatusCode::CONFLICT {
-        return Ok(ApplyAttempt::Conflict);
-    }
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::CONFLICT {
+            if let Some(paths) = retryable_conflict_paths(&body) {
+                return Ok(ApplyAttempt::Conflict { paths });
+            }
+        }
         return Err(internal_error(format!(
             "origin apply failed ({}): {}",
             status.as_u16(),
@@ -286,6 +341,29 @@ async fn post_bootstrap_apply(
         .filter(|value| !value.is_empty());
     let committed = payload.get("committed").and_then(JsonValue::as_bool);
     Ok(ApplyAttempt::Applied { rev, committed })
+}
+
+/// The paths of a 409 that says the space moved since the read, or `None`
+/// for any other 409 (which stays an error).
+fn retryable_conflict_paths(body: &str) -> Option<BTreeSet<String>> {
+    let payload = serde_json::from_str::<JsonValue>(body).ok()?;
+    let code = payload.get("code")?.as_str()?;
+    if !RETRYABLE_CONFLICT_CODES.contains(&code) {
+        return None;
+    }
+    Some(
+        payload
+            .get("paths")
+            .and_then(JsonValue::as_array)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 fn bootstrap_manifest(
@@ -317,8 +395,8 @@ fn bootstrap_manifest(
     manifest
 }
 
-/// Log once per origin (per process) that it reports no read state, so
-/// its bootstrap writes stay unconditional.
+/// Log once per origin (per process) that it reports no read state, so its
+/// bootstrap writes carry only absence conditions.
 fn note_unreported_read_state(target: &OriginBootstrapTarget<'_>, snapshot: &OriginReadSnapshot) {
     if snapshot.reports_read_state() || !first_unreported_sighting(target.origin_id) {
         return;
@@ -326,7 +404,7 @@ fn note_unreported_read_state(target: &OriginBootstrapTarget<'_>, snapshot: &Ori
     tracing::info!(
         project_id = %target.project_id,
         origin_id = %target.origin_id,
-        "origin reports no read revision or blob ids; project memory writes stay unconditional"
+        "origin reports no read revision or blob ids; project memory writes carry only absence conditions"
     );
 }
 
@@ -347,12 +425,13 @@ struct OriginTextRead {
     rev: Option<String>,
 }
 
+/// One read; `None` when a pinned read finds the revision gone.
 async fn origin_read_text_file(
     target: &OriginBootstrapTarget<'_>,
     token: &str,
     path: &str,
     rev: Option<&str>,
-) -> ApiResult<OriginTextRead> {
+) -> ApiResult<Option<OriginTextRead>> {
     let encoded = encode_workspace_path(path);
     let mut url = format!("{}/files/{encoded}?encoding=base64", target.endpoint);
     if let Some(rev) = rev {
@@ -375,15 +454,13 @@ async fn origin_read_text_file(
         // A pinned read of a revision the origin no longer serves is not an
         // absent file: never plan writes from it.
         if rev.is_some() && error_code(&body).as_deref() == Some("rev_not_found") {
-            return Err(internal_error(
-                "origin no longer serves the revision this bootstrap read",
-            ));
+            return Ok(None);
         }
-        return Ok(OriginTextRead {
+        return Ok(Some(OriginTextRead {
             content: None,
             blob: None,
             rev: served_rev,
-        });
+        }));
     }
 
     if !status.is_success() {
@@ -412,11 +489,11 @@ async fn origin_read_text_file(
     })?;
     let text = String::from_utf8(bytes)
         .map_err(|error| internal_error(format!("origin file response was not UTF-8: {error}")))?;
-    Ok(OriginTextRead {
+    Ok(Some(OriginTextRead {
         content: Some(text),
         blob,
         rev: served_rev,
-    })
+    }))
 }
 
 /// A full SHA-1 or SHA-256 object id from a response header, lower-cased.
@@ -488,7 +565,7 @@ fn build_project_memory_archive(
 /// optional `X-Instafy-Rev` / `X-Instafy-Blob`, and records every `/apply`.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::io::{Cursor, Read};
     use std::sync::{Arc, Mutex};
 
@@ -520,6 +597,15 @@ pub(crate) mod test_support {
         pub(crate) report_blobs: bool,
         /// Answer this many applies with 409 before honouring any.
         pub(crate) forced_conflicts: usize,
+        /// Code of the forced 409s (default `main_busy`).
+        pub(crate) forced_conflict_code: Option<&'static str>,
+        /// Paths the forced 409s name.
+        pub(crate) forced_conflict_paths: Vec<String>,
+        /// Present but unreadable paths (a symlink on a Desktop folder): read
+        /// as 404 without a blob, yet never absent for `expected`.
+        pub(crate) unreadable: BTreeSet<String>,
+        /// Every write that targeted an unreadable path.
+        pub(crate) unreadable_writes: Vec<String>,
         /// Refuse an apply whose `expected` does not match, like an origin
         /// that honours it.
         pub(crate) check_expected: bool,
@@ -528,8 +614,8 @@ pub(crate) mod test_support {
         pub(crate) concurrent_write: Option<(String, String)>,
         /// `committed` in apply responses (default true).
         pub(crate) committed: Option<bool>,
-        /// Answer pinned reads with 404 `rev_not_found`.
-        pub(crate) forget_revisions: bool,
+        /// Answer this many pinned reads with 404 `rev_not_found`.
+        pub(crate) forgotten_pinned_reads: usize,
         /// `(path, rev query)` of every read.
         pub(crate) reads: Vec<(String, Option<String>)>,
         /// Every apply manifest, in order.
@@ -586,7 +672,8 @@ pub(crate) mod test_support {
         let mut stub = stub.lock().expect("stub lock");
         let pinned = query.get("rev").cloned();
         stub.reads.push((path.clone(), pinned.clone()));
-        if stub.forget_revisions && pinned.is_some() {
+        if stub.forgotten_pinned_reads > 0 && pinned.is_some() {
+            stub.forgotten_pinned_reads -= 1;
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "error": "revision not found", "code": "rev_not_found" })),
@@ -596,6 +683,14 @@ pub(crate) mod test_support {
         let mut headers = HeaderMap::new();
         if let Some(rev) = stub.rev.as_deref() {
             headers.insert("x-instafy-rev", HeaderValue::from_str(rev).unwrap());
+        }
+        if stub.unreadable.contains(&path) {
+            return (
+                StatusCode::NOT_FOUND,
+                headers,
+                Json(json!({ "error": "file not found" })),
+            )
+                .into_response();
         }
         match stub.files.get(&path) {
             Some(content) => {
@@ -652,9 +747,10 @@ pub(crate) mod test_support {
         }
         if stub.forced_conflicts > 0 {
             stub.forced_conflicts -= 1;
+            let code = stub.forced_conflict_code.unwrap_or("main_busy");
             return (
                 StatusCode::CONFLICT,
-                Json(json!({ "error": "busy", "code": "main_busy" })),
+                Json(json!({ "error": "refused", "code": code, "paths": stub.forced_conflict_paths })),
             )
                 .into_response();
         }
@@ -663,11 +759,14 @@ pub(crate) mod test_support {
                 let stale = expected
                     .iter()
                     .filter(|(path, oid)| {
-                        stub.files
-                            .get(*path)
-                            .map(|content| blob_oid(content))
-                            .as_deref()
-                            != oid.as_str()
+                        // Like a Desktop origin: an unreadable entry never
+                        // matches a blob or "absent".
+                        let current = if stub.unreadable.contains(*path) {
+                            Some("unreadable".to_string())
+                        } else {
+                            stub.files.get(*path).map(|content| blob_oid(content))
+                        };
+                        current.as_deref() != oid.as_str()
                     })
                     .map(|(path, _)| path.clone())
                     .collect::<Vec<_>>();
@@ -683,6 +782,9 @@ pub(crate) mod test_support {
         let file_count = archive.len();
         let bytes_written = archive.values().map(String::len).sum::<usize>();
         for (path, content) in archive {
+            if stub.unreadable.contains(&path) {
+                stub.unreadable_writes.push(path.clone());
+            }
             stub.files.insert(path, content);
         }
         let rev = advance(&mut stub);
@@ -771,11 +873,14 @@ mod tests {
         DESIRED.iter().map(|(path, _)| path.to_string()).collect()
     }
 
-    /// Make every desired path hold its desired content.
+    /// Make every desired path hold its desired content, leaving paths the
+    /// origin reported as unreadable alone (the contract of every plan).
     fn plan(snapshot: &OriginReadSnapshot) -> ApiResult<Vec<ProjectMemoryWriteFile>> {
         Ok(DESIRED
             .iter()
-            .filter(|(path, content)| snapshot.content(path) != Some(*content))
+            .filter(|(path, content)| {
+                !snapshot.is_unreadable(path) && snapshot.content(path) != Some(*content)
+            })
             .map(|(path, content)| ProjectMemoryWriteFile {
                 path: path.to_string(),
                 content: content.to_string(),
@@ -796,7 +901,8 @@ mod tests {
         };
         let first = read_origin_snapshot(&target, "read-token", &paths())
             .await
-            .expect("first read");
+            .expect("first read")
+            .expect("revision served");
         let outcome = bootstrap_write_via_origin(
             &target,
             "read-token",
@@ -937,7 +1043,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_origin_without_read_state_gets_the_unconditional_manifest() {
+    async fn an_origin_without_read_state_gets_only_absence_conditions() {
+        // Today's gateway: no headers, and it ignores `expected`.
         let origin_id = Uuid::new_v4();
         let origin = start(StubState {
             files: stub_files(&[("AGENTS.md", "older")]),
@@ -955,9 +1062,119 @@ mod tests {
         assert!(stub.reads.iter().all(|(_, rev)| rev.is_none()));
         let manifest = &stub.applies[0];
         assert!(manifest.get("baseRev").is_none());
-        assert!(manifest.get("expected").is_none());
+        // A path read without a blob gets no condition; a missing one must
+        // still be missing.
+        assert_eq!(manifest["expected"], json!({ "NEW.md": null }));
+        assert_eq!(stub.files["AGENTS.md"], "agents template");
         // Logged once per origin.
         assert!(!first_unreported_sighting(origin_id));
+    }
+
+    #[tokio::test]
+    async fn a_fresh_origin_that_honours_expected_refuses_to_overwrite_a_concurrent_save() {
+        // A fresh Desktop folder (every read 404, so no blob or rev is ever
+        // reported), or a gateway space with no main yet: someone saves
+        // AGENTS.md between the read and the write.
+        let origin = start(StubState {
+            check_expected: true,
+            concurrent_write: Some(("AGENTS.md".to_string(), "their notes".to_string())),
+            ..StubState::default()
+        })
+        .await;
+
+        let (outcome, first) = run(&origin.endpoint, Uuid::new_v4()).await;
+        assert_eq!(first.rev, None);
+        outcome.expect("write");
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(
+            stub.applies[0]["expected"],
+            json!({ "AGENTS.md": null, "NEW.md": null })
+        );
+        // The first, unconditional-looking write was refused instead of
+        // replacing the save. (This test plan then rewrites AGENTS.md from
+        // the fresh read, conditionally; the real plan keeps it, see
+        // projects.rs.)
+        assert_eq!(stub.applies.len(), 2);
+        assert!(stub.applies[1]["expected"].get("NEW.md").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_symlinked_template_is_left_alone_instead_of_looping() {
+        // CLAUDE.md -> AGENTS.md on a Desktop folder: the no-follow read is a
+        // 404, but the origin never treats the link as absent.
+        let origin = start(StubState {
+            files: stub_files(&[("AGENTS.md", "older")]),
+            unreadable: ["NEW.md".to_string()].into_iter().collect(),
+            report_blobs: true,
+            check_expected: true,
+            ..StubState::default()
+        })
+        .await;
+
+        let (outcome, _) = run(&origin.endpoint, Uuid::new_v4()).await;
+        assert!(matches!(
+            outcome.expect("write"),
+            BootstrapWriteOutcome::Seeded { file_count: 1, .. }
+        ));
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), 2);
+        assert_eq!(stub.applies[0]["expected"]["NEW.md"], JsonValue::Null);
+        // The retry no longer writes or conditions the unreadable path.
+        assert!(stub.applies[1]["expected"].get("NEW.md").is_none());
+        assert!(stub.unreadable_writes.is_empty());
+        assert_eq!(stub.files["AGENTS.md"], "agents template");
+    }
+
+    #[tokio::test]
+    async fn only_moved_space_conflicts_are_retried() {
+        let origin = start(StubState {
+            rev: Some(rev_for(0)),
+            report_blobs: true,
+            forced_conflicts: 1,
+            forced_conflict_code: Some("checkout_failed"),
+            ..StubState::default()
+        })
+        .await;
+        let (outcome, _) = run(&origin.endpoint, Uuid::new_v4()).await;
+        assert!(outcome.is_err(), "any other 409 stays an error");
+        assert_eq!(origin.state.lock().unwrap().applies.len(), 1);
+
+        for code in ["head_moved", "path_type_conflict"] {
+            let origin = start(StubState {
+                rev: Some(rev_for(0)),
+                report_blobs: true,
+                forced_conflicts: 1,
+                forced_conflict_code: Some(code),
+                ..StubState::default()
+            })
+            .await;
+            let (outcome, _) = run(&origin.endpoint, Uuid::new_v4()).await;
+            assert!(matches!(
+                outcome.expect(code),
+                BootstrapWriteOutcome::Seeded { .. }
+            ));
+            assert_eq!(origin.state.lock().unwrap().applies.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_same_refusal_twice_is_a_conflict_not_busy() {
+        let origin = start(StubState {
+            files: stub_files(&[("AGENTS.md", "older")]),
+            rev: Some(rev_for(0)),
+            report_blobs: true,
+            forced_conflicts: 2,
+            forced_conflict_code: Some("head_moved"),
+            forced_conflict_paths: vec!["AGENTS.md".to_string()],
+            ..StubState::default()
+        })
+        .await;
+        let (outcome, _) = run(&origin.endpoint, Uuid::new_v4()).await;
+        assert!(matches!(
+            outcome.expect("write"),
+            BootstrapWriteOutcome::Conflict
+        ));
+        assert_eq!(origin.state.lock().unwrap().applies.len(), 2);
     }
 
     #[tokio::test]
@@ -1002,14 +1219,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pinned_read_of_a_vanished_revision_is_an_error_not_a_missing_file() {
+    async fn a_vanished_revision_restarts_the_read_once_and_is_never_a_missing_file() {
+        let http = reqwest::Client::new();
+        // Gone once: the read starts over unpinned and succeeds.
         let origin = start(StubState {
+            files: stub_files(&[("NEW.md", "kept")]),
             rev: Some(rev_for(0)),
-            forget_revisions: true,
+            forgotten_pinned_reads: 1,
             ..StubState::default()
         })
         .await;
-        let http = reqwest::Client::new();
+        let target = OriginBootstrapTarget {
+            http: &http,
+            endpoint: &origin.endpoint,
+            origin_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+        };
+        let snapshot = read_origin_snapshot(&target, "read-token", &paths())
+            .await
+            .expect("read")
+            .expect("second pass succeeds");
+        assert_eq!(snapshot.content("NEW.md"), Some("kept"));
+
+        // Gone every time: no snapshot (the bootstrap reports workspace-busy),
+        // and never a plan made from a "missing" file.
+        let origin = start(StubState {
+            files: stub_files(&[("NEW.md", "kept")]),
+            rev: Some(rev_for(0)),
+            forgotten_pinned_reads: usize::MAX,
+            ..StubState::default()
+        })
+        .await;
         let target = OriginBootstrapTarget {
             http: &http,
             endpoint: &origin.endpoint,
@@ -1018,7 +1258,9 @@ mod tests {
         };
         assert!(read_origin_snapshot(&target, "read-token", &paths())
             .await
-            .is_err());
+            .expect("read")
+            .is_none());
+        assert_eq!(origin.state.lock().unwrap().reads.len(), 4);
     }
 
     #[test]

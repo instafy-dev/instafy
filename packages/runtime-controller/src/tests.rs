@@ -16956,18 +16956,29 @@ async fn insert_bootstrap_project(
     Ok(())
 }
 
+/// `as_user`: call as that user's session; `None` calls with the service role.
 async fn post_project_memory_bootstrap(
     pool: &PgPool,
     config: AppConfig,
     project_id: &Uuid,
+    as_user: Option<&Uuid>,
 ) -> anyhow::Result<serde_json::Value> {
+    let authorization = match as_user {
+        Some(user_id) => format!(
+            "Bearer {}",
+            crate::auth::issue_controller_token(&config, user_id)
+                .expect("issue user session token")
+                .token
+        ),
+        None => "Bearer service-role-token".to_string(),
+    };
     let app = crate::projects::router().with_state(build_test_state(pool.clone(), config));
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri(format!("/projects/{project_id}/memory/bootstrap"))
-                .header("authorization", "Bearer service-role-token")
+                .header("authorization", authorization)
                 .body(Body::empty())?,
         )
         .await?;
@@ -17030,7 +17041,9 @@ async fn project_memory_bootstrap_pins_reads_retries_a_conflict_and_authors_with
     )?;
     config.author_pseudonym_keys = Some(keyring.clone());
 
-    let body = post_project_memory_bootstrap(&pool, config, &project_id).await?;
+    // The owner's own session: their pseudonym authors the commit.
+    let body =
+        post_project_memory_bootstrap(&pool, config, &project_id, Some(&owner_user_id)).await?;
     assert_eq!(body["ok"], true, "{body}");
     assert_eq!(body["seeded"], true, "{body}");
 
@@ -17077,7 +17090,7 @@ async fn project_memory_bootstrap_pins_reads_retries_a_conflict_and_authors_with
 }
 
 #[tokio::test]
-async fn project_memory_bootstrap_writes_unconditionally_to_an_origin_without_read_state(
+async fn project_memory_bootstrap_writes_to_an_origin_without_read_state_as_before(
 ) -> anyhow::Result<()> {
     use crate::project_memory_origin::test_support::{start, StubState};
 
@@ -17098,8 +17111,13 @@ async fn project_memory_bootstrap_writes_unconditionally_to_an_origin_without_re
         "project-memory-legacy-origin",
     );
     config.hosted_origin_endpoint = Some(origin.endpoint.clone());
+    // Even with a keyring, a service-role call is attributed to nobody: the
+    // owner did not make it.
+    config.author_pseudonym_keys = Some(crate::author_identity::AuthorPseudonymKeyring::parse(
+        "v1:ERERERERERERERERERERERERERERERERERERERERERE=",
+    )?);
 
-    let body = post_project_memory_bootstrap(&pool, config, &project_id).await?;
+    let body = post_project_memory_bootstrap(&pool, config, &project_id, None).await?;
     assert_eq!(body["ok"], true, "{body}");
     assert_eq!(body["seeded"], true, "{body}");
 
@@ -17108,8 +17126,11 @@ async fn project_memory_bootstrap_writes_unconditionally_to_an_origin_without_re
         assert!(stub.reads.iter().all(|(_, pinned)| pinned.is_none()));
         assert_eq!(stub.applies.len(), 1);
         assert!(stub.applies[0].get("baseRev").is_none());
-        assert!(stub.applies[0].get("expected").is_none());
-        // No keyring configured: the origin keeps its own identity.
+        // Absence conditions only, which this origin ignores.
+        let expected = stub.applies[0]["expected"].as_object().expect("expected");
+        assert!(!expected.is_empty());
+        assert!(expected.values().all(serde_json::Value::is_null));
+        // A service-role call: the origin keeps its own identity.
         let payload = jwt_payload(&stub.apply_tokens[0]);
         assert!(payload.get("author_email").is_none());
         assert!(payload.get("author_name").is_none());
