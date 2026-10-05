@@ -21,7 +21,9 @@ each entry is classified and reported as one JSON line on stdout.
   --apply           push salvage refs, export chat images, and write the bundles,
                     private archives and report.jsonl under <root>/.salvage/
   --remove          also remove each entry whose work is on canonical (or that
-                    was clean); only with --apply does anything get removed
+                    was clean); only with --apply does anything get removed.
+                    An entry with paths left out, a chat image a rerun may
+                    still export, or a filtered history needs --ack
   --ack <entry>     remove this entry even without a canonical record
                     (repeatable; the entry's folder name under .legacy/)
   --root <dir>      the gateway's workspace root (default: ORIGIN_WORKSPACE_ROOT)

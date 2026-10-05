@@ -689,10 +689,10 @@ fn a_diverged_checkout_is_salvaged_once_and_kept_private_where_it_must() {
     assert_eq!(summary.exit_code(), 0, "{:#}", removed[0]);
     assert_eq!(removed[0]["removed"], true);
     assert!(!gateway.entry().exists());
-    // The bundle goes once the ref is verified; the private archive and the
-    // ref stay.
-    assert_eq!(removed[0]["bundleRemoved"], true);
-    assert!(!bundle.exists());
+    // The bundle stays (canonical has the filtered commit, not the local
+    // history), and so do the private archive and the ref.
+    assert_eq!(removed[0]["bundleRemoved"], false);
+    assert!(bundle.exists());
     assert!(archive.exists());
     assert_eq!(gateway.salvage_refs().len(), 1);
     assert!(diverged.c1.len() == 40);
@@ -1273,6 +1273,8 @@ fn a_path_the_shard_refuses_is_left_out_and_the_push_retried() {
     let report = &lines[0];
     assert!(report["error"].is_null(), "{report:#}");
     assert_eq!(report["canonicalVerified"], true);
+    // W reached canonical only as a rebuilt commit.
+    assert_eq!(report["historyFiltered"], true);
     assert_eq!(stub.salvage_tokens.get(), 2);
     let skipped: Vec<(String, String)> = report["skippedPaths"]
         .as_array()
@@ -1396,6 +1398,85 @@ fn an_export_that_may_succeed_later_holds_up_removal() {
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
     assert!(!entry.exists());
+}
+
+/// A filtered entry's local commits reach canonical only as one commit, so
+/// the bundle is the only copy of their versions, messages and authors: the
+/// entry is removed only with an acknowledgement, even with nothing
+/// skipped, and its bundle stays.
+#[test]
+fn a_filtered_history_needs_an_ack_and_keeps_its_bundle() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("app.js", Some("v0\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("app.js"), b"v1\n");
+    ig(&entry, &["add", "-A"]);
+    entry_commit(&entry, "First version");
+    let v1 = ig(&entry, &["rev-parse", "HEAD:app.js"]);
+    write(&entry.join("app.js"), b"v2\n");
+    write(&entry.join(".env.production"), b"API_KEY=1\n");
+    ig(&entry, &["add", "-A"]);
+    entry_commit(&entry, "Second version");
+    ig(&entry, &["rm", "-q", ".env.production"]);
+    let last = entry_commit(&entry, "Drop the settings");
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["historyFiltered"], true);
+    assert_eq!(report["canonicalVerified"], true);
+    assert_eq!(report["skippedPaths"], serde_json::json!([]));
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert!(
+        report["removeRefused"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--ack"),
+        "{report:#}"
+    );
+    assert_eq!(summary.exit_code(), 1);
+    assert!(entry.exists());
+    // The first version never reached canonical.
+    assert!(
+        !git_output(&gateway.canonical(), &["cat-file", "-e", &v1], None)
+            .status
+            .success()
+    );
+
+    let entry_name = gateway.project.to_string();
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[&entry_name]), &stub);
+    let report = &lines[0];
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(report["bundleRemoved"], false, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+    assert!(!entry.exists());
+    // The bundle still gives back the raw history and its first version.
+    let bundle = report["bundle"].as_str().unwrap();
+    let restored = gateway.root.parent().unwrap().join("restored");
+    git_in(
+        gateway.root.parent().unwrap(),
+        &["init", "-q", "--bare", restored.to_str().unwrap()],
+    );
+    git_in(
+        &restored,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/heads/main",
+        ],
+    );
+    git_in(
+        &restored,
+        &["fetch", "-q", bundle, "+refs/instafy/*:refs/instafy/*"],
+    );
+    assert_eq!(
+        git_in(&restored, &["rev-parse", "refs/instafy/salvage-local/head"]),
+        last
+    );
+    assert_eq!(git_in(&restored, &["cat-file", "-p", &v1]), "v1");
 }
 
 /// A version only a local commit held may not reach canonical (over the

@@ -527,6 +527,8 @@ fn push_salvage_ref(
                     bail!("canonical refused {path} again ({})", reason_name(reason));
                 }
                 push.filtered.insert(path.clone(), RejectReason::Policy);
+                // What reaches canonical is now a rebuilt commit.
+                report.history_filtered = true;
                 report.skipped_paths.push(Skipped {
                     path,
                     size: 0,
