@@ -66,7 +66,7 @@ pub const PATH_TRAILER: &str = "Instafy-Path";
 pub const LEFT_OUT_TRAILER: &str = "Instafy-Left-Out";
 /// How many refused paths one recovery commit may drop before giving up.
 const MAX_POLICY_RETRIES: usize = 8;
-const KIND_TRAILER: &str = "Instafy-Recovery-Kind";
+pub(crate) const KIND_TRAILER: &str = "Instafy-Recovery-Kind";
 const ORIGIN_TRAILER: &str = "Instafy-Origin";
 const MAX_LISTED_PATHS: usize = 200;
 const MAX_LISTED_COMMITS: usize = 50;

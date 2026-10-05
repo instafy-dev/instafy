@@ -227,3 +227,48 @@ fn edit_commit(ws: &Path, parent: Option<&str>, edit: impl FnOnce(&[(&str, &str)
         ],
     )
 }
+
+/// Install the shard's update hook in the bare repository `remote`, with
+/// `env` exported for it (policy settings such as `GIT_DENY_PATHS`).
+pub(crate) fn install_shard_hook(remote: &Path, env: &[(&str, &str)]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let hooks = remote.join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let real = hooks.join("update.shard");
+    std::fs::write(
+        &real,
+        git_service::policy::render_update_hook("main").unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut wrapper = String::from("#!/bin/sh\n");
+    for (key, value) in env {
+        wrapper.push_str(&format!("export {key}='{value}'\n"));
+    }
+    wrapper.push_str(&format!("exec '{}' \"$@\"\n", real.display()));
+    let update = hooks.join("update");
+    std::fs::write(&update, wrapper).unwrap();
+    std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Runs git through a shell script for commands built on the current thread
+/// only (the server's `GIT_PROGRAM_OVERRIDE`): `prelude` runs first with the
+/// command's arguments in "$@", then the real git. Dropping it restores git.
+pub(crate) struct GitWrapper;
+
+impl GitWrapper {
+    pub(crate) fn install(dir: &Path, prelude: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = dir.join(format!("git-wrapper-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&script, format!("#!/bin/sh\n{prelude}\nexec git \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(script));
+        Self
+    }
+}
+
+impl Drop for GitWrapper {
+    fn drop(&mut self) {
+        crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+    }
+}

@@ -22,7 +22,7 @@ use crate::push::{clear_push_hook, set_push_hook, PushHookAction};
 use crate::recovery::{
     LOCAL_RECOVERY_DISMISSED_ROOT, LOCAL_RECOVERY_PUSHED_ROOT, LOCAL_RECOVERY_ROOT,
 };
-use crate::test_support::{git_in, git_output, ig};
+use crate::test_support::{git_in, git_output, ig, install_shard_hook};
 use crate::workspace_git::GitIdentity;
 
 const README: &str = "one\ntwo\nthree\nfour\nfive\n";
@@ -335,27 +335,6 @@ fn write(dir: &Path, path: &str, bytes: &[u8]) {
         fs::create_dir_all(parent).unwrap();
     }
     fs::write(target, bytes).unwrap();
-}
-
-fn install_shard_hook(remote: &Path, env: &[(&str, &str)]) {
-    use std::os::unix::fs::PermissionsExt as _;
-    let hooks = remote.join("hooks");
-    fs::create_dir_all(&hooks).unwrap();
-    let real = hooks.join("update.shard");
-    fs::write(
-        &real,
-        git_service::policy::render_update_hook("main").unwrap(),
-    )
-    .unwrap();
-    fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
-    let mut wrapper = String::from("#!/bin/sh\n");
-    for (key, value) in env {
-        wrapper.push_str(&format!("export {key}='{value}'\n"));
-    }
-    wrapper.push_str(&format!("exec '{}' \"$@\"\n", real.display()));
-    let update = hooks.join("update");
-    fs::write(&update, wrapper).unwrap();
-    fs::set_permissions(&update, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 struct PushHookGuard;
@@ -1271,6 +1250,40 @@ async fn n14_desktop_saves_keep_their_author_and_are_never_flushed() {
     );
 }
 
+/// Starting the origin removes fetch namespaces that a recovery read which
+/// died left in the checkout, and keeps a recent one a running call may own.
+#[tokio::test(flavor = "multi_thread")]
+async fn starting_removes_stale_recovery_fetch_refs() {
+    let sc = Scenario::new(Options::default());
+    let head = ig(&sc.ws, &["rev-parse", "HEAD"]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let stale = "refs/instafy/fetched/1000-0123456789abcdef0123456789abcdef/0".to_string();
+    let live = format!("refs/instafy/fetched/{now}-fedcba9876543210fedcba9876543210/0");
+    for name in [&stale, &live] {
+        ig(&sc.ws, &["update-ref", name, &head]);
+    }
+    let mut server = crate::server::OriginHttpServer::new(sc.config.clone()).unwrap();
+    server.start().await.unwrap();
+    // The sweep runs in the background, so the listener never waits on it.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let left = loop {
+        let left: Vec<String> = sc
+            .local_refs("refs/instafy/fetched/")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        if left.len() == 1 || Instant::now() > deadline {
+            break left;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    server.stop().await.unwrap();
+    assert_eq!(left, vec![live]);
+}
+
 /// 14b: a hosted stop without a write credential parks unsaved work locally.
 #[tokio::test]
 async fn n14b_hosted_shutdown_parks_unsaved_work_locally() {
@@ -1641,36 +1654,335 @@ fn a_selection_leaves_other_staged_changes_alone() {
 // Static rules for the publish modules.
 // ---------------------------------------------------------------------------
 
-/// The production code of a module: its test module and comments removed.
+/// The production code of a module: its comments removed, then every
+/// `#[cfg(test)]` module (inline, or declared with `;`, behind any further
+/// attributes such as `#[path]`) wherever it sits in the file. The rest of
+/// the file is kept, string literals included.
 fn production_source(source: &str) -> String {
-    let source = match source.find("#[cfg(test)]\nmod tests") {
-        Some(index) => &source[..index],
-        None => source,
+    test_modules(source).0
+}
+
+/// `source` without its comments and its `#[cfg(test)]` modules, and each
+/// removed module's name with its `#[path]` (if any). The marker counts only
+/// in code: not in a comment or a string or character literal.
+fn test_modules(source: &str) -> (String, Vec<(String, Option<String>)>) {
+    const MARKER: &str = "#[cfg(test)]";
+    let (uncommented, masked) = mask_source(source);
+    let mut kept = String::new();
+    let mut modules = Vec::new();
+    let mut position = 0;
+    while let Some(found) = masked[position..].find(MARKER) {
+        let start = position + found;
+        let after = start + MARKER.len();
+        kept.push_str(&uncommented[position..start]);
+        match test_module_item(&masked[after..], &uncommented[after..]) {
+            Some((end, name, path)) => {
+                modules.push((name, path));
+                position = after + end;
+            }
+            None => {
+                kept.push_str(MARKER);
+                position = after;
+            }
+        }
+    }
+    kept.push_str(&uncommented[position..]);
+    (kept, modules)
+}
+
+/// `source` with every comment blanked, and a copy that also has the
+/// contents of every string and character literal blanked. Blanking keeps
+/// each byte's offset (each blanked byte becomes a space, newlines stay),
+/// so an offset in one is the same place in the other.
+fn mask_source(source: &str) -> (String, String) {
+    let bytes = source.as_bytes();
+    let mut uncommented = bytes.to_vec();
+    let mut masked = bytes.to_vec();
+    let blank = |out: &mut Vec<u8>, from: usize, to: usize| {
+        for byte in &mut out[from..to] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
     };
-    source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if byte == b'/' && next == Some(b'/') {
+            let end = index + source[index..].find('\n').unwrap_or(bytes.len() - index);
+            blank(&mut uncommented, index, end);
+            blank(&mut masked, index, end);
+            index = end;
+            continue;
+        }
+        if byte == b'/' && next == Some(b'*') {
+            let mut depth = 0usize;
+            let mut end = index;
+            while end < bytes.len() {
+                if bytes[end] == b'/' && bytes.get(end + 1) == Some(&b'*') {
+                    depth += 1;
+                    end += 2;
+                } else if bytes[end] == b'*' && bytes.get(end + 1) == Some(&b'/') {
+                    depth -= 1;
+                    end += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    end += 1;
+                }
+            }
+            blank(&mut uncommented, index, end);
+            blank(&mut masked, index, end);
+            index = end;
+            continue;
+        }
+        let raw_start = byte == b'r'
+            && (index == 0
+                || !is_ident(bytes[index - 1])
+                || (bytes[index - 1] == b'b' && (index < 2 || !is_ident(bytes[index - 2]))));
+        if raw_start && matches!(next, Some(b'"') | Some(b'#')) {
+            let hashes = bytes[index + 1..]
+                .iter()
+                .take_while(|byte| **byte == b'#')
+                .count();
+            if bytes.get(index + 1 + hashes) == Some(&b'"') {
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let body = index + 2 + hashes;
+                let close = body
+                    + source[body..]
+                        .find(&terminator)
+                        .unwrap_or(bytes.len() - body);
+                blank(&mut masked, body, close);
+                index = (close + terminator.len()).min(bytes.len());
+                continue;
+            }
+        }
+        if byte == b'"' {
+            let mut end = index + 1;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += if bytes[end] == b'\\' { 2 } else { 1 };
+            }
+            let end = end.min(bytes.len());
+            blank(&mut masked, index + 1, end);
+            index = end + 1;
+            continue;
+        }
+        if byte == b'\'' {
+            let close = if next == Some(b'\\') {
+                source[index + 2..]
+                    .find('\'')
+                    .map(|offset| index + 2 + offset)
+            } else {
+                source[index + 1..].chars().next().and_then(|character| {
+                    let after = index + 1 + character.len_utf8();
+                    (bytes.get(after) == Some(&b'\'')).then_some(after)
+                })
+            };
+            if let Some(close) = close {
+                blank(&mut masked, index + 1, close);
+                index = close + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    (
+        String::from_utf8(uncommented).expect("blanking keeps UTF-8"),
+        String::from_utf8(masked).expect("blanking keeps UTF-8"),
+    )
+}
+
+/// When `text` (code after a `#[cfg(test)]`, with comments and literals
+/// blanked) is, after whitespace and further attributes,
+/// `[pub[(…)]] mod <name>;` or `… mod <name> { … }`: the offset just past
+/// that item, the module's name and its `#[path]` (read from `original`,
+/// the same text with its literals).
+fn test_module_item(text: &str, original: &str) -> Option<(usize, String, Option<String>)> {
+    let skip_space = |index: usize| {
+        index
+            + text[index..]
+                .find(|c: char| !c.is_whitespace())
+                .unwrap_or(text.len() - index)
+    };
+    let mut index = skip_space(0);
+    let mut path = None;
+    while text[index..].starts_with("#[") {
+        let end = matching_close(text, index + 1)?;
+        let attribute = original[index + 2..end - 1].trim();
+        if let Some(value) = attribute.strip_prefix("path") {
+            path = Some(
+                value
+                    .trim()
+                    .trim_start_matches('=')
+                    .trim()
+                    .trim_matches('"')
+                    .to_string(),
+            );
+        }
+        index = skip_space(end);
+    }
+    if text[index..].starts_with("pub") {
+        index = skip_space(index + 3);
+        if text[index..].starts_with('(') {
+            index = skip_space(index + text[index..].find(')')? + 1);
+        }
+    }
+    let after_mod = text[index..].strip_prefix("mod")?;
+    if !after_mod.starts_with(char::is_whitespace) {
+        return None;
+    }
+    index = skip_space(index + 3);
+    let name_length = text[index..]
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(text.len() - index);
+    if name_length == 0 {
+        return None;
+    }
+    let name = text[index..index + name_length].to_string();
+    index = skip_space(index + name_length);
+    let end = match text.as_bytes().get(index)? {
+        b';' => index + 1,
+        b'{' => matching_close(text, index)?,
+        _ => return None,
+    };
+    Some((end, name, path))
+}
+
+/// The offset just past the bracket that closes the `{` or `[` at `open`,
+/// skipping comments and string and character literals.
+fn matching_close(text: &str, open: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let (opening, closing) = match bytes.get(open)? {
+        b'{' => (b'{', b'}'),
+        b'[' => (b'[', b']'),
+        _ => return None,
+    };
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        if byte == b'/' && next == Some(b'/') {
+            index += text[index..].find('\n').unwrap_or(text.len() - index);
+            continue;
+        }
+        if byte == b'/' && next == Some(b'*') {
+            index += 2 + text[index + 2..].find("*/")? + 2;
+            continue;
+        }
+        let raw_start = byte == b'r'
+            && (index == 0
+                || !is_ident(bytes[index - 1])
+                || (bytes[index - 1] == b'b' && (index < 2 || !is_ident(bytes[index - 2]))));
+        if raw_start && matches!(next, Some(b'"') | Some(b'#')) {
+            let hashes = bytes[index + 1..]
+                .iter()
+                .take_while(|byte| **byte == b'#')
+                .count();
+            if bytes.get(index + 1 + hashes) == Some(&b'"') {
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let body = index + 2 + hashes;
+                index = body + text[body..].find(&terminator)? + terminator.len();
+                continue;
+            }
+        }
+        if byte == b'"' {
+            index += 1;
+            while *bytes.get(index)? != b'"' {
+                index += if bytes[index] == b'\\' { 2 } else { 1 };
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\'' {
+            if next == Some(b'\\') {
+                index += 2 + text[index + 2..].find('\'')? + 1;
+                continue;
+            }
+            let character = text[index + 1..].chars().next()?;
+            let after = index + 1 + character.len_utf8();
+            if bytes.get(after) == Some(&b'\'') {
+                index = after + 1;
+                continue;
+            }
+            // A lifetime.
+            index += 1;
+            continue;
+        }
+        if byte == opening {
+            depth += 1;
+        } else if byte == closing {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index + 1);
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 const PUBLISH_MODULES: &[(&str, &str)] = &[
     ("publish.rs", include_str!("publish.rs")),
     ("push.rs", include_str!("push.rs")),
     ("recovery.rs", include_str!("recovery.rs")),
+    ("recovery_view.rs", include_str!("recovery_view.rs")),
     ("stale_align.rs", include_str!("stale_align.rs")),
     ("tree_merge.rs", include_str!("tree_merge.rs")),
     ("publish_policy.rs", include_str!("publish_policy.rs")),
     ("workspace_git.rs", include_str!("workspace_git.rs")),
 ];
 
-/// Every git process in the publish modules is built by
-/// `server_git_command` (through `WorkspaceGit`), never spawned directly:
-/// no module names a `Command` type at all (however it is imported or
-/// renamed), and `process::` items are only process results, the spawned
-/// git's handle and the signals that stop it at a deadline.
-#[test]
-fn publish_modules_spawn_git_only_through_server_git_command() {
+/// Modules under `src/` written before these rules: the command builder
+/// itself, other process spawners, HTTP plumbing and test harnesses. Every
+/// other module, including any added later in any folder, must follow the
+/// rules.
+const MODULES_BEFORE_THE_RULES: &[&str] = &[
+    "apply.rs",
+    "apply_idempotency.rs",
+    "auth.rs",
+    "browser.rs",
+    "browser_approval.rs",
+    "browser_approval_tests.rs",
+    "browser_collaboration.rs",
+    "browser_screencast.rs",
+    "browser_screencast/input.rs",
+    "browser_screencast/protocol.rs",
+    "browser_screencast/stream.rs",
+    "browser_screencast/transport.rs",
+    "browser_webrtc.rs",
+    "config.rs",
+    "error.rs",
+    "git.rs",
+    "git_tokens.rs",
+    "jwks.rs",
+    "lib.rs",
+    "main.rs",
+    "paths.rs",
+    "publish_tests.rs",
+    "routes.rs",
+    "safe_fs.rs",
+    "server.rs",
+    "test_support.rs",
+    "untrusted_git.rs",
+    "workspace_fs.rs",
+    "workspace_lock.rs",
+];
+
+/// The one module that builds git commands from `server_git_command`.
+const COMMAND_BUILDER: &str = "workspace_git.rs";
+
+/// Ways the production code of module `name` could start a process other
+/// than through `WorkspaceGit`: naming a `Command` type at all (however it
+/// is imported or renamed), any `process::` item other than a spawned
+/// process's results, its handle and the signals that stop it at a
+/// deadline, calling `server_git_command` itself (only `WorkspaceGit` does,
+/// once), or naming the git program.
+fn spawn_rule_violations(name: &str, source: &str) -> Vec<String> {
     // Results of a git that was spawned, its handle, and the signals that stop
     // it at a deadline (`rustix::process`); none of them can start a process.
     const PROCESS_ITEMS: &[&str] = &[
@@ -1683,37 +1995,93 @@ fn publish_modules_spawn_git_only_through_server_git_command() {
         "Pid",
         "Signal",
     ];
-    for (name, source) in PUBLISH_MODULES {
-        let code = production_source(source);
-        for identifier in code
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .filter(|word| !word.is_empty())
-        {
-            assert!(
-                !matches!(identifier, "Command" | "CommandExt"),
-                "{name} names a process type ({identifier})"
-            );
+    let code = production_source(source);
+    let mut violations = Vec::new();
+    for identifier in code
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty())
+    {
+        if matches!(identifier, "Command" | "CommandExt") {
+            violations.push(format!("{name} names a process type ({identifier})"));
         }
-        for (index, _) in code.match_indices("process::") {
-            let rest = &code[index + "process::".len()..];
-            let items: Vec<&str> = match rest.strip_prefix('{') {
-                Some(group) => group[..group.find('}').unwrap_or(group.len())]
-                    .split(',')
-                    .map(|item| item.trim().split(' ').next().unwrap_or_default())
-                    .filter(|item| !item.is_empty())
-                    .collect(),
-                None => vec![rest
-                    .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .next()
-                    .unwrap_or_default()],
-            };
-            for item in items {
-                assert!(
-                    PROCESS_ITEMS.contains(&item),
-                    "{name} uses std::process::{item}"
-                );
+    }
+    for (index, _) in code.match_indices("process::") {
+        let rest = &code[index + "process::".len()..];
+        let items: Vec<&str> = match rest.strip_prefix('{') {
+            Some(group) => group[..group.find('}').unwrap_or(group.len())]
+                .split(',')
+                .map(|item| item.trim().split(' ').next().unwrap_or_default())
+                .filter(|item| !item.is_empty())
+                .collect(),
+            None => vec![rest
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default()],
+        };
+        for item in items {
+            if !PROCESS_ITEMS.contains(&item) {
+                violations.push(format!("{name} uses std::process::{item}"));
             }
         }
+    }
+    if name == COMMAND_BUILDER {
+        let calls = code.matches("server_git_command(").count();
+        if calls != 1 {
+            violations.push(format!(
+                "{name} calls server_git_command {calls} times instead of once"
+            ));
+        }
+    } else if code.contains("server_git_command") {
+        violations.push(format!("{name} uses server_git_command directly"));
+    }
+    if code.contains("\"git\"") {
+        violations.push(format!("{name} names the git program"));
+    }
+    violations
+}
+
+/// Uses of git newer than 2.34, of a forced update of a remote ref, or of a
+/// reset onto one, in the production code of module `name`.
+fn force_rule_violations(name: &str, source: &str) -> Vec<String> {
+    let code = production_source(source);
+    let mut violations = Vec::new();
+    for forbidden in [
+        "\"merge-tree\"",
+        "--write-tree",
+        "--object-id",
+        "--empty=",
+        "\"rebase\"",
+        "\"--force\"",
+        "\"-f\"",
+        "\"--hard\"",
+        "\"--mixed\"",
+        "\"--force-if-includes\"",
+        "\"--mirror\"",
+    ] {
+        if code.contains(forbidden) {
+            violations.push(format!("{name} uses {forbidden}"));
+        }
+    }
+    // The only lease form is create-only (`<ref>:` with no value) or
+    // pinned to an exact listed id when deleting a recovery ref.
+    for (index, _) in code.match_indices("--force-with-lease=") {
+        let tail = &code[index..code.len().min(index + 60)];
+        if !(tail.starts_with("--force-with-lease={reference}:\"")
+            || tail.starts_with("--force-with-lease={destination}:{rev}\""))
+        {
+            violations.push(format!("{name}: unexpected lease form {tail}"));
+        }
+    }
+    violations
+}
+
+/// Every git process in the publish modules is built by
+/// `server_git_command` through `WorkspaceGit`, never spawned directly.
+#[test]
+fn publish_modules_spawn_git_only_through_server_git_command() {
+    for (name, source) in PUBLISH_MODULES {
+        let violations = spawn_rule_violations(name, source);
+        assert!(violations.is_empty(), "{violations:#?}");
     }
     let workspace_git = production_source(include_str!("workspace_git.rs"));
     assert_eq!(
@@ -1728,33 +2096,168 @@ fn publish_modules_spawn_git_only_through_server_git_command() {
 #[test]
 fn publish_modules_use_only_git_2_34_and_never_force() {
     for (name, source) in PUBLISH_MODULES {
-        let code = production_source(source);
-        for forbidden in [
-            "\"merge-tree\"",
-            "--write-tree",
-            "--object-id",
-            "--empty=",
-            "\"rebase\"",
-            "\"--force\"",
-            "\"-f\"",
-            "\"--hard\"",
-            "\"--mixed\"",
-            "\"--force-if-includes\"",
-            "\"--mirror\"",
-        ] {
-            assert!(!code.contains(forbidden), "{name} uses {forbidden}");
-        }
-        // The only lease form is create-only (`<ref>:` with no value) or
-        // pinned to an exact listed id when deleting a recovery ref.
-        for (index, _) in code.match_indices("--force-with-lease=") {
-            let tail = &code[index..code.len().min(index + 60)];
-            assert!(
-                tail.starts_with("--force-with-lease={reference}:\"")
-                    || tail.starts_with("--force-with-lease={destination}:{rev}\""),
-                "{name}: unexpected lease form {tail}"
-            );
+        let violations = force_rule_violations(name, source);
+        assert!(violations.is_empty(), "{violations:#?}");
+    }
+}
+
+/// The same rules hold for every module under `src/` that is not listed in
+/// [`MODULES_BEFORE_THE_RULES`], so a new module is checked without anyone
+/// remembering to list it. Test modules (`tests.rs`, `*_tests.rs`) are not
+/// production code.
+#[test]
+fn every_module_written_after_the_rules_follows_them() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut modules = Vec::new();
+    let mut folders = vec![src.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let relative = path.strip_prefix(&src).unwrap();
+                let name = relative
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                modules.push((name, path));
+            }
         }
     }
+    let names: Vec<&str> = modules.iter().map(|(name, _)| name.as_str()).collect();
+    for (name, _) in PUBLISH_MODULES {
+        assert!(names.contains(name), "{name} was not found under src/");
+    }
+    for name in MODULES_BEFORE_THE_RULES {
+        assert!(
+            names.contains(name),
+            "{name} no longer exists: remove it from MODULES_BEFORE_THE_RULES"
+        );
+    }
+
+    // Every module a parent declares under `#[cfg(test)]`, as the file it
+    // names: `<dir>/<name>.rs` (or `<dir>/<name>/mod.rs`), or its `#[path]`.
+    let mut test_files = Vec::new();
+    for (name, path) in &modules {
+        let file = name.rsplit('/').next().unwrap_or_default();
+        let folder = &name[..name.len() - file.len()];
+        let children = match file {
+            "lib.rs" | "main.rs" | "mod.rs" => folder.to_string(),
+            _ => format!("{folder}{}/", file.trim_end_matches(".rs")),
+        };
+        for (module, attribute) in test_modules(&fs::read_to_string(path).unwrap()).1 {
+            match attribute {
+                Some(target) => test_files.push(format!("{folder}{target}")),
+                None => {
+                    test_files.push(format!("{children}{module}.rs"));
+                    test_files.push(format!("{children}{module}/mod.rs"));
+                }
+            }
+        }
+    }
+
+    let mut checked = 0;
+    for (name, path) in &modules {
+        let file = name.rsplit('/').next().unwrap_or_default();
+        if file == "tests.rs" || file.ends_with("_tests.rs") {
+            // Skipped as test code only when a parent compiles it for
+            // tests alone.
+            assert!(
+                test_files.contains(name),
+                "{name} is named as test code but no parent declares it under #[cfg(test)]"
+            );
+            continue;
+        }
+        if MODULES_BEFORE_THE_RULES.contains(&name.as_str()) {
+            continue;
+        }
+        let source = fs::read_to_string(path).unwrap();
+        let mut violations = spawn_rule_violations(name, &source);
+        violations.extend(force_rule_violations(name, &source));
+        assert!(violations.is_empty(), "{violations:#?}");
+        checked += 1;
+    }
+    assert!(
+        checked >= PUBLISH_MODULES.len(),
+        "checked {checked} modules"
+    );
+}
+
+/// The rules catch a module that starts git itself, in each way the
+/// checks look for.
+#[test]
+fn the_spawn_rule_catches_a_module_that_runs_git_itself() {
+    for source in [
+        "fn run() { let _ = std::process::Command::new(\"git\").arg(\"status\").output(); }\n",
+        "use std::process::Command as Git;\nfn run() { let _ = Git::new(PROGRAM).output(); }\n",
+        "use std::process::{Child, Command};\n",
+        "use std::process::*;\nfn run() { let _ = Builder::new(PROGRAM); }\n",
+        "fn run() { let _ = tokio::process::Command::new(PROGRAM); }\n",
+        "use std::os::unix::process::CommandExt;\n",
+        "fn run() { let _ = std::process::exit(1); }\n",
+        "fn run() { let _ = crate::git::server_git_command().arg(\"status\").output(); }\n",
+        "fn run() { let _ = crate::git::GitProcess::new(\"git\"); }\n",
+        // An aliased process module: only the `Command` name gives it away.
+        "use std::process as p;\nfn run() { let _ = p::Command::new(PROGRAM).output(); }\n",
+        "use tokio::process as tp;\nfn run() { let _ = tp::Command::new(PROGRAM); }\n",
+        // Production code after a test module declared near the top, the
+        // way a `mod.rs` lists its submodules.
+        "mod cache;\n#[cfg(test)]\nmod tests;\nfn run() { let _ = std::process::Command::new(PROGRAM); }\n",
+        "#[cfg(test)]\n#[path = \"cache_tests.rs\"]\nmod tests;\nfn run() { let _ = Command::new(PROGRAM); }\n",
+        // A comment or a literal that ends with the marker hides nothing.
+        "/// Kept apart from the code built under #[cfg(test)]\nmod wire {\n    pub fn run() { let _ = std::process::Command::new(\"git\"); }\n}\n",
+        "fn f() {} // #[cfg(test)]\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
+        "/* #[cfg(test)] */\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
+        "const NOTE: &str = r#\"x #[cfg(test)]\nmod fake {\"#;\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\n",
+        // A string holding the marker and the start of a module, closed
+        // by a later string: only masking strings keeps `wire` checked.
+        "const A: &str = \"#[cfg(test)] mod fake {\";\nmod wire { pub fn run() { let _ = Command::new(PROGRAM); } }\nconst B: &str = \"}\";\n",
+        // Production code after an inline test module whose literals hold
+        // braces.
+        "#[cfg(test)]\nmod tests {\n    fn t() { let _ = \"}\"; let _ = '{'; let _ = r#\"}\"#; }\n}\nfn run() { let _ = Command::new(PROGRAM); }\n",
+    ] {
+        assert!(
+            !spawn_rule_violations("new_module.rs", source).is_empty(),
+            "not caught: {source}"
+        );
+    }
+    for source in [
+        "fn run(git: &WorkspaceGit<'_>) { let _ = git.run(&[\"status\"]); }\n",
+        "use std::process::{Output, Stdio};\n",
+        "// std::process::Command::new(\"git\") is never used here.\n",
+        "fn run() {}\n#[cfg(test)]\nmod tests {\n    use std::process::Command;\n}\n",
+        "#[cfg(test)]\nmod tests {\n    mod inner { fn t() { let _ = std::process::Command::new(\"git\"); } }\n    fn u<'a>(x: &'a str) -> char { let _ = x; '}' }\n}\nfn run(git: &WorkspaceGit<'_>) { let _ = git.run(&[\"status\"]); }\n",
+        "mod cache;\n#[cfg(test)]\nmod tests;\nfn run(git: &WorkspaceGit<'_>) { let _ = git.run(&[\"status\"]); }\n",
+    ] {
+        assert_eq!(
+            spawn_rule_violations("new_module.rs", source),
+            Vec::<String>::new(),
+            "{source}"
+        );
+    }
+    // Only the command builder may call server_git_command, and only once.
+    let builder = "fn spawn() { let command = server_git_command(); }\n";
+    assert!(spawn_rule_violations(COMMAND_BUILDER, builder).is_empty());
+    assert!(!spawn_rule_violations(COMMAND_BUILDER, &builder.repeat(2)).is_empty());
+    assert!(!spawn_rule_violations(COMMAND_BUILDER, "fn spawn() {}\n").is_empty());
+
+    assert!(!force_rule_violations(
+        "new_module.rs",
+        "fn push() { let _ = [\"push\", \"--force\"]; }\n"
+    )
+    .is_empty());
+    assert!(!force_rule_violations(
+        "hosted/mod.rs",
+        "mod cache;\n#[cfg(test)]\nmod tests;\npub fn f() { let _ = [\"fetch\", \"--force\"]; }\n"
+    )
+    .is_empty());
+    assert!(!force_rule_violations(
+        "new_module.rs",
+        "fn push(r: &str) { let _ = format!(\"--force-with-lease={r}\"); }\n"
+    )
+    .is_empty());
 }
 
 // ---------------------------------------------------------------------------
