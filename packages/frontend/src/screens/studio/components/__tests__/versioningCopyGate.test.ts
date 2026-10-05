@@ -56,6 +56,8 @@ const GATED_FILES = [
   resolve(components, "WorkspaceGitDiffPanel.tsx"),
   resolve(components, "WorkspaceGitRollingDiffPanel.tsx"),
   resolve(src, "services/runtimeController/workspaceGit.ts"),
+  // The origin answers the copy is chosen by (the gateway's 503 codes).
+  resolve(src, "services/runtimeController/originErrors.ts"),
   // Studio chrome: the History or Changes label and its badge, unsaved
   // edits as drafts, and the review tabs.
   resolve(src, "screens/StudioLayout.tsx"),

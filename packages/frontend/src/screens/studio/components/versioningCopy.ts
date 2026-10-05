@@ -5,6 +5,10 @@ import type {
   VersioningMode,
   WorkspaceGitHistoryEntry,
 } from "../../../sdk/instafy";
+import {
+  originAutoRetryDelayMs,
+  type OriginAutoRetryBudget,
+} from "../../../services/runtimeController/originErrors";
 import { REVERT_ROUTE_UNAVAILABLE_MESSAGE } from "../../../services/runtimeController/workspaceGit";
 import type { ChatMessageFileNotSaved, ChatMessageUnsavedReason } from "../types";
 
@@ -69,6 +73,17 @@ function asSentence(clause: string): string {
 export const MAIN_BUSY_COPY = "The space is busy saving other changes. Try again in a moment.";
 export const LEASE_CONFLICT_COPY = "The agent is saving right now. Try again in a moment.";
 export const FETCH_PENDING_COPY = "The space is still loading. Try again in a moment.";
+// The gateway's other answers that say to try again later (503 with
+// Retry-After). None of them wrote anything.
+const WRITES_BUSY_LEAD = "The server is busy saving other changes.";
+const MIRROR_RESET_LEAD = "The server is rebuilding its copy of this space.";
+const DISK_FULL_LEAD = "The space is out of room right now.";
+const TRY_AGAIN_IN_A_MOMENT = "Try again in a moment.";
+const TRY_AGAIN_LATER = "Try again later.";
+export const WRITES_BUSY_COPY = `${WRITES_BUSY_LEAD} ${TRY_AGAIN_IN_A_MOMENT}`;
+export const MIRROR_RESET_COPY = `${MIRROR_RESET_LEAD} ${TRY_AGAIN_IN_A_MOMENT}`;
+// A full disk does not clear in a moment, so nothing asks again by itself.
+export const DISK_FULL_COPY = `${DISK_FULL_LEAD} ${TRY_AGAIN_LATER}`;
 export const STATELESS_UNREACHABLE_COPY = "Couldn't reach the space's saved files. Try again.";
 export const DESKTOP_UNREACHABLE_COPY = "The folder on this computer isn't connected.";
 export const DISMISSAL_NOT_APPLIED_COPY =
@@ -93,7 +108,8 @@ function isUnreachableCode(code: string | null | undefined): boolean {
 
 /**
  * No answer, or a gateway error. A 503 without a code reads as unreachable
- * too: a gateway still fetching the space's history says `fetch_pending`.
+ * too: the gateway's own 503s (`fetch_pending`, `writes_busy`,
+ * `mirror_reset`, `disk_full`) carry a code and have their own copy.
  */
 function isUnreachableStatus(status: number | null | undefined): boolean {
   return status === 0 || status === 502 || status === 503 || status === 504;
@@ -101,6 +117,22 @@ function isUnreachableStatus(status: number | null | undefined): boolean {
 
 function isOriginUnreachable(error: Pick<OriginError, "code" | "status">): boolean {
   return isUnreachableCode(error.code) || isUnreachableStatus(error.status);
+}
+
+/** The sentence for an answer that says to try again later, or null for any other. */
+export function retryLaterCopy(code: string | null | undefined): string | null {
+  switch (code) {
+    case "fetch_pending":
+      return FETCH_PENDING_COPY;
+    case "writes_busy":
+      return WRITES_BUSY_COPY;
+    case "mirror_reset":
+      return MIRROR_RESET_COPY;
+    case "disk_full":
+      return DISK_FULL_COPY;
+    default:
+      return null;
+  }
 }
 
 /** "Not saved: <the origin's reason>." or "Not saved." when it named none. */
@@ -167,6 +199,9 @@ export const SAVE_COPY = Object.freeze({
   deleteRequiresBaseRev: "Reload the folder and try again.",
   readTooLarge: "This file is larger than 20 MB, so it can't be opened here.",
   fetchPending: FETCH_PENDING_COPY,
+  writesBusy: `${WRITES_BUSY_LEAD} ${EDITS_KEPT_HERE} ${TRY_AGAIN_IN_A_MOMENT}`,
+  mirrorReset: `${MIRROR_RESET_LEAD} ${EDITS_KEPT_HERE} ${TRY_AGAIN_IN_A_MOMENT}`,
+  diskFull: `${DISK_FULL_LEAD} ${EDITS_KEPT_HERE} ${TRY_AGAIN_LATER}`,
   statelessUnreachable: "Couldn't reach the space's saved files. Your edits are kept here. Try again.",
   desktopUnreachable: `${DESKTOP_UNREACHABLE_COPY} ${EDITS_KEPT_HERE}`,
   dismissalNotApplied: DISMISSAL_NOT_APPLIED_COPY,
@@ -286,6 +321,14 @@ export function describeSaveFailure(params: {
       return { message: SAVE_COPY.deleteRequiresBaseRev };
     case "fetch_pending":
       return { message: SAVE_COPY.fetchPending };
+    // Nothing was written. A save keeps the edits in the editor; the busy
+    // answers clear in a moment, a full disk only later (no Try again).
+    case "writes_busy":
+      return { message: operation === "save" ? SAVE_COPY.writesBusy : WRITES_BUSY_COPY, action: RETRY_ACTION };
+    case "mirror_reset":
+      return { message: operation === "save" ? SAVE_COPY.mirrorReset : MIRROR_RESET_COPY, action: RETRY_ACTION };
+    case "disk_full":
+      return { message: operation === "save" ? SAVE_COPY.diskFull : DISK_FULL_COPY };
     case "not_saved":
       return { message: notSavedMessage(error, operation, params.unsavedWorkVisible === true) };
     case "dismissal_not_applied":
@@ -383,13 +426,15 @@ function unreachableCopy(origin: HistoryOriginKind): string {
  * Desktop publish refusals). Null when the caller should use its own copy.
  */
 export function sharedOriginErrorCopy(error: OriginError, origin: HistoryOriginKind): string | null {
+  const later = retryLaterCopy(error.code);
+  if (later) {
+    return later;
+  }
   switch (error.code) {
     case "main_busy":
       return MAIN_BUSY_COPY;
     case "lease_conflict":
       return LEASE_CONFLICT_COPY;
-    case "fetch_pending":
-      return FETCH_PENDING_COPY;
     case "not_saved":
       return `${notSavedLead(error)} ${WORK_KEPT_IN_UNSAVED_WORK}`;
     case "dismissal_not_applied":
@@ -814,39 +859,38 @@ function refusedPathRule(code: string | null, reason: string | null): string | n
   }
 }
 
-const FETCH_PENDING_RETRY_DEFAULT_MS = 2000;
-const FETCH_PENDING_RETRY_MAX_MS = 5000;
+// The chat card asks once more on its own after a wait of at most 5 s.
+const CARD_AUTO_RETRY_BUDGET: OriginAutoRetryBudget = { defaultDelayMs: 2000, maxDelayMs: 5000 };
 
-// A gateway still fetching the space's saved history answers 503
-// fetch_pending with Retry-After. The card retries once after that delay
-// (at most 5 s) before it shows FETCH_PENDING_COPY. Null for every other
-// answer.
-export function fetchPendingRetryDelayMs(
+// A gateway that cannot answer yet says so with a 503 and Retry-After: it is
+// still fetching the space's saved history (fetch_pending), every write slot
+// is taken (writes_busy) or its copy of the space is being made again
+// (mirror_reset). The card retries once after that delay (at most 5 s)
+// before it shows the code's copy. Null for every other answer, disk_full
+// included: a full disk does not clear in a moment.
+export function autoRetryDelayMs(
   error: Pick<OriginError, "code" | "retryAfterMs"> | null | undefined,
 ): number | null {
-  if (error?.code !== "fetch_pending") {
-    return null;
-  }
-  const retryAfter = error.retryAfterMs;
-  const delay =
-    typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0
-      ? retryAfter
-      : FETCH_PENDING_RETRY_DEFAULT_MS;
-  return Math.min(delay, FETCH_PENDING_RETRY_MAX_MS);
+  return originAutoRetryDelayMs(error, CARD_AUTO_RETRY_BUDGET);
 }
 
-// The same for the revert itself: nothing was committed by a fetch_pending
-// answer, so one retry is safe.
+// The same for the revert itself: nothing was committed by these answers,
+// so one retry is safe.
 export function revertRetryDelayMs(result: RevertWorkspaceGitCommitResult | null): number | null {
   if (!result || result.ok) {
     return null;
   }
   const code = result.code ?? result.errorInfo?.code ?? null;
-  return fetchPendingRetryDelayMs({ code: code ?? undefined, retryAfterMs: result.errorInfo?.retryAfterMs });
+  return autoRetryDelayMs({ code: code ?? undefined, retryAfterMs: result.errorInfo?.retryAfterMs });
 }
 
-// The check before Revert met a gateway that was still fetching, twice.
-export const REVERT_CHECK_STILL_LOADING_MESSAGE = FETCH_PENDING_COPY;
+// The check before Revert failed. A gateway that said to try again later
+// (still fetching or making its copy again, even after one retry, or out
+// of room) gets its own sentence; anything else the plain one.
+export function revertCheckFailedCopy(code: string | null | undefined): string {
+  return retryLaterCopy(code) ?? REVERT_CHECK_FAILED_MESSAGE;
+}
+
 const CHANGE_REVERT_FALLBACK_MESSAGE = "Couldn't revert this change. Try again, or ask the agent to undo it.";
 
 // What "Revert this change" did, as one toast: the request is
@@ -886,6 +930,12 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
   if (result.routeUnavailable || info?.routeUnavailable) {
     return outcome("warning", REVERT_ROUTE_UNAVAILABLE_MESSAGE, { offerAgentUndo: true });
   }
+  // The gateway said to try again later and committed nothing. A full disk
+  // is an error; the other answers clear in a moment.
+  const later = retryLaterCopy(code);
+  if (later) {
+    return outcome(code === "disk_full" ? "error" : "warning", later);
+  }
   switch (code) {
     case "revert_conflict":
       return outcome("warning", REVERT_CONFLICT_COPY, { offerAgentUndo: true });
@@ -910,8 +960,6 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
         "This change isn't in the space's saved history, so it can't be reverted here. Ask the agent to undo it.",
         { offerAgentUndo: true },
       );
-    case "fetch_pending":
-      return outcome("warning", FETCH_PENDING_COPY);
     default:
       break;
   }

@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import type { RevertWorkspaceGitCommitResult } from "../../../../services/runtimeController/workspaceGit";
 import {
+  autoRetryDelayMs,
   describeChangeRevertOutcome,
   describeRevertCombined,
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
-  fetchPendingRetryDelayMs,
+  revertCheckFailedCopy,
   revertRetryDelayMs,
 } from "../versioningCopy";
 
@@ -165,12 +166,12 @@ describe("a revert while the space is still loading", () => {
   });
 
   it("uses the same delay for the check before Revert", () => {
-    expect(fetchPendingRetryDelayMs({ code: "fetch_pending", retryAfterMs: 1000 })).toBe(1000);
-    expect(fetchPendingRetryDelayMs({ code: "fetch_pending", retryAfterMs: 60_000 })).toBe(5000);
-    expect(fetchPendingRetryDelayMs({ code: "fetch_pending" })).toBe(2000);
-    expect(fetchPendingRetryDelayMs({ code: "canonical_unreachable", retryAfterMs: 1000 })).toBeNull();
-    expect(fetchPendingRetryDelayMs({})).toBeNull();
-    expect(fetchPendingRetryDelayMs(undefined)).toBeNull();
+    expect(autoRetryDelayMs({ code: "fetch_pending", retryAfterMs: 1000 })).toBe(1000);
+    expect(autoRetryDelayMs({ code: "fetch_pending", retryAfterMs: 60_000 })).toBe(5000);
+    expect(autoRetryDelayMs({ code: "fetch_pending" })).toBe(2000);
+    expect(autoRetryDelayMs({ code: "canonical_unreachable", retryAfterMs: 1000 })).toBeNull();
+    expect(autoRetryDelayMs({})).toBeNull();
+    expect(autoRetryDelayMs(undefined)).toBeNull();
   });
 
   it("does not retry anything else", () => {
@@ -187,6 +188,70 @@ describe("a revert while the space is still loading", () => {
       message: "The space is still loading. Try again in a moment.",
       reverted: false,
     });
+  });
+});
+
+// The gateway's other 503 answers. Nothing was committed by any of them.
+describe("a revert the gateway asks to try again later", () => {
+  function later(code: string, retryAfterMs?: number): RevertWorkspaceGitCommitResult {
+    return {
+      ok: false,
+      conflict: false,
+      code,
+      errorInfo: { status: 503, code, message: "try again in a moment", retryAfterMs, routeUnavailable: false },
+    };
+  }
+
+  it.each(["writes_busy", "mirror_reset"])("retries %s once after Retry-After, capped at 5 s", (code) => {
+    expect(revertRetryDelayMs(later(code, 2000))).toBe(2000);
+    expect(revertRetryDelayMs(later(code, 0))).toBe(0);
+    expect(revertRetryDelayMs(later(code, 9000))).toBe(5000);
+    expect(revertRetryDelayMs(later(code))).toBe(2000);
+    expect(autoRetryDelayMs({ code, retryAfterMs: 1000 })).toBe(1000);
+    // The code may arrive only in errorInfo (a result built from the answer).
+    expect(revertRetryDelayMs({ ...later(code, 1000), code: undefined })).toBe(1000);
+  });
+
+  it("never retries disk_full on its own", () => {
+    expect(revertRetryDelayMs(later("disk_full", 2000))).toBeNull();
+    expect(revertRetryDelayMs(later("disk_full"))).toBeNull();
+    expect(autoRetryDelayMs({ code: "disk_full", retryAfterMs: 2000 })).toBeNull();
+  });
+
+  it("gives each its own sentence, never the unreachable one", () => {
+    expect(describeChangeRevertOutcome(later("writes_busy", 2000))).toEqual({
+      intent: "warning",
+      message: "The server is busy saving other changes. Try again in a moment.",
+      reverted: false,
+      unrevertedPaths: [],
+      offerAgentUndo: false,
+    });
+    expect(describeChangeRevertOutcome(later("mirror_reset", 2000))).toEqual({
+      intent: "warning",
+      message: "The server is rebuilding its copy of this space. Try again in a moment.",
+      reverted: false,
+      unrevertedPaths: [],
+      offerAgentUndo: false,
+    });
+    expect(describeChangeRevertOutcome(later("disk_full", 2000))).toEqual({
+      intent: "error",
+      message: "The space is out of room right now. Try again later.",
+      reverted: false,
+      unrevertedPaths: [],
+      offerAgentUndo: false,
+    });
+  });
+
+  it("names the answer when the check before Revert fails", () => {
+    expect(revertCheckFailedCopy("fetch_pending")).toBe("The space is still loading. Try again in a moment.");
+    expect(revertCheckFailedCopy("writes_busy")).toBe("The server is busy saving other changes. Try again in a moment.");
+    expect(revertCheckFailedCopy("mirror_reset")).toBe(
+      "The server is rebuilding its copy of this space. Try again in a moment.",
+    );
+    expect(revertCheckFailedCopy("disk_full")).toBe("The space is out of room right now. Try again later.");
+    for (const code of [undefined, null, "canonical_unreachable", "rev_not_found"]) {
+      expect(revertCheckFailedCopy(code)).toBe("Couldn't check what this change includes. Try again.");
+    }
   });
 });
 

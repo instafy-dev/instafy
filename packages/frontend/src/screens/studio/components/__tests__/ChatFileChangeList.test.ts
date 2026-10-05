@@ -1426,6 +1426,56 @@ describe("ChatFileChangeList", () => {
       );
     });
 
+    // The gateway's copy of the space was damaged: it makes it again and
+    // answers 503 mirror_reset with Retry-After.
+    function reviewAnswered(code: string, retryAfterMs: number) {
+      return {
+        ...reviewStillLoading(retryAfterMs),
+        errorInfo: { status: 503, code, message: "try again in a moment", retryAfterMs, routeUnavailable: false },
+      };
+    }
+
+    it("checks again once while the gateway makes its copy again, then offers Revert", async () => {
+      fetchWorkspaceGitHistoryReview.mockResolvedValueOnce(reviewAnswered("mirror_reset", 5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+      await waitForDialogState("ready");
+
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
+      expect(dialog()?.getAttribute("data-state")).toBe("ready");
+    });
+
+    it("names a copy still being made again after the second check", async () => {
+      fetchWorkspaceGitHistoryReview.mockResolvedValue(reviewAnswered("mirror_reset", 5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+      await waitForDialogState("failed");
+
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(2);
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "The server is rebuilding its copy of this space. Try again in a moment.",
+      );
+      expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+    });
+
+    it("never checks again on its own when the space is out of room", async () => {
+      fetchWorkspaceGitHistoryReview.mockResolvedValue(reviewAnswered("disk_full", 5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await openRevertDialog();
+      await waitForDialogState("failed");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+
+      expect(fetchWorkspaceGitHistoryReview).toHaveBeenCalledTimes(1);
+      expect(dialog()?.querySelector('[role="status"]')?.textContent).toBe(
+        "The space is out of room right now. Try again later.",
+      );
+      // The person can still ask again.
+      expect(document.querySelector('[data-testid="chat-file-change-revert-retry-check"]')).not.toBeNull();
+      expect(revertWorkspaceGitCommit).not.toHaveBeenCalled();
+    });
+
     it("marks only the files the reverted version touched", async () => {
       // The head version holds src/util.ts only; src/app.ts reached the
       // saved history in another version this revert does not touch.
@@ -1613,6 +1663,61 @@ describe("ChatFileChangeList", () => {
       expect(revertWorkspaceGitCommit.mock.calls[1]?.[0]).toEqual(revertWorkspaceGitCommit.mock.calls[0]?.[0]);
       expect(showStatus).toHaveBeenCalledTimes(1);
       expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+    });
+
+    function answeredLater(code: string, retryAfterMs: number) {
+      return {
+        ok: false,
+        conflict: false,
+        code,
+        errorInfo: { status: 503, code, message: "try again in a moment", retryAfterMs, routeUnavailable: false },
+      };
+    }
+
+    it.each(["writes_busy", "mirror_reset"])("retries %s once, then reverts", async (code) => {
+      revertWorkspaceGitCommit
+        .mockResolvedValueOnce(answeredLater(code, 5))
+        .mockResolvedValueOnce({ ok: true, rev: "c".repeat(40), committed: true });
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await confirmRevert();
+      await waitFor(30);
+
+      expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(2);
+      expect(revertWorkspaceGitCommit.mock.calls[1]?.[0]).toEqual(revertWorkspaceGitCommit.mock.calls[0]?.[0]);
+      expect(showStatus).toHaveBeenCalledTimes(1);
+      expect(showStatus).toHaveBeenCalledWith("Reverted. Saved as a new version.", "success", 4000, undefined);
+    });
+
+    it.each([
+      ["writes_busy", "The server is busy saving other changes. Try again in a moment."],
+      ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],
+    ])("names %s when the retry meets it again", async (code, message) => {
+      revertWorkspaceGitCommit.mockResolvedValue(answeredLater(code, 5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await confirmRevert();
+      await waitFor(30);
+
+      expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(2);
+      expect(showStatus).toHaveBeenCalledTimes(1);
+      expect(showStatus).toHaveBeenCalledWith(message, "warning", 6500, undefined);
+      expect(revertChip()).not.toBeNull();
+    });
+
+    it("never retries a revert when the space is out of room", async () => {
+      revertWorkspaceGitCommit.mockResolvedValue(answeredLater("disk_full", 5));
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await confirmRevert();
+      await waitFor(30);
+
+      expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(1);
+      expect(showStatus).toHaveBeenCalledTimes(1);
+      expect(showStatus).toHaveBeenCalledWith(
+        "The space is out of room right now. Try again later.",
+        "error",
+        expect.any(Number),
+        undefined,
+      );
+      expect(revertChip()).not.toBeNull();
     });
 
     it("says the space is still loading when the retry finds it loading too", async () => {
