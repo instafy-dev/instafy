@@ -59,8 +59,11 @@ use super::legacy::LEGACY_DIR;
 use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git_tokens;
-use crate::recovery_view::{sweep_stale_fetches, MAIN_REF};
+use crate::recovery_view::{copy_from_alphabet, sweep_stale_fetches, MAIN_REF};
 use crate::workspace_git::{failure, WorkspaceGit};
+
+/// Every byte a hyphenated space id holds.
+const UUID_BYTES: &[u8] = b"0123456789abcdef-";
 
 /// The cache's folder under the workspace root.
 pub(crate) const CACHE_DIR: &str = ".git-cache";
@@ -535,6 +538,11 @@ impl MirrorCache {
 
     /// The canonical repository of `project`.
     pub(crate) fn remote_url(&self, project: Uuid) -> Result<String, OriginError> {
+        // The space id comes from the caller's token: the URL git is handed
+        // holds a copy built from the bytes a hyphenated id may hold.
+        let project = copy_from_alphabet(&project.as_hyphenated().to_string(), UUID_BYTES)
+            .and_then(|copy| Uuid::parse_str(&copy).ok())
+            .ok_or_else(|| OriginError::internal("a space id did not copy"))?;
         self.config
             .git_remote_url_for_project(project)
             .ok_or_else(|| OriginError::internal("the gateway has no canonical base URL"))

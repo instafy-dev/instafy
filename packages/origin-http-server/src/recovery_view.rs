@@ -257,7 +257,7 @@ const LOWER_HEX_BYTES: &[u8] = b"0123456789abcdef";
 /// copy holds the table's own byte, so a name or id a caller sent reaches
 /// git's argument list only as bytes of `alphabet`. `None` when a byte is
 /// not in `alphabet`.
-fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
+pub(crate) fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
     value
         .bytes()
         .map(|byte| {
@@ -267,6 +267,13 @@ fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
                 .map(|allowed| char::from(*allowed))
         })
         .collect()
+}
+
+/// `value` in decimal, as a copy of the digits (see [`copy_from_alphabet`]):
+/// a count a caller sent (a page size, how many to skip) reaches git's
+/// arguments only as table bytes.
+pub(crate) fn decimal(value: usize) -> String {
+    copy_from_alphabet(&value.to_string(), b"0123456789").unwrap_or_default()
 }
 
 /// What a read names.
@@ -435,28 +442,13 @@ pub(crate) fn path_kind_at(
         return Ok(PathKind::Directory);
     }
     let path = checked_path(path)?;
-    let raw = git.bytes_opts(
-        &[
-            "ls-tree",
-            "-z",
-            "--full-tree",
-            "--end-of-options",
-            &commit,
-            "--",
-            &path,
-        ],
-        &RunOpts {
-            literal_pathspecs: true,
-            ..RunOpts::default()
-        },
-    )?;
     // The tree first: a reserved path that is there is hidden from reads
     // but never absent, as on the hosted gateway (`not_found` only when
     // the tree has no entry).
     let reserved = is_reserved_path(&path);
-    let kind = crate::workspace_git::parse_ls_tree(&raw)
-        .into_iter()
-        .find(|entry| entry.path == path)
+    let kind = git
+        .entries_by_path(&commit, std::slice::from_ref(&path))?
+        .remove(&path)
         .map(|entry| match (entry.mode.as_str(), entry.kind.as_str()) {
             _ if reserved => PathKind::Unsupported,
             ("100644" | "100755", "blob") => PathKind::File,
@@ -678,33 +670,17 @@ pub(crate) fn absence_at(
 ) -> Result<Absence, ViewError> {
     let commit = parse_rev(commit)?;
     let path = checked_path(path)?;
-    let raw = git.bytes_opts(
-        &[
-            "ls-tree",
-            "-l",
-            "-z",
-            "--full-tree",
-            "--end-of-options",
-            &commit,
-            "--",
-            &path,
-        ],
-        &RunOpts {
-            literal_pathspecs: true,
-            ..RunOpts::default()
-        },
-    )?;
-    let found = parse_ls_tree_long(&raw)?
-        .into_iter()
-        .find(|(entry_path, _)| *entry_path == path);
-    Ok(match found {
-        None => Absence::Absent,
-        Some((_, Some(entry)))
-            if entry.kind == ObjectKind::Directory && !is_reserved_path(&path) =>
-        {
+    let Some(found) = git
+        .entries_by_path(&commit, std::slice::from_ref(&path))?
+        .remove(&path)
+    else {
+        return Ok(Absence::Absent);
+    };
+    Ok(match shown_entry(git, found)? {
+        Some(entry) if entry.kind == ObjectKind::Directory && !is_reserved_path(&path) => {
             Absence::Directory
         }
-        Some(_) => Absence::Hidden,
+        _ => Absence::Hidden,
     })
 }
 
@@ -721,32 +697,62 @@ fn checked_path(path: &str) -> Result<String, ViewError> {
     }
 }
 
-/// The shown entry at exactly `path` in `commit`, if any.
+/// The shown entry at exactly `path` in `commit`, if any. The path reaches
+/// git only on stdin ([`WorkspaceGit::entries_by_path`]).
 fn entry_at(
     git: &WorkspaceGit<'_>,
     commit: &str,
     path: &str,
 ) -> Result<Option<ObjectEntry>, ViewError> {
-    let raw = git.bytes_opts(
-        &[
-            "ls-tree",
-            "-l",
-            "-z",
-            "--full-tree",
-            "--end-of-options",
-            commit,
-            "--",
-            path,
-        ],
-        &RunOpts {
-            literal_pathspecs: true,
-            ..RunOpts::default()
-        },
-    )?;
-    Ok(parse_ls_tree_long(&raw)?
-        .into_iter()
-        .find(|(entry_path, _)| entry_path == path)
-        .and_then(|(_, entry)| entry))
+    match git
+        .entries_by_path(commit, &[path.to_string()])?
+        .remove(path)
+    {
+        Some(entry) => shown_entry(git, entry),
+        None => Ok(None),
+    }
+}
+
+/// `entry` as a listing shows it: a regular file with its size, or a
+/// folder; `None` for anything else (symlinks, submodules). A regular file
+/// whose size git could not read (its object is missing or corrupt) is an
+/// error, never a path that is not there: a client would take that for a
+/// deleted file.
+fn shown_entry(
+    git: &WorkspaceGit<'_>,
+    entry: crate::workspace_git::TreeEntry,
+) -> Result<Option<ObjectEntry>, ViewError> {
+    match (entry.mode.as_str(), entry.kind.as_str()) {
+        ("100644" | "100755", "blob") => {
+            let size = git
+                .object_sizes(std::slice::from_ref(&entry.oid))?
+                .pop()
+                .flatten()
+                .map(|(_, size)| size);
+            let Some(size) = size else {
+                return Err(ViewError::Git(anyhow::anyhow!(
+                    "the object of {} ({}) is missing or corrupt",
+                    entry.path,
+                    entry.oid
+                )));
+            };
+            Ok(Some(ObjectEntry {
+                path: entry.path,
+                kind: ObjectKind::File,
+                mode: entry.mode,
+                oid: entry.oid,
+                size: Some(size),
+            }))
+        }
+        ("040000", "tree") => Ok(Some(ObjectEntry {
+            path: entry.path,
+            kind: ObjectKind::Directory,
+            mode: entry.mode,
+            oid: entry.oid,
+            size: None,
+        })),
+        _ => Ok(None),
+    }
 }
 
 /// The shown entries of one `ls-tree -l -z` listing of a folder at
@@ -905,8 +911,8 @@ fn walk_history(
     if count == 0 || skip > MAX_HISTORY_SKIP {
         return Ok(Vec::new());
     }
-    let max_count = count.to_string();
-    let skip = skip.to_string();
+    let max_count = decimal(count);
+    let skip = decimal(skip);
     let mut walk_args = Vec::new();
     if walk == HistoryWalk::FirstParent {
         walk_args.push("--first-parent");
