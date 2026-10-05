@@ -20,6 +20,7 @@ mod publish_tests;
 mod push;
 pub mod recovery;
 mod recovery_view;
+mod route_auth;
 pub mod routes;
 mod safe_fs;
 pub mod server;
