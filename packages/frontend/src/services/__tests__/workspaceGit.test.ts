@@ -244,6 +244,30 @@ describe("default routing", () => {
     expect(mocks.token.mock.calls[1][0]).not.toHaveProperty("preferHosted");
   });
 
+  it("review reports the origin's code and Retry-After when the gateway is still fetching", async () => {
+    fetchMock().mockResolvedValue(
+      json(503, { error: "the workspace is still being fetched", code: "fetch_pending" }, { "retry-after": "2" }),
+    );
+    const review = await fetchWorkspaceGitHistoryReviewFromController({ projectId: "p", commit: "c", routing: "default" });
+    expect(review).toMatchObject({
+      supported: true,
+      commit: "c",
+      entries: [],
+      busy: false,
+      error: "Unable to load saved version changes right now. Try Refresh.",
+      errorInfo: { status: 503, code: "fetch_pending", retryAfterMs: 2000 },
+    });
+
+    // A plain failure still reports its status; a success carries no error.
+    fetchMock().mockResolvedValue(json(502, { error: "upstream" }));
+    const failed = await fetchWorkspaceGitHistoryReviewFromController({ projectId: "p", commit: "c", routing: "default" });
+    expect(failed?.errorInfo).toMatchObject({ status: 502 });
+    expect(failed?.errorInfo?.code).toBeUndefined();
+    fetchMock().mockResolvedValue(json(200, { supported: true, entries: [] }));
+    const ok = await fetchWorkspaceGitHistoryReviewFromController({ projectId: "p", commit: "c", routing: "default" });
+    expect(ok).not.toHaveProperty("errorInfo");
+  });
+
   it("sync never omits the message and parses a Desktop publish report", async () => {
     fetchMock().mockResolvedValue(
       json(200, {

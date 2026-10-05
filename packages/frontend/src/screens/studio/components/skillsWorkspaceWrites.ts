@@ -1,6 +1,6 @@
 import { controllerClient, type ControllerWorkspaceEntry } from "../../../sdk/instafy";
 import type { FilesVersioning } from "./filesVersioning";
-import { describeSaveFailure, SAVE_COPY } from "./workspaceSaveCopy";
+import { describeSaveFailure, SAVE_COPY } from "./versioningCopy";
 
 /**
  * Skills writes in the stateless and desktop modes: each change is one

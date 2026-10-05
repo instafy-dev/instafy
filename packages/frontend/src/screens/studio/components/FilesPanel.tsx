@@ -57,6 +57,7 @@ import {
   useFilesPanelViewerState,
 } from "./useFilesPanelViewerState";
 import { resolveViewerStateWithoutActiveFile } from "./filesPanelViewerSync";
+import { describeFileViewerFacts } from "./filesViewerFooter";
 import { FilesExplorerTree } from "./FilesExplorerTree";
 import {
   type DirectoryEntries,
@@ -75,7 +76,7 @@ import {
 } from "./filesVersioning";
 import type { FilesCreateVersionedOptions } from "./useFilesPanelCreateEntries";
 import { useFilesPanelSave } from "./useFilesPanelSave";
-import { SAVE_COPY, type SaveCopy } from "./workspaceSaveCopy";
+import { SAVE_COPY, type SaveCopy } from "./versioningCopy";
 
 const ignoreEmbeddedNavigation = () => {};
 
@@ -429,33 +430,6 @@ function isInstafyManagedPath(path: string): boolean {
     return true;
   }
   return INSTAFY_ROOT_ENTRY_NAMES.has(normalized);
-}
-
-function formatFileSize(bytes: number | null | undefined): string {
-  if (typeof bytes !== "number" || Number.isNaN(bytes)) {
-    return "—";
-  }
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${Math.round((bytes / 1024) * 10) / 10} KB`;
-  }
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
-  }
-  return `${Math.round((bytes / (1024 * 1024 * 1024)) * 10) / 10} GB`;
-}
-
-function formatTimestamp(timestamp: string | null | undefined): string {
-  if (!timestamp) {
-    return "";
-  }
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) {
-    return timestamp;
-  }
-  return date.toLocaleString();
 }
 
 export function FilesPanel({
@@ -1984,7 +1958,7 @@ export function FilesPanel({
           data-testid="files-read-only-notice"
           role="status"
         >
-          Read-only — you can browse files, but you can’t edit, create, or delete them.
+          Read-only. You can browse files, but you can’t edit, create, or delete them.
         </div>
       ) : null}
 
@@ -2617,10 +2591,16 @@ export function FilesPanel({
         {viewerState.entry && viewerState.entry.kind === "file" ? (
           <footer className={`border-t border-slate-200/70 px-4 py-2.5 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`}>
             <div className="flex flex-wrap items-center gap-4">
-              <span>Size · {formatFileSize(viewerState.entry.size ?? activeFile?.size ?? null)}</span>
-              {/* Listings without a time (the stateless gateway) leave the row out. */}
-              {viewerModifiedAt ? <span>Modified · {formatTimestamp(viewerModifiedAt)}</span> : null}
-              {viewerState.entry.mimeType ? <span>MIME · {viewerState.entry.mimeType}</span> : null}
+              {/* Unknown facts are left out: listings without a time (the stateless gateway) have no Modified row. */}
+              {describeFileViewerFacts({
+                size: viewerState.entry.size ?? activeFile?.size ?? null,
+                modified: viewerModifiedAt,
+                mimeType: viewerState.entry.mimeType,
+              }).map((fact) => (
+                <span key={fact.label}>
+                  {fact.label} · {fact.value}
+                </span>
+              ))}
             </div>
           </footer>
         ) : null}

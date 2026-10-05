@@ -26,7 +26,7 @@ import {
   SAVE_COPY,
   staleSaveMessage,
   type SaveCopy,
-} from "./workspaceSaveCopy";
+} from "./versioningCopy";
 
 /** The longest wait for a `503 fetch_pending` before the one retry. */
 export const SAVE_FETCH_PENDING_RETRY_CAP_MS = 5_000;

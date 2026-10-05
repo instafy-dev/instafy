@@ -250,7 +250,7 @@ import { useChatGettingStartedState } from "./useChatGettingStartedState";
 import { mergeMentionableMembers } from "./mentionableMembers";
 import { sendWorkspaceFileStaleMerge } from "./workspaceFileStaleMerge";
 import { prepareStaleWorkspaceFileReload } from "./workspaceFileStaleReload";
-import { SAVE_COPY } from "./workspaceSaveCopy";
+import { SAVE_COPY } from "./versioningCopy";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,

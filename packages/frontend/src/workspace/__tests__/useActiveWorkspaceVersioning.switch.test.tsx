@@ -24,12 +24,21 @@ vi.mock("../../runtime/useRuntime", () => ({
 
 import { resetWorkspaceVersioningProbesForTests } from "../../services/runtimeController/workspaceVersioning";
 import { resetWorkspaceVersioningCacheForTests } from "../../services/runtimeController/workspaceVersioningCache";
-import { useActiveWorkspaceVersioning, type ActiveWorkspaceVersioning } from "../useActiveWorkspaceVersioning";
+import {
+  useActiveWorkspaceVersioning,
+  useWorkspaceVersioningForProject,
+  type ActiveWorkspaceVersioning,
+} from "../useActiveWorkspaceVersioning";
 
 let latest: ActiveWorkspaceVersioning | null = null;
 
 function Probe() {
   latest = useActiveWorkspaceVersioning();
+  return null;
+}
+
+function ProjectProbe({ projectId }: { projectId: string | null }) {
+  latest = useWorkspaceVersioningForProject({ projectId });
   return null;
 }
 
@@ -85,6 +94,24 @@ describe("useActiveWorkspaceVersioning across a project switch", () => {
     expect(latest?.historyReady).toBe(false);
     expect(window.localStorage.getItem("instafy.versioning.mode.cloud-project")).toBeNull();
     expect(mocks.status).not.toHaveBeenCalled();
+  });
+
+  it("guards a surface that is handed its project the same way", async () => {
+    // The active project does not matter here: the card names its own.
+    mocks.projectId = null;
+    mocks.runtime = { desktopOrigin: DESK, desktopOriginProjectId: "desk-project" };
+    await act(async () => root.render(<ProjectProbe projectId=" cloud-project " />));
+    await flush();
+    expect(latest?.projectId).toBe("cloud-project");
+    expect(latest?.originId).toBeNull();
+    expect(latest?.chromeMode).toBe("legacy");
+    expect(window.localStorage.getItem("instafy.versioning.mode.cloud-project")).toBeNull();
+    expect(mocks.status).not.toHaveBeenCalled();
+
+    await act(async () => root.render(<ProjectProbe projectId="desk-project" />));
+    await flush();
+    expect(latest?.originId).toBe("desk-origin");
+    expect(latest?.chromeMode).toBe("desktop");
   });
 
   it("keeps a summary whose project is unknown", async () => {

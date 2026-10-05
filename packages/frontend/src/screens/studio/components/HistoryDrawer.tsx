@@ -31,7 +31,7 @@ import {
   revertSuccessCopy,
   type HistoryNotice,
   type HistoryOriginKind,
-} from "./historyCopy";
+} from "./versioningCopy";
 import { formatRelativeCommitTime, parseSavedVersionSubject } from "./workspaceGitReviewShared";
 
 export const HISTORY_PAGE_SIZE = 20;

@@ -27,7 +27,7 @@ import {
   type OwnRevisions,
 } from "./filesVersioning";
 import { raiseWorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
-import { SAVE_COPY } from "./workspaceSaveCopy";
+import { SAVE_COPY } from "./versioningCopy";
 
 type DirectoryEntries = Record<string, ControllerWorkspaceEntry[]>;
 

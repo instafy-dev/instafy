@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { OriginError } from "../../../../sdk/instafy";
 import {
@@ -8,7 +6,7 @@ import {
   rejectedPathsCopy,
   SAVE_COPY,
   staleSaveMessage,
-} from "../workspaceSaveCopy";
+} from "../versioningCopy";
 
 function error(patch: Partial<OriginError>): OriginError {
   return { status: 409, message: "refused", routeUnavailable: false, ...patch };
@@ -17,6 +15,7 @@ function error(patch: Partial<OriginError>): OriginError {
 const describeStateless = (patch: Partial<OriginError>) =>
   describeSaveFailure({ error: error(patch), mode: "stateless", label: "README.md" });
 
+// Save in Files. The em-dash rule for this copy is versioningCopyGate.test.ts.
 describe("workspace save copy", () => {
   it("raises the stale card and offers Resolve for a moved head", () => {
     for (const code of ["head_moved", "path_type_conflict"]) {
@@ -145,10 +144,5 @@ describe("workspace save copy", () => {
       describeSaveFailure({ error: error(patch), mode: "stateless", label: "Docs skill", operation: "update" });
     expect(update({ code: "head_moved" }).message).toBe('"Docs skill" changed in the space. Refresh and try again.');
     expect(update({ status: 400 }).message).toBe('Couldn\'t update "Docs skill".');
-  });
-
-  it("keeps the copy free of em dashes", () => {
-    const source = readFileSync(fileURLToPath(new URL("../workspaceSaveCopy.ts", import.meta.url)), "utf8");
-    expect(source).not.toContain("\u2014");
   });
 });

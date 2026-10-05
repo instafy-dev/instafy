@@ -1,12 +1,16 @@
 import { useConversationFileOpener } from "../../../workspace/ConversationFileContext";
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
-import { Eye, NavArrowRight, OpenNewWindow, Undo, WarningTriangle } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Eye, NavArrowRight, OpenNewWindow, Undo, UndoCircle, WarningTriangle } from "iconoir-react";
+import { Button, IconButton } from "../../../components/Button";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { useStatus } from "../../../status/useStatus";
 import { controllerClient } from "../../../sdk/instafy";
+import { WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS } from "../../../services/runtimeController/workspaceSave";
+import type { RevertWorkspaceGitCommitResult } from "../../../services/runtimeController/workspaceGit";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
+import { useWorkspaceVersioningForProject } from "../../../workspace/useActiveWorkspaceVersioning";
 import { getUnifiedDiffRowClass, parseUnifiedDiff, splitUnifiedDiffHeader } from "../../../utils/unifiedDiff";
 import type {
   ChatMessageCommitRange,
@@ -16,11 +20,29 @@ import type {
   ChatMessageUnsavedReason,
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
+import {
+  REVERT_CHECK_FAILED_MESSAGE,
+  REVERT_CHECK_STILL_LOADING_MESSAGE,
+  REVERT_CHECKING_MESSAGE,
+  REVERT_RUNNING_MESSAGE,
+  REVERT_STILL_RUNNING_MESSAGE,
+  REVERT_WAITING_AGAIN_MESSAGE,
+  describeChangeRevertOutcome,
+  describeFileNotSaved,
+  describeRevertCombined,
+  describeRevertConfirm,
+  describeRevertOtherWork,
+  describeUnsavedChanges,
+  fetchPendingRetryDelayMs,
+  revertRetryDelayMs,
+} from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
+  fetchHistoryReview: fetchWorkspaceGitHistoryReviewFromController,
   revertPaths: revertWorkspaceGitPathsFromController,
+  revertCommit: revertWorkspaceGitCommitFromController,
 } = controllerClient.workspace.git;
 const { read: readWorkspaceFileFromController } = controllerClient.workspace.files;
 
@@ -69,6 +91,23 @@ type ChatFileDiffStat =
 
 type ChatFileUndoStatus = "reverted" | "removed";
 
+// What "Revert this change" would undo, checked before Revert is offered:
+// the files the change's saved version itself touched.
+type ChatChangeRevertScope =
+  | { status: "checking" }
+  // `paths` is everything the version touched; `unlistedPaths` the ones this
+  // turn saved without listing them on the card; `renameSources` the card's
+  // deleted files the review left out because it lists a rename by its new
+  // path only.
+  | { status: "ready"; paths: string[]; unlistedPaths: string[]; renameSources: string[] }
+  | { status: "other_work"; otherPaths: string[] }
+  // The version lists no files of its own: a merge, which the card cannot
+  // bound to this turn's commits.
+  | { status: "combined" }
+  // `stillLoading`: the gateway was still fetching the space's history, even
+  // after one retry.
+  | { status: "failed"; stillLoading?: boolean };
+
 type ResolvedChatFileChange = {
   file: ChatMessageFileChange;
   workspacePath: string;
@@ -81,11 +120,16 @@ const MAX_FILES_EXPANDED_BY_DEFAULT = 4;
 // click cannot fire two requests; the composer chain serializes the rest.
 const UNDO_REQUEST_COOLDOWN_MS = 2500;
 
+// How long "Revert this change" waits for the origin before it stops
+// waiting (the request itself is never cancelled). The longest normal
+// answer is a lease retry, a gateway fetch, a 5 s wait and a second try.
+export const REVERT_WAIT_TIMEOUT_MS = 45_000;
+
 const chipBaseClass =
   "inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border px-2.5 text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950 disabled:pointer-events-none disabled:opacity-45";
 // One distinguishing property per rail role: the summary is a borderless label,
 // file chips are the only bordered pills, actions are ghost buttons.
-// summaryToggleClass is the chat-wide disclosure vocabulary — reused by other chat surfaces.
+// summaryToggleClass is the chat-wide disclosure vocabulary, reused by other chat surfaces.
 // -ml-1.5 hangs the pill's own padding so the label TEXT aligns with the message text column.
 export const summaryToggleClass = `${chipBaseClass} -ml-1.5 border-transparent px-1.5 font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-200 dark:hover:bg-white/[0.07]`;
 const actionChipClass = `${chipBaseClass} border-transparent font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-300 dark:hover:bg-white/[0.07] dark:hover:text-slate-100`;
@@ -246,16 +290,6 @@ function resolveChangeSetVerb(entries: ResolvedChatFileChange[]): string {
   return "Edited";
 }
 
-// Plain-words reason behind the "Not saved" state. Hosted spaces keep unsaved
-// changes only on the machine running them, which can be replaced. The state
-// is a snapshot of the turn's own save, so the words describe that turn and
-// stay true after a later Save version.
-function describeUnsavedChanges(reason: ChatMessageUnsavedReason): string {
-  return reason === "auto_save_off"
-    ? "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts."
-    : "Saving failed when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.";
-}
-
 function buildSyntheticDiffPreview(
   path: string,
   contentText: string,
@@ -306,13 +340,15 @@ export function ChatFileChangeList({
   // The run's base..head commits: pins diffs to what that run changed (real
   // edit diffs on snapshot-history origins, stable after later edits).
   commitRange?: ChatMessageCommitRange | null;
-  // Set when the run's save failed or auto-save was off: the changes exist
-  // only on the space's machine, so the rail says "Not saved".
+  // Set when the run's save failed or did not run, so the rail says "Not
+  // saved" for the whole change. Files a partial save left out carry their
+  // own `notSaved` instead.
   unsavedReason?: ChatMessageUnsavedReason | null;
   // Identity of the chat message these changes belong to. When present, the
   // Undo chip becomes a conversational affordance (#165): it asks the agent to
   // undo that message's change instead of silently reverting files. Without it
-  // the chip falls back to the legacy file revert.
+  // the chip falls back to the legacy file revert on a space that keeps
+  // versions the old way, and to "Revert this change" alone elsewhere.
   messageId?: string | null;
   messageTimestamp?: number | null;
 }) {
@@ -320,6 +356,24 @@ export function ChatFileChangeList({
   const { showStatus } = useStatus();
   const { effectiveRuntimeId, runtimeReady } = useRuntime();
   const projectAccess = useOptionalProjectAccess();
+  // How the space keeps versions. Instances share one probe and cache, and
+  // the store's origin counts only when it belongs to this card's project.
+  const versioning = useWorkspaceVersioningForProject({ projectId });
+  // Only a History drawer with an Unsaved work section can be pointed at:
+  // the stateless gateway has one, a Desktop origin once it lists recovery.
+  // A space that keeps versions the old way still saves from Changes.
+  const unsavedWorkPlacement = {
+    unsavedWorkInHistory:
+      versioning.mode === "stateless" || (versioning.mode === "desktop" && versioning.recovery === "supported"),
+    saveVersionInChanges: versioning.mode === "legacy",
+  };
+  // Every save is a version on the stateless gateway and on a Desktop origin.
+  // There the change is undone by reverting the version its save published
+  // (the canonical range's head) as a new version, never by discarding
+  // paths. Until a probe answers, the mode is legacy and the card behaves as
+  // it always has.
+  const savesAreVersions = versioning.mode === "stateless" || versioning.mode === "desktop";
+  const revertRange = savesAreVersions && commitRange?.source === "git" ? commitRange : null;
   const projectWriteEnabled =
     projectAccess?.projectCapabilitiesResolved === true &&
     projectAccess.canWriteProject === true;
@@ -334,6 +388,29 @@ export function ChatFileChangeList({
     () => resolveUniqueChatFileChanges(files).length <= MAX_FILES_EXPANDED_BY_DEFAULT,
   );
   const [unsavedNoteOpen, setUnsavedNoteOpen] = useState(false);
+  const [openNotSavedNotes, setOpenNotSavedNotes] = useState<Record<string, boolean>>({});
+  const [revertConfirmOpen, setRevertConfirmOpen] = useState(false);
+  const [revertingChange, setRevertingChange] = useState(false);
+  // The files were undone by a saved revert version, not by a path discard.
+  const [revertedByVersion, setRevertedByVersion] = useState(false);
+  const [revertScope, setRevertScope] = useState<ChatChangeRevertScope | null>(null);
+  const revertScopeRequestRef = useRef(0);
+  // The revert request this card has running, settled once its answer has
+  // been shown. One at a time: a second request would only meet the first
+  // one's lease, so the card waits for the first one again instead.
+  const runningRevertRef = useRef<Promise<void> | null>(null);
+  // The dialog reopened while that request still runs, after the card had
+  // stopped waiting for it.
+  const [revertWaitingAgain, setRevertWaitingAgain] = useState(false);
+  // Set when the dialog closes after a revert request: focus goes back to
+  // the card, never to the page body.
+  const [returnFocusAfterRevert, setReturnFocusAfterRevert] = useState(false);
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const revertChipRef = useRef<HTMLButtonElement | null>(null);
+  const summaryToggleRef = useRef<HTMLButtonElement | null>(null);
+  // The dialog's safe choice: focus goes back here whenever the control
+  // that had it is replaced (Try again becomes Revert once a check passes).
+  const revertCancelRef = useRef<HTMLButtonElement | null>(null);
   const cardIdBase = useId();
 
   const resolvedFiles = useMemo(() => resolveUniqueChatFileChanges(files), [files]);
@@ -389,6 +466,8 @@ export function ChatFileChangeList({
   const totalCount = uniquePaths.length;
 
   const revertedCount = totalCount - pendingCount;
+  // Files the turn's save left out; reverted ones have nothing left to save.
+  const notSavedCount = pendingEntries.filter((entry) => entry.file.notSaved).length;
 
   const compactSummaryLabel = (() => {
     if (totalCount === 0) {
@@ -397,17 +476,19 @@ export function ChatFileChangeList({
     if (pendingCount === 0) {
       return `Reverted ${formatFileCount(totalCount)}`;
     }
+    const notSavedSuffix = notSavedCount > 0 ? ` · ${notSavedCount} not saved` : "";
     if (revertedCount > 0) {
-      return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} reverted`;
+      return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(totalCount)} · ${revertedCount} reverted${notSavedSuffix}`;
     }
-    return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}`;
+    return `${resolveChangeSetVerb(pendingEntries)} ${formatFileCount(pendingCount)}${notSavedSuffix}`;
   })();
 
   // Reverted files have nothing left to save, so the state follows the actions.
-  const unsavedNote = unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedReason) : null;
+  const unsavedNote =
+    unsavedReason && pendingCount > 0 ? describeUnsavedChanges(unsavedReason, unsavedWorkPlacement) : null;
   const unsavedNoteId = `${cardIdBase}-unsaved`;
 
-  // A single file needs no summary/toggle chip — the file chip carries everything.
+  // A single file needs no summary/toggle chip: the file chip carries everything.
   const showSummaryToggle = totalCount > 1;
   const visibleChipEntries = railExpanded || !showSummaryToggle ? resolvedFiles : [];
   const chipLabels = resolveChipLabels(resolvedFiles);
@@ -466,7 +547,7 @@ export function ChatFileChangeList({
         // A newly created file can return an empty diff during the brief window
         // before its change is committed/synced on the origin. Rather than
         // dead-ending on "No diff available", synthesize the added-lines diff from
-        // the file's current contents — accurate for a create (every line is new).
+        // the file's current contents, which is accurate for a create (every line is new).
         const shouldSynthesizeEmptyDiff =
           diffValue.trim().length === 0 &&
           (isExcludedFromSpaceHistoryPath(path) || changeType === "created");
@@ -735,7 +816,7 @@ export function ChatFileChangeList({
         });
         showStatus("Undid changes.", "success", 4000);
         setDiffRefreshNonce((value) => value + 1);
-        // Fully-reverted rails are history — tuck them down to the summary chip.
+        // Fully reverted rails are history: tuck them down to the summary chip.
         const remainingPending = pendingPaths.filter((path) => !targetPaths.includes(path));
         if (remainingPending.length === 0 && totalCount > 1) {
           setRailExpanded(false);
@@ -760,7 +841,7 @@ export function ChatFileChangeList({
 
   // Conversational undo (#165): ask the agent to undo this message's change
   // rather than silently reverting files. ChatPanel listens, fills the
-  // composer, and sends — the request lands in the thread like any user turn.
+  // composer, and sends, so the request lands in the thread like any user turn.
   const handleUndoRequest = useCallback(() => {
     if (!messageId || undoRequestPending || typeof window === "undefined") {
       return;
@@ -789,13 +870,367 @@ export function ChatFileChangeList({
     return () => window.clearTimeout(timer);
   }, [undoRequestPending]);
 
+  // One saved revert undoes the whole version; files it left alone (never
+  // saved) are not something a second revert can reach.
+  const canRevertChange = Boolean(projectId && projectWriteEnabled && revertRange && !revertedByVersion);
+
+  // The canonical range's head is the version this turn's save published.
+  // Its own change (against its first parent) is what the revert undoes, and
+  // it can hold more than this card's files: a save that publishes work an
+  // earlier turn could not publish carries that work too. So the dialog
+  // first lists the files that version touched, and offers Revert only when
+  // every one of them is this turn's own: on the card, or among the files
+  // the turn's save selected without listing them.
+  const checkRevertScope = useCallback(async () => {
+    const request = revertScopeRequestRef.current + 1;
+    revertScopeRequestRef.current = request;
+    if (!projectId || !revertRange) {
+      setRevertScope({ status: "failed" });
+      return;
+    }
+    setRevertScope({ status: "checking" });
+    const reviewHead = () =>
+      fetchWorkspaceGitHistoryReviewFromController({
+        projectId,
+        commit: revertRange.head,
+        originId: versioning.originId,
+        routing: "default",
+      });
+    let review = await reviewHead();
+    if (revertScopeRequestRef.current !== request) {
+      return;
+    }
+    // A gateway whose copy of the space is cold fetches first and asks for a
+    // moment (503 fetch_pending). This check is the first request to meet
+    // it, so it waits that moment and asks once more.
+    const retryDelay = fetchPendingRetryDelayMs(review?.errorInfo);
+    if (retryDelay !== null) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      if (revertScopeRequestRef.current !== request) {
+        return;
+      }
+      review = await reviewHead();
+      if (revertScopeRequestRef.current !== request) {
+        return;
+      }
+    }
+    if (!review || !review.supported || review.busy || review.error) {
+      setRevertScope({ status: "failed", stillLoading: review?.errorInfo?.code === "fetch_pending" });
+      return;
+    }
+    const cardPaths = new Set(uniquePaths);
+    const savedPaths = new Set((revertRange.savedPaths ?? []).map(normalizeWorkspacePath));
+    const turnPaths = new Set([...uniquePaths, ...savedPaths]);
+    const paths = Array.from(
+      new Set(review.entries.map((entry) => normalizeWorkspacePath(entry.path)).filter((path) => path.length > 0)),
+    );
+    // A turn's own save always changes files. A version that lists none is
+    // a merge whose combined review is empty (a Desktop origin's review of a
+    // clean merge), and a revert of it would need a base the card cannot
+    // bound to this turn: ask the agent instead.
+    if (paths.length === 0) {
+      setRevertScope({ status: "combined" });
+      return;
+    }
+    const otherPaths = paths.filter((path) => !turnPaths.has(path));
+    if (otherPaths.length > 0) {
+      setRevertScope({ status: "other_work", otherPaths });
+      return;
+    }
+    // The runtime records a moved file as two changes (old path deleted, new
+    // path created), but the origin's review detects the rename and lists
+    // only the new path. The revert brings the old path back too: a deleted
+    // card file the turn's own save selected, and that the review left out,
+    // is that rename's source.
+    const reviewPaths = new Set(paths);
+    const listsRename = review.entries.some((entry) => entry.code.trim().toUpperCase().startsWith("R"));
+    const renameSources = listsRename
+      ? uniquePaths.filter(
+          (path) => changeTypeByPath[path] === "deleted" && savedPaths.has(path) && !reviewPaths.has(path),
+        )
+      : [];
+    setRevertScope({
+      status: "ready",
+      paths,
+      unlistedPaths: paths.filter((path) => !cardPaths.has(path)),
+      renameSources,
+    });
+  }, [changeTypeByPath, projectId, revertRange, uniquePaths, versioning.originId]);
+
+  // Waits for the running revert with the dialog busy and the chip
+  // "Reverting…", but only for REVERT_WAIT_TIMEOUT_MS. Then the card stops
+  // waiting: it says the revert may still finish and frees the chip. The
+  // request is never cancelled, and its answer is shown whenever it comes.
+  const waitForRevert = useCallback(
+    async (running: Promise<void>) => {
+      setRevertingChange(true);
+      let waitTimer: ReturnType<typeof setTimeout> | undefined;
+      const stoppedWaiting = new Promise<"timeout">((resolve) => {
+        waitTimer = setTimeout(() => resolve("timeout"), REVERT_WAIT_TIMEOUT_MS);
+      });
+      const answered = () => "answered" as const;
+      const first = await Promise.race([running.then(answered, answered), stoppedWaiting]);
+      clearTimeout(waitTimer);
+      setRevertingChange(false);
+      setRevertConfirmOpen(false);
+      setReturnFocusAfterRevert(true);
+      if (first === "timeout") {
+        showStatus(REVERT_STILL_RUNNING_MESSAGE, "warning", 9000);
+      }
+    },
+    [showStatus],
+  );
+
+  const openRevertDialog = useCallback(() => {
+    // The chip stays focusable while a revert runs, but opens nothing.
+    if (revertingChange) {
+      return;
+    }
+    const running = runningRevertRef.current;
+    setRevertWaitingAgain(running !== null);
+    setRevertConfirmOpen(true);
+    if (running) {
+      // The card stopped waiting for this request, but it still runs: wait
+      // for it again rather than check and offer a second revert.
+      void waitForRevert(running);
+      return;
+    }
+    void checkRevertScope();
+  }, [checkRevertScope, revertingChange, waitForRevert]);
+
+  const closeRevertDialog = useCallback(() => {
+    revertScopeRequestRef.current += 1;
+    setRevertConfirmOpen(false);
+  }, []);
+
+  // Closing the dialog never cancels a revert that is already running: the
+  // request keeps going, the chip says "Reverting…", and the result shows
+  // as a toast when it settles. Focus goes back to the card.
+  const dismissRevertDialog = useCallback(() => {
+    closeRevertDialog();
+    if (revertingChange) {
+      setReturnFocusAfterRevert(true);
+    }
+  }, [closeRevertDialog, revertingChange]);
+
+  const askAgentFromRevertDialog = useCallback(() => {
+    closeRevertDialog();
+    handleUndoRequest();
+  }, [closeRevertDialog, handleUndoRequest]);
+
+  // Try again is replaced by Revert (or by the agent offer) when the check
+  // answers. Focus moves to Cancel first, so a second Enter can never land
+  // on a Revert the user did not move to.
+  const retryRevertScopeCheck = useCallback(() => {
+    revertCancelRef.current?.focus();
+    void checkRevertScope();
+  }, [checkRevertScope]);
+
+  // What a revert answered: mark the files it undid and say so. Also runs
+  // for an answer that arrives after the card stopped waiting for it.
+  const applyRevertOutcome = useCallback(
+    (result: RevertWorkspaceGitCommitResult | null, revertedVersionPaths: ReadonlySet<string>) => {
+      const outcome = describeChangeRevertOutcome(result);
+      if (outcome.reverted) {
+        const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));
+        // A version revert only undoes what that version touched. Files the
+        // turn's save left out (Not saved) and folders that are never saved
+        // stay as they are, and keep their state on the card.
+        const targetPaths = pendingEntries
+          .filter(
+            ({ file, workspacePath }) =>
+              revertedVersionPaths.has(workspacePath) &&
+              !left.has(workspacePath) &&
+              !file.notSaved &&
+              !isExcludedFromSpaceHistoryPath(workspacePath),
+          )
+          .map(({ workspacePath }) => workspacePath);
+        setRevertedByVersion(true);
+        setUndoStatusByPath((prev) => {
+          const next = { ...prev };
+          for (const path of targetPaths) {
+            // Reverting a run that created a file removes it again.
+            next[path] = changeTypeByPath[path] === "created" ? "removed" : "reverted";
+          }
+          return next;
+        });
+        if (targetPaths.length === pendingPaths.length && totalCount > 1) {
+          setRailExpanded(false);
+        }
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
+        }
+      }
+      const askAgent = outcome.offerAgentUndo && messageId ? handleUndoRequest : null;
+      showStatus(
+        outcome.message,
+        outcome.intent,
+        askAgent ? 9000 : outcome.intent === "success" || outcome.intent === "info" ? 4000 : 6500,
+        askAgent ? { actionLabel: "Ask the agent to undo it", onAction: askAgent } : undefined,
+      );
+    },
+    [changeTypeByPath, handleUndoRequest, messageId, pendingEntries, pendingPaths, projectId, showStatus, totalCount],
+  );
+
+  // A late answer is shown with the card as it is then, not as it was when
+  // the request started.
+  const applyRevertOutcomeRef = useRef(applyRevertOutcome);
+  useEffect(() => {
+    applyRevertOutcomeRef.current = applyRevertOutcome;
+  }, [applyRevertOutcome]);
+
+  // "Revert this change": a new version that undoes the saved version the
+  // dialog checked (`{commit: head}`, no base, so the origin reverts exactly
+  // that commit's own change), on the origin the versioning probe described.
+  // The dialog stays open and busy while the request runs, so focus stays on
+  // a control that is there; the user can close it at any time without
+  // cancelling the request. The answer is shown when the request settles,
+  // also after the card stopped waiting for it (see waitForRevert).
+  const handleRevertChange = useCallback(async () => {
+    if (revertingChange || runningRevertRef.current || revertScope?.status !== "ready") {
+      return;
+    }
+    if (!canRevertChange || !projectId || !revertRange) {
+      // The change stopped being revertable here while the dialog was open
+      // (the space's mode or write access changed): close it rather than
+      // leave a Revert that does nothing.
+      closeRevertDialog();
+      setReturnFocusAfterRevert(true);
+      return;
+    }
+    const revertedVersionPaths = new Set([...revertScope.paths, ...revertScope.renameSources]);
+    const revert = () =>
+      revertWorkspaceGitCommitFromController({
+        projectId,
+        commit: revertRange.head,
+        originId: versioning.originId,
+        routing: "default",
+        // An agent checkpoint holds the project lease briefly: retry once.
+        leaseConflictRetryDelayMs: WORKSPACE_SAVE_LEASE_RETRY_DELAY_MS,
+      });
+    const answer = (async () => {
+      try {
+        let result = await revert();
+        // A gateway still fetching the space's history asks for a moment.
+        // Nothing was committed, so one retry after that delay is safe.
+        const retryDelay = revertRetryDelayMs(result);
+        if (retryDelay !== null) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          result = await revert();
+        }
+        return result;
+      } catch {
+        return null;
+      }
+    })();
+    const running = answer.then((result) => {
+      runningRevertRef.current = null;
+      applyRevertOutcomeRef.current(result, revertedVersionPaths);
+    });
+    runningRevertRef.current = running;
+    setRevertWaitingAgain(false);
+    await waitForRevert(running);
+  }, [
+    canRevertChange,
+    closeRevertDialog,
+    projectId,
+    revertRange,
+    revertScope,
+    revertingChange,
+    versioning.originId,
+    waitForRevert,
+  ]);
+
+  // The dialog belongs to "Revert this change". When the change stops being
+  // revertable while it is open (a re-probe answers that the space keeps
+  // versions the old way, or write access is re-resolving), the chip behind
+  // it is gone: close the dialog and return focus to the card.
+  useEffect(() => {
+    if (revertConfirmOpen && !canRevertChange && !revertingChange) {
+      closeRevertDialog();
+      setReturnFocusAfterRevert(true);
+    }
+  }, [canRevertChange, closeRevertDialog, revertConfirmOpen, revertingChange]);
+
+  // After a revert the dialog's own button is gone and the Revert chip may be
+  // too (every file reverted). Focus lands on the chip when it is still
+  // there, else on the summary toggle, else on the first file chip.
+  useLayoutEffect(() => {
+    if (!returnFocusAfterRevert || revertConfirmOpen) {
+      return;
+    }
+    setReturnFocusAfterRevert(false);
+    if (typeof document === "undefined") {
+      return;
+    }
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) {
+      return;
+    }
+    const chip = revertChipRef.current;
+    const target =
+      chip?.isConnected && !chip.disabled
+        ? chip
+        : summaryToggleRef.current?.isConnected
+          ? summaryToggleRef.current
+          : cardRef.current?.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]');
+    target?.focus();
+  }, [returnFocusAfterRevert, revertConfirmOpen]);
+
+  // While the dialog is open its action button is swapped as the check
+  // answers. Focus never stays on the page body behind the dialog: it goes
+  // to Cancel, the safe choice.
+  useLayoutEffect(() => {
+    if (!revertConfirmOpen || typeof document === "undefined") {
+      return;
+    }
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) {
+      return;
+    }
+    revertCancelRef.current?.focus();
+  }, [revertConfirmOpen, revertScope?.status]);
+
+  const revertScopeMessage = (() => {
+    if (revertingChange) {
+      return revertWaitingAgain ? REVERT_WAITING_AGAIN_MESSAGE : REVERT_RUNNING_MESSAGE;
+    }
+    switch (revertScope?.status) {
+      case "ready":
+        return describeRevertConfirm(revertScope.unlistedPaths);
+      case "other_work":
+        return describeRevertOtherWork(revertScope.otherPaths, Boolean(messageId));
+      case "combined":
+        return describeRevertCombined(Boolean(messageId));
+      case "failed":
+        return revertScope.stillLoading ? REVERT_CHECK_STILL_LOADING_MESSAGE : REVERT_CHECK_FAILED_MESSAGE;
+      default:
+        return REVERT_CHECKING_MESSAGE;
+    }
+  })();
+
+  const conversationalUndoChip = messageId ? (
+    <button
+      type="button"
+      className={actionUndoChipClass}
+      onClick={handleUndoRequest}
+      disabled={undoRequestPending}
+      title="Ask the agent to undo this change"
+      data-testid="chat-file-change-undo"
+    >
+      <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+      <span>{undoRequestPending ? "Undo…" : "Undo"}</span>
+    </button>
+  ) : null;
+
   return (
-    <div className="mt-2 text-sm" data-testid="chat-file-change-summary">
+    <div ref={cardRef} className="mt-2 text-sm" data-testid="chat-file-change-summary">
       {/* Chips and their actions flow as one row: actions follow the chips after a thin
           divider (no far-right gap on single-file rails) and wrap together on narrow widths. */}
       <div className="flex max-w-full flex-wrap items-center gap-x-1.5 gap-y-1.5">
           {showSummaryToggle ? (
             <button
+              ref={summaryToggleRef}
               type="button"
               className={summaryToggleClass}
               onClick={() => setRailExpanded((value) => !value)}
@@ -828,19 +1263,23 @@ export function ChatFileChangeList({
             const isReverted = Boolean(undoStatusByPath[workspacePath]);
             const cardOpen = Boolean(expandedDiffByPath[workspacePath]);
             const isDeleted = file.changeType === "deleted";
-            return (
+            const chipLabel = middleTruncateLabel(chipLabels.get(workspacePath) ?? workspacePath);
+            const notSavedReason =
+              file.notSaved && !isReverted ? describeFileNotSaved(file.notSaved, unsavedWorkPlacement) : null;
+            const notSavedNoteOpen = Boolean(openNotSavedNotes[workspacePath]);
+            const fileChipClass = cardOpen
+              ? isReverted
+                ? chipFileRevertedActiveClass
+                : chipFileActiveClass
+              : isReverted
+                ? chipFileRevertedClass
+                : chipFileClass;
+            const fileChip = (
               <button
-                key={workspacePath}
                 type="button"
-                className={
-                  cardOpen
-                    ? isReverted
-                      ? chipFileRevertedActiveClass
-                      : chipFileActiveClass
-                    : isReverted
-                      ? chipFileRevertedClass
-                      : chipFileClass
-                }
+                // In a group with its save state the chip may shrink, so its
+                // label truncates instead of pushing the state to a new line.
+                className={notSavedReason ? `${fileChipClass} min-w-0` : fileChipClass}
                 onClick={() => toggleFileCard(workspacePath)}
                 title={isReverted ? `${workspacePath} (reverted)` : workspacePath}
                 aria-expanded={cardOpen}
@@ -849,7 +1288,7 @@ export function ChatFileChangeList({
               >
                 {isReverted ? <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" /> : null}
                 <span className={`min-w-0 max-w-56 truncate ${isDeleted ? "line-through" : ""}`}>
-                  {middleTruncateLabel(chipLabels.get(workspacePath) ?? workspacePath)}
+                  {chipLabel}
                 </span>
                 {isReverted ? <span className="sr-only">(reverted)</span> : null}
                 {!isReverted && stat?.kind === "ready" ? (
@@ -861,6 +1300,33 @@ export function ChatFileChangeList({
                   />
                 ) : null}
               </button>
+            );
+            if (!notSavedReason) {
+              return <Fragment key={workspacePath}>{fileChip}</Fragment>;
+            }
+            // This file's own save state sits right after its chip, as glyph
+            // and words; a tap opens the reason under the row. The two wrap
+            // as one unit, so on a narrow rail the state never starts the
+            // next line, where it would read as the next file's.
+            return (
+              <span key={workspacePath} className="inline-flex min-w-0 max-w-full items-center gap-x-1.5">
+                {fileChip}
+                <button
+                  type="button"
+                  className={unsavedStateClass}
+                  onClick={() =>
+                    setOpenNotSavedNotes((prev) => ({ ...prev, [workspacePath]: !prev[workspacePath] }))
+                  }
+                  aria-expanded={notSavedNoteOpen}
+                  aria-controls={`${cardIdBase}-not-saved-${index}`}
+                  title={notSavedReason}
+                  data-testid="chat-file-change-not-saved-chip"
+                >
+                  <WarningTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  <span>Not saved</span>
+                  <span className="sr-only">{`: ${chipLabel}`}</span>
+                </button>
+              </span>
             );
           })}
           </span>
@@ -896,19 +1362,30 @@ export function ChatFileChangeList({
               <Eye className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
               <span>Review changes</span>
             </button>
-            {projectWriteEnabled ? (
+            {projectWriteEnabled && savesAreVersions ? (
+              <>
+                {conversationalUndoChip}
+                {canRevertChange ? (
+                  <button
+                    ref={revertChipRef}
+                    type="button"
+                    // Not `disabled` while a revert runs: focus can rest here
+                    // after the dialog is closed, and a press opens nothing.
+                    className={revertingChange ? `${actionChipClass} opacity-45` : actionChipClass}
+                    onClick={openRevertDialog}
+                    aria-disabled={revertingChange || undefined}
+                    aria-busy={revertingChange || undefined}
+                    title="Save a new version that undoes this change"
+                    data-testid="chat-file-change-revert"
+                  >
+                    <UndoCircle className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+                    <span>{revertingChange ? "Reverting…" : "Revert this change"}</span>
+                  </button>
+                ) : null}
+              </>
+            ) : projectWriteEnabled ? (
               messageId ? (
-                <button
-                  type="button"
-                  className={actionUndoChipClass}
-                  onClick={handleUndoRequest}
-                  disabled={undoRequestPending}
-                  title="Ask the agent to undo this change"
-                  data-testid="chat-file-change-undo"
-                >
-                  <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
-                  <span>{undoRequestPending ? "Undo…" : "Undo"}</span>
-                </button>
+                conversationalUndoChip
               ) : (
                 // Legacy fallback for surfaces that render changes without a
                 // message identity: reverting files is all "undo" can mean here.
@@ -940,6 +1417,25 @@ export function ChatFileChangeList({
           {unsavedNote}
         </p>
       ) : null}
+
+      {visibleChipEntries.map(({ file, workspacePath }, index) => {
+        if (!file.notSaved || undoStatusByPath[workspacePath]) {
+          return null;
+        }
+        return (
+          <p
+            key={workspacePath}
+            id={`${cardIdBase}-not-saved-${index}`}
+            className={
+              openNotSavedNotes[workspacePath] ? "mt-1 text-xs text-slate-600 dark:text-slate-300" : "sr-only"
+            }
+            data-testid="chat-file-change-not-saved-note"
+          >
+            <span className="font-mono">{chipLabels.get(workspacePath) ?? workspacePath}</span>
+            {`: ${describeFileNotSaved(file.notSaved, unsavedWorkPlacement)}`}
+          </p>
+        );
+      })}
 
       {resolvedFiles.map(({ file, workspacePath, displayLabel }, index) => {
         if (!railExpanded || !expandedDiffByPath[workspacePath]) {
@@ -1004,7 +1500,13 @@ export function ChatFileChangeList({
                         ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200"
                         : "border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200",
                     ].join(" ")}
-                    title={undoStatus === "removed" ? "Removed from workspace" : "Reverted to git HEAD"}
+                    title={
+                      revertedByVersion
+                        ? "Undone by a new saved version"
+                        : undoStatus === "removed"
+                          ? "Removed from workspace"
+                          : "Reverted to git HEAD"
+                    }
                   >
                     {undoStatus === "removed" ? "Removed" : "Reverted"}
                   </span>
@@ -1022,12 +1524,12 @@ export function ChatFileChangeList({
                 >
                   <OpenNewWindow className="h-3 w-3 text-slate-500 dark:text-slate-400" aria-hidden="true" />
                 </IconButton>
-                {!isReverted && projectWriteEnabled ? (
+                {!isReverted && projectWriteEnabled && !savesAreVersions ? (
                   <>
                     <span className="mx-0.5 h-3.5 w-px shrink-0 bg-slate-200 dark:bg-white/[0.08]" aria-hidden="true" />
                     {/* Direct file revert stays available from the file card,
                         where its scope (this file's workspace changes) is
-                        unambiguous — the chip-row Undo is the conversational
+                        unambiguous; the chip-row Undo is the conversational
                         affordance. */}
                     <IconButton
                       aria-label={`Revert file changes to ${workspacePath}`}
@@ -1126,6 +1628,68 @@ export function ChatFileChangeList({
           </div>
         );
       })}
+
+      {revertConfirmOpen ? (
+        <StudioDialogModal
+          isOpen
+          // Escape, a click outside and Close all work while a revert runs;
+          // none of them cancels it (see dismissRevertDialog).
+          isDismissable
+          onOpenChange={(open) => {
+            if (!open) {
+              dismissRevertDialog();
+            }
+          }}
+          dialogAriaLabelledBy={`${cardIdBase}-revert-title`}
+          modalClassName="p-5"
+        >
+          <div data-testid="chat-file-change-revert-dialog" data-state={revertScope?.status ?? "checking"}>
+            <h2 id={`${cardIdBase}-revert-title`} className="text-lg font-semibold">
+              Revert this change?
+            </h2>
+            <p
+              role="status"
+              className="mt-2 text-sm text-slate-500 dark:text-slate-400"
+              data-testid="chat-file-change-revert-scope"
+            >
+              {revertScopeMessage}
+            </p>
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <Button ref={revertCancelRef} variant="outline" autoFocus onPress={dismissRevertDialog}>
+                {/* Nothing is cancelled once the request is on its way. */}
+                {revertingChange ? "Close" : "Cancel"}
+              </Button>
+              {/* Each action has its own key, so React never reuses one
+                  button's node (and its focus) for another action. */}
+              {revertScope?.status === "other_work" || revertScope?.status === "combined" ? (
+                messageId ? (
+                  <Button
+                    key="ask"
+                    onPress={askAgentFromRevertDialog}
+                    data-testid="chat-file-change-revert-ask-agent"
+                  >
+                    Ask the agent to undo it
+                  </Button>
+                ) : null
+              ) : revertScope?.status === "failed" ? (
+                <Button key="retry" onPress={retryRevertScopeCheck} data-testid="chat-file-change-revert-retry-check">
+                  Try again
+                </Button>
+              ) : (
+                <Button
+                  key="revert"
+                  isDisabled={revertScope?.status !== "ready"}
+                  isPending={revertingChange}
+                  onPress={() => void handleRevertChange()}
+                  data-testid="chat-file-change-revert-confirm"
+                >
+                  Revert
+                </Button>
+              )}
+            </div>
+          </div>
+        </StudioDialogModal>
+      ) : null}
     </div>
   );
 }

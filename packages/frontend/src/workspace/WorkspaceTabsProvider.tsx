@@ -662,7 +662,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       tabsRef.current = nextTabs;
       setTabs(nextTabs);
       // Pruning a stale tab can leave activeTabId pointing at nothing, and the
-      // repair below only runs on the chat panel — on Home the workspace would
+      // repair below only runs on the chat panel. On Home the workspace would
       // sit blank until the next click.
       const activeId = activeTabIdRef.current;
       if (activeId && !nextTabs.some((tab) => tab.id === activeId)) {

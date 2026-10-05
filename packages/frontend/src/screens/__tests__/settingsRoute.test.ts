@@ -97,7 +97,6 @@ describe("settings sections in all scopes", () => {
   it.each([
     ["org", "profile", "billing"],
     ["project", "overview", "providers"],
-    ["profile", "account", "preferences"],
     ["profile", "account", "notifications"],
     ["profile", "account", "appearance"],
     ["profile", "account", "advanced"],
@@ -111,13 +110,20 @@ describe("settings sections in all scopes", () => {
   });
 
   it("uses the incoming routed tab, not the previous rendered tab", () => {
-    expect(resolveSettingsRoute("?panel=settings&settingsTab=profile&settingsCategory=preferences", "project"))
-      .toEqual({ tab: "profile", category: "preferences", itemId: null });
+    expect(resolveSettingsRoute("?panel=settings&settingsTab=profile&settingsCategory=notifications", "project"))
+      .toEqual({ tab: "profile", category: "notifications", itemId: null });
     expect(resolveSettingsRoute("?panel=settings&settingsTab=org&settingsCategory=providers"))
       .toEqual({ tab: "org", category: "profile", itemId: null });
     expect(resolveSettingsRoute("?panel=credits&settingsTab=project&settingsCategory=ai&settingsItem=speech", "profile"))
       .toEqual({ tab: "profile", category: "account", itemId: null });
     expect(() => buildSettingsSectionSearch("", "profile", "providers")).toThrow("Unknown settings category");
+  });
+
+  it("opens Profile for a link to the removed Preferences category", () => {
+    // Preferences held only the auto-save setting, which is gone: every turn saves.
+    expect(resolveSettingsRoute("?panel=settings&settingsTab=profile&settingsCategory=preferences"))
+      .toEqual({ tab: "profile", category: "account", itemId: null });
+    expect(() => buildSettingsSectionSearch("", "profile", "preferences")).toThrow("Unknown settings category");
   });
 
   it("opens account notification settings without inheriting the selected team's scope", () => {

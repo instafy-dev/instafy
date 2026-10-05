@@ -475,7 +475,7 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ keep: ["src/a.ts", "src/b.ts"] }));
     const status = q(container, "history-status")?.textContent ?? "";
     // The entry held only these two files: there is no rest to speak of.
-    expect(status).toBe("Kept the current version of src/a.ts, src/b.ts.");
+    expect(status).toBe("Kept the current version of src/a.ts and src/b.ts.");
     expect(status).not.toContain("Secret and ignored");
     expect(status).not.toContain("Restored as a new version");
   });

@@ -4,6 +4,8 @@ import type {
   ChatMessageFileChange,
   ChatMessageFileChangeType,
   ChatMessageFileLineRange,
+  ChatMessageFileNotSaved,
+  ChatMessageNotSavedReason,
   ChatMessageUnsavedReason,
 } from "../screens/studio/types";
 import type { ControllerConversationMessage } from "../sdk/instafy";
@@ -549,6 +551,20 @@ export function extractFileChangesFromMetadata(
     .filter((entry): entry is ChatMessageFileChange => entry !== null);
 }
 
+// The paths a checkpoint's save selected, as the runtime recorded them.
+function readSavedPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const paths = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry === "string" && entry.trim().length > 0) {
+      paths.add(entry.trim());
+    }
+  }
+  return Array.from(paths);
+}
+
 function gitRevString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
@@ -561,8 +577,10 @@ function gitRevString(value: unknown): string | null {
 
 // The base..head commit pair of the run that produced this message's file
 // changes, taken from the runtime's origin/apply artifact. Lets the diff cards
-// show what *that run* changed — as a real edit diff even on snapshot-history
-// origins, and stable after later edits.
+// show what *that run* changed (as a real edit diff even on snapshot-history
+// origins, and stable after later edits). `source` says which pair it is:
+// only the canonical "git" pair names commits on the space's saved history,
+// so only that one can be reverted as a saved version.
 export function extractWorkspaceCommitRangeFromMetadata(
   metadata: Record<string, unknown> | null | undefined
 ): ChatMessageCommitRange | null {
@@ -573,7 +591,7 @@ export function extractWorkspaceCommitRangeFromMetadata(
   if (!Array.isArray(artifacts)) {
     return null;
   }
-  // Prefer the newest apply artifact — retried runs append a fresh one.
+  // Prefer the newest apply artifact: retried runs append a fresh one.
   for (let index = artifacts.length - 1; index >= 0; index -= 1) {
     const artifact = artifacts[index];
     if (!isPlainObject(artifact) || artifact.kind !== "origin/apply") {
@@ -597,12 +615,128 @@ export function extractWorkspaceCommitRangeFromMetadata(
       head: gitRevString(artifactMetadata["rev"]),
     };
     // Never mix pairs: base and head must bracket the same commit operation.
-    const pair = gitPair.base && gitPair.head ? gitPair : applyPair;
+    const source = gitPair.base && gitPair.head ? "git" : "apply";
+    const pair = source === "git" ? gitPair : applyPair;
     if (pair.base && pair.head && pair.base !== pair.head) {
-      return { base: pair.base, head: pair.head };
+      const savedPaths = source === "git" ? readSavedPaths(artifactMetadata["paths"]) : [];
+      return savedPaths.length > 0
+        ? { base: pair.base, head: pair.head, source, savedPaths }
+        : { base: pair.base, head: pair.head, source };
     }
   }
   return null;
+}
+
+// The newest origin/apply artifact of the turn's own save. A command lane's
+// save (such as the skill files `/skills import --start` saves first) is not
+// the save of this message's file changes.
+function findTurnOriginApplyMetadata(
+  metadata: Record<string, unknown> | null | undefined
+): Record<string, unknown> | null {
+  const artifacts = metadata?.["artifacts"];
+  if (!Array.isArray(artifacts)) {
+    return null;
+  }
+  for (let index = artifacts.length - 1; index >= 0; index -= 1) {
+    const artifact = artifacts[index];
+    if (!isPlainObject(artifact) || artifact.kind !== "origin/apply") {
+      continue;
+    }
+    const artifactMetadata = isPlainObject(artifact["metadata"]) ? artifact["metadata"] : null;
+    if (!artifactMetadata || typeof artifactMetadata["lane"] === "string") {
+      continue;
+    }
+    return artifactMetadata;
+  }
+  return null;
+}
+
+const NOT_SAVED_REJECTION_REASONS: ReadonlySet<ChatMessageNotSavedReason> = new Set([
+  "excluded",
+  "secret",
+  "ignored",
+  "too_large",
+  "attachment",
+  "policy",
+  "unsupported",
+]);
+
+function normalizeUnsavedPath(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const normalized = value.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/^\/+|\/+$/g, "");
+  return normalized.length > 0 ? normalized : null;
+}
+
+function parseNotSavedReason(value: unknown): ChatMessageNotSavedReason {
+  const normalized = normalizeMessageTypeValue(value)?.replace(/-/g, "_") ?? null;
+  return normalized && NOT_SAVED_REJECTION_REASONS.has(normalized as ChatMessageNotSavedReason)
+    ? (normalized as ChatMessageNotSavedReason)
+    : "unknown";
+}
+
+export interface ChatMessageUnsavedPath extends ChatMessageFileNotSaved {
+  path: string;
+}
+
+// The files the turn's save left out of the space's saved history, one entry
+// per path, from the artifact's `conflictedPaths` (the space changed them too;
+// the agent's version is kept as unsaved work) and `rejectedPaths` (refused
+// by the space's file rules, each with a `reason`). The runtime has written
+// both since saves publish by merging. A conflicted path wins over a rejected
+// one for the same file.
+export function extractUnsavedPathsFromMetadata(
+  metadata: Record<string, unknown> | null | undefined
+): ChatMessageUnsavedPath[] {
+  const artifactMetadata = findTurnOriginApplyMetadata(metadata);
+  if (!artifactMetadata) {
+    return [];
+  }
+  const byPath = new Map<string, ChatMessageUnsavedPath>();
+  const conflicted = artifactMetadata["conflictedPaths"];
+  if (Array.isArray(conflicted)) {
+    for (const entry of conflicted) {
+      const path = normalizeUnsavedPath(isPlainObject(entry) ? entry["path"] : entry);
+      if (path && !byPath.has(path)) {
+        byPath.set(path, { path, reason: "conflicted", keptSavedVersion: true });
+      }
+    }
+  }
+  const rejected = artifactMetadata["rejectedPaths"];
+  if (Array.isArray(rejected)) {
+    for (const entry of rejected) {
+      const record = isPlainObject(entry) ? entry : null;
+      const path = normalizeUnsavedPath(record ? record["path"] : entry);
+      if (!path || byPath.has(path)) {
+        continue;
+      }
+      byPath.set(path, {
+        path,
+        reason: parseNotSavedReason(record?.["reason"]),
+        keptSavedVersion: record?.["keptSavedVersion"] === true || record?.["kept_saved_version"] === true,
+      });
+    }
+  }
+  return Array.from(byPath.values());
+}
+
+// Marks each file change whose path the turn's save left out. Paths the save
+// reported that are not among the message's files are left to the agent's own
+// "Not saved: ..." sentence at the end of its reply.
+export function attachUnsavedPathsToFileChanges(
+  files: ChatMessageFileChange[],
+  unsavedPaths: ChatMessageUnsavedPath[]
+): ChatMessageFileChange[] {
+  if (files.length === 0 || unsavedPaths.length === 0) {
+    return files;
+  }
+  const byPath = new Map(unsavedPaths.map((entry) => [entry.path, entry] as const));
+  return files.map((file) => {
+    const path = normalizeUnsavedPath(file.workspacePath) ?? normalizeUnsavedPath(file.path);
+    const entry = path ? byPath.get(path) : undefined;
+    return entry ? { ...file, notSaved: { reason: entry.reason, keptSavedVersion: entry.keptSavedVersion } } : file;
+  });
 }
 
 const HISTORY_EXCLUSION_MARKER = "path is excluded from space history:";
@@ -660,12 +794,14 @@ function skippedSaveLeftPathsUnsaved(artifactMetadata: Record<string, unknown>):
 // Whether the run that produced this message's file changes failed to save
 // them, from the runtime's origin/apply artifact. The runtime records
 // gitSyncStatus "failed" when the save ran and errored, and "disabled" when
-// auto-save was off so no save ran (its status message reports these as
+// saving was off so no save ran (its status message reports these as
 // sync_failed and manual_required). "skipped" means the origin refused paths
 // that are kept out of history; that is only a failed save when the same
 // request also carried other paths, since the refusal saves none of them.
-// "synced" is saved, no artifact means no save was attempted, and Desktop
-// folders keep the files on the user's disk, so those return null.
+// "synced" is saved and "partial" saved all but some files, which are marked
+// one by one (extractUnsavedPathsFromMetadata). No artifact means no save was
+// attempted, and Desktop folders keep the files on the user's disk, so those
+// return null.
 export function extractUnsavedReasonFromMetadata(
   metadata: Record<string, unknown> | null | undefined
 ): ChatMessageUnsavedReason | null {
@@ -744,7 +880,10 @@ export function mapControllerMessageToChat(message: ControllerConversationMessag
       metadata = { runId };
     }
   }
-  const files = extractFileChangesFromMetadata(metadata);
+  const files = attachUnsavedPathsToFileChanges(
+    extractFileChangesFromMetadata(metadata),
+    extractUnsavedPathsFromMetadata(metadata),
+  );
   const commitRange = extractWorkspaceCommitRangeFromMetadata(metadata);
   const unsavedReason = extractUnsavedReasonFromMetadata(metadata);
   const promptMetadata = resolvePromptMetadataRecord(metadata);

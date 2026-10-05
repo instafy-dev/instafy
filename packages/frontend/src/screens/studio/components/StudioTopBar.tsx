@@ -486,8 +486,8 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
             variant="ghost"
             radius="full"
             size="md"
-            aria-label="Home — all teams"
-            title="Home — all teams"
+            aria-label="Home, all teams"
+            title="Home, all teams"
             aria-current={navigationPage === "home" ? "page" : undefined}
             data-testid="topbar-home-button"
             className={`!min-h-12 !min-w-12 shrink-0 text-slate-600 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS} aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/15 dark:aria-[current=page]:text-primary-400`}

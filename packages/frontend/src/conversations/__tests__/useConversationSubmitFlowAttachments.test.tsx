@@ -150,6 +150,22 @@ describe("chat attachments through the real submit flow", () => {
     expect(mocks.applyChanges).not.toHaveBeenCalled();
   });
 
+  // Not an attachment case, but this is the real submit flow's harness.
+  it("sends no auto-save choice with a prompt and drops the retired stored one", async () => {
+    window.localStorage.setItem("instafy.git.autoSyncAfterApply", "0");
+    await render(createInitialConversation({ localId: "conversation-local", controllerId: EXISTING_ID }));
+    await act(async () => {
+      await flow.handleSubmit("conversation-local", "Edit the README", sendOptions());
+    });
+
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    const metadata = mocks.sendMessage.mock.calls[0][0].metadata as Record<string, unknown>;
+    expect(metadata).toHaveProperty("clientMessageId");
+    expect(metadata).not.toHaveProperty("git");
+    expect(JSON.stringify(metadata)).not.toContain("autoSyncAfterApply");
+    expect(window.localStorage.getItem("instafy.git.autoSyncAfterApply")).toBeNull();
+  });
+
   it("uploads into an existing chat's folder without creating another chat", async () => {
     await render(createInitialConversation({ localId: "conversation-local", controllerId: EXISTING_ID }));
     await act(async () => {

@@ -19,7 +19,6 @@ import {
 } from "./agentCollaborationPolicy";
 import { runLocalCapabilityConversationFlow } from "./localCapabilityConversationFlow";
 import { parseTerminalCommandRequest } from "./terminalCommand";
-import { getGitAutoSyncAfterApplyPreference } from "./gitAutoSyncPreference";
 import { createConversationTaskQueue } from "./conversationTaskQueue";
 import {
   buildGroupParticipationMetadata,
@@ -124,6 +123,18 @@ export function buildAssistantCapabilityContextForTargets(
 
 function detectWebdevRuntimeNeed(): WebdevRuntimeNeed | null {
   return null;
+}
+
+// The removed "Auto-save assistant file changes" setting stored its choice
+// here. Runtimes ignore an off choice, so it is cleared on the next prompt.
+const RETIRED_GIT_AUTO_SYNC_STORAGE_KEY = "instafy.git.autoSyncAfterApply";
+
+function forgetRetiredGitAutoSyncPreference(): void {
+  try {
+    window.localStorage.removeItem(RETIRED_GIT_AUTO_SYNC_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable (private windows, blocked site data).
+  }
 }
 
 export function useConversationSubmitFlow({
@@ -566,14 +577,13 @@ export function useConversationSubmitFlow({
         targetConversation = learnConversation;
         displayConversationId = parentConversation.localId;
       }
-      const autoSyncAfterApply = getGitAutoSyncAfterApplyPreference();
+      // Every turn saves, so prompts no longer carry an auto-save choice;
+      // the stored choice from the removed setting is dropped here.
+      forgetRetiredGitAutoSyncPreference();
       let promptMetadata: Record<string, unknown> | null = {
         ...submittedMetadata,
         client: buildConversationClientMetadata(chatClientSessionId, currentUserId),
         clientMessageId: generateUUID(),
-        git: {
-          autoSyncAfterApply,
-        },
       };
       const goalMetadata = activeGoalPromptMetadata(targetConversation.activeGoal);
       if (goalMetadata) {
@@ -1160,7 +1170,7 @@ export function useConversationSubmitFlow({
                 return {
                   ...previous,
                   content:
-                    "Switching to the Webdev runtime (Playwright) — it’s already ready; running your request now…",
+                    "Switching to the Webdev runtime (Playwright). It’s already ready; running your request now…",
                   metadata: {
                     ...previousMetadata,
                     details: {
@@ -1194,7 +1204,7 @@ export function useConversationSubmitFlow({
                 return {
                   ...previous,
                   content:
-                    "Switching to the Webdev runtime (Playwright) — starting it now; I’ll run your request as soon as it’s ready…",
+                    "Switching to the Webdev runtime (Playwright). Starting it now; I’ll run your request as soon as it’s ready…",
                   metadata: {
                     ...previousMetadata,
                     details: {
@@ -1254,7 +1264,7 @@ export function useConversationSubmitFlow({
                       return {
                         ...previous,
                         content:
-                          "Switching to the Webdev runtime (Playwright) — it’s ready; running your request now…",
+                          "Switching to the Webdev runtime (Playwright). It’s ready; running your request now…",
                         metadata: {
                           ...previousMetadata,
                           details: {

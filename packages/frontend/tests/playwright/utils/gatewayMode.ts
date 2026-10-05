@@ -13,6 +13,9 @@ import { fetchDefaultOriginGitStatus, type OriginTokenFailure } from "./harness.
  *   with the variable unset exactly as before.
  * - `requireGatewayMode` skips a spec written for the other mode and probes
  *   whenever the spec runs, unset included.
+ *
+ * A spec that runs on both gateways reads `readGatewayModeEnv()` and checks
+ * a mode's own details only when the run names that mode.
  */
 export type PlaywrightGatewayMode = "legacy" | "stateless";
 export type GatewayMode = PlaywrightGatewayMode;
@@ -24,6 +27,7 @@ type GatewayStatusProbe = (
   options: { projectId: string },
 ) => ReturnType<typeof fetchDefaultOriginGitStatus>;
 
+/** The mode the run names, or null when it names none. Any other value throws. */
 export function readGatewayModeEnv(env: NodeJS.ProcessEnv = process.env): PlaywrightGatewayMode | null {
   const raw = (env[GATEWAY_MODE_ENV] ?? "").trim().toLowerCase();
   if (!raw) {

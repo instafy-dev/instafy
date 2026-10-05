@@ -14,7 +14,7 @@ import {
   desktopSavedCopy,
   keptOnComputerCopy,
   type HistoryNotice,
-} from "./historyCopy";
+} from "./versioningCopy";
 
 const LEASE_RETRY_DELAY_MS = 1_500;
 

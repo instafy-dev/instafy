@@ -62,8 +62,8 @@ describe("StudioOrganizationRail", () => {
     await render({ homeActive: true, homeAttentionCount: 3, orgAttentionCounts: { empty: 2 } });
     const home = container.querySelector('[data-testid="sidebar-home-button"]');
     expect(home?.getAttribute("aria-current")).toBe("page");
-    expect(home?.getAttribute("aria-label")).toBe("Home — all teams");
-    expect(home?.getAttribute("title")).toBe("Home — all teams");
+    expect(home?.getAttribute("aria-label")).toBe("Home, all teams");
+    expect(home?.getAttribute("title")).toBe("Home, all teams");
     expect(document.getElementById(home!.getAttribute("aria-describedby")!)?.textContent).toBe("3 unread updates across teams");
     expect(container.querySelector('[data-testid="sidebar-home-badge"]')?.textContent).toBe("3");
     expect(container.querySelector('[data-testid="sidebar-home-badge"]')?.getAttribute("title")).toBe("3 unread updates across teams");

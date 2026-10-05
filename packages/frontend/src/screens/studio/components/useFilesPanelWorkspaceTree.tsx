@@ -19,7 +19,7 @@ import {
   type FilesVersioning,
   type OwnRevisions,
 } from "./filesVersioning";
-import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./workspaceSaveCopy";
+import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./versioningCopy";
 import { gitBlobOid } from "../../../utils/gitBlobOid";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;

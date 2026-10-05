@@ -37,12 +37,6 @@ async function ensureHostedRuntimeReady(page: Page, projectId: string): Promise<
   return hosted.runtimeId ?? null;
 }
 
-async function setAssistantAutoSync(page: Page, enabled: boolean) {
-  await page.evaluate((value) => {
-    window.localStorage.setItem("instafy.git.autoSyncAfterApply", value ? "1" : "0");
-  }, enabled);
-}
-
 async function discardIgnoredGeneratedChanges(page: Page) {
   for (const path of IGNORED_GENERATED_CHANGE_PATHS) {
     const discardButton = page.getByRole("button", { name: `Discard changes for ${path}` }).first();
@@ -257,7 +251,6 @@ test.describe("Source Control UI (git-canonical)", () => {
         await setRuntimePreference(page, projectId, runtimeId, "source-control-ui");
       }
     }
-    await setAssistantAutoSync(page, true);
   });
 
   test.afterEach(async ({ page }) => {

@@ -1262,7 +1262,7 @@ export function StudioSidebar({
             }}
             data-testid="sidebar-home-button"
             aria-current={activePanel === "home" ? "page" : undefined}
-            aria-label="Home — all teams" title="Home — all teams"
+            aria-label="Home, all teams" title="Home, all teams"
             className="relative !min-h-12 !min-w-12 shrink-0 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
             <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
             <AttentionBadge count={homeAttentionCount} testId="sidebar-home-badge" aria-hidden

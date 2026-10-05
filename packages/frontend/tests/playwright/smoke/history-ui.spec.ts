@@ -159,7 +159,7 @@ test.describe("History UI (stateless gateway)", () => {
 
     const status = page.getByTestId("history-status");
     await expect(status).toContainText(
-      "Later changes touch the same files, so this can't be reverted automatically.",
+      "Later changes touch the same lines, so this can't be reverted automatically.",
       { timeout: 60_000 },
     );
     await expect(page.getByTestId("history-revert-ask-agent")).toBeVisible();
