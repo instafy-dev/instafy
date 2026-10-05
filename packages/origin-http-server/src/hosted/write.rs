@@ -361,11 +361,13 @@ async fn commit(
     let read_token = caller_token(token).map(str::to_string);
     let runtime = tokio::runtime::Handle::current();
     let deadline = Instant::now() + budget;
+    let paused = admission.clone();
     let committed = blocking(move || {
         let dir = cache.ensure_mirror(&mirror)?;
         let mut canonical = CachedCanonical::new(cache, lease, read_token, runtime)
             .caller_expires(caller_expires)
-            .wait_until(deadline);
+            .wait_until(deadline)
+            .admission(Some(paused));
         let target = CasTarget {
             mirror: &dir,
             quarantine_parent: &quarantine_parent,
@@ -477,11 +479,17 @@ pub(super) async fn handle_git_revert_commit(
         .transpose()?;
     let caller = caller_token(&token);
     let lease = state.cache.lease(project);
-    let commit = resolve_rev(&state, &lease, caller, &commit).await?;
-    let base = match base {
-        Some(base) => Some(resolve_rev(&state, &lease, caller, &base).await?),
-        None => None,
-    };
+    // Finding the commits may fetch: not work that needs the slot.
+    let (commit, base) = admission
+        .paused(async {
+            let commit = resolve_rev(&state, &lease, caller, &commit).await?;
+            let base = match base {
+                Some(base) => Some(resolve_rev(&state, &lease, caller, &base).await?),
+                None => None,
+            };
+            Ok((commit, base))
+        })
+        .await?;
     let cache = state.cache.clone();
     let mirror = lease.mirror();
     let reverted = commit.clone();

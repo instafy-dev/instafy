@@ -246,46 +246,54 @@ impl StubController {
         }
         let write_tokens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let lease_answer = Arc::new(Mutex::new(active));
-        let app =
-            axum::Router::new()
-                .route(
-                    "/.well-known/jwks.json",
-                    get_route(|State(stub): State<Stub>| async move { axum::Json(stub.jwks) }),
-                )
-                .route(
-                    "/projects/:project/lease",
-                    get_route(|State(stub): State<Stub>| async move {
-                        axum::Json(stub.lease.lock().unwrap().clone())
-                    }),
-                )
-                .route(
-                    "/projects/:project/git/access_token",
-                    post_route(
-                        |State(stub): State<Stub>,
-                         axum::Json(body): axum::Json<serde_json::Value>| async move {
-                            let writes = body["scopes"].as_array().is_some_and(|scopes| {
-                                scopes.iter().any(|scope| scope == "git.write")
-                            });
-                            let n = if writes {
-                                stub.write_tokens
-                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                            } else {
-                                0
-                            };
-                            let until = chrono::Utc::now().timestamp() + stub.life;
-                            axum::Json(json!({
-                                "token": format!("git-{n}-until-{until}"),
-                                "expiresIn": stub.life,
-                            }))
-                        },
-                    ),
-                )
-                .with_state(Stub {
-                    jwks,
-                    lease: lease_answer.clone(),
-                    write_tokens: write_tokens.clone(),
-                    life,
-                });
+        let app = axum::Router::new()
+            .route(
+                "/.well-known/jwks.json",
+                get_route(|State(stub): State<Stub>| async move { axum::Json(stub.jwks) }),
+            )
+            .route(
+                "/projects/:project/lease",
+                get_route(|State(stub): State<Stub>| async move {
+                    axum::Json(stub.lease.lock().unwrap().clone())
+                }),
+            )
+            .route(
+                "/projects/:project/git/access_token",
+                post_route(
+                    |State(stub): State<Stub>,
+                     headers: axum::http::HeaderMap,
+                     axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        use axum::response::IntoResponse as _;
+                        // Like the controller: an expired bearer is
+                        // never exchanged.
+                        if bearer_expired(&headers) {
+                            return (axum::http::StatusCode::UNAUTHORIZED, "access token expired")
+                                .into_response();
+                        }
+                        let writes = body["scopes"]
+                            .as_array()
+                            .is_some_and(|scopes| scopes.iter().any(|scope| scope == "git.write"));
+                        let n = if writes {
+                            stub.write_tokens
+                                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        } else {
+                            0
+                        };
+                        let until = chrono::Utc::now().timestamp() + stub.life;
+                        axum::Json(json!({
+                            "token": format!("git-{n}-until-{until}"),
+                            "expiresIn": stub.life,
+                        }))
+                        .into_response()
+                    },
+                ),
+            )
+            .with_state(Stub {
+                jwks,
+                lease: lease_answer.clone(),
+                write_tokens: write_tokens.clone(),
+                life,
+            });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -341,6 +349,29 @@ impl StubController {
         };
         jsonwebtoken::encode(&header, &claims, &self.key).unwrap()
     }
+}
+
+/// Whether the bearer of `headers` is a token whose `exp` has passed.
+fn bearer_expired(headers: &axum::http::HeaderMap) -> bool {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let Some(token) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    let Some(payload) = token
+        .split('.')
+        .nth(1)
+        .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+        .and_then(|payload| serde_json::from_slice::<serde_json::Value>(&payload).ok())
+    else {
+        return false;
+    };
+    payload["exp"]
+        .as_i64()
+        .is_some_and(|exp| exp < chrono::Utc::now().timestamp())
 }
 
 /// The gateway's identity in [`HostedScenario`].
@@ -2622,6 +2653,193 @@ async fn write_slots_are_bounded_and_end_before_the_push() {
     assert_eq!(saved.status, 200, "{}", saved.json());
     assert_eq!(served.state.apply_slots.available_permits(), 4);
     assert_eq!(served.state.import_slots.available_permits(), 2);
+}
+
+/// An import keyed `key` writing `path`, sent with `token` to `base`:
+/// status and body.
+async fn send_import(
+    base: String,
+    token: String,
+    lease: String,
+    key: &'static str,
+    path: &'static str,
+) -> (u16, serde_json::Value) {
+    let request = json!({
+        "manifest": manifest(&[path], &[], json!({
+            "leaseId": lease,
+            "idempotencyKey": key,
+            "requestFingerprint": "sha256:aaaa",
+        })),
+        "archiveBase64": base64::engine::general_purpose::STANDARD.encode(zip(&[(path, b"x\n")])),
+    });
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .bearer_auth(token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = response.json().await.unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+/// An import waiting on a slow fetch of `main` (a space's first clone)
+/// holds no admission slot meanwhile: a third import is admitted while two
+/// wait, instead of being told `writes_busy`, and all three are saved.
+#[tokio::test(flavor = "multi_thread")]
+async fn imports_let_their_slot_go_while_a_fetch_runs() {
+    let mut sc = HostedScenario::new();
+    sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = super::tests::serve_with_cache(
+        &sc,
+        |mut cache| {
+            cache.test_fetch_delay = Some(Duration::from_millis(2500));
+            cache.with_waits(Duration::from_millis(300), Duration::from_millis(300))
+        },
+        |state| state.with_admission_wait(Duration::from_millis(300)),
+    )
+    .await;
+    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let lease = controller.lease.to_string();
+
+    let first = tokio::spawn(send_import(
+        served.base.clone(),
+        import.clone(),
+        lease.clone(),
+        "imp:00000000000000000001",
+        "one.txt",
+    ));
+    let second = tokio::spawn(send_import(
+        served.base.clone(),
+        import.clone(),
+        lease.clone(),
+        "imp:00000000000000000002",
+        "two.txt",
+    ));
+    // Both reach the fetch (2.5 s) and let their slots go.
+    let waited = Instant::now();
+    while served.cache.fetches_started() == 0 || served.state.import_slots.available_permits() < 2 {
+        assert!(
+            waited.elapsed() < Duration::from_millis(2000),
+            "slots held while the imports wait on the fetch: {} free",
+            served.state.import_slots.available_permits()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (status, body) = send_import(
+        served.base.clone(),
+        import.clone(),
+        lease.clone(),
+        "imp:00000000000000000003",
+        "three.txt",
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    for import in [first, second] {
+        let (status, body) = import.await.unwrap();
+        assert_eq!(status, 200, "{body}");
+    }
+    let main = sc.canonical_main().unwrap();
+    for path in ["one.txt", "two.txt", "three.txt"] {
+        assert!(show(&sc, &main, path).is_some(), "{path}");
+    }
+    assert_eq!(served.state.import_slots.available_permits(), 2);
+}
+
+/// A change waits out a slow fetch only while the caller's bearer can
+/// still be exchanged for the push: one that would outlive it is told
+/// `fetch_pending` (and asks again with a new one) instead of failing
+/// after minutes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_for_a_fetch_ends_before_the_callers_access_does() {
+    let mut sc = HostedScenario::new();
+    sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = super::tests::serve_with_cache(
+        &sc,
+        |mut cache| {
+            cache.test_fetch_delay = Some(Duration::from_secs(8));
+            cache.with_waits(Duration::from_millis(300), Duration::from_millis(300))
+        },
+        |state| state,
+    )
+    .await;
+    let exp = chrono::Utc::now().timestamp() + 17;
+    let import = controller.token(&["fs.write", "workspace.import"], json!({ "exp": exp }));
+    let started = Instant::now();
+    let (status, body) = send_import(
+        served.base.clone(),
+        import,
+        controller.lease.to_string(),
+        "imp:00000000000000000004",
+        "one.txt",
+    )
+    .await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (503, Some("fetch_pending")),
+        "{body}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// A first attempt that outlives the caller's bearer (here a fetch that
+/// answered after it expired) cannot exchange it for the push: 409
+/// `main_busy`, nothing saved, not a server failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_push_after_the_callers_access_ended_is_main_busy() {
+    let mut sc = HostedScenario::new();
+    let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = super::tests::serve_with_cache(
+        &sc,
+        |mut cache| {
+            cache.test_fetch_delay = Some(Duration::from_millis(3000));
+            cache.with_waits(Duration::from_secs(8), Duration::from_secs(8))
+        },
+        |state| state,
+    )
+    .await;
+    // A read first, so the read credential is cached.
+    let reader = controller.token(&["fs.read"], json!({}));
+    let read = reqwest::Client::new()
+        .get(format!("{}/files/a.txt", served.base))
+        .bearer_auth(&reader)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status().as_u16(), 200);
+
+    let exp = chrono::Utc::now().timestamp() + 2;
+    let person = controller.token(&["fs.read", "fs.write"], json!({ "exp": exp }));
+    let answer = apply_as(
+        &served,
+        manifest(
+            &["b.txt"],
+            &[],
+            json!({ "baseRev": head, "leaseId": controller.lease.to_string() }),
+        ),
+        &zip(&[("b.txt", b"b\n")]),
+        Some(&person),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (409, "main_busy"),
+        "{}",
+        answer.json()
+    );
+    assert_eq!(sc.canonical_main().as_deref(), Some(head.as_str()));
 }
 
 /// A change with time left (an import's minutes) waits out a slow fetch

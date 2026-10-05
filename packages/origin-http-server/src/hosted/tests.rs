@@ -962,10 +962,20 @@ pub(super) async fn serve_with(
     sc: &HostedScenario,
     adjust: impl FnOnce(super::routes::HostedState) -> super::routes::HostedState,
 ) -> Served {
+    serve_with_cache(sc, |cache| cache, adjust).await
+}
+
+/// [`serve_with`] with the cache `cache` makes of the usual one.
+pub(super) async fn serve_with_cache(
+    sc: &HostedScenario,
+    cache: impl FnOnce(MirrorCache) -> MirrorCache,
+    adjust: impl FnOnce(super::routes::HostedState) -> super::routes::HostedState,
+) -> Served {
     let config = Arc::new(sc.config.clone());
     let http = reqwest::Client::new();
-    let cache =
-        Arc::new(MirrorCache::open(&sc.root, config.clone(), http.clone(), u64::MAX).unwrap());
+    let cache = Arc::new(cache(
+        MirrorCache::open(&sc.root, config.clone(), http.clone(), u64::MAX).unwrap(),
+    ));
     let auth = crate::route_auth::RouteAuth {
         token_validator: crate::auth::TokenValidator::new(http.clone(), config.jwks_url.clone()),
         config,
