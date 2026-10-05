@@ -324,15 +324,14 @@ impl OriginHttpServer {
         .context("could not open the mirror cache")?;
         let cache = Arc::new(cache);
         self.sweeper = Some(cache.spawn_sweeper());
-        let state = HostedState {
-            auth: RouteAuth {
+        let state = HostedState::new(
+            RouteAuth {
                 config: self.config.clone(),
                 token_validator,
                 http_client: self.http_client.clone(),
             },
-            hosted,
             cache,
-        };
+        );
         Ok(crate::hosted::router(state))
     }
 

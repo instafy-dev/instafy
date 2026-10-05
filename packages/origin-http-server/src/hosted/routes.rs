@@ -1,37 +1,944 @@
 //! The gateway's HTTP routes. Browser and flush routes are never mounted:
 //! the gateway has no browser and no working copy to flush.
+//!
+//! Reads take `?rev=<commit>` or `?ref=<recovery or salvage ref>` (not
+//! both) and otherwise show canonical `main`. Every read that looked at a
+//! commit answers with `X-Instafy-Rev` naming it (for `?ref=`, the ref's
+//! own id), errors included, and without the header when the space has no
+//! `main` yet. A path is `not_found` only when the commit's tree has no
+//! entry there; a link, a submodule or a reserved path is
+//! `unsupported_entry`.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use axum::extract::DefaultBodyLimit;
-use axum::http::Method;
-use axum::routing::get;
-use axum::Router;
+use axum::body::{Body, Bytes};
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Json, Response};
+use axum::routing::{get, post};
+use axum::{Extension, Router};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
+use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use tower_http::cors::{Any, CorsLayer};
+use tracing::warn;
+use uuid::Uuid;
 
-use super::cache::MirrorCache;
-use super::config::HostedGatewayConfig;
-use crate::route_auth::RouteAuth;
+use super::cache::{canonical_unreachable, Freshness, MirrorCache, MirrorLease};
+use super::read::{self, EntriesRead, FileRead};
+use crate::apply::normalize_relative_path;
+use crate::auth::OriginClaims;
+use crate::error::OriginError;
+use crate::git::{DirtyPathEntry, DirtyPathGroup, GitHistoryEntry};
+use crate::paths::is_reserved_path;
+use crate::recovery_view::{
+    fetch_refs, parse_rev, remote_tip, Absence, FetchedRef, RecoveryRef, ViewError,
+    MAX_HISTORY_PAGE,
+};
+use crate::route_auth::{self, OriginAccessToken, RouteAuth};
+use crate::routes::{
+    apply_raw_security_headers, mime_type_for_path, FileContentResponse, INSTAFY_BLOB_HEADER,
+};
+use crate::workspace_git::WorkspaceGit;
+
+/// The header naming the commit a read looked at.
+pub(crate) const INSTAFY_REV_HEADER: &str = "x-instafy-rev";
+
+/// How many uploads are staged and committed at once, across all spaces.
+const APPLY_SLOTS: usize = 4;
+
+/// How long a `?ref=` read may spend listing and fetching the ref.
+const REF_FETCH_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Everything a gateway request needs.
 #[derive(Clone)]
-// The read and write routes that use these land next.
-#[allow(dead_code)]
 pub(crate) struct HostedState {
     pub(crate) auth: RouteAuth,
-    pub(crate) hosted: Arc<HostedGatewayConfig>,
     pub(crate) cache: Arc<MirrorCache>,
+    /// Admission for uploads and the writes that build trees.
+    pub(crate) apply_slots: Arc<Semaphore>,
+}
+
+impl HostedState {
+    pub(crate) fn new(auth: RouteAuth, cache: Arc<MirrorCache>) -> Self {
+        Self {
+            auth,
+            cache,
+            apply_slots: Arc::new(Semaphore::new(APPLY_SLOTS)),
+        }
+    }
+
+    fn gateway_email(&self) -> String {
+        self.auth.config.git_author_email.clone()
+    }
 }
 
 pub(crate) fn router(state: HostedState) -> Router {
     let cors_layer = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-        .allow_headers(Any);
+        .allow_headers(Any)
+        .expose_headers([
+            HeaderName::from_static(INSTAFY_REV_HEADER),
+            HeaderName::from_static(INSTAFY_BLOB_HEADER),
+            axum::http::header::RETRY_AFTER,
+        ]);
+
+    let read_routes = Router::new()
+        .route("/entries", get(handle_entries))
+        .route("/files/*path", get(handle_file))
+        .route("/raw/*path", get(handle_raw))
+        .route("/git/status", get(handle_git_status))
+        .route("/git/diff", get(handle_git_diff))
+        .route("/git/history", get(handle_git_history))
+        .route("/git/history/review", get(handle_git_history_review))
+        .route("/git/recovery", get(handle_git_recovery))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_read,
+        ));
+
+    let admitted_routes = Router::new()
+        .route(
+            "/apply",
+            post(handle_not_available).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/apply-json", post(handle_not_available))
+        .route("/git/revert-commit", post(handle_not_available))
+        .route("/git/recovery/restore", post(handle_not_available))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            limit_apply_concurrency,
+        ));
+
+    let write_routes = Router::new()
+        .merge(admitted_routes)
+        .route("/apply/status", post(handle_not_available))
+        .route("/git/sync", post(handle_git_sync))
+        .route("/git/revert", post(handle_git_revert))
+        .route("/git/recovery/dismiss", post(handle_not_available))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_write,
+        ));
 
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .merge(read_routes)
+        .merge(write_routes)
+        // The server-wide RequestBodyLimitLayer bounds uploads.
         .layer(DefaultBodyLimit::disable())
         .layer(cors_layer)
         .with_state(state)
+}
+
+async fn require_read(
+    State(state): State<HostedState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, OriginError> {
+    route_auth::authorize_and_continue(&state.auth, request, next, &["fs.read"]).await
+}
+
+async fn require_write(
+    State(state): State<HostedState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, OriginError> {
+    route_auth::authorize_and_continue(&state.auth, request, next, &["fs.write"]).await
+}
+
+async fn limit_apply_concurrency(
+    State(state): State<HostedState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, OriginError> {
+    let _permit = state
+        .apply_slots
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| OriginError::unavailable("apply admission is unavailable"))?;
+    Ok(next.run(request).await)
+}
+
+fn project_of(state: &HostedState, claims: &OriginClaims) -> Result<Uuid, OriginError> {
+    route_auth::project_id_for_claims(&state.auth.config, claims)
+}
+
+fn caller_token(token: &OriginAccessToken) -> Option<&str> {
+    Some(token.token.trim()).filter(|token| !token.is_empty())
+}
+
+/// Run blocking git work for a request.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, OriginError> + Send + 'static,
+) -> Result<T, OriginError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| OriginError::internal(format!("git read task failed: {error}")))?
+}
+
+fn coded(status: StatusCode, code: &'static str, message: &str) -> OriginError {
+    OriginError::with_report(status, code, message, serde_json::json!({}))
+}
+
+/// `response` with `X-Instafy-Rev` naming `rev`, when there is one.
+fn with_rev(mut response: Response, rev: Option<&str>) -> Response {
+    if let Some(value) = rev.and_then(|rev| HeaderValue::from_str(rev).ok()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(INSTAFY_REV_HEADER), value);
+    }
+    response
+}
+
+fn with_blob(mut response: Response, blob: &str) -> Response {
+    if let Ok(value) = HeaderValue::from_str(blob) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(INSTAFY_BLOB_HEADER), value);
+    }
+    response
+}
+
+/// The 404 for a path a read showed nothing at.
+fn missing(absence: Absence) -> OriginError {
+    match absence {
+        Absence::Absent => coded(StatusCode::NOT_FOUND, "not_found", "path not found"),
+        Absence::Directory => coded(
+            StatusCode::NOT_FOUND,
+            "unsupported_entry",
+            "this path is a folder, not a file",
+        ),
+        Absence::Hidden => coded(
+            StatusCode::NOT_FOUND,
+            "unsupported_entry",
+            "this path is a link, a submodule or a reserved path, which cannot be read here",
+        ),
+    }
+}
+
+/// A `?ref=` read that could not reach canonical is a 502, like a fetch.
+fn ref_error(error: ViewError) -> OriginError {
+    match error {
+        ViewError::Git(error) => {
+            warn!(error = %format!("{error:#}"), "fetching a recovery ref failed");
+            canonical_unreachable()
+        }
+        other => other.into(),
+    }
+}
+
+/// What a read looks at: the commit, and the id `X-Instafy-Rev` names.
+struct Target {
+    commit: Option<String>,
+    served: Option<String>,
+}
+
+/// `main`, a commit (`rev`) or the tip of a recovery or salvage ref
+/// (`ref`), fetching what is needed. Empty values count as absent.
+async fn read_target(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    rev: Option<&str>,
+    reference: Option<&str>,
+) -> Result<Target, OriginError> {
+    let rev = rev.filter(|value| !value.is_empty());
+    let reference = reference.filter(|value| !value.is_empty());
+    match (rev, reference) {
+        (Some(_), Some(_)) => Err(ViewError::RevAndRef.into()),
+        (Some(rev), None) => {
+            let commit = resolve_rev(state, lease, token, rev).await?;
+            Ok(Target {
+                commit: Some(commit.clone()),
+                served: Some(commit),
+            })
+        }
+        (None, Some(reference)) => {
+            let fetched = resolve_ref(state, lease, token, reference).await?;
+            Ok(Target {
+                commit: Some(fetched.commit),
+                served: Some(fetched.tip),
+            })
+        }
+        (None, None) => {
+            let main = state
+                .cache
+                .resolve_main(lease, Freshness::Coalesced, token)
+                .await?;
+            Ok(Target {
+                commit: main.clone(),
+                served: main,
+            })
+        }
+    }
+}
+
+/// A full commit id that `main` (or a branch) reaches, fetching `main`
+/// once when it is not here yet; otherwise 404 `rev_not_found`.
+///
+/// The fetch is one that starts after the request arrived (shared with
+/// every other request waiting for one): a fetch that finished just before
+/// cannot hold a commit saved after it, and a client that names a commit
+/// usually just learned of it.
+async fn resolve_rev(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    rev: &str,
+) -> Result<String, OriginError> {
+    let rev = parse_rev(rev)?;
+    if readable_here(state, lease, &rev).await? {
+        return Ok(rev);
+    }
+    state
+        .cache
+        .resolve_main(lease, Freshness::Fresh, token)
+        .await?;
+    if readable_here(state, lease, &rev).await? {
+        return Ok(rev);
+    }
+    Err(ViewError::RevNotFound.into())
+}
+
+async fn readable_here(
+    state: &HostedState,
+    lease: &MirrorLease,
+    rev: &str,
+) -> Result<bool, OriginError> {
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let rev = rev.to_string();
+    blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        Ok(read::readable(&WorkspaceGit::bare(&dir, None), &rev)?)
+    })
+    .await
+}
+
+/// A recovery or salvage ref, read on canonical by exactly its name and
+/// fetched: its own id (`tip`) and its commit. A ref canonical does not
+/// have is 404 `rev_not_found`.
+async fn resolve_ref(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    reference: &str,
+) -> Result<FetchedRef, OriginError> {
+    let reference = RecoveryRef::parse(reference)?;
+    let project = lease.project();
+    let git_token = state.cache.read_token(project, token).await?;
+    let url = state.cache.remote_url(project)?;
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        let git = WorkspaceGit::bare(&dir, git_token.as_deref())
+            .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
+        let reference = RecoveryRef::validate(&git, reference.as_str())?;
+        let Some(tip) = remote_tip(&git, &url, &reference).map_err(ref_error)? else {
+            return Err(ViewError::RefNotFound.into());
+        };
+        fetch_refs(&git, &url, &[(reference, tip)])
+            .map_err(ref_error)?
+            .fetched
+            .pop()
+            .ok_or_else(|| ViewError::RefNotFound.into())
+    })
+    .await
+}
+
+/// A path from a query or a route, in the one form reads accept.
+fn normalized_path(path: &str) -> Result<String, OriginError> {
+    normalize_relative_path(path).ok_or_else(|| ViewError::InvalidPath.into())
+}
+
+#[derive(Debug, Deserialize)]
+struct EntriesQuery {
+    path: Option<String>,
+    rev: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AtQuery {
+    rev: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+}
+
+async fn handle_entries(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+    Query(query): Query<EntriesQuery>,
+) -> Result<Response, OriginError> {
+    let project = project_of(&state, &claims)?;
+    let path = match query.path.as_deref().map(str::trim) {
+        Some(path) if !path.is_empty() => Some(normalized_path(path)?),
+        _ => None,
+    };
+    let lease = state.cache.lease(project);
+    let target = read_target(
+        &state,
+        &lease,
+        caller_token(&token),
+        query.rev.as_deref(),
+        query.reference.as_deref(),
+    )
+    .await?;
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let commit = target.commit.clone();
+    let read = blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        Ok(read::entries(
+            &WorkspaceGit::bare(&dir, None),
+            commit.as_deref(),
+            path.as_deref(),
+        )?)
+    })
+    .await?;
+    let response = match read {
+        EntriesRead::Listed(entries) => Json(entries).into_response(),
+        EntriesRead::Missing(absence) => missing(absence).into_response(),
+    };
+    Ok(with_rev(response, target.served.as_deref()))
+}
+
+/// A file read: the normalized path, the blob (or the error that came after
+/// the commit was found, which still carries `X-Instafy-Rev`), and the id
+/// that header names.
+type FileOutcome = (
+    String,
+    Result<(String, Vec<u8>), OriginError>,
+    Option<String>,
+);
+
+async fn read_file(
+    state: &HostedState,
+    claims: &OriginClaims,
+    token: &OriginAccessToken,
+    path: &str,
+    query: &AtQuery,
+) -> Result<FileOutcome, OriginError> {
+    let project = project_of(state, claims)?;
+    let path = normalized_path(path)?;
+    let lease = state.cache.lease(project);
+    let target = read_target(
+        state,
+        &lease,
+        caller_token(token),
+        query.rev.as_deref(),
+        query.reference.as_deref(),
+    )
+    .await?;
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let commit = target.commit.clone();
+    let read_path = path.clone();
+    let read = blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        Ok(read::file(
+            &WorkspaceGit::bare(&dir, None),
+            commit.as_deref(),
+            &read_path,
+        )?)
+    })
+    .await?;
+    let outcome = match read {
+        FileRead::Found { oid, data } => Ok((oid, data)),
+        FileRead::TooLarge => Err(coded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            "this file is too large to read here",
+        )),
+        FileRead::Missing(absence) => Err(missing(absence)),
+    };
+    Ok((path, outcome, target.served))
+}
+
+async fn handle_file(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+    AxumPath(path): AxumPath<String>,
+    Query(query): Query<AtQuery>,
+) -> Result<Response, OriginError> {
+    let (path, outcome, served) = read_file(&state, &claims, &token, &path, &query).await?;
+    let response = match outcome {
+        Ok((oid, data)) => {
+            let response = Json(FileContentResponse {
+                encoding: "base64".to_string(),
+                content_base64: BASE64_STANDARD.encode(&data),
+                size: data.len() as u64,
+                mime_type: mime_type_for_path(&path),
+                modified: None,
+                path,
+            })
+            .into_response();
+            with_blob(response, &oid)
+        }
+        Err(error) => error.into_response(),
+    };
+    Ok(with_rev(response, served.as_deref()))
+}
+
+async fn handle_raw(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+    AxumPath(path): AxumPath<String>,
+    Query(query): Query<AtQuery>,
+) -> Result<Response, OriginError> {
+    let (path, outcome, served) = read_file(&state, &claims, &token, &path, &query).await?;
+    let response = match outcome {
+        Ok((oid, data)) => {
+            let mut response = Response::new(Body::from(data));
+            let mime = mime_type_for_path(&path);
+            if let Some(value) = mime.as_deref().and_then(|mime| mime.parse().ok()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::CONTENT_TYPE, value);
+            }
+            apply_raw_security_headers(&mut response, &path, mime.as_deref());
+            with_blob(response, &oid)
+        }
+        Err(error) => error.into_response(),
+    };
+    Ok(with_rev(response, served.as_deref()))
+}
+
+#[derive(Debug, Deserialize)]
+struct StatusQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+/// The single-tenant status shape: the gateway keeps no working copy, so
+/// nothing is ever unsaved here.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusResponse {
+    supported: bool,
+    dirty_count: usize,
+    dirty_paths: Vec<DirtyPathEntry>,
+    dirty_groups: Vec<DirtyPathGroup>,
+    page_offset: usize,
+    page_limit: usize,
+    has_more_files: bool,
+    stateless: bool,
+}
+
+/// No git call and no fetch: the answer is the same for every space.
+async fn handle_git_status(Query(query): Query<StatusQuery>) -> Json<StatusResponse> {
+    Json(StatusResponse {
+        supported: true,
+        dirty_count: 0,
+        dirty_paths: Vec::new(),
+        dirty_groups: Vec::new(),
+        page_offset: query.offset.unwrap_or(0),
+        page_limit: query.limit.unwrap_or(100).clamp(1, 200),
+        has_more_files: false,
+        stateless: true,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    limit: Option<usize>,
+    skip: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryResponse {
+    supported: bool,
+    entries: Vec<GitHistoryEntry>,
+    branch: &'static str,
+    head_ref: &'static str,
+    has_more: bool,
+}
+
+async fn handle_git_history(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Response, OriginError> {
+    let project = project_of(&state, &claims)?;
+    let limit = query.limit.unwrap_or(8).clamp(1, MAX_HISTORY_PAGE);
+    let skip = query.skip.unwrap_or(0);
+    let lease = state.cache.lease(project);
+    let main = state
+        .cache
+        .resolve_main(&lease, Freshness::Coalesced, caller_token(&token))
+        .await?;
+    let Some(head) = main else {
+        return Ok(Json(HistoryResponse {
+            supported: true,
+            entries: Vec::new(),
+            branch: "main",
+            head_ref: "main",
+            has_more: false,
+        })
+        .into_response());
+    };
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let gateway_email = state.gateway_email();
+    let read_head = head.clone();
+    let (entries, has_more) = blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        Ok(read::history(
+            &WorkspaceGit::bare(&dir, None),
+            &read_head,
+            limit,
+            skip,
+            &gateway_email,
+        )?)
+    })
+    .await?;
+    let response = Json(HistoryResponse {
+        supported: true,
+        entries,
+        branch: "main",
+        head_ref: "main",
+        has_more,
+    })
+    .into_response();
+    Ok(with_rev(response, Some(&head)))
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewQuery {
+    commit: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewResponse {
+    supported: bool,
+    commit: Option<String>,
+    entries: Vec<DirtyPathEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// The commit a review or diff names: with `ref`, the ref's commit, and a
+/// `commit` that names neither the ref's id nor its commit means the ref
+/// moved since the client listed it (409 `recovery_ref_moved`); without,
+/// a commit `main` reaches.
+async fn reviewed_commit(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    commit: Option<&str>,
+    reference: Option<&str>,
+) -> Result<Option<String>, OriginError> {
+    let commit = commit.filter(|value| !value.is_empty());
+    match reference.filter(|value| !value.is_empty()) {
+        Some(reference) => {
+            let requested = commit.map(parse_rev).transpose()?;
+            let fetched = resolve_ref(state, lease, token, reference).await?;
+            if let Some(requested) = requested {
+                if requested != fetched.tip && requested != fetched.commit {
+                    return Err(OriginError::with_report(
+                        StatusCode::CONFLICT,
+                        "recovery_ref_moved",
+                        "this unsaved work changed since it was listed; refresh and try again",
+                        serde_json::json!({ "rev": fetched.tip }),
+                    ));
+                }
+            }
+            Ok(Some(fetched.commit))
+        }
+        None => match commit {
+            Some(commit) => Ok(Some(resolve_rev(state, lease, token, commit).await?)),
+            None => Ok(None),
+        },
+    }
+}
+
+async fn handle_git_history_review(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+    Query(query): Query<ReviewQuery>,
+) -> Result<Json<ReviewResponse>, OriginError> {
+    let project = project_of(&state, &claims)?;
+    let requested = query
+        .commit
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(requested) = requested else {
+        return Ok(Json(ReviewResponse {
+            supported: true,
+            commit: None,
+            entries: Vec::new(),
+            parent_count: None,
+            error: Some("missing commit".to_string()),
+        }));
+    };
+    let lease = state.cache.lease(project);
+    let commit = reviewed_commit(
+        &state,
+        &lease,
+        caller_token(&token),
+        Some(requested),
+        query.reference.as_deref(),
+    )
+    .await?
+    .ok_or_else(|| OriginError::from(ViewError::InvalidRev))?;
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let (entries, parents) = blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        Ok(read::review(&WorkspaceGit::bare(&dir, None), &commit)?)
+    })
+    .await?;
+    Ok(Json(ReviewResponse {
+        supported: true,
+        commit: Some(requested.to_ascii_lowercase()),
+        entries,
+        parent_count: Some(parents),
+        error: None,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct DiffQuery {
+    path: Option<String>,
+    commit: Option<String>,
+    base: Option<String>,
+    #[serde(rename = "ref")]
+    reference: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiffResponse {
+    supported: bool,
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit: Option<String>,
+    diff: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
+}
+
+async fn handle_git_diff(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+    Query(query): Query<DiffQuery>,
+) -> Result<Json<DiffResponse>, OriginError> {
+    let project = project_of(&state, &claims)?;
+    let requested = query
+        .commit
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let path = match query.path.as_deref().map(str::trim) {
+        Some(path) if !path.is_empty() => normalized_path(path)?,
+        _ => {
+            return Ok(Json(DiffResponse {
+                supported: true,
+                path: None,
+                commit: requested,
+                diff: String::new(),
+                truncated: None,
+            }))
+        }
+    };
+    if is_reserved_path(&path) {
+        return Err(coded(
+            StatusCode::NOT_FOUND,
+            "unsupported_entry",
+            "this path is reserved and cannot be read here",
+        ));
+    }
+    let token = caller_token(&token);
+    let lease = state.cache.lease(project);
+    let commit = reviewed_commit(
+        &state,
+        &lease,
+        token,
+        requested.as_deref(),
+        query.reference.as_deref(),
+    )
+    .await?;
+    let base = match query.base.as_deref().map(str::trim) {
+        Some(base) if !base.is_empty() => Some(resolve_rev(&state, &lease, token, base).await?),
+        _ => None,
+    };
+    let main = if commit.is_none() {
+        state
+            .cache
+            .resolve_main(&lease, Freshness::Coalesced, token)
+            .await?
+    } else {
+        None
+    };
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let diff_path = path.clone();
+    let (diff, truncated) = blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        Ok(read::diff(
+            &WorkspaceGit::bare(&dir, None),
+            base.as_deref(),
+            commit.as_deref(),
+            main.as_deref(),
+            &diff_path,
+        )?)
+    })
+    .await?;
+    Ok(Json(DiffResponse {
+        supported: true,
+        path: Some(path),
+        commit: requested,
+        diff,
+        truncated: truncated.then_some(true),
+    }))
+}
+
+async fn handle_git_recovery(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+) -> Result<Response, OriginError> {
+    let project = project_of(&state, &claims)?;
+    let token = caller_token(&token);
+    let lease = state.cache.lease(project);
+    let main = state
+        .cache
+        .resolve_main(&lease, Freshness::Coalesced, token)
+        .await?;
+    let git_token = state.cache.read_token(project, token).await?;
+    let url = state.cache.remote_url(project)?;
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let gateway_email = state.gateway_email();
+    let list_main = main.clone();
+    let entries = blocking(move || {
+        let dir = cache.ensure_mirror(&mirror)?;
+        let git = WorkspaceGit::bare(&dir, git_token.as_deref())
+            .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
+        read::recovery_list(&git, &url, list_main.as_deref(), &gateway_email).map_err(ref_error)
+    })
+    .await?;
+    let response = Json(serde_json::json!({
+        "supported": true,
+        "entries": entries,
+    }))
+    .into_response();
+    Ok(with_rev(response, main.as_deref()))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncRequest {
+    expected_rev: Option<String>,
+    mode: Option<String>,
+}
+
+/// Saves are commits on `main` already, so there is nothing to sync:
+/// `{expectedRev}` checks that a commit is on `main` (an import's resume
+/// relies on it), and anything else answers with `main`.
+async fn handle_git_sync(
+    State(state): State<HostedState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(token): Extension<OriginAccessToken>,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    let project = project_of(&state, &claims)?;
+    let request: SyncRequest = if body.iter().all(u8::is_ascii_whitespace) {
+        SyncRequest::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|error| OriginError::bad_request(format!("invalid sync request: {error}")))?
+    };
+    if request
+        .mode
+        .as_deref()
+        .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("refresh"))
+    {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "not_supported",
+            "a cloud space has no working copy to refresh",
+        ));
+    }
+    let expected = request
+        .expected_rev
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(parse_rev)
+        .transpose()?;
+    let lease = state.cache.lease(project);
+    let main = state
+        .cache
+        .resolve_main(&lease, Freshness::Fresh, caller_token(&token))
+        .await?;
+    let Some(expected) = expected else {
+        return Ok(Json(serde_json::json!({
+            "rev": main,
+            "baseRev": main,
+            "committed": false,
+        })));
+    };
+    let on_main = match main.clone() {
+        Some(head) => {
+            let cache = state.cache.clone();
+            let mirror = lease.mirror();
+            let rev = expected.clone();
+            blocking(move || {
+                let dir = cache.ensure_mirror(&mirror)?;
+                Ok(read::on_main(&WorkspaceGit::bare(&dir, None), &rev, &head)?)
+            })
+            .await?
+        }
+        None => false,
+    };
+    if !on_main {
+        return Err(OriginError::with_report(
+            StatusCode::CONFLICT,
+            "rev_not_on_main",
+            "that version is not part of the saved history",
+            serde_json::json!({ "head": main }),
+        ));
+    }
+    Ok(Json(serde_json::json!({ "rev": main, "baseRev": main })))
+}
+
+/// Discarding working-copy changes: a cloud space has none.
+async fn handle_git_revert() -> OriginError {
+    coded(
+        StatusCode::BAD_REQUEST,
+        "not_supported",
+        "discarding changes is not available on a cloud space",
+    )
+}
+
+/// Writes that are not served by this gateway yet.
+async fn handle_not_available() -> OriginError {
+    coded(
+        StatusCode::NOT_IMPLEMENTED,
+        "not_implemented",
+        "this change is not available on this gateway yet",
+    )
 }

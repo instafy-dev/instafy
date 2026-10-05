@@ -590,7 +590,7 @@ fn worktree_miss(error: &std::io::Error, absent: &str) -> OriginError {
     }
 }
 
-const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
+pub(crate) const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
 /// `/raw` reads files up to this size into memory to send `X-Instafy-Blob`;
 /// larger files stream without it.
 const MAX_RAW_HASHED_BYTES: u64 = 32 * 1024 * 1024;
@@ -3527,7 +3527,11 @@ fn file_entry_from_metadata(
     }
 }
 
-fn apply_raw_security_headers(response: &mut Response, relative: &str, mime: Option<&str>) {
+pub(crate) fn apply_raw_security_headers(
+    response: &mut Response,
+    relative: &str,
+    mime: Option<&str>,
+) {
     let headers = response.headers_mut();
     headers.insert(
         HeaderName::from_static("content-security-policy"),
@@ -3580,7 +3584,7 @@ fn is_active_raw_content(relative: &str, mime: Option<&str>) -> bool {
     active_mime || active_extension
 }
 
-fn mime_type_for_path(relative: &str) -> Option<String> {
+pub(crate) fn mime_type_for_path(relative: &str) -> Option<String> {
     let ext = Path::new(relative)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -3588,7 +3592,7 @@ fn mime_type_for_path(relative: &str) -> Option<String> {
     ext.and_then(|e| mime_type_for_extension(&e))
 }
 
-fn mime_type_for_extension(ext: &str) -> Option<String> {
+pub(crate) fn mime_type_for_extension(ext: &str) -> Option<String> {
     let mime = match ext.to_ascii_lowercase().as_str() {
         "txt" => "text/plain",
         "md" | "mdx" => "text/markdown",

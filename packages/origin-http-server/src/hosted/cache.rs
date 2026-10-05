@@ -22,10 +22,6 @@
 //! clone) and is then told to retry; a failed fetch is an error, never
 //! stale data.
 
-// The reads and writes that use the mirrors land next; until then only the
-// server start (open, sweeper) and the tests do.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -176,6 +172,21 @@ impl MirrorLease {
     pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
+
+    /// The mirror, for blocking work the request waits for while it holds
+    /// this lease.
+    pub(crate) fn mirror(&self) -> MirrorRef {
+        MirrorRef {
+            entry: self.entry.clone(),
+        }
+    }
+}
+
+/// A mirror, as blocking work that runs under a request's
+/// [`MirrorLease`] names it.
+#[derive(Clone)]
+pub(crate) struct MirrorRef {
+    entry: Arc<MirrorEntry>,
 }
 
 impl Drop for MirrorLease {
@@ -277,11 +288,13 @@ impl MirrorCache {
     }
 
     /// The cache's folder.
+    #[cfg(test)]
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
     /// How many fetches of `main` this process started.
+    #[cfg(test)]
     pub(crate) fn fetches_started(&self) -> u64 {
         self.fetches_started.load(Ordering::SeqCst)
     }
@@ -529,9 +542,9 @@ impl MirrorCache {
         }
     }
 
-    /// The mirror of `lease`'s space, created empty when missing. Blocking.
-    pub(crate) fn ensure_mirror(&self, lease: &MirrorLease) -> Result<PathBuf, OriginError> {
-        self.open_mirror(&lease.entry)
+    /// The mirror's bare repository, created empty when missing. Blocking.
+    pub(crate) fn ensure_mirror(&self, mirror: &MirrorRef) -> Result<PathBuf, OriginError> {
+        self.open_mirror(&mirror.entry)
             .map_err(FetchError::into_origin)
     }
 

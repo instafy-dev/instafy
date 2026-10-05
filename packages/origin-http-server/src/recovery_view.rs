@@ -655,6 +655,59 @@ pub(crate) fn read_blob_at(
     })
 }
 
+/// Why a read shows nothing at a path of a commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Absence {
+    /// The tree has no entry at the path.
+    Absent,
+    /// A folder is there (a file read finds no file).
+    Directory,
+    /// Something reads never show is there: a symlink, a submodule, or a
+    /// reserved path.
+    Hidden,
+}
+
+/// What `commit` holds at exactly `path` when a read showed nothing there.
+/// Only [`Absence::Absent`] means the path is not in the tree, so only it
+/// may be reported as a missing path: a client could otherwise turn a link
+/// or a submodule into a delete.
+pub(crate) fn absence_at(
+    git: &WorkspaceGit<'_>,
+    commit: &str,
+    path: &str,
+) -> Result<Absence, ViewError> {
+    let commit = parse_rev(commit)?;
+    let path = checked_path(path)?;
+    let raw = git.bytes_opts(
+        &[
+            "ls-tree",
+            "-l",
+            "-z",
+            "--full-tree",
+            "--end-of-options",
+            &commit,
+            "--",
+            &path,
+        ],
+        &RunOpts {
+            literal_pathspecs: true,
+            ..RunOpts::default()
+        },
+    )?;
+    let found = parse_ls_tree_long(&raw)
+        .into_iter()
+        .find(|(entry_path, _)| *entry_path == path);
+    Ok(match found {
+        None => Absence::Absent,
+        Some((_, Some(entry)))
+            if entry.kind == ObjectKind::Directory && !is_reserved_path(&path) =>
+        {
+            Absence::Directory
+        }
+        Some(_) => Absence::Hidden,
+    })
+}
+
 /// `path` as `normalize_relative_path` writes it, or an error: reads take
 /// paths in that form only, so one path never names two entries.
 fn checked_path(path: &str) -> Result<String, ViewError> {
@@ -2462,6 +2515,25 @@ mod tests {
                 read_blob_at(&git, &head, "src", 1 << 20).unwrap(),
                 BlobRead::Missing
             );
+            // Why nothing was shown: only a path the tree lacks is absent.
+            for (path, why) in [
+                ("missing", Absence::Absent),
+                ("link/inside", Absence::Absent),
+                ("vendor/sub/file", Absence::Absent),
+                ("README.md/below", Absence::Absent),
+                ("link", Absence::Hidden),
+                ("vendor/sub", Absence::Hidden),
+                (".instafy", Absence::Hidden),
+                (".instafy/state.json", Absence::Hidden),
+                ("src", Absence::Directory),
+                ("src/nested", Absence::Directory),
+            ] {
+                assert_eq!(absence_at(&git, &head, path).unwrap(), why, "{path}");
+            }
+            assert!(matches!(
+                absence_at(&git, &head, "../x"),
+                Err(ViewError::InvalidPath)
+            ));
 
             let BlobRead::Found { data, mode, .. } =
                 read_blob_at(&git, &head, "README.md", 1 << 20).unwrap()
@@ -2549,6 +2621,10 @@ mod tests {
         let json = serde_json::to_value(&page).unwrap();
         assert_eq!(json[0]["firstParent"], merge.as_str());
         assert!(json[3].get("firstParent").is_none(), "{json}");
+        let parents: Vec<Option<usize>> = page.iter().map(|entry| entry.parent_count).collect();
+        assert_eq!(parents, vec![Some(1), Some(2), Some(1), Some(0)]);
+        assert_eq!(json[1]["parentCount"], 2);
+        assert_eq!(json[3]["parentCount"], 0);
 
         let skipped = first_parent_history(&git, &c, 2, 1).unwrap();
         assert_eq!(
