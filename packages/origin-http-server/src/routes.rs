@@ -227,23 +227,19 @@ pub fn router(state: AppState) -> Router {
 
     let health_routes = Router::new().route("/healthz", get(|| async { "ok" }));
 
-    let mut read_routes = Router::new()
+    let read_routes = Router::new()
         .route("/entries", get(handle_entries))
         .route("/files/*path", get(handle_file))
         .route("/raw/*path", get(handle_raw))
         .route("/git/status", get(handle_git_status))
         .route("/git/diff", get(handle_git_diff))
         .route("/git/history", get(handle_git_history))
-        .route("/git/history/review", get(handle_git_history_review));
-    // Unsaved work on a single-tenant checkout (Desktop and workspace
-    // runtimes). A multi-tenant origin does not serve it.
-    if !state.config.multi_tenant {
-        read_routes = read_routes.route("/git/recovery", get(handle_git_recovery));
-    }
-    let read_routes = read_routes.route_layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        require_read,
-    ));
+        .route("/git/history/review", get(handle_git_history_review))
+        .merge(unsaved_work_read_routes(&state))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_read,
+        ));
 
     let apply_routes = Router::new()
         // Multipart uploads use the server-level RequestBodyLimitLayer cap.
@@ -258,21 +254,17 @@ pub fn router(state: AppState) -> Router {
             limit_apply_concurrency,
         ));
 
-    let mut write_routes = Router::new()
+    let write_routes = Router::new()
         .merge(apply_routes)
         .route("/apply/status", post(handle_apply_status))
         .route("/git/revert", post(handle_git_revert))
         .route("/git/revert-commit", post(handle_git_revert_commit))
-        .route("/git/sync", post(handle_git_sync));
-    if !state.config.multi_tenant {
-        write_routes = write_routes
-            .route("/git/recovery/restore", post(handle_git_recovery_restore))
-            .route("/git/recovery/dismiss", post(handle_git_recovery_dismiss));
-    }
-    let write_routes = write_routes.route_layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        require_write,
-    ));
+        .route("/git/sync", post(handle_git_sync))
+        .merge(unsaved_work_write_routes(&state))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_write,
+        ));
 
     let flush_routes = Router::new()
         .route("/git/flush", post(handle_git_flush))
@@ -307,6 +299,27 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::disable())
         .layer(cors_layer)
         .with_state(state)
+}
+
+/// Unsaved work on a single-tenant checkout (Desktop and workspace
+/// runtimes): the list, behind `require_read`. A multi-tenant origin does
+/// not serve it.
+fn unsaved_work_read_routes(state: &AppState) -> Router<AppState> {
+    if state.config.multi_tenant {
+        return Router::new();
+    }
+    Router::new().route("/git/recovery", get(handle_git_recovery))
+}
+
+/// Restoring and dismissing unsaved work on a single-tenant checkout,
+/// behind `require_write`. A multi-tenant origin does not serve them.
+fn unsaved_work_write_routes(state: &AppState) -> Router<AppState> {
+    if state.config.multi_tenant {
+        return Router::new();
+    }
+    Router::new()
+        .route("/git/recovery/restore", post(handle_git_recovery_restore))
+        .route("/git/recovery/dismiss", post(handle_git_recovery_dismiss))
 }
 
 async fn limit_apply_concurrency(
