@@ -3365,6 +3365,7 @@ async fn restore_route_restores_unsaved_work_once() {
             ("kept.md", Some(b"kept\n")),
             (".env", Some(b"TOKEN=1\n")),
             ("debug.log", Some(b"log\n")),
+            ("chat-upload-1-x.png", Some(b"png\n")),
         ],
         &[],
         "Unsaved edits with a secret",
@@ -3393,7 +3394,11 @@ async fn restore_route_restores_unsaved_work_once() {
     assert_eq!(body["gitSyncStatus"], "published");
     assert_eq!(
         body["notRestored"],
-        serde_json::json!([".env", "debug.log"])
+        serde_json::json!([
+            { "path": ".env", "reason": "secret" },
+            { "path": "chat-upload-1-x.png", "reason": "attachment" },
+            { "path": "debug.log", "reason": "ignored" },
+        ])
     );
     assert_eq!(sc.remote_file("kept.md").as_deref(), Some("kept\n"));
     assert!(sc.remote_file(".env").is_none());
@@ -3477,7 +3482,10 @@ async fn restore_route_restores_unsaved_work_once() {
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true);
-    assert_eq!(body["notRestored"], serde_json::json!(["README.md"]));
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": "README.md", "reason": "kept" }])
+    );
     // Everything left out was left out on request: the ref goes.
     assert_eq!(body["refDeleted"], true, "{body}");
     assert!(sc.remote_refs(&conflicted).is_empty());
@@ -3668,12 +3676,18 @@ async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
     fs::remove_file(sc.ws.join("unrelated.md")).unwrap();
 
     // What is left is a secret, or a file `main` now ignores.
-    for (reference, left_out) in [(refused, ".env"), (ignored, "notes/plan.md")] {
+    for (reference, left_out, reason) in [
+        (refused, ".env", "secret"),
+        (ignored, "notes/plan.md", "ignored"),
+    ] {
         let (status, body) = restore(serde_json::json!({ "ref": reference })).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{reference}: {body}");
         assert_eq!(body["committed"], false, "{reference}: {body}");
         assert_eq!(body["marked"], true, "{reference}: {body}");
-        assert_eq!(body["notRestored"], serde_json::json!([left_out]));
+        assert_eq!(
+            body["notRestored"],
+            serde_json::json!([{ "path": left_out, "reason": reason }])
+        );
         let marker = body["localRev"].as_str().unwrap().to_string();
         assert!(on_main(&sc, &marker), "{reference}");
         assert!(is_marker(&marker, reference), "{reference}");
@@ -3807,7 +3821,11 @@ async fn a_salvage_marker_survives_the_first_publish_of_an_unrelated_history() {
 
     let (status, body) = restore().await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["notRestored"], serde_json::json!([".env"]), "{body}");
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": ".env", "reason": "secret" }]),
+        "{body}"
+    );
     assert_eq!(body["refDeleted"], false, "{body}");
     let marker = sc.main();
     assert_ne!(marker, main_before, "{body}");
@@ -4107,7 +4125,10 @@ async fn a_restore_keep_list_is_bounded() {
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["notRestored"], serde_json::json!(["docs/a.md"]));
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": "docs/a.md", "reason": "kept" }])
+    );
     assert_eq!(sc.remote_file("docs2/b.md").as_deref(), Some("b\n"));
     assert!(sc.remote_file("docs/a.md").is_none());
     server.abort();
@@ -4169,7 +4190,7 @@ async fn keep_clears_a_file_and_folder_conflict() {
         assert_eq!(body["committed"], true, "{keep}: {body}");
         assert_eq!(
             body["notRestored"],
-            serde_json::json!(["docs/readme.md"]),
+            serde_json::json!([{ "path": "docs/readme.md", "reason": "kept" }]),
             "{keep}: {body}"
         );
         assert_eq!(body["refDeleted"], true, "{keep}: {body}");
@@ -4236,9 +4257,13 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true, "{body}");
+    // Why each path stayed out: the secret is refused, the kept file kept.
     assert_eq!(
         body["notRestored"],
-        serde_json::json!(["docs/.env", "docs/readme.md"])
+        serde_json::json!([
+            { "path": "docs/.env", "reason": "secret" },
+            { "path": "docs/readme.md", "reason": "kept" },
+        ])
     );
     assert_eq!(body["refDeleted"], false, "{body}");
     assert_eq!(sc.remote_refs(&reference).len(), 1);
@@ -4287,7 +4312,10 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], false, "{body}");
     assert_eq!(body["marked"], false, "{body}");
-    assert_eq!(body["notRestored"], serde_json::json!(["notes/plan.md"]));
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": "notes/plan.md", "reason": "ignored" }])
+    );
     assert_eq!(body["refDeleted"], false, "{body}");
     assert_eq!(body["rev"], main_before.as_str(), "{body}");
     assert_eq!(sc.main(), main_before);

@@ -30,24 +30,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::Serialize;
-
 use super::answers::{head_moved, hook_refusal, internal, restore_conflict};
 use super::change::{check_ignored, entries_at, gitignores_for, is_regular, moved_since};
 use super::read::readable;
 use crate::error::OriginError;
 use crate::publish::parse_raw_changes;
 use crate::publish_policy::{restore_refusal, RejectReason};
-use crate::recovery_view::{left_out_reason, KEPT};
+use crate::recovery_view::{left_out_reason, NotRestored, KEPT};
 use crate::tree_merge::{changed_paths, three_way, tree_with_entries_from};
 use crate::workspace_git::WorkspaceGit;
-
-/// A path a restore left as `main` has it, and why.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct NotRestored {
-    pub path: String,
-    pub reason: &'static str,
-}
 
 /// Unsaved work merged onto `main`.
 pub(crate) struct Restore {
