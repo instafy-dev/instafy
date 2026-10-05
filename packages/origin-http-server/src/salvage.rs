@@ -187,7 +187,9 @@ pub(crate) struct EntryReport {
     pub canonical_verified: bool,
     pub local_only_commits: usize,
     pub subjects: Vec<String>,
-    /// Paths W changes from HEAD (the work tree's edits).
+    /// Paths W changes from HEAD (the work tree's edits). For a salvage ref
+    /// an earlier run made and this one reports, that run's, as with
+    /// `stale_paths`.
     pub archived_paths: Vec<String>,
     pub stale_paths: Vec<String>,
     pub private_archived_paths: Vec<PrivatePath>,

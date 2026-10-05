@@ -659,6 +659,10 @@ fn reuse_recorded(
     report.salvage_rev = Some(rev.clone());
     report.canonical_verified = true;
     report.history_filtered |= earlier.history_filtered;
+    // The line describes the ref it names: what this run would put in a new
+    // W differs once `main` holds part of the work (a partial restore).
+    report.archived_paths = earlier.archived_paths.clone();
+    report.stale_paths = earlier.stale_paths.clone();
     // Paths the shard refused then are only known from that run.
     for skipped in &earlier.skipped_paths {
         let policy = reason_name(RejectReason::Policy);
@@ -677,7 +681,8 @@ fn reuse_recorded(
         }
     }
     report.notes.push(format!(
-        "{reference} holds this work from an earlier run; nothing was pushed"
+        "{reference} holds this work from an earlier run, whose archivedPaths and stalePaths \
+         this line repeats; nothing was pushed"
     ));
     Ok(true)
 }
