@@ -185,6 +185,8 @@ pub(super) struct StubController {
     pub(super) lease: Uuid,
     /// How many `git.write` credentials it handed out.
     pub(super) write_tokens: Arc<std::sync::atomic::AtomicUsize>,
+    /// What it answers about the space's active lease.
+    lease_answer: Arc<Mutex<serde_json::Value>>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -238,11 +240,12 @@ impl StubController {
         #[derive(Clone)]
         struct Stub {
             jwks: serde_json::Value,
-            lease: serde_json::Value,
+            lease: Arc<Mutex<serde_json::Value>>,
             write_tokens: Arc<std::sync::atomic::AtomicUsize>,
             life: i64,
         }
         let write_tokens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lease_answer = Arc::new(Mutex::new(active));
         let app =
             axum::Router::new()
                 .route(
@@ -251,7 +254,9 @@ impl StubController {
                 )
                 .route(
                     "/projects/:project/lease",
-                    get_route(|State(stub): State<Stub>| async move { axum::Json(stub.lease) }),
+                    get_route(|State(stub): State<Stub>| async move {
+                        axum::Json(stub.lease.lock().unwrap().clone())
+                    }),
                 )
                 .route(
                     "/projects/:project/git/access_token",
@@ -277,7 +282,7 @@ impl StubController {
                 )
                 .with_state(Stub {
                     jwks,
-                    lease: active,
+                    lease: lease_answer.clone(),
                     write_tokens: write_tokens.clone(),
                     life,
                 });
@@ -293,8 +298,14 @@ impl StubController {
             user,
             lease,
             write_tokens,
+            lease_answer,
             server,
         }
+    }
+
+    /// Answer `answer` about the space's active lease from now on.
+    pub(super) fn set_lease_answer(&self, answer: serde_json::Value) {
+        *self.lease_answer.lock().unwrap() = answer;
     }
 
     /// Point the scenario's gateway at this controller.
@@ -1863,6 +1874,157 @@ async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
         git_in(&empty.remote(), &["ls-tree", "-r", "--name-only", &receipt]),
         ""
     );
+}
+
+/// The write routes, each with a body it would act on.
+fn write_routes(head: &str, lease: &str) -> Vec<(&'static str, serde_json::Value)> {
+    let upload = json!({
+        "manifest": manifest(&["w.txt"], &[], json!({ "baseRev": head, "leaseId": lease })),
+        "archiveBase64": base64::engine::general_purpose::STANDARD.encode(zip(&[("w.txt", b"w\n")])),
+    });
+    let reference = format!("refs/instafy/recovery/{}/unsaved-1", Uuid::new_v4());
+    vec![
+        ("/apply-json", upload),
+        (
+            "/apply/status",
+            json!({ "idempotencyKey": "imp:0123456789abcdef" }),
+        ),
+        ("/git/sync", json!({ "expectedRev": head })),
+        ("/git/revert", json!({})),
+        ("/git/revert-commit", json!({ "commit": head })),
+        ("/git/recovery/restore", json!({ "ref": reference })),
+        (
+            "/git/recovery/dismiss",
+            json!({ "ref": reference, "rev": head }),
+        ),
+    ]
+}
+
+/// Every write route needs `fs.write` (a read token, as put in `?token=`
+/// image URLs, is refused) and the live workspace lease the token names
+/// (none, another, an expired one, or another person's is refused), before
+/// anything is fetched or pushed. A manifest naming another lease or
+/// another space is refused too.
+#[tokio::test(flavor = "multi_thread")]
+async fn writes_need_fs_write_the_live_lease_and_the_tokens_space() {
+    let mut sc = HostedScenario::new();
+    let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = serve(&sc).await;
+    let lease = controller.lease.to_string();
+    let refused = |answer: &Answer| matches!(answer.status, 401 | 403);
+
+    let reader = controller.token(&["fs.read"], json!({}));
+    for (route, body) in write_routes(&head, &lease) {
+        let answer = post_as(&served, route, body, &reader).await;
+        assert!(refused(&answer), "{route}: {}", answer.status);
+    }
+    // The multipart upload too.
+    let response = reqwest::Client::new()
+        .post(format!("{}/apply", served.base))
+        .bearer_auth(&reader)
+        .header("content-type", "multipart/form-data; boundary=x")
+        .body("--x--\r\n")
+        .send()
+        .await
+        .unwrap();
+    assert!(matches!(response.status().as_u16(), 401 | 403));
+
+    let other_lease = Uuid::new_v4().to_string();
+    let writers = [
+        (
+            "no lease",
+            controller.token(&["fs.write"], json!({ "lease_id": null })),
+        ),
+        (
+            "another lease",
+            controller.token(&["fs.write"], json!({ "lease_id": other_lease })),
+        ),
+        (
+            "another person",
+            controller.token(&["fs.write"], json!({ "sub": Uuid::new_v4().to_string() })),
+        ),
+    ];
+    for (case, token) in &writers {
+        for (route, body) in write_routes(&head, &lease) {
+            let answer = post_as(&served, route, body, token).await;
+            assert!(refused(&answer), "{case} {route}: {}", answer.status);
+        }
+    }
+    let writer = controller.token(&["fs.write"], json!({}));
+    let expired = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    for (case, answer) in [
+        ("no active lease", json!({ "lease": null })),
+        (
+            "an expired lease",
+            json!({ "lease": {
+                "leaseId": lease,
+                "projectId": sc.project,
+                "userId": controller.user,
+                "runtimeId": null,
+                "expiresAt": expired,
+            }}),
+        ),
+    ] {
+        controller.set_lease_answer(answer);
+        for (route, body) in write_routes(&head, &lease) {
+            let answer = post_as(&served, route, body, &writer).await;
+            assert!(refused(&answer), "{case} {route}: {}", answer.status);
+        }
+    }
+    assert_eq!(served.cache.fetches_started(), 0, "nothing was fetched");
+    assert_eq!(
+        controller
+            .write_tokens
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(sc.canonical_main().as_deref(), Some(head.as_str()));
+
+    // With the live lease: a manifest naming another lease or another
+    // space is refused, and main stays.
+    controller.set_lease_answer(json!({ "lease": {
+        "leaseId": lease,
+        "projectId": sc.project,
+        "userId": controller.user,
+        "runtimeId": null,
+        "expiresAt": (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+    }}));
+    for extra in [
+        json!({ "baseRev": head, "leaseId": other_lease }),
+        json!({ "baseRev": head }),
+        json!({ "baseRev": head, "leaseId": lease, "projectId": Uuid::new_v4().to_string() }),
+    ] {
+        let answer = apply_as(
+            &served,
+            manifest(&["w.txt"], &[], extra.clone()),
+            &zip(&[("w.txt", b"w\n")]),
+            Some(&writer),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(answer.status, 400 | 401 | 403),
+            "{extra}: {}",
+            answer.status
+        );
+    }
+    assert_eq!(sc.canonical_main().as_deref(), Some(head.as_str()));
+    // The same request with the token's own lease and space is saved.
+    let answer = apply_as(
+        &served,
+        manifest(
+            &["w.txt"],
+            &[],
+            json!({ "baseRev": head, "leaseId": lease, "projectId": sc.project.to_string() }),
+        ),
+        &zip(&[("w.txt", b"w\n")]),
+        Some(&writer),
+        None,
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
 }
 
 /// r3 test 14 (Q6 form): a person's save is authored by the name and
