@@ -3739,6 +3739,60 @@ mod tests {
         assert!(peel_to_commits(&git, &[]).unwrap().is_empty());
     }
 
+    /// Dismiss looks at the ref, then deletes it under a lease on what it
+    /// saw. Work saved to the ref between the two stays: the lease refuses
+    /// the delete, and the dismissal answers 409 `recovery_ref_moved` with
+    /// the new tip.
+    #[test]
+    fn a_dismissal_never_removes_work_saved_after_it_looked() {
+        struct ClearHook;
+        impl Drop for ClearHook {
+            fn drop(&mut self) {
+                crate::push::clear_push_hook();
+            }
+        }
+
+        let (_dir, root) = tempdir();
+        let canonical = bare(&root, "canonical.git");
+        let remote = WorkspaceGit::bare(&canonical, None);
+        let files = tree(&remote, &[("notes.md", "notes\n")]);
+        let seen = commit(&remote, &files, &[], 1_700_000_000, "seen\n");
+        let newer = commit(&remote, &files, &[&seen], 1_700_000_100, "newer\n");
+        let name = format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab");
+        remote.update_ref(&name, &seen, None, "test").unwrap();
+        let reference = RecoveryRef::parse(&name).unwrap();
+        let local_dir = bare(&root, "local.git");
+        let local = WorkspaceGit::bare(&local_dir, None);
+        let url = format!("file://{}", canonical.display());
+
+        let moved = std::rc::Rc::new(std::cell::Cell::new(false));
+        let _clear = ClearHook;
+        {
+            let moved = moved.clone();
+            let canonical = canonical.clone();
+            let (name, newer) = (name.clone(), newer.clone());
+            crate::push::set_push_hook(move |_| {
+                if !moved.replace(true) {
+                    git_in(&canonical, &["update-ref", &name, &newer]);
+                }
+                crate::push::PushHookAction::Proceed
+            });
+        }
+        let error = dismiss(&local, &url, &reference, &seen).unwrap_err();
+        assert!(moved.get(), "the delete was never attempted");
+        match error {
+            OriginError::WithReport { code, report, .. } => {
+                assert_eq!(code, "recovery_ref_moved");
+                assert_eq!(report["rev"], newer.as_str());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            remote.commit_id(&name).unwrap().as_deref(),
+            Some(newer.as_str())
+        );
+    }
+
     #[test]
     fn only_the_exact_restore_message_names_a_ref_and_saves_drop_it() {
         let reference =
