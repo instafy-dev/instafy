@@ -41,8 +41,9 @@ use crate::recovery_view::{parse_rev, remote_tip, restore_commit_message, Recove
 use crate::route_auth::OriginAccessToken;
 use crate::workspace_git::WorkspaceGit;
 
-/// The most paths a restore can be asked to keep.
-const MAX_KEEP_PATHS: usize = 1_000;
+/// The most paths a restore can be asked to keep, as on Desktop: at least
+/// as many as a `restore_conflict` lists.
+const MAX_KEEP_PATHS: usize = crate::publish::MAX_RESTORE_KEEP_PATHS;
 
 /// An optional full commit id from a request; empty counts as absent.
 fn optional_rev(value: Option<&str>) -> Result<Option<String>, OriginError> {

@@ -668,7 +668,9 @@ async fn restore_requests_are_checked_before_anything_changes() {
     }
     let moved = restore(&served, json!({ "ref": reference, "rev": seed })).await;
     assert_eq!(moved.json()["rev"], unsaved.as_str());
-    let many: Vec<String> = (0..1001).map(|index| format!("f{index}")).collect();
+    let many: Vec<String> = (0..=crate::publish::MAX_RESTORE_KEEP_PATHS)
+        .map(|index| format!("f{index}"))
+        .collect();
     let answer = restore(&served, json!({ "ref": reference, "keep": many })).await;
     assert_eq!(answer.status, 400);
     assert_eq!(sc.canonical_main(), Some(seed));
