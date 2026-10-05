@@ -1447,45 +1447,199 @@ fn restored_from(message: &str) -> Option<&str> {
     RecoveryRef::parse(reference).ok().map(|_| reference)
 }
 
-/// The prefix of every trailer the origin or the gateway writes itself and
-/// reads back from history (`Instafy-Restored-From`, `Instafy-Apply-Key`,
-/// `Instafy-Apply-Fingerprint`, the recovery trailers).
+/// The prefix of every trailer key the origin or the gateway writes itself
+/// and reads back from history (`Instafy-Restored-From`,
+/// `Instafy-Apply-Key`, `Instafy-Apply-Fingerprint`, the recovery
+/// trailers), in any letter case.
 const ORIGIN_TRAILER_PREFIX: &str = "instafy-";
 
 /// The one `Instafy-` trailer callers write: history only shows it.
 const CALLER_TRAILER: &str = "Instafy-Resolved-By";
 
-/// `message` without any line that starts with an `Instafy-` key, in any
-/// letter case, after its control characters (other than tab) and its
-/// leading blanks are set aside: the trailers the origin and the gateway
-/// write and trust. Text a caller gives a save goes through this before
-/// the origin commits it as itself (and canonical history is shared with
-/// the gateway), so a save can never pass for a restore or an import
-/// receipt. `Instafy-Resolved-By` and every other line stay.
+/// Trailer lines git writes itself. With one of them, a trailer block may
+/// hold up to three other lines per trailer.
+const GIT_GENERATED_TRAILERS: [&str; 2] = ["Signed-off-by: ", "(cherry picked from commit "];
+
+/// The line `git commit --verbose` cuts the message off at.
+const SCISSORS_LINE: &str = "# ------------------------ >8 ------------------------";
+
+/// Rounds [`without_origin_trailers`] looks for a trailer block in. A
+/// message whose paragraphs keep turning into trailer blocks is not prose:
+/// past the bound, every `Instafy-` trailer line below the subject goes at
+/// once, so a long one never costs a round per paragraph.
+const TRAILER_ROUNDS: usize = 8;
+
+/// `message`, trimmed as every save trims it, without the trailers the
+/// origin and the gateway write and trust. A line goes only when git reads
+/// it in the message's trailer block ([`trailer_block`]) and it is a
+/// `Key: value` line whose key starts with `Instafy-` in any letter case,
+/// once its control characters (other than tab) and leading blanks are set
+/// aside. Every other line stays: the subject, other paragraphs, a last
+/// paragraph git does not read as trailers, text that only starts with
+/// `Instafy-` ("Instafy-style buttons"), a key git would not parse (a
+/// Unicode look-alike), and `Instafy-Resolved-By`, which callers write and
+/// history only shows.
+///
+/// Text a caller gives a save goes through this before the origin commits
+/// it as itself (and canonical history is shared with the gateway), so a
+/// save can never pass for a restore or an import receipt. The block is
+/// looked for in the text as given and with its control characters set
+/// aside, each with and without the `---` line that ends a message for
+/// `git interpret-trailers` (but not for `%(trailers)`). Dropping a block's
+/// lines can leave the paragraph above it last, so this repeats until
+/// nothing more goes (see [`TRAILER_ROUNDS`]).
 pub(crate) fn without_origin_trailers(message: &str) -> String {
+    let mut message = message.trim().to_string();
+    for round in 0..=TRAILER_ROUNDS {
+        let lines: Vec<&str> = message.split('\n').collect();
+        let shown: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.chars()
+                    .filter(|ch| *ch == '\t' || !ch.is_control())
+                    .collect()
+            })
+            .collect();
+        let mut origin = vec![false; lines.len()];
+        if round < TRAILER_ROUNDS {
+            let shown_lines: Vec<&str> = shown.iter().map(String::as_str).collect();
+            for view in [&lines, &shown_lines] {
+                for divider in [false, true] {
+                    for index in trailer_block(view, divider) {
+                        origin[index] |= is_origin_trailer(&shown[index]);
+                    }
+                }
+            }
+        } else {
+            // The subject line is never in a trailer block, in any view.
+            for index in 1..lines.len() {
+                origin[index] = is_origin_trailer(&shown[index]);
+            }
+        }
+        if !origin.contains(&true) {
+            break;
+        }
+        let kept: Vec<&str> = lines
+            .iter()
+            .zip(&origin)
+            .filter(|(_, origin)| !**origin)
+            .map(|(line, _)| *line)
+            .collect();
+        let next = kept.join("\n").trim().to_string();
+        message = next;
+    }
     message
-        .split_inclusive('\n')
-        .filter(|line| !names_origin_trailer(line))
-        .collect()
 }
 
-fn names_origin_trailer(line: &str) -> bool {
-    let shown: String = line
-        .chars()
-        .filter(|ch| *ch == '\t' || !ch.is_control())
-        .collect();
-    let shown = shown.trim_start();
-    let starts_with = |key: &str| {
-        shown
-            .get(..key.len())
-            .is_some_and(|start| start.eq_ignore_ascii_case(key))
-    };
-    if !starts_with(ORIGIN_TRAILER_PREFIX) {
-        return false;
+/// Whether `shown` (a line with its control characters set aside) is a
+/// trailer the origin or the gateway trusts: leading blanks aside, a
+/// `Key: value` line whose key starts with `Instafy-` and is not
+/// `Instafy-Resolved-By`.
+fn is_origin_trailer(shown: &str) -> bool {
+    trailer_key(shown.trim_start_matches([' ', '\t'])).is_some_and(|key| {
+        key.get(..ORIGIN_TRAILER_PREFIX.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(ORIGIN_TRAILER_PREFIX))
+            && !key.eq_ignore_ascii_case(CALLER_TRAILER)
+    })
+}
+
+/// The key of `line` when git reads the line as a trailer: ASCII letters,
+/// digits and `-`, then optional blanks, then `:` (git's
+/// `find_separator`).
+fn trailer_key(line: &str) -> Option<&str> {
+    let end = line
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        .count();
+    let rest = line[end..].trim_start_matches([' ', '\t']);
+    (end > 0 && rest.starts_with(':')).then(|| &line[..end])
+}
+
+/// The lines of a message (`lines`, each read as ending in a newline, as a
+/// committed message does) git's trailer parser reads as its trailer
+/// block, with git's default settings (`#` comments, `:` separators, no
+/// configured trailers), as `trailer.c` and `commit.c` find it since git
+/// 2.34. The message ends at the first `---` line when `divider` is set,
+/// at the scissors line, and before a trailing run of comments, empty
+/// lines and an old `Conflicts:` list. The block is its last paragraph
+/// after the subject, when all of that paragraph's lines are trailers (or
+/// lines continuing one), or at least a quarter of them with one git
+/// writes itself (`Signed-off-by: `). Empty when there is none.
+fn trailer_block(lines: &[&str], divider: bool) -> std::ops::Range<usize> {
+    let is_space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    let is_blank = |line: &str| line.bytes().all(is_space);
+    let is_comment = |line: &str| line.starts_with('#');
+    let mut end = lines.len();
+    if divider {
+        if let Some(at) = lines.iter().position(|line| {
+            line.strip_prefix("---")
+                .is_some_and(|rest| rest.bytes().next().is_none_or(is_space))
+        }) {
+            end = at;
+        }
     }
-    let callers =
-        starts_with(CALLER_TRAILER) && shown[CALLER_TRAILER.len()..].trim_start().starts_with(':');
-    !callers
+    let cutoff = lines[..end]
+        .iter()
+        .position(|line| line.starts_with(SCISSORS_LINE))
+        .unwrap_or(end);
+    // The trailing run; like git, one that starts at the first line is
+    // not counted.
+    let mut run = None;
+    let mut conflicts = false;
+    for (index, line) in lines[..cutoff].iter().enumerate() {
+        if is_comment(line) || line.is_empty() || *line == "Conflicts:" {
+            conflicts |= *line == "Conflicts:";
+            if run.is_none() && index > 0 {
+                run = Some(index);
+            }
+        } else if conflicts && line.starts_with('\t') {
+            // A path in the old conflicts list.
+        } else if run.is_some() {
+            run = None;
+            conflicts = false;
+        }
+    }
+    let lines = &lines[..run.unwrap_or(cutoff)];
+    let title = lines
+        .iter()
+        .position(|line| !is_comment(line) && is_blank(line))
+        .unwrap_or(lines.len());
+    let (mut trailers, mut others, mut continuing) = (0usize, 0usize, 0usize);
+    let mut recognized = false;
+    let mut only_blank = true;
+    for index in (title..lines.len()).rev() {
+        let line = lines[index];
+        if is_comment(line) {
+            others += continuing;
+            continuing = 0;
+        } else if is_blank(line) {
+            if only_blank {
+                continue;
+            }
+            others += continuing;
+            let block = (recognized && trailers * 3 >= others) || (trailers > 0 && others == 0);
+            return if block { index + 1..lines.len() } else { 0..0 };
+        } else {
+            only_blank = false;
+            if GIT_GENERATED_TRAILERS
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+            {
+                trailers += 1;
+                continuing = 0;
+                recognized = true;
+            } else if trailer_key(line).is_some() {
+                trailers += 1;
+                continuing = 0;
+            } else if line.bytes().next().is_some_and(is_space) {
+                continuing += 1;
+            } else {
+                others += 1 + continuing;
+                continuing = 0;
+            }
+        }
+    }
+    0..0
 }
 
 /// Most restore commits one walk reads.
@@ -3805,11 +3959,11 @@ mod tests {
                 "Fix\n\nInstafy-Resolved-By: assistant\n  instafy-restored-from : {reference}\n\
                  {RESTORED_FROM_TRAILER}: {reference}"
             )),
-            "Fix\n\nInstafy-Resolved-By: assistant\n"
+            "Fix\n\nInstafy-Resolved-By: assistant"
         );
         assert_eq!(
             without_origin_trailers("Notes on Instafy-Restored-From handling\n"),
-            "Notes on Instafy-Restored-From handling\n"
+            "Notes on Instafy-Restored-From handling"
         );
     }
 
@@ -3834,7 +3988,7 @@ mod tests {
         );
         assert_eq!(
             without_origin_trailers(&message),
-            "Fix\n\nInstafy-Resolved-By: assistant\nSigned-off-by: A <a@x>\n"
+            "Fix\n\nInstafy-Resolved-By: assistant\nSigned-off-by: A <a@x>"
         );
         // Text that only mentions a trailer, or has no key before it, stays.
         for kept in [
@@ -3842,8 +3996,177 @@ mod tests {
             "See \u{1}Instafy-Restored-From\n",
             "Instafy\n",
         ] {
-            assert_eq!(without_origin_trailers(kept), kept, "{kept:?}");
+            assert_eq!(without_origin_trailers(kept), kept.trim_end(), "{kept:?}");
         }
+    }
+
+    /// The trailer keys git's own parser reads in `message`, in lower case:
+    /// `git interpret-trailers --parse`, with and without `--no-divider`
+    /// (as `%(trailers)` reads a commit), with no configuration.
+    fn git_trailer_keys(message: &str) -> Vec<String> {
+        let (_dir, root) = tempdir();
+        let mut keys = Vec::new();
+        for args in [
+            &["interpret-trailers", "--parse"][..],
+            &["interpret-trailers", "--parse", "--no-divider"][..],
+        ] {
+            let output = crate::test_support::git_output(&root, args, Some(message.as_bytes()));
+            assert!(output.status.success(), "{args:?}: {output:?}");
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let (key, _) = line.split_once(':').unwrap_or((line, ""));
+                keys.push(key.trim().to_ascii_lowercase());
+            }
+        }
+        keys
+    }
+
+    /// `message` as `git commit -m` keeps it (`git stripspace`).
+    fn git_stripspace(message: &str) -> String {
+        let (_dir, root) = tempdir();
+        let output =
+            crate::test_support::git_output(&root, &["stripspace"], Some(message.as_bytes()));
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// A save drops only the `Instafy-` trailers git reads in the trailer
+    /// block, never prose: a subject or a body line that starts with
+    /// `Instafy-`, a `Key: value` line in another paragraph, or a last
+    /// paragraph git does not read as trailers stays word for word, and so
+    /// does a key git would not parse (Unicode look-alikes, a format
+    /// character before it). Every variant git reads, or would read once a
+    /// save trims the text or its control characters are set aside, goes,
+    /// so no save message is the restore message or carries a receipt.
+    #[test]
+    fn saves_keep_prose_and_drop_only_the_trailers_git_reads() {
+        let reference = "refs/instafy/salvage/gateway/node-1-0123abcd";
+        let reads_origin_trailer = |message: &str| {
+            git_trailer_keys(message)
+                .iter()
+                .any(|key| key.starts_with("instafy-") && key != "instafy-resolved-by")
+        };
+        // What the origin commits: trimmed with a newline (a Desktop save),
+        // or as `git commit -m` keeps it (the multi-tenant routes).
+        let assert_clean = |message: &str, saved: &str| {
+            for committed in [format!("{}\n", saved.trim()), git_stripspace(saved)] {
+                assert!(
+                    !reads_origin_trailer(&committed),
+                    "{message:?} saved as {committed:?}"
+                );
+                assert_eq!(restored_from(&committed), None, "{message:?}");
+            }
+        };
+
+        let prose = [
+            "Instafy-style buttons on the landing page".to_string(),
+            "instafy-cli: bump the version\n\nMore detail here".to_string(),
+            "Tidy\n\nInstafy-hosted docs are linked now".to_string(),
+            "Tidy\n\ninstafy-cli: now prints JSON.\nIt also fixes the flag parsing.".to_string(),
+            "Tidy\n\ninstafy-cli: now prints JSON.\n\nMore detail here".to_string(),
+            format!("Tidy\n\nInstafy-Restored-From: {reference}\n\nQuoted above, not a trailer."),
+            "Notes on Instafy-Apply-Key handling".to_string(),
+            "See \u{1}Instafy-Restored-From".to_string(),
+            "Instafy".to_string(),
+        ];
+        let look_alikes = [
+            format!("Tidy\n\n\u{feff}Instafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{200b}Instafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{a0}Instafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{406}nstafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{ff29}nstafy-Restored-From: {reference}"),
+            format!("Tidy\n\nInstafy\u{2010}Restored-From: {reference}"),
+            format!("Tidy\n\nInstafy-Restored-From\u{ff1a} {reference}"),
+            format!("Tidy\n\nInstafy-Restored-From\u{a0}: {reference}"),
+        ];
+        for message in prose.iter().chain(&look_alikes) {
+            assert!(!reads_origin_trailer(message), "git reads {message:?}");
+            assert_eq!(without_origin_trailers(message), *message, "{message:?}");
+            assert_clean(message, message);
+        }
+
+        // Trailers git reads: any letter case, blanks before the colon, a
+        // block a `Signed-off-by: ` line lets hold other text, before a
+        // `---` line, trailing comments or the scissors line, and a block
+        // that is last only once the one below it is gone.
+        let read = [
+            (
+                format!("Tidy\n\nINSTAFY-RESTORED-FROM: {reference}"),
+                "Tidy".to_string(),
+            ),
+            (
+                format!("Tidy\n\ninstafy-restored-from : {reference}\nSigned-off-by: A <a@x>"),
+                "Tidy\n\nSigned-off-by: A <a@x>".to_string(),
+            ),
+            (
+                "Tidy\n\nprose one\nprose two\nInstafy-Apply-Key: imp:x\nSigned-off-by: A <a@x>"
+                    .to_string(),
+                "Tidy\n\nprose one\nprose two\nSigned-off-by: A <a@x>".to_string(),
+            ),
+            (
+                format!("Tidy\n\nInstafy-Restored-From: {reference}\n\u{1}\nSigned-off-by: A"),
+                "Tidy\n\n\u{1}\nSigned-off-by: A".to_string(),
+            ),
+            (
+                format!("Tidy\n\nInstafy-Restored-From: {reference}\n---\nmore text"),
+                "Tidy\n\n---\nmore text".to_string(),
+            ),
+            (
+                format!("Tidy\n\nInstafy-Restored-From: {reference}\n\n# a comment"),
+                "Tidy\n\n\n# a comment".to_string(),
+            ),
+            (
+                format!(
+                    "Tidy\n\nInstafy-Restored-From: {reference}\n\
+                     # ------------------------ >8 ------------------------\nmore text"
+                ),
+                "Tidy\n\n# ------------------------ >8 ------------------------\nmore text"
+                    .to_string(),
+            ),
+            (
+                format!(
+                    "Restore unsaved work\n\nInstafy-Restored-From: {reference}\n\n\
+                     Instafy-Apply-Key: imp:x"
+                ),
+                "Restore unsaved work".to_string(),
+            ),
+        ];
+        for (message, saved) in &read {
+            assert!(
+                reads_origin_trailer(message),
+                "git reads none in {message:?}"
+            );
+            assert_eq!(without_origin_trailers(message), *saved, "{message:?}");
+            assert_clean(message, saved);
+        }
+
+        // Trailers git does not read as given, but would once the save trims
+        // the text, or a reader sets control characters aside.
+        let hidden = [
+            (
+                format!("Restore unsaved work\n\nInstafy-Restored-From: {reference}\n\u{3000}"),
+                "Restore unsaved work".to_string(),
+            ),
+            (
+                format!(
+                    "Tidy\n\n\u{1}Instafy-Restored-From: {reference}\n\
+                     \r\u{7f}Instafy-Apply-Key: imp:x\nInsta\u{1b}fy-Apply-Fingerprint: abc"
+                ),
+                "Tidy".to_string(),
+            ),
+        ];
+        for (message, saved) in &hidden {
+            assert_eq!(without_origin_trailers(message), *saved, "{message:?}");
+            assert_clean(message, saved);
+        }
+
+        // Paragraph after paragraph of trailers: each round makes the one
+        // above it last, and past the bound every `Instafy-` trailer line
+        // below the subject goes at once.
+        let stacked = format!(
+            "Restore unsaved work\n\nInstafy-Restored-From: {reference}{}",
+            "\n\nInstafy-Apply-Key: imp:x".repeat(20_000)
+        );
+        assert_eq!(without_origin_trailers(&stacked), "Restore unsaved work");
     }
 
     #[test]

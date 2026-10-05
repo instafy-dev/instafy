@@ -3095,6 +3095,18 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    // Prose that only starts with `Instafy-` is not a trailer: it stays.
+    sc.write("unrelated.md", b"tidy with prose\n");
+    let prose = "Instafy-style buttons on the landing page\n\nInstafy-hosted docs are linked now";
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/sync"),
+        serde_json::json!({ "paths": ["unrelated.md"], "message": prose }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let saved = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
+    assert_eq!(saved.trim_end(), prose);
     // Trailers the origin or the gateway trusts, hidden behind control
     // characters or in another letter case, through a save and an apply.
     sc.write("unrelated.md", b"tidy a third time\n");
