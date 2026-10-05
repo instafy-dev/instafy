@@ -911,7 +911,9 @@ describe("ChatMessageContent", () => {
 
     const fileRef = container.querySelector('[data-testid="chat-message-file-reference-inline"]') as HTMLButtonElement | null;
     expect(fileRef).not.toBeNull();
-    expect(fileRef?.textContent?.trim()).toBe("runtime_telemetry.rs");
+    // The folder inside the imported repo shows, never the repos/<repo>/ prefix.
+    expect(fileRef?.textContent?.trim()).toBe("…/rust/src/runtime_telemetry.rs");
+    expect(fileRef?.textContent).not.toContain("instafy-dev-demo");
     expect(fileRef?.getAttribute("title")).toBe(
       `firmware/esp32/rust/src/runtime_telemetry.rs - Imported repo: instafy-dev-demo. Workspace path: ${longPath}`,
     );
@@ -921,10 +923,16 @@ describe("ChatMessageContent", () => {
     expect(fileRef?.className).toContain("min-w-0");
     expect(fileRef?.className).toContain("overflow-hidden");
 
+    // A long folder gives way first: it shrinks and clips, the name does not.
     const label = fileRef?.querySelector("span");
     expect(label?.className).toContain("min-w-0");
     expect(label?.className).toContain("max-w-full");
-    expect(label?.className).toContain("truncate");
+    const folder = fileRef?.querySelector('[data-testid="chat-message-file-reference-folder"]');
+    expect(folder?.textContent).toBe("…/rust/src/");
+    expect(folder?.className.split(" ")).toEqual(expect.arrayContaining(["min-w-0", "truncate"]));
+    const name = fileRef?.querySelector('[data-testid="chat-message-file-reference-name"]');
+    expect(name?.textContent).toBe("runtime_telemetry.rs");
+    expect(name?.className.split(" ")).toEqual(expect.arrayContaining(["flex-none", "max-w-full", "truncate"]));
   });
 
   it("preserves line suffixes in compact workspace file labels", async () => {
@@ -936,7 +944,12 @@ describe("ChatMessageContent", () => {
 
     const fileRef = container.querySelector('[data-testid="chat-message-file-reference-inline"]') as HTMLButtonElement | null;
     expect(fileRef).not.toBeNull();
-    expect(fileRef?.textContent?.trim()).toBe("esp_idf_backend.rs:42");
+    expect(fileRef?.querySelector('[data-testid="chat-message-file-reference-folder"]')?.textContent).toBe(
+      "…/rust/src/",
+    );
+    expect(fileRef?.querySelector('[data-testid="chat-message-file-reference-name"]')?.textContent).toBe(
+      "esp_idf_backend.rs:42",
+    );
     expect(fileRef?.getAttribute("title")).toBe(
       `firmware/esp32/rust/src/esp_idf_backend.rs:42 - Imported repo: instafy-dev-demo. Workspace path: ${longPathWithLine}`,
     );
@@ -968,7 +981,12 @@ describe("ChatMessageContent", () => {
 
     const fileRef = container.querySelector('[data-testid="chat-message-file-reference-inline"]') as HTMLButtonElement | null;
     expect(fileRef).not.toBeNull();
-    expect(fileRef?.textContent?.trim()).toBe("index.ts:28");
+    expect(fileRef?.querySelector('[data-testid="chat-message-file-reference-folder"]')?.textContent).toBe(
+      "…/borsh/src/",
+    );
+    expect(fileRef?.querySelector('[data-testid="chat-message-file-reference-name"]')?.textContent).toBe(
+      "index.ts:28",
+    );
     expect(fileRef?.getAttribute("title")).toBe(`${relativePath}:28 - Original path: ${absolutePath}`);
     expect(fileRef?.getAttribute("aria-label")).toBe(`Open workspace file: ${relativePath}:28`);
     expect(fileRef?.getAttribute("data-workspace-path")).toBe(relativePath);
@@ -1003,7 +1021,12 @@ describe("ChatMessageContent", () => {
 
     const fileRef = container.querySelector('[data-testid="chat-message-file-reference-inline"]') as HTMLButtonElement | null;
     expect(fileRef).not.toBeNull();
-    expect(fileRef?.textContent?.trim()).toBe("current-state.md:4");
+    expect(fileRef?.querySelector('[data-testid="chat-message-file-reference-folder"]')?.textContent).toBe(
+      "docs/handoff/",
+    );
+    expect(fileRef?.querySelector('[data-testid="chat-message-file-reference-name"]')?.textContent).toBe(
+      "current-state.md:4",
+    );
 
     await act(async () => {
       fileRef?.parentElement?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
@@ -1091,7 +1114,6 @@ describe("ChatMessageContent", () => {
 
     const fileRef = container.querySelector('[data-testid="chat-message-file-reference-inline"]') as HTMLButtonElement | null;
     expect(fileRef).not.toBeNull();
-    expect(fileRef?.textContent?.trim()).toBe(longFileName);
     expect(fileRef?.getAttribute("title")).toBe(
       `firmware/esp32/rust/src/${longFileName} - Imported repo: instafy-dev-demo. Workspace path: ${longPath}`,
     );
@@ -1100,7 +1122,14 @@ describe("ChatMessageContent", () => {
     );
     expect(fileRef?.className).toContain("max-w-[14rem]");
     expect(fileRef?.className).toContain("overflow-hidden");
-    expect(fileRef?.querySelector("span")?.className).toContain("truncate");
+    // The name keeps its width and clips at the chip edge; the folder can
+    // shrink to nothing beside it.
+    const folder = fileRef?.querySelector('[data-testid="chat-message-file-reference-folder"]');
+    expect(folder?.textContent).toBe("…/rust/src/");
+    expect(folder?.className.split(" ")).toEqual(expect.arrayContaining(["min-w-0", "truncate"]));
+    const name = fileRef?.querySelector('[data-testid="chat-message-file-reference-name"]');
+    expect(name?.textContent).toBe(longFileName);
+    expect(name?.className.split(" ")).toEqual(expect.arrayContaining(["flex-none", "max-w-full", "truncate"]));
 
     fileRef?.click();
 
@@ -1111,6 +1140,100 @@ describe("ChatMessageContent", () => {
       projectId: "project-1",
       returnTarget: "assistant",
     });
+  });
+
+  it("shows the folder before the file name in user and assistant file chips", async () => {
+    const path = "notes/persistence-check.md";
+    const userMessage: ChatMessage = {
+      id: "user-file-chip",
+      role: "user",
+      content: `Did ${path} survive the restart?`,
+      timestamp: Date.now(),
+    };
+    const assistantMessage: ChatMessage = {
+      id: "assistant-file-chip",
+      role: "assistant",
+      content: `Yes, ${path} is still there.`,
+      timestamp: Date.now(),
+    };
+
+    await act(async () => {
+      root.render(
+        <>
+          <UserMessageBubble message={userMessage} />
+          <AssistantMessageEntry message={assistantMessage} conversationMessages={[userMessage, assistantMessage]} />
+        </>,
+      );
+    });
+
+    const chips = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-message-file-reference-inline"]'),
+    );
+    expect(chips).toHaveLength(2);
+    expect(chips[0]?.closest('[data-testid="chat-bubble-user"]')).not.toBeNull();
+    expect(chips[1]?.closest('[data-testid="chat-bubble-assistant"]')).not.toBeNull();
+    chips.forEach((chip) => {
+      expect(chip.querySelector('[data-testid="chat-message-file-reference-folder"]')?.textContent).toBe("notes/");
+      expect(chip.querySelector('[data-testid="chat-message-file-reference-name"]')?.textContent).toBe(
+        "persistence-check.md",
+      );
+      // Read or copied, the chip gives the whole path.
+      expect(chip.textContent).toBe(path);
+      expect(chip.getAttribute("title")).toBe(path);
+      expect(chip.getAttribute("aria-label")).toBe(`Open workspace file: ${path}`);
+      expect(chip.getAttribute("data-workspace-path")).toBe(path);
+    });
+  });
+
+  it("names the folder from a markdown link's destination, never its label", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"See [the note](notes/persistence-check.md)."} projectId="project-1" />);
+    });
+
+    const chip = container.querySelector('[data-testid="chat-message-file-reference-inline"]');
+    expect(chip?.querySelector('[data-testid="chat-message-file-reference-folder"]')?.textContent).toBe("notes/");
+    expect(chip?.querySelector('[data-testid="chat-message-file-reference-name"]')?.textContent).toBe(
+      "persistence-check.md",
+    );
+    expect(container.textContent).not.toContain("the note");
+  });
+
+  it("keeps the two folders nearest the file and its line on the name", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"Check `a/b/c/d/file.ts:12` next."} projectId="project-1" />);
+    });
+
+    const chip = container.querySelector('[data-testid="chat-message-file-reference-inline"]');
+    expect(chip?.querySelector('[data-testid="chat-message-file-reference-folder"]')?.textContent).toBe("…/c/d/");
+    expect(chip?.querySelector('[data-testid="chat-message-file-reference-name"]')?.textContent).toBe("file.ts:12");
+    expect(chip?.getAttribute("title")).toBe("a/b/c/d/file.ts:12");
+  });
+
+  it("shows only the name for a file at the workspace root", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"Read `TODO.md` and AGENTS.md first."} projectId="project-1" />);
+    });
+
+    const chips = Array.from(container.querySelectorAll('[data-testid="chat-message-file-reference-inline"]'));
+    expect(chips.map((chip) => chip.textContent)).toEqual(["TODO.md", "AGENTS.md"]);
+    chips.forEach((chip) => {
+      expect(chip.querySelector('[data-testid="chat-message-file-reference-folder"]')).toBeNull();
+      expect(chip.querySelector('[data-testid="chat-message-file-reference-name"]')?.className).toContain("truncate");
+    });
+  });
+
+  it("names the file's folder in its action menu", async () => {
+    await act(async () => {
+      root.render(<MessageContent content="Inspect notes/persistence-check.md:3 again." projectId="project-1" />);
+    });
+
+    const chip = container.querySelector('[data-testid="chat-message-file-reference-inline"]');
+    await act(async () => {
+      chip?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 80, clientY: 90 }));
+    });
+
+    const menu = container.querySelector('[data-testid="chat-message-file-reference-menu"]');
+    expect(menu?.getAttribute("aria-label")).toBe("File actions for notes/persistence-check.md:3");
   });
 
   it("previews workspace file references on hover without navigating", async () => {
