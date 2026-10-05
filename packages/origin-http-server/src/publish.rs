@@ -33,8 +33,8 @@ use crate::publish_policy::{
 use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
-    parse_rev, recovery_ref_moved, resolve_ref, restore_commit_message, without_restored_from,
-    RecoveryRef, ViewError,
+    parse_rev, recovery_ref_moved, resolve_ref, restore_commit_message, restore_commits,
+    without_restored_from, RecoveryRef, ViewError, RESTORED_FROM_TRAILER,
 };
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
@@ -321,8 +321,10 @@ pub struct RestoreRequest {
 pub struct RestoreReport {
     #[serde(flatten)]
     pub publish: PublishReport,
-    /// A restore commit was made (false: the saved version already held
-    /// this work, or the rest of it was kept or refused).
+    /// This call made the restore's new version: it committed one, or it
+    /// published the restore commit an earlier call of the same ref made
+    /// and could not publish. False when the saved version already held
+    /// this work, or the rest of it was kept or refused.
     pub committed: bool,
     /// Paths the work changes that kept the saved version: kept on request,
     /// or never restorable here (ignored, excluded, secret, legacy
@@ -2674,8 +2676,16 @@ impl Publisher<'_> {
             .map_err(internal)?;
 
         let mut local = head.clone();
-        let committed = tree != head_tree;
-        if committed {
+        let made = tree != head_tree;
+        // With nothing new to commit, an earlier restore of this ref whose
+        // publish did not reach `main` may still be on the branch: this
+        // call publishes it, so it is this call's new version.
+        let committed = made
+            || self
+                .unpublished_restore(&head, reference.as_str())
+                .map_err(internal)?
+                .is_some();
+        if made {
             let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
             let dirty: Vec<String> = self
                 .status()
@@ -2748,6 +2758,44 @@ impl Publisher<'_> {
         not_restored.sort();
         not_restored.dedup();
         Ok((committed, not_restored, ref_deleted))
+    }
+}
+
+impl Publisher<'_> {
+    /// A restore commit of `reference` that this origin committed on
+    /// `head`'s history and canonical `main` (as last fetched) does not
+    /// have yet, if any.
+    fn unpublished_restore(&self, head: &str, reference: &str) -> Result<Option<String>> {
+        let grep = format!("--grep={RESTORED_FROM_TRAILER}: {reference}");
+        let mut args = vec![
+            "rev-list".to_string(),
+            "--fixed-strings".to_string(),
+            grep,
+            "--end-of-options".to_string(),
+            head.to_string(),
+        ];
+        if let Some(main) = self.tracked_main()? {
+            args.push(format!("^{main}"));
+        }
+        if let Some(frontier) = self.git.commit_id(PUBLISHED_FRONTIER_REF)? {
+            args.push(format!("^{frontier}"));
+        }
+        args.push("--".to_string());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let ids: Vec<String> = self
+            .git
+            .stdout(&args)?
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect();
+        Ok(
+            restore_commits(&self.git, &ids, &self.config.git_author_email)?
+                .into_iter()
+                .find(|(_, restored)| restored == reference)
+                .map(|(id, _)| id),
+        )
     }
 }
 

@@ -2878,6 +2878,11 @@ async fn handle_git_recovery(
     .map(|minted| minted.token);
     let root = workspace_root_for_project(&state, project_id);
     let service_email = state.config.git_author_email.clone();
+    // What the checkout last saw of canonical `main`.
+    let canonical_main = format!(
+        "refs/remotes/{}/{}",
+        state.config.git_remote_name, state.config.git_branch
+    );
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
     let items = tokio::task::spawn_blocking(move || {
@@ -2888,6 +2893,7 @@ async fn handle_git_recovery(
         Ok::<_, OriginError>(checkout_versions::list_unsaved_work(
             &git,
             &remote,
+            &canonical_main,
             &service_email,
         )?)
     })

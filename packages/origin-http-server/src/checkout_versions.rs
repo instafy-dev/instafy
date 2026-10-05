@@ -122,17 +122,25 @@ pub(crate) fn fetch_ref_for_review(
 /// Every recovery and salvage ref on `remote`, newest first (at most
 /// [`recovery_view::MAX_RECOVERY_ITEMS`]), each with its merge base with
 /// the checkout's `HEAD` (which a review and a restore compare against)
-/// and, when a restore commit this origin (`service_email`) made on
-/// `HEAD`'s history names it, `restoredRev`.
+/// and, when a restore commit this origin (`service_email`) made names it,
+/// `restoredRev`.
+///
+/// A restore counts only once canonical `main` has it: restore commits are
+/// looked for on `canonical_main` (the checkout's tracking ref of the
+/// canonical branch, which moves on every fetch and after every publish
+/// that reached `main`), never on `HEAD`, which also holds a restore whose
+/// publish failed.
 pub(crate) fn list_unsaved_work(
     git: &WorkspaceGit<'_>,
     remote: &str,
+    canonical_main: &str,
     service_email: &str,
 ) -> Result<Vec<RecoveryItem>, ViewError> {
     let listed = list_remote_refs(git, remote).map_err(unreachable)?;
     let fetched = fetch_refs(git, remote, &listed).map_err(unreachable)?;
     let head = git.commit_id("HEAD")?;
     let mut items = describe(git, &fetched.fetched, head.as_deref())?;
-    recovery_view::mark_restored(git, &mut items, head.as_deref(), service_email)?;
+    let main = git.commit_id(canonical_main)?;
+    recovery_view::mark_restored(git, &mut items, main.as_deref(), service_email)?;
     Ok(items)
 }

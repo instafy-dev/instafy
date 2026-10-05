@@ -3256,6 +3256,75 @@ async fn restore_route_restores_unsaved_work_once() {
     server.abort();
 }
 
+/// A restore whose publish did not reach `main` is not restored yet: the
+/// ref stays, the list shows no `restoredRev` until canonical `main` has
+/// the restore commit, and the retry that publishes it reports
+/// `committed: true` (it made the new version reach `main`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_counts_only_once_main_has_it() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    let commit = push_to_ref(
+        &sc,
+        &[("notes.md", Some(b"notes\n"))],
+        &[],
+        "Unsaved edits",
+        &reference,
+    );
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let restore = || {
+        post_json(
+            &client,
+            format!("{base}/git/recovery/restore"),
+            serde_json::json!({ "ref": reference, "rev": commit }),
+        )
+    };
+
+    let hook = close_main(&sc);
+    let main_before = sc.main();
+    let (status, body) = restore().await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "not_saved", "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(sc.main(), main_before);
+    assert_eq!(sc.remote_refs(&reference).len(), 1);
+
+    let listed: serde_json::Value = client
+        .get(format!("{base}/git/recovery"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["ref"] == reference.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("{reference} not listed in {listed}"));
+    assert!(entry.get("restoredRev").is_none(), "{entry}");
+
+    // Once `main` takes pushes again, the retry publishes the restore.
+    fs::remove_file(hook).unwrap();
+    let (status, body) = restore().await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["gitSyncStatus"], "published", "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(body["refDeleted"], true, "{body}");
+    assert_eq!(body["rev"], sc.main().as_str());
+    assert_eq!(sc.remote_file("notes.md").as_deref(), Some("notes\n"));
+    let head = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
+    assert!(head.starts_with("Restore unsaved work\n"), "{head}");
+    server.abort();
+}
+
 /// Work that adds a folder where `main` now has a file conflicts on both
 /// paths. Keeping the saved version of either side, or of both, clears
 /// the clash and restores the rest; keeping only part of the folder does

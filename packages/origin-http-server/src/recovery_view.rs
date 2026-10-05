@@ -1510,10 +1510,31 @@ pub(crate) fn mark_restored(
         .filter(|id| is_full_object_id(id))
         .map(str::to_string)
         .collect();
-    let committer_email = committer_email.trim().to_ascii_lowercase();
     let mut restored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (id, object) in ids.iter().zip(git.read_objects(&ids)?) {
-        if object.kind != "commit" || committer_of(&object.data) != Some(committer_email.clone()) {
+    for (id, reference) in restore_commits(git, &ids, committer_email)? {
+        // Newest first: the first commit seen for a ref wins.
+        restored.entry(reference).or_insert(id);
+    }
+    for item in items.iter_mut() {
+        item.restored_rev = restored.get(&item.reference).cloned();
+    }
+    Ok(())
+}
+
+/// `(id, ref)` of each of `ids` that is a restore commit
+/// ([`restore_commit_message`] of `ref`) committed by `committer_email`,
+/// in the order given, with one `cat-file --batch`.
+pub(crate) fn restore_commits(
+    git: &WorkspaceGit<'_>,
+    ids: &[String],
+    committer_email: &str,
+) -> Result<Vec<(String, String)>, ViewError> {
+    let committer_email = committer_email.trim().to_ascii_lowercase();
+    let mut found = Vec::new();
+    for (id, object) in ids.iter().zip(git.read_objects(ids)?) {
+        if object.kind != "commit"
+            || committer_of(&object.data).as_deref() != Some(committer_email.as_str())
+        {
             continue;
         }
         let text = String::from_utf8_lossy(&object.data);
@@ -1521,16 +1542,10 @@ pub(crate) fn mark_restored(
             continue;
         };
         if let Some(reference) = restored_from(message) {
-            // Newest first: the first commit seen for a ref wins.
-            restored
-                .entry(reference.to_string())
-                .or_insert_with(|| id.clone());
+            found.push((id.clone(), reference.to_string()));
         }
     }
-    for item in items.iter_mut() {
-        item.restored_rev = restored.get(&item.reference).cloned();
-    }
-    Ok(())
+    Ok(found)
 }
 
 /// The committer's address of a raw commit, in lower case.
