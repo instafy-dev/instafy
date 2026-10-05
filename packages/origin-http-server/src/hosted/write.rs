@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Multipart, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -41,7 +41,6 @@ use crate::apply_request::{
 use crate::auth::{OriginClaims, WORKSPACE_IMPORT_SCOPE};
 use crate::error::OriginError;
 use crate::git::is_full_object_id;
-use crate::git_tokens;
 use crate::recovery_view::parse_rev;
 use crate::route_auth::OriginAccessToken;
 use crate::workspace_git::{GitIdentity, WorkspaceGit};
@@ -105,26 +104,25 @@ pub(super) fn gateway_identity(state: &HostedState) -> GitIdentity {
     )
 }
 
-/// The `git.write` credential for this request, exchanged from the
-/// caller's own `fs.write` token (never the gateway's machine credential).
+/// A `git.write` credential for this request, exchanged from the caller's
+/// own `fs.write` token (never the gateway's machine credential). It lives
+/// a minute at most: exchange it right before the push it is for.
 pub(super) async fn write_token(
     state: &HostedState,
     project: Uuid,
     token: &OriginAccessToken,
 ) -> Result<Option<String>, OriginError> {
-    let caller = caller_token(token);
-    if state.auth.config.skip_auth && caller.is_none() {
-        return Ok(None);
-    }
-    Ok(git_tokens::mint_git_access_token(
-        &state.auth.http_client,
-        &state.auth.config,
-        project,
-        &["git.read", "git.write"],
-        caller,
-    )
-    .await?
-    .map(|minted| minted.token))
+    Ok(state
+        .cache
+        .write_token(project, caller_token(token))
+        .await?
+        .map(|(token, _)| token))
+}
+
+/// When the caller's bearer expires (its `exp` claim).
+pub(super) fn caller_expiry(claims: &OriginClaims) -> Option<SystemTime> {
+    let seconds = u64::try_from(claims.exp?).ok()?;
+    UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
 }
 
 /// `expected` with normalized paths and lower-case full blob ids (`None`:
@@ -259,7 +257,6 @@ async fn apply(
         .unwrap_or_else(|| default_message(&written, &staged.deletes));
     let (file_count, bytes_written) = (staged.file_count, staged.bytes_written);
 
-    let write_token = write_token(&state, project, &token).await?;
     let budget = if import { IMPORT_BUDGET } else { SAVE_BUDGET };
     let change = Change::Edits(
         Edits::new(
@@ -276,7 +273,7 @@ async fn apply(
         &state,
         project,
         &token,
-        write_token,
+        caller_expiry(&claims),
         change,
         Some(staging),
         author,
@@ -316,15 +313,17 @@ async fn apply(
 }
 
 /// Run [`cas_commit`] for `change` on `project`'s mirror, off the async
-/// threads, with fetches through the mirror cache. `staging` (the upload's
-/// files) lives as long as that work, even when the request is gone.
-/// Returns the change too (what an import skipped).
+/// threads, with fetches through the mirror cache and a `git.write`
+/// credential exchanged from the caller's bearer (`token`, expiring at
+/// `caller_expires`) before each push. `staging` (the upload's files) lives
+/// as long as that work, even when the request is gone. Returns the change
+/// too (what an import skipped).
 #[allow(clippy::too_many_arguments)]
 async fn commit(
     state: &HostedState,
     project: Uuid,
     token: &OriginAccessToken,
-    write_token: Option<String>,
+    caller_expires: Option<SystemTime>,
     mut change: Change,
     staging: Option<Staging>,
     author: GitIdentity,
@@ -343,12 +342,12 @@ async fn commit(
     let deadline = Instant::now() + budget;
     blocking(move || {
         let dir = cache.ensure_mirror(&mirror)?;
-        let mut canonical = CachedCanonical::new(cache, lease, read_token, runtime);
+        let mut canonical =
+            CachedCanonical::new(cache, lease, read_token, runtime).caller_expires(caller_expires);
         let target = CasTarget {
             mirror: &dir,
             quarantine_parent: &quarantine_parent,
             remote: &remote,
-            write_token: write_token.as_deref(),
             committer: &committer,
             deadline,
         };
@@ -501,13 +500,12 @@ pub(super) async fn handle_git_revert_commit(
     drop(lease);
 
     let message = format!("Revert \"{subject}\"\n\nThis reverts commit {commit}.");
-    let write_token = write_token(&state, project, &token).await?;
     let author = save_author(&claims, &gateway_identity(&state));
     let (outcome, _) = commit_change(
         &state,
         project,
         &token,
-        write_token,
+        caller_expiry(&claims),
         Change::Revert(Revert::new(commit, base)),
         author,
         message,
@@ -525,7 +523,7 @@ pub(super) async fn commit_change(
     state: &HostedState,
     project: Uuid,
     token: &OriginAccessToken,
-    write_token: Option<String>,
+    caller_expires: Option<SystemTime>,
     change: Change,
     author: GitIdentity,
     message: String,
@@ -534,7 +532,7 @@ pub(super) async fn commit_change(
         state,
         project,
         token,
-        write_token,
+        caller_expires,
         change,
         None,
         author,

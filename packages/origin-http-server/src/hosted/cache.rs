@@ -604,6 +604,35 @@ impl MirrorCache {
         }
     }
 
+    /// A `git.write` credential for `project`, exchanged from the caller's
+    /// own `fs.write` token (never the gateway's machine credential), with
+    /// its lifetime. `None` when the server needs none (local development
+    /// without auth and no caller token).
+    pub(crate) async fn write_token(
+        &self,
+        project: Uuid,
+        caller_token: Option<&str>,
+    ) -> Result<Option<(String, Duration)>, OriginError> {
+        let caller_token = caller_token
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        if self.config.skip_auth && caller_token.is_none() {
+            return Ok(None);
+        }
+        Ok(git_tokens::mint_git_access_token(
+            &self.http,
+            &self.config,
+            project,
+            &["git.read", "git.write"],
+            caller_token,
+        )
+        .await?
+        .map(|minted| {
+            let lifetime = Duration::from_secs(u64::try_from(minted.expires_in).unwrap_or(0));
+            (minted.token, lifetime)
+        }))
+    }
+
     /// After a write pushed `commit` (on top of `old`, `None` for a new
     /// `main`) to canonical: move the mirror's `main` to it, so reads show
     /// the save without a fetch. Only when the commit's objects were moved

@@ -32,7 +32,7 @@ use super::restore::Restore;
 use super::routes::{
     blocking, caller_token, fetch_ref, project_of, ref_error, HostedState, REF_FETCH_DEADLINE,
 };
-use super::write::{commit_change, gateway_identity, write_token};
+use super::write::{caller_expiry, commit_change, gateway_identity, write_token};
 use crate::apply::normalize_relative_path;
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
@@ -125,13 +125,12 @@ pub(super) async fn handle_restore(
         (Some(fetched), _) => fetched,
     };
 
-    let write_token = write_token(&state, project, &token).await?;
     let author = save_author(&claims, &gateway_identity(&state));
     let (outcome, change) = commit_change(
         &state,
         project,
         &token,
-        write_token.clone(),
+        caller_expiry(&claims),
         Change::Restore(Restore::new(fetched.commit.clone(), keep, base_rev)),
         author,
         restore_message(&reference),
@@ -145,7 +144,15 @@ pub(super) async fn handle_restore(
     // person chose to keep). Salvage refs stay for good, and so does a ref
     // holding work that could not be saved here.
     let ref_deleted = if reference.dismissible() && !restore.left_out_unsaveable() {
-        match remove_ref(&state, &lease, write_token, &reference, &fetched.tip).await {
+        // A credential of its own: the restore's push may have outlived
+        // the one it used.
+        let removal = match write_token(&state, project, &token).await {
+            Ok(write_token) => {
+                remove_ref(&state, &lease, write_token, &reference, &fetched.tip).await
+            }
+            Err(error) => Err(error),
+        };
+        match removal {
             Ok(Removal::Deleted | Removal::Missing) => true,
             Ok(other) => {
                 info!(%project, reference = reference.as_str(), outcome = ?other, "kept a restored ref");
