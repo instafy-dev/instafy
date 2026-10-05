@@ -1029,7 +1029,7 @@ async fn entries_at_version(
         checkout_versions::EntriesAt::Listed(objects) => {
             let mut entries: Vec<FileEntryResponse> =
                 objects.iter().map(object_entry_response).collect();
-            entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            entries.sort_by_key(|entry| entry.name.to_lowercase());
             Json(entries).into_response()
         }
         checkout_versions::EntriesAt::Missing(kind) => {
