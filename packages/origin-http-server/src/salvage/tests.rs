@@ -12,7 +12,9 @@ use uuid::Uuid;
 use super::options::Settings;
 use super::services::{interpret_export, ExportOutcome, ExportedTo, Services};
 use super::{entry_project, run, Summary};
-use crate::test_support::{git_in, git_output, ig, init_workspace_repo, install_shard_hook};
+use crate::test_support::{
+    git_in, git_output, ig, init_workspace_repo, install_shard_hook, GitWrapper,
+};
 use crate::workspace_git::GitIdentity;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDRchat";
@@ -37,7 +39,9 @@ impl Services for Stub {
         if let Some(hook) = self.on_read_token.borrow_mut().as_mut() {
             hook();
         }
-        Ok(None)
+        // A local remote ignores the header; tests that log git's arguments
+        // see which credential each command carried.
+        Ok(Some(format!("read-{}", self.read_tokens.get())))
     }
 
     fn salvage_token(&self, _project: &Uuid) -> anyhow::Result<String> {
@@ -1420,6 +1424,110 @@ fn an_export_that_may_succeed_later_holds_up_removal() {
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
     assert!(!entry.exists());
+}
+
+/// A path git refuses to add (`cfg/x` while the index holds the file
+/// `cfg`) stops a whole `update-index` batch without changing the index; it
+/// is reported and left as it was, and the rest of the work tree's changes
+/// still go into W.
+#[test]
+fn a_path_git_refuses_is_left_out_and_the_rest_kept() {
+    let gateway = Gateway::new();
+    let mut files: Vec<(String, Option<String>)> = (0..40)
+        .map(|n| (format!("src/f{n:02}.js"), Some(format!("v0 {n}\n"))))
+        .collect();
+    files.push(("cfg".to_string(), Some("file\n".to_string())));
+    let listed: Vec<(&str, Option<&str>)> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_deref()))
+        .collect();
+    let c1 = gateway.publish(&listed, "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    for n in 0..40 {
+        write(&entry.join(format!("src/f{n:02}.js")), b"v1\n");
+    }
+    std::fs::remove_file(entry.join("cfg")).unwrap();
+    write(&entry.join("cfg/x"), b"now a folder\n");
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (_, lines) = salvage(&gateway.settings(true, false, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let skipped: Vec<(String, String)> = report["skippedPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["path"].as_str().unwrap().to_string(),
+                item["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        skipped,
+        vec![
+            ("cfg/".to_string(), "unsupported".to_string()),
+            ("cfg/x".to_string(), "unsupported".to_string()),
+        ]
+    );
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    for n in 0..40 {
+        assert_eq!(
+            git_in(&canonical, &["show", &format!("{salvaged}:src/f{n:02}.js")]),
+            "v1"
+        );
+    }
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:cfg")]),
+        "file"
+    );
+}
+
+/// Every read of canonical carries a `git.read` credential minted for it: a
+/// long entry (a slow fetch, many exports, a large work tree) can outlast
+/// the one minted when it started.
+#[test]
+fn every_read_of_canonical_carries_its_own_credential() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("README.md"), b"edited\n");
+    gateway.salvage_mode_hook(&[]);
+    let log = gateway.root.parent().unwrap().join("git.log");
+    let stub = Stub::default();
+    let (_, lines) = {
+        let _wrapper = GitWrapper::install(
+            gateway.root.parent().unwrap(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        salvage(&gateway.settings(true, false, &[]), &stub)
+    };
+    assert_eq!(lines[0]["canonicalVerified"], true, "{:#}", lines[0]);
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let mut reads = Vec::new();
+    for line in logged.lines() {
+        let words: Vec<&str> = line.split(' ').collect();
+        if !words
+            .iter()
+            .any(|word| matches!(*word, "fetch" | "ls-remote"))
+        {
+            continue;
+        }
+        let bearer = words
+            .iter()
+            .position(|word| *word == "Bearer")
+            .map(|at| words[at + 1].to_string());
+        reads.push(bearer.unwrap_or_else(|| panic!("no credential: {line}")));
+    }
+    // The fetch, the check before the push, and the read back after it.
+    assert_eq!(reads.len(), 3, "{logged}");
+    let distinct: std::collections::BTreeSet<&String> = reads.iter().collect();
+    assert_eq!(distinct.len(), reads.len(), "{reads:?}");
+    assert_eq!(stub.read_tokens.get(), reads.len());
 }
 
 /// A rerun of an entry that still holds the same work reports the salvage

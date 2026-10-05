@@ -505,7 +505,7 @@ fn push_salvage_ref(
 ) -> Result<bool> {
     let git = push.git;
     if let Some(earlier) = push.recorded {
-        if reuse_recorded(push, earlier, tip, report)? {
+        if reuse_recorded(services, push, earlier, tip, report)? {
             return Ok(true);
         }
     }
@@ -515,7 +515,7 @@ fn push_salvage_ref(
         let reference = salvage_ref(&settings.node, &current)?;
         report.salvage_ref = Some(reference.clone());
         report.salvage_rev = Some(current.clone());
-        match canonical::salvage_tip(git, push.url, &reference)? {
+        match read_salvage_tip(services, push, &reference)? {
             Some(rev) if rev == current => {
                 report.canonical_verified = true;
                 return Ok(true);
@@ -531,7 +531,7 @@ fn push_salvage_ref(
         let pusher = entry_git(push.root, Some(&token));
         match canonical::create_salvage_ref(&pusher, push.url, &current, &reference)? {
             Pushed::Created => {
-                if canonical::salvage_tip(git, push.url, &reference)?.as_deref()
+                if read_salvage_tip(services, push, &reference)?.as_deref()
                     != Some(current.as_str())
                 {
                     bail!("{reference} was pushed but canonical does not show it at {current}");
@@ -588,7 +588,7 @@ fn push_salvage_ref(
             }
             Pushed::Failed(text) => {
                 // An unknown outcome may still have landed.
-                if canonical::salvage_tip(git, push.url, &reference)?.as_deref()
+                if read_salvage_tip(services, push, &reference)?.as_deref()
                     == Some(current.as_str())
                 {
                     report.canonical_verified = true;
@@ -606,6 +606,7 @@ fn push_salvage_ref(
 /// makes a different W), and so may the node name, but the work is already
 /// on canonical. Returns false when the ref cannot be used.
 fn reuse_recorded(
+    services: &dyn Services,
     push: &PushState<'_, '_>,
     earlier: &Recorded,
     tip: &mut Option<String>,
@@ -616,7 +617,7 @@ fn reuse_recorded(
     };
     if !is_salvage_ref_name(reference)
         || push.git.commit_id(rev)?.as_deref() != Some(rev.as_str())
-        || canonical::salvage_tip(push.git, push.url, reference)?.as_deref() != Some(rev.as_str())
+        || read_salvage_tip(services, push, reference)?.as_deref() != Some(rev.as_str())
     {
         return Ok(false);
     }
@@ -646,6 +647,19 @@ fn reuse_recorded(
         "{reference} holds this work from an earlier run; nothing was pushed"
     ));
     Ok(true)
+}
+
+/// The tip of a salvage ref on canonical, read with a `git.read` credential
+/// minted for this read: the one minted when the entry started may have
+/// expired after a slow fetch, many exports or a large work tree.
+fn read_salvage_tip(
+    services: &dyn Services,
+    push: &PushState<'_, '_>,
+    reference: &str,
+) -> Result<Option<String>> {
+    let token = services.read_token(&push.project)?;
+    let reader = entry_git(push.root, token.as_deref());
+    canonical::salvage_tip(&reader, push.url, reference)
 }
 
 /// `refs/instafy/salvage/gateway/<node>-<W[:8]>`, checked against the
