@@ -2665,6 +2665,7 @@ impl Publisher<'_> {
                 refused_before: &self.filtered,
                 restorers: &restorers,
                 recorded_on: tracked.as_deref(),
+                salvage_committer: crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL,
                 scratch: scratch.path(),
             },
         ) {

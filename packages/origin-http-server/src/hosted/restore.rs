@@ -8,7 +8,8 @@
 //! `excluded`, `secret`, `attachment`, `unsupported`, `too_large`,
 //! `ignored` by the restored tree's own `.gitignore` files, or a shard's
 //! reason from an earlier attempt; then `kept` on request, a path also
-//! covering everything below it), which clashes are 409
+//! covering everything below it; and, for a salvage commit the gateway
+//! made, the files its salvage kept privately), which clashes are 409
 //! `restore_conflict`, whether the ref may go, and whether an empty restore
 //! commit records it. With a `baseRev` other than `main`, every path the
 //! restore changes must be as it was at `baseRev` (409 `head_moved`), as
@@ -48,6 +49,9 @@ pub(crate) struct Restore {
     /// The committers whose restore commits count: the gateway's own
     /// address and Desktop's.
     committers: Vec<String>,
+    /// The gateway's own address: a salvage commit it made lists the files
+    /// its salvage kept privately.
+    salvage_committer: String,
     /// The last attempt brings nothing new to `main` and records the
     /// restore with an empty restore commit.
     marker: bool,
@@ -71,6 +75,7 @@ impl Restore {
             lets_ref_go: true,
             touched: None,
             committers: restore_committers(&committer_email),
+            salvage_committer: committer_email,
             marker: false,
         }
     }
@@ -110,6 +115,7 @@ impl Restore {
                 refused_before: &self.shard_refused,
                 restorers: &self.committers,
                 recorded_on: None,
+                salvage_committer: &self.salvage_committer,
                 scratch,
             },
         )

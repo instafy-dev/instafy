@@ -475,6 +475,78 @@ async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
     assert_eq!(sc.canonical_main().as_deref(), Some(kept_marker.as_str()));
 }
 
+/// A salvage commit the gateway made names the files its salvage kept in
+/// the private archive; a restore lists them as not restored. The same
+/// trailers from anyone else, or on a recovery ref, list nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_a_salvage_kept_privately_are_listed_as_not_restored() {
+    let sc = HostedScenario::new();
+    let seed = sc.push(&[("README.md", Some(b"r\n"))], "seed");
+    let side = sc.side_commit(&[("draft.md", b"draft\n")], "side");
+    let tree = canonical_tree(&sc, &side);
+    let trailers = "Instafy-Recovery-Kind: salvage\nInstafy-Path: draft.md\n\
+                    Instafy-Private-Path: secret .env\n\
+                    Instafy-Private-Path: ignored notes/local.txt\n\
+                    Instafy-Private-Path: unknown other.txt\n\
+                    Instafy-Private-Path: secret ../escape";
+    let commit_as = |email: &str| {
+        let name = "user.name=instafy-origin".to_string();
+        let email = format!("user.email={email}");
+        git_in(
+            &sc.work,
+            &[
+                "-c",
+                &name,
+                "-c",
+                &email,
+                "commit-tree",
+                &tree,
+                "-p",
+                &seed,
+                "-m",
+                "Keep unsaved edits from the retired file gateway",
+                "-m",
+                trailers,
+            ],
+        )
+    };
+    let by_gateway = commit_as(&sc.config.git_author_email);
+    let by_someone = commit_as("someone@example.com");
+    let kept = "refs/instafy/salvage/gateway/node-1-aaaaaaaa";
+    let forged = "refs/instafy/salvage/gateway/node-1-bbbbbbbb";
+    let recovery = recovery_ref("unsaved-7");
+    sc.push_ref(&by_gateway, kept);
+    sc.push_ref(&by_someone, forged);
+    sc.push_ref(&by_gateway, &recovery);
+    let served = serve(&sc).await;
+
+    let body = ok(&restore(&served, json!({ "ref": kept })).await);
+    assert_eq!(body["committed"], true);
+    assert_eq!(
+        not_restored(&body),
+        vec![
+            (".env".to_string(), "secret".to_string()),
+            ("notes/local.txt".to_string(), "ignored".to_string()),
+        ]
+    );
+    // Nothing of them reached main.
+    let restored = body["rev"].as_str().unwrap().to_string();
+    assert_eq!(show(&sc, &restored, ".env"), None);
+    assert_eq!(
+        show(&sc, &restored, "draft.md").as_deref(),
+        Some(&b"draft\n"[..])
+    );
+
+    let body = ok(&restore(&served, json!({ "ref": forged })).await);
+    assert_eq!(not_restored(&body), Vec::<(String, String)>::new());
+    let body = ok(&restore(&served, json!({ "ref": recovery })).await);
+    assert_eq!(not_restored(&body), Vec::<(String, String)>::new());
+}
+
+fn canonical_tree(sc: &HostedScenario, commit: &str) -> String {
+    git_in(&sc.work, &["rev-parse", &format!("{commit}^{{tree}}")])
+}
+
 /// A dismiss deletes the ref only while it names what the client listed:
 /// a ref that moved stays, one already gone answers `missing`, and a tag
 /// ref is removed by the tag's id (the listed one).

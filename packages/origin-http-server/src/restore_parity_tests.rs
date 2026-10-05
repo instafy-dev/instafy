@@ -2221,3 +2221,65 @@ async fn a_restore_recorded_in_one_mode_counts_in_the_other() {
         }
     }
 }
+
+/// A salvage commit the gateway made names the files its salvage kept in
+/// the owner-only archive: both modes list them as not restored, with their
+/// reason, and restore the rest. The same trailers under another committer
+/// list nothing, and neither changes what reaches `main`.
+#[tokio::test(flavor = "multi_thread")]
+async fn files_a_salvage_kept_privately_are_listed_in_both_modes() {
+    for mode in MODES {
+        let space = Space::new(mode, &[]).await;
+        space.sync_work();
+        let parent = space.main();
+        commit_files(&space.work, &[("draft.md", Some(b"draft\n"))], "draft");
+        let tree = git_in(&space.work, &["rev-parse", "HEAD^{tree}"]);
+        git_in(&space.work, &["reset", "-q", "--hard", &parent]);
+        let salvage = |committer: &str, reference: &str| {
+            let email = format!("user.email={committer}");
+            let commit = git_in(
+                &space.work,
+                &[
+                    "-c",
+                    "user.name=instafy-origin",
+                    "-c",
+                    &email,
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    &parent,
+                    "-m",
+                    "Keep unsaved edits from the retired file gateway",
+                    "-m",
+                    "Instafy-Recovery-Kind: salvage\nInstafy-Path: draft.md\n\
+                     Instafy-Private-Path: secret .env\n\
+                     Instafy-Private-Path: attachment chat-upload-1.png\n\
+                     Instafy-Private-Path: unknown other.txt",
+                ],
+            );
+            let spec = format!("{commit}:{reference}");
+            git_in(
+                &space.work,
+                &["push", "-q", space.remote.to_str().unwrap(), &spec],
+            );
+        };
+        let kept = "refs/instafy/salvage/gateway/node-1-aaaaaaaa";
+        let forged = "refs/instafy/salvage/gateway/node-1-bbbbbbbb";
+        salvage(crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL, kept);
+        salvage("agent@instafy.dev", forged);
+
+        let body = space.restored(json!({ "ref": kept })).await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[(".env", "secret"), ("chat-upload-1.png", "attachment")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(space.on_main("draft.md").as_deref(), Some(&b"draft\n"[..]));
+        assert_eq!(space.on_main(".env"), None, "{mode:?}");
+        assert_eq!(space.on_main("chat-upload-1.png"), None, "{mode:?}");
+
+        let body = space.restored(json!({ "ref": forged })).await;
+        assert_eq!(body["notRestored"], json!([]), "{mode:?}: {body}");
+    }
+}
