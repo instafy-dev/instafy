@@ -79,6 +79,9 @@ pub(crate) const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 pub(crate) const EVICT_IDLE_AFTER: Duration = Duration::from_secs(3600);
 /// Scratch older than this belongs to a request that is gone.
 const SCRATCH_STALE_AFTER: Duration = Duration::from_secs(3600);
+/// Below this much free space on the cache's disk the sweeper removes
+/// mirrors nobody holds, however recently used, until it has it again.
+pub(crate) const MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// About this many loose objects in a mirror, or more packs than
 /// [`PACK_LIMIT`], and the sweeper packs it (git's own `gc --auto` limits;
 /// git never packs a mirror by itself).
@@ -288,6 +291,12 @@ pub(crate) struct MirrorCache {
     first_clone_wait: Duration,
     /// When the sweeper packs a mirror: (loose objects, packs).
     pack_limits: (u64, u64),
+    /// The free space the sweeper keeps on the cache's disk.
+    min_free_bytes: u64,
+    /// The free space on the disk of a path (`None`: unknown).
+    free_space: Box<dyn Fn(&Path) -> Option<u64> + Send + Sync>,
+    /// Held while a sweep runs: one at a time.
+    sweeping: Mutex<()>,
     #[cfg(test)]
     pub(crate) test_fetch_delay: Option<Duration>,
 }
@@ -346,9 +355,28 @@ impl MirrorCache {
             fetch_wait: FETCH_WAIT,
             first_clone_wait: FIRST_CLONE_WAIT,
             pack_limits: (LOOSE_OBJECT_LIMIT, PACK_LIMIT),
+            min_free_bytes: MIN_FREE_BYTES,
+            // Tests see no disk pressure unless they ask for it.
+            #[cfg(not(test))]
+            free_space: Box::new(free_bytes),
+            #[cfg(test)]
+            free_space: Box::new(|_| None),
+            sweeping: Mutex::new(()),
             #[cfg(test)]
             test_fetch_delay: None,
         })
+    }
+
+    /// The free space the sweeper keeps and how it is measured, for tests.
+    #[cfg(test)]
+    pub(crate) fn with_free_space(
+        mut self,
+        min_free_bytes: u64,
+        free_space: impl Fn(&Path) -> Option<u64> + Send + Sync + 'static,
+    ) -> Self {
+        self.min_free_bytes = min_free_bytes;
+        self.free_space = Box::new(free_space);
+        self
     }
 
     /// Lower packing limits, for tests.
@@ -641,6 +669,7 @@ impl MirrorCache {
                     }
                     warn!(%project, ?failure, "threw away a mirror the gateway's disk broke");
                     if matches!(failure, FetchError::DiskFull) {
+                        cache.request_sweep();
                         return Err(failure);
                     }
                     let dir = cache.open_mirror(&entry)?;
@@ -866,6 +895,23 @@ impl MirrorCache {
         remove_entry(&trash)
     }
 
+    /// Sweep now, off the request (the disk filled up): unless a sweep is
+    /// running already. Needs a runtime.
+    pub(crate) fn request_sweep(self: &Arc<Self>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let cache = self.clone();
+        runtime.spawn_blocking(move || {
+            let report = cache.sweep(SystemTime::now());
+            info!(
+                evicted = report.evicted.len(),
+                bytes = report.total_bytes,
+                "swept the mirror cache after the disk filled up"
+            );
+        });
+    }
+
     /// Run [`Self::sweep`] every [`SWEEP_INTERVAL`].
     pub(crate) fn spawn_sweeper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let cache = self.clone();
@@ -903,6 +949,9 @@ impl MirrorCache {
     /// has used for an hour and nobody holds. The cap is soft: mirrors in
     /// use are never removed for it.
     pub(crate) fn sweep(&self, now: SystemTime) -> SweepReport {
+        let Ok(_sweeping) = self.sweeping.try_lock() else {
+            return SweepReport::default();
+        };
         for folder in [QUARANTINE_DIR, STAGING_DIR] {
             remove_older_than(&self.root.join(folder), now, SCRATCH_STALE_AFTER);
         }
@@ -926,9 +975,45 @@ impl MirrorCache {
             .fold(0u64, |total, stat| total.saturating_add(stat.bytes));
         let mut evicted = Vec::new();
         for project in plan_eviction(&stats, self.max_bytes, now) {
-            if self.evict(project, now) {
+            if self.evict(project, now, true) {
                 evicted.push(project);
             }
+        }
+        // A disk short of space (the cache shares it with `.legacy/` and
+        // anything else): mirrors nobody holds go, least recently used
+        // first, however recently used. Deleting one only costs a fetch.
+        if let Some(free) = (self.free_space)(&self.root).filter(|free| *free < self.min_free_bytes)
+        {
+            let left: Vec<MirrorStat> = stats
+                .iter()
+                .filter(|stat| !evicted.contains(&stat.project))
+                .cloned()
+                .collect();
+            let mut freed = 0;
+            for project in plan_space_eviction(&left, self.min_free_bytes - free) {
+                if self.evict(project, now, false) {
+                    freed += 1;
+                    evicted.push(project);
+                }
+            }
+            warn!(
+                free,
+                floor = self.min_free_bytes,
+                removed = freed,
+                "the mirror cache's disk is low on space; removed mirrors nobody holds"
+            );
+        }
+        let kept: u64 = stats
+            .iter()
+            .filter(|stat| !evicted.contains(&stat.project))
+            .fold(0u64, |total, stat| total.saturating_add(stat.bytes));
+        if kept > self.max_bytes {
+            warn!(
+                mirrors = stats.len() - evicted.len(),
+                bytes = kept,
+                cap = self.max_bytes,
+                "the mirror cache stays over its cap: the rest is in use or used within the hour"
+            );
         }
         // One mirror at a time, the ones that crossed git's own limits.
         let mut packed = Vec::new();
@@ -1024,11 +1109,12 @@ impl MirrorCache {
         stats
     }
 
-    /// Remove `project`'s mirror if nobody holds it and nobody used it for
-    /// [`EVICT_IDLE_AFTER`]. Checked and moved to the trash under the
-    /// mirrors lock, which every new lease takes, so a request either holds
-    /// the old mirror (and it stays) or starts on a fresh one.
-    fn evict(&self, project: Uuid, now: SystemTime) -> bool {
+    /// Remove `project`'s mirror if nobody holds it and (when `idle_only`)
+    /// nobody used it for [`EVICT_IDLE_AFTER`]. Checked and moved to the
+    /// trash under the mirrors lock, which every new lease takes, so a
+    /// request either holds the old mirror (and it stays) or starts on a
+    /// fresh one.
+    fn evict(&self, project: Uuid, now: SystemTime, idle_only: bool) -> bool {
         let dir = self.mirror_dir(project);
         let trash = self.root.join(TRASH_DIR).join(format!(
             "{}-{}",
@@ -1047,7 +1133,7 @@ impl MirrorCache {
                 .or_else(|| modified(&dir))
                 .and_then(|at| now.duration_since(at).ok())
                 .is_some_and(|age| age > EVICT_IDLE_AFTER);
-            if !idle {
+            if idle_only && !idle {
                 return false;
             }
             if rename_no_replace(&dir, &trash).is_err() {
@@ -1273,6 +1359,42 @@ pub(crate) struct SweepReport {
     pub total_bytes: u64,
 }
 
+/// The mirrors to remove to free `needed` bytes on a disk short of space:
+/// least recently used first, any that nobody holds. When those are not
+/// enough, all of them.
+pub(crate) fn plan_space_eviction(stats: &[MirrorStat], needed: u64) -> Vec<Uuid> {
+    let mut unheld: Vec<&MirrorStat> = stats.iter().filter(|stat| stat.leases == 0).collect();
+    unheld.sort_by_key(|stat| (stat.last_use, stat.project));
+    let mut freed = 0u64;
+    let mut evict = Vec::new();
+    for stat in unheld {
+        if freed >= needed {
+            break;
+        }
+        freed = freed.saturating_add(stat.bytes);
+        evict.push(stat.project);
+    }
+    evict
+}
+
+/// The free space on the disk of `path` for the server's user.
+#[cfg(unix)]
+fn free_bytes(path: &Path) -> Option<u64> {
+    let stats = rustix::fs::statvfs(path).ok()?;
+    Some(stats.f_bavail.saturating_mul(stats.f_frsize))
+}
+
+#[cfg(not(unix))]
+fn free_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Whether `text` (an error's) says a disk is full.
+pub(crate) fn says_disk_full(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("no space left on device") || lower.contains("disk quota exceeded")
+}
+
 /// The mirrors to remove so the total gets under `cap`: least recently
 /// used first, and only mirrors nobody holds that were last used more than
 /// [`EVICT_IDLE_AFTER`] before `now`. When those are not enough the cache
@@ -1308,6 +1430,14 @@ pub(crate) fn plan_eviction(stats: &[MirrorStat], cap: u64, now: SystemTime) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn free_space_is_measured_on_the_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(free_bytes(dir.path()).is_some_and(|free| free > 0));
+        assert_eq!(free_bytes(&dir.path().join("missing")), None);
+    }
 
     #[test]
     fn local_failures_are_told_apart_from_canonical_ones() {

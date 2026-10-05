@@ -19,7 +19,7 @@ use serde::Deserialize;
 use tracing::info;
 use uuid::Uuid;
 
-use super::answers::idempotency_conflict;
+use super::answers::{idempotency_conflict, is_disk_full, or_disk_full};
 use super::cache::Freshness;
 use super::cas::{
     applied_size, caller_message, cas_commit, default_message, find_applied, save_author, ApplyKey,
@@ -90,6 +90,19 @@ impl Staging {
         })?;
         Ok(Self(path))
     }
+}
+
+/// `result`, with a full disk answered as 503 `disk_full`; a write that
+/// ran out of disk has the cache swept at once.
+fn noting_disk_full<T>(
+    state: &HostedState,
+    result: Result<T, OriginError>,
+) -> Result<T, OriginError> {
+    let result = result.map_err(or_disk_full);
+    if matches!(&result, Err(error) if is_disk_full(error)) {
+        state.cache.request_sweep();
+    }
+    result
 }
 
 impl Drop for Staging {
@@ -234,11 +247,11 @@ async fn apply(
     let auto_commit = manifest.auto_commit_after_apply;
 
     // Stage the upload under the cache, never in a space folder.
-    let staging = Staging::create(&state.cache.staging_dir()?)?;
+    let staging = noting_disk_full(&state, Staging::create(&state.cache.staging_dir()?))?;
     let staging_path = staging.0.clone();
     let max_archive_bytes = state.auth.config.max_archive_bytes;
     let (files, deletes) = (manifest.files, manifest.deletes);
-    let staged: StagedArchive = blocking(move || {
+    let staged = blocking(move || {
         let dir = Dir::open_ambient_dir(&staging_path, ambient_authority()).map_err(|error| {
             OriginError::internal(format!("failed to open the staging folder: {error}"))
         })?;
@@ -256,7 +269,8 @@ async fn apply(
             }
         }
     })
-    .await?;
+    .await;
+    let staged: StagedArchive = noting_disk_full(&state, staged)?;
     let written: Vec<String> = staged.files.iter().map(|file| file.path.clone()).collect();
     let message = caller_message(caller_text.as_deref())
         .unwrap_or_else(|| default_message(&written, &staged.deletes));
@@ -347,7 +361,7 @@ async fn commit(
     let read_token = caller_token(token).map(str::to_string);
     let runtime = tokio::runtime::Handle::current();
     let deadline = Instant::now() + budget;
-    blocking(move || {
+    let committed = blocking(move || {
         let dir = cache.ensure_mirror(&mirror)?;
         let mut canonical =
             CachedCanonical::new(cache, lease, read_token, runtime).caller_expires(caller_expires);
@@ -370,7 +384,8 @@ async fn commit(
         drop(staging);
         Ok((outcome?, change))
     })
-    .await
+    .await;
+    noting_disk_full(state, committed)
 }
 
 #[derive(Debug, Deserialize)]
