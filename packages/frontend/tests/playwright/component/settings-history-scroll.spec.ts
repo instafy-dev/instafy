@@ -27,7 +27,7 @@ async function mountSettings(page: Page) {
       const [filter, setFilter] = React.useState("");
       const [loading, setLoading] = React.useState(false);
       const categories = {
-        profile: [{id:"account", label:"Account"}, {id:"preferences", label:"Preferences"}],
+        profile: [{id:"account", label:"Account"}, {id:"appearance", label:"Appearance"}],
         org: [{id:"members", label:"Members"}, {id:"billing", label:"Billing"}],
         project: [{id:"overview", label:"Overview"}, {id:"ai", label:"Voice & audio", children:[{id:"speech", label:"Speech"}, {id:"audio", label:"Audio"}]}],
       }[route.tab];
@@ -75,7 +75,7 @@ test("restores URL-driven settings categories and per-visit scroll with browser 
   expect(await page.evaluate(() => history.length)).toBe(initialHistory);
   await port.evaluate((element) => { element.scrollTop = 725; });
   await page.getByRole("button", { name: "Next category", exact: true }).click();
-  await expect(section).toHaveText('["profile","preferences",null]');
+  await expect(section).toHaveText('["profile","appearance",null]');
   expect(await page.evaluate(() => history.length)).toBe(initialHistory + 1);
   await page.getByRole("button", { name: "Next category", exact: true }).click();
   expect(await page.evaluate(() => history.length)).toBe(initialHistory + 1);
@@ -87,7 +87,7 @@ test("restores URL-driven settings categories and per-visit scroll with browser 
   // Complete async content without a user gesture in the restoring scrollport.
   await page.getByRole("button", { name: "Finish loading", exact: true }).click();
   await expect.poll(() => port.evaluate((element) => element.scrollTop)).toBe(725);
-  await page.goForward(); await expect(section).toHaveText('["profile","preferences",null]');
+  await page.goForward(); await expect(section).toHaveText('["profile","appearance",null]');
   await page.getByRole("button", { name: "org", exact: true }).click();
   await expect(section).toHaveText('["org","members",null]');
   await port.evaluate((element) => { element.scrollTop = 550; });
