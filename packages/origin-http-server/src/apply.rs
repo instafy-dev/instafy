@@ -35,7 +35,6 @@ const MAX_APPLY_TOTAL_PATH_BYTES: usize = 12 * 1024 * 1024;
 // smaller effective budget below.
 const MAX_APPLY_ROLLBACK_DIR_CAPABILITIES: usize = 4096;
 const APPLY_NON_ROLLBACK_FD_MIN_RESERVE: usize = 128;
-const MULTI_TENANT_ORIGIN_MIN_NOFILE: usize = 8192;
 
 #[cfg(unix)]
 fn process_nofile_soft_limit() -> Option<usize> {
@@ -65,22 +64,6 @@ fn apply_rollback_dir_capability_limit_for_nofile(soft_limit: Option<usize>) -> 
 
 fn apply_rollback_dir_capability_limit() -> usize {
     apply_rollback_dir_capability_limit_for_nofile(process_nofile_soft_limit())
-}
-
-fn validate_multi_tenant_apply_fd_contract_for_nofile(soft_limit: Option<usize>) -> Result<()> {
-    let Some(soft_limit) = soft_limit else {
-        return Ok(());
-    };
-    if soft_limit < MULTI_TENANT_ORIGIN_MIN_NOFILE {
-        anyhow::bail!(
-            "multi-tenant origin requires a nofile soft limit of at least {MULTI_TENANT_ORIGIN_MIN_NOFILE} (found {soft_limit})"
-        );
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_multi_tenant_apply_fd_contract() -> Result<()> {
-    validate_multi_tenant_apply_fd_contract_for_nofile(process_nofile_soft_limit())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1137,10 +1120,8 @@ mod tests {
         apply_changes_transactional, apply_rollback_dir_capability_limit,
         apply_rollback_dir_capability_limit_for_nofile, install_staged_file_at_parent,
         install_staged_files, install_staged_files_with_hook, normalize_relative_path,
-        validate_install_parent_capability_limit,
-        validate_multi_tenant_apply_fd_contract_for_nofile, ApplyManifest, ApplyRollback,
-        ApplySummary, ManifestFileEntry, MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
-        MULTI_TENANT_ORIGIN_MIN_NOFILE,
+        validate_install_parent_capability_limit, ApplyManifest, ApplyRollback, ApplySummary,
+        ManifestFileEntry, MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
     };
     use crate::config::ServerConfig;
     use crate::error::OriginError;
@@ -1620,14 +1601,6 @@ mod tests {
             apply_rollback_dir_capability_limit_for_nofile(Some(384)),
             256
         );
-        assert!(validate_multi_tenant_apply_fd_contract_for_nofile(Some(
-            MULTI_TENANT_ORIGIN_MIN_NOFILE - 1
-        ))
-        .is_err());
-        assert!(validate_multi_tenant_apply_fd_contract_for_nofile(Some(
-            MULTI_TENANT_ORIGIN_MIN_NOFILE
-        ))
-        .is_ok());
     }
 
     #[test]

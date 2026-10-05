@@ -20,6 +20,8 @@ use crate::config::CONTROLLER_TOKEN_REFRESH_TIMEOUT;
 use crate::config::MAX_APPLY_MANIFEST_BYTES;
 use crate::git;
 use crate::git_tokens;
+use crate::hosted::{park_legacy_checkouts, HostedGatewayConfig, HostedState};
+use crate::route_auth::RouteAuth;
 use crate::routes::{self, AppState};
 use serde_json::Value as JsonValue;
 
@@ -51,6 +53,8 @@ pub struct OriginHttpServer {
     presence_url: Option<Url>,
     presence_metadata: Arc<RwLock<JsonValue>>,
     state: Option<AppState>,
+    /// Set for a multi-tenant gateway, which serves the hosted routes.
+    hosted: Option<Arc<HostedGatewayConfig>>,
 }
 
 pub struct ServerStart {
@@ -76,11 +80,26 @@ impl CheckoutRefresher {
 }
 
 impl OriginHttpServer {
+    /// An origin for `config`. A multi-tenant gateway gets the default
+    /// gateway settings; use [`Self::new_hosted`] to choose them.
     pub fn new(config: ServerConfig) -> Result<Self> {
         if config.multi_tenant {
-            crate::apply::validate_multi_tenant_apply_fd_contract()
-                .context("origin apply file-descriptor contract is not satisfied")?;
+            return Self::new_hosted(config, HostedGatewayConfig::default());
         }
+        Self::build(config, None)
+    }
+
+    /// The multi-tenant gateway: `config` must be multi-tenant and pass
+    /// [`ServerConfig::validate_multi_tenant`].
+    pub fn new_hosted(config: ServerConfig, hosted: HostedGatewayConfig) -> Result<Self> {
+        if !config.multi_tenant {
+            anyhow::bail!("the hosted gateway needs a multi-tenant configuration");
+        }
+        config.validate_multi_tenant()?;
+        Self::build(config, Some(Arc::new(hosted)))
+    }
+
+    fn build(config: ServerConfig, hosted: Option<Arc<HostedGatewayConfig>>) -> Result<Self> {
         let http_client = reqwest::Client::builder()
             .user_agent("instafy-origin-http/0.1")
             .timeout(Duration::from_secs(20))
@@ -101,6 +120,7 @@ impl OriginHttpServer {
             presence_url: None,
             presence_metadata: Arc::new(RwLock::new(default_metadata)),
             state: None,
+            hosted,
         })
     }
 
@@ -188,23 +208,32 @@ impl OriginHttpServer {
         let token_validator =
             TokenValidator::new(self.http_client.clone(), self.config.jwks_url.clone());
 
-        let commit_url = self
-            .config
-            .controller_commit_receipt_url()
-            .ok()
-            .filter(|_| self.config.controller_internal_token.is_some());
+        let router = match self.hosted.clone() {
+            Some(hosted) => {
+                self.hosted_router(hosted, token_validator, &canonical_root)
+                    .await?
+            }
+            None => {
+                let commit_url = self
+                    .config
+                    .controller_commit_receipt_url()
+                    .ok()
+                    .filter(|_| self.config.controller_internal_token.is_some());
 
-        let state = AppState::new(
-            self.config.clone(),
-            token_validator,
-            self.http_client.clone(),
-            canonical_root,
-            commit_url,
-        )
-        .context("failed to open workspace root capability")?;
-        self.state = Some(state.clone());
+                let state = AppState::new(
+                    self.config.clone(),
+                    token_validator,
+                    self.http_client.clone(),
+                    canonical_root,
+                    commit_url,
+                )
+                .context("failed to open workspace root capability")?;
+                self.state = Some(state.clone());
+                routes::router(state)
+            }
+        };
 
-        let router = routes::router(state).layer(
+        let router = router.layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http().make_span_with(
                     |request: &axum::http::Request<axum::body::Body>| {
@@ -256,6 +285,39 @@ impl OriginHttpServer {
         Ok(ServerStart {
             address: local_addr,
         })
+    }
+
+    /// The gateway's routes. Before anything is served, every working copy
+    /// the stateful gateway left in the root is moved to `.legacy/`, so an
+    /// older image started on this volume later clones fresh instead of
+    /// saving old drafts; a failure stops the start.
+    async fn hosted_router(
+        &self,
+        hosted: Arc<HostedGatewayConfig>,
+        token_validator: TokenValidator,
+        root: &std::path::Path,
+    ) -> Result<axum::Router> {
+        let parked_root = root.to_path_buf();
+        let parked = tokio::task::spawn_blocking(move || park_legacy_checkouts(&parked_root))
+            .await
+            .context("moving old gateway working copies failed")?
+            .context("could not move old gateway working copies to .legacy; refusing to start")?;
+        if !parked.moved.is_empty() || parked.removed_empty > 0 {
+            info!(
+                moved = parked.moved.len(),
+                removed_empty = parked.removed_empty,
+                "moved old gateway working copies out of the workspace root"
+            );
+        }
+        let state = HostedState {
+            auth: RouteAuth {
+                config: self.config.clone(),
+                token_validator,
+                http_client: self.http_client.clone(),
+            },
+            hosted,
+        };
+        Ok(crate::hosted::router(state))
     }
 
     /// Last chance to keep work when the process stops. Hosted runtime
@@ -919,5 +981,109 @@ mod presence_tests {
 
         assert_eq!(state.calls.load(Ordering::SeqCst), 2);
         assert_eq!(store.generation(), 0, "a 404 is not a credential problem");
+    }
+}
+
+#[cfg(test)]
+mod hosted_start_tests {
+    use super::*;
+
+    fn gateway_config(root: &std::path::Path) -> ServerConfig {
+        ServerConfig {
+            project_id: uuid::Uuid::nil(),
+            origin_id: uuid::Uuid::nil(),
+            workspace_root: root.to_path_buf(),
+            git_remote_url: None,
+            git_remote_base_url: Some("http://127.0.0.1:1".into()),
+            git_branch: "main".into(),
+            git_remote_name: "origin".into(),
+            git_author_name: "instafy-origin".into(),
+            git_author_email: "origin@instafy.dev".into(),
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            controller_base_url: "http://127.0.0.1:1/".parse().expect("base url"),
+            controller_internal_token: None,
+            controller_token_source: None,
+            jwks_url: "http://127.0.0.1:1/jwks".parse().expect("jwks url"),
+            skip_auth: true,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(30),
+            max_archive_bytes: 1024 * 1024,
+            staging_base: None,
+            multi_tenant: true,
+            hosted_checkout: false,
+        }
+    }
+
+    #[test]
+    fn a_gateway_with_one_repository_for_every_space_does_not_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = gateway_config(dir.path());
+        config.git_remote_url = Some("http://127.0.0.1:1/one.git".into());
+        let error = OriginHttpServer::new(config.clone())
+            .err()
+            .expect("refused");
+        assert!(format!("{error:#}").contains("ORIGIN_GIT_REMOTE_URL"));
+        assert!(
+            OriginHttpServer::new_hosted(config, HostedGatewayConfig::default()).is_err(),
+            "the gateway constructor checks too"
+        );
+
+        let mut config = gateway_config(dir.path());
+        config.git_remote_base_url = None;
+        let error = OriginHttpServer::new(config).err().expect("refused");
+        assert!(format!("{error:#}").contains("ORIGIN_GIT_REMOTE_BASE_URL"));
+
+        let mut config = gateway_config(dir.path());
+        config.multi_tenant = false;
+        assert!(OriginHttpServer::new_hosted(config, HostedGatewayConfig::default()).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_gateway_moves_old_working_copies_before_it_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let space = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(root.join(&space).join(".instafy/.git")).unwrap();
+        std::fs::write(root.join(&space).join("draft.md"), "draft\n").unwrap();
+
+        let mut server = OriginHttpServer::new(gateway_config(&root)).unwrap();
+        let start = server.start().await.unwrap();
+
+        assert!(!root.join(&space).exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join(".legacy").join(&space).join("draft.md")).unwrap(),
+            "draft\n"
+        );
+        let health = reqwest::get(format!("http://{}/healthz", start.address))
+            .await
+            .unwrap();
+        assert_eq!(health.status(), reqwest::StatusCode::OK);
+        // No browser routes on the gateway.
+        let browser = reqwest::get(format!("http://{}/browser/capabilities", start.address))
+            .await
+            .unwrap();
+        assert_eq!(browser.status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(server.checkout_refresher().is_none());
+        server.stop().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_gateway_that_cannot_move_old_working_copies_does_not_listen() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let space = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir_all(root.join(&space)).unwrap();
+        std::fs::write(root.join(&space).join("draft.md"), "draft\n").unwrap();
+        // `.legacy` is a file: nothing can be moved into it.
+        std::fs::write(root.join(".legacy"), "not a folder").unwrap();
+
+        let mut server = OriginHttpServer::new(gateway_config(&root)).unwrap();
+        let error = server.start().await.err().expect("the start fails");
+
+        assert!(format!("{error:#}").contains(".legacy"), "{error:#}");
+        assert!(server.address.is_none(), "nothing was bound");
+        assert!(root.join(&space).join("draft.md").is_file());
     }
 }
