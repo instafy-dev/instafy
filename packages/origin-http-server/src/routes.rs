@@ -1993,6 +1993,10 @@ async fn handle_git_revert_commit(
 
     if !config.multi_tenant {
         let base = payload.base.clone();
+        // A person's revert carries the per-space pseudonym from their
+        // token; jobs and tokens without one commit as the origin. User ids
+        // never enter history.
+        let author = claims.user_author();
         let report = tokio::task::spawn_blocking(move || {
             let _apply_guard = apply_guard;
             let _workspace_apply_guard = workspace_apply_guard;
@@ -2006,9 +2010,7 @@ async fn handle_git_revert_commit(
                 },
                 &target_commit,
                 base.as_deref(),
-                // The origin's own identity until the controller issues the
-                // per-project author pseudonym; user ids never enter history.
-                None,
+                author,
             )
         })
         .await
@@ -2256,10 +2258,11 @@ async fn handle_git_sync(
                 serde_json::json!({ "retryable": true }),
             ));
         }
-        // Saves are authored by the origin's own identity until the
-        // controller issues the per-project author pseudonym (with PR-5):
-        // user ids never enter permanent history.
-        let author: Option<GitIdentity> = None;
+        // A person's save is authored by the per-space pseudonym the
+        // controller put in their token; a job's save, or one with a token
+        // that has no pseudonym, by the origin's own identity. User ids
+        // never enter permanent history.
+        let author: Option<GitIdentity> = claims.user_author();
         let report = tokio::task::spawn_blocking(move || {
             let _apply_guard = apply_guard;
             let _workspace_apply_guard = workspace_apply_guard;
@@ -3230,6 +3233,8 @@ mod tests {
             jti: None,
             actor_label: None,
             browser_session_id: None,
+            author_name: None,
+            author_email: None,
         };
         let response = tokio::time::timeout(
             Duration::from_secs(2),
@@ -3844,6 +3849,8 @@ mod tests {
             jti: None,
             actor_label: None,
             browser_session_id: None,
+            author_name: None,
+            author_email: None,
         };
 
         authorize_active_write_lease(&state, &claims, "origin-write-token")

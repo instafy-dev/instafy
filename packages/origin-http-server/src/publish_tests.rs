@@ -2672,28 +2672,39 @@ impl StubController {
         user_id: Uuid,
         runtime_id: Uuid,
     ) -> String {
+        self.origin_token_with(config, lease_id, user_id, runtime_id, serde_json::json!({}))
+    }
+
+    /// [`Self::origin_token`] with `extra` claims added (an author, a run).
+    fn origin_token_with(
+        &self,
+        config: &ServerConfig,
+        lease_id: Uuid,
+        user_id: Uuid,
+        runtime_id: Uuid,
+        extra: serde_json::Value,
+    ) -> String {
         let now = chrono::Utc::now().timestamp();
         let header = jsonwebtoken::Header {
             kid: Some("stub-key".to_string()),
             ..jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA)
         };
-        jsonwebtoken::encode(
-            &header,
-            &serde_json::json!({
-                "aud": config.origin_id.to_string(),
-                "sub": user_id.to_string(),
-                "project_id": config.project_id.to_string(),
-                "origin_id": config.origin_id.to_string(),
-                "runtime_id": runtime_id.to_string(),
-                "protocol": "http",
-                "scopes": ["fs.write"],
-                "lease_id": lease_id.to_string(),
-                "iat": now,
-                "exp": now + 60,
-            }),
-            &self.encoding_key,
-        )
-        .unwrap()
+        let mut claims = serde_json::json!({
+            "aud": config.origin_id.to_string(),
+            "sub": user_id.to_string(),
+            "project_id": config.project_id.to_string(),
+            "origin_id": config.origin_id.to_string(),
+            "runtime_id": runtime_id.to_string(),
+            "protocol": "http",
+            "scopes": ["fs.write"],
+            "lease_id": lease_id.to_string(),
+            "iat": now,
+            "exp": now + 60,
+        });
+        for (key, value) in extra.as_object().expect("extra claims are an object") {
+            claims[key] = value.clone();
+        }
+        jsonwebtoken::encode(&header, &claims, &self.encoding_key).unwrap()
     }
 }
 
@@ -3855,9 +3866,13 @@ async fn multi_tenant_apply_ignores_expected() {
     server.abort();
 }
 
-/// A Desktop "save everything" with a user's token is authored by the
-/// origin's own identity until the per-project author pseudonym exists:
-/// no user id reaches permanent history.
+/// The pseudonym the controller issues for one person in one space.
+const PSEUDONYM: &str = "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev";
+
+/// A Desktop "save everything" or revert with a person's token is authored
+/// by the per-space pseudonym and display name from the token, committed by
+/// the origin; a job's token, or one from a controller without pseudonyms,
+/// commits as the origin. No user id ever reaches permanent history.
 #[tokio::test(flavor = "multi_thread")]
 async fn user_saves_never_write_a_user_id_into_history() {
     let sc = Scenario::new(Options {
@@ -3874,27 +3889,90 @@ async fn user_saves_never_write_a_user_id_into_history() {
     config.controller_base_url = Url::parse(&controller.base).unwrap();
     config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
     config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
-    let token = controller.origin_token(&config, lease_id, user_id, runtime_id);
+    let person = controller.origin_token_with(
+        &config,
+        lease_id,
+        user_id,
+        runtime_id,
+        serde_json::json!({ "author_name": "Ada Lovelace", "author_email": PSEUDONYM }),
+    );
+    let job = controller.origin_token_with(
+        &config,
+        lease_id,
+        user_id,
+        runtime_id,
+        serde_json::json!({
+            "author_name": "Ada Lovelace",
+            "author_email": PSEUDONYM,
+            "run_id": Uuid::new_v4().to_string(),
+        }),
+    );
+    let older_controller = controller.origin_token(&config, lease_id, user_id, runtime_id);
     let (base, server) = serve_config(config, sc.ws.clone()).await;
+    let client = reqwest::Client::new();
+    let head = |format: &str| {
+        git_in(
+            &sc.remote,
+            &["log", "-1", &format!("--format={format}"), "main"],
+        )
+    };
+
+    // A person's save: the pseudonym authors it, the origin commits it.
     sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nfrom the user\n");
-    let response = reqwest::Client::new()
+    let response = client
         .post(format!("{base}/git/sync"))
-        .bearer_auth(&token)
+        .bearer_auth(&person)
         .json(&serde_json::json!({ "message": "Save version" }))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert!(sc.remote_file("doc.md").unwrap().contains("from the user"));
+    let saved = head("%H");
+    assert_eq!(
+        head("%an <%ae> | %cn <%ce> | %s"),
+        format!("Ada Lovelace <{PSEUDONYM}> | Instafy Origin <origin@instafy.dev> | Save version")
+    );
+
+    // A person's revert is theirs too.
+    let response = client
+        .post(format!("{base}/git/revert-commit"))
+        .bearer_auth(&person)
+        .json(&serde_json::json!({ "commit": saved }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        head("%an <%ae> | %cn <%ce>"),
+        format!("Ada Lovelace <{PSEUDONYM}> | Instafy Origin <origin@instafy.dev>")
+    );
+
+    // A job's save and a save with an older controller's token: the origin.
+    for (token, line) in [
+        (&job, "from a job"),
+        (&older_controller, "from an older token"),
+    ] {
+        sc.write("doc.md", format!("alpha\n{line}\n").as_bytes());
+        let response = client
+            .post(format!("{base}/git/sync"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "message": "Save version" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            head("%an <%ae> | %cn <%ce> | %s"),
+            "Instafy Origin <origin@instafy.dev> | Instafy Origin <origin@instafy.dev> | Save version"
+        );
+    }
+
     let log = git_in(
         &sc.remote,
         &["log", "--format=%an <%ae> | %cn <%ce> | %B", "main"],
     );
     assert!(!log.contains(&user_id.to_string()), "{log}");
-    assert!(
-        log.starts_with("Instafy Origin <origin@instafy.dev> | Instafy Origin <origin@instafy.dev> | Save version"),
-        "{log}"
-    );
     server.abort();
     controller.server.abort();
 }
