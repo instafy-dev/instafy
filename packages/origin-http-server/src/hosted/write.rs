@@ -363,8 +363,9 @@ async fn commit(
     let deadline = Instant::now() + budget;
     let committed = blocking(move || {
         let dir = cache.ensure_mirror(&mirror)?;
-        let mut canonical =
-            CachedCanonical::new(cache, lease, read_token, runtime).caller_expires(caller_expires);
+        let mut canonical = CachedCanonical::new(cache, lease, read_token, runtime)
+            .caller_expires(caller_expires)
+            .wait_until(deadline);
         let target = CasTarget {
             mirror: &dir,
             quarantine_parent: &quarantine_parent,
