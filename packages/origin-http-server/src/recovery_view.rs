@@ -77,6 +77,10 @@ pub(crate) enum ViewError {
     RevNotFound,
     #[error("that ref does not exist")]
     RefNotFound,
+    /// The canonical repository could not be reached (or refused) while a
+    /// ref was listed or fetched: never answered from stale data.
+    #[error("the saved history could not be reached: {0:#}")]
+    Unreachable(anyhow::Error),
     #[error(transparent)]
     Git(#[from] anyhow::Error),
 }
@@ -88,8 +92,10 @@ impl ViewError {
             Self::InvalidRef | Self::RevAndRef => "invalid_ref",
             Self::InvalidRev => "invalid_rev",
             Self::InvalidPath => "invalid_path",
-            Self::RevNotFound => "rev_not_found",
-            Self::RefNotFound => "not_found",
+            // `not_found` is kept for a path absent from a commit's tree; a
+            // ref that does not resolve is a version that is not there.
+            Self::RevNotFound | Self::RefNotFound => "rev_not_found",
+            Self::Unreachable(_) => "canonical_unreachable",
             Self::Git(_) => "internal",
         }
     }
@@ -100,6 +106,7 @@ impl ViewError {
                 StatusCode::BAD_REQUEST
             }
             Self::RevNotFound | Self::RefNotFound => StatusCode::NOT_FOUND,
+            Self::Unreachable(_) => StatusCode::BAD_GATEWAY,
             Self::Git(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -291,19 +298,144 @@ pub(crate) fn resolve(
                 Err(ViewError::RevNotFound)
             }
         }
-        ReadAt::Ref(reference) => {
-            let Some(rev) = remote_tip(git, remote, reference)? else {
-                return Err(ViewError::RefNotFound);
-            };
-            match fetch_refs(git, remote, &[(reference.clone(), rev)])?
-                .fetched
-                .pop()
-            {
-                Some(fetched) => Ok(Some(fetched.commit)),
-                None => Err(ViewError::RefNotFound),
-            }
-        }
+        ReadAt::Ref(reference) => Ok(Some(resolve_ref(git, remote, reference)?.commit)),
     }
+}
+
+/// `reference` on `remote`, by exactly its name, fetched: what it names
+/// there (`tip`, which a lease on it uses and a read reports) and the
+/// commit. [`ViewError::RefNotFound`] when the remote has no such ref,
+/// [`ViewError::Unreachable`] when the remote cannot be listed or fetched.
+pub(crate) fn resolve_ref(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    reference: &RecoveryRef,
+) -> Result<FetchedRef, ViewError> {
+    let Some(rev) = remote_tip(git, remote, reference).map_err(unreachable)? else {
+        return Err(ViewError::RefNotFound);
+    };
+    match fetch_refs(git, remote, &[(reference.clone(), rev)])
+        .map_err(unreachable)?
+        .fetched
+        .pop()
+    {
+        Some(fetched) => Ok(fetched),
+        None => Err(ViewError::RefNotFound),
+    }
+}
+
+/// A git failure while talking to the remote is [`ViewError::Unreachable`].
+pub(crate) fn unreachable(error: ViewError) -> ViewError {
+    match error {
+        ViewError::Git(error) => ViewError::Unreachable(error),
+        other => other,
+    }
+}
+
+/// [`resolve`] of a `rev`, and when it is not readable here, once more after
+/// fetching `remote`'s `main` into a fetch namespace of this call (so a
+/// checkout whose own branch has not moved to a newer canonical commit can
+/// still read it). [`ViewError::RevNotFound`] when neither has it; with no
+/// `remote`, only what is here is read.
+pub(crate) fn resolve_rev_fetching_main(
+    git: &WorkspaceGit<'_>,
+    remote: Option<&str>,
+    rev: &str,
+) -> Result<String, ViewError> {
+    let rev = parse_rev(rev)?;
+    if readable_commit(git, &rev)? {
+        return Ok(rev);
+    }
+    let Some(remote) = remote else {
+        return Err(ViewError::RevNotFound);
+    };
+    let listed = git
+        .stdout(&["ls-remote", "--end-of-options", remote, MAIN_REF])
+        .map_err(ViewError::Unreachable)?;
+    if !parse_ls_remote(&listed)
+        .iter()
+        .any(|(name, _)| name == MAIN_REF)
+    {
+        return Err(ViewError::RevNotFound);
+    }
+    sweep_stale_fetches(git);
+    let scratch = FetchScratch::new(git);
+    let target = scratch.target(0);
+    let refspec = format!("+{MAIN_REF}:{target}");
+    git.ok(&[
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--end-of-options",
+        remote,
+        &refspec,
+    ])
+    .map_err(ViewError::Unreachable)?;
+    // Read while the fetch ref holds the commits; dropping the scratch
+    // removes the ref, never the objects.
+    if readable_commit(git, &rev)? {
+        Ok(rev)
+    } else {
+        Err(ViewError::RevNotFound)
+    }
+}
+
+/// What a commit holds at exactly one path, whether or not a read serves
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    /// Nothing, a reserved path, or a path below a file, symlink or
+    /// submodule: absent from what reads show.
+    Absent,
+    /// A regular file.
+    File,
+    /// A folder.
+    Directory,
+    /// A symlink, a submodule or another entry reads never serve.
+    Unsupported,
+}
+
+/// What `commit` holds at `path` (in `normalize_relative_path` form; ""
+/// is the root folder). Reads use it to tell a path that is absent (404
+/// `not_found`) from one that holds something they never serve (404
+/// `unsupported_entry`), which a client must never take for a delete.
+pub(crate) fn path_kind_at(
+    git: &WorkspaceGit<'_>,
+    commit: &str,
+    path: &str,
+) -> Result<PathKind, ViewError> {
+    let commit = parse_rev(commit)?;
+    if path.is_empty() {
+        return Ok(PathKind::Directory);
+    }
+    let path = checked_path(path)?;
+    if is_reserved_path(&path) {
+        return Ok(PathKind::Absent);
+    }
+    let raw = git.bytes_opts(
+        &[
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            "--end-of-options",
+            &commit,
+            "--",
+            &path,
+        ],
+        &RunOpts {
+            literal_pathspecs: true,
+            ..RunOpts::default()
+        },
+    )?;
+    let kind = crate::workspace_git::parse_ls_tree(&raw)
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .map(|entry| match (entry.mode.as_str(), entry.kind.as_str()) {
+            ("100644" | "100755", "blob") => PathKind::File,
+            ("040000", "tree") => PathKind::Directory,
+            _ => PathKind::Unsupported,
+        });
+    Ok(kind.unwrap_or(PathKind::Absent))
 }
 
 /// Whether `rev` is a commit here that is complete: its tree is here, and
@@ -1646,7 +1778,12 @@ mod tests {
             (ViewError::InvalidRev, 400, "invalid_rev"),
             (ViewError::InvalidPath, 400, "invalid_path"),
             (ViewError::RevNotFound, 404, "rev_not_found"),
-            (ViewError::RefNotFound, 404, "not_found"),
+            (ViewError::RefNotFound, 404, "rev_not_found"),
+            (
+                ViewError::Unreachable(anyhow::anyhow!("offline")),
+                502,
+                "canonical_unreachable",
+            ),
             (ViewError::Git(anyhow::anyhow!("boom")), 500, "internal"),
         ] {
             assert_eq!(error.code(), code);
@@ -1678,6 +1815,48 @@ mod tests {
         let head = with_raw_entry(workspace, &linked, "vendor/sub", "160000", &first);
         ig(workspace, &["update-ref", "refs/heads/main", &head]);
         head
+    }
+
+    /// What a path holds tells an absent path (404 `not_found`) from one a
+    /// read never serves (404 `unsupported_entry`), in either layout.
+    #[test]
+    fn path_kinds_tell_absent_paths_from_unsupported_entries() {
+        let (_dir, root) = tempdir();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let head = object_fixture(&workspace);
+        let mirror = bare(&root, "mirror.git");
+        let mirror_git = WorkspaceGit::bare(&mirror, None);
+        fetch(
+            &mirror_git,
+            &workspace.join(".instafy/.git"),
+            "+refs/heads/main:refs/heads/main",
+        );
+        for git in [ws_git(&workspace), mirror_git] {
+            for (path, kind) in [
+                ("", PathKind::Directory),
+                ("README.md", PathKind::File),
+                ("bin/run.sh", PathKind::File),
+                ("src", PathKind::Directory),
+                ("src/nested", PathKind::Directory),
+                ("link", PathKind::Unsupported),
+                ("vendor/sub", PathKind::Unsupported),
+                ("missing.md", PathKind::Absent),
+                ("src/missing.rs", PathKind::Absent),
+                // Below a file, a symlink or a submodule nothing can be.
+                ("README.md/x", PathKind::Absent),
+                ("link/x", PathKind::Absent),
+                ("vendor/sub/x", PathKind::Absent),
+                // Reserved paths are never shown.
+                (".instafy/state.json", PathKind::Absent),
+            ] {
+                assert_eq!(path_kind_at(&git, &head, path).unwrap(), kind, "{path}");
+            }
+            assert!(matches!(
+                path_kind_at(&git, &head, "./README.md"),
+                Err(ViewError::InvalidPath)
+            ));
+        }
     }
 
     fn names(entries: &[ObjectEntry]) -> Vec<(&str, ObjectKind)> {

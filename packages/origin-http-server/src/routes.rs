@@ -33,12 +33,14 @@ use crate::apply_idempotency::{
 };
 use crate::auth::{OriginClaims, TokenValidator};
 use crate::browser;
+use crate::checkout_versions;
 use crate::config::{ServerConfig, MAX_APPLY_MANIFEST_BYTES};
 use crate::error::OriginError;
 use crate::git;
 use crate::git_tokens;
 use crate::paths::is_reserved_path;
 use crate::publish::{self, PublishContext, PublishReport, PublishRequest, Selection, SyncStatus};
+use crate::publish_policy::MAX_PUBLISH_BLOB_BYTES;
 use crate::recovery_view;
 use crate::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
 use crate::workspace_git::{
@@ -167,6 +169,20 @@ impl AppState {
 pub struct EntriesQuery {
     pub path: Option<String>,
     pub sync: Option<String>,
+    /// List this commit instead of the work tree (single-tenant origins).
+    pub rev: Option<String>,
+    /// List the commit a recovery or salvage ref names (single-tenant
+    /// origins).
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+}
+
+/// `?rev=` / `?ref=` of a file read (see [`EntriesQuery`]).
+#[derive(Debug, Default, Deserialize)]
+pub struct VersionQuery {
+    pub rev: Option<String>,
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -575,8 +591,21 @@ async fn handle_entries(
     Extension(claims): Extension<OriginClaims>,
     Extension(access_token): Extension<OriginAccessToken>,
     Query(query): Query<EntriesQuery>,
-) -> Result<Json<Vec<FileEntryResponse>>, OriginError> {
-    let EntriesQuery { path, sync } = query;
+) -> Result<Response, OriginError> {
+    let EntriesQuery {
+        path,
+        sync,
+        rev,
+        reference,
+    } = query;
+    if let Some(version) = requested_version(&state, rev, reference) {
+        let relative = match path.as_deref().map(str::trim) {
+            Some(relative) if !relative.is_empty() => normalize_relative_path(relative)
+                .ok_or_else(|| OriginError::bad_request("invalid path"))?,
+            _ => String::new(),
+        };
+        return entries_at_version(&state, &claims, &access_token, version, relative).await;
+    }
     let sync_behavior = match sync
         .as_deref()
         .map(str::trim)
@@ -624,7 +653,7 @@ async fn handle_entries(
                 if !state.config.multi_tenant {
                     add_blob_oids(&workspace, &mut entry);
                 }
-                return Ok(Json(entry));
+                return Ok(Json(entry).into_response());
             }
             WorkspaceEntryKind::Directory => {}
         }
@@ -634,7 +663,7 @@ async fn handle_entries(
     if !state.config.multi_tenant {
         add_blob_oids(&workspace, &mut entries);
     }
-    Ok(Json(entries))
+    Ok(Json(entries).into_response())
 }
 
 async fn handle_file(
@@ -642,7 +671,13 @@ async fn handle_file(
     Extension(claims): Extension<OriginClaims>,
     Extension(access_token): Extension<OriginAccessToken>,
     AxumPath(path): AxumPath<String>,
+    Query(version): Query<VersionQuery>,
 ) -> Result<Response, OriginError> {
+    if let Some(version) = requested_version(&state, version.rev, version.reference) {
+        let normalized = normalize_relative_path(&path)
+            .ok_or_else(|| OriginError::bad_request("invalid file path"))?;
+        return file_at_version(&state, &claims, &access_token, version, normalized, false).await;
+    }
     let project_id = project_id_for_request(&state, &claims)?;
     ensure_workspace_ready(
         &state,
@@ -749,7 +784,13 @@ async fn handle_raw(
     Extension(claims): Extension<OriginClaims>,
     Extension(access_token): Extension<OriginAccessToken>,
     AxumPath(path): AxumPath<String>,
+    Query(version): Query<VersionQuery>,
 ) -> Result<Response, OriginError> {
+    if let Some(version) = requested_version(&state, version.rev, version.reference) {
+        let normalized = normalize_relative_path(&path)
+            .ok_or_else(|| OriginError::bad_request("invalid file path"))?;
+        return file_at_version(&state, &claims, &access_token, version, normalized, true).await;
+    }
     let project_id = project_id_for_request(&state, &claims)?;
     ensure_workspace_ready(
         &state,
@@ -806,6 +847,263 @@ async fn handle_raw(
     Ok(response)
 }
 
+/// The commit a single-tenant read reports it read.
+const INSTAFY_REV_HEADER: &str = "x-instafy-rev";
+
+fn set_rev_header(response: &mut Response, rev: &str) {
+    if let Ok(value) = HeaderValue::from_str(rev) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(INSTAFY_REV_HEADER), value);
+    }
+}
+
+/// `(rev, ref)` when a single-tenant read names a saved version (an empty
+/// value counts as absent; sending both is refused when it is resolved).
+/// Multi-tenant reads ignore both, as before.
+fn requested_version(
+    state: &AppState,
+    rev: Option<String>,
+    reference: Option<String>,
+) -> Option<(Option<String>, Option<String>)> {
+    if state.config.multi_tenant {
+        return None;
+    }
+    let rev = rev.filter(|value| !value.is_empty());
+    let reference = reference.filter(|value| !value.is_empty());
+    (rev.is_some() || reference.is_some()).then_some((rev, reference))
+}
+
+/// Run `read` on the commit a single-tenant read at a version names: a
+/// `rev` the checkout holds (or canonical `main` holds), or the tip of a
+/// recovery or salvage ref fetched by its exact name. The checkout is
+/// locked like other git work, objects are read from `.instafy/.git`, and
+/// the work tree is never touched. Returns the id for `X-Instafy-Rev` and
+/// what `read` found.
+async fn read_at_version<T: Send + 'static>(
+    state: &AppState,
+    claims: &OriginClaims,
+    access_token: &OriginAccessToken,
+    (rev, reference): (Option<String>, Option<String>),
+    read: impl FnOnce(&WorkspaceGit<'_>, &str) -> Result<T, recovery_view::ViewError> + Send + 'static,
+) -> Result<(String, T), OriginError> {
+    let project_id = project_id_for_request(state, claims)?;
+    let root = workspace_root_for_project(state, project_id);
+    let remote = state.config.git_remote_url_for_project(project_id);
+    let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
+    if remote.is_some() && !has_git_checkout(state, project_id) {
+        ensure_workspace_ready(
+            state,
+            project_id,
+            &["git.read"],
+            caller,
+            WorkspaceSyncBehavior::BlockingForced,
+        )
+        .await?;
+    }
+    let token = match remote {
+        Some(_) => git_tokens::mint_git_access_token(
+            &state.http_client,
+            state.config.as_ref(),
+            project_id,
+            &["git.read"],
+            caller,
+        )
+        .await?
+        .map(|minted| minted.token),
+        None => None,
+    };
+    let apply_lock = project_apply_lock(state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_guard = try_acquire_workspace_apply_lock(&root)?
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        let git = WorkspaceGit::new(&root, token.as_deref());
+        let at = recovery_view::ReadAt::from_query(&git, rev.as_deref(), reference.as_deref())?;
+        let resolved = checkout_versions::resolve_read(&git, remote.as_deref(), &at)?
+            .ok_or_else(|| OriginError::internal("a read at a version named no version"))?;
+        let found = read(&git, &resolved.commit)?;
+        Ok((resolved.served_rev, found))
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("git read task failed: {error}")))?
+}
+
+/// The 404 for a path a commit holds no servable entry at: `not_found`
+/// only when it is absent there.
+fn missing_at_version(kind: recovery_view::PathKind, absent: &str) -> OriginError {
+    match kind {
+        recovery_view::PathKind::Absent => OriginError::not_found(absent),
+        recovery_view::PathKind::Directory => {
+            OriginError::unsupported_entry("a folder is at this path, not a file")
+        }
+        recovery_view::PathKind::File | recovery_view::PathKind::Unsupported => {
+            OriginError::unsupported_entry("a symlink or submodule is at this path")
+        }
+    }
+}
+
+/// `/files` or `/raw` (`raw`) of a file of a saved version: the blob's
+/// bytes, `X-Instafy-Blob` and `X-Instafy-Rev`, or the coded 404 (also
+/// with `X-Instafy-Rev`), or 413 `too_large` past the publish size cap.
+async fn file_at_version(
+    state: &AppState,
+    claims: &OriginClaims,
+    access_token: &OriginAccessToken,
+    version: (Option<String>, Option<String>),
+    normalized: String,
+    raw: bool,
+) -> Result<Response, OriginError> {
+    let path = normalized.clone();
+    let (served_rev, file) =
+        read_at_version(state, claims, access_token, version, move |git, commit| {
+            checkout_versions::file_at(git, commit, &path, MAX_PUBLISH_BLOB_BYTES)
+        })
+        .await?;
+    let mut response = match file {
+        checkout_versions::FileAt::Found { oid, data } => {
+            let mime = mime_type_for_path(&normalized);
+            let mut response = if raw {
+                let mut response = Response::new(Body::from(data));
+                if let Some(value) = mime.as_deref().and_then(|mime| mime.parse().ok()) {
+                    response.headers_mut().insert(header::CONTENT_TYPE, value);
+                }
+                apply_raw_security_headers(&mut response, &normalized, mime.as_deref());
+                response
+            } else {
+                Json(FileContentResponse {
+                    path: normalized.clone(),
+                    encoding: "base64".to_string(),
+                    content_base64: BASE64_STANDARD.encode(&data),
+                    size: data.len() as u64,
+                    mime_type: mime,
+                    modified: None,
+                })
+                .into_response()
+            };
+            set_blob_header(&mut response, &oid);
+            response
+        }
+        checkout_versions::FileAt::TooLarge { size } => OriginError::with_report(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            format!("the file is larger than {MAX_PUBLISH_BLOB_BYTES} bytes"),
+            serde_json::json!({ "size": size }),
+        )
+        .into_response(),
+        checkout_versions::FileAt::Missing(kind) => {
+            missing_at_version(kind, "file not found").into_response()
+        }
+    };
+    set_rev_header(&mut response, &served_rev);
+    Ok(response)
+}
+
+/// `/entries` of a saved version: a folder's children (folders always say
+/// they have children) or a file's own entry, with blob ids and
+/// `X-Instafy-Rev`; symlinks, submodules and reserved paths are hidden.
+async fn entries_at_version(
+    state: &AppState,
+    claims: &OriginClaims,
+    access_token: &OriginAccessToken,
+    version: (Option<String>, Option<String>),
+    relative: String,
+) -> Result<Response, OriginError> {
+    let (served_rev, listed) =
+        read_at_version(state, claims, access_token, version, move |git, commit| {
+            checkout_versions::entries_at(git, commit, &relative)
+        })
+        .await?;
+    let mut response = match listed {
+        checkout_versions::EntriesAt::Listed(objects) => {
+            let mut entries: Vec<FileEntryResponse> =
+                objects.iter().map(object_entry_response).collect();
+            entries.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            Json(entries).into_response()
+        }
+        checkout_versions::EntriesAt::Missing(kind) => {
+            missing_at_version(kind, "path not found").into_response()
+        }
+    };
+    set_rev_header(&mut response, &served_rev);
+    Ok(response)
+}
+
+fn object_entry_response(entry: &recovery_view::ObjectEntry) -> FileEntryResponse {
+    let name = entry
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(entry.path.as_str())
+        .to_string();
+    match entry.kind {
+        recovery_view::ObjectKind::Directory => FileEntryResponse {
+            name,
+            path: entry.path.clone(),
+            kind: "directory".to_string(),
+            size: None,
+            modified: None,
+            extension: None,
+            has_children: true,
+            mime_type: None,
+            blob_oid: None,
+        },
+        recovery_view::ObjectKind::File => {
+            let extension = Path::new(&entry.path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(str::to_string);
+            FileEntryResponse {
+                name,
+                path: entry.path.clone(),
+                kind: "file".to_string(),
+                size: entry.size,
+                modified: None,
+                mime_type: extension.as_deref().and_then(mime_type_for_extension),
+                extension,
+                has_children: false,
+                blob_oid: Some(entry.oid.clone()),
+            }
+        }
+    }
+}
+
+/// Fetch the recovery or salvage ref a single-tenant review or diff names
+/// (`ref=`), so the commits it compares are here. The caller holds the
+/// project's apply lock.
+async fn fetch_ref_for_review(
+    state: &AppState,
+    project_id: Uuid,
+    access_token: &OriginAccessToken,
+    reference: String,
+) -> Result<(), OriginError> {
+    let root = workspace_root_for_project(state, project_id);
+    let remote = state.config.git_remote_url_for_project(project_id);
+    let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
+    let token = match remote {
+        Some(_) => git_tokens::mint_git_access_token(
+            &state.http_client,
+            state.config.as_ref(),
+            project_id,
+            &["git.read"],
+            caller,
+        )
+        .await?
+        .map(|minted| minted.token),
+        None => None,
+    };
+    tokio::task::spawn_blocking(move || {
+        let _workspace_guard = try_acquire_workspace_apply_lock(&root)?
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        let git = WorkspaceGit::new(&root, token.as_deref());
+        checkout_versions::fetch_ref_for_review(&git, remote.as_deref(), &reference)?;
+        Ok::<_, OriginError>(())
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("git fetch task failed: {error}")))?
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GitStatusResponse {
@@ -834,6 +1132,10 @@ struct GitDiffQuery {
     path: Option<String>,
     commit: Option<String>,
     base: Option<String>,
+    /// A recovery or salvage ref to fetch first, so its commits can be
+    /// compared (single-tenant origins).
+    #[serde(rename = "ref")]
+    reference: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -846,6 +1148,9 @@ struct GitHistoryQuery {
 #[derive(Debug, Deserialize)]
 struct GitHistoryReviewQuery {
     commit: Option<String>,
+    /// A recovery or salvage ref to fetch first (single-tenant origins).
+    #[serde(rename = "ref")]
+    reference: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1072,6 +1377,11 @@ async fn handle_git_diff(
             }));
         }
     };
+    if let Some(reference) = requested_version(&state, None, query.reference.clone())
+        .and_then(|(_, reference)| reference)
+    {
+        fetch_ref_for_review(&state, project_id, &access_token, reference).await?;
+    }
 
     let canonical_root = Arc::new(workspace_root);
     let commit = query.commit.clone();
@@ -1206,6 +1516,11 @@ async fn handle_git_history_review(
             }));
         }
     };
+    if let Some(reference) = requested_version(&state, None, query.reference.clone())
+        .and_then(|(_, reference)| reference)
+    {
+        fetch_ref_for_review(&state, project_id, &access_token, reference).await?;
+    }
 
     let canonical_root = Arc::new(workspace_root);
     let commit = normalized_commit.to_string();

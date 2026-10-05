@@ -6,6 +6,7 @@ mod browser_approval;
 pub mod browser_collaboration;
 pub mod browser_screencast;
 pub mod browser_webrtc;
+mod checkout_versions;
 pub mod config;
 pub mod error;
 pub mod git;
