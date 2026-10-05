@@ -1263,6 +1263,13 @@ fn a_salvage_ref_with_another_tip_stops_the_entry() {
         .join(".salvage")
         .join(format!("{}.private.tar", gateway.project))
         .is_file());
+
+    // Its ref is not verified, so no acknowledgement removes it.
+    let entry_name = gateway.project.to_string();
+    let (_, lines) = salvage(&gateway.settings(true, true, &[&entry_name]), &stub);
+    assert!(lines[0]["error"].is_string(), "{:#}", lines[0]);
+    assert_eq!(lines[0]["removed"], false, "{:#}", lines[0]);
+    assert!(entry.join(".env").is_file());
 }
 
 /// A refusal the hook marks as a salvage refusal is final: one push, no
@@ -1520,6 +1527,85 @@ fn private_files_are_sized_and_the_volume_keeps_its_floor() {
     assert_eq!(summary.private_bytes, 4009);
     let archive = PathBuf::from(lines[0]["privateArchive"].as_str().unwrap());
     assert!(std::fs::metadata(archive).unwrap().len() >= 4009);
+}
+
+/// An entry whose run stopped before everything it keeps was written (here
+/// at the free-space floor, after the push) is never removed, even when it
+/// is named with `--ack`: its private files and bundle exist nowhere else.
+/// Once a run writes them, the acknowledged entry goes.
+#[test]
+fn an_entry_whose_run_stopped_early_is_never_removed_whatever_the_acks() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[("README.md", Some("one\n")), (".gitignore", Some(".env\n"))],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("README.md"), b"edited\n");
+    write(&entry.join(".env"), b"SECRET=1\n");
+    write(&entry.join("local.md"), b"local\n");
+    ig(&entry, &["add", "local.md"]);
+    entry_commit(&entry, "Local notes");
+    // An entry without a repository: every file is private.
+    let files_only = gateway
+        .root
+        .join(".legacy")
+        .join(format!("{}-20261005T000000Z", gateway.project));
+    write(&files_only.join("notes.md"), b"draft\n");
+    write(&files_only.join(".env"), b"OTHER=1\n");
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+    let names = [
+        gateway.project.to_string(),
+        format!("{}-20261005T000000Z", gateway.project),
+    ];
+    let acks: Vec<&str> = names.iter().map(String::as_str).collect();
+
+    let mut cramped = gateway.settings(true, true, &acks);
+    cramped.min_free_bytes = u64::MAX / 2;
+    let (summary, lines) = salvage(&cramped, &stub);
+    assert_eq!(lines.len(), 2);
+    for report in &lines {
+        assert!(
+            report["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("free"),
+            "{report:#}"
+        );
+        assert!(report["privateArchive"].is_null(), "{report:#}");
+        assert_eq!(report["removed"], false, "{report:#}");
+        let refused = report["removeRefused"].as_str().unwrap_or_default();
+        assert!(refused.contains("even with --ack"), "{report:#}");
+    }
+    assert_eq!(lines[0]["canonicalVerified"], true);
+    assert!(lines[0]["bundle"].is_null());
+    assert_eq!(lines[1]["noRepository"], true);
+    assert_eq!(summary.removed, 0);
+    assert_eq!(summary.exit_code(), 1);
+    assert_eq!(std::fs::read(entry.join(".env")).unwrap(), b"SECRET=1\n");
+    assert_eq!(
+        std::fs::read(files_only.join(".env")).unwrap(),
+        b"OTHER=1\n"
+    );
+    let written: Vec<String> = std::fs::read_dir(gateway.root.join(".salvage"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".tar") || name.ends_with(".bundle"))
+        .collect();
+    assert!(written.is_empty(), "{written:?}");
+
+    // With room, the outputs are written and the acknowledged entries go.
+    let (summary, lines) = salvage(&gateway.settings(true, true, &acks), &stub);
+    for report in &lines {
+        assert!(report["error"].is_null(), "{report:#}");
+        assert_eq!(report["removed"], true, "{report:#}");
+        let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+        assert!(tar_listing(&archive).contains(&"worktree/.env".to_string()));
+    }
+    assert!(lines[0]["bundle"].is_string(), "{:#}", lines[0]);
+    assert_eq!(summary.exit_code(), 0);
+    assert!(!entry.exists() && !files_only.exists());
 }
 
 /// A path git refuses to add (`cfg/x` while the index holds the file

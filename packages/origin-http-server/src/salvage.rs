@@ -67,7 +67,9 @@
 //! image was exported or given a final answer, and no history was filtered,
 //! or the entry is named with `--ack`. Salvage refs and private archives are
 //! never removed; a bundle only once canonical holds the raw history it has
-//! (the ref verified at the unfiltered W).
+//! (the ref verified at the unfiltered W). An entry whose run stopped before
+//! its outputs were written and checked (the free-space floor, any error) is
+//! never removed, even with `--ack`.
 
 mod archive;
 mod canonical;
@@ -218,6 +220,14 @@ pub(crate) struct EntryReport {
     pub would_remove: bool,
     pub remove_refused: Option<String>,
     pub bundle_removed: bool,
+    /// The run did everything it does for the entry: with `--apply`, the
+    /// salvage ref is verified on canonical when one was due, and the
+    /// bundle and the private archive (with every chat image not exported)
+    /// are written. Set last, so a run that stopped early (the free-space
+    /// floor, any error) leaves it false, and such an entry is never
+    /// removed, whatever `--ack` says.
+    #[serde(skip)]
+    pub finished: bool,
 }
 
 /// Counts over one run.
@@ -431,6 +441,7 @@ fn salvage_entry(
             report
                 .notes
                 .push("a link is never followed: review where it points".to_string());
+            report.finished = true;
             Ok(())
         }
         Kind::Folder => {
@@ -438,6 +449,7 @@ fn salvage_entry(
         }
         _ => {
             report.notes.push("not a folder".to_string());
+            report.finished = true;
             Ok(())
         }
     };
@@ -450,14 +462,21 @@ fn salvage_entry(
     report
 }
 
-/// Why an entry may not be removed without `--ack`, if so.
+/// Why an entry may not be removed, if so: never when its run stopped
+/// before everything it keeps was written, and otherwise only with `--ack`
+/// when something needs review.
 fn removal_blocker(settings: &Settings, report: &EntryReport) -> Option<String> {
+    if !report.finished {
+        return Some(
+            "its salvage stopped before everything it keeps for the entry was written and \
+             checked, so it is not removed, even with --ack: fix the error, then rerun"
+                .to_string(),
+        );
+    }
     if settings.acks.contains(&report.entry) {
         return None;
     }
-    let reason = if report.error.is_some() {
-        "its salvage did not finish"
-    } else if report.link_entry.is_some() {
+    let reason = if report.link_entry.is_some() {
         "it is a link; review its target"
     } else if !report.inspected {
         "it was not inspected"
