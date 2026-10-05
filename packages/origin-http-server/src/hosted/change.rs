@@ -15,7 +15,7 @@
 //!   (`expected`, or a `baseRev` other than `main`) that changed since
 //!   (409 `head_moved`).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -255,8 +255,10 @@ pub(crate) struct Edits {
     /// (reported as skipped) instead of refusing the import, and tracked
     /// content is taken as is (no ignore check), as `git add --force` did.
     import: bool,
-    /// Blob ids of `files`, hashed on the first attempt.
-    blobs: Option<Vec<String>>,
+    /// Blob ids of the files not skipped, by path, hashed on the first
+    /// attempt. A skipped file is never hashed, so it never reaches the
+    /// mirror.
+    blobs: Option<HashMap<String, String>>,
     skipped: BTreeMap<String, RejectReason>,
     attempt: Option<Attempt>,
 }
@@ -315,13 +317,19 @@ impl Edits {
         self.files.iter().any(|file| file.path == path)
     }
 
-    /// Hash every staged file into the quarantine with one process.
-    fn hash(&self, git: &WorkspaceGit<'_>) -> Result<Vec<String>, OriginError> {
-        if self.files.is_empty() {
-            return Ok(Vec::new());
+    /// Hash every staged file that is not skipped into the quarantine with
+    /// one process.
+    fn hash(&self, git: &WorkspaceGit<'_>) -> Result<HashMap<String, String>, OriginError> {
+        let files: Vec<&StagedFile> = self
+            .files
+            .iter()
+            .filter(|file| !self.skipped.contains_key(&file.path))
+            .collect();
+        if files.is_empty() {
+            return Ok(HashMap::new());
         }
         let mut input = Vec::new();
-        for file in &self.files {
+        for file in &files {
             let path = self.staging.join(&file.staged_name);
             let text = path
                 .to_str()
@@ -340,14 +348,18 @@ impl Edits {
             )
             .map_err(internal)?;
         let blobs: Vec<String> = output.lines().map(str::to_string).collect();
-        if blobs.len() != self.files.len() || !blobs.iter().all(|id| is_full_object_id(id)) {
+        if blobs.len() != files.len() || !blobs.iter().all(|id| is_full_object_id(id)) {
             return Err(internal(format!(
                 "hash-object printed {} ids for {} files",
                 blobs.len(),
-                self.files.len()
+                files.len()
             )));
         }
-        Ok(blobs)
+        Ok(files
+            .into_iter()
+            .map(|file| file.path.clone())
+            .zip(blobs)
+            .collect())
     }
 
     fn build(
@@ -369,13 +381,14 @@ impl Edits {
             }
             self.blobs = Some(self.hash(git)?);
         }
-        let blobs = self.blobs.as_deref().unwrap_or_default();
+        let Some(blobs) = self.blobs.as_ref() else {
+            return Err(internal("an upload was built before it was hashed"));
+        };
         let writes: Vec<(&StagedFile, &str)> = self
             .files
             .iter()
-            .zip(blobs)
-            .filter(|(file, _)| !self.skipped.contains_key(&file.path))
-            .map(|(file, blob)| (file, blob.as_str()))
+            .filter(|file| !self.skipped.contains_key(&file.path))
+            .filter_map(|file| blobs.get(&file.path).map(|blob| (file, blob.as_str())))
             .collect();
         let request_paths = || -> Vec<String> {
             writes
@@ -402,7 +415,9 @@ impl Edits {
         for (file, _) in &writes {
             wanted.insert(file.path.clone());
             wanted.extend(ancestors(&file.path));
-            wanted.extend(gitignores_for(&file.path));
+            if !self.import {
+                wanted.extend(gitignores_for(&file.path));
+            }
         }
         for delete in &self.deletes {
             wanted.insert(delete.clone());
@@ -604,6 +619,7 @@ fn ignored_paths(
         .iter()
         .map(|(mode, oid, path)| (path.as_str(), (mode.as_str(), oid.as_str())))
         .collect();
+    let removed: HashSet<&str> = removals.iter().map(String::as_str).collect();
     let mut rules: BTreeMap<String, String> = BTreeMap::new();
     for path in paths {
         for candidate in gitignores_for(path) {
@@ -612,7 +628,7 @@ fn ignored_paths(
             }
             let blob = match added.get(candidate.as_str()) {
                 Some((mode, oid)) => is_regular(mode).then(|| oid.to_string()),
-                None if removals.contains(&candidate) => None,
+                None if removed.contains(candidate.as_str()) => None,
                 None => at_main
                     .get(&candidate)
                     .filter(|entry| is_regular(&entry.mode))
