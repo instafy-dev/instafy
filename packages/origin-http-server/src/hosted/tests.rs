@@ -605,6 +605,40 @@ fn eviction_removes_least_recently_used_idle_mirrors_until_under_the_cap() {
     assert!(plan_eviction(&edge, 0, now).is_empty());
 }
 
+/// A sweep measures only mirrors that changed since the last one: a mirror
+/// nothing fetched into keeps its size (bytes written behind the server's
+/// back are not seen), and a fetch has it measured again.
+#[tokio::test(flavor = "multi_thread")]
+async fn sweeps_measure_only_mirrors_that_changed() {
+    let sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"one\n"))], "one");
+    let cache = Arc::new(sc.open_cache());
+    let lease = cache.lease(sc.project);
+    cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap();
+    let sweep = |cache: Arc<MirrorCache>| async move {
+        tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
+            .await
+            .unwrap()
+            .total_bytes
+    };
+    let first = sweep(cache.clone()).await;
+    assert!(first > 0);
+    std::fs::write(
+        sc.mirror().join("objects/unmeasured"),
+        vec![0u8; 1024 * 1024],
+    )
+    .unwrap();
+    assert_eq!(sweep(cache.clone()).await, first, "measured again");
+    cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap();
+    assert!(sweep(cache.clone()).await >= first + 1024 * 1024);
+}
+
 /// The packs in a mirror.
 fn packs(mirror: &Path) -> usize {
     std::fs::read_dir(mirror.join("objects/pack"))
