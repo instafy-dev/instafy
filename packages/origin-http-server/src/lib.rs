@@ -22,6 +22,9 @@ mod publish_tests;
 mod push;
 pub mod recovery;
 mod recovery_view;
+#[cfg(test)]
+mod restore_parity_tests;
+mod restore_plan;
 mod route_auth;
 pub mod routes;
 mod safe_fs;

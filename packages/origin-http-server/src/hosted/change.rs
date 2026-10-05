@@ -29,7 +29,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::Context as _;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -46,8 +45,9 @@ use crate::publish::parse_raw_changes;
 use crate::publish_policy::{
     deletion_allowed, unpublishable_reason, RejectReason, MAX_PUBLISH_BLOB_BYTES,
 };
+use crate::restore_plan::{check_ignored, gitignores_for};
 use crate::tree_merge::three_way;
-use crate::workspace_git::{nul_list, parse_ls_tree, zero_oid, RunOpts, TreeEntry, WorkspaceGit};
+use crate::workspace_git::{parse_ls_tree, zero_oid, RunOpts, TreeEntry, WorkspaceGit};
 
 /// Above this many paths, one full listing is cheaper than lookups.
 const FULL_LISTING_ABOVE: usize = 2_000;
@@ -70,17 +70,6 @@ pub(super) fn is_regular(mode: &str) -> bool {
 fn ancestors(path: &str) -> Vec<String> {
     path.match_indices('/')
         .map(|(index, _)| path[..index].to_string())
-        .collect()
-}
-
-/// The `.gitignore` files that apply to `path`, outermost first.
-pub(super) fn gitignores_for(path: &str) -> Vec<String> {
-    std::iter::once(".gitignore".to_string())
-        .chain(
-            ancestors(path)
-                .into_iter()
-                .map(|folder| format!("{folder}/.gitignore")),
-        )
         .collect()
 }
 
@@ -787,64 +776,7 @@ fn ignored_paths(
             }
         }
     }
-    check_ignored(git, scratch, &rules, paths)
-}
-
-/// The paths of `paths` that the `.gitignore` files `rules` (path → blob
-/// id) ignore. The files are written into a scratch work tree and
-/// `check-ignore --no-index` runs there, with no rules from the server's
-/// own configuration.
-pub(super) fn check_ignored(
-    git: &WorkspaceGit<'_>,
-    scratch: &Path,
-    rules: &BTreeMap<String, String>,
-    paths: &[String],
-) -> Result<Vec<String>, OriginError> {
-    if rules.is_empty() || paths.is_empty() {
-        return Ok(Vec::new());
-    }
-    let tree = scratch.join(format!("ignore-{}", Uuid::new_v4().simple()));
-    std::fs::create_dir(&tree)
-        .with_context(|| format!("failed to create {tree:?}"))
-        .map_err(internal)?;
-    let ids: Vec<String> = rules.values().cloned().collect();
-    let contents = git.read_objects(&ids).map_err(internal)?;
-    for ((path, _), object) in rules.iter().zip(contents) {
-        let target = tree.join(path);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {parent:?}"))
-                .map_err(internal)?;
-        }
-        std::fs::write(&target, &object.data)
-            .with_context(|| format!("failed to write {target:?}"))
-            .map_err(internal)?;
-    }
-    let input = nul_list(paths);
-    let checker = git.with_work_tree(&tree);
-    let args = ["check-ignore", "--no-index", "-z", "--stdin"];
-    let output = checker
-        .run_opts(
-            &args,
-            &RunOpts {
-                stdin: Some(&input),
-                ..RunOpts::default()
-            },
-        )
-        .map_err(internal)?;
-    let _ = std::fs::remove_dir_all(&tree);
-    match output.status.code() {
-        Some(0) | Some(1) => {}
-        _ => {
-            return Err(internal(crate::workspace_git::failure(&args, &output)));
-        }
-    }
-    Ok(output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).to_string())
-        .collect())
+    check_ignored(git, scratch, &rules, paths).map_err(internal)
 }
 
 /// `main`'s tree (empty without `main`) with `removals` gone and
