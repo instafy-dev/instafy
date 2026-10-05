@@ -67,40 +67,19 @@ impl WorkIndex {
         git: &WorkspaceGit<'_>,
         paths: &[String],
     ) -> Result<Vec<String>> {
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
         let args = ["update-index", "--add", "--remove", "-z", "--stdin"];
-        let list = nul_list(paths);
-        let batch = git.run_opts(
-            &args,
-            &RunOpts {
-                index_file: Some(&self.index),
-                stdin: Some(&list),
-                ..RunOpts::default()
-            },
-        )?;
-        if batch.status.success() {
-            return Ok(Vec::new());
-        }
-        // A refused path stops the whole batch and leaves the index as it
-        // was: take the paths one at a time.
-        let mut refused = Vec::new();
-        for path in paths {
-            let one = nul_list(std::slice::from_ref(path));
+        take_in_batches(paths, &mut |batch| {
+            let list = nul_list(batch);
             let output = git.run_opts(
                 &args,
                 &RunOpts {
                     index_file: Some(&self.index),
-                    stdin: Some(&one),
+                    stdin: Some(&list),
                     ..RunOpts::default()
                 },
             )?;
-            if !output.status.success() {
-                refused.push(path.clone());
-            }
-        }
-        Ok(refused)
+            Ok(output.status.success())
+        })
     }
 
     /// The index's entry for each path (`None` when it has none).
@@ -181,6 +160,38 @@ impl WorkIndex {
     pub(crate) fn write_tree(&self, git: &WorkspaceGit<'_>) -> Result<String> {
         git.stdout_opts(&["write-tree"], &self.opts())
     }
+}
+
+/// Take `paths` with `take`, which takes a batch whole or, refusing one
+/// path, none of it (as `update-index --stdin` does). A refused batch is
+/// taken again as two halves, in order, down to single paths: a few refused
+/// paths among many cost a few batches each instead of one git process per
+/// path, and the result is the same as taking the paths one at a time.
+/// Returns the refused paths.
+fn take_in_batches(
+    paths: &[String],
+    take: &mut dyn FnMut(&[String]) -> Result<bool>,
+) -> Result<Vec<String>> {
+    let mut refused = Vec::new();
+    take_halves(paths, take, &mut refused)?;
+    Ok(refused)
+}
+
+fn take_halves(
+    paths: &[String],
+    take: &mut dyn FnMut(&[String]) -> Result<bool>,
+    refused: &mut Vec<String>,
+) -> Result<()> {
+    if paths.is_empty() || take(paths)? {
+        return Ok(());
+    }
+    if let [path] = paths {
+        refused.push(path.clone());
+        return Ok(());
+    }
+    let (first, second) = paths.split_at(paths.len() / 2);
+    take_halves(first, take, refused)?;
+    take_halves(second, take, refused)
 }
 
 /// `<epoch> <zone>` of a commit's committer.
@@ -441,6 +452,83 @@ pub(crate) fn squash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An index that takes a path unless it is bad or would sit where a
+    /// path it holds is a folder or a file (`a` and `a/b`); a batch is taken
+    /// whole or not at all, as `update-index --stdin` does.
+    struct ModelIndex {
+        held: Vec<String>,
+        bad: Vec<String>,
+        batches: usize,
+    }
+
+    impl ModelIndex {
+        fn accepts(&self, held: &[String], path: &str) -> bool {
+            !self.bad.iter().any(|bad| bad == path)
+                && !held.iter().any(|other| {
+                    path.starts_with(&format!("{other}/")) || other.starts_with(&format!("{path}/"))
+                })
+        }
+
+        fn take(&mut self, batch: &[String]) -> bool {
+            self.batches += 1;
+            let mut held = self.held.clone();
+            for path in batch {
+                if !self.accepts(&held, path) {
+                    return false;
+                }
+                held.push(path.clone());
+            }
+            self.held = held;
+            true
+        }
+    }
+
+    /// A few refused paths among many cost a few batches, not one git
+    /// process per path (each rewriting the whole index), and the result is
+    /// what taking the paths one at a time gives.
+    #[test]
+    fn refused_paths_are_found_in_a_few_batches() {
+        let mut paths: Vec<String> = (0..2000).map(|n| format!("src/f{n:04}")).collect();
+        paths.push("cfg".to_string());
+        paths.push("cfg/x".to_string());
+        paths.push("lib".to_string());
+        paths.sort();
+        let bad = vec!["src/f0500".to_string(), "src/f1999".to_string()];
+        let mut index = ModelIndex {
+            held: Vec::new(),
+            bad: bad.clone(),
+            batches: 0,
+        };
+        let refused = take_in_batches(&paths, &mut |batch| Ok(index.take(batch))).unwrap();
+
+        let mut one_by_one = ModelIndex {
+            held: Vec::new(),
+            bad,
+            batches: 0,
+        };
+        let mut expected = Vec::new();
+        for path in &paths {
+            if !one_by_one.take(std::slice::from_ref(path)) {
+                expected.push(path.clone());
+            }
+        }
+        assert_eq!(
+            refused,
+            vec![
+                "cfg/x".to_string(),
+                "src/f0500".to_string(),
+                "src/f1999".to_string()
+            ]
+        );
+        assert_eq!(refused, expected);
+        assert_eq!(index.held, one_by_one.held);
+        // Three refused paths among 2003: about 3 * 2 * log2(2003) batches.
+        assert!(index.batches <= 80, "{} batches", index.batches);
+        assert!(take_in_batches(&[], &mut |_| unreachable!())
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn the_message_names_paths_and_private_files_as_trailers() {
