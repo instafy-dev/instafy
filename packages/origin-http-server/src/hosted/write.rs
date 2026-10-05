@@ -28,7 +28,9 @@ use super::cas::{
 use super::change::{Change, Edits, Revert};
 use super::disk::{create_private_dir, remove_entry};
 use super::read;
-use super::routes::{blocking, caller_token, coded, project_of, resolve_rev, HostedState};
+use super::routes::{
+    blocking, caller_token, coded, project_of, resolve_rev, Admission, HostedState,
+};
 use crate::apply::{
     normalize_relative_path, stage_archive, validate_apply_paths, ApplyManifest, StagedArchive,
 };
@@ -151,6 +153,7 @@ pub(super) async fn handle_apply(
     State(state): State<HostedState>,
     Extension(claims): Extension<OriginClaims>,
     Extension(token): Extension<OriginAccessToken>,
+    Extension(admission): Extension<Admission>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, OriginError> {
@@ -161,18 +164,19 @@ pub(super) async fn handle_apply(
         Some(&spool),
     )
     .await?;
-    apply(state, claims, token, &headers, manifest, archive).await
+    apply(state, claims, token, admission, &headers, manifest, archive).await
 }
 
 pub(super) async fn handle_apply_json(
     State(state): State<HostedState>,
     Extension(claims): Extension<OriginClaims>,
     Extension(token): Extension<OriginAccessToken>,
+    Extension(admission): Extension<Admission>,
     request: Request,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let headers = request.headers().clone();
     let (manifest, archive) = read_apply_json(request, state.auth.config.max_archive_bytes).await?;
-    apply(state, claims, token, &headers, manifest, archive).await
+    apply(state, claims, token, admission, &headers, manifest, archive).await
 }
 
 /// One upload: staged from the archive, then committed on `main`.
@@ -180,6 +184,7 @@ async fn apply(
     state: HostedState,
     claims: OriginClaims,
     token: OriginAccessToken,
+    admission: Admission,
     headers: &HeaderMap,
     manifest: ApplyManifest,
     archive: ApplyArchive,
@@ -274,6 +279,7 @@ async fn apply(
         project,
         &token,
         caller_expiry(&claims),
+        admission,
         change,
         Some(staging),
         author,
@@ -324,6 +330,7 @@ async fn commit(
     project: Uuid,
     token: &OriginAccessToken,
     caller_expires: Option<SystemTime>,
+    admission: Admission,
     mut change: Change,
     staging: Option<Staging>,
     author: GitIdentity,
@@ -350,6 +357,7 @@ async fn commit(
             remote: &remote,
             committer: &committer,
             deadline,
+            admission: Some(&admission),
         };
         let outcome = cas_commit(
             &target,
@@ -439,6 +447,7 @@ pub(super) async fn handle_git_revert_commit(
     State(state): State<HostedState>,
     Extension(claims): Extension<OriginClaims>,
     Extension(token): Extension<OriginAccessToken>,
+    Extension(admission): Extension<Admission>,
     Json(request): Json<RevertCommitRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project = project_of(&state, &claims)?;
@@ -506,6 +515,7 @@ pub(super) async fn handle_git_revert_commit(
         project,
         &token,
         caller_expiry(&claims),
+        admission,
         Change::Revert(Revert::new(commit, base)),
         author,
         message,
@@ -519,11 +529,13 @@ pub(super) async fn handle_git_revert_commit(
 }
 
 /// [`commit`] for a person's change (the save budget, no import key).
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn commit_change(
     state: &HostedState,
     project: Uuid,
     token: &OriginAccessToken,
     caller_expires: Option<SystemTime>,
+    admission: Admission,
     change: Change,
     author: GitIdentity,
     message: String,
@@ -533,6 +545,7 @@ pub(super) async fn commit_change(
         project,
         token,
         caller_expires,
+        admission,
         change,
         None,
         author,

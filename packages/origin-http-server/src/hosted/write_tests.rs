@@ -22,7 +22,9 @@ use super::cas::{
     MAX_ATTEMPTS,
 };
 use super::change::{Change, Edits};
-use super::tests::{decoded, get, post, runtime_push, serve, Answer, HostedScenario, Served};
+use super::tests::{
+    decoded, get, post, runtime_push, serve, serve_with, Answer, HostedScenario, Served,
+};
 use crate::apply::{stage_archive, validate_apply_paths, ManifestFileEntry};
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
@@ -430,6 +432,7 @@ impl Direct {
             // Longer than a save's budget, so a test can count every
             // attempt on a loaded machine.
             deadline: Instant::now() + Duration::from_secs(60),
+            admission: None,
         };
         cas_commit(&target, change, &gateway(), message, None, &mut canonical)
     }
@@ -2314,6 +2317,147 @@ done"#,
     assert_eq!(*pushes.lock().unwrap(), 1);
 }
 
+/// Admission covers the work on this server only: a slot is let go before
+/// the push (which may wait on a slow shard), a write that finds every slot
+/// taken is told to retry after a bounded wait (503 `writes_busy` with
+/// `Retry-After`), and imports have slots of their own.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_slots_are_bounded_and_end_before_the_push() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut sc = HostedScenario::new();
+    let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = serve_with(&sc, |state| {
+        state.with_admission_wait(Duration::from_millis(500))
+    })
+    .await;
+    let person = controller.token(&["fs.read", "fs.write"], json!({}));
+    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let lease = controller.lease.to_string();
+
+    // A slow shard: the push of a save waits in canonical's hook.
+    let marker = sc.root.join("in-hook");
+    let hook = sc.remote().join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ntouch '{}'\nsleep 3\nexit 0\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let save = {
+        let base = served.base.clone();
+        let person = person.clone();
+        let request = json!({
+            "manifest": manifest(&["slow.txt"], &[], json!({ "baseRev": head, "leaseId": lease })),
+            "archiveBase64": base64::engine::general_purpose::STANDARD.encode(zip(&[("slow.txt", b"s\n")])),
+        });
+        tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{base}/apply-json"))
+                .bearer_auth(person)
+                .json(&request)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        })
+    };
+    let waited = Instant::now();
+    while !marker.exists() {
+        assert!(
+            waited.elapsed() < Duration::from_secs(30),
+            "the push never reached the hook"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(served.state.apply_slots.available_permits(), 4);
+    assert_eq!(save.await.unwrap(), 200);
+    std::fs::remove_file(&hook).unwrap();
+
+    // Every save slot taken: a bounded wait, then 503 with Retry-After.
+    let taken = served
+        .state
+        .apply_slots
+        .clone()
+        .acquire_many_owned(4)
+        .await
+        .unwrap();
+    let main = sc.canonical_main().unwrap();
+    let started = Instant::now();
+    let busy = apply_as(
+        &served,
+        manifest(
+            &["b.txt"],
+            &[],
+            json!({ "baseRev": main, "leaseId": lease }),
+        ),
+        &zip(&[("b.txt", b"b\n")]),
+        Some(&person),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (busy.status, busy.code().as_str()),
+        (503, "writes_busy"),
+        "{}",
+        busy.json()
+    );
+    assert_eq!(busy.header("retry-after").as_deref(), Some("2"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let revert = post_as(
+        &served,
+        "/git/revert-commit",
+        json!({ "commit": main }),
+        &person,
+    )
+    .await;
+    assert_eq!(
+        (revert.status, revert.code().as_str()),
+        (503, "writes_busy")
+    );
+    // An import has its own slots.
+    let imported = apply_as(
+        &served,
+        manifest(
+            &["src/app.ts"],
+            &[],
+            json!({
+                "leaseId": lease,
+                "idempotencyKey": "imp:0123456789abcdef",
+                "requestFingerprint": "sha256:aaaa",
+            }),
+        ),
+        &zip(&[("src/app.ts", b"export {}\n")]),
+        Some(&import),
+        None,
+    )
+    .await;
+    assert_eq!(imported.status, 200, "{}", imported.json());
+    drop(taken);
+    let main = sc.canonical_main().unwrap();
+    let saved = apply_as(
+        &served,
+        manifest(
+            &["b.txt"],
+            &[],
+            json!({ "baseRev": main, "leaseId": lease }),
+        ),
+        &zip(&[("b.txt", b"b\n")]),
+        Some(&person),
+        None,
+    )
+    .await;
+    assert_eq!(saved.status, 200, "{}", saved.json());
+    assert_eq!(served.state.apply_slots.available_permits(), 4);
+    assert_eq!(served.state.import_slots.available_permits(), 2);
+}
+
 /// r3 test 5: a push whose answer was lost is settled by fetching: it
 /// landed (one commit, no duplicate), or it did not and is tried again.
 #[test]
@@ -2410,6 +2554,7 @@ fn import_trailers_are_added_by_the_gateway_only() {
         remote: &direct.remote,
         committer: &committer,
         deadline: Instant::now() + Duration::from_secs(30),
+        admission: None,
     };
     let key = ApplyKey {
         key: "imp:k".into(),

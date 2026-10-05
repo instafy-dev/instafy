@@ -30,7 +30,8 @@ use super::change::Change;
 use super::read::RESTORED_FROM_TRAILER;
 use super::restore::Restore;
 use super::routes::{
-    blocking, caller_token, fetch_ref, project_of, ref_error, HostedState, REF_FETCH_DEADLINE,
+    blocking, caller_token, fetch_ref, project_of, ref_error, Admission, HostedState,
+    REF_FETCH_DEADLINE,
 };
 use super::write::{caller_expiry, commit_change, gateway_identity, write_token};
 use crate::apply::normalize_relative_path;
@@ -105,6 +106,7 @@ pub(super) async fn handle_restore(
     State(state): State<HostedState>,
     Extension(claims): Extension<OriginClaims>,
     Extension(token): Extension<OriginAccessToken>,
+    Extension(admission): Extension<Admission>,
     Json(request): Json<RestoreRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project = project_of(&state, &claims)?;
@@ -131,11 +133,14 @@ pub(super) async fn handle_restore(
         project,
         &token,
         caller_expiry(&claims),
+        admission.clone(),
         Change::Restore(Restore::new(fetched.commit.clone(), keep, base_rev)),
         author,
         restore_message(&reference),
     )
     .await?;
+    // Removing the ref is network work too.
+    admission.release();
     let Change::Restore(restore) = change else {
         return Err(internal("a restore came back as another change"));
     };
