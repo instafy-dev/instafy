@@ -1288,15 +1288,50 @@ async fn review_and_diff_read_objects_only() {
     assert!(root_diff.json()["diff"].as_str().unwrap().contains("+one"));
     let reserved = get(&served, "/git/diff?path=.instafy/x").await;
     assert_eq!(reserved.status, 404);
-    let unknown = get(
+
+    // A commit this space does not have (a turn whose save failed, a commit
+    // only an earlier gateway's working copy held) is answered in the
+    // usual shape with an error: clients read any 404 here as "no version
+    // tracking in this space".
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+    let unknown = get(&served, &format!("/git/diff?path=README.md&commit={gone}")).await;
+    assert_eq!(unknown.status, 200, "{}", unknown.json());
+    let body = unknown.json();
+    assert_eq!(
+        (
+            body["supported"].clone(),
+            body["diff"].clone(),
+            body["code"].clone(),
+            body["commit"].clone()
+        ),
+        (
+            serde_json::json!(true),
+            serde_json::json!(""),
+            serde_json::json!("rev_not_found"),
+            serde_json::json!(gone)
+        )
+    );
+    assert!(body["error"].is_string());
+    let unknown = get(&served, &format!("/git/history/review?commit={gone}")).await;
+    assert_eq!(unknown.status, 200, "{}", unknown.json());
+    let body = unknown.json();
+    assert_eq!(body["supported"], true);
+    assert_eq!(body["entries"], serde_json::json!([]));
+    assert_eq!(body["code"], "rev_not_found");
+    assert!(body["error"].is_string());
+    // An unknown base: the commit's own change instead.
+    let fallback = get(
         &served,
-        "/git/diff?path=README.md&commit=0123456789abcdef0123456789abcdef01234567",
+        &format!("/git/diff?path=README.md&base={gone}&commit={second}"),
     )
     .await;
-    assert_eq!(
-        (unknown.status, unknown.code().as_str()),
-        (404, "rev_not_found")
-    );
+    assert_eq!(fallback.status, 200, "{}", fallback.json());
+    let text = fallback.json()["diff"].as_str().unwrap().to_string();
+    assert!(text.contains("-one") && text.contains("+two"), "{text}");
+    assert!(fallback.json().get("code").is_none());
+    // Malformed ids are still refused.
+    let bad = get(&served, "/git/diff?path=README.md&commit=not-a-commit").await;
+    assert_eq!(bad.status, 400);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1337,6 +1372,18 @@ async fn unsaved_work_is_reviewed_through_its_ref() {
         (409, "recovery_ref_moved")
     );
     assert_eq!(moved.json()["rev"], unsaved.as_str());
+
+    // The ref is gone (dismissed meanwhile): the usual shape with an error.
+    git_in(&sc.remote(), &["update-ref", "-d", &reference]);
+    for route in [
+        format!("/git/history/review?commit={unsaved}&ref={reference}"),
+        format!("/git/diff?path=README.md&commit={unsaved}&ref={reference}"),
+    ] {
+        let answer = get(&served, &route).await;
+        assert_eq!(answer.status, 200, "{route}: {}", answer.json());
+        assert_eq!(answer.json()["code"], "rev_not_found", "{route}");
+        assert_eq!(answer.json()["supported"], true, "{route}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
