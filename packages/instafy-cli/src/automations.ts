@@ -277,13 +277,13 @@ function listToRecords(payload: unknown): AutomationRecord[] {
 }
 
 function defaultTimezone(): string {
-  for (const raw of [
-    process.env["INSTAFY_CLIENT_TIMEZONE"],
-    process.env["TZ"],
-  ]) {
-    const value = raw?.trim();
-    if (value) return value;
+  const clientTimezone = process.env["INSTAFY_CLIENT_TIMEZONE"]?.trim();
+  if (clientTimezone) return clientTimezone;
+  if (resolveRuntimeControllerCredential()?.kind === "job") {
+    throw new Error("The client's timezone is unknown. Resolve the user's timezone and pass --timezone explicitly before creating an automation.");
   }
+  const hostTimezone = process.env["TZ"]?.trim();
+  if (hostTimezone) return hostTimezone;
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (typeof tz === "string" && tz.trim()) return tz.trim();
@@ -415,6 +415,10 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
   }
 
   const scheduleKind = options.scheduleKind ?? "weekly";
+  if (options.timezone !== undefined && !options.timezone.trim()
+    && resolveRuntimeControllerCredential()?.kind === "job") {
+    throw new Error("--timezone must not be empty for a runtime job. Resolve the user's timezone before creating an automation.");
+  }
   const timezone = (options.timezone ?? defaultTimezone()).trim() || "UTC";
 
   const body: Record<string, unknown> = {

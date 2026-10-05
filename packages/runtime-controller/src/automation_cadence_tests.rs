@@ -292,6 +292,259 @@ async fn automation_cadence_jobs_remain_bound_to_owner_project_and_live_lease() 
 }
 
 #[tokio::test]
+async fn automation_cadence_one_shot_changes_reject_past_and_ambiguous_times_without_mutation(
+) -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let initial = f.create("prompt").await?;
+    let path = format!("/automations/{}", initial.id);
+    let create_path = format!("/projects/{}/automations", f.project);
+    let (_, token) = f.job().await?;
+    let unchanged = serde_json::to_value(record_to_payload(f.record(initial.id).await?))?;
+    for run_at in [
+        "2000-01-10T20:00:00",
+        "2099-03-29T02:30:00", // Europe/Vienna spring gap.
+        "2099-10-25T02:30:00", // Europe/Vienna autumn overlap.
+    ] {
+        for actor in [&f.token, &token] {
+            let (status, result) = f
+                .request(
+                    actor,
+                    "PATCH",
+                    &path,
+                    json!({"scheduleKind":"once","runAt":run_at,"timezone":"Europe/Vienna"}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{run_at}: {result}");
+            assert_eq!(
+                serde_json::to_value(record_to_payload(f.record(initial.id).await?))?,
+                unchanged,
+                "a rejected date must preserve the schedule and its pending run"
+            );
+            let (status, result) = f
+                .request(
+                    actor,
+                    "POST",
+                    &create_path,
+                    json!({"name":"Reminder","promptText":"Remind me to review the draft.","scheduleKind":"once","runAt":run_at,"timezone":"Europe/Vienna"}),
+                )
+                .await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{run_at}: {result}");
+        }
+    }
+    let db = f.state.pool.get().await?;
+    assert_eq!(
+        db.query_one(
+            "select count(*) from automations where project_id=$1",
+            &[&f.project]
+        )
+        .await?
+        .get::<_, i64>(0),
+        1
+    );
+    drop(db);
+
+    let mut overlap_times = Vec::new();
+    for (run_at, expected) in [
+        ("2099-10-25T02:30:00+02:00", "2099-10-25T00:30:00Z"),
+        ("2099-10-25T02:30:00+01:00", "2099-10-25T01:30:00Z"),
+        // Preserve the existing API's local datetime with a space separator.
+        ("2099-01-10 20:00", "2099-01-10T19:00:00Z"),
+    ] {
+        let (status, result) = f
+            .request(
+                &token,
+                "PATCH",
+                &path,
+                json!({"scheduleKind":"once","runAt":run_at,"timezone":"Europe/Vienna"}),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let saved = f.record(initial.id).await?;
+        assert_eq!(saved.run_at, Some(expected.parse::<DateTime<Utc>>()?));
+        assert_eq!(saved.next_run_at, saved.run_at);
+        overlap_times.push(saved.run_at.unwrap());
+    }
+    assert_eq!((overlap_times[1] - overlap_times[0]).num_hours(), 1);
+
+    // Resuming an existing elapsed one-shot without supplying a new date keeps
+    // its established behavior. Only an explicitly changed runAt is rejected.
+    f.state.pool.get().await?.execute(
+        "update automations set status='paused',run_at=now()-interval '1 hour',next_run_at=now()-interval '1 hour' where id=$1",
+        &[&initial.id],
+    ).await?;
+    let before_resume = Utc::now();
+    let (status, result) = f
+        .request(&token, "PATCH", &path, json!({"status":"active"}))
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let resumed = f.record(initial.id).await?;
+    assert_eq!(resumed.status, "active");
+    assert!(resumed.run_at.unwrap() < before_resume);
+    assert!(resumed.next_run_at.unwrap() >= before_resume);
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn automation_cadence_manual_run_finalizes_the_dispatched_schedule_snapshot(
+) -> anyhow::Result<()> {
+    let mut f = Fixture::new().await?;
+    // Exercise the real run route and asynchronous finalization without any
+    // external model credentials or managed-AI provisioning.
+    f.state.config.managed_ai_enabled = false;
+    f.app = router().with_state(f.state.clone());
+    let initial = f.create("prompt").await?;
+    let path = format!("/automations/{}", initial.id);
+    for once in [false, true] {
+        if once {
+            let (status, body) = f.request(&f.token, "PATCH", &path, json!({
+                "scheduleKind":"once", "runAt":(Utc::now()+ChronoDuration::hours(6)).to_rfc3339(), "status":"paused"
+            })).await?;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (status, body) = f
+            .request(&f.token, "POST", &format!("{path}/run"), JsonValue::Null)
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let finalized = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let record = f.record(initial.id).await?;
+                if record.locked_until.is_none() && record.last_run_at.is_some() {
+                    break Ok::<_, anyhow::Error>(record);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+        assert!(finalized.last_error.is_some(), "the fixture has no AI credentials, so this proves the launch-failure finalization path");
+        if once {
+            assert_eq!(finalized.status, "paused");
+            assert!(
+                finalized.next_run_at.is_none(),
+                "the completed manual one-shot must not become due again"
+            );
+        } else {
+            assert_eq!(finalized.status, "active");
+            assert!(
+                finalized.next_run_at.unwrap() > Utc::now() + ChronoDuration::hours(23),
+                "the manual recurring run must advance past the just-claimed instant"
+            );
+        }
+    }
+    f.cleanup().await
+}
+
+#[tokio::test]
+async fn automation_cadence_stale_finalizer_cannot_unlock_or_report_for_a_newer_claim(
+) -> anyhow::Result<()> {
+    let f = Fixture::new().await?;
+    let initial = f.create("space_review").await?;
+    let conversation = initial.conversation_id.unwrap();
+    f.state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "update automations set next_run_at=now()-interval '1 minute' where id=$1",
+            &[&initial.id],
+        )
+        .await?;
+    let first = claim_due_automations(&f.state)
+        .await?
+        .into_iter()
+        .find(|record| record.id == initial.id)
+        .expect("due automation is claimed");
+    assert!(first.locked_until.is_some());
+    assert_eq!(first.locked_until, f.record(initial.id).await?.locked_until);
+
+    // Simulate expiry and a new scheduler claim while the first launch is slow.
+    f.state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "update automations set locked_until=now()-interval '1 second' where id=$1",
+            &[&initial.id],
+        )
+        .await?;
+    let second = claim_due_automations(&f.state)
+        .await?
+        .into_iter()
+        .find(|record| record.id == initial.id)
+        .expect("expired automation is reclaimed");
+    assert_ne!(first.locked_until, second.locked_until);
+    let before: PgJson<JsonValue> = f
+        .state
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select to_jsonb(automations) from automations where id=$1",
+            &[&initial.id],
+        )
+        .await?
+        .get(0);
+    let mut events = f.state.events.subscribe();
+    finalize_automation_attempt(
+        &f.state,
+        &first,
+        Utc::now(),
+        None,
+        Some("paused"),
+        Some(AutomationLaunchFailure::minted(
+            "Stale launch failed",
+            CODE_CONTROLLER_UNAVAILABLE,
+        )),
+    )
+    .await?;
+    let db = f.state.pool.get().await?;
+    let after: PgJson<JsonValue> = db
+        .query_one(
+            "select to_jsonb(automations) from automations where id=$1",
+            &[&initial.id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        after.0, before.0,
+        "a stale attempt must not alter any newer claim state"
+    );
+    assert_eq!(
+        db.query_one(
+            "select count(*) from conversation_messages where conversation_id=$1",
+            &[&conversation]
+        )
+        .await?
+        .get::<_, i64>(0),
+        0,
+        "a stale attempt must not publish a misleading launch-failure notice"
+    );
+    drop(db);
+    assert!(events.try_recv().is_err());
+    assert!(
+        claim_due_automations(&f.state)
+            .await?
+            .iter()
+            .all(|record| record.id != initial.id),
+        "the newer claim stays locked against another scheduler dispatch"
+    );
+
+    let next = Some(Utc::now() + ChronoDuration::hours(24));
+    finalize_automation_attempt(&f.state, &second, Utc::now(), next, None, None).await?;
+    let finished = f.record(initial.id).await?;
+    assert!(finished.locked_until.is_none());
+    assert!(finished.last_run_at.is_some());
+    assert_eq!(
+        finished.next_run_at.map(|time| time.timestamp_micros()),
+        next.map(|time| time.timestamp_micros())
+    );
+    assert!(claim_due_automations(&f.state)
+        .await?
+        .iter()
+        .all(|record| record.id != initial.id));
+    f.cleanup().await
+}
+
+#[tokio::test]
 async fn automation_cadence_launch_finalization_preserves_newer_schedule_and_pause(
 ) -> anyhow::Result<()> {
     let f = Fixture::new().await?;

@@ -143,7 +143,7 @@ async function execCli(args: string[], extraEnv: NodeJS.ProcessEnv = {}) {
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
   try {
     const env = { ...process.env };
-    for (const key of ["INSTAFY_ACCESS_TOKEN", "SUPABASE_ACCESS_TOKEN", "CONTROLLER_ACCESS_TOKEN", "CONTROLLER_BASE_URL", "RUNTIME_ACCESS_TOKEN", "RUNTIME_ID", "RUNTIME_LEASE_ID", "INSTAFY_CONVERSATION_ID", "CONVERSATION_ID", "SPACE_ID", "INSTAFY_SPACE_ID", "PROJECT_ID", "INSTAFY_PROJECT_ID", "INSTAFY_PROFILE", "INSTAFY_SERVER_URL", "INSTAFY_CLI_CONFIG"]) delete env[key];
+    for (const key of ["INSTAFY_ACCESS_TOKEN", "SUPABASE_ACCESS_TOKEN", "CONTROLLER_ACCESS_TOKEN", "CONTROLLER_BASE_URL", "RUNTIME_ACCESS_TOKEN", "RUNTIME_ID", "RUNTIME_LEASE_ID", "INSTAFY_CONVERSATION_ID", "CONVERSATION_ID", "SPACE_ID", "INSTAFY_SPACE_ID", "PROJECT_ID", "INSTAFY_PROJECT_ID", "INSTAFY_PROFILE", "INSTAFY_SERVER_URL", "INSTAFY_CLI_CONFIG", "INSTAFY_CLIENT_TIMEZONE", "TZ"]) delete env[key];
     const child = spawn(process.execPath, [entry, ...args], {
       cwd: packageRoot,
       env: {
@@ -176,6 +176,75 @@ function automationArgs(controllerUrl: string, token: string): string[] {
 }
 
 describe("automations cli", () => {
+  it.each([
+    { clientTimezone: undefined, flags: [] },
+    { clientTimezone: "   ", flags: [] },
+    { clientTimezone: "Europe/Vienna", flags: ["--timezone", "   "] },
+  ])("rejects an unresolved or explicitly blank runtime timezone before creating a schedule: %j", async ({ clientTimezone, flags }) => {
+    const { server, projectId, state } = startMockController("scoped-job-token");
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const result = await execCli(["automations", "create", "--name", "Reminder", "--prompt", "Remind me to revisit the draft", "--schedule-kind", "once", "--run-at", "2099-10-05T22:00:00", ...flags, "--json"], {
+        RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: randomUUID(),
+        CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: `http://127.0.0.1:${address.port}`,
+        SPACE_ID: projectId, INSTAFY_CLIENT_TIMEZONE: clientTimezone, TZ: "Pacific/Auckland",
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("--timezone");
+      expect(state.requests).toEqual([]);
+    } finally { await closeServer(server); }
+  });
+
+  it.each([
+    { clientTimezone: "Europe/Vienna", explicit: undefined, expected: "Europe/Vienna" },
+    { clientTimezone: "UTC", explicit: undefined, expected: "UTC" },
+    { clientTimezone: undefined, explicit: "UTC", expected: "UTC" },
+    { clientTimezone: "Europe/Vienna", explicit: "Asia/Tokyo", expected: "Asia/Tokyo" },
+  ])("creates runtime automations using the explicit or trusted client timezone: %j", async ({ clientTimezone, explicit, expected }) => {
+    const { server, projectId, state } = startMockController("scoped-job-token");
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const result = await execCli(["automations", "create", "--name", "Reminder", "--prompt", "Remind me to revisit the draft", "--schedule-kind", "once", "--run-at", "2099-10-05T22:00:00", ...(explicit ? ["--timezone", explicit] : []), "--json"], {
+        RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: randomUUID(),
+        CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: `http://127.0.0.1:${address.port}`,
+        SPACE_ID: projectId, INSTAFY_CLIENT_TIMEZONE: clientTimezone, TZ: "Pacific/Auckland",
+      });
+      expect(result.code, result.stderr).toBe(0);
+      expect(state.createBodies[0].timezone).toBe(expected);
+      expect(JSON.parse(result.stdout).timezone).toBe(expected);
+    } finally { await closeServer(server); }
+  });
+
+  it("preserves human CLI local timezone defaults", async () => {
+    const { server, projectId, state } = startMockController("human-token");
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const result = await execCli(["automations", "create", "--name", "Reminder", "--prompt", "Remind me to revisit the draft", "--schedule-kind", "once", "--run-at", "2099-10-05T22:00:00", "--json", ...controllerArgs(projectId, `http://127.0.0.1:${address.port}`, "human-token")], { TZ: "Pacific/Auckland" });
+      expect(result.code, result.stderr).toBe(0);
+      expect(state.createBodies[0].timezone).toBe("Pacific/Auckland");
+    } finally { await closeServer(server); }
+  });
+
+  it("preserves an existing automation timezone when a runtime cadence update omits it", async () => {
+    const automation = automationPayload({ timezone: "Europe/Vienna" });
+    const { server, projectId, state } = startMockController("scoped-job-token", [automation]);
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const result = await execCli(["automations", "update", automation.id, "--interval-hours", "48", "--json"], {
+        RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: randomUUID(),
+        CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: `http://127.0.0.1:${address.port}`,
+        SPACE_ID: projectId, TZ: "Pacific/Auckland",
+      });
+      expect(result.code, result.stderr).toBe(0);
+      expect(state.updateBodies).toEqual([{ automationId: automation.id, body: { intervalHours: 48 } }]);
+      expect(JSON.parse(result.stdout).timezone).toBe("Europe/Vienna");
+    } finally { await closeServer(server); }
+  });
+
   it("lists, changes cadence and pauses with only the active runtime job credential", async () => {
     const token = "scoped-job-token";
     const automation = automationPayload({ mode: "space_review" });

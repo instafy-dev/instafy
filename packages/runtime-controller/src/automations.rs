@@ -382,12 +382,16 @@ fn normalize_weekly_days(
     Ok(out)
 }
 
-fn parse_run_at(raw: &str, timezone: &str) -> Result<DateTime<Utc>, (StatusCode, Json<ApiError>)> {
+pub(crate) fn parse_run_at(
+    raw: &str,
+    timezone: &str,
+) -> Result<DateTime<Utc>, (StatusCode, Json<ApiError>)> {
     let value = raw.trim();
     if value.is_empty() {
         return Err(bad_request("runAt is required for once schedules"));
     }
 
+    let tz = parse_tz(timezone).ok_or_else(|| bad_request("timezone must be an IANA timezone"))?;
     if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
         return Ok(parsed.with_timezone(&Utc));
     }
@@ -400,27 +404,12 @@ fn parse_run_at(raw: &str, timezone: &str) -> Result<DateTime<Utc>, (StatusCode,
             bad_request("runAt must be RFC3339 or local datetime (YYYY-MM-DDTHH:MM[:SS])")
         })?;
 
-    let tz = parse_tz(timezone).unwrap_or(chrono_tz::UTC);
-    // Handle DST gaps/overlaps. Prefer earliest mapping when ambiguous.
-    let mut candidate_local = tz.from_local_datetime(&naive).earliest();
-    if candidate_local.is_none() {
-        // If the local time does not exist (DST jump), try bumping forward in 30m steps.
-        for bump in 1..=6i64 {
-            let bumped = naive + ChronoDuration::minutes(30 * bump);
-            candidate_local = tz.from_local_datetime(&bumped).earliest();
-            if candidate_local.is_some() {
-                break;
-            }
-        }
-    }
-
-    let Some(candidate_local) = candidate_local else {
-        return Err(bad_request(
-            "runAt maps to a non-existent local time in the chosen timezone",
-        ));
-    };
-
-    Ok(candidate_local.with_timezone(&Utc))
+    tz.from_local_datetime(&naive)
+        .single()
+        .map(|time| time.with_timezone(&Utc))
+        .ok_or_else(|| {
+            bad_request("runAt is ambiguous or nonexistent in this timezone; choose an explicit offset or another time")
+        })
 }
 
 fn compute_next_run_at(
@@ -1149,7 +1138,7 @@ async fn finalize_automation_attempt(
     // launch, but never overwrite a newer schedule with the claimed snapshot.
     // Compare scheduling fields rather than updated_at: an unrelated name or
     // prompt edit must still let the completed launch advance its next run.
-    transaction
+    let finalized = transaction
         .execute(
             "update automations
              set locked_until = null,
@@ -1164,7 +1153,7 @@ async fn finalize_automation_attempt(
                    is not distinct from ($6, $7, $8, $9, $10, $11, $12, $13, $14)
                    then coalesce($5, status) else status end,
                  updated_at = now()
-             where id = $1",
+             where id = $1 and locked_until is not distinct from $15",
             &[
                 &automation_id,
                 &attempted_at,
@@ -1180,9 +1169,16 @@ async fn finalize_automation_attempt(
                 &record.timezone,
                 &record.status,
                 &record.next_run_at,
+                &record.locked_until,
             ],
         )
         .await?;
+    if finalized == 0 {
+        // A later claim now owns the schedule. A stale launch must not release
+        // its lock, replace its outcome, or publish a failure notice for it.
+        transaction.commit().await?;
+        return Ok(());
+    }
 
     // A launch failure is told where the work would have happened: a notice in
     // the scheduled conversation (like a runtime alert), and a failed-run row
@@ -2204,7 +2200,11 @@ async fn update_automation(
         }
         _ => {
             let run_at = if let Some(raw) = body.run_at.as_deref() {
-                Some(parse_run_at(raw, timezone.as_str())?)
+                let requested = parse_run_at(raw, timezone.as_str())?;
+                if requested <= Utc::now() {
+                    return Err(bad_request("runAt must be in the future"));
+                }
+                Some(requested)
             } else {
                 existing_record.run_at
             };
@@ -2567,18 +2567,22 @@ async fn run_automation_now(
     }
     let now = Utc::now();
     let locked_until = now + ChronoDuration::seconds(AUTOMATION_SCHEDULER_LOCK_SECONDS);
-    transaction
-        .execute(
+    let scheduled = transaction
+        .query_one(
             "update automations
              set next_run_at = $2,
                  locked_until = $3,
                  status = 'active',
                  updated_at = now()
-             where id = $1",
+             where id = $1
+             returning *",
             &[&automation_id, &now, &locked_until],
         )
         .await
         .map_err(|error| internal_error(format!("failed to schedule automation: {error}")))?;
+    // Finalization compares against the claim snapshot. A manual run changes
+    // next_run_at and may resume a paused schedule, so dispatch that new snapshot.
+    let record = row_to_record(&scheduled);
 
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit automation run schedule: {error}"))

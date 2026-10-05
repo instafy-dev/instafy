@@ -1,7 +1,6 @@
 //! A reply can change only the recommendation delivered into that exact private root.
 //! This deliberately does not grant access to the originating review's private context.
 use super::*;
-use chrono::{NaiveDateTime, TimeZone};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -97,23 +96,6 @@ fn is_active(conversation: &ConversationRecord, user_id: Uuid) -> bool {
     )
 }
 
-fn parse_reminder_time(raw: &str, timezone: &str) -> ApiResult<DateTime<Utc>> {
-    let tz = timezone
-        .parse::<chrono_tz::Tz>()
-        .map_err(|_| bad_request("timezone must be an IANA timezone"))?;
-    let value = raw.trim();
-    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
-        return Ok(parsed.with_timezone(&Utc));
-    }
-    let local = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M"))
-        .map_err(|_| {
-            bad_request("runAt must be RFC3339 or local datetime (YYYY-MM-DDTHH:MM[:SS])")
-        })?;
-    tz.from_local_datetime(&local).single().map(|time| time.with_timezone(&Utc))
-        .ok_or_else(|| bad_request("runAt is ambiguous or nonexistent in this timezone; choose an explicit offset or another time"))
-}
-
 async fn get_feedback(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -172,7 +154,7 @@ async fn update_feedback(
         FeedbackAction::Dismiss {} => ("dismissed", None, None),
         FeedbackAction::Remind { run_at, timezone } => {
             let timezone = timezone.trim().to_owned();
-            let run_at = parse_reminder_time(&run_at, &timezone)?;
+            let run_at = crate::automations::parse_run_at(&run_at, &timezone)?;
             if run_at <= Utc::now() {
                 return Err(bad_request("runAt must be in the future"));
             }
@@ -188,9 +170,24 @@ async fn update_feedback(
                     "restore this conversation before scheduling a reminder",
                 ));
             }
-            // Dismissal remains possible even if old evidence has gone away. A new
-            // reminder, however, must still have accessible, grounded sources.
-            validate_evidence(&transaction, &reader, &record.project_id, &record.evidence).await?;
+            // Only the controller checks the owner's evidence access. The reply
+            // job stays in its delivered root and receives no source content or
+            // identifiers; a private source in another root must not prevent a
+            // reminder about the topic already delivered here. Do not inherit
+            // service authority when verifying the owner's current access.
+            let owner = authorize(
+                &transaction,
+                &state,
+                RequestContext {
+                    user_id: Some(reader.user_id),
+                    is_service_role: false,
+                    scoped_claims: None,
+                },
+                &record.project_id,
+                ActiveJobProjectAccess::Write,
+            )
+            .await?;
+            validate_evidence(&transaction, &owner, &record.project_id, &record.evidence).await?;
             ("proposed", Some(run_at), Some(timezone))
         }
     };

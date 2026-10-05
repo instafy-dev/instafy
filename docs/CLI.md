@@ -626,6 +626,10 @@ Add `--json` to any of these commands for machine-readable output.
 
 Create and manage scheduled project prompts with `instafy automations`. When no local space
 manifest is available, pass `--space` to the project-scoped `list` and `create` commands.
+Runtime jobs creating an automation must supply `--timezone` or have a known
+`INSTAFY_CLIENT_TIMEZONE`; an unknown client timezone never falls back to the runtime host's
+zone. An ordinary interactive CLI invocation retains its local timezone default. Omitting
+`--timezone` when updating an automation preserves the saved timezone.
 
 For a bounded review that starts at most one normal private Octo conversation per run:
 

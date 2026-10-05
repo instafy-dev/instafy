@@ -183,6 +183,77 @@ async fn recommendation_feedback_rejects_unrelated_or_inactive_authority() -> an
 }
 
 #[tokio::test]
+async fn recommendation_feedback_private_sources_allow_reminding_without_expanding_job_reads(
+) -> anyhow::Result<()> {
+    let mut f = Fixture::new().await?;
+    f.app = router()
+        .merge(crate::conversations::router())
+        .with_state(f.state.clone());
+    let (_, chat) = deliver(&f, f.private).await?;
+    let source_path = format!("/conversations/{}/messages", f.private);
+    let (reply_token, _) = f
+        .job(
+            chat,
+            vec![
+                "prompt.execute".into(),
+                "job.token.workspace-separated".into(),
+            ],
+        )
+        .await?;
+    assert_eq!(
+        f.request(&f.tokens[0], "GET", &source_path, Value::Null)
+            .await?
+            .0,
+        StatusCode::OK,
+        "the owner can still access the original private evidence"
+    );
+    assert_eq!(
+        f.request(&reply_token, "GET", &source_path, Value::Null)
+            .await?
+            .0,
+        StatusCode::FORBIDDEN,
+        "the reply job cannot read another private root"
+    );
+    let saved = patch_feedback(&f, &reply_token, chat, remind_at("2099-01-10T20:00:00")).await?;
+    assert!(saved["remindAt"].is_string());
+    for hidden in ["sourceConversationId", "evidence", "reason", "prompt"] {
+        assert!(saved.get(hidden).is_none(), "feedback leaked {hidden}");
+    }
+    assert!(!saved.to_string().contains(&f.private.to_string()));
+    assert_eq!(
+        f.request(&reply_token, "GET", &source_path, Value::Null)
+            .await?
+            .0,
+        StatusCode::FORBIDDEN,
+        "saving feedback must not grant source access"
+    );
+    assert!(f.list(&reply_token).await?.is_empty());
+    f.state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "delete from conversation_participants where conversation_id=$1 and user_id=$2",
+            &[&f.private, &f.users[0]],
+        )
+        .await?;
+    let (status, result) = f
+        .request(
+            &reply_token,
+            "PATCH",
+            &feedback_path(chat),
+            remind_at("2099-01-17T10:00:00"),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{result}");
+    assert_eq!(read_feedback(&f, chat).await?, saved);
+    let dismissed = patch_feedback(&f, &reply_token, chat, json!({"action":"dismiss"})).await?;
+    assert_eq!(dismissed["status"], "dismissed");
+    assert!(dismissed["remindAt"].is_null());
+    f.cleanup().await
+}
+
+#[tokio::test]
 async fn recommendation_feedback_can_dismiss_after_source_access_is_revoked() -> anyhow::Result<()>
 {
     let f = Fixture::new().await?;

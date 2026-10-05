@@ -167,7 +167,10 @@ const AUTOMATIONS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-automations/SKILL.md"
 ));
-const LEGACY_AUTOMATIONS_TEMPLATES: &[&str] = &[include_str!("legacy/automations-v1.md")];
+const LEGACY_AUTOMATIONS_TEMPLATES: &[&str] = &[
+    include_str!("legacy/automations-v1.md"),
+    include_str!("legacy/automations-v2.md"),
+];
 const PERSISTENT_CONTEXTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-persistent-contexts/SKILL.md"
@@ -1639,6 +1642,8 @@ mod tests {
             "Remind me tonight",
             "Let's do that in the weekend",
             "Check in less often, only on Fridays",
+            "Remind me tonight at 22:30 UTC",
+            "This weekend, after the workshop we discussed",
         ] {
             let snapshot = super::super::format_project_memory_snapshot(workspace.path(), request)
                 .expect("reminder memory snapshot");

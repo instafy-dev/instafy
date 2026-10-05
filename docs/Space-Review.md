@@ -51,6 +51,14 @@ Octo uses the bundled automation skill to save conversational preferences:
   existing space review schedule, preserving its private visibility and managed review prompt.
   Pausing stops future runs; a review already in progress can still finish.
 
+There is no universal clock time for “tonight,” “morning” or “the weekend.” The skill resolves
+these from the user's wording, current local time, conversation context and relevant preferences.
+It states its chosen time and any assumption, and asks when competing interpretations would
+materially change the request. Explicit user choices take precedence over browser context.
+The browser supplies its detected IANA timezone with each message; failed detection is sent as
+unknown, not UTC. A local timestamp's offset or locale alone does not establish a timezone.
+When the timezone is unknown and no reliable preference is available, Octo asks before saving.
+
 The reminder worker posts a normal Octo message and source links into the existing private chat.
 It does not run a model, start the suggested work, or create another chat. Delivery and clearing
 the due date are atomic; concurrent workers cannot deliver the same pending reminder twice.
@@ -78,6 +86,9 @@ it does not infer semantic equivalence between differently named topics.
   scoped jobs; delivery is not a grant to inspect the new private chat.
 - Sources are checked on submission, recommendation-list retrieval and reminder scheduling/delivery.
   Revoked access hides the finding from the list and prevents reminder delivery.
+  In a delivered chat, the controller checks evidence against the owner's current access when
+  saving a reminder. This lets an authorized reply postpone its own topic even when the source
+  is in another private chat, without granting the reply job access to that source's contents.
 - Delivered openers show one source chip per distinct evidence conversation, labeled with its
   accessible chat title at delivery time (or **Source chat** when untitled); labels do not update
   after a rename. Chips open the source chat; all original message-level evidence remains stored.
@@ -207,6 +218,10 @@ For conversational preferences, use normal replies in a disposable delivered cha
 to get reminded any more of this,” “Remind me tonight,” then “Let's do that in the weekend.”
 Verify `recommendations current --json` after each completed turn: dismissal cancels a pending
 reminder, postponement replaces its time, and the confirmation matches the saved local date/time.
+Include a late-evening request after any former default time, unknown client timezone despite a
+timestamp offset, and an explicit timezone supplied in a follow-up. Verify that unknown context
+does not save a guessed reminder and that the follow-up can resolve it. Test a source in another
+private chat separately: saving the reminder must not grant the scoped reply access to that chat.
 Check “less often,” an explicit weekly cadence and “stop these check-ins” against the same review
 automation ID. Observe an actual due reminder and a subsequent scheduler tick: one message in the
 existing chat, no extra conversation or agent job, and no execution of the proposed task. Keep

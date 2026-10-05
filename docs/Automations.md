@@ -51,6 +51,12 @@ The controller supports three schedule kinds:
 - `hourly` runs every configured number of hours.
 - `weekly` runs on selected weekdays at a local hour and minute in an IANA timezone.
 
+For one-shot schedules, `runAt` accepts an RFC3339 timestamp with an explicit offset or a local
+date/time in the supplied IANA timezone. A local time skipped or repeated during a daylight-saving
+transition is rejected; provide an explicit offset to select an unambiguous instant. Creating a
+schedule or explicitly replacing `runAt` requires a future instant. Resuming without a new
+`runAt` preserves the existing overdue-run behavior.
+
 Creating a prompt automation also creates its result conversation and adds the owner as a participant.
 Later runs reuse that thread, so results stay together without appearing in an unrelated chat.
 Pausing an automation stops scheduled runs without deleting its configuration or thread.
