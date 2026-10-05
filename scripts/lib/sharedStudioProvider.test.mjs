@@ -53,7 +53,7 @@ async function fixture(t, { rootSuffix = "", ...options } = {}) {
   await writeFile(
     agent,
     `#!/usr/bin/env node
-import { writeFileSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import path from "node:path";
@@ -63,7 +63,12 @@ const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]
 let listening = 0;
 for (const port of [9223, 9226]) createServer().listen(port, "127.0.0.1", () => {
   listening += 1;
-  if (listening === 2) writeFileSync(path.join(process.env.WORKSPACE_DIR, "observed-env.json"), JSON.stringify({ env: process.env, descendantPid: descendant.pid }));
+  if (listening === 2) {
+    const observationPath = path.join(process.env.WORKSPACE_DIR, "observed-env.json");
+    // The parent polls this path; publish only after the complete JSON is written.
+    writeFileSync(observationPath + ".tmp", JSON.stringify({ env: process.env, descendantPid: descendant.pid }));
+    renameSync(observationPath + ".tmp", observationPath);
+  }
 });
 setInterval(() => {}, 1000);
 `,
