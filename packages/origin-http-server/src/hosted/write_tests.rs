@@ -1301,6 +1301,81 @@ async fn a_bootstrap_leaves_linked_managed_files_alone_and_seeds_the_rest() {
     );
 }
 
+/// A person creating a file over a path that is a link or a submodule on
+/// `main` (which listings hide, so the client sends "it was absent") is
+/// told it is a link or submodule (400 `unsupported_entry`) when that entry
+/// is what the version they read had too: reading again cannot help. It is
+/// 409 `head_moved` only when `main` changed that path since that version,
+/// or when the request names no version but says what it read.
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_over_a_hidden_link_is_unsupported_unless_it_changed_since() {
+    let sc = HostedScenario::new();
+    let before = sc.push(&[("AGENTS.md", Some(b"agents\n"))], "seed");
+    let target = sc.blob("AGENTS.md");
+    let linked = sc.push_entry("CLAUDE.md", "120000", &target, "a link");
+    let any = git_in(&sc.work, &["rev-parse", "HEAD"]);
+    let head = sc.push_entry("INSTAFY.md", "160000", &any, "a submodule");
+    let served = serve(&sc).await;
+    let create = |path: &str, extra: serde_json::Value| {
+        let mut fields = json!({ "expected": { path: null } });
+        if let (Some(fields), serde_json::Value::Object(extra)) = (fields.as_object_mut(), extra) {
+            fields.extend(extra);
+        }
+        manifest(&[path], &[], fields)
+    };
+
+    // The version the person read had the same link or submodule there.
+    for (path, base) in [
+        ("CLAUDE.md", &linked),
+        ("CLAUDE.md", &head),
+        ("INSTAFY.md", &head),
+    ] {
+        let answer = apply(
+            &served,
+            create(path, json!({ "baseRev": base })),
+            &zip(&[(path, b"mine\n")]),
+        )
+        .await;
+        assert_eq!(
+            (answer.status, answer.code().as_str()),
+            (400, "unsupported_entry"),
+            "{path} at {base}: {}",
+            answer.json()
+        );
+        assert_eq!(answer.json()["paths"], json!([path]));
+    }
+
+    // The link appeared after the version the person read.
+    let answer = apply(
+        &served,
+        create("CLAUDE.md", json!({ "baseRev": before })),
+        &zip(&[("CLAUDE.md", b"mine\n")]),
+    )
+    .await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (409, "head_moved"),
+        "{}",
+        answer.json()
+    );
+    assert_eq!(answer.json()["paths"], json!(["CLAUDE.md"]));
+
+    // No version, but what was read there: it cannot have been this link.
+    let answer = apply(
+        &served,
+        create("CLAUDE.md", json!({})),
+        &zip(&[("CLAUDE.md", b"mine\n")]),
+    )
+    .await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (409, "head_moved"),
+        "{}",
+        answer.json()
+    );
+    assert_eq!(sc.canonical_main().as_deref(), Some(head.as_str()));
+}
+
 /// A managed file the space's `.gitignore` ignores is seeded like tracked
 /// content when the controller writes it (`autoCommitAfterApply`, as the
 /// single-tenant apply force-adds); a person's save of a new ignored file
