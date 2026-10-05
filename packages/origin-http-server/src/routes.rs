@@ -119,6 +119,9 @@ impl StopFence {
 }
 
 impl AppState {
+    /// The state of a single-tenant origin: one checkout at `workspace_root`.
+    /// A multi-tenant configuration is refused; the gateway serves
+    /// [`crate::hosted`] routes and keeps no checkout.
     pub fn new(
         config: Arc<ServerConfig>,
         token_validator: TokenValidator,
@@ -126,6 +129,12 @@ impl AppState {
         workspace_root: PathBuf,
         commit_receipt_url: Option<reqwest::Url>,
     ) -> std::io::Result<Self> {
+        if config.multi_tenant {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the single-tenant routes do not serve a multi-tenant gateway",
+            ));
+        }
         let workspace_fs = WorkspaceDir::open(&workspace_root)?;
         Ok(Self {
             config,
@@ -137,9 +146,8 @@ impl AppState {
             commit_receipt_url,
             apply_locks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             git_last_sync: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            // Archive parsing/staging can be memory and I/O intensive. Keep a
-            // single bounded admission point across all projects served by a
-            // multi-tenant origin process.
+            // Archive parsing and staging can be memory and I/O intensive:
+            // one apply at a time.
             apply_slots: Arc::new(Semaphore::new(1)),
             stopping: StopFence::default(),
         })
@@ -225,7 +233,7 @@ pub fn router(state: AppState) -> Router {
         .route("/git/diff", get(handle_git_diff))
         .route("/git/history", get(handle_git_history))
         .route("/git/history/review", get(handle_git_history_review))
-        .merge(unsaved_work_read_routes(&state))
+        .merge(unsaved_work_read_routes())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_read,
@@ -250,7 +258,7 @@ pub fn router(state: AppState) -> Router {
         .route("/git/revert", post(handle_git_revert))
         .route("/git/revert-commit", post(handle_git_revert_commit))
         .route("/git/sync", post(handle_git_sync))
-        .merge(unsaved_work_write_routes(&state))
+        .merge(unsaved_work_write_routes())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_write,
@@ -291,22 +299,16 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Unsaved work on a single-tenant checkout (Desktop and workspace
-/// runtimes): the list, behind `require_read`. A multi-tenant origin does
-/// not serve it.
-fn unsaved_work_read_routes(state: &AppState) -> Router<AppState> {
-    if state.config.multi_tenant {
-        return Router::new();
-    }
+/// Unsaved work kept on canonical for this checkout (Desktop and workspace
+/// runtimes): the list, behind `require_read`. The gateway serves its own
+/// from [`crate::hosted`].
+fn unsaved_work_read_routes() -> Router<AppState> {
     Router::new().route("/git/recovery", get(handle_git_recovery))
 }
 
-/// Restoring and dismissing unsaved work on a single-tenant checkout,
-/// behind `require_write`. A multi-tenant origin does not serve them.
-fn unsaved_work_write_routes(state: &AppState) -> Router<AppState> {
-    if state.config.multi_tenant {
-        return Router::new();
-    }
+/// Restoring and dismissing unsaved work on this checkout, behind
+/// `require_write`.
+fn unsaved_work_write_routes() -> Router<AppState> {
     Router::new()
         .route("/git/recovery/restore", post(handle_git_recovery_restore))
         .route("/git/recovery/dismiss", post(handle_git_recovery_dismiss))
@@ -431,7 +433,7 @@ async fn handle_entries(
         rev,
         reference,
     } = query;
-    if let Some(version) = requested_version(&state, rev, reference) {
+    if let Some(version) = requested_version(rev, reference) {
         let relative = match path.as_deref().map(str::trim) {
             Some(relative) if !relative.is_empty() => normalize_relative_path(relative)
                 .ok_or_else(|| OriginError::bad_request("invalid path"))?,
@@ -475,7 +477,7 @@ async fn handle_entries(
         }
     }
 
-    let workspace = workspace_dir_for_project(&state, project_id)?;
+    let workspace = state.workspace_fs.clone();
     if let Some(relative) = normalized.as_deref() {
         match workspace
             .entry_kind(relative)
@@ -483,9 +485,7 @@ async fn handle_entries(
         {
             WorkspaceEntryKind::File => {
                 let mut entry = build_file_entry(&workspace, relative)?;
-                if !state.config.multi_tenant {
-                    add_blob_oids(&workspace, &mut entry);
-                }
+                add_blob_oids(&workspace, &mut entry);
                 return Ok(Json(entry).into_response());
             }
             WorkspaceEntryKind::Directory => {}
@@ -493,9 +493,7 @@ async fn handle_entries(
     }
 
     let mut entries = list_directory(&workspace, normalized.as_deref())?;
-    if !state.config.multi_tenant {
-        add_blob_oids(&workspace, &mut entries);
-    }
+    add_blob_oids(&workspace, &mut entries);
     Ok(Json(entries).into_response())
 }
 
@@ -506,7 +504,7 @@ async fn handle_file(
     AxumPath(path): AxumPath<String>,
     Query(version): Query<VersionQuery>,
 ) -> Result<Response, OriginError> {
-    if let Some(version) = requested_version(&state, version.rev, version.reference) {
+    if let Some(version) = requested_version(version.rev, version.reference) {
         let normalized = normalize_relative_path(&path)
             .ok_or_else(|| OriginError::bad_request("invalid file path"))?;
         return file_at_version(&state, &claims, &access_token, version, normalized, false).await;
@@ -528,7 +526,7 @@ async fn handle_file(
         return Err(OriginError::not_found("file not found"));
     }
 
-    let workspace = workspace_dir_for_project(&state, project_id)?;
+    let workspace = state.workspace_fs.clone();
     let file = workspace
         .open_file(&normalized)
         .map_err(|_| worktree_file_miss(&workspace, &normalized))?;
@@ -545,7 +543,7 @@ async fn handle_file(
     let mime = mime_type_for_path(&normalized);
     let modified = metadata.modified().ok().map(format_system_time);
     // The id of exactly the bytes served, from the same no-follow read.
-    let blob = (!state.config.multi_tenant).then(|| blob_oid(&data));
+    let blob = blob_oid(&data);
 
     let mut response = Json(FileContentResponse {
         path: normalized,
@@ -556,9 +554,7 @@ async fn handle_file(
         modified,
     })
     .into_response();
-    if let Some(blob) = blob {
-        set_blob_header(&mut response, &blob);
-    }
+    set_blob_header(&mut response, &blob);
     Ok(response)
 }
 
@@ -619,7 +615,7 @@ async fn handle_raw(
     AxumPath(path): AxumPath<String>,
     Query(version): Query<VersionQuery>,
 ) -> Result<Response, OriginError> {
-    if let Some(version) = requested_version(&state, version.rev, version.reference) {
+    if let Some(version) = requested_version(version.rev, version.reference) {
         let normalized = normalize_relative_path(&path)
             .ok_or_else(|| OriginError::bad_request("invalid file path"))?;
         return file_at_version(&state, &claims, &access_token, version, normalized, true).await;
@@ -641,7 +637,7 @@ async fn handle_raw(
         return Err(OriginError::not_found("file not found"));
     }
 
-    let workspace = workspace_dir_for_project(&state, project_id)?;
+    let workspace = state.workspace_fs.clone();
     let file = workspace
         .open_file(&normalized)
         .map_err(|_| worktree_file_miss(&workspace, &normalized))?;
@@ -652,7 +648,7 @@ async fn handle_raw(
     let mut file = tokio::fs::File::from_std(file);
 
     let mut blob = None;
-    let body = if !state.config.multi_tenant && size <= MAX_RAW_HASHED_BYTES {
+    let body = if size <= MAX_RAW_HASHED_BYTES {
         let mut data = Vec::with_capacity(size as usize);
         file.read_to_end(&mut data)
             .await
@@ -691,17 +687,12 @@ fn set_rev_header(response: &mut Response, rev: &str) {
     }
 }
 
-/// `(rev, ref)` when a single-tenant read names a saved version (an empty
-/// value counts as absent; sending both is refused when it is resolved).
-/// Multi-tenant reads ignore both, as before.
+/// `(rev, ref)` when a read names a saved version (an empty value counts as
+/// absent; sending both is refused when it is resolved).
 fn requested_version(
-    state: &AppState,
     rev: Option<String>,
     reference: Option<String>,
 ) -> Option<(Option<String>, Option<String>)> {
-    if state.config.multi_tenant {
-        return None;
-    }
     let rev = rev.filter(|value| !value.is_empty());
     let reference = reference.filter(|value| !value.is_empty());
     (rev.is_some() || reference.is_some()).then_some((rev, reference))
@@ -721,10 +712,10 @@ async fn read_at_version<T: Send + 'static>(
     read: impl FnOnce(&WorkspaceGit<'_>, &str) -> Result<T, recovery_view::ViewError> + Send + 'static,
 ) -> Result<(String, T), OriginError> {
     let project_id = project_id_for_request(state, claims)?;
-    let root = workspace_root_for_project(state, project_id);
+    let root = checkout_root(state);
     let remote = state.config.git_remote_url_for_project(project_id);
     let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
-    if remote.is_some() && !has_git_checkout(state, project_id) {
+    if remote.is_some() && !has_git_checkout(state) {
         ensure_workspace_ready(
             state,
             project_id,
@@ -911,7 +902,7 @@ async fn fetch_ref_for_review(
     access_token: &OriginAccessToken,
     reference: String,
 ) -> Result<(), OriginError> {
-    let root = workspace_root_for_project(state, project_id);
+    let root = checkout_root(state);
     let remote = state.config.git_remote_url_for_project(project_id);
     let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
     let token = match remote {
@@ -1037,8 +1028,7 @@ async fn handle_git_status(
     Query(query): Query<GitStatusQuery>,
 ) -> Result<Json<GitStatusResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     if state
         .config
@@ -1058,7 +1048,7 @@ async fn handle_git_status(
         }));
     }
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
 
     if needs_checkout {
         let _ = ensure_workspace_ready(
@@ -1099,11 +1089,9 @@ async fn handle_git_status(
     let dirty = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
-        if !status_config.multi_tenant {
-            // Count changes only after copies an older sync left behind
-            // have been put right.
-            publish::repair_stale_checkout(&status_config, canonical_root.as_path())?;
-        }
+        // Count changes only after copies an older sync left behind have
+        // been put right.
+        publish::repair_stale_checkout(&status_config, canonical_root.as_path())?;
         git::list_dirty_files(canonical_root.as_path(), None)
     })
     .await
@@ -1151,8 +1139,7 @@ async fn handle_git_diff(
     Query(query): Query<GitDiffQuery>,
 ) -> Result<Json<GitDiffResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     if state
         .config
@@ -1181,7 +1168,7 @@ async fn handle_git_diff(
         _ => None,
     };
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
     if needs_checkout {
         let _ = ensure_workspace_ready(
             &state,
@@ -1210,8 +1197,8 @@ async fn handle_git_diff(
             }));
         }
     };
-    if let Some(reference) = requested_version(&state, None, query.reference.clone())
-        .and_then(|(_, reference)| reference)
+    if let Some(reference) =
+        requested_version(None, query.reference.clone()).and_then(|(_, reference)| reference)
     {
         fetch_ref_for_review(&state, project_id, &access_token, reference).await?;
     }
@@ -1293,8 +1280,7 @@ async fn handle_git_history_review(
     Query(query): Query<GitHistoryReviewQuery>,
 ) -> Result<Json<GitHistoryReviewResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     let normalized_commit = query.commit.as_deref().map(str::trim).unwrap_or("");
     if normalized_commit.is_empty() {
@@ -1321,7 +1307,7 @@ async fn handle_git_history_review(
         }));
     }
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
     if needs_checkout {
         let _ = ensure_workspace_ready(
             &state,
@@ -1349,24 +1335,19 @@ async fn handle_git_history_review(
             }));
         }
     };
-    if let Some(reference) = requested_version(&state, None, query.reference.clone())
-        .and_then(|(_, reference)| reference)
+    if let Some(reference) =
+        requested_version(None, query.reference.clone()).and_then(|(_, reference)| reference)
     {
         fetch_ref_for_review(&state, project_id, &access_token, reference).await?;
     }
 
     let canonical_root = Arc::new(workspace_root);
     let commit = normalized_commit.to_string();
-    let count_parents = !state.config.multi_tenant;
     let review = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
         let entries = git::list_commit_files(canonical_root.as_path(), &commit, None)?;
-        let parent_count = if count_parents {
-            commit_parent_count(canonical_root.as_path(), &commit)
-        } else {
-            None
-        };
+        let parent_count = commit_parent_count(canonical_root.as_path(), &commit);
         Ok::<_, OriginError>((entries, parent_count))
     })
     .await
@@ -1415,8 +1396,7 @@ async fn handle_git_history(
     Query(query): Query<GitHistoryQuery>,
 ) -> Result<Json<GitHistoryResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     if state
         .config
@@ -1433,7 +1413,7 @@ async fn handle_git_history(
         }));
     }
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
     if needs_checkout {
         let _ = ensure_workspace_ready(
             &state,
@@ -1464,41 +1444,9 @@ async fn handle_git_history(
     };
 
     let canonical_root = Arc::new(workspace_root);
-    if !state.config.multi_tenant {
-        return Ok(Json(
-            checkout_history_page(&state, project_id, canonical_root, query.limit, query.skip)
-                .await?,
-        ));
-    }
-    let limit = query.limit.unwrap_or(8).clamp(1, 12);
-    let history = tokio::task::spawn_blocking(move || {
-        let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
-            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
-        let head = git::resolve_history_head_ref(canonical_root.as_path(), None)?;
-        let entries = git::list_recent_commits(canonical_root.as_path(), limit, None)?;
-        Ok::<_, OriginError>((head, entries))
-    })
-    .await
-    .map_err(|error| OriginError::internal(format!("git history task failed: {error}")))?;
-
-    match history {
-        Ok((head, entries)) => Ok(Json(GitHistoryResponse {
-            supported: true,
-            entries,
-            branch: head.branch,
-            head_ref: head.head_ref,
-            has_more: None,
-            error: None,
-        })),
-        Err(error) => Ok(Json(GitHistoryResponse {
-            supported: true,
-            entries: Vec::new(),
-            branch: None,
-            head_ref: None,
-            has_more: None,
-            error: Some(error.to_string()),
-        })),
-    }
+    Ok(Json(
+        checkout_history_page(&state, canonical_root, query.limit, query.skip).await?,
+    ))
 }
 
 /// A single-tenant checkout's history page: up to
@@ -1508,7 +1456,6 @@ async fn handle_git_history(
 /// the project's apply lock.
 async fn checkout_history_page(
     state: &AppState,
-    project_id: Uuid,
     root: Arc<PathBuf>,
     limit: Option<usize>,
     skip: Option<usize>,
@@ -1516,7 +1463,7 @@ async fn checkout_history_page(
     let limit = limit.unwrap_or(8).clamp(1, recovery_view::MAX_HISTORY_PAGE);
     let skip = skip.unwrap_or(0);
     let service_email = state.config.git_author_email.clone();
-    let has_checkout = has_git_checkout(state, project_id);
+    let has_checkout = has_git_checkout(state);
     let history = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
@@ -1592,12 +1539,12 @@ async fn handle_apply_status(
     Extension(claims): Extension<OriginClaims>,
     Json(payload): Json<ApplyStatusRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    let project_id = project_id_for_request(&state, &claims)?;
+    project_id_for_request(&state, &claims)?;
     let idempotency_key = normalize_apply_idempotency_key(Some(&payload.idempotency_key))?
         .ok_or_else(|| OriginError::bad_request("idempotencyKey is required"))?;
     let request_fingerprint =
         normalize_apply_request_fingerprint(payload.request_fingerprint.as_deref())?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
+    let workspace_root = checkout_root(&state);
     tokio::fs::create_dir_all(&workspace_root)
         .await
         .map_err(|error| {
@@ -1646,7 +1593,7 @@ async fn apply_manifest_archive(
     archive: ApplyArchive,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let config = state.config.clone();
     if let Some(manifest_project) = manifest.project_id.as_deref() {
         if manifest_project.trim() != claims.project_id.trim() {
@@ -1670,7 +1617,7 @@ async fn apply_manifest_archive(
     // Establish only the workspace directory itself before the write-ahead
     // claim. Git fetch/checkout/reset is intentionally deferred into the same
     // guarded blocking closure as apply and commit.
-    let workspace_path = workspace_root_for_project(&state, project_id);
+    let workspace_path = checkout_root(&state);
     tokio::fs::create_dir_all(&workspace_path)
         .await
         .map_err(|error| {
@@ -1762,13 +1709,8 @@ async fn apply_manifest_archive(
         None
     };
 
-    // Desktop and runtime origins check what each changed path held when the
-    // client read it; the gateway's conditional writes come with PR-5.
-    let expected = if config.multi_tenant {
-        None
-    } else {
-        manifest.expected.take()
-    };
+    // What each changed path held when the client read it.
+    let expected = manifest.expected.take();
     let manifest_deletes = manifest.deletes.clone();
     let auto_commit_after_apply = manifest.auto_commit_after_apply;
     // Committed by the origin's identity: the caller's text never carries
@@ -1897,7 +1839,7 @@ async fn apply_manifest_archive(
     .await
     .map_err(|error| OriginError::internal(format!("apply task failed: {error}")))??;
 
-    if let (Some(url), Some(origin_id)) = (state.commit_receipt_url.clone(), origin_id) {
+    if let Some(url) = state.commit_receipt_url.clone() {
         let lease_id = claims.lease_id.clone();
         tokio::spawn(post_commit_receipt(
             state.http_client.clone(),
@@ -2112,13 +2054,12 @@ async fn handle_git_revert_commit(
     Json(payload): Json<GitRevertCommitRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
 
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -2151,73 +2092,30 @@ async fn handle_git_revert_commit(
 
     let canonical_root = Arc::new(workspace_root);
     let target_commit = payload.commit.clone();
-
-    if !config.multi_tenant {
-        let base = payload.base.clone();
-        // A person's revert carries the per-space pseudonym from their
-        // token; jobs and tokens without one commit as the origin. User ids
-        // never enter history.
-        let author = claims.user_author();
-        let report = tokio::task::spawn_blocking(move || {
-            let _apply_guard = apply_guard;
-            let _workspace_apply_guard = workspace_apply_guard;
-            ensure_checkout_for_publish(&config_clone, token.as_deref())?;
-            publish::revert_commit(
-                &PublishContext {
-                    config: &config_clone,
-                    workspace_root: canonical_root.as_path(),
-                    token: token.as_deref(),
-                    can_write: token.is_some() || config_clone.skip_auth,
-                },
-                &target_commit,
-                base.as_deref(),
-                author,
-            )
-        })
-        .await
-        .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))??;
-        return publish_response(&state, &claims, project_id, origin_id, report, false);
-    }
-
-    let commit_hash = tokio::task::spawn_blocking(move || {
+    let base = payload.base.clone();
+    // A person's revert carries the per-space pseudonym from their token;
+    // jobs and tokens without one commit as the origin. User ids never
+    // enter history.
+    let author = claims.user_author();
+    let report = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
-        git::ensure_git_checkout(&config_clone, token.as_deref())?;
-        git::revert_commit_and_push(
-            &config_clone,
-            canonical_root.as_path(),
+        ensure_checkout_for_publish(&config_clone, token.as_deref())?;
+        publish::revert_commit(
+            &PublishContext {
+                config: &config_clone,
+                workspace_root: canonical_root.as_path(),
+                token: token.as_deref(),
+                can_write: token.is_some() || config_clone.skip_auth,
+            },
             &target_commit,
-            token.as_deref(),
+            base.as_deref(),
+            author,
         )
     })
     .await
     .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))??;
-
-    let summary = ApplySummary {
-        rev: commit_hash.clone(),
-        bytes_written: 0,
-        file_count: 0,
-        lease_id: claims.lease_id.clone(),
-        applied_paths: Vec::new(),
-        deleted_paths: Vec::new(),
-    };
-
-    if let (Some(url), Some(origin_id)) = (state.commit_receipt_url.clone(), origin_id) {
-        tokio::spawn(post_commit_receipt(
-            state.http_client.clone(),
-            url,
-            state.config.clone(),
-            project_id,
-            origin_id,
-            claims.lease_id.clone(),
-            Some(claims.sub.clone()),
-            summary,
-        ));
-    }
-
-    Ok(Json(serde_json::json!({
-        "rev": commit_hash,
-    })))
+    publish_response(&state, &claims, project_id, origin_id, report, false)
 }
 
 async fn handle_git_revert(
@@ -2227,8 +2125,7 @@ async fn handle_git_revert(
     Json(payload): Json<GitRevertRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     let config = state.config.clone();
     let remote_url = config
@@ -2305,13 +2202,12 @@ async fn handle_git_sync(
     Json(payload): Json<GitSyncRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
 
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -2369,12 +2265,6 @@ async fn handle_git_sync(
             "refresh cannot be combined with paths or expectedRev",
         ));
     }
-    if refresh && config.multi_tenant {
-        return Err(OriginError::bad_request(
-            "refresh is only available on a workspace runtime",
-        ));
-    }
-
     if expected_rev.is_some() && paths.is_some() {
         return Err(OriginError::bad_request(
             "expectedRev cannot be combined with paths",
@@ -2394,9 +2284,7 @@ async fn handle_git_sync(
     };
     // A publish without a message gets a plain subject; user ids stay out of
     // permanent history.
-    let publish_message = message_override.clone().unwrap_or_default();
-    let message =
-        message_override.unwrap_or_else(|| format!("instafy: sync (user {})", claims.sub));
+    let publish_message = message_override.unwrap_or_default();
 
     let mut config_clone = (*config).clone();
     config_clone.workspace_root = workspace_root.clone();
@@ -2404,7 +2292,7 @@ async fn handle_git_sync(
 
     let canonical_root = Arc::new(workspace_root);
 
-    if !config.multi_tenant && expected_rev.is_none() {
+    let Some(expected_rev) = expected_rev else {
         let selection = if refresh {
             Selection::None
         } else {
@@ -2457,42 +2345,21 @@ async fn handle_git_sync(
         .await
         .map_err(|error| OriginError::internal(format!("git sync task failed: {error}")))??;
         return publish_response(&state, &claims, project_id, origin_id, report, refresh);
-    }
+    };
 
+    // `expectedRev`: push exactly the commit an earlier apply made here
+    // (imports), never anything else in the checkout.
     let (base_rev, commit_hash) = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
-        if let Some(expected_rev) = expected_rev {
-            let base = git::head_rev(canonical_root.as_path(), token.as_deref());
-            let commit = git::push_existing_head(
-                &config_clone,
-                canonical_root.as_path(),
-                &expected_rev,
-                token.as_deref(),
-            )?;
-            Ok::<_, OriginError>((base, commit))
-        } else {
-            git::ensure_git_checkout(&config_clone, token.as_deref())?;
-            // HEAD before this sync's own commit: the base for rendering the synced
-            // change as a tree-to-tree diff later.
-            let base = git::head_rev(canonical_root.as_path(), token.as_deref());
-            let commit = match selected_paths {
-                Some(paths) => git::commit_and_push_paths(
-                    &config_clone,
-                    canonical_root.as_path(),
-                    &paths,
-                    &message,
-                    token.as_deref(),
-                ),
-                None => git::commit_and_push_dirty(
-                    &config_clone,
-                    canonical_root.as_path(),
-                    &message,
-                    token.as_deref(),
-                ),
-            }?;
-            Ok::<_, OriginError>((base, commit))
-        }
+        let base = git::head_rev(canonical_root.as_path(), token.as_deref());
+        let commit = git::push_existing_head(
+            &config_clone,
+            canonical_root.as_path(),
+            &expected_rev,
+            token.as_deref(),
+        )?;
+        Ok::<_, OriginError>((base, commit))
     })
     .await
     .map_err(|error| OriginError::internal(format!("git sync task failed: {error}")))??;
@@ -2507,7 +2374,7 @@ async fn handle_git_sync(
         deleted_paths: Vec::new(),
     };
 
-    if let (Some(url), Some(origin_id)) = (state.commit_receipt_url.clone(), origin_id) {
+    if let Some(url) = state.commit_receipt_url.clone() {
         tokio::spawn(post_commit_receipt(
             state.http_client.clone(),
             url,
@@ -2547,7 +2414,7 @@ async fn handle_git_recovery(
         ));
     };
     let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
-    if !has_git_checkout(&state, project_id) {
+    if !has_git_checkout(&state) {
         ensure_workspace_ready(
             &state,
             project_id,
@@ -2566,7 +2433,7 @@ async fn handle_git_recovery(
     )
     .await?
     .map(|minted| minted.token);
-    let root = workspace_root_for_project(&state, project_id);
+    let root = checkout_root(&state);
     let service_email = state.config.git_author_email.clone();
     // What the checkout last saw of canonical `main`.
     let canonical_main = format!(
@@ -2626,11 +2493,11 @@ async fn handle_git_recovery_restore(
         )));
     }
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -2758,7 +2625,7 @@ async fn handle_git_recovery_dismiss(
         .git_remote_url_for_project(project_id)
         .ok_or_else(|| OriginError::bad_request("git remote is not configured for this project"))?;
     let token = mint_git_write_token(&state, project_id, &access_token).await?;
-    let root = workspace_root_for_project(&state, project_id);
+    let root = checkout_root(&state);
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
     tokio::task::spawn_blocking(move || {
@@ -2830,7 +2697,7 @@ fn publish_response(
     state: &AppState,
     claims: &OriginClaims,
     project_id: Uuid,
-    origin_id: Option<Uuid>,
+    origin_id: Uuid,
     report: PublishReport,
     refresh: bool,
 ) -> Result<Json<serde_json::Value>, OriginError> {
@@ -2854,12 +2721,9 @@ fn publish_response(
     }
 
     let moved = report.rev.is_some() && report.rev != report.base_rev;
-    if let (true, Some(rev), Some(url), Some(origin_id)) = (
-        moved,
-        report.rev.clone(),
-        state.commit_receipt_url.clone(),
-        origin_id,
-    ) {
+    if let (true, Some(rev), Some(url)) =
+        (moved, report.rev.clone(), state.commit_receipt_url.clone())
+    {
         tokio::spawn(post_commit_receipt(
             state.http_client.clone(),
             url,
@@ -2891,7 +2755,7 @@ async fn handle_git_flush(
     Extension(access_token): Extension<OriginAccessToken>,
     payload: Option<Json<GitFlushRequest>>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    if state.config.multi_tenant || !state.config.hosted_checkout {
+    if !state.config.hosted_checkout {
         return Err(OriginError::bad_request(
             "flush is only available on a hosted workspace runtime",
         ));
@@ -2903,7 +2767,7 @@ async fn handle_git_flush(
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -2962,7 +2826,7 @@ async fn handle_git_flush_resume(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    if state.config.multi_tenant || !state.config.hosted_checkout {
+    if !state.config.hosted_checkout {
         return Err(OriginError::bad_request(
             "flush is only available on a hosted workspace runtime",
         ));
@@ -2984,11 +2848,6 @@ async fn handle_git_flush_resume(
 pub(crate) async fn refresh_checkout_read_only(
     state: &AppState,
 ) -> Result<PublishReport, OriginError> {
-    if state.config.multi_tenant {
-        return Err(OriginError::bad_request(
-            "refresh is only available on a workspace runtime",
-        ));
-    }
     let project_id = state.config.project_id;
     let Some(remote_url) = state.config.git_remote_url_for_project(project_id) else {
         return Ok(PublishReport::default());
@@ -3004,7 +2863,7 @@ pub(crate) async fn refresh_checkout_read_only(
     )
     .await?
     .map(|minted| minted.token);
-    let workspace_root = workspace_root_for_project(state, project_id);
+    let workspace_root = checkout_root(state);
     let mut config = (*state.config).clone();
     config.workspace_root = workspace_root.clone();
     config.git_remote_url = Some(remote_url);
@@ -3064,59 +2923,15 @@ fn project_id_for_request(state: &AppState, claims: &OriginClaims) -> Result<Uui
     route_auth::project_id_for_claims(&state.config, claims)
 }
 
-fn origin_id_for_receipt(state: &AppState, claims: &OriginClaims) -> Option<Uuid> {
-    if !state.config.multi_tenant {
-        return Some(state.config.origin_id);
-    }
-    let raw = claims.origin_id.as_deref()?.trim();
-    Uuid::parse_str(raw).ok()
+/// The origin's one checkout.
+fn checkout_root(state: &AppState) -> PathBuf {
+    state.workspace_root.as_ref().clone()
 }
 
-fn workspace_root_for_project(state: &AppState, project_id: Uuid) -> PathBuf {
-    if state.config.multi_tenant {
-        state.workspace_root.join(project_id.to_string())
-    } else {
-        state.workspace_root.as_ref().clone()
-    }
-}
-
-fn workspace_dir_for_project(
-    state: &AppState,
-    project_id: Uuid,
-) -> Result<WorkspaceDir, OriginError> {
-    if state.config.multi_tenant {
-        state
-            .workspace_fs
-            .open_dir(&project_id.to_string())
-            .map_err(|_| OriginError::not_found("workspace not found"))
-    } else {
-        Ok(state.workspace_fs.clone())
-    }
-}
-
-fn ensure_workspace_dir_for_project(
-    state: &AppState,
-    project_id: Uuid,
-) -> Result<WorkspaceDir, OriginError> {
-    if state.config.multi_tenant {
-        state
-            .workspace_fs
-            .create_dir_all(&project_id.to_string())
-            .map_err(|error| {
-                OriginError::internal(format!("failed to create workspace directory: {error}"))
-            })
-    } else {
-        Ok(state.workspace_fs.clone())
-    }
-}
-
-fn has_git_checkout(state: &AppState, project_id: Uuid) -> bool {
-    workspace_dir_for_project(state, project_id)
-        .and_then(|workspace| {
-            workspace
-                .entry_kind(".instafy/.git")
-                .map_err(|_| OriginError::not_found("git checkout not found"))
-        })
+fn has_git_checkout(state: &AppState) -> bool {
+    state
+        .workspace_fs
+        .entry_kind(".instafy/.git")
         .is_ok_and(|kind| kind == WorkspaceEntryKind::Directory)
 }
 
@@ -3135,9 +2950,7 @@ async fn ensure_workspace_ready(
     origin_access_token: Option<&str>,
     sync_behavior: WorkspaceSyncBehavior,
 ) -> Result<PathBuf, OriginError> {
-    let workspace_root = workspace_root_for_project(state, project_id);
-
-    ensure_workspace_dir_for_project(state, project_id)?;
+    let workspace_root = checkout_root(state);
 
     let Some(remote_url) = state.config.git_remote_url_for_project(project_id) else {
         return Ok(workspace_root);
@@ -3163,7 +2976,7 @@ async fn ensure_workspace_ready(
         return Ok(workspace_root);
     }
 
-    let has_checkout = has_git_checkout(state, project_id);
+    let has_checkout = has_git_checkout(state);
 
     if has_checkout && matches!(sync_behavior, WorkspaceSyncBehavior::RefreshInBackground) {
         let apply_lock = project_apply_lock(state, project_id).await;
@@ -3242,7 +3055,7 @@ async fn refresh_git_checkout(
     now: Instant,
 ) -> Result<(), OriginError> {
     if has_checkout {
-        let workspace = workspace_dir_for_project(state, project_id)?;
+        let workspace = &state.workspace_fs;
         let operation_in_progress = [
             ".instafy/.git/rebase-apply",
             ".instafy/.git/rebase-merge",

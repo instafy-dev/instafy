@@ -235,14 +235,6 @@ impl ServerConfig {
         canonicalize(&self.workspace_root)
     }
 
-    pub fn workspace_root_for_project(&self, project_id: Uuid) -> PathBuf {
-        if self.multi_tenant {
-            self.workspace_root.join(project_id.to_string())
-        } else {
-            self.workspace_root.clone()
-        }
-    }
-
     pub fn git_remote_url_for_project(&self, project_id: Uuid) -> Option<String> {
         if let Some(url) = self.git_remote_url.as_deref() {
             let trimmed = url.trim();

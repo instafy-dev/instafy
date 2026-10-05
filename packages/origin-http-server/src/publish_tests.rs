@@ -3196,49 +3196,6 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
     server.abort();
 }
 
-/// A multi-tenant `/git/sync` commits with `git commit` in the project's
-/// checkout, not through the publish, so only the route drops the trailers
-/// the origin or the gateway trusts from the caller's message; the rest of
-/// the message stays.
-#[tokio::test(flavor = "multi_thread")]
-async fn multi_tenant_saves_drop_origin_trailers_at_the_route() {
-    let sc = Scenario::new(Options::default());
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let mut config = sc.config.clone();
-    config.multi_tenant = true;
-    config.hosted_checkout = false;
-    config.workspace_root = root.clone();
-    let workspace = config.workspace_root_for_project(config.project_id);
-    fs::create_dir_all(&workspace).unwrap();
-    let project = ServerConfig {
-        workspace_root: workspace.clone(),
-        ..config.clone()
-    };
-    ensure_git_checkout(&project, None).expect("project checkout");
-    write(&workspace, "notes.md", b"notes\n");
-    let (base, server) = serve_config(config, root).await;
-
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    let (status, body) = post_json(
-        &reqwest::Client::new(),
-        format!("{base}/git/sync"),
-        serde_json::json!({
-            "paths": ["notes.md"],
-            "message": format!(
-                "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {salvage}\n\
-                 \u{1}INSTAFY-APPLY-KEY: imp:forged"
-            ),
-        }),
-    )
-    .await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(sc.remote_file("notes.md").as_deref(), Some("notes\n"));
-    let saved = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
-    assert_eq!(saved, "Tidy\n\nInstafy-Resolved-By: assistant");
-    server.abort();
-}
-
 /// The publish drops the same trailers from its own message, whoever calls
 /// it: a Desktop save never relies on the route alone.
 #[test]
@@ -4339,35 +4296,6 @@ async fn unsaved_work_without_a_canonical_repository_is_unsupported() {
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["code"], "not_supported", "{body}");
     assert!(body.get("entries").is_none(), "{body}");
-    server.abort();
-}
-
-/// A multi-tenant origin serves no recovery routes.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_multi_tenant_origin_mounts_no_recovery_routes() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let mut config = Scenario::new(Options::default()).config;
-    config.workspace_root = root.clone();
-    config.git_remote_url = None;
-    config.multi_tenant = true;
-    let (base, server) = serve_config(config, root).await;
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("{base}/git/recovery"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
-    for path in ["/git/recovery/restore", "/git/recovery/dismiss"] {
-        let response = client
-            .post(format!("{base}{path}"))
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
-    }
     server.abort();
 }
 
@@ -5790,22 +5718,20 @@ async fn apply_route_refuses_a_stale_expected_blob_and_keeps_the_edit() {
     server.abort();
 }
 
-/// The gateway's conditional writes come later: a multi-tenant origin
-/// ignores `expected`.
-#[tokio::test(flavor = "multi_thread")]
-async fn multi_tenant_apply_ignores_expected() {
+/// The single-tenant routes serve one checkout. A gateway configuration
+/// gets the hosted routes, which keep no working copy, so these refuse it
+/// before anything touches the workspace root.
+#[test]
+fn the_single_tenant_routes_refuse_a_gateway_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let project_id = Uuid::new_v4();
-    let workspace = root.join(project_id.to_string());
-    fs::create_dir_all(&workspace).unwrap();
-    fs::write(workspace.join("README.md"), b"agent edit\n").unwrap();
     let config = ServerConfig {
         project_id,
-        origin_id: Uuid::new_v4(),
+        origin_id: Uuid::nil(),
         workspace_root: root.clone(),
         git_remote_url: None,
-        git_remote_base_url: None,
+        git_remote_base_url: Some("file:///nowhere".to_string()),
         git_branch: "main".to_string(),
         git_remote_name: "origin".to_string(),
         git_author_name: "Instafy Origin".to_string(),
@@ -5824,28 +5750,19 @@ async fn multi_tenant_apply_ignores_expected() {
         multi_tenant: true,
         hosted_checkout: false,
     };
-    let (base, server) = serve_config(config, root.clone()).await;
-    let stale = crate::workspace_git::blob_oid(b"what the client read\n");
-    let response = reqwest::Client::new()
-        .post(format!("{base}/apply-json"))
-        .json(&serde_json::json!({
-            "manifest": {
-                "projectId": project_id,
-                "files": [{ "path": "README.md", "size": 12 }],
-                "deletes": [],
-                "expected": { "README.md": stale },
-            },
-            "archiveBase64": apply_archive("README.md", b"from editor\n"),
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        fs::read_to_string(workspace.join("README.md")).unwrap(),
-        "from editor\n"
-    );
-    server.abort();
+    let client = reqwest::Client::new();
+    let validator = crate::auth::TokenValidator::new(client.clone(), config.jwks_url.clone());
+    let refused = crate::routes::AppState::new(
+        std::sync::Arc::new(config),
+        validator,
+        client,
+        root.clone(),
+        None,
+    )
+    .err()
+    .expect("a gateway configuration is refused");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
 }
 
 /// Restore and dismiss change canonical for everyone, so they take the
