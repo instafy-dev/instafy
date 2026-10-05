@@ -14,7 +14,8 @@
 //!    history) goes to the private archive whole (`noRepository`). A link
 //!    named like a space is never followed (`linkEntry`).
 //! 2. Every git command goes through [`WorkspaceGit`]: hooks off, the entry's
-//!    config reduced to data-only settings, protocols pinned. Canonical `main`
+//!    config reduced to data-only settings, protocols pinned, replacement
+//!    refs ignored (so the checks read what a push sends). Canonical `main`
 //!    is fetched from the computed URL `<ORIGIN_GIT_REMOTE_BASE_URL>/<id>.git`,
 //!    never the entry's own remote, with every received object checked, under
 //!    a `git.read` credential the controller mints for the gateway's internal

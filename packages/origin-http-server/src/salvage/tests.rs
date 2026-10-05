@@ -966,6 +966,164 @@ fn files_without_a_usable_repository_go_to_the_private_archive() {
     assert!(secret.len() == 40);
 }
 
+/// `git --version` as (major, minor).
+fn git_version() -> (u32, u32) {
+    let text = git_in(Path::new("."), &["--version"]);
+    let mut numbers = text
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or_default()
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0))
+}
+
+/// The salvage's git handle reads the objects a push sends: a replacement
+/// ref, wherever the ref storage keeps it, changes nothing it reads.
+#[test]
+fn the_salvage_handle_reads_the_objects_a_push_sends() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    init_workspace_repo(&root);
+    write(&root.join(".env.local"), b"KEY=1\n");
+    let blob = ig(&root, &["hash-object", "-w", ".env.local"]);
+    let harmless = git_output(
+        &root,
+        &["--git-dir", ".instafy/.git", "hash-object", "-w", "--stdin"],
+        Some(b"nothing\n"),
+    );
+    let harmless = String::from_utf8_lossy(&harmless.stdout).trim().to_string();
+    ig(&root, &["replace", &blob, &harmless]);
+    // Plain git reads the replacement.
+    assert_eq!(ig(&root, &["cat-file", "-p", &blob]), "nothing");
+    let git = super::repository::entry_git(&root, None);
+    assert_eq!(git.stdout(&["cat-file", "-p", &blob]).unwrap(), "KEY=1");
+}
+
+/// Every git handle the salvage makes comes from `entry_git`, so none reads
+/// replaced objects.
+#[test]
+fn every_salvage_git_handle_ignores_replacement_refs() {
+    for (name, source) in [
+        ("salvage.rs", include_str!("../salvage.rs")),
+        ("canonical.rs", include_str!("canonical.rs")),
+        ("classify.rs", include_str!("classify.rs")),
+        ("options.rs", include_str!("options.rs")),
+        ("outputs.rs", include_str!("outputs.rs")),
+        ("repository.rs", include_str!("repository.rs")),
+        ("services.rs", include_str!("services.rs")),
+        ("work.rs", include_str!("work.rs")),
+    ] {
+        let expected = usize::from(name == "repository.rs");
+        assert_eq!(
+            source.matches("WorkspaceGit::new(").count(),
+            expected,
+            "{name} must make its git handles with entry_git"
+        );
+    }
+}
+
+/// A replacement ref that only reftable storage holds (no `refs/replace`
+/// folder, no `packed-refs`) never hides a local commit's credential from
+/// the history check: the checks read the commit a push sends.
+#[test]
+fn replacement_refs_in_reftable_storage_never_hide_history() {
+    let version = git_version();
+    if version < (2, 45) {
+        // reftable storage came with git 2.45; the handle test above covers
+        // every git.
+        eprintln!("git {version:?} has no reftable storage; nothing to check here");
+        return;
+    }
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.entry();
+    std::fs::create_dir_all(entry.join(".instafy")).unwrap();
+    git_in(
+        &entry,
+        &[
+            "--git-dir",
+            ".instafy/.git",
+            "--work-tree",
+            ".",
+            "init",
+            "-q",
+            "-b",
+            "main",
+            "--ref-format=reftable",
+        ],
+    );
+    ig(&entry, &["config", "user.name", "Fixture"]);
+    ig(&entry, &["config", "user.email", "fixture@instafy.dev"]);
+    ig(
+        &entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(&entry, &["reset", "-q", "--hard", &c1]);
+    write(&entry.join("app.js"), b"app\n");
+    write(&entry.join(".env.production"), b"SECRET=hunter2\n");
+    ig(&entry, &["add", "-A"]);
+    let leaking = entry_commit(&entry, "Add the app");
+    let secret = ig(&entry, &["hash-object", ".env.production"]);
+    // The same commit without the credential, as a replacement.
+    let listing = ig(&entry, &["ls-tree", &leaking]);
+    let kept: String = listing
+        .lines()
+        .filter(|line| !line.ends_with("\t.env.production"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let tree = git_output(
+        &entry,
+        &["--git-dir", ".instafy/.git", "mktree"],
+        Some(kept.as_bytes()),
+    );
+    let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+    let replacement = ig(
+        &entry,
+        &["commit-tree", &tree, "-p", &c1, "-m", "Add the app"],
+    );
+    ig(&entry, &["replace", &leaking, &replacement]);
+    let git_dir = entry.join(".instafy/.git");
+    assert!(git_dir.join("reftable").is_dir());
+    assert!(!git_dir.join("refs/replace").exists());
+    assert!(!git_dir.join("packed-refs").exists());
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (_, lines) = salvage(&gateway.settings(true, false, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["noRepository"], false, "{report:#}");
+    assert_eq!(report["historyFiltered"], true, "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let canonical = gateway.canonical();
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let listed = git_in(&canonical, &["ls-tree", "-r", "--name-only", salvaged]);
+    assert!(listed.lines().any(|path| path == "app.js"), "{listed}");
+    assert!(
+        !listed.lines().any(|path| path == ".env.production"),
+        "{listed}"
+    );
+    for object in [&secret, &leaking] {
+        assert!(
+            !git_output(&canonical, &["cat-file", "-e", object], None)
+                .status
+                .success(),
+            "{object} reached canonical"
+        );
+    }
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(
+        tar_listing(&archive),
+        vec![format!("history/{leaking}/.env.production")]
+    );
+}
+
 /// An existing salvage ref with another tip stops the entry before any
 /// push; the bundle and private archive are still written.
 #[test]

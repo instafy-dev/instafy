@@ -22,6 +22,14 @@ use crate::publish_policy::RejectReason;
 use crate::tree_merge::changed_paths;
 use crate::workspace_git::WorkspaceGit;
 
+/// Git in a parked entry's repository: every salvage command, so the
+/// history checks read the objects a push sends. Replacement refs are
+/// ignored whatever ref storage holds them (reftable keeps them out of
+/// `refs/replace` and `packed-refs`).
+pub(super) fn entry_git<'a>(root: &'a Path, token: Option<&'a str>) -> WorkspaceGit<'a> {
+    WorkspaceGit::new(root, token).without_replace_objects()
+}
+
 /// Pushes of one entry that the shard's path policy may refuse.
 const MAX_POLICY_RETRIES: usize = 8;
 /// Rounds of history filtering before giving up on an entry.
@@ -96,7 +104,8 @@ fn move_plain_git(root: &Path) -> Result<()> {
 /// Why git must not run in the repository at `git_dir`, if so: its parts
 /// must be real files and folders, and nothing may point git at another
 /// repository's objects or history, or make what the checks read differ
-/// from what a push sends (replacement refs).
+/// from what a push sends (replacement refs in files or `packed-refs`; any
+/// others, such as reftable's, are ignored by [`entry_git`]).
 fn repository_problem(git_dir: &Path) -> Option<String> {
     for (name, folder) in [("HEAD", false), ("objects", true), ("refs", true)] {
         let kind = classify::kind_of(&git_dir.join(name));
@@ -183,7 +192,7 @@ fn salvage_repository(
     report: &mut EntryReport,
 ) -> Result<()> {
     let read_token = services.read_token(&project)?;
-    let git = WorkspaceGit::new(root, read_token.as_deref());
+    let git = entry_git(root, read_token.as_deref());
     let url = settings.remote_url(&project);
     let canonical = canonical::fetch_main(&git, &url)?;
     report.canonical_missing = canonical == Canonical::Missing;
@@ -477,7 +486,7 @@ fn push_salvage_ref(
             None => {}
         }
         let token = services.salvage_token(&push.project)?;
-        let pusher = WorkspaceGit::new(push.root, Some(&token));
+        let pusher = entry_git(push.root, Some(&token));
         match canonical::create_salvage_ref(&pusher, push.url, &current, &reference)? {
             Pushed::Created => {
                 if canonical::salvage_tip(git, push.url, &reference)?.as_deref()
