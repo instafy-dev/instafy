@@ -1,5 +1,6 @@
 //! Saved versions and unsaved work on a single-tenant checkout (a Desktop
-//! folder or a workspace runtime): reads at `?rev=` and `?ref=`.
+//! folder or a workspace runtime): reads at `?rev=` and `?ref=`, and the
+//! unsaved-work list.
 //!
 //! Everything here reads objects from the checkout's `.instafy/.git`
 //! through [`WorkspaceGit`] and never the work tree, so a read at a version
@@ -10,8 +11,9 @@
 //! (`publish::restore`); dismissing it is [`recovery_view::dismiss`].
 
 use crate::recovery_view::{
-    path_kind_at, read_blob_at, read_tree_at, resolve_ref, resolve_rev_fetching_main, BlobRead,
-    ObjectEntry, PathKind, ReadAt, RecoveryRef, TreeRead, ViewError,
+    self, describe, fetch_refs, list_remote_refs, path_kind_at, read_blob_at, read_tree_at,
+    resolve_ref, resolve_rev_fetching_main, unreachable, BlobRead, ObjectEntry, PathKind, ReadAt,
+    RecoveryItem, RecoveryRef, TreeRead, ViewError,
 };
 use crate::workspace_git::WorkspaceGit;
 
@@ -115,4 +117,22 @@ pub(crate) fn fetch_ref_for_review(
     let reference = RecoveryRef::validate(git, name)?;
     let remote = remote.ok_or(ViewError::RefNotFound)?;
     Ok(resolve_ref(git, remote, &reference)?.tip)
+}
+
+/// Every recovery and salvage ref on `remote`, newest first (at most
+/// [`recovery_view::MAX_RECOVERY_ITEMS`]), each with its merge base with
+/// the checkout's `HEAD` (which a review and a restore compare against)
+/// and, when a restore commit this origin (`service_email`) made on
+/// `HEAD`'s history names it, `restoredRev`.
+pub(crate) fn list_unsaved_work(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    service_email: &str,
+) -> Result<Vec<RecoveryItem>, ViewError> {
+    let listed = list_remote_refs(git, remote).map_err(unreachable)?;
+    let fetched = fetch_refs(git, remote, &listed).map_err(unreachable)?;
+    let head = git.commit_id("HEAD")?;
+    let mut items = describe(git, &fetched.fetched, head.as_deref())?;
+    recovery_view::mark_restored(git, &mut items, head.as_deref(), service_email)?;
+    Ok(items)
 }

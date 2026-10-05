@@ -137,6 +137,32 @@ pub(crate) fn push(
     })
 }
 
+/// Delete `destination` on `remote` only while it still names `rev`: a
+/// ref that moved or is gone is left alone and the push fails as a lost
+/// race. Used to dismiss unsaved work and to remove a restored recovery
+/// ref.
+pub(crate) fn delete_with_lease(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    destination: &str,
+    rev: &str,
+) -> Result<PushResult> {
+    let lease = format!("--force-with-lease={destination}:{rev}");
+    let delete = format!(":{destination}");
+    let output = git.run(&[
+        "push",
+        "--porcelain",
+        "--no-verify",
+        &lease,
+        remote,
+        &delete,
+    ])?;
+    Ok(PushResult {
+        class: classify_output(&output),
+        refs: parse_porcelain(&output.stdout),
+    })
+}
+
 #[cfg(all(test, unix))]
 fn failed_status() -> std::process::ExitStatus {
     use std::os::unix::process::ExitStatusExt as _;

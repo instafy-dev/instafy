@@ -1324,6 +1324,11 @@ pub(crate) struct RecoveryItem {
     /// Where the work left `main`: review and restore compare against it.
     pub base: Option<String>,
     pub dismissible: bool,
+    /// The newest commit on `main` that restored this ref (see
+    /// [`mark_restored`]); salvage refs stay after a restore, so this is
+    /// how a restored one is shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_rev: Option<String>,
     #[serde(skip)]
     timestamp: i64,
 }
@@ -1392,6 +1397,7 @@ pub(crate) fn describe(
             paths,
             base: None,
             dismissible: reference.dismissible(),
+            restored_rev: None,
             timestamp: commit.timestamp,
         });
     }
@@ -1408,6 +1414,176 @@ pub(crate) fn describe(
         }
     }
     Ok(items)
+}
+
+/// The trailer a restore commit names the ref it restored with. Only the
+/// origin itself writes it (as the commit's committer).
+pub(crate) const RESTORED_FROM_TRAILER: &str = "Instafy-Restored-From";
+
+/// Most restore commits one listing reads.
+const MAX_RESTORE_COMMITS: usize = 500;
+
+/// How long before the oldest listed item a restore of it is looked for:
+/// clocks of the machines that made the commits may differ.
+const RESTORE_CLOCK_SLACK_SECONDS: i64 = 24 * 60 * 60;
+
+/// Give every item a commit `main` reaches restored its `restored_rev`: the
+/// newest commit whose last-paragraph `Instafy-Restored-From` trailer names
+/// the item's ref and whose committer is `committer_email` (this origin's
+/// own identity; anyone can write the trailer, only the origin commits
+/// restores as itself). The walk covers `main`'s history since the oldest
+/// item was made, with one `rev-list` and one `cat-file --batch`.
+pub(crate) fn mark_restored(
+    git: &WorkspaceGit<'_>,
+    items: &mut [RecoveryItem],
+    main: Option<&str>,
+    committer_email: &str,
+) -> Result<(), ViewError> {
+    let (Some(main), Some(oldest)) = (main, items.iter().map(|item| item.timestamp).min()) else {
+        return Ok(());
+    };
+    let main = parse_rev(main)?;
+    let grep = format!("--grep={RESTORED_FROM_TRAILER}: ");
+    let max_count = format!("--max-count={MAX_RESTORE_COMMITS}");
+    let since = format!(
+        "--max-age={}",
+        oldest.saturating_sub(RESTORE_CLOCK_SLACK_SECONDS).max(0)
+    );
+    let listed = git.stdout(&[
+        "rev-list",
+        "--fixed-strings",
+        &grep,
+        &max_count,
+        &since,
+        "--end-of-options",
+        &main,
+        "--",
+    ])?;
+    let ids: Vec<String> = listed
+        .lines()
+        .map(str::trim)
+        .filter(|id| is_full_object_id(id))
+        .map(str::to_string)
+        .collect();
+    let committer_email = committer_email.trim().to_ascii_lowercase();
+    let mut restored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (id, object) in ids.iter().zip(git.read_objects(&ids)?) {
+        if object.kind != "commit" || committer_of(&object.data) != Some(committer_email.clone()) {
+            continue;
+        }
+        for (key, value) in parse_commit(&object.data).trailers {
+            // Newest first: the first commit seen for a ref wins.
+            if key == RESTORED_FROM_TRAILER && !restored.contains_key(&value) {
+                restored.insert(value, id.clone());
+            }
+        }
+    }
+    for item in items.iter_mut() {
+        item.restored_rev = restored.get(&item.reference).cloned();
+    }
+    Ok(())
+}
+
+/// The committer's address of a raw commit, in lower case.
+fn committer_of(data: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(data);
+    let headers = text.split("\n\n").next()?;
+    let committer = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("committer "))?;
+    let open = committer.rfind('<')?;
+    let close = committer.rfind('>')?;
+    (open < close).then(|| committer[open + 1..close].trim().to_ascii_lowercase())
+}
+
+/// The answer to a dismissal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Dismissed {
+    /// This call removed the ref.
+    pub dismissed: bool,
+    /// The ref was already gone.
+    pub missing: bool,
+}
+
+/// Dismiss unsaved work for everyone: delete `reference` on `remote` while
+/// it still names `rev` (the tip the person saw), with a lease, so work
+/// that changed since is never removed. Salvage refs are kept for good
+/// (409 `salvage_ref_kept`); a ref that names something else now is 409
+/// `recovery_ref_moved`; a ref already gone is `{dismissed: false,
+/// missing: true}`. The handle needs write access to `remote`.
+pub(crate) fn dismiss(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    reference: &RecoveryRef,
+    rev: &str,
+) -> Result<Dismissed, OriginError> {
+    if reference.is_salvage() {
+        return Err(OriginError::with_report(
+            StatusCode::CONFLICT,
+            "salvage_ref_kept",
+            "work kept from the retired file server stays; it can be restored, not removed",
+            serde_json::json!({}),
+        ));
+    }
+    let rev = parse_rev(rev)?;
+    let mut pushed = false;
+    for _ in 0..2 {
+        match remote_tip(git, remote, reference).map_err(unreachable)? {
+            None => {
+                return Ok(Dismissed {
+                    dismissed: pushed,
+                    missing: !pushed,
+                })
+            }
+            Some(tip) if tip != rev => return Err(recovery_ref_moved(Some(&tip))),
+            Some(_) => {}
+        }
+        let result = crate::push::delete_with_lease(git, remote, reference.as_str(), &rev)
+            .map_err(ViewError::Unreachable)?;
+        match result.class {
+            crate::push::PushClass::Pushed => {
+                return Ok(Dismissed {
+                    dismissed: true,
+                    missing: false,
+                })
+            }
+            // Someone moved or removed it first: look again.
+            crate::push::PushClass::LostRace(_) => {}
+            // The answer was lost: the removal may have happened.
+            crate::push::PushClass::Ambiguous(_) => pushed = true,
+            crate::push::PushClass::Rejected(detail) => {
+                return Err(OriginError::with_report(
+                    StatusCode::BAD_GATEWAY,
+                    "push_rejected",
+                    format!("the saved history refused the removal: {detail}"),
+                    serde_json::json!({}),
+                ))
+            }
+            crate::push::PushClass::PathRejected { path, .. } => {
+                return Err(OriginError::with_report(
+                    StatusCode::BAD_GATEWAY,
+                    "push_rejected",
+                    format!("the saved history refused the removal ({path})"),
+                    serde_json::json!({}),
+                ))
+            }
+        }
+    }
+    Err(recovery_ref_moved(None))
+}
+
+/// 409 `recovery_ref_moved`: the ref no longer names what the person saw
+/// (`rev`: what it names now, if anything).
+pub(crate) fn recovery_ref_moved(rev: Option<&str>) -> OriginError {
+    OriginError::with_report(
+        StatusCode::CONFLICT,
+        "recovery_ref_moved",
+        "this unsaved work changed since it was listed; refresh the list",
+        match rev {
+            Some(rev) => serde_json::json!({ "rev": rev }),
+            None => serde_json::json!({ "missing": true }),
+        },
+    )
 }
 
 /// A recovery ref's own kind; `salvage` (or anything else) on a recovery ref

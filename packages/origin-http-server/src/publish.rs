@@ -23,14 +23,18 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tracing::{info, warn};
 
+use crate::apply::normalize_relative_path;
 use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git::{looks_like_transient_http_error, EmbeddedGitDirGuard};
 use crate::publish_policy::{
     deletion_allowed, is_unsafe_path, unpublishable_reason, RejectReason, MAX_PUBLISH_BLOB_BYTES,
 };
-use crate::push::{push, PushClass};
+use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
+use crate::recovery_view::{
+    parse_rev, recovery_ref_moved, resolve_ref, RecoveryRef, ViewError, RESTORED_FROM_TRAILER,
+};
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
 use crate::workspace_fs::WorkspaceDir;
@@ -292,6 +296,56 @@ pub fn revert_commit(
     let mut publisher = Publisher::new(ctx, DEFAULT_PUBLISH_BUDGET);
     publisher.revert(commit, base, author)?;
     Ok(publisher.report)
+}
+
+/// What a restore of unsaved work asks for.
+#[derive(Clone, Debug, Default)]
+pub struct RestoreRequest {
+    /// A recovery ref (`refs/instafy/recovery/<origin id>/<name>`) or a
+    /// salvage ref (`refs/instafy/salvage/gateway/<name>`).
+    pub reference: String,
+    /// The tip the person saw; a ref that names something else now is
+    /// refused (409 `recovery_ref_moved`).
+    pub rev: Option<String>,
+    /// Paths (files or folders) that keep the saved version.
+    pub keep: Vec<String>,
+    /// Author of the restore commit; the origin's own identity when `None`.
+    pub author: Option<GitIdentity>,
+}
+
+/// The result of a restore: the publish of the restore commit, plus what it
+/// did with the unsaved work.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreReport {
+    #[serde(flatten)]
+    pub publish: PublishReport,
+    /// A restore commit was made (false: the saved version already held
+    /// this work, or the rest of it was kept or refused).
+    pub committed: bool,
+    /// Paths the work changes that kept the saved version: kept on request,
+    /// or never restorable here (ignored, excluded, secret, legacy
+    /// attachments, too large).
+    pub not_restored: Vec<String>,
+    /// The recovery ref was removed after the restore reached `main`.
+    /// Salvage refs are never removed.
+    pub ref_deleted: bool,
+}
+
+/// Restore unsaved work kept on a recovery or salvage ref onto the
+/// checkout's branch and publish it (see `Publisher::restore`).
+pub fn restore(
+    ctx: &PublishContext<'_>,
+    request: RestoreRequest,
+) -> Result<RestoreReport, OriginError> {
+    let mut publisher = Publisher::new(ctx, DEFAULT_PUBLISH_BUDGET);
+    let (committed, not_restored, ref_deleted) = publisher.restore(request)?;
+    Ok(RestoreReport {
+        publish: publisher.report,
+        committed,
+        not_restored,
+        ref_deleted,
+    })
 }
 
 /// Run the one-time repair of copies an older sync left behind (see
@@ -2452,6 +2506,211 @@ impl<'a> Publisher<'a> {
         self.publish_local(local).map_err(internal)?;
         self.finish().map_err(internal)?;
         Ok(())
+    }
+}
+
+impl Publisher<'_> {
+    /// Restore the work a recovery or salvage ref keeps (Q) onto `HEAD`,
+    /// the way a revert applies its inverse: everything checked first, then
+    /// the index and only the files the restore changes, one commit, one
+    /// publish.
+    ///
+    /// - The ref is read from the remote by exactly its name; `rev`, when
+    ///   given, must still be its tip.
+    /// - `T = three_way(merge-base(Q, HEAD), HEAD, Q)`. Paths Q changes that
+    ///   are kept on request, reserved, never publishable (excluded, secret,
+    ///   legacy attachments, unsupported, too large) or ignored here keep
+    ///   `HEAD`'s entry and are reported as not restored.
+    /// - Any other conflict is 409 `restore_conflict {head, paths}`; an
+    ///   unsaved edit of a path the restore changes is 409 `dirty_paths`.
+    /// - The commit (`Restore unsaved work`, with an
+    ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
+    ///   and committed by the origin, then published.
+    /// - Once the work is on `main`, a recovery ref is deleted under a
+    ///   lease on its tip, so the same work is not restored twice. Salvage
+    ///   refs are kept.
+    fn restore(
+        &mut self,
+        request: RestoreRequest,
+    ) -> Result<(bool, Vec<String>, bool), OriginError> {
+        let reference = RecoveryRef::validate(&self.git, request.reference.trim())?;
+        let expected = match request.rev.as_deref().map(str::trim) {
+            Some(rev) if !rev.is_empty() => Some(parse_rev(rev)?),
+            _ => None,
+        };
+        let mut keep = Vec::new();
+        for path in &request.keep {
+            let normalized = normalize_relative_path(path)
+                .ok_or_else(|| OriginError::bad_request("invalid keep path"))?;
+            keep.push(normalized);
+        }
+
+        self.prepare().map_err(internal)?;
+        if !self.fetched {
+            return Err(OriginError::with_report(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "canonical_unreachable",
+                self.report
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "could not reach the saved history".to_string()),
+                serde_json::json!({ "retryable": true }),
+            ));
+        }
+        let remote = self.remote.clone();
+        let fetched = match resolve_ref(&self.git, &remote, &reference) {
+            Ok(fetched) => fetched,
+            Err(ViewError::RefNotFound) if expected.is_some() => {
+                return Err(recovery_ref_moved(None))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if expected.as_deref().is_some_and(|rev| rev != fetched.tip) {
+            return Err(recovery_ref_moved(Some(&fetched.tip)));
+        }
+        let head = self
+            .git
+            .commit_id("HEAD")
+            .map_err(internal)?
+            .ok_or_else(|| OriginError::conflict("the workspace has no saved version yet"))?;
+        let head_tree = self.git.tree_id(&head).map_err(internal)?;
+        let saved = fetched.commit.clone();
+        let base = self.git.merge_base(&saved, &head).map_err(internal)?;
+        let base_tree = match base.as_deref() {
+            Some(base) => self.git.tree_id(base).map_err(internal)?,
+            None => self.git.empty_tree().map_err(internal)?,
+        };
+        let merged = three_way(&self.git, base.as_deref(), &head, &saved).map_err(internal)?;
+
+        // What the work changes, and which of it may not come back here.
+        let saved_tree = self.git.tree_id(&saved).map_err(internal)?;
+        let raw = self
+            .git
+            .bytes(&[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--no-renames",
+                "--raw",
+                &base_tree,
+                &saved_tree,
+            ])
+            .map_err(internal)?;
+        let changes = parse_raw_changes(&raw);
+        let sizes = self.blob_sizes(&changes).map_err(internal)?;
+        let written: Vec<String> = changes
+            .iter()
+            .filter(|change| change.status != 'D')
+            .map(|change| change.path.clone())
+            .collect();
+        let ignored: BTreeSet<String> = self
+            .ignored(&written)
+            .map_err(internal)?
+            .into_iter()
+            .collect();
+        let under = |path: &str, roots: &[String]| {
+            roots
+                .iter()
+                .any(|root| path == root || path.starts_with(&format!("{root}/")))
+        };
+        let mut not_restored = Vec::new();
+        for change in &changes {
+            let refused = under(&change.path, &keep)
+                || crate::paths::is_reserved_path(&change.path)
+                || self.policy_reason(change, &sizes).is_some()
+                || ignored.contains(&change.path);
+            if refused {
+                not_restored.push(change.path.clone());
+            }
+        }
+        let conflicts: Vec<String> = merged
+            .conflicts
+            .iter()
+            .filter(|path| !under(path, &not_restored))
+            .cloned()
+            .collect();
+        if !conflicts.is_empty() {
+            return Err(OriginError::with_report(
+                axum::http::StatusCode::CONFLICT,
+                "restore_conflict",
+                "the saved version changed the same files since; choose a version per file",
+                serde_json::json!({ "head": head, "paths": conflicts }),
+            ));
+        }
+        let tree = tree_with_entries_from(&self.git, &merged.tree, Some(&head), &not_restored)
+            .map_err(internal)?;
+
+        let mut local = head.clone();
+        let committed = tree != head_tree;
+        if committed {
+            let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
+            let dirty: Vec<String> = self
+                .status()
+                .map_err(internal)?
+                .into_iter()
+                .map(|(path, _)| path)
+                .filter(|path| {
+                    touched.iter().any(|touched| {
+                        touched == path
+                            || touched.starts_with(&format!("{path}/"))
+                            || path.starts_with(&format!("{touched}/"))
+                    })
+                })
+                .collect();
+            if !dirty.is_empty() {
+                return Err(OriginError::conflict_paths(
+                    "dirty_paths",
+                    "unsaved edits touch files this restore changes",
+                    dirty,
+                ));
+            }
+            self.git
+                .ok(&["read-tree", "-m", "-u", &head, &tree])
+                .map_err(internal)?;
+            let message = format!(
+                "Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: {}\n",
+                reference.as_str()
+            );
+            let author = request.author.unwrap_or_else(|| self.identity.clone());
+            let restored = self
+                .git
+                .commit_tree(&tree, &[&head], &author, &self.identity, message.as_bytes())
+                .map_err(internal)?;
+            self.git
+                .update_ref(
+                    "HEAD",
+                    &restored,
+                    Some(&head),
+                    "instafy: restore unsaved work",
+                )
+                .map_err(internal)?;
+            local = restored;
+        }
+        self.report.local_rev = Some(local.clone());
+        self.publish_local(Some(local.clone())).map_err(internal)?;
+        self.finish().map_err(internal)?;
+
+        let landed = matches!(
+            self.report.git_sync_status,
+            SyncStatus::Published | SyncStatus::Unchanged
+        ) && self
+            .is_published(&local, self.report.rev.as_deref())
+            .map_err(internal)?;
+        let mut ref_deleted = false;
+        if landed && !reference.is_salvage() && self.can_write {
+            match delete_with_lease(&self.git, &remote, reference.as_str(), &fetched.tip) {
+                Ok(result) if result.class == PushClass::Pushed => ref_deleted = true,
+                Ok(result) => {
+                    warn!(reference = reference.as_str(), class = ?result.class, "restored work's ref was not removed")
+                }
+                Err(error) => {
+                    warn!(reference = reference.as_str(), error = %format!("{error:#}"), "restored work's ref was not removed")
+                }
+            }
+        }
+        not_restored.sort();
+        not_restored.dedup();
+        Ok((committed, not_restored, ref_deleted))
     }
 }
 

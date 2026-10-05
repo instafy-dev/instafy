@@ -227,18 +227,23 @@ pub fn router(state: AppState) -> Router {
 
     let health_routes = Router::new().route("/healthz", get(|| async { "ok" }));
 
-    let read_routes = Router::new()
+    let mut read_routes = Router::new()
         .route("/entries", get(handle_entries))
         .route("/files/*path", get(handle_file))
         .route("/raw/*path", get(handle_raw))
         .route("/git/status", get(handle_git_status))
         .route("/git/diff", get(handle_git_diff))
         .route("/git/history", get(handle_git_history))
-        .route("/git/history/review", get(handle_git_history_review))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_read,
-        ));
+        .route("/git/history/review", get(handle_git_history_review));
+    // Unsaved work on a single-tenant checkout (Desktop and workspace
+    // runtimes). A multi-tenant origin does not serve it.
+    if !state.config.multi_tenant {
+        read_routes = read_routes.route("/git/recovery", get(handle_git_recovery));
+    }
+    let read_routes = read_routes.route_layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_read,
+    ));
 
     let apply_routes = Router::new()
         // Multipart uploads use the server-level RequestBodyLimitLayer cap.
@@ -253,16 +258,21 @@ pub fn router(state: AppState) -> Router {
             limit_apply_concurrency,
         ));
 
-    let write_routes = Router::new()
+    let mut write_routes = Router::new()
         .merge(apply_routes)
         .route("/apply/status", post(handle_apply_status))
         .route("/git/revert", post(handle_git_revert))
         .route("/git/revert-commit", post(handle_git_revert_commit))
-        .route("/git/sync", post(handle_git_sync))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_write,
-        ));
+        .route("/git/sync", post(handle_git_sync));
+    if !state.config.multi_tenant {
+        write_routes = write_routes
+            .route("/git/recovery/restore", post(handle_git_recovery_restore))
+            .route("/git/recovery/dismiss", post(handle_git_recovery_dismiss));
+    }
+    let write_routes = write_routes.route_layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_write,
+    ));
 
     let flush_routes = Router::new()
         .route("/git/flush", post(handle_git_flush))
@@ -2821,6 +2831,234 @@ async fn handle_git_sync(
         "rev": commit_hash,
         "baseRev": base_rev,
     })))
+}
+
+/// `GET /git/recovery`: unsaved work kept on recovery and salvage refs of
+/// canonical, newest first (see [`checkout_versions::list_unsaved_work`]),
+/// as `{entries: [...]}`. 502 `canonical_unreachable` when canonical cannot
+/// be listed: the list is never answered from stale data.
+async fn handle_git_recovery(
+    State(state): State<AppState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(access_token): Extension<OriginAccessToken>,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    let project_id = project_id_for_request(&state, &claims)?;
+    let Some(remote) = state.config.git_remote_url_for_project(project_id) else {
+        return Ok(Json(
+            serde_json::json!({ "supported": false, "entries": [] }),
+        ));
+    };
+    let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
+    if !has_git_checkout(&state, project_id) {
+        ensure_workspace_ready(
+            &state,
+            project_id,
+            &["git.read"],
+            caller,
+            WorkspaceSyncBehavior::BlockingForced,
+        )
+        .await?;
+    }
+    let token = git_tokens::mint_git_access_token(
+        &state.http_client,
+        state.config.as_ref(),
+        project_id,
+        &["git.read"],
+        caller,
+    )
+    .await?
+    .map(|minted| minted.token);
+    let root = workspace_root_for_project(&state, project_id);
+    let service_email = state.config.git_author_email.clone();
+    let apply_lock = project_apply_lock(&state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let items = tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_guard = try_acquire_workspace_apply_lock(&root)?
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        let git = WorkspaceGit::new(&root, token.as_deref());
+        Ok::<_, OriginError>(checkout_versions::list_unsaved_work(
+            &git,
+            &remote,
+            &service_email,
+        )?)
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("recovery list task failed: {error}")))??;
+    Ok(Json(serde_json::json!({ "entries": items })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryRestoreRequest {
+    #[serde(rename = "ref")]
+    reference: String,
+    /// The tip the person saw.
+    rev: Option<String>,
+    /// Paths that keep the saved version.
+    #[serde(default)]
+    keep: Vec<String>,
+}
+
+/// `POST /git/recovery/restore {ref, rev?, baseRev?, keep?}`: restore
+/// unsaved work onto the checkout and publish it (see
+/// [`publish::restore`]). A checkout restores onto its own branch and
+/// merges on publish, so `baseRev` (the newest saved version the client
+/// knew, which the hosted gateway compares against) is not needed here.
+/// The answer is the publish report plus `committed`, `notRestored` and
+/// `refDeleted`; a restore that could not reach `main` answers like
+/// `/git/sync` (`not_saved`, the ref kept).
+async fn handle_git_recovery_restore(
+    State(state): State<AppState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(access_token): Extension<OriginAccessToken>,
+    Json(payload): Json<RecoveryRestoreRequest>,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    let project_id = project_id_for_request(&state, &claims)?;
+    let origin_id = origin_id_for_receipt(&state, &claims);
+    let apply_lock = project_apply_lock(&state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    let config = state.config.clone();
+    let workspace_root = workspace_root_for_project(&state, project_id);
+    let lock_workspace = workspace_root.clone();
+    let workspace_apply_guard =
+        tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
+            .await
+            .map_err(|error| {
+                OriginError::internal(format!("workspace lock task failed: {error}"))
+            })??
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+    let remote_url = config
+        .git_remote_url_for_project(project_id)
+        .ok_or_else(|| OriginError::bad_request("git remote is not configured for this project"))?;
+    if let Some(reason) = active_lease_blocks_sync(
+        &state,
+        project_id,
+        claims.lease_id.as_deref(),
+        (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str()),
+    )
+    .await
+    {
+        return Err(OriginError::conflict(reason));
+    }
+    if state.stopping.is_up() {
+        return Err(OriginError::with_report(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            WORKSPACE_STOPPING_CODE,
+            "the workspace is stopping and its work is kept on recovery refs; restore again after it restarts",
+            serde_json::json!({ "retryable": true }),
+        ));
+    }
+    let token = mint_git_write_token(&state, project_id, &access_token).await?;
+    let mut config_clone = (*config).clone();
+    config_clone.workspace_root = workspace_root.clone();
+    config_clone.git_remote_url = Some(remote_url);
+    let request = publish::RestoreRequest {
+        reference: payload.reference,
+        rev: payload.rev,
+        keep: payload.keep,
+        // A person's restore is theirs; jobs and tokens without a
+        // pseudonym restore as the origin.
+        author: claims.user_author(),
+    };
+    let report = tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_apply_guard = workspace_apply_guard;
+        ensure_checkout_for_publish(&config_clone, token.as_deref())?;
+        publish::restore(
+            &PublishContext {
+                config: &config_clone,
+                workspace_root: workspace_root.as_path(),
+                token: token.as_deref(),
+                can_write: token.is_some() || config_clone.skip_auth,
+            },
+            request,
+        )
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("git restore task failed: {error}")))??;
+    let extra = serde_json::json!({
+        "committed": report.committed,
+        "notRestored": report.not_restored,
+        "refDeleted": report.ref_deleted,
+    });
+    let merge = |body: &mut serde_json::Value| {
+        if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+    };
+    match publish_response(
+        &state,
+        &claims,
+        project_id,
+        origin_id,
+        report.publish,
+        false,
+    ) {
+        Ok(Json(mut body)) => {
+            merge(&mut body);
+            Ok(Json(body))
+        }
+        Err(OriginError::WithReport {
+            status,
+            code,
+            message,
+            mut report,
+        }) => {
+            merge(&mut report);
+            Err(OriginError::WithReport {
+                status,
+                code,
+                message,
+                report,
+            })
+        }
+        Err(other) => Err(other),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RecoveryDismissRequest {
+    #[serde(rename = "ref")]
+    reference: String,
+    /// The tip the person saw: only that is removed.
+    rev: Option<String>,
+}
+
+/// `POST /git/recovery/dismiss {ref, rev}`: remove unsaved work for
+/// everyone (see [`recovery_view::dismiss`]), with git.write minted from
+/// the caller's fs.write token.
+async fn handle_git_recovery_dismiss(
+    State(state): State<AppState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(access_token): Extension<OriginAccessToken>,
+    Json(payload): Json<RecoveryDismissRequest>,
+) -> Result<Json<recovery_view::Dismissed>, OriginError> {
+    let project_id = project_id_for_request(&state, &claims)?;
+    let rev = payload
+        .rev
+        .filter(|rev| !rev.trim().is_empty())
+        .ok_or(recovery_view::ViewError::InvalidRev)?;
+    let remote = state
+        .config
+        .git_remote_url_for_project(project_id)
+        .ok_or_else(|| OriginError::bad_request("git remote is not configured for this project"))?;
+    let token = mint_git_write_token(&state, project_id, &access_token).await?;
+    let root = workspace_root_for_project(&state, project_id);
+    let apply_lock = project_apply_lock(&state, project_id).await;
+    let apply_guard = apply_lock.lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _apply_guard = apply_guard;
+        let _workspace_guard = try_acquire_workspace_apply_lock(&root)?
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        let git = WorkspaceGit::new(&root, token.as_deref());
+        let reference = recovery_view::RecoveryRef::validate(&git, payload.reference.trim())?;
+        recovery_view::dismiss(&git, &remote, &reference, rev.trim()).map(Json)
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("recovery dismiss task failed: {error}")))?
 }
 
 /// Exchange the caller's `fs.write` token for a short-lived `git.write`
