@@ -428,8 +428,8 @@ function parseChangeType(value: unknown): ChatMessageFileChangeType {
 }
 
 // The runtime lists files a turn only read in apply/files as read references
-// (packages/runtime-agent/README.md, "Structured file results"). They are
-// display-only and never a change.
+// (packages/runtime-agent/README.md, "Structured file results"). They never
+// describe a change, so Studio leaves them out of ChatMessage.files.
 function isReadFileReference(entry: Record<string, unknown>): boolean {
   const marker = (value: unknown) => typeof value === "string" && value.trim().toLowerCase() === "read";
   return (
