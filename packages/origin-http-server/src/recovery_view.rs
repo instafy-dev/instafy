@@ -268,9 +268,11 @@ impl ReadAt {
 }
 
 /// The commit `at` names: `main`'s tip here (`None` while `main` does not
-/// exist), or the commit itself when it is here
-/// ([`ViewError::RevNotFound`] otherwise); neither makes a network call,
-/// so the caller fetches `main` first where it needs to. A recovery or
+/// exist), or the commit itself when it is readable here (see
+/// [`readable_commit`]; [`ViewError::RevNotFound`] otherwise: a commit that
+/// only `HEAD`, the reflog or another kind of ref reaches counts as not
+/// here); neither makes a network call, so the caller fetches `main` first
+/// where it needs to. A recovery or
 /// salvage ref is resolved on `remote` by exactly its name and fetched
 /// ([`ViewError::RefNotFound`] when the remote has no such ref): it is never
 /// read from a local ref, which on a case-insensitive disk could stand for
@@ -304,12 +306,19 @@ pub(crate) fn resolve(
     }
 }
 
-/// Whether `rev` is a commit here that is complete: its tree is here, and a
-/// local ref reaches it. Git moves a ref only after the fetch's
-/// connectivity check, so whatever a ref reaches has every object it names,
-/// while a fetch that stopped partway can leave loose objects (written
-/// commit first) that no ref reaches. Such a commit is not readable, so the
-/// caller fetches. Two processes.
+/// Whether `rev` is a commit here that is complete: its tree is here, and
+/// `main` or a branch or fetch ref reaches it. Git moves a ref only after
+/// the fetch's connectivity check, so whatever a ref reaches has every
+/// object it names, while a fetch that stopped partway can leave loose
+/// objects (written commit first) that no ref reaches. Such a commit is not
+/// readable, so the caller fetches.
+///
+/// At most three processes, and only the refs reads need are walked: `main`
+/// first (one ancestry walk), then, only when `main` does not reach it,
+/// `refs/heads/` and the fetch namespaces. Git before 2.49 tests every ref
+/// for `--contains` whatever `--count` says, so tags and other namespaces
+/// are never consulted; a smaller set can only make a commit "not here",
+/// never let an incomplete one through.
 fn readable_commit(git: &WorkspaceGit<'_>, rev: &str) -> Result<bool, ViewError> {
     let input = format!("{rev}\n{rev}^{{tree}}\n");
     let raw = git.stdout_opts(
@@ -327,12 +336,18 @@ fn readable_commit(git: &WorkspaceGit<'_>, rev: &str) -> Result<bool, ViewError>
     if !present {
         return Ok(false);
     }
+    let on_main = git.run(&["merge-base", "--is-ancestor", rev, MAIN_REF])?;
+    if on_main.status.code() == Some(0) {
+        return Ok(true);
+    }
     let reaching = git.stdout(&[
         "for-each-ref",
         "--count=1",
         "--format=%(refname)",
         "--contains",
         rev,
+        "refs/heads",
+        FETCHED_REF_ROOT,
     ])?;
     Ok(!reaching.is_empty())
 }
@@ -817,7 +832,16 @@ pub(crate) fn fetch_refs(
         }
     }
 
-    // A commit, or an annotated tag of one (the shard accepts both).
+    // A commit, or an annotated tag of one (the shard accepts both, nested
+    // tags included). Git before 2.45 peels `%(*objectname)` one level
+    // only; tags still pointing at tags are peeled in one more process.
+    let nested: Vec<String> = found
+        .iter()
+        .flatten()
+        .filter(|fetched| fetched.kind == "tag" && fetched.peeled_kind == "tag")
+        .map(|fetched| fetched.peeled.clone())
+        .collect();
+    let peeled = peel_to_commits(git, &nested)?;
     for (index, (reference, _)) in listed.iter().enumerate() {
         let Some(fetched) = found[index].take() else {
             continue;
@@ -825,6 +849,7 @@ pub(crate) fn fetch_refs(
         let commit = match (fetched.kind.as_str(), fetched.peeled_kind.as_str()) {
             ("commit", _) => Some(fetched.id.clone()),
             ("tag", "commit") => Some(fetched.peeled.clone()),
+            ("tag", "tag") => peeled.get(&fetched.peeled).cloned(),
             _ => None,
         };
         match commit {
@@ -839,9 +864,42 @@ pub(crate) fn fetch_refs(
     Ok(outcome)
 }
 
-/// Remove every fetch namespace older than [`FETCH_SCRATCH_STALE_AFTER`]
-/// (or not named the way this server names them): a call that died left
-/// it. Called by [`fetch_refs`] and when the server starts, under the same
+/// The commit each of `tags` (tag ids) finally names, with one
+/// `cat-file --batch-check` over `<id>^{commit}`; a tag that names no
+/// commit is left out. No process when `tags` is empty.
+fn peel_to_commits(
+    git: &WorkspaceGit<'_>,
+    tags: &[String],
+) -> Result<std::collections::HashMap<String, String>, ViewError> {
+    let mut peeled = std::collections::HashMap::new();
+    if tags.is_empty() {
+        return Ok(peeled);
+    }
+    let input: String = tags
+        .iter()
+        .map(|tag| format!("{tag}^{{commit}}\n"))
+        .collect();
+    let raw = git.stdout_opts(
+        &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+        &RunOpts {
+            stdin: Some(input.as_bytes()),
+            ..RunOpts::default()
+        },
+    )?;
+    for (tag, line) in tags.iter().zip(raw.lines()) {
+        if let Some(commit) = line.strip_suffix(" commit") {
+            if is_full_object_id(commit) {
+                peeled.insert(tag.clone(), commit.to_string());
+            }
+        }
+    }
+    Ok(peeled)
+}
+
+/// Remove every fetch namespace older than [`FETCH_SCRATCH_STALE_AFTER`]:
+/// a call that died left it. Only names this server makes
+/// (`<unix seconds>-<32 hex>/<n>`) are ever removed; anything else under the
+/// root is left alone. Called by [`fetch_refs`] and when the server starts, under the same
 /// age rule. Best effort: it never fails, and logs only counts. Several
 /// calls may sweep the same refs at once: a ref another call already
 /// removed is not an error. Returns how many stale refs it removed.
@@ -850,7 +908,6 @@ pub(crate) fn sweep_stale_fetches(git: &WorkspaceGit<'_>) -> usize {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let prefix = format!("{FETCHED_REF_ROOT}/");
     let Ok(listed) = local_refs(git, &[FETCHED_REF_ROOT]) else {
         tracing::warn!(target: "origin_recovery", "could not list fetch refs to sweep");
         return 0;
@@ -858,14 +915,9 @@ pub(crate) fn sweep_stale_fetches(git: &WorkspaceGit<'_>) -> usize {
     let stale: Vec<(String, String)> = listed
         .into_iter()
         .filter(|(name, _)| {
-            let started = name
-                .strip_prefix(&prefix)
-                .and_then(|rest| rest.split_once('-'))
-                .and_then(|(seconds, _)| seconds.parse::<u64>().ok());
-            match started {
-                Some(started) => now.saturating_sub(started) > FETCH_SCRATCH_STALE_AFTER.as_secs(),
-                None => true,
-            }
+            fetch_ref_started(name).is_some_and(|started| {
+                now.saturating_sub(started) > FETCH_SCRATCH_STALE_AFTER.as_secs()
+            })
         })
         .collect();
     if delete_refs(git, &stale).is_err() {
@@ -879,24 +931,42 @@ pub(crate) fn sweep_stale_fetches(git: &WorkspaceGit<'_>) -> usize {
     stale.len()
 }
 
-/// Delete the refs named in `refs` (`(name, id)`), which must all be fetch
-/// refs, in one transaction. `--no-deref` deletes a symbolic ref itself,
-/// never the ref it points to, and no old id is given, so a ref that is
-/// already gone is not an error.
+/// When the fetch namespace a ref named `<root>/<unix seconds>-<32 hex>/<n>`
+/// was made (its seconds); `None` for any other name.
+fn fetch_ref_started(name: &str) -> Option<u64> {
+    let rest = name.strip_prefix(FETCHED_REF_ROOT)?.strip_prefix('/')?;
+    let (namespace, index) = rest.split_once('/')?;
+    let (seconds, token) = namespace.split_once('-')?;
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    let hex = token.len() == 32
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    (digits(seconds) && hex && digits(index))
+        .then(|| seconds.parse().ok())
+        .flatten()
+}
+
+/// Delete the fetch refs named in `refs` (`(name, id)`; any name that is not
+/// one is skipped) in one transaction and one attempt. Best effort, and it
+/// never holds its caller up: `--no-deref` deletes a symbolic ref itself,
+/// never the ref it points to; no old id is given, so a ref that is already
+/// gone is not an error; and a held lock (a concurrent delete, or one left
+/// by a process that was killed) is waited for briefly, then the refs are
+/// left for the next sweep. Lock files are never removed.
 fn delete_refs(git: &WorkspaceGit<'_>, refs: &[(String, String)]) -> Result<(), ViewError> {
-    let prefix = format!("{FETCHED_REF_ROOT}/");
     let mut transaction = String::new();
     for (name, _) in refs {
-        if name.starts_with(&prefix) {
+        if fetch_ref_started(name).is_some() {
             transaction.push_str(&format!("delete {name}\n"));
         }
     }
     if transaction.is_empty() {
         return Ok(());
     }
-    // A delete locks `packed-refs`, which every concurrent delete in the
-    // repository also locks: wait for it (and for loose ref locks) instead
-    // of failing after git's default of one second.
+    // A delete locks `packed-refs`, which concurrent deletes also lock for a
+    // moment: wait at most a second for it, and a tenth of a second for a
+    // loose ref lock, in a single attempt.
     git.ok_opts(
         &["update-ref", "--no-deref", "--stdin"],
         &RunOpts {
@@ -904,15 +974,22 @@ fn delete_refs(git: &WorkspaceGit<'_>, refs: &[(String, String)]) -> Result<(), 
             env: vec![
                 ("GIT_CONFIG_COUNT", "2".into()),
                 ("GIT_CONFIG_KEY_0", "core.packedRefsTimeout".into()),
-                ("GIT_CONFIG_VALUE_0", "10000".into()),
+                ("GIT_CONFIG_VALUE_0", DELETE_PACKED_REFS_WAIT_MS.into()),
                 ("GIT_CONFIG_KEY_1", "core.filesRefLockTimeout".into()),
-                ("GIT_CONFIG_VALUE_1", "2000".into()),
+                ("GIT_CONFIG_VALUE_1", DELETE_REF_LOCK_WAIT_MS.into()),
             ],
+            single_attempt: true,
             ..RunOpts::default()
         },
     )?;
     Ok(())
 }
+
+/// How long a fetch-ref delete waits for `packed-refs.lock`, in ms.
+const DELETE_PACKED_REFS_WAIT_MS: &str = "1000";
+
+/// How long a fetch-ref delete waits for a loose ref lock, in ms.
+const DELETE_REF_LOCK_WAIT_MS: &str = "100";
 
 /// What a fetch ref names: the object, its type, and for an annotated tag
 /// the object the tag names.
@@ -2418,6 +2495,16 @@ mod tests {
         assert!(git.refs_under(FETCHED_REF_ROOT).unwrap().is_empty());
     }
 
+    /// Turn off the automatic maintenance a fetch starts: from git 2.49 it
+    /// runs `pack-refs --auto`, which races concurrent ref deletes and can
+    /// put back refs they just removed (harmless in production: the
+    /// namespace is swept later), which would make "nothing is left"
+    /// assertions flaky.
+    fn quiet_maintenance(repository: &Path) {
+        git_in(repository, &["config", "maintenance.auto", "false"]);
+        git_in(repository, &["config", "gc.auto", "0"]);
+    }
+
     /// Calls that run at once on one repository each fetch into their own
     /// namespace: every call gets its own refs' commits and nothing is
     /// left behind.
@@ -2427,6 +2514,7 @@ mod tests {
         let (canonical, _main, _revs) = canonical_with_many_refs(&root, 8);
         let url = canonical.to_str().unwrap();
         let mirror = bare(&root, "mirror.git");
+        quiet_maintenance(&mirror);
         let listed = list_remote_refs(&WorkspaceGit::bare(&mirror, None), url).unwrap();
         std::thread::scope(|scope| {
             for thread in 0..8 {
@@ -2504,19 +2592,24 @@ mod tests {
             .as_secs();
         let old = now - FETCH_SCRATCH_STALE_AFTER.as_secs() - 60;
         let stale = format!("{FETCHED_REF_ROOT}/{old}-0123456789abcdef0123456789abcdef/0");
+        // Names this server does not make are never removed: through a
+        // linked folder they could be other refs.
         let unnamed = format!("{FETCHED_REF_ROOT}/0123456789abcdef0123456789abcdef/0");
+        let other = format!("{FETCHED_REF_ROOT}/main");
         let live = format!("{FETCHED_REF_ROOT}/{now}-fedcba9876543210fedcba9876543210/0");
-        for name in [&stale, &unnamed, &live] {
+        for name in [&stale, &unnamed, &other, &live] {
             git.update_ref(name, &main, None, "test").unwrap();
         }
-        assert_eq!(sweep_stale_fetches(&git), 2);
+        assert_eq!(sweep_stale_fetches(&git), 1);
+        let mut kept = vec![unnamed.clone(), other.clone(), live.clone()];
+        kept.sort();
         let left: Vec<String> = git
             .refs_under(FETCHED_REF_ROOT)
             .unwrap()
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(left, vec![live.clone()]);
+        assert_eq!(left, kept);
 
         git.update_ref(&stale, &main, None, "test").unwrap();
         let listed = list_remote_refs(&git, url).unwrap();
@@ -2527,7 +2620,7 @@ mod tests {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        assert_eq!(left, vec![live]);
+        assert_eq!(left, kept);
     }
 
     /// A fetch that stops partway can leave loose objects (git writes them
@@ -2583,6 +2676,7 @@ mod tests {
                 resolve(git, url, &ReadAt::Rev(tip.clone())).unwrap()
             };
             assert_eq!(resolved.as_deref(), Some(tip.as_str()));
+            // A branch, not main, reaches it: presence, main, branches.
             // (A checkout also reads its config before each command.)
             let counts = subcommand_counts(&log);
             let commands: usize = counts
@@ -2590,7 +2684,7 @@ mod tests {
                 .filter(|(name, _)| name.as_str() != "config")
                 .map(|(_, count)| count)
                 .sum();
-            assert_eq!(commands, 2, "{counts:?}");
+            assert_eq!(commands, 3, "{counts:?}");
             assert!(matches!(
                 read_blob_at(git, &tip, "a.txt", 1 << 20).unwrap(),
                 BlobRead::Found { .. }
@@ -2689,6 +2783,7 @@ mod tests {
         let (canonical, main, _revs) = canonical_with_many_refs(&root, 4);
         let url = canonical.to_str().unwrap();
         let mirror = bare(&root, "mirror.git");
+        quiet_maintenance(&mirror);
         let git = WorkspaceGit::bare(&mirror, None);
         fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
         let listed = list_remote_refs(&git, url).unwrap();
@@ -2729,7 +2824,7 @@ mod tests {
         let files = tree(&git, &[("a.txt", "a\n")]);
         let main = commit(&git, &files, &[], 1_700_000_000, "main\n");
         git.update_ref(MAIN_REF, &main, None, "test").unwrap();
-        let link = format!("{FETCHED_REF_ROOT}/1000-aa/0");
+        let link = format!("{FETCHED_REF_ROOT}/1000-{:032x}/0", 0xaa);
         git.ok(&["symbolic-ref", &link, MAIN_REF]).unwrap();
         assert_eq!(sweep_stale_fetches(&git), 1);
         assert_eq!(
@@ -2758,6 +2853,249 @@ mod tests {
         let counts = subcommand_counts(&log);
         assert_eq!(counts.get("ls-remote"), Some(&1), "{counts:?}");
         assert_eq!(counts.get("fetch"), Some(&1), "{counts:?}");
+    }
+
+    /// A version from history (a commit `main` has moved past, with refs
+    /// packed) reads through `?rev`, in a checkout and a mirror alike, with
+    /// two processes: presence, then one ancestry walk from `main`.
+    #[test]
+    fn an_older_commit_on_main_reads_through_rev() {
+        let (_dir, root) = tempdir();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        init_workspace_repo(&workspace);
+        let mirror = bare(&root, "mirror.git");
+        for git in [ws_git(&workspace), WorkspaceGit::bare(&mirror, None)] {
+            let first = tree(&git, &[("a.txt", "old\n")]);
+            let second = tree(&git, &[("a.txt", "new\n")]);
+            let older = commit(&git, &first, &[], 1_700_000_000, "older\n");
+            let newer = commit(&git, &second, &[&older], 1_700_000_100, "newer\n");
+            git.update_ref(MAIN_REF, &newer, None, "test").unwrap();
+            git.ok(&["pack-refs", "--all"]).unwrap();
+            let log = root.join("older.log");
+            let _ = std::fs::remove_file(&log);
+            let resolved = {
+                let _wrapper =
+                    crate::test_support::GitWrapper::install(&root, &log_subcommands(&log));
+                resolve(&git, "", &ReadAt::Rev(older.clone())).unwrap()
+            };
+            assert_eq!(resolved.as_deref(), Some(older.as_str()));
+            let counts = subcommand_counts(&log);
+            assert_eq!(counts.get("cat-file"), Some(&1), "{counts:?}");
+            assert_eq!(counts.get("merge-base"), Some(&1), "{counts:?}");
+            assert_eq!(counts.get("for-each-ref"), None, "{counts:?}");
+            let BlobRead::Found { data, .. } =
+                read_blob_at(&git, &older, "a.txt", 1 << 20).unwrap()
+            else {
+                panic!("the older file reads");
+            };
+            assert_eq!(data, b"old\n");
+        }
+    }
+
+    /// Reachability consults `main`, then only branches and fetch refs:
+    /// never tags or recovery refs, however many there are (git before
+    /// 2.49 tests every ref it is given). A commit only a tag or a recovery
+    /// ref reaches is therefore "not here".
+    #[test]
+    fn readability_never_walks_tags_or_other_namespaces() {
+        let (_dir, root) = tempdir();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let files = tree(&git, &[("a.txt", "a\n")]);
+        let main = commit(&git, &files, &[], 1_700_000_000, "main\n");
+        let on_branch = commit(&git, &files, &[&main], 1_700_000_100, "branch\n");
+        let tagged = commit(&git, &files, &[&main], 1_700_000_200, "tagged\n");
+        let parked = commit(&git, &files, &[&main], 1_700_000_300, "parked\n");
+        let mut packed = String::from("# pack-refs with: peeled fully-peeled sorted \n");
+        let mut names = vec![
+            (MAIN_REF.to_string(), main.clone()),
+            ("refs/heads/side".to_string(), on_branch.clone()),
+        ];
+        for index in 0..300 {
+            names.push((format!("refs/tags/t{index:03}"), tagged.clone()));
+            names.push((
+                format!("refs/instafy/recovery/{ORIGIN}/item-{index:03}"),
+                parked.clone(),
+            ));
+        }
+        names.sort();
+        for (name, id) in &names {
+            packed.push_str(&format!("{id} {name}\n"));
+        }
+        std::fs::write(mirror.join("packed-refs"), packed).unwrap();
+
+        let log = root.join("args.log");
+        let outcome = |rev: &str| {
+            let _ = std::fs::remove_file(&log);
+            let resolved = {
+                let _wrapper = crate::test_support::GitWrapper::install(
+                    &root,
+                    &format!("echo \"$*\" >> '{}'", log.display()),
+                );
+                resolve(&git, "", &ReadAt::Rev(rev.to_string()))
+            };
+            let calls = std::fs::read_to_string(&log).unwrap_or_default();
+            (resolved, calls)
+        };
+
+        let (resolved, calls) = outcome(&on_branch);
+        assert_eq!(resolved.unwrap().as_deref(), Some(on_branch.as_str()));
+        assert_eq!(calls.lines().count(), 3, "{calls}");
+        let walk = calls
+            .lines()
+            .find(|line| line.contains("for-each-ref"))
+            .unwrap();
+        assert!(
+            walk.ends_with(&format!(
+                "--contains {on_branch} refs/heads {FETCHED_REF_ROOT}"
+            )),
+            "{walk}"
+        );
+        for rev in [&tagged, &parked] {
+            let (resolved, calls) = outcome(rev);
+            assert!(matches!(resolved, Err(ViewError::RevNotFound)), "{calls}");
+            assert_eq!(calls.lines().count(), 3, "{calls}");
+        }
+    }
+
+    /// A `packed-refs.lock` left by a process that was killed never holds a
+    /// read up: removing the fetch refs is tried once with a short wait and
+    /// then left to a later sweep, and the read is still correct.
+    #[test]
+    fn a_stale_packed_refs_lock_never_holds_a_read_up() {
+        let (_dir, root) = tempdir();
+        let (canonical, _main, revs) = canonical_with_many_refs(&root, 3);
+        let url = canonical.to_str().unwrap();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let listed = list_remote_refs(&git, url).unwrap();
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - FETCH_SCRATCH_STALE_AFTER.as_secs()
+            - 60;
+        fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
+        let main = git.commit_id(MAIN_REF).unwrap().unwrap();
+        let stale = format!("{FETCHED_REF_ROOT}/{old}-{:032x}/0", 1);
+        git.update_ref(&stale, &main, None, "test").unwrap();
+        std::fs::write(mirror.join("packed-refs.lock"), b"").unwrap();
+
+        let log = root.join("commands.log");
+        let started = std::time::Instant::now();
+        let (fetched, resolved) = {
+            let _wrapper = crate::test_support::GitWrapper::install(&root, &log_subcommands(&log));
+            let fetched = fetch_refs(&git, url, &listed).unwrap();
+            let resolved = resolve(&git, url, &ReadAt::Ref(listed[1].0.clone())).unwrap();
+            (fetched, resolved)
+        };
+        let elapsed = started.elapsed();
+        assert_eq!(pairs(&fetched.fetched), listed);
+        assert_eq!(resolved.as_deref(), Some(revs[1].as_str()));
+        // One delete attempt per sweep and per cleanup, never a retry loop
+        // (which waited about a minute per call).
+        let counts = subcommand_counts(&log);
+        assert_eq!(counts.get("update-ref"), Some(&4), "{counts:?}");
+        assert!(elapsed < std::time::Duration::from_secs(20), "{elapsed:?}");
+        // The lock file is never removed.
+        assert!(mirror.join("packed-refs.lock").exists());
+    }
+
+    /// A sweep that cannot remove a stale namespace (a ref lock left by a
+    /// process that was killed) never fails the call, and the call still
+    /// removes its own namespace.
+    #[test]
+    fn a_failed_sweep_never_fails_the_call() {
+        let (_dir, root) = tempdir();
+        let (canonical, main, _revs) = canonical_with_many_refs(&root, 2);
+        let url = canonical.to_str().unwrap();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
+        let listed = list_remote_refs(&git, url).unwrap();
+        let old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - FETCH_SCRATCH_STALE_AFTER.as_secs()
+            - 60;
+        let namespace = format!("{FETCHED_REF_ROOT}/{old}-{:032x}", 7);
+        let stale = format!("{namespace}/0");
+        git.update_ref(&stale, &main, None, "test").unwrap();
+        std::fs::write(mirror.join(format!("{stale}.lock")), b"").unwrap();
+        for _ in 0..3 {
+            let fetched = fetch_refs(&git, url, &listed).unwrap();
+            assert_eq!(pairs(&fetched.fetched), listed);
+        }
+        let left: Vec<String> = git
+            .refs_under(FETCHED_REF_ROOT)
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(left, vec![stale]);
+    }
+
+    /// The shard accepts a recovery ref naming a tag of a tag of a commit.
+    /// Git before 2.45 peels `%(*objectname)` one level only; the commit is
+    /// then found with one more process.
+    #[test]
+    fn a_recovery_ref_naming_nested_tags_reads_as_its_commit() {
+        let (_dir, root) = tempdir();
+        let (canonical, _main, revs) = canonical_with_many_refs(&root, 1);
+        let url = canonical.to_str().unwrap();
+        let tag = |name: &str, target: &str| {
+            git_in(
+                &canonical,
+                &[
+                    "-c",
+                    "user.name=Tagger",
+                    "-c",
+                    "user.email=tagger@instafy.dev",
+                    "tag",
+                    "-a",
+                    "-m",
+                    name,
+                    name,
+                    target,
+                ],
+            );
+            git_in(&canonical, &["rev-parse", &format!("refs/tags/{name}")])
+        };
+        let inner = tag("inner", &revs[0]);
+        let outer = tag("outer", &inner);
+        let name = format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-nested");
+        git_in(&canonical, &["update-ref", &name, &outer]);
+        let reference = RecoveryRef::parse(&name).unwrap();
+
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let listed = list_remote_refs(&git, url).unwrap();
+        let fetched = fetch_refs(&git, url, &listed).unwrap();
+        let nested = fetched
+            .fetched
+            .iter()
+            .find(|fetched| fetched.reference == reference)
+            .expect("listed");
+        assert_eq!(
+            (nested.tip.as_str(), nested.commit.as_str()),
+            (outer.as_str(), revs[0].as_str())
+        );
+
+        // The second step on its own, as git before 2.45 needs it.
+        let peeled = peel_to_commits(&git, &[inner.clone(), outer.clone()]);
+        // The tags were fetched with the ref, so they are here.
+        let peeled = peeled.unwrap();
+        assert_eq!(
+            peeled.get(&inner).map(String::as_str),
+            Some(revs[0].as_str())
+        );
+        assert_eq!(
+            peeled.get(&outer).map(String::as_str),
+            Some(revs[0].as_str())
+        );
+        assert!(peel_to_commits(&git, &[]).unwrap().is_empty());
     }
 
     #[test]

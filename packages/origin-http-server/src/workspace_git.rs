@@ -73,6 +73,9 @@ pub(crate) struct RunOpts<'b> {
     pub stdin: Option<&'b [u8]>,
     /// Treat every pathspec as a literal path.
     pub literal_pathspecs: bool,
+    /// Run once: no wait-and-retry when a lock is held. For best-effort
+    /// housekeeping that must never hold up its caller.
+    pub single_attempt: bool,
 }
 
 /// An identity for a commit's author or committer.
@@ -222,7 +225,7 @@ impl<'a> WorkspaceGit<'a> {
         let mut attempts = 0usize;
         loop {
             let output = self.spawn(args, opts, network)?;
-            if output.status.success() || network || attempts >= 4 {
+            if output.status.success() || network || opts.single_attempt || attempts >= 4 {
                 return Ok(output);
             }
             // A git process the agent runs in the same checkout can hold the

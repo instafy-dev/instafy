@@ -1267,11 +1267,19 @@ async fn starting_removes_stale_recovery_fetch_refs() {
     }
     let mut server = crate::server::OriginHttpServer::new(sc.config.clone()).unwrap();
     server.start().await.unwrap();
-    let left: Vec<String> = sc
-        .local_refs("refs/instafy/fetched/")
-        .into_iter()
-        .map(|(name, _)| name)
-        .collect();
+    // The sweep runs in the background, so the listener never waits on it.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let left = loop {
+        let left: Vec<String> = sc
+            .local_refs("refs/instafy/fetched/")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        if left.len() == 1 || Instant::now() > deadline {
+            break left;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     server.stop().await.unwrap();
     assert_eq!(left, vec![live]);
 }
