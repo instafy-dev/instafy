@@ -26,9 +26,15 @@ pub(crate) struct ExportedTo {
 pub(crate) enum ExportOutcome {
     /// Stored for each listed conversation.
     Exported(Vec<ExportedTo>),
-    /// Not stored (no message names it, no Storage, not an image, or a
-    /// failure); the salvage keeps it in the private archive.
+    /// Not stored, and a rerun would get the same answer (no message names
+    /// it, not an image, the space is gone); the salvage keeps it in the
+    /// private archive.
     Kept(String),
+    /// Not stored, but a rerun may store it (no Storage or no route yet, a
+    /// credential the controller refused, a server error, a timeout, no
+    /// answer); the salvage keeps it in the private archive and the entry
+    /// waits for that rerun.
+    Failed(String),
 }
 
 pub(crate) trait Services {
@@ -145,7 +151,7 @@ impl Services for ControllerServices {
         bytes: Vec<u8>,
     ) -> ExportOutcome {
         let Some(token) = self.config.controller_internal_token.as_deref() else {
-            return ExportOutcome::Kept("no ORIGIN_INTERNAL_TOKEN to export with".to_string());
+            return ExportOutcome::Failed("no ORIGIN_INTERNAL_TOKEN to export with".to_string());
         };
         let mut url = self.config.controller_base_url.clone();
         match url.path_segments_mut() {
@@ -158,7 +164,7 @@ impl Services for ControllerServices {
                     "legacy",
                 ]);
             }
-            Err(()) => return ExportOutcome::Kept("ORIGIN_CONTROLLER_URL has no path".into()),
+            Err(()) => return ExportOutcome::Failed("ORIGIN_CONTROLLER_URL has no path".into()),
         }
         url.query_pairs_mut()
             .append_pair("workspacePath", workspace_path);
@@ -173,7 +179,7 @@ impl Services for ControllerServices {
             let response = match request.send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    return ExportOutcome::Kept(format!(
+                    return ExportOutcome::Failed(format!(
                         "the export request failed: {}",
                         error.without_url()
                     ))
@@ -190,7 +196,10 @@ impl Services for ControllerServices {
 /// its own credential, alone, for 120 seconds.
 const GIT_SALVAGE_SCOPE: &str = "git.salvage";
 
-/// What an export answer means for the file.
+/// What an export answer means for the file. Only answers about the file
+/// or the space itself are final; anything else (no Storage, a route that is
+/// not deployed yet and answers 404 without a code, a refused credential, a
+/// server error) may change by a rerun.
 pub(crate) fn interpret_export(status: u16, body: &serde_json::Value) -> ExportOutcome {
     if status == 200 {
         let exported: Vec<ExportedTo> = body
@@ -204,11 +213,18 @@ pub(crate) fn interpret_export(status: u16, body: &serde_json::Value) -> ExportO
             ExportOutcome::Exported(exported)
         };
     }
-    let code = body
-        .get("code")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("unknown");
-    ExportOutcome::Kept(format!("the controller answered {status} ({code})"))
+    let code = body.get("code").and_then(serde_json::Value::as_str);
+    let text = format!(
+        "the controller answered {status} ({})",
+        code.unwrap_or("unknown")
+    );
+    let file_or_space =
+        matches!(status, 400 | 413 | 415) || (status == 404 && code == Some("project_not_found"));
+    if file_or_space && code.is_some() {
+        ExportOutcome::Kept(text)
+    } else {
+        ExportOutcome::Failed(text)
+    }
 }
 
 #[cfg(test)]
@@ -232,16 +248,35 @@ mod tests {
                 messages: 2,
             }])
         );
+        // Final: the answer is about the file or the space.
         for (status, body) in [
             (200, json!({ "exported": [], "unreferenced": true })),
             (200, json!({ "exported": "nonsense" })),
-            (409, json!({ "code": "attachments_unavailable" })),
+            (400, json!({ "code": "invalid_workspace_path" })),
+            (400, json!({ "code": "empty_file" })),
+            (413, json!({ "code": "too_large" })),
             (415, json!({ "code": "unsupported_image" })),
-            (502, json!(null)),
-            (403, json!({ "message": "no" })),
+            (404, json!({ "code": "project_not_found" })),
         ] {
             assert!(
                 matches!(interpret_export(status, &body), ExportOutcome::Kept(_)),
+                "{status} {body}"
+            );
+        }
+        // A rerun may export it.
+        for (status, body) in [
+            (409, json!({ "code": "attachments_unavailable" })),
+            (404, json!(null)),
+            (404, json!({ "message": "not found" })),
+            (403, json!({ "code": "service_authentication_required" })),
+            (401, json!(null)),
+            (500, json!(null)),
+            (502, json!({ "code": "storage_upload_failed" })),
+            (503, json!(null)),
+            (400, json!(null)),
+        ] {
+            assert!(
+                matches!(interpret_export(status, &body), ExportOutcome::Failed(_)),
                 "{status} {body}"
             );
         }

@@ -371,30 +371,37 @@ fn salvage_repository(
                 report.exported_attachments.push(ExportedAttachment {
                     path,
                     conversations,
-                })
+                });
+                continue;
             }
             ExportOutcome::Kept(why) => {
                 report.notes.push(format!("{path} was not exported: {why}"));
-                items.push(match source {
-                    AttachmentSource::Worktree => ArchiveItem::Worktree(path.clone()),
-                    AttachmentSource::Blob(ref oid) => ArchiveItem::Blob {
-                        commit: head.clone().unwrap_or_default(),
-                        path: path.clone(),
-                        oid: oid.clone(),
-                        link: false,
-                        executable: false,
-                    },
-                });
-                private.push(PrivatePath {
-                    path,
-                    reason: "attachment",
-                    commit: match source {
-                        AttachmentSource::Worktree => None,
-                        AttachmentSource::Blob(_) => head.clone(),
-                    },
-                });
+            }
+            ExportOutcome::Failed(why) => {
+                report
+                    .notes
+                    .push(format!("{path} was not exported (a rerun may): {why}"));
+                report.export_failed.push(path.clone());
             }
         }
+        items.push(match source {
+            AttachmentSource::Worktree => ArchiveItem::Worktree(path.clone()),
+            AttachmentSource::Blob(ref oid) => ArchiveItem::Blob {
+                commit: head.clone().unwrap_or_default(),
+                path: path.clone(),
+                oid: oid.clone(),
+                link: false,
+                executable: false,
+            },
+        });
+        private.push(PrivatePath {
+            path,
+            reason: "attachment",
+            commit: match source {
+                AttachmentSource::Worktree => None,
+                AttachmentSource::Blob(_) => head.clone(),
+            },
+        });
     }
 
     // Canonical. The bundle and the private archive are written whatever
