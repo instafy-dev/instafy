@@ -310,6 +310,12 @@ impl MirrorCache {
         self.fetches_started.load(Ordering::SeqCst)
     }
 
+    /// Hold a mirror's ref lock, as a running fetch does.
+    #[cfg(test)]
+    pub(crate) fn hold_refs(lease: &MirrorLease) -> MutexGuard<'_, ()> {
+        locked(&lease.entry.refs)
+    }
+
     fn mirror_dir(&self, project: Uuid) -> PathBuf {
         self.root.join(format!("{}.git", project.as_hyphenated()))
     }
