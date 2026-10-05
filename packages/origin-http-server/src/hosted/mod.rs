@@ -30,5 +30,6 @@ mod write_tests;
 
 pub(crate) use cache::MirrorCache;
 pub use config::HostedGatewayConfig;
-pub(crate) use legacy::park_legacy_checkouts;
+pub(crate) use disk::{ensure_private_dir, remove_entry, rename_no_replace, tree_size};
+pub(crate) use legacy::{park_legacy_checkouts, LEGACY_DIR};
 pub(crate) use routes::{router, HostedState};

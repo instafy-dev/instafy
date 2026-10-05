@@ -23,6 +23,14 @@ async fn main() {
 }
 
 async fn real_main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("salvage") {
+        // A one-shot run next to the server (`docker exec <gateway>
+        // origin-http-server salvage ...`): its report goes to stdout, and
+        // only warnings are logged.
+        init_salvage_tracing();
+        process::exit(origin_http_server::salvage::cli(args[2..].to_vec()).await);
+    }
     init_tracing()?;
     let config = load_config()?;
     let mut server = if config.multi_tenant {
@@ -60,6 +68,15 @@ fn init_tracing() -> Result<()> {
         .init();
 
     Ok(())
+}
+
+fn init_salvage_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn load_config() -> Result<ServerConfig> {

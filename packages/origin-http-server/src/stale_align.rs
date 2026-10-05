@@ -650,7 +650,7 @@ fn untracked_paths(git: &WorkspaceGit<'_>) -> Result<Vec<String>> {
 }
 
 /// Each line of `.instafy/.git/logs/HEAD`, or `None` without a reflog.
-fn read_reflog(workspace: &WorkspaceDir) -> Option<Vec<String>> {
+pub(crate) fn read_reflog(workspace: &WorkspaceDir) -> Option<Vec<String>> {
     use std::io::Read as _;
     let mut file = workspace.open_file(".instafy/.git/logs/HEAD").ok()?;
     let mut text = String::new();
@@ -660,7 +660,7 @@ fn read_reflog(workspace: &WorkspaceDir) -> Option<Vec<String>> {
 
 /// The commit HEAD was on before each `reset: moving to <remote>/<branch>`,
 /// newest first.
-fn old_heads_before_resets(lines: &[String], remote_branch: &str) -> Vec<String> {
+pub(crate) fn old_heads_before_resets(lines: &[String], remote_branch: &str) -> Vec<String> {
     let wanted = format!("reset: moving to {remote_branch}");
     lines
         .iter()
