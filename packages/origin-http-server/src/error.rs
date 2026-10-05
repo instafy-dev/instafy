@@ -52,6 +52,14 @@ pub enum OriginError {
         message: String,
         report: serde_json::Value,
     },
+    /// Not ready yet: 503 with a stable code and `Retry-After`, for work
+    /// that is still running and will be done shortly.
+    #[error("{message}")]
+    RetryLater {
+        code: &'static str,
+        message: String,
+        retry_after_seconds: u64,
+    },
 }
 
 impl OriginError {
@@ -115,6 +123,18 @@ impl OriginError {
         }
     }
 
+    pub fn retry_later<T: Into<String>>(
+        code: &'static str,
+        message: T,
+        retry_after_seconds: u64,
+    ) -> Self {
+        Self::RetryLater {
+            code,
+            message: message.into(),
+            retry_after_seconds,
+        }
+    }
+
     fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
@@ -125,6 +145,7 @@ impl OriginError {
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ConflictPaths { .. } => StatusCode::CONFLICT,
             Self::WithReport { status, .. } => *status,
+            Self::RetryLater { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 }
@@ -163,6 +184,22 @@ impl IntoResponse for OriginError {
                 );
                 (status, Json(serde_json::Value::Object(body))).into_response()
             }
+            Self::RetryLater {
+                code,
+                message,
+                retry_after_seconds,
+            } => (
+                status,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_seconds.to_string(),
+                )],
+                Json(serde_json::json!({
+                    "error": message,
+                    "code": code,
+                })),
+            )
+                .into_response(),
             other => {
                 let code = matches!(other, Self::NotFound(_)).then_some(NOT_FOUND_CODE);
                 let body = Json(ErrorBody {

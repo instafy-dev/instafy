@@ -7,11 +7,15 @@
 //! copy of anything. The single-tenant origin (hosted runtimes, Desktop)
 //! lives in [`crate::routes`] and is unchanged by this module.
 
+mod cache;
 pub mod config;
 mod disk;
 mod legacy;
 mod routes;
+#[cfg(test)]
+mod tests;
 
+pub(crate) use cache::MirrorCache;
 pub use config::HostedGatewayConfig;
 pub(crate) use legacy::park_legacy_checkouts;
 pub(crate) use routes::{router, HostedState};

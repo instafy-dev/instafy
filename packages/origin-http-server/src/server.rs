@@ -20,7 +20,7 @@ use crate::config::CONTROLLER_TOKEN_REFRESH_TIMEOUT;
 use crate::config::MAX_APPLY_MANIFEST_BYTES;
 use crate::git;
 use crate::git_tokens;
-use crate::hosted::{park_legacy_checkouts, HostedGatewayConfig, HostedState};
+use crate::hosted::{park_legacy_checkouts, HostedGatewayConfig, HostedState, MirrorCache};
 use crate::route_auth::RouteAuth;
 use crate::routes::{self, AppState};
 use serde_json::Value as JsonValue;
@@ -55,6 +55,8 @@ pub struct OriginHttpServer {
     state: Option<AppState>,
     /// Set for a multi-tenant gateway, which serves the hosted routes.
     hosted: Option<Arc<HostedGatewayConfig>>,
+    /// The gateway's cache sweeper, stopped with the server.
+    sweeper: Option<JoinHandle<()>>,
 }
 
 pub struct ServerStart {
@@ -121,6 +123,7 @@ impl OriginHttpServer {
             presence_metadata: Arc::new(RwLock::new(default_metadata)),
             state: None,
             hosted,
+            sweeper: None,
         })
     }
 
@@ -292,7 +295,7 @@ impl OriginHttpServer {
     /// older image started on this volume later clones fresh instead of
     /// saving old drafts; a failure stops the start.
     async fn hosted_router(
-        &self,
+        &mut self,
         hosted: Arc<HostedGatewayConfig>,
         token_validator: TokenValidator,
         root: &std::path::Path,
@@ -309,6 +312,18 @@ impl OriginHttpServer {
                 "moved old gateway working copies out of the workspace root"
             );
         }
+        let cache_root = root.to_path_buf();
+        let config = self.config.clone();
+        let http = self.http_client.clone();
+        let max_bytes = hosted.cache_max_bytes;
+        let cache = tokio::task::spawn_blocking(move || {
+            MirrorCache::open(&cache_root, config, http, max_bytes)
+        })
+        .await
+        .context("opening the mirror cache failed")?
+        .context("could not open the mirror cache")?;
+        let cache = Arc::new(cache);
+        self.sweeper = Some(cache.spawn_sweeper());
         let state = HostedState {
             auth: RouteAuth {
                 config: self.config.clone(),
@@ -316,6 +331,7 @@ impl OriginHttpServer {
                 http_client: self.http_client.clone(),
             },
             hosted,
+            cache,
         };
         Ok(crate::hosted::router(state))
     }
@@ -410,6 +426,9 @@ impl OriginHttpServer {
             self.flush_workspace_before_shutdown(turn_active).await;
         }
         self.state = None;
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.abort();
+        }
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }

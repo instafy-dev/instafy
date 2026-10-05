@@ -5,6 +5,7 @@
 
 use std::io;
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
 
@@ -69,6 +70,60 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// Remove whatever is at `path`: a directory tree (never descending through
+/// a link), a file or a link. Nothing there is not an error.
+pub(crate) fn remove_entry(path: &Path) -> io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let result = if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match result {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// The bytes of every regular file under `path`, links not followed.
+/// Entries that vanish while it walks are skipped.
+pub(crate) fn tree_size(path: &Path) -> u64 {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(metadata) if metadata.file_type().is_file() => return metadata.len(),
+        _ => return 0,
+    }
+    let mut total = 0u64;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.file_type().is_dir() {
+                pending.push(entry.path());
+            } else if metadata.file_type().is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+    }
+    total
+}
+
+/// When `path` (not followed) last changed, if it exists.
+pub(crate) fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::symlink_metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,7 +147,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn links_are_moved_as_links_and_never_taken_for_folders() {
+    fn links_are_moved_and_removed_as_links_and_never_taken_for_folders() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         std::fs::create_dir(root.join("target")).unwrap();
@@ -104,10 +159,18 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
-        assert!(root.join("target/file").is_file(), "the target stays");
+        assert_eq!(tree_size(&root.join("moved")), 0, "a link is never walked");
+
+        remove_entry(&root.join("moved")).unwrap();
+        assert!(root.join("target/file").is_file(), "the target survives");
+        remove_entry(&root.join("moved")).unwrap();
 
         assert!(ensure_private_dir(&root.join("target/file")).is_err());
-        assert!(ensure_private_dir(&root.join("moved")).is_err());
+        std::os::unix::fs::symlink(root.join("target"), root.join("link2")).unwrap();
+        assert!(ensure_private_dir(&root.join("link2")).is_err());
+        assert_eq!(tree_size(&root.join("target")), 1);
+        assert!(modified(&root.join("link2")).is_some());
+        assert!(modified(&root.join("nothing")).is_none());
         ensure_private_dir(&root.join("fresh")).unwrap();
         ensure_private_dir(&root.join("fresh")).unwrap();
         use std::os::unix::fs::PermissionsExt as _;
