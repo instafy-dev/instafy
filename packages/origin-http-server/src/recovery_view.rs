@@ -177,10 +177,10 @@ impl RecoveryRef {
         } else {
             return Err(ViewError::InvalidRef);
         };
-        Ok(Self {
-            name: name.to_string(),
-            source,
-        })
+        // Every byte passed the rule above; git is given a copy built from
+        // the bytes the rule allows, never the caller's own string.
+        let name = copy_from_alphabet(name, REF_NAME_BYTES).ok_or(ViewError::InvalidRef)?;
+        Ok(Self { name, source })
     }
 
     /// [`Self::parse`], and `git check-ref-format` agrees.
@@ -235,13 +235,38 @@ fn is_valid_recovery_name(name: &str) -> bool {
 }
 
 /// A commit id a client sends (`?rev=`, `baseRev`, a listed `rev`): exactly
-/// 40 or 64 hex digits, returned in lower case.
+/// 40 or 64 hex digits, returned in lower case, copied from the hex digits
+/// (see [`copy_from_alphabet`]).
 pub(crate) fn parse_rev(value: &str) -> Result<String, ViewError> {
     if matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(value.to_ascii_lowercase())
+        copy_from_alphabet(&value.to_ascii_lowercase(), LOWER_HEX_BYTES)
+            .ok_or(ViewError::InvalidRev)
     } else {
         Err(ViewError::InvalidRev)
     }
+}
+
+/// Every byte a recovery or salvage ref name may hold (see
+/// [`RecoveryRef::parse`]).
+const REF_NAME_BYTES: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-/";
+
+/// The digits of a commit id in lower case.
+const LOWER_HEX_BYTES: &[u8] = b"0123456789abcdef";
+
+/// `value` rebuilt from `alphabet`: each byte is looked up there and the
+/// copy holds the table's own byte, so a name or id a caller sent reaches
+/// git's argument list only as bytes of `alphabet`. `None` when a byte is
+/// not in `alphabet`.
+fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
+    value
+        .bytes()
+        .map(|byte| {
+            alphabet
+                .iter()
+                .find(|allowed| **allowed == byte)
+                .map(|allowed| char::from(*allowed))
+        })
+        .collect()
 }
 
 /// What a read names.
@@ -2151,6 +2176,36 @@ mod tests {
             RecoveryRef::validate(&git, "refs/instafy/salvage/gateway/a..b"),
             Err(ViewError::InvalidRef)
         ));
+    }
+
+    #[test]
+    fn names_and_ids_reach_git_as_copies_of_the_allowed_bytes() {
+        let name = format!("refs/instafy/recovery/{ORIGIN}/Unsaved_0.x-1");
+        assert_eq!(
+            copy_from_alphabet(&name, REF_NAME_BYTES).as_deref(),
+            Some(name.as_str())
+        );
+        assert_eq!(RecoveryRef::parse(&name).unwrap().as_str(), name);
+        let salvage = "refs/instafy/salvage/gateway/node-1.local-0123abcd";
+        assert_eq!(RecoveryRef::parse(salvage).unwrap().as_str(), salvage);
+        assert_eq!(
+            copy_from_alphabet("0123456789abcdef", LOWER_HEX_BYTES).as_deref(),
+            Some("0123456789abcdef")
+        );
+        for outside in ["a b", "a\0b", "a\nb", "a:b", "a~b", "é", "ABC"] {
+            assert_eq!(
+                copy_from_alphabet(outside, LOWER_HEX_BYTES),
+                None,
+                "{outside:?}"
+            );
+        }
+        for outside in ["refs/a b", "refs/a\0b", "refs/a:b", "refs/a^b", "refs/é"] {
+            assert_eq!(
+                copy_from_alphabet(outside, REF_NAME_BYTES),
+                None,
+                "{outside:?}"
+            );
+        }
     }
 
     #[test]
