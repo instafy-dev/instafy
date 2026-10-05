@@ -348,7 +348,13 @@ Studio picks its versioning UI per space from the project's default origin:
   symlink or nested repository in the folder (`unsupported_entry`), and sends the folder's current
   blob as `expected` (none when the folder lacks the path, which the origin enforces). Remove
   deletes a recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show
-  "Restored" once restored. The section is hidden on servers without these routes.
+  "Restored" once restored. A restore of work the saved version already has answers
+  `committed: false` and says there was nothing to restore; with `marked: true` (salvage refs) the
+  origin recorded it as an empty version on `main`, so History also reloads at that `rev` and the
+  entry shows "Restored". `notRestored` items may carry a `reason`: a file left out as an old chat
+  upload (`attachment`, which a salvage keeps privately) is named in a sentence of its own, apart
+  from secret and ignored files, and a `kept` file is never named as refused. The section is
+  hidden on servers without these routes.
 - **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
   version (`POST /git/sync`), naming files it kept on the computer and why.
 

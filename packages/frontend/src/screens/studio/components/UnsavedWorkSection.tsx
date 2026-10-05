@@ -249,11 +249,15 @@ export function UnsavedWorkSection({
       }
       if (result.ok) {
         requestRowFocus(entry.ref);
+        // committed: false with marked: main already had the work, and an
+        // empty version (result.rev) now records the restore. The copy
+        // stays "nothing to restore", but main moved.
         onNotice({
           tone: result.committed === false ? "info" : "success",
           text: restoreSuccessCopy({
             committed: result.committed,
             notRestored: result.notRestored,
+            reasons: result.notRestoredReasons,
             kept: options.keep ?? [],
             // A conflict entry lists only its conflicted paths, not all it holds.
             entryPaths: entry.kind === "conflict" ? null : entry.paths,
@@ -265,7 +269,7 @@ export function UnsavedWorkSection({
             ? entries.filter((item) => item.ref !== entry.ref)
             : entries.map((item) => (item.ref === entry.ref ? { ...item, restoredRev: result.rev ?? item.rev } : item)),
         );
-        if (result.committed !== false) {
+        if (result.committed !== false || result.marked) {
           onCommitted(result.rev);
         }
         void refresh({ force: true });

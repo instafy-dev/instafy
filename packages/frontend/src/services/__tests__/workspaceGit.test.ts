@@ -624,7 +624,9 @@ describe("unsaved work (recovery)", () => {
       rev: "m2",
       baseRev: "m1",
       committed: true,
+      marked: false,
       notRestored: [".env"],
+      notRestoredReasons: {},
       refDeleted: true,
       originId: "gateway",
       originMode: "hosted",
@@ -635,7 +637,44 @@ describe("unsaved work (recovery)", () => {
     fetchMock().mockResolvedValue(json(200, { rev: "m2" }));
     const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/salvage/gateway/x", keep: [] });
     expect(lastRequest().init.body).toBe(JSON.stringify({ ref: "refs/instafy/salvage/gateway/x" }));
-    expect(result).toMatchObject({ ok: true, committed: null, notRestored: [], refDeleted: false });
+    expect(result).toMatchObject({ ok: true, committed: null, marked: false, notRestored: [], notRestoredReasons: {}, refDeleted: false });
+  });
+
+  it("reads marked: an empty version on main records the restore of work main already had", async () => {
+    // Desktop (and the gateway once it converges) answers a salvage restore
+    // with nothing left to bring back like this.
+    fetchMock().mockResolvedValue(
+      json(200, { rev: "m3", baseRev: "m2", committed: false, marked: true, notRestored: [], refDeleted: false }),
+    );
+    const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/salvage/gateway/x" });
+    expect(result).toMatchObject({ ok: true, rev: "m3", committed: false, marked: true });
+    // Only a boolean true counts.
+    fetchMock().mockResolvedValue(json(200, { rev: "m3", committed: false, marked: "true" }));
+    expect(await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "r" })).toMatchObject({ marked: false });
+  });
+
+  it("reads why each path was not restored when the answer says", async () => {
+    // The gateway lists {path, reason}; Desktop lists bare paths.
+    fetchMock().mockResolvedValue(
+      json(200, {
+        rev: "m3",
+        committed: true,
+        notRestored: [
+          { path: ".env", reason: "secret" },
+          { path: "chat-upload-1.png", reason: "attachment" },
+          { path: "src/kept.ts", reason: "kept" },
+          { path: "no-reason.txt" },
+          "bare.txt",
+        ],
+        refDeleted: false,
+      }),
+    );
+    const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/salvage/gateway/x" });
+    expect(result).toMatchObject({
+      ok: true,
+      notRestored: [".env", "chat-upload-1.png", "src/kept.ts", "no-reason.txt", "bare.txt"],
+      notRestoredReasons: { ".env": "secret", "chat-upload-1.png": "attachment", "src/kept.ts": "kept" },
+    });
   });
 
   it("returns restore conflicts with head and paths", async () => {

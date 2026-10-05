@@ -65,7 +65,7 @@ vi.mock("../../../../sdk/instafy", () => ({
 
 import { readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../../workspace/unsavedWorkSeen";
 import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
-import { HistoryDrawer } from "../HistoryDrawer";
+import { HISTORY_COMMIT_DEBOUNCE_MS, HistoryDrawer } from "../HistoryDrawer";
 
 const HEAD = "e".repeat(40);
 const NEW_HEAD = "f".repeat(40);
@@ -351,9 +351,90 @@ describe("HistoryDrawer: Unsaved work", () => {
       originMode: "hosted",
     });
     await render();
-    await press(row(container, SALVAGE), "unsaved-work-restore");
+    const commits: unknown[] = [];
+    const onCommit = (event: Event) => commits.push((event as CustomEvent).detail);
+    window.addEventListener("instafy:workspace-commit", onCommit);
+    try {
+      await press(row(container, SALVAGE), "unsaved-work-restore");
+    } finally {
+      window.removeEventListener("instafy:workspace-commit", onCommit);
+    }
     expect(q(container, "history-status")?.textContent).toBe(
       "Nothing to restore. The saved version already has this work.",
+    );
+    // No marked: main did not move, so nothing announces a new version.
+    expect(commits).toEqual([]);
+  });
+
+  it("reloads History at the empty version a marked restore made and marks the salvage entry restored", async () => {
+    const MARKER = "9".repeat(40);
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+    mocks.restoreRecovery.mockResolvedValue({
+      ok: true,
+      rev: MARKER,
+      baseRev: HEAD,
+      committed: false,
+      marked: true,
+      notRestored: [],
+      notRestoredReasons: {},
+      refDeleted: false,
+      originId: "origin-1",
+      originMode: "desktop",
+    });
+    await render(versioning({ mode: "desktop", firstPaintMode: "desktop", originMode: "desktop", stateless: false, chromeMode: "desktop" }));
+    expect(q(row(container, SALVAGE), "unsaved-work-restored")).toBeNull();
+    // The list after the restore has not answered: the mark comes from the answer.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    const loads = mocks.fetchHistory.mock.calls.length;
+    const commits: unknown[] = [];
+    const onCommit = (event: Event) => commits.push((event as CustomEvent).detail);
+    window.addEventListener("instafy:workspace-commit", onCommit);
+    vi.useFakeTimers();
+    try {
+      await press(row(container, SALVAGE), "unsaved-work-restore");
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Nothing to restore. The saved version already has this work.",
+      );
+      // main moved to the empty version that records the restore.
+      expect(commits).toEqual([{ projectId: "project-1", kind: "workspace.commit", data: { rev: MARKER } }]);
+      expect(q(row(container, SALVAGE), "unsaved-work-restored")?.textContent).toBe("Restored");
+      await act(async () => {
+        vi.advanceTimersByTime(HISTORY_COMMIT_DEBOUNCE_MS);
+      });
+      await flush();
+      expect(mocks.fetchHistory.mock.calls.length).toBe(loads + 1);
+    } finally {
+      window.removeEventListener("instafy:workspace-commit", onCommit);
+      vi.useRealTimers();
+    }
+  });
+
+  it("names old chat uploads the salvage kept privately apart from secret files", async () => {
+    mocks.fetchRecovery.mockResolvedValue(
+      list([
+        recoveryEntry(SALVAGE, {
+          kind: "salvage",
+          dismissible: false,
+          paths: ["src/a.ts", ".env", "chat-upload-1.png"],
+        }),
+      ]),
+    );
+    mocks.restoreRecovery.mockResolvedValue({
+      ok: true,
+      rev: NEW_HEAD,
+      baseRev: HEAD,
+      committed: true,
+      marked: false,
+      notRestored: [".env", "chat-upload-1.png"],
+      notRestoredReasons: { ".env": "secret", "chat-upload-1.png": "attachment" },
+      refDeleted: false,
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, SALVAGE), "unsaved-work-restore");
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Restored as a new version. Not restored: .env and chat-upload-1.png. Secret and ignored files stay out of the space. Old chat upload files aren't saved to the space.",
     );
   });
 

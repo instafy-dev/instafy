@@ -18,7 +18,9 @@ import {
   LEASE_CONFLICT_COPY,
   MAIN_BUSY_COPY,
   MIRROR_RESET_COPY,
+  NOTHING_TO_RESTORE_COPY,
   rejectedPathCopy,
+  restoreSuccessCopy,
   REVERT_CONFLICT_COPY,
   REVERT_DIALOG,
   revertCheckFailedCopy,
@@ -221,6 +223,51 @@ describe("versioning copy shared across surfaces", () => {
     expect(cardRevertMessage(422, "excluded_path", { reason: "secret" })).toBe(
       "This change can't be reverted here. Secret files aren't saved to the space. Ask the agent to undo it.",
     );
+  });
+
+  it("names old chat uploads a salvage kept privately in a sentence of their own on Restore", () => {
+    const placement = { unsavedWorkInHistory: true };
+    const attachmentRule = describeFileNotSaved({ reason: "attachment", keptSavedVersion: false }, placement);
+    expect(attachmentRule).toBe("Old chat upload files aren't saved to the space.");
+    // Only old chat uploads were left out: the secret and ignored sentence would be wrong.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["chat-upload-1.png"],
+        reasons: { "chat-upload-1.png": "attachment" },
+      }),
+    ).toBe(`Restored as a new version. Not restored: chat-upload-1.png. ${attachmentRule}`);
+    // Both kinds: one list, then one sentence for each.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: [".env", "chat-upload-1.png"],
+        reasons: { ".env": "secret", "chat-upload-1.png": "attachment" },
+      }),
+    ).toBe(
+      `Restored as a new version. Not restored: .env and chat-upload-1.png. Secret and ignored files stay out of the space. ${attachmentRule}`,
+    );
+    // Desktop lists paths without reasons: the one sentence as before.
+    expect(restoreSuccessCopy({ committed: true, notRestored: [".env", "chat-upload-1.png"] })).toBe(
+      "Restored as a new version. Not restored: .env and chat-upload-1.png. Secret and ignored files stay out of the space.",
+    );
+  });
+
+  it("never names a path the restore kept on request as refused", () => {
+    // Keep on a folder covers the files below it; the gateway names each one `kept`.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["src/lib/a.ts"],
+        kept: ["src/lib"],
+        reasons: { "src/lib/a.ts": "kept" },
+      }),
+    ).toBe("Restored as a new version. Kept the current version of src/lib.");
+  });
+
+  it("says there was nothing to restore when main already had the work, marked or not", () => {
+    expect(NOTHING_TO_RESTORE_COPY).toBe("Nothing to restore. The saved version already has this work.");
+    expect(restoreSuccessCopy({ committed: false, notRestored: [] })).toBe(NOTHING_TO_RESTORE_COPY);
   });
 
   it("lists paths one way", () => {

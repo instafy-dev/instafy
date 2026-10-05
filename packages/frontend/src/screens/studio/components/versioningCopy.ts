@@ -626,43 +626,66 @@ export function unsavedWorkUnconfirmedDeleteCopy(path: string): string {
 }
 
 /**
+ * A restore with nothing to bring back: the saved version already held the
+ * work. Also when the origin marked it (an empty version on `main` now
+ * records the restore): no files changed either way.
+ */
+export const NOTHING_TO_RESTORE_COPY = "Nothing to restore. The saved version already has this work.";
+
+/**
  * A finished restore. `kept` are the paths the person chose "Keep current"
- * for (the server reports them in `notRestored` too); only the rest of
- * `notRestored` were refused as secret or ignored. `committed: false` means
- * no version was made: the saved version already held everything that could
- * be restored, so the copy says what was left out first (never that the
- * space has the refused files). `entryPaths` is every path the entry holds,
- * or null when that is not known (a conflict entry lists only its conflicted
- * paths): the copy speaks of "the rest" only when there was one.
+ * for (the server reports them in `notRestored` too, the gateway with the
+ * reason `kept`, which also covers files below a kept folder); only the
+ * rest of `notRestored` were refused. `reasons` says why, when the origin
+ * does: old chat uploads (`attachment`, files a salvage kept privately) get
+ * a sentence of their own, and every other refusal reads as secret or
+ * ignored, as it does without reasons (Desktop lists bare paths).
+ * `committed: false` means no version with changes was made: the saved
+ * version already held everything that could be restored, so the copy says
+ * what was left out first (never that the space has the refused files).
+ * `entryPaths` is every path the entry holds, or null when that is not known
+ * (a conflict entry lists only its conflicted paths): the copy speaks of
+ * "the rest" only when there was one.
  */
 export function restoreSuccessCopy({
   committed,
   notRestored,
   kept = [],
   entryPaths = null,
+  reasons = {},
 }: {
   committed: boolean | null | undefined;
   notRestored: string[];
   kept?: string[];
   entryPaths?: string[] | null;
+  reasons?: Readonly<Record<string, string>>;
 }): string {
   const keptSet = new Set(kept);
   const keptPaths = Array.from(keptSet);
-  const refused = notRestored.filter((path) => !keptSet.has(path));
+  const refused = notRestored.filter((path) => !keptSet.has(path) && reasons[path] !== "kept");
+  const attachments = refused.filter((path) => reasons[path] === "attachment");
   const leftOut: string[] = [];
   if (keptPaths.length > 0) {
     leftOut.push(`Kept the current version of ${formatPathList(keptPaths)}.`);
   }
   if (refused.length > 0) {
-    leftOut.push(`Not restored: ${formatPathList(refused)}. Secret and ignored files stay out of the space.`);
+    leftOut.push(`Not restored: ${formatPathList(refused)}.`);
+    if (attachments.length < refused.length) {
+      leftOut.push("Secret and ignored files stay out of the space.");
+    }
+    if (attachments.length > 0) {
+      leftOut.push(asSentence(FILE_RULES.attachment));
+    }
   }
   if (committed !== false) {
     return ["Restored as a new version.", ...leftOut].join(" ");
   }
   if (leftOut.length === 0) {
-    return "Nothing to restore. The saved version already has this work.";
+    return NOTHING_TO_RESTORE_COPY;
   }
-  const leftOutSet = new Set([...keptPaths, ...refused]);
+  // Everything in notRestored was left out: kept (files below a kept folder
+  // too) or refused.
+  const leftOutSet = new Set([...keptPaths, ...notRestored]);
   const known = entryPaths && entryPaths.length > 0 ? entryPaths : null;
   if (!known) {
     return [...leftOut, "Nothing else to restore."].join(" ");
