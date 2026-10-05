@@ -2389,6 +2389,108 @@ async fn revert_route_reverts_through_the_publish() {
     server.abort();
 }
 
+/// Desktop History pages: `skip`, up to 50 rows, `hasMore`, each row's
+/// first parent and parent count, and who made it (a person's pseudonym,
+/// Instafy, or someone else), in the checkout's `git log` order.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_route_pages_a_checkout_with_parents_and_actors() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let seed = sc.head();
+    sc.write("a.md", b"a\n");
+    sc.agent_commit(&["a.md"], "agent work");
+    sc.write("b.md", b"b\n");
+    let report = publish(
+        &sc.ctx(true),
+        PublishRequest {
+            selection: Selection::Paths(vec!["b.md".to_string()]),
+            message: "Save version".to_string(),
+            author: Some(GitIdentity::new("Ada Lovelace", PSEUDONYM)),
+            budget: Duration::from_secs(30),
+        },
+    )
+    .expect("publish");
+    assert_eq!(report.git_sync_status, SyncStatus::Published);
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let get = |query: &str| {
+        let url = format!("{base}/git/history{query}");
+        let client = client.clone();
+        async move {
+            let response = client.get(url).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            response.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+
+    let page = get("?limit=2").await;
+    assert_eq!(page["hasMore"], true, "{page}");
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["subject"], "Save version");
+    assert_eq!(entries[0]["authorEmail"], PSEUDONYM);
+    assert_eq!(entries[0]["actor"], "user");
+    assert_eq!(entries[0]["parentCount"], 1);
+    assert_eq!(entries[0]["firstParent"], entries[1]["commit"]);
+    assert_eq!(entries[1]["subject"], "agent work");
+    assert_eq!(entries[1]["actor"], "external");
+
+    let rest = get("?limit=2&skip=2").await;
+    assert_eq!(rest["hasMore"], false, "{rest}");
+    let rest = rest["entries"].as_array().unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0]["commit"], seed.as_str());
+    assert_eq!(rest[0]["parentCount"], 0);
+    assert!(rest[0].get("firstParent").is_none(), "{rest:?}");
+    // The seed commit's identity is an `@instafy.dev` service address.
+    assert_eq!(rest[0]["actor"], "service");
+
+    // The default page is 8 rows and a page is never longer than 50.
+    for _ in 0..60 {
+        sc.push_other(
+            &[("count.md", Some(Uuid::new_v4().to_string().as_bytes()))],
+            "more",
+        );
+    }
+    sc.publish(Selection::None);
+    assert_eq!(get("").await["entries"].as_array().unwrap().len(), 8);
+    let capped = get("?limit=500").await;
+    assert_eq!(capped["entries"].as_array().unwrap().len(), 50);
+    assert_eq!(capped["hasMore"], true);
+    server.abort();
+}
+
+/// The review of a saved version says whether it is a merge.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_review_counts_the_parents_of_a_version() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    sc.write("mine.md", b"mine\n");
+    sc.agent_commit(&["mine.md"], "local work");
+    sc.push_other(&[("theirs.md", Some(b"theirs\n"))], "saved elsewhere");
+    let report = sc.publish(Selection::None);
+    let merge = report.rev.expect("a merge was published");
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    for (commit, parents) in [(merge.clone(), 2), (format!("{merge}^2"), 1)] {
+        let body: serde_json::Value = client
+            .get(format!("{base}/git/history/review"))
+            .query(&[("commit", commit.as_str())])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["parentCount"], parents, "{commit}: {body}");
+    }
+    server.abort();
+}
+
 /// A path the shard refuses never keeps the rest of a stop's work local:
 /// the recovery commit is pushed without it, so a drain sees nothing
 /// unpushed.

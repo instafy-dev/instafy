@@ -592,7 +592,7 @@ fn parse_ls_tree_long(raw: &[u8]) -> Vec<(String, Option<ObjectEntry>)> {
 
 /// Up to `limit` (at most [`MAX_HISTORY_PAGE`]) commits of `head`'s
 /// first-parent chain after skipping `skip`, newest first, each with its
-/// first parent.
+/// first parent and parent count.
 ///
 /// Ids and parents come from `rev-list`, which prints nothing but ids, so no
 /// commit text can change them; the other fields come from a `git log` of
@@ -603,33 +603,97 @@ pub(crate) fn first_parent_history(
     limit: usize,
     skip: usize,
 ) -> Result<Vec<GitHistoryEntry>, ViewError> {
-    let head = parse_rev(head)?;
+    walk_history(
+        git,
+        head,
+        limit.min(MAX_HISTORY_PAGE),
+        skip,
+        HistoryWalk::FirstParent,
+    )
+}
+
+/// Which commits a history page lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistoryWalk {
+    /// The first-parent chain: the versions of `main`.
+    FirstParent,
+    /// Every commit `head` reaches, in `git log`'s default order: a
+    /// checkout's own history, as single-tenant origins list it.
+    All,
+}
+
+/// One page of history and whether older commits follow it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HistoryPage {
+    pub entries: Vec<GitHistoryEntry>,
+    pub has_more: bool,
+}
+
+/// Up to `limit` (at most [`MAX_HISTORY_PAGE`]) commits of `walk` from
+/// `head` after skipping `skip`, newest first, each with its first parent
+/// and parent count, and whether another commit follows the page (one more
+/// is walked to tell).
+pub(crate) fn history_page(
+    git: &WorkspaceGit<'_>,
+    head: &str,
+    limit: usize,
+    skip: usize,
+    walk: HistoryWalk,
+) -> Result<HistoryPage, ViewError> {
     let limit = limit.min(MAX_HISTORY_PAGE);
+    if limit == 0 {
+        return Ok(HistoryPage::default());
+    }
+    let mut entries = walk_history(git, head, limit + 1, skip, walk)?;
+    let has_more = entries.len() > limit;
+    entries.truncate(limit);
+    Ok(HistoryPage { entries, has_more })
+}
+
+/// Up to `count` commits of `walk` from `head` after `skip`, as
+/// [`first_parent_history`] reads them.
+fn walk_history(
+    git: &WorkspaceGit<'_>,
+    head: &str,
+    count: usize,
+    skip: usize,
+    walk: HistoryWalk,
+) -> Result<Vec<GitHistoryEntry>, ViewError> {
+    let head = parse_rev(head)?;
     // Git reads the count as an int: a larger skip is past any history.
-    if limit == 0 || skip > MAX_HISTORY_SKIP {
+    if count == 0 || skip > MAX_HISTORY_SKIP {
         return Ok(Vec::new());
     }
-    let max_count = limit.to_string();
+    let max_count = count.to_string();
     let skip = skip.to_string();
-    let walk = ["--first-parent", "--max-count", &max_count, "--skip", &skip];
+    let mut walk_args = Vec::new();
+    if walk == HistoryWalk::FirstParent {
+        walk_args.push("--first-parent");
+    }
+    walk_args.extend(["--max-count", &max_count, "--skip", &skip]);
     let mut args = vec!["rev-list", "--parents"];
-    args.extend(walk);
+    args.extend(&walk_args);
     args.extend(["--end-of-options", &head, "--"]);
     let listed = git.stdout(&args)?;
     let mut chain = Vec::new();
     for line in listed.lines() {
         let mut ids = line.split(' ');
         let commit = ids.next().unwrap_or_default();
-        if !is_full_object_id(commit) {
+        let parents: Vec<&str> = ids.collect();
+        if !is_full_object_id(commit) || !parents.iter().all(|id| is_full_object_id(id)) {
             return Err(anyhow::anyhow!("rev-list printed {line:?}").into());
         }
-        chain.push((commit.to_string(), ids.next().map(str::to_string)));
+        chain.push((
+            commit.to_string(),
+            parents.first().map(|id| id.to_string()),
+            parents.len(),
+        ));
     }
 
     let format = HistoryFormat::new();
     let pretty = format.pretty_arg();
     let mut args = vec!["log"];
-    args.extend(walk);
+    args.extend(&walk_args);
     args.extend([
         "--date=iso-strict",
         &pretty,
@@ -642,12 +706,13 @@ pub(crate) fn first_parent_history(
         || entries
             .iter()
             .zip(&chain)
-            .any(|(entry, (commit, _))| entry.commit != *commit)
+            .any(|(entry, (commit, _, _))| entry.commit != *commit)
     {
         return Err(anyhow::anyhow!("the history of {head} changed while it was read").into());
     }
-    for (entry, (_, first_parent)) in entries.iter_mut().zip(chain) {
+    for (entry, (_, first_parent, parents)) in entries.iter_mut().zip(chain) {
         entry.first_parent = first_parent;
+        entry.parent_count = Some(parents);
     }
     Ok(entries)
 }
@@ -1815,6 +1880,91 @@ mod tests {
         assert!(first_parent_history(&git, &c, 2, i32::MAX as usize)
             .unwrap()
             .is_empty());
+    }
+
+    /// A page walks one commit more than it shows to say whether older ones
+    /// follow; every row names its parents' count, and the whole-history
+    /// walk (a checkout's) lists side commits too, in `git log` order.
+    #[test]
+    fn history_pages_count_parents_and_say_whether_more_follow() {
+        let (_dir, root) = tempdir();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let files = tree(&git, &[("README.md", "one\n")]);
+        let a = commit(&git, &files, &[], 1_700_000_000, "first\n");
+        let b = commit(&git, &files, &[&a], 1_700_000_100, "second\n");
+        let side = commit(&git, &files, &[&a], 1_700_000_150, "side\n");
+        let merge = commit(&git, &files, &[&b, &side], 1_700_000_200, "merge\n");
+        let c = commit(&git, &files, &[&merge], 1_700_000_300, "latest\n");
+
+        let rows = |page: &HistoryPage| -> Vec<(String, Option<usize>)> {
+            page.entries
+                .iter()
+                .map(|entry| (entry.subject.clone(), entry.parent_count))
+                .collect()
+        };
+        let first = history_page(&git, &c, 2, 0, HistoryWalk::FirstParent).unwrap();
+        assert_eq!(
+            rows(&first),
+            vec![
+                ("latest".to_string(), Some(1)),
+                ("merge".to_string(), Some(2))
+            ]
+        );
+        assert!(first.has_more);
+        let last = history_page(&git, &c, 2, 2, HistoryWalk::FirstParent).unwrap();
+        assert_eq!(
+            rows(&last),
+            vec![
+                ("second".to_string(), Some(1)),
+                ("first".to_string(), Some(0))
+            ]
+        );
+        assert!(!last.has_more, "nothing follows the root");
+        assert_eq!(last.entries[1].first_parent, None);
+
+        let all = history_page(&git, &c, 50, 0, HistoryWalk::All).unwrap();
+        let expected: Vec<String> = git
+            .stdout(&["log", "--format=%s", &c])
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            all.entries
+                .iter()
+                .map(|entry| entry.subject.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(all.entries.len(), 5);
+        assert!(!all.has_more);
+        let merge_row = all
+            .entries
+            .iter()
+            .find(|entry| entry.commit == merge)
+            .unwrap();
+        assert_eq!(merge_row.parent_count, Some(2));
+        assert_eq!(merge_row.first_parent.as_deref(), Some(b.as_str()));
+        let json = serde_json::to_value(&all.entries).unwrap();
+        assert_eq!(json[0]["parentCount"], 1);
+
+        // A page is at most 50 rows, and a full page of exactly the rest
+        // says nothing follows.
+        let full = history_page(&git, &c, 5, 0, HistoryWalk::All).unwrap();
+        assert_eq!(full.entries.len(), 5);
+        assert!(!full.has_more);
+        assert_eq!(
+            history_page(&git, &c, 0, 0, HistoryWalk::All).unwrap(),
+            HistoryPage::default()
+        );
+        let mut long = c.clone();
+        for index in 0..55i64 {
+            long = commit(&git, &files, &[&long], 1_700_001_000 + index, "more\n");
+        }
+        let capped = history_page(&git, &long, 500, 0, HistoryWalk::All).unwrap();
+        assert_eq!(capped.entries.len(), MAX_HISTORY_PAGE);
+        assert!(capped.has_more);
     }
 
     /// Subjects, author names and trailers that hold the bytes a listing

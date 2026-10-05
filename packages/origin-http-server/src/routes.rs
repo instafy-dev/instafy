@@ -39,8 +39,11 @@ use crate::git;
 use crate::git_tokens;
 use crate::paths::is_reserved_path;
 use crate::publish::{self, PublishContext, PublishReport, PublishRequest, Selection, SyncStatus};
+use crate::recovery_view;
 use crate::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
-use crate::workspace_git::{blob_oid, workspace_file_blob_oid, GitIdentity, MAX_LISTED_BLOB_BYTES};
+use crate::workspace_git::{
+    blob_oid, workspace_file_blob_oid, GitIdentity, WorkspaceGit, MAX_LISTED_BLOB_BYTES,
+};
 use crate::workspace_lock::try_acquire_workspace_apply_lock;
 
 const GIT_WORKSPACE_SYNC_TTL_SECONDS: u64 = 120;
@@ -836,6 +839,8 @@ struct GitDiffQuery {
 #[derive(Debug, Deserialize)]
 struct GitHistoryQuery {
     limit: Option<usize>,
+    /// Commits to skip before the page (single-tenant origins).
+    skip: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -866,6 +871,9 @@ struct GitHistoryResponse {
     branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     head_ref: Option<String>,
+    /// Older commits follow this page (single-tenant origins).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    has_more: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -876,6 +884,10 @@ struct GitHistoryReviewResponse {
     supported: bool,
     commit: Option<String>,
     entries: Vec<git::DirtyPathEntry>,
+    /// How many parents the commit has (single-tenant origins): a merge
+    /// cannot be reverted without a base.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -1147,6 +1159,7 @@ async fn handle_git_history_review(
             supported: true,
             commit: None,
             entries: Vec::new(),
+            parent_count: None,
             error: Some("missing commit".to_string()),
         }));
     }
@@ -1160,6 +1173,7 @@ async fn handle_git_history_review(
             supported: false,
             commit: Some(normalized_commit.to_string()),
             entries: Vec::new(),
+            parent_count: None,
             error: None,
         }));
     }
@@ -1184,6 +1198,7 @@ async fn handle_git_history_review(
                 supported: true,
                 commit: Some(normalized_commit.to_string()),
                 entries: Vec::new(),
+                parent_count: None,
                 error: Some(
                     "Workspace is busy applying/syncing changes. Try Refresh in a moment."
                         .to_string(),
@@ -1194,28 +1209,55 @@ async fn handle_git_history_review(
 
     let canonical_root = Arc::new(workspace_root);
     let commit = normalized_commit.to_string();
+    let count_parents = !state.config.multi_tenant;
     let review = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
-        git::list_commit_files(canonical_root.as_path(), &commit, None)
+        let entries = git::list_commit_files(canonical_root.as_path(), &commit, None)?;
+        let parent_count = if count_parents {
+            commit_parent_count(canonical_root.as_path(), &commit)
+        } else {
+            None
+        };
+        Ok::<_, OriginError>((entries, parent_count))
     })
     .await
     .map_err(|error| OriginError::internal(format!("git history review task failed: {error}")))?;
 
     match review {
-        Ok(entries) => Ok(Json(GitHistoryReviewResponse {
+        Ok((entries, parent_count)) => Ok(Json(GitHistoryReviewResponse {
             supported: true,
             commit: Some(normalized_commit.to_string()),
             entries,
+            parent_count,
             error: None,
         })),
         Err(error) => Ok(Json(GitHistoryReviewResponse {
             supported: true,
             commit: Some(normalized_commit.to_string()),
             entries: Vec::new(),
+            parent_count: None,
             error: Some(error.to_string()),
         })),
     }
+}
+
+/// How many parents `commit` has in the checkout at `root`, when it names a
+/// commit there.
+fn commit_parent_count(root: &Path, commit: &str) -> Option<usize> {
+    let git = WorkspaceGit::new(root, None);
+    let id = git.commit_id(commit).ok()??;
+    let listed = git
+        .stdout(&[
+            "rev-list",
+            "--parents",
+            "--max-count=1",
+            "--end-of-options",
+            &id,
+            "--",
+        ])
+        .ok()?;
+    Some(listed.split_whitespace().count().saturating_sub(1))
 }
 
 async fn handle_git_history(
@@ -1238,6 +1280,7 @@ async fn handle_git_history(
             entries: Vec::new(),
             branch: None,
             head_ref: None,
+            has_more: None,
             error: None,
         }));
     }
@@ -1263,6 +1306,7 @@ async fn handle_git_history(
                 entries: Vec::new(),
                 branch: None,
                 head_ref: None,
+                has_more: None,
                 error: Some(
                     "Workspace is busy applying/syncing changes. Try Refresh in a moment."
                         .to_string(),
@@ -1272,6 +1316,12 @@ async fn handle_git_history(
     };
 
     let canonical_root = Arc::new(workspace_root);
+    if !state.config.multi_tenant {
+        return Ok(Json(
+            checkout_history_page(&state, project_id, canonical_root, query.limit, query.skip)
+                .await?,
+        ));
+    }
     let limit = query.limit.unwrap_or(8).clamp(1, 12);
     let history = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
@@ -1289,6 +1339,7 @@ async fn handle_git_history(
             entries,
             branch: head.branch,
             head_ref: head.head_ref,
+            has_more: None,
             error: None,
         })),
         Err(error) => Ok(Json(GitHistoryResponse {
@@ -1296,9 +1347,78 @@ async fn handle_git_history(
             entries: Vec::new(),
             branch: None,
             head_ref: None,
+            has_more: None,
             error: Some(error.to_string()),
         })),
     }
+}
+
+/// A single-tenant checkout's history page: up to
+/// [`recovery_view::MAX_HISTORY_PAGE`] commits (8 by default) after `skip`,
+/// in `git log` order as before, each with its first parent, its parent
+/// count and who made it, and whether older commits follow. The caller holds
+/// the project's apply lock.
+async fn checkout_history_page(
+    state: &AppState,
+    project_id: Uuid,
+    root: Arc<PathBuf>,
+    limit: Option<usize>,
+    skip: Option<usize>,
+) -> Result<GitHistoryResponse, OriginError> {
+    let limit = limit.unwrap_or(8).clamp(1, recovery_view::MAX_HISTORY_PAGE);
+    let skip = skip.unwrap_or(0);
+    let service_email = state.config.git_author_email.clone();
+    let has_checkout = has_git_checkout(state, project_id);
+    let history = tokio::task::spawn_blocking(move || {
+        let _workspace_guard = try_acquire_workspace_apply_lock(root.as_path())?
+            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+        let head = git::resolve_history_head_ref(root.as_path(), None)?;
+        if !has_checkout {
+            return Ok::<_, OriginError>((head, recovery_view::HistoryPage::default()));
+        }
+        let git = WorkspaceGit::new(root.as_path(), None);
+        let tip = git
+            .commit_id("HEAD")
+            .map_err(|error| OriginError::internal(format!("{error:#}")))?;
+        let mut page = match tip {
+            Some(tip) => recovery_view::history_page(
+                &git,
+                &tip,
+                limit,
+                skip,
+                recovery_view::HistoryWalk::All,
+            )?,
+            None => recovery_view::HistoryPage::default(),
+        };
+        for entry in &mut page.entries {
+            entry.actor = Some(git::HistoryActor::of_author(
+                &entry.author_email,
+                &service_email,
+            ));
+        }
+        Ok((head, page))
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("git history task failed: {error}")))?;
+
+    Ok(match history {
+        Ok((head, page)) => GitHistoryResponse {
+            supported: true,
+            entries: page.entries,
+            branch: head.branch,
+            head_ref: head.head_ref,
+            has_more: Some(page.has_more),
+            error: None,
+        },
+        Err(error) => GitHistoryResponse {
+            supported: true,
+            entries: Vec::new(),
+            branch: None,
+            head_ref: None,
+            has_more: None,
+            error: Some(error.to_string()),
+        },
+    })
 }
 
 async fn handle_apply(
