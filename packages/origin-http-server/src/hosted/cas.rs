@@ -123,27 +123,30 @@ fn author_name(name: Option<&str>) -> String {
     }
 }
 
-/// A caller's commit message with every line that starts with `Instafy-`
-/// (any letter case) removed, since those trailers mean something to the
-/// gateway, and control characters other than newlines and tabs dropped.
-/// `None` when nothing is left.
+/// A caller's commit message with control characters other than newlines
+/// and tabs dropped, and then every line that starts with `Instafy-` (any
+/// letter case, after leading blanks) removed, since those trailers mean
+/// something to the gateway. `None` when nothing is left.
+///
+/// The order matters: a line checked before its control characters are
+/// dropped (`\u{1}Instafy-Restored-From: ...`) would pass the check and
+/// then become a real trailer of a commit the gateway makes.
 pub(crate) fn caller_message(text: Option<&str>) -> Option<String> {
     let text = text?;
     let kept: Vec<String> = text
         .lines()
+        .map(|line| {
+            line.chars()
+                .filter(|c| *c == '\t' || !c.is_control())
+                .collect::<String>()
+        })
         .filter(|line| {
             !line
                 .trim_start()
                 .get(..8)
                 .is_some_and(|prefix| prefix.eq_ignore_ascii_case("instafy-"))
         })
-        .map(|line| {
-            line.chars()
-                .filter(|c| *c == '\t' || !c.is_control())
-                .collect::<String>()
-                .trim_end()
-                .to_string()
-        })
+        .map(|line| line.trim_end().to_string())
         .collect();
     let joined = kept.join("\n");
     let mut message = joined.trim().to_string();
