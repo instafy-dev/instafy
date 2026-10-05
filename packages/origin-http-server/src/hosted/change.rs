@@ -35,8 +35,7 @@ use uuid::Uuid;
 
 use super::answers::{
     delete_requires_base_rev, excluded_path, head_moved, hook_refusal, ignored_path, internal,
-    path_type_conflict, policy_rejected, reason_name, rev_not_on_main, revert_conflict,
-    unsupported_entry,
+    path_type_conflict, policy_rejected, rev_not_on_main, revert_conflict, unsupported_entry,
 };
 use super::read::readable;
 use super::restore::Restore;
@@ -357,7 +356,7 @@ impl Edits {
             .iter()
             .map(|(path, reason)| SkippedPath {
                 path: path.clone(),
-                reason: reason_name(*reason),
+                reason: reason.name(),
             })
             .collect()
     }

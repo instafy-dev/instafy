@@ -28,13 +28,15 @@ use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git::{looks_like_transient_http_error, EmbeddedGitDirGuard};
 use crate::publish_policy::{
-    deletion_allowed, is_unsafe_path, unpublishable_reason, RejectReason, MAX_PUBLISH_BLOB_BYTES,
+    deletion_allowed, is_unsafe_path, restore_refusal, unpublishable_reason, RejectReason,
+    MAX_PUBLISH_BLOB_BYTES,
 };
 use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
-    parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
-    restore_commits, restore_of, without_origin_trailers, RecoveryRef, ViewError,
+    left_out_reason, parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref,
+    restore_commit_message, restore_commits, restore_of, without_origin_trailers, RecoveryRef,
+    ViewError,
 };
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
@@ -2673,19 +2675,34 @@ impl Publisher<'_> {
             .collect();
         // Refused because it can never come back here, or left out on
         // request (`keep`). Only the person's own choices let the ref go,
-        // so refusal is decided first: a secret or ignored file below a
-        // kept folder (which no conflict showed them) is refused, not kept.
+        // so refusal is decided first, by the rule the gateway restores by
+        // too: a secret or ignored file below a kept folder (which no
+        // conflict showed them) is refused, not kept.
         let mut not_restored = Vec::new();
         let mut refused = Vec::new();
         for change in &changes {
-            if crate::paths::is_reserved_path(&change.path)
-                || self.policy_reason(change, &sizes).is_some()
-                || ignored.contains(&change.path)
-            {
+            let refusal = self
+                .filtered
+                .get(&change.path)
+                .copied()
+                .or_else(|| {
+                    restore_refusal(
+                        &change.path,
+                        change.status == 'D',
+                        &change.new_mode,
+                        sizes.get(&change.new_oid).copied(),
+                    )
+                })
+                .or_else(|| {
+                    ignored
+                        .contains(&change.path)
+                        .then_some(RejectReason::Ignored)
+                });
+            if left_out_reason(refusal, keep.covers(&change.path)).is_some() {
                 not_restored.push(change.path.clone());
-                refused.push(change.path.clone());
-            } else if keep.covers(&change.path) {
-                not_restored.push(change.path.clone());
+                if refusal.is_some() {
+                    refused.push(change.path.clone());
+                }
             }
         }
         // A conflict (which keeps `HEAD`'s entry) is settled when the work

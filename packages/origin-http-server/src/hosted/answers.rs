@@ -110,18 +110,6 @@ pub(super) fn delete_requires_base_rev(paths: Vec<String>) -> OriginError {
     )
 }
 
-pub(super) fn reason_name(reason: RejectReason) -> &'static str {
-    match reason {
-        RejectReason::Excluded => "excluded",
-        RejectReason::Secret => "secret",
-        RejectReason::Attachment => "attachment",
-        RejectReason::Ignored => "ignored",
-        RejectReason::TooLarge => "too_large",
-        RejectReason::Policy => "policy",
-        RejectReason::Unsupported => "unsupported",
-    }
-}
-
 /// 422 for paths that may never be saved. One answer names one reason:
 /// secrets first (the client points to project secrets), then legacy chat
 /// uploads, then everything else.
@@ -154,7 +142,7 @@ pub(super) fn excluded_path(refused: Vec<(String, RejectReason)>) -> OriginError
         message,
         with_fields(
             listed(paths),
-            serde_json::json!({ "reason": reason_name(reason) }),
+            serde_json::json!({ "reason": reason.name() }),
         ),
     )
 }
@@ -166,7 +154,7 @@ pub(super) fn policy_rejected(paths: Vec<String>, reason: RejectReason) -> Origi
         "these files are larger than a save may hold",
         with_fields(
             listed(paths),
-            serde_json::json!({ "reason": reason_name(reason) }),
+            serde_json::json!({ "reason": reason.name() }),
         ),
     )
 }
