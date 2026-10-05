@@ -1133,6 +1133,54 @@ async fn history_pages_follow_first_parents_with_actors_and_merges() {
     assert_eq!(one["entries"].as_array().unwrap().len(), 1);
 }
 
+/// A page holds at most 50 entries (the shared walk's cap), and `hasMore`
+/// looks one past the page, so a page that ends exactly at the root says
+/// so.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_pages_hold_at_most_fifty_and_know_when_more_follow() {
+    let sc = HostedScenario::new();
+    for index in 0..51 {
+        git_in(
+            &sc.work,
+            &[
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                &format!("save {index}"),
+            ],
+        );
+    }
+    let head = git_in(&sc.work, &["rev-parse", "HEAD"]);
+    let remote = sc.remote();
+    git_in(
+        &sc.work,
+        &[
+            "push",
+            "-q",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/main",
+        ],
+    );
+    let served = serve(&sc).await;
+
+    let page = get(&served, "/git/history?limit=500").await.json();
+    assert_eq!(page["entries"].as_array().unwrap().len(), 50);
+    assert_eq!(page["entries"][0]["commit"], head.as_str());
+    assert_eq!(page["hasMore"], true);
+    let exact = get(&served, "/git/history?limit=50&skip=1").await.json();
+    assert_eq!(exact["entries"].as_array().unwrap().len(), 50);
+    assert_eq!(exact["hasMore"], false);
+    let last = get(&served, "/git/history?limit=50&skip=50").await.json();
+    assert_eq!(last["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(last["entries"][0]["subject"], "save 0");
+    assert_eq!(last["entries"][0]["parentCount"], 0);
+    assert_eq!(last["hasMore"], false);
+    let past = get(&served, "/git/history?skip=51").await.json();
+    assert_eq!(past["entries"], serde_json::json!([]));
+    assert_eq!(past["hasMore"], false);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn review_and_diff_read_objects_only() {
     let sc = HostedScenario::new();
