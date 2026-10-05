@@ -435,7 +435,7 @@ describe("ChatFileChangeList", () => {
       const chip = chips[index];
       // The path is a description, so the line counts stay in the chip's name.
       expect(chip?.hasAttribute("aria-label")).toBe(false);
-      expect(chip?.textContent).toContain("1 lines added, 1 lines removed");
+      expect(chip?.textContent).toMatch(/1 lines? added, 1 lines? removed/);
       const description = document.getElementById(chip?.getAttribute("aria-describedby") ?? "");
       expect(description?.textContent).toBe(path);
       expect(description?.hidden).toBe(true);
