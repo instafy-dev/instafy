@@ -74,15 +74,19 @@ The hook checks every pushed ref:
   lower case. In a repository git marked `core.ignorecase` when it created it, ref names must also
   be ASCII, because some other letters fold onto ASCII ones there.
 - **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) hold work
-  recovered from retired workspaces and may be the only copy of it. A push may not create, move or
-  delete them. Only the shard can set the hook environment that would allow it, never from a
-  request header, and no request sets it yet. This check and the ASCII rule run before
-  `GIT_POLICY_DISABLED`.
+  recovered from retired workspaces and may be the only copy of it. An ordinary push may not
+  create, move or delete them. Only a push the shard marked as a salvage push, because it carries
+  the controller's exact salvage credential (see
+  [Controller-only salvage pushes](#controller-only-salvage-pushes)), may create one, and only as
+  `refs/instafy/salvage/gateway/<name>` with a lower-case name of at most 100 characters. No push
+  can move or delete a salvage ref, and every other ref update in a salvage push is refused. The shard sets the
+  hook environment for this itself, never from a request header. These rules and the ASCII rule run
+  before `GIT_POLICY_DISABLED`.
 - **`main`** is fast-forward only and cannot be deleted. A name that differs from it only in letter
   case is refused.
 - **`refs/instafy/`** holds only recovery refs, `refs/instafy/recovery/<origin id>/<name>` with a
-  lower-case UUID and a name of `[0-9A-Za-z._-]`. A push may create or move nothing else there, so
-  a stray ref such as `refs/instafy/recovery` cannot block them.
+  lower-case UUID and a name of `[0-9A-Za-z._-]`, and the salvage refs above. A push may create or
+  move nothing else there, so a stray ref such as `refs/instafy/recovery` cannot block them.
 - **Other refs**, recovery refs included, may be deleted by any client allowed to push
   (`git.write`).
 - **Every ref points to a commit**, directly or through an annotated tag.
@@ -97,7 +101,7 @@ Knobs:
 - `GIT_DENY_PATHS` (optional, comma-separated glob patterns): additional blocked paths (e.g. `*/vendor/*,*.zip`)
 - `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB): largest pack one push may send. Any value
   other than a positive whole number of bytes stops the shard from starting.
-- `GIT_POLICY_DISABLED=1`: disable the hook's checks except salvage ref protection and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rules and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
 roll it back to an older shard image: older shards rewrite per-repository hooks on each request
@@ -117,7 +121,8 @@ cannot be created.
 Payload schema is `instafy.git-service.event.v1` with `kind=git.push.received`, repo name, optional `projectId`, `defaultBranch`, and the pushed ref updates. Controller can consume these via `/git/hooks/events` and fan out `workspace.commit` SSE events so Studio refreshes quickly after external pushes.
 
 For each push the shard names a fresh report file under `<GIT_REPO_ROOT>/.instafy-push-reports/`
-in the hook environment. The shared `post-receive` hook appends the refs that push updated, and the
+in the hook environment (when push events are on, and for every salvage push, whose created refs
+the shard logs). The shared `post-receive` hook appends the refs that push updated, and the
 shard builds the event once `git receive-pack` has exited. An event lists the push's own updates to
 branches and tags, so pushes that overlap in time never show up in each other's events. Each
 update carries `refName`, `oldRev` (absent for a created ref), `newRev` (absent for a deleted ref)
@@ -146,6 +151,35 @@ Browsers should not speak git for normal editing. The “phone UI” flow is:
 Native environments can choose:
 - **FS API** (same as Studio) via `/apply` (write) + `/git/sync` (commit/push), or
 - **git client** directly (`clone/commit/push`), as long as `main` protections/hook policies are enforced.
+
+### Saving files in Studio
+Studio picks how the Files editor saves from the space's default origin (the controller's
+`GET /projects/:id/origin`), probing `GET /git/status?limit=1` for a hosted origin:
+- **Stateful gateway** (no `stateless: true` in the status, or unknown): Save draft and Save
+  version, exactly as before.
+- **Stateless gateway** (`stateless: true`) and **Desktop origins**: one Save (Cmd/Ctrl+S, also
+  Shift+Cmd/Ctrl+S). Each save is one `/apply` manifest pinned to the origin the file was read
+  from, and checked the way that origin checks it, even after the default origin changed (the
+  Desktop app went offline or came online). On the stateless gateway it carries `baseRev` (the
+  `X-Instafy-Rev` of the read) and `expected` (the read's blob id) and commits on apply; on a
+  Desktop origin it carries `expected` when the blob id is known and is published with
+  `/git/sync {paths}`. If the file changed in the space meanwhile, the save answers 409 and the
+  edits stay in the editor with a card that offers Merge or Reload. An edit read before such a
+  change of origin or mode is checked once against the space's text when the file is opened: the
+  same base text needs nothing, a different one raises the card. A new file stays in the browser
+  until its first Save (which creates it on the default origin), and a new folder is one commit
+  of its `.instafy.keep` placeholder, which the first save into the folder removes. Commit events
+  reload the explorer at the event's commit; the editor's own saves, deletes and new folders are
+  not reloaded, even when their event arrives before the save's response, and every open Files
+  panel (the Files tab, the explorer drawer, a chat file surface) shows them at once. A save that
+  is still running when its panel closes, the user switches spaces or leaves Studio is still
+  recorded on the file, also when the user comes back before it finishes, so the next save builds
+  on it. A save that fails once the user is in another space or has left Studio shows no message:
+  the file keeps its unsaved edits, and when the file changed in the space its card waits in that
+  space's chat. A file read again after a save shows what the space holds then, even when that is
+  the text the save started from. Unsaved edits warn when leaving Studio;
+  inside the Desktop app they do not block closing the window or quitting, because they stay on
+  this device.
 
 ### Embedded repositories and protected checkpoints
 
@@ -225,6 +259,60 @@ the exact-root validation; refuses symlinks, non-direct children, non-directorie
 entries (including nested mounts), and directories that do not have the structural markers of a
 bare Git repository; and never auto-initializes a repository while handling `DELETE`.
 
+### Controller-only salvage pushes
+
+Work recovered from retired workspace copies is kept on canonical as salvage refs. Writing one
+needs a separate controller capability, `git.salvage`, which can do nothing else:
+
+1. Use an unscoped controller-internal or Supabase service-role bearer to call
+   `POST /projects/<uuid>/git/access_token` with `{"scopes":["git.salvage"]}`.
+2. Push with the returned token as the bearer credential through Git Edge, creating
+   `refs/instafy/salvage/gateway/<name>` with an empty expected old value, for example
+   `git push --force-with-lease=<ref>: origin <commit>:<ref>`. The name starts with `[0-9a-z]`,
+   continues with `[0-9a-z._-]` and has at most 100 characters (`policy::is_salvage_ref_name`).
+
+`git.salvage` must be the only requested scope, always mints with a fixed 120-second lifetime, and
+cannot be minted by a human session or any scoped runtime, job, origin or pre-stop grant token. The
+controller logs each issuance with the project id and the token id (`jti`), never the token.
+
+Git Edge accepts the token for exactly two requests, the two of a push:
+`GET /<uuid>.git/info/refs?service=git-receive-pack` with no other query, and
+`POST /<uuid>.git/git-receive-pack` without a query. Any other request is refused, including the
+reads `git http-backend` would serve for shapes that only mention `git-receive-pack` (an
+upload-pack request with that query appended, a second `service=` parameter, dumb-HTTP `HEAD` and
+object paths). The push's ref advertisement lists the repository's refs and their commit ids, but
+the token cannot fetch any object. The token must also have its exact shape: protocol `git`, the
+repository's project, subject `instafy-controller-salvage`, `git.salvage` as the only scope, the
+fixed lifetime, and no runtime, origin, lease, run or browser binding. A token that names
+`git.salvage` is refused in any other shape, whatever else it holds.
+
+Git Shard checks the token again with the same request matcher: a request whose bearer lists
+`git.salvage` must be one of those two requests, verify against `GIT_JWKS_URL` and `GIT_AUDIENCE`
+and have the same exact shape, or the shard refuses it before it touches the repository. So the
+credential can never read, and never push as an ordinary `git.write` one. Other requests are left
+to Git Edge as before. The shard logs each accepted salvage credential with its token id and, after
+a salvage push, the refs it created; never the token.
+
+A verified salvage push may only create salvage refs: it cannot move or delete one, and every other
+ref update in the same push (`main`, branches, tags, recovery refs) is refused. Every refusal
+specific to a salvage push starts with `instafy: salvage push refused:` and is permanent; retrying
+the same ref cannot succeed. Object checks and the push size bound apply to every pushed object.
+Deny paths and the blob size cap apply as for any push, which means to the net change between the
+new tip and the current `main`, not to each commit in the ref's history: a path or blob that one
+pushed commit adds and a later one removes is not checked, and the hook has no secret patterns at
+all. Because salvage refs are permanent and readable by every `git.read` holder, the client that
+builds a salvage commit must filter its whole history itself (every commit not already on `main`)
+for secrets and excluded paths before it pushes, or push a single filtered commit on top of `main`.
+
+Only deleting the repository (`git.delete`) removes salvage refs through the service. Short of
+that, an operator can delete one on the shard host after review.
+
+Upgrades: deploy shards before Git Edge. An older shard does not check the salvage credential and
+would run its push as an ordinary write, so no salvage token may be minted until every shard runs
+this policy. For the same reason, never roll a shard back to a version without salvage support
+while Git Edge still accepts the credential: roll Git Edge back first, or stop minting
+`git.salvage`.
+
 ## Concurrency (human-style)
 - Agents/runtimes work on branches or local commits.
 - To update `main`, they: `fetch main → merge → push` (FF-only). The local commits keep their ids
@@ -232,6 +320,48 @@ bare Git repository; and never auto-initializes a repository while handling `DEL
 - If push is rejected, they fetch and retry; on conflicts `main` keeps its copy and the local copy
   goes to a recovery ref (`refs/instafy/recovery/<origin id>/<name>`) for the user or the agent.
 - No global merge queue service; the git ref update is the serialization point.
+
+## History in Studio
+
+Studio picks its versioning UI per space from the project's default origin:
+
+- **Changes** (a cloud space on the stateful gateway, and any space whose mode is not known yet):
+  the working-tree drawer with Save version and Discard, unchanged.
+- **History** (a cloud space whose gateway answers `/git/status` with `stateless: true`, and every
+  Desktop space): saved versions read from the default origin, 20 per page with Show more where
+  the origin pages history. Each version can be reviewed or reverted; Revert saves a new version
+  that undoes it (`POST /git/revert-commit {commit, base}`) and never rewrites history.
+- **Unsaved work** (History only): work kept on `refs/instafy/recovery/*` and
+  `refs/instafy/salvage/*`, listed with `GET /git/recovery`. Restore commits it as a new version
+  (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
+  version, keep the current one, or ask the agent) and finishes with a `keep` list, or Cancel,
+  which closes the choices and restores nothing else (the only way out for salvage). "Use this
+  version" reads the file at the ref and saves it on top of the head the restore reported. A read
+  answers 404 `not_found` only when the path is absent from the tree at that commit,
+  `unsupported_entry` when the path is a symlink or submodule (which reads and listings both
+  hide), and `rev_not_found` when the ref no longer resolves. `not_found` at the ref becomes a
+  delete only when a listing at the ref shows the ref still resolves without the path;
+  `unsupported_entry` and an uncoded 404 write nothing, and `rev_not_found` reloads the list.
+  Reads and listings at a ref carry `X-Instafy-Rev` set to the ref's tip, or no header; another
+  commit means the entry moved and the list reloads, and a missing header never does. On a
+  Desktop space it refuses a file the folder has uncommitted edits to, writes nothing over a
+  symlink or nested repository in the folder (`unsupported_entry`), and sends the folder's current
+  blob as `expected` (none when the folder lacks the path, which the origin enforces). Remove
+  deletes a recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show
+  "Restored" once restored. The section is hidden on servers without these routes.
+- **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
+  version (`POST /git/sync`), naming files it kept on the computer and why.
+
+When a mode check swaps one drawer for the other while it has keyboard focus, the new drawer's
+title takes focus and says which one the space uses; a space only ever shown as Changes never
+sees this.
+
+The nav badge counts uncommitted changes in Changes and unsaved-work entries in History; salvage
+entries (by their kind, whatever the ref's letter case), which cannot be removed, count only until
+the viewer has seen them (newer recovery entries never push a seen salvage entry out). Each viewer sees one chat row the first time new
+unsaved work appears (opening History counts as seeing it); it is not written into the
+conversation. What a viewer has seen lives in the browser's storage, and in memory for the session
+when the browser refuses storage.
 
 ## Local dev (what we should wire into `pnpm stack:up`)
 - Start `git-shard-0` + `git-edge` in Docker (compose file), storing repos in a local docker volume.

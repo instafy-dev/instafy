@@ -849,8 +849,8 @@ describe("StudioSidebar organization navigation", () => {
     expect(header.firstElementChild).toBe(home);
     expect(home.nextElementSibling).toBe(team);
     expect(team?.nextElementSibling).toBe(close);
-    expect(home.getAttribute("aria-label")).toBe("Home — all teams");
-    expect(home.title).toBe("Home — all teams");
+    expect(home.getAttribute("aria-label")).toBe("Home, all teams");
+    expect(home.title).toBe("Home, all teams");
     expect(home.querySelector(".octo-mark")).not.toBeNull();
     expect(home.querySelector('[data-testid="sidebar-home-badge"]')?.textContent).toBe("3");
     expect(close?.getAttribute("aria-label")).toBe("Close navigation");

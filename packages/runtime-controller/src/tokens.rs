@@ -7,11 +7,28 @@ use jsonwebtoken::errors::ErrorKind as JwtErrorKind;
 use jsonwebtoken::{
     decode, encode, Algorithm, DecodingKey, EncodingKey, Header as JwtHeader, Validation,
 };
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::author_identity::AuthorClaims;
 use crate::{config::AppConfig, internal_error, unauthorized, ApiError};
 use runtime_contracts::AccessTokenClaims;
+
+/// The signed payload: the shared claims plus the optional author claims of
+/// a workspace-write token. The author claims are serialized next to the
+/// shared ones instead of extending [`AccessTokenClaims`], so no other crate
+/// that builds or checks those claims changes; origins that do not read
+/// `author_name` / `author_email` ignore them.
+#[derive(Serialize)]
+struct SignedAccessTokenClaims<'a> {
+    #[serde(flatten)]
+    claims: &'a AccessTokenClaims,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_email: Option<&'a str>,
+}
 
 #[derive(Debug)]
 pub struct ScopedTokenRequest {
@@ -51,7 +68,18 @@ pub fn mint_scoped_token(
     config: &AppConfig,
     request: ScopedTokenRequest,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token_inner(config, request, None, None, None, None)
+    mint_scoped_token_inner(config, request, None, None, None, None, None)
+}
+
+/// Mint a workspace-write token that names the user the origin should
+/// author commits as (see [`crate::author_identity`]). `None` mints an
+/// ordinary token, so the origin keeps its own identity.
+pub fn mint_scoped_token_with_author(
+    config: &AppConfig,
+    request: ScopedTokenRequest,
+    author: Option<AuthorClaims>,
+) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
+    mint_scoped_token_inner(config, request, None, None, None, None, author)
 }
 
 pub fn mint_scoped_token_with_runtime_generation(
@@ -59,18 +87,20 @@ pub fn mint_scoped_token_with_runtime_generation(
     request: ScopedTokenRequest,
     runtime_generation: Option<Uuid>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token_inner(config, request, runtime_generation, None, None, None)
+    mint_scoped_token_inner(config, request, runtime_generation, None, None, None, None)
 }
 
 /// Mint a runtime-scoped token with controller-attested collaborative browser
 /// identity. Ordinary workspace/runtime tokens intentionally omit these
-/// presentation/session fields.
+/// presentation/session fields. `author` is set only on workspace-write
+/// tokens whose subject is a person.
 pub fn mint_scoped_token_with_browser_actor(
     config: &AppConfig,
     request: ScopedTokenRequest,
     runtime_generation: Option<Uuid>,
     actor_label: Option<String>,
     browser_session_id: Option<String>,
+    author: Option<AuthorClaims>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
     mint_scoped_token_inner(
         config,
@@ -79,6 +109,7 @@ pub fn mint_scoped_token_with_browser_actor(
         None,
         actor_label,
         browser_session_id,
+        author,
     )
 }
 
@@ -93,7 +124,15 @@ pub fn mint_scoped_token_expires_no_later_than(
     request: ScopedTokenRequest,
     latest_expires_at: DateTime<Utc>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
-    mint_scoped_token_inner(config, request, None, Some(latest_expires_at), None, None)
+    mint_scoped_token_inner(
+        config,
+        request,
+        None,
+        Some(latest_expires_at),
+        None,
+        None,
+        None,
+    )
 }
 
 fn mint_scoped_token_inner(
@@ -103,6 +142,7 @@ fn mint_scoped_token_inner(
     latest_expires_at: Option<DateTime<Utc>>,
     actor_label: Option<String>,
     browser_session_id: Option<String>,
+    author: Option<AuthorClaims>,
 ) -> Result<MintedAccessToken, (StatusCode, Json<ApiError>)> {
     let private_key_pem = config
         .origin_token_private_key
@@ -161,7 +201,12 @@ fn mint_scoped_token_inner(
         browser_session_id,
     };
 
-    let token = encode(&header, &claims, &encoding_key)
+    let signed = SignedAccessTokenClaims {
+        claims: &claims,
+        author_name: author.as_ref().map(|author| author.name.as_str()),
+        author_email: author.as_ref().map(|author| author.email.as_str()),
+    };
+    let token = encode(&header, &signed, &encoding_key)
         .map_err(|error| internal_error(format!("failed to sign access token: {error}")))?;
 
     Ok(MintedAccessToken {
@@ -274,6 +319,7 @@ mod tests {
             Some(runtime_generation),
             Some("Ada Lovelace".to_string()),
             Some("browser-tab-123".to_string()),
+            None,
         )
         .expect("mint browser actor token");
         let claims = decode_scoped_token(&config, &minted.token, "browser actor token")
@@ -288,5 +334,97 @@ mod tests {
             claims.runtime_generation.as_deref(),
             Some(runtime_generation.to_string().as_str())
         );
+    }
+
+    fn signed_payload(token: &str) -> serde_json::Value {
+        let payload = token.split('.').nth(1).expect("JWT payload segment");
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).expect("base64url payload"))
+            .expect("JSON payload")
+    }
+
+    #[test]
+    fn author_claims_are_signed_next_to_the_shared_claims() {
+        let config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "scoped-token-author",
+        );
+        let author = AuthorClaims {
+            name: "Ada Lovelace".to_string(),
+            email: "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev".to_string(),
+        };
+        let minted = mint_scoped_token_with_author(&config, request(600), Some(author.clone()))
+            .expect("mint author token");
+        let payload = signed_payload(&minted.token);
+        assert_eq!(payload["author_name"], "Ada Lovelace");
+        assert_eq!(payload["author_email"], author.email.as_str());
+        assert_eq!(
+            payload["scopes"],
+            serde_json::json!(["git.read", "git.write"])
+        );
+
+        // The controller still decodes its own token with the shared claims.
+        let claims = decode_scoped_token(&config, &minted.token, "author token")
+            .expect("decode author token");
+        assert_eq!(claims.scopes, vec!["git.read", "git.write"]);
+
+        // Without an author the payload has no author fields at all.
+        let plain = mint_scoped_token(&config, request(600)).expect("mint plain token");
+        let payload = signed_payload(&plain.token);
+        assert!(payload.get("author_name").is_none());
+        assert!(payload.get("author_email").is_none());
+        let plain = mint_scoped_token_with_author(&config, request(600), None)
+            .expect("mint token without author");
+        assert!(signed_payload(&plain.token).get("author_email").is_none());
+    }
+
+    fn unconnected_pool() -> crate::config::PgPool {
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )
+        .expect("connection manager");
+        bb8::Pool::builder().max_size(1).build_unchecked(manager)
+    }
+
+    #[tokio::test]
+    async fn no_author_claims_without_a_keyring_or_for_the_service_user() {
+        // Never touches the database: both cases return before any lookup.
+        let pool = unconnected_pool();
+        let project_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let mut config = crate::tests::build_app_config(
+            crate::tests::test_origin_private_key(),
+            crate::tests::test_origin_public_key(),
+            "author-claims-without-keyring",
+        );
+        // Unset keyring, even with a hosted gateway: the controller runs and
+        // origins keep their own identity.
+        config.hosted_origin_endpoint = Some("http://127.0.0.1:9".to_string());
+        config.author_pseudonym_keys = None;
+        assert!(crate::author_identity::author_claims_for_user(
+            &config,
+            &pool,
+            &project_id,
+            &user_id
+        )
+        .await
+        .is_none());
+
+        config.author_pseudonym_keys = Some(
+            crate::author_identity::AuthorPseudonymKeyring::parse(
+                "v1:ERERERERERERERERERERERERERERERERERERERERERE=",
+            )
+            .expect("keyring"),
+        );
+        config.service_runtime_user_id = Some(user_id);
+        assert!(crate::author_identity::author_claims_for_user(
+            &config,
+            &pool,
+            &project_id,
+            &user_id
+        )
+        .await
+        .is_none());
     }
 }

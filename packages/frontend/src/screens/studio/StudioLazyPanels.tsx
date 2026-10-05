@@ -20,7 +20,7 @@ function PanelFallback({ children, title, onClose, tabs, headerPortalTarget, act
     <div className="flex h-full min-h-0 flex-col">
       {tabs}
       {renderMobileHeader ? renderMobileHeader({ title, actions: null }) : actionsPortalTarget ? null : onClose ? (
-        <DrawerHeader portalTarget={headerPortalTarget} actionsPortalTarget={actionsPortalTarget} title={title} pageTitle={title === "Files" || title === "Changes"} frame="rail" actions={
+        <DrawerHeader portalTarget={headerPortalTarget} actionsPortalTarget={actionsPortalTarget} title={title} pageTitle={title === "Files" || title === "Changes" || title === "History"} frame="rail" actions={
           <IconButton variant="ghost" size="sm" radius="full" aria-label={`Close ${title.toLowerCase()}`} onPress={onClose}>
             <Xmark className="h-4 w-4" />
           </IconButton>
@@ -52,7 +52,7 @@ export const GitReviewView = lazyStudioPanel(
 );
 export const SourceControlDrawer = lazyStudioPanel(
   "Changes", async () => ({ default: (await import("./components/SourceControlDrawer")).SourceControlDrawer }),
-  (content, props) => <PanelFallback title="Changes" headerPortalTarget={props.headerPortalTarget} actionsPortalTarget={props.actionsPortalTarget} onClose={props.onRequestClose}>{content}</PanelFallback>,
+  (content, props) => <PanelFallback title={props.title ?? "Changes"} headerPortalTarget={props.headerPortalTarget} actionsPortalTarget={props.actionsPortalTarget} onClose={props.onRequestClose}>{content}</PanelFallback>,
 );
 export const CreditsPanel = lazyStudioPanel(
   "Credits", async () => ({ default: (await import("./components/CreditsPanel")).CreditsPanel }),

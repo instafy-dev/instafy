@@ -11,6 +11,7 @@ Rules:
 - Hard size budget: keep this file under ~10k bytes. If it grows, move details into learned blocks under `.agents/skills/instafy-learned/blocks/` and keep only a short pointer here.
 - Never store secrets (keys, tokens, passwords).
 - Store project-specific facts and stable user preferences only (not general knowledge).
+- Explicit shared defaults belong under `## Project preferences` (at most 4 KiB). They apply to this project, not a private user profile; a current request can override them. Edit that section only when a persistent change is authorized. Removing its content withdraws those defaults.
 - Prefer available skills/tools (CLI/MCP) for procedures; don’t paste long how-tos here.
 - For local hardware/IO, use compact agent context cards as soft guidance and verify on the active runtime before claiming access; ask for Desktop/CLI on the attached machine when cloud or Docker cannot reach the device.
 
@@ -25,8 +26,8 @@ Start-of-task ritual (Agent must do this before taking action on the workspace):
 - Primary goal now: <short>
 - “Done” means: <short>
 - Kind: code | content | data | mixed | unknown
-- User preferences (optional):
-  - Users want AI agents to reply in <Language>.
+
+## Project preferences
 
 ## Constants (don’t guess)
 

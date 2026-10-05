@@ -14,6 +14,10 @@ import { controllerClient } from "../sdk/instafy";
  * file changes at commit time. After a failed fetch the fallback stays quiet
  * until the next event, project or runtime change, which replaces the old
  * 60 s backoff.
+ *
+ * This is the legacy (stateful gateway) badge. `paused` turns it off for
+ * spaces whose History shows unsaved work instead: no status call is made
+ * while paused.
  */
 export const GIT_STATUS_CHANGE_DEBOUNCE_MS = 750;
 export const GIT_STATUS_FALLBACK_INTERVAL_MS = 120_000;
@@ -28,6 +32,8 @@ export interface StudioGitStatusBadgeInput {
   projectReadyForWorkspace: boolean;
   effectiveRuntimeId: string | null | undefined;
   runtimeReady: boolean;
+  /** Stateless and Desktop spaces: make no status calls and report nothing. */
+  paused?: boolean;
 }
 
 export interface StudioGitStatusBadge {
@@ -49,6 +55,7 @@ export function useStudioGitStatusBadge({
   projectReadyForWorkspace,
   effectiveRuntimeId,
   runtimeReady,
+  paused = false,
 }: StudioGitStatusBadgeInput): StudioGitStatusBadge {
   const [gitDirtyCount, setGitDirtyCount] = useState(0);
   const [gitSupported, setGitSupported] = useState(false);
@@ -61,16 +68,16 @@ export function useStudioGitStatusBadge({
   // that is not there; cleared by any event-driven refresh.
   const fallbackSuppressedRef = useRef(false);
 
-  const enabled = Boolean(activeProjectId) && !controllerProjectMissing && projectReadyForWorkspace;
+  const enabled = Boolean(activeProjectId) && !controllerProjectMissing && projectReadyForWorkspace && !paused;
 
   useEffect(() => {
     epochRef.current += 1;
-  }, [activeProjectId, controllerProjectMissing, effectiveRuntimeId, projectReadyForWorkspace, runtimeReady]);
+  }, [activeProjectId, controllerProjectMissing, effectiveRuntimeId, paused, projectReadyForWorkspace, runtimeReady]);
 
   const refreshGitStatus = useCallback(
     async (options?: { silent?: boolean }): Promise<boolean> => {
       const epoch = epochRef.current;
-      if (!activeProjectId || controllerProjectMissing || !projectReadyForWorkspace) {
+      if (!activeProjectId || controllerProjectMissing || !projectReadyForWorkspace || paused) {
         if (!options?.silent) {
           setGitDirtyCount(0);
           setGitSupported(false);
@@ -105,7 +112,7 @@ export function useStudioGitStatusBadge({
       setGitDirtyCount(count);
       return true;
     },
-    [activeProjectId, controllerProjectMissing, effectiveRuntimeId, projectReadyForWorkspace],
+    [activeProjectId, controllerProjectMissing, effectiveRuntimeId, paused, projectReadyForWorkspace],
   );
 
   const refreshGitStatusRef = useRef(refreshGitStatus);
@@ -127,7 +134,7 @@ export function useStudioGitStatusBadge({
   useEffect(() => {
     setGitDirtyCount(0);
     setGitSupported(false);
-  }, [activeProjectId]);
+  }, [activeProjectId, paused]);
 
   // One fetch when the project becomes ready, and again when the runtime it
   // reads from changes or comes online.

@@ -149,6 +149,7 @@ export function ComposerActionMenu({
   stashDisabled = false,
   onUploadImage,
   uploadImageDisabled = false,
+  uploadImageUnavailableReason = null,
   onInsertSuggestion,
   onStartVoiceInput,
   voiceInputDisabled = false,
@@ -189,6 +190,8 @@ export function ComposerActionMenu({
   // composer passes each handler only while it applies.
   onUploadImage?: () => void;
   uploadImageDisabled?: boolean;
+  /** Shown under "Upload image", which is then off, when this server can't store attachments. */
+  uploadImageUnavailableReason?: string | null;
   onInsertSuggestion?: () => void;
   onStartVoiceInput?: () => void;
   voiceInputDisabled?: boolean;
@@ -356,7 +359,9 @@ export function ComposerActionMenu({
                   closeMenu();
                   onUploadImage();
                 }}
-                disabled={uploadImageDisabled}
+                disabled={uploadImageDisabled || Boolean(uploadImageUnavailableReason)}
+                description={uploadImageUnavailableReason ?? undefined}
+                hoverTitle={uploadImageUnavailableReason ?? undefined}
                 testId="composer-action-menu-upload-image"
               />
             ) : null}

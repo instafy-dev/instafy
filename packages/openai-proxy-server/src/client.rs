@@ -1787,7 +1787,8 @@ fn response_item_should_be_preserved(item: &Value) -> bool {
         Some("function_call")
         | Some("custom_tool_call")
         | Some("local_shell_call")
-        | Some("tool_search_call") => true,
+        | Some("tool_search_call")
+        | Some("compaction") => true,
         _ => response_item_has_assistant_output_text(item),
     }
 }
@@ -3121,6 +3122,41 @@ data: [DONE]
         let completion = parse_completion(raw).expect("completion should parse");
 
         assert_eq!(completion.text.as_deref(), Some("done text"));
+    }
+
+    #[test]
+    fn chatgpt_stream_preserves_opaque_compaction_output_item() {
+        let item = json!({
+            "type": "compaction",
+            "encrypted_content": "opaque-test-ciphertext+/=",
+        });
+        for completed_output in [json!([]), json!([item.clone()])] {
+            let done = json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": item,
+            });
+            let completed = json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp-compact",
+                    "status": "completed",
+                    "output": completed_output,
+                },
+            });
+            let stream = format!(
+                "event: response.output_item.done\ndata: {done}\n\nevent: response.completed\ndata: {completed}\n\ndata: [DONE]\n\n"
+            );
+
+            let raw = read_chatgpt_stream_text(&stream).expect("compaction stream should parse");
+            assert_eq!(raw["output"], json!([item.clone()]));
+            let completion = parse_completion(raw).expect("compaction completion should parse");
+            assert!(
+                completion.text.is_none(),
+                "opaque context is not assistant text"
+            );
+            assert_eq!(completion.raw["output"], json!([item.clone()]));
+        }
     }
 
     #[test]

@@ -34,21 +34,21 @@ describe("URL-driven settings selection", () => {
     await act(async () => root.render(<MemoryRouter initialEntries={[{ pathname: "/studio", search: "?panel=settings&settingsTab=profile", state: { instafyVisitKey: "old-visit" } }]}><Harness /></MemoryRouter>));
     expect(state().tab).toBe("profile"); expect(state().category).toBe("account");
     const initialKey = state().key;
-    await act(async () => select("preferences"));
+    await act(async () => select("notifications"));
     expect(state().historyAction).toBe("PUSH");
     expect(state().state).toBeNull();
-    const preferencesKey = state().key;
-    await act(async () => select("preferences"));
+    const notificationsKey = state().key;
+    await act(async () => select("notifications"));
     await act(async () => setFilter("local filter"));
-    expect(state().key).toBe(preferencesKey);
+    expect(state().key).toBe(notificationsKey);
     await act(async () => select("account"));
     expect(state().search).not.toContain("settingsCategory");
     await act(async () => navigate(-1));
-    expect(state().category).toBe("preferences"); expect(state().key).toBe(preferencesKey);
+    expect(state().category).toBe("notifications"); expect(state().key).toBe(notificationsKey);
     await act(async () => navigate(-1));
     expect(state().category).toBe("account"); expect(state().key).toBe(initialKey);
     await act(async () => navigate(1));
-    expect(state().category).toBe("preferences");
+    expect(state().category).toBe("notifications");
   });
 
   it("restores team categories and audio subsections from historical URLs rather than local state", async () => {
@@ -62,14 +62,18 @@ describe("URL-driven settings selection", () => {
     await act(async () => navigate(-1)); expect(state().category).toBe("billing");
   });
 
-  it.each(["notifications", "appearance", "advanced"])("restores %s through Back and Forward in account settings", async (category) => {
+  it.each([
+    ["notifications", "appearance"],
+    ["appearance", "advanced"],
+    ["advanced", "notifications"],
+  ])("restores %s through Back and Forward in account settings", async (category, next) => {
     await act(async () => root.render(<MemoryRouter initialEntries={[`/studio?panel=settings&settingsTab=profile&settingsCategory=${category}`]}><Harness /></MemoryRouter>));
     expect(state().category).toBe(category);
-    await act(async () => select("preferences"));
+    await act(async () => select(next));
     await act(async () => navigate(-1));
     expect(state().category).toBe(category);
     await act(async () => navigate(1));
-    expect(state().category).toBe("preferences");
+    expect(state().category).toBe(next);
   });
 
   it("restores Profile and Members for each selected team without changing the active space", async () => {
@@ -108,9 +112,9 @@ describe("URL-driven settings selection", () => {
   it("deduplicates consecutive identical presses and chains distinct presses before React renders", async () => {
     await act(async () => root.render(<MemoryRouter initialEntries={["/studio?panel=settings&settingsTab=profile"]}><Harness /></MemoryRouter>));
     const initialKey = state().key;
-    await act(async () => { select("preferences"); select("preferences"); select("account"); });
+    await act(async () => { select("appearance"); select("appearance"); select("account"); });
     expect(state().category).toBe("account");
-    await act(async () => navigate(-1)); expect(state().category).toBe("preferences");
+    await act(async () => navigate(-1)); expect(state().category).toBe("appearance");
     await act(async () => navigate(-1)); expect(state().key).toBe(initialKey);
   });
 });

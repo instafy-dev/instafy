@@ -11,6 +11,8 @@ import { NotchedMessageShell } from "./ChatMessageEntries";
 import { ThreadSpine } from "./ThreadSpine";
 import type { AssistantAgentIdentity } from "./chatAssistantIdentity";
 import type { WorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
+import { SAVE_COPY } from "./versioningCopy";
+import type { UnsavedWorkNotice } from "./useUnsavedWorkNotice";
 
 const CHAT_LEFT_SPINE_OFFSET_CLASS = "left-[-26px]";
 const ASSISTANT_AVATAR_GUTTER_PLACEHOLDER = (
@@ -80,6 +82,48 @@ function OutOfCreditsChatBubble({
           </div>
         </div>
       </NotchedMessageShell>
+    </ChatBubbleRow>
+  );
+}
+
+export function unsavedWorkNoticeDescription(count: number): string {
+  return count > 1
+    ? `${count} entries are kept in History, under Unsaved work, until someone restores or removes them.`
+    : "It's kept in History, under Unsaved work, until someone restores or removes it.";
+}
+
+/** Per viewer, never written into the conversation (see useUnsavedWorkNotice). */
+export function UnsavedWorkSystemRow({
+  notice,
+  renderAssistantAvatar,
+}: {
+  notice: UnsavedWorkNotice;
+  renderAssistantAvatar: AssistantAvatarRenderer;
+}) {
+  return (
+    <ChatBubbleRow align="left" avatar={renderAssistantAvatar(null)}>
+      <ChatActionCard
+        testId="unsaved-work-system-row"
+        overline="Space"
+        title="Some work wasn't saved"
+        description={unsavedWorkNoticeDescription(notice.count)}
+        actions={[
+          {
+            id: "open-history",
+            label: "Open History",
+            variant: "primary",
+            onPress: notice.onOpenHistory,
+            testId: "unsaved-work-system-row-open",
+          },
+          {
+            id: "dismiss",
+            label: "Dismiss",
+            variant: "ghost",
+            onPress: notice.onDismiss,
+            testId: "unsaved-work-system-row-dismiss",
+          },
+        ]}
+      />
     </ChatBubbleRow>
   );
 }
@@ -160,6 +204,7 @@ export function ChatPostTranscriptAuxiliaryRows({
   onWorkspaceFileStaleMerge,
   onWorkspaceFileStaleReload,
   onWorkspaceFileStaleDismiss,
+  unsavedWorkNotice = null,
   workspaceGitSyncConflictDetails,
   workspaceGitSyncConflictDetectedAt,
   credentialGateStateForBubble,
@@ -186,11 +231,13 @@ export function ChatPostTranscriptAuxiliaryRows({
 }: {
   jobThreadPresent: boolean;
   workspaceFileStaleNotice: WorkspaceFileStaleNotice | null;
-  workspaceFileStaleBusy: null | "merge";
+  workspaceFileStaleBusy: null | "merge" | "reload";
   workspaceFileStaleError: string | null;
   onWorkspaceFileStaleMerge: () => void;
   onWorkspaceFileStaleReload: () => void;
   onWorkspaceFileStaleDismiss: () => void;
+  /** New unsaved work in a stateless or Desktop space, once per viewer. */
+  unsavedWorkNotice?: UnsavedWorkNotice | null;
   workspaceGitSyncConflictDetails: Record<string, unknown> | null;
   workspaceGitSyncConflictDetectedAt: number | null;
   credentialGateStateForBubble: AiCredentialsGateState | null;
@@ -246,7 +293,11 @@ export function ChatPostTranscriptAuxiliaryRows({
             testId="workspace-file-stale-card"
             overline="Space"
             title={`"${workspaceFileStaleNotice.label}" changed`}
-            description="A newer version was saved while you were editing. Reload discards your unsaved edits; Merge keeps both."
+            description={
+              workspaceFileStaleNotice.variant === "desktop"
+                ? SAVE_COPY.desktopStaleDescription
+                : "A newer version was saved while you were editing. Reload discards your unsaved edits; Merge keeps both."
+            }
             actions={[
               {
                 id: "merge",
@@ -254,6 +305,7 @@ export function ChatPostTranscriptAuxiliaryRows({
                 variant: "primary",
                 onPress: () => void onWorkspaceFileStaleMerge(),
                 isLoading: workspaceFileStaleBusy === "merge",
+                isDisabled: workspaceFileStaleBusy === "reload",
                 loadingLabel: "Starting merge…",
                 testId: "workspace-file-stale-merge",
               },
@@ -262,7 +314,8 @@ export function ChatPostTranscriptAuxiliaryRows({
                 label: "Reload latest",
                 variant: "outline",
                 onPress: onWorkspaceFileStaleReload,
-                isDisabled: workspaceFileStaleBusy !== null,
+                isLoading: workspaceFileStaleBusy === "reload",
+                isDisabled: workspaceFileStaleBusy === "merge",
                 testId: "workspace-file-stale-reload",
               },
               {
@@ -282,6 +335,9 @@ export function ChatPostTranscriptAuxiliaryRows({
             ) : null}
           </ChatActionCard>
         </ChatBubbleRow>
+      ) : null}
+      {!jobThreadPresent && unsavedWorkNotice ? (
+        <UnsavedWorkSystemRow notice={unsavedWorkNotice} renderAssistantAvatar={renderAssistantAvatar} />
       ) : null}
       {workspaceGitSyncConflictDetails ? (
         <ChatBubbleRow

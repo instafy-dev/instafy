@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+mod author_identity;
+#[allow(dead_code)]
 mod browser_turn;
 pub mod config;
 #[allow(dead_code)]

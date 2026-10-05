@@ -1,11 +1,23 @@
-//! Git commands against a single-tenant workspace checkout: the repository in
-//! `.instafy/.git` with the workspace itself as the work tree.
+//! Git commands against one repository, in one of two layouts:
+//!
+//! - a single-tenant workspace checkout: the repository in `.instafy/.git`
+//!   with the workspace itself as the work tree;
+//! - a bare repository the server created and is the only writer of (the
+//!   hosted gateway's mirror of a canonical repository).
 //!
 //! Every process starts from [`crate::git::server_git_command`], so hooks,
 //! helpers, config includes, protocols and the transfer-speed bound are pinned
-//! exactly as for the rest of the origin server. Before each command the
-//! workspace-writable `.instafy/.git/config` is reduced to data-only settings,
-//! and the bearer token is attached only to commands that talk to the remote.
+//! exactly as for the rest of the origin server, and runs in a working
+//! directory pinned to a descriptor opened without following links. Before
+//! each checkout command the workspace-writable `.instafy/.git/config` is
+//! reduced to data-only settings; a bare repository's layout is checked
+//! instead (its config is the server's own). The bearer token is attached only
+//! to commands that talk to the remote, and for a bare repository only through
+//! the environment, never the argument list.
+//!
+//! New objects for a commit that is not on the remote yet can be written to a
+//! [`Quarantine`] instead of the repository, and moved in only once the push
+//! that needed them succeeded, so a refused push leaves nothing behind.
 
 use std::ffi::OsString;
 use std::io::Write as _;
@@ -19,7 +31,7 @@ use crate::git::{
     instafy_git_dir, is_network_git_command, pin_command_cwd, refresh_instafy_git_worktree_config,
     server_git_command, validate_instafy_git_layout,
 };
-use crate::workspace_fs::WorkspaceDir;
+use crate::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
 
 /// Environment a caller may not inherit into a workspace git process: each
 /// one would point the command at another repository, index or object store,
@@ -61,6 +73,9 @@ pub(crate) struct RunOpts<'b> {
     pub stdin: Option<&'b [u8]>,
     /// Treat every pathspec as a literal path.
     pub literal_pathspecs: bool,
+    /// Run once: no wait-and-retry when a lock is held. For best-effort
+    /// housekeeping that must never hold up its caller.
+    pub single_attempt: bool,
 }
 
 /// An identity for a commit's author or committer.
@@ -87,25 +102,76 @@ impl GitIdentity {
     }
 }
 
-/// Git in one workspace, optionally holding a bearer token for the remote.
+/// Where a repository's files are.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Layout<'a> {
+    /// A workspace checkout: the repository in `.instafy/.git` under `root`,
+    /// with `root` as the work tree. The workspace (and so the repository's
+    /// config) is writable by code running in it.
+    Checkout { root: &'a Path },
+    /// A bare repository at `git_dir` (an absolute path) that only the server
+    /// writes. Commands run inside it with no work tree.
+    Bare { git_dir: &'a Path },
+}
+
+/// Commands a quarantined handle may run: they read objects and refs, write
+/// objects (into the quarantine) or push. Anything that could make a local
+/// ref name an object that only the quarantine holds, or remove objects, is
+/// refused, so dropping a quarantine can never leave the repository naming a
+/// missing object.
+const QUARANTINE_COMMANDS: &[&str] = &[
+    "cat-file",
+    "check-ignore",
+    "commit-tree",
+    "diff",
+    "diff-tree",
+    "for-each-ref",
+    "hash-object",
+    "log",
+    "ls-files",
+    "ls-remote",
+    "ls-tree",
+    "merge-base",
+    "merge-file",
+    "mktree",
+    "push",
+    "read-tree",
+    "rev-list",
+    "rev-parse",
+    "update-index",
+    "write-tree",
+];
+
+/// Git in one repository, optionally holding a bearer token for the remote.
 #[derive(Clone, Copy)]
 pub(crate) struct WorkspaceGit<'a> {
-    root: &'a Path,
+    layout: Layout<'a>,
     token: Option<&'a str>,
     /// A shorter stall window for commands that talk to the remote.
     stall_seconds: Option<u32>,
     /// Commands that talk to the remote are stopped at this time, and none
     /// starts after it.
     network_deadline: Option<Instant>,
+    /// New objects go to this objects directory (bare repositories only).
+    quarantine: Option<&'a Path>,
+    /// A work tree for commands that read files (bare repositories only).
+    work_tree: Option<&'a Path>,
 }
 
 impl<'a> WorkspaceGit<'a> {
+    /// Git in the workspace checkout at `root`.
     pub(crate) fn new(root: &'a Path, token: Option<&'a str>) -> Self {
+        Self::with_layout(Layout::Checkout { root }, token)
+    }
+
+    fn with_layout(layout: Layout<'a>, token: Option<&'a str>) -> Self {
         Self {
-            root,
+            layout,
             token,
             stall_seconds: None,
             network_deadline: None,
+            quarantine: None,
+            work_tree: None,
         }
     }
 
@@ -126,13 +192,27 @@ impl<'a> WorkspaceGit<'a> {
         self
     }
 
+    /// The workspace root of a checkout. Only checkout code (publish, stale
+    /// copy repair) asks for it; a bare repository has no workspace, and
+    /// asking is a programming error.
+    #[track_caller]
     pub(crate) fn root(&self) -> &'a Path {
-        self.root
+        match self.layout {
+            Layout::Checkout { root } => root,
+            Layout::Bare { git_dir } => {
+                panic!("the bare repository {git_dir:?} has no workspace root")
+            }
+        }
     }
 
-    /// The repository directory, `.instafy/.git` under the workspace.
+    /// The repository directory: `.instafy/.git` under a checkout's
+    /// workspace, or the bare repository itself. Temporary index and merge
+    /// files are made here, on the same filesystem as the objects.
     pub(crate) fn git_dir(&self) -> PathBuf {
-        instafy_git_dir(self.root)
+        match self.layout {
+            Layout::Checkout { root } => instafy_git_dir(root),
+            Layout::Bare { git_dir } => git_dir.to_path_buf(),
+        }
     }
 
     /// Run git and return its output, whatever the exit status.
@@ -145,7 +225,7 @@ impl<'a> WorkspaceGit<'a> {
         let mut attempts = 0usize;
         loop {
             let output = self.spawn(args, opts, network)?;
-            if output.status.success() || network || attempts >= 4 {
+            if output.status.success() || network || opts.single_attempt || attempts >= 4 {
                 return Ok(output);
             }
             // A git process the agent runs in the same checkout can hold the
@@ -168,27 +248,101 @@ impl<'a> WorkspaceGit<'a> {
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             bail!("no time left to run git {}", describe(args));
         }
-        validate_instafy_git_layout(self.root)?;
-        refresh_instafy_git_worktree_config(self.root)?;
-        let workspace = WorkspaceDir::open(self.root)
-            .with_context(|| format!("failed to open workspace {:?}", self.root))?;
-
         let mut command = server_git_command();
-        pin_command_cwd(&mut command, &workspace)?;
-        for key in SCRUBBED_ENV {
-            command.env_remove(key);
-        }
-        command
-            .arg("--git-dir")
-            .arg(".instafy/.git")
-            .arg("--work-tree")
-            .arg(".");
-        if network {
-            if let Some(token) = self.token {
+        match self.layout {
+            Layout::Checkout { root } => {
+                if self.quarantine.is_some() || self.work_tree.is_some() {
+                    bail!("a workspace checkout takes no quarantine or separate work tree");
+                }
+                validate_instafy_git_layout(root)?;
+                refresh_instafy_git_worktree_config(root)?;
+                let workspace = WorkspaceDir::open(root)
+                    .with_context(|| format!("failed to open workspace {root:?}"))?;
+                pin_command_cwd(&mut command, &workspace)?;
+                for key in SCRUBBED_ENV {
+                    command.env_remove(key);
+                }
+                command
+                    .arg("--git-dir")
+                    .arg(".instafy/.git")
+                    .arg("--work-tree")
+                    .arg(".");
+                if network {
+                    if let Some(token) = self.token {
+                        command
+                            .arg("-c")
+                            .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
+                    }
+                }
+            }
+            Layout::Bare { git_dir } => {
+                let repository = open_bare_repository(git_dir)?;
+                if self.quarantine.is_some()
+                    && !QUARANTINE_COMMANDS.contains(&args.first().copied().unwrap_or_default())
+                {
+                    bail!(
+                        "git {} may not run with a quarantine: it could leave a ref naming a \
+                         quarantined object",
+                        describe(args)
+                    );
+                }
+                match self.work_tree {
+                    // The work tree is the working directory; the repository
+                    // was just checked by its descriptor.
+                    Some(work_tree) => {
+                        if !work_tree.is_absolute() {
+                            bail!("a work tree path must be absolute: {work_tree:?}");
+                        }
+                        let work_tree = WorkspaceDir::open(work_tree)
+                            .with_context(|| format!("failed to open work tree {work_tree:?}"))?;
+                        pin_command_cwd(&mut command, &work_tree)?;
+                        command
+                            .arg("--git-dir")
+                            .arg(git_dir)
+                            .arg("--work-tree")
+                            .arg(".");
+                    }
+                    None => {
+                        pin_command_cwd(&mut command, &repository)?;
+                        command
+                            .arg("--git-dir")
+                            .arg(".")
+                            .arg("-c")
+                            .arg("core.bare=true");
+                    }
+                }
+                // Ignore and attribute rules come only from the trees the
+                // server reads, never from the server user's home.
                 command
                     .arg("-c")
-                    .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
+                    .arg("core.excludesFile=/dev/null")
+                    .arg("-c")
+                    .arg("core.attributesFile=/dev/null");
+                for key in SCRUBBED_ENV {
+                    command.env_remove(key);
+                }
+                if let Some(objects) = self.quarantine {
+                    command.env("GIT_OBJECT_DIRECTORY", objects).env(
+                        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                        quoted_alternate(&git_dir.join("objects"))?,
+                    );
+                }
+                if network {
+                    if let Some(token) = self.token {
+                        // `server_git_command` removed every inherited
+                        // `GIT_CONFIG_*` variable, so this is the only entry.
+                        command
+                            .env("GIT_CONFIG_COUNT", "1")
+                            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                            .env(
+                                "GIT_CONFIG_VALUE_0",
+                                format!("Authorization: Bearer {token}"),
+                            );
+                    }
+                }
             }
+        }
+        if network {
             if let Some(seconds) = self.stall_seconds {
                 // The environment overrides the configured window.
                 command.env("GIT_HTTP_LOW_SPEED_TIME", seconds.to_string());
@@ -542,6 +696,52 @@ impl<'a> WorkspaceGit<'a> {
     }
 }
 
+/// Bare repositories, quarantines and separate work trees: the hosted
+/// gateway's layout.
+#[cfg_attr(not(test), allow(dead_code))]
+impl<'a> WorkspaceGit<'a> {
+    /// Git in the bare repository at `git_dir`, an absolute path. The
+    /// repository must have been created by the server ([`Self::init_bare`]);
+    /// its config is not sanitised before each command.
+    pub(crate) fn bare(git_dir: &'a Path, token: Option<&'a str>) -> Self {
+        Self::with_layout(Layout::Bare { git_dir }, token)
+    }
+
+    /// Create an empty bare repository at `git_dir` (an absolute path whose
+    /// last component must not exist yet), private to the server, with
+    /// `main` as its initial branch and no template files (no sample hooks).
+    pub(crate) fn init_bare(git_dir: &Path) -> Result<()> {
+        if !git_dir.is_absolute() {
+            bail!("a bare repository path must be absolute: {git_dir:?}");
+        }
+        create_private_dir(git_dir)
+            .with_context(|| format!("failed to create bare repository {git_dir:?}"))?;
+        WorkspaceGit::bare(git_dir, None).ok(&[
+            "init",
+            "--bare",
+            "--quiet",
+            "--template=",
+            "--initial-branch=main",
+        ])
+    }
+
+    /// Write new objects to `quarantine` instead of the repository, while
+    /// still reading the repository's own objects. Only for a bare
+    /// repository, and only for the commands in [`QUARANTINE_COMMANDS`].
+    pub(crate) fn with_quarantine(mut self, quarantine: &'a Quarantine) -> Self {
+        self.quarantine = Some(quarantine.objects_dir());
+        self
+    }
+
+    /// Run commands with `work_tree` (an absolute path to a directory the
+    /// server prepared) as the work tree, for commands that read files such
+    /// as `check-ignore --no-index`. Only for a bare repository.
+    pub(crate) fn with_work_tree(mut self, work_tree: &'a Path) -> Self {
+        self.work_tree = Some(work_tree);
+        self
+    }
+}
+
 /// One object read by [`WorkspaceGit::read_objects`].
 pub(crate) struct GitObject {
     pub kind: String,
@@ -582,6 +782,332 @@ fn size_or_missing(kind: &str) -> bool {
 /// The all-zero id in the same object format as `like`.
 pub(crate) fn zero_oid(like: &str) -> String {
     "0".repeat(if like.len() == 64 { 64 } else { 40 })
+}
+
+/// Open a bare repository's directory without following a link, and check
+/// that what git reads to find its objects and refs are real files and
+/// directories, never links, and that nothing points git at another
+/// repository's objects or history.
+fn open_bare_repository(git_dir: &Path) -> Result<WorkspaceDir> {
+    if !git_dir.is_absolute() {
+        bail!("a bare repository path must be absolute: {git_dir:?}");
+    }
+    let repository = WorkspaceDir::open(git_dir)
+        .with_context(|| format!("failed to open bare repository {git_dir:?}"))?;
+    for (relative, expected) in [
+        ("HEAD", WorkspaceEntryKind::File),
+        ("config", WorkspaceEntryKind::File),
+        ("packed-refs", WorkspaceEntryKind::File),
+        ("objects", WorkspaceEntryKind::Directory),
+        ("refs", WorkspaceEntryKind::Directory),
+    ] {
+        match repository.entry_kind(relative) {
+            Ok(kind) if kind == expected => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => bail!("{relative:?} in bare repository {git_dir:?} has the wrong type"),
+            Err(error) => {
+                bail!(
+                    "{relative:?} in bare repository {git_dir:?} is not safely contained: {error}"
+                )
+            }
+        }
+    }
+    for redirect in ["commondir", "objects/info/alternates", "info/grafts"] {
+        match repository.entry_kind(redirect) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                bail!("bare repository {git_dir:?} has {redirect:?}, which the server never writes")
+            }
+        }
+    }
+    Ok(repository)
+}
+
+/// `path` as one entry of `GIT_ALTERNATE_OBJECT_DIRECTORIES`. Git splits
+/// that list on `:` (`;` on Windows) and C-unquotes an entry that starts
+/// with `"`, so the path is always quoted: a `:` in a self-hoster's root
+/// must not split it. A path with control bytes is refused.
+fn quoted_alternate(path: &Path) -> Result<OsString> {
+    let text = path
+        .to_str()
+        .with_context(|| format!("the repository path {path:?} is not UTF-8"))?;
+    if text.chars().any(char::is_control) {
+        bail!("the repository path {path:?} holds a control character");
+    }
+    let mut quoted = String::with_capacity(text.len() + 2);
+    quoted.push('"');
+    for character in text.chars() {
+        if matches!(character, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    Ok(OsString::from(quoted))
+}
+
+/// Create one directory, readable only by the server's user. Fails when the
+/// name exists in any form, a link included.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// A private objects directory for one change that is not on the remote yet.
+///
+/// A handle made with [`WorkspaceGit::with_quarantine`] writes every new
+/// object here while still reading the repository's own objects, so a commit
+/// can be built and pushed without adding anything to the repository.
+/// [`Quarantine::promote`] moves the objects in once the push succeeded;
+/// dropping the quarantine removes it with whatever was not promoted, so a
+/// refused push leaves no object behind.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct Quarantine {
+    dir: PathBuf,
+    objects: PathBuf,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+impl Quarantine {
+    /// A new quarantine under `parent`: an absolute path to an existing
+    /// directory (not a link) on the same filesystem as the repositories it
+    /// serves. It is named by a fresh UUID and readable only by the server.
+    pub(crate) fn create_in(parent: &Path) -> Result<Self> {
+        if !parent.is_absolute() {
+            bail!("a quarantine parent must be an absolute path: {parent:?}");
+        }
+        WorkspaceDir::open(parent)
+            .with_context(|| format!("failed to open quarantine parent {parent:?}"))?;
+        let dir = parent.join(uuid::Uuid::new_v4().as_hyphenated().to_string());
+        create_private_dir(&dir).with_context(|| format!("failed to create quarantine {dir:?}"))?;
+        let quarantine = Self {
+            objects: dir.join("objects"),
+            dir,
+        };
+        for relative in ["", "info", "pack"] {
+            let path = quarantine.objects.join(relative);
+            create_private_dir(&path)
+                .with_context(|| format!("failed to create quarantine directory {path:?}"))?;
+        }
+        Ok(quarantine)
+    }
+
+    /// The quarantine's own directory.
+    pub(crate) fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    /// The objects directory new objects are written to.
+    pub(crate) fn objects_dir(&self) -> &Path {
+        &self.objects
+    }
+
+    /// Move every object written here into the bare repository `git` works
+    /// in, never replacing an object it already has, and returns how many
+    /// files were moved. Call it only after the push that needed the
+    /// objects succeeded, and before any local ref is set to them.
+    ///
+    /// Objects move in an order that keeps the rule "a commit in the
+    /// repository has everything it names": loose blobs and trees, then
+    /// packs (each index after its pack), then loose commits with every
+    /// parent before its children, then anything else. A promotion that
+    /// stops partway (a full disk, a stop) leaves commits out, never their
+    /// trees, so a reader that finds a commit can read all of it, and a
+    /// later promotion of the same quarantine finishes the job.
+    pub(crate) fn promote(&self, git: &WorkspaceGit<'_>) -> Result<usize> {
+        let Layout::Bare { git_dir } = git.layout else {
+            bail!("only a bare repository takes quarantined objects");
+        };
+        open_bare_repository(git_dir)?;
+        let target = git_dir.join("objects");
+        let (loose, mut packs) = self.contents()?;
+
+        // Each object's type, read through the quarantine.
+        let staged = WorkspaceGit::bare(git_dir, None).with_quarantine(self);
+        let ids: Vec<String> = loose.iter().map(|(id, _)| id.clone()).collect();
+        let kinds = staged.object_sizes(&ids)?;
+        let mut contents = Vec::new();
+        let mut commits = Vec::new();
+        let mut others = Vec::new();
+        for (object, kind) in loose.into_iter().zip(kinds) {
+            match kind.as_ref().map(|(kind, _)| kind.as_str()) {
+                Some("blob") => contents.push((0, object)),
+                Some("tree") => contents.push((1, object)),
+                Some("commit") => commits.push(object),
+                _ => others.push(object),
+            }
+        }
+        contents.sort_by_key(|(rank, _)| *rank);
+        let commits = parents_first(&staged, commits)?;
+
+        let mut moved = 0usize;
+        for (_, (id, path)) in contents {
+            moved += usize::from(move_loose_object(&target, &id, &path)?);
+        }
+        if !packs.is_empty() {
+            let pack_dir = target.join("pack");
+            ensure_object_dir(&pack_dir)?;
+            // An index makes git look for its pack: move it last.
+            packs.sort_by_key(|name| (name.ends_with(".idx"), name.clone()));
+            for name in packs {
+                let from = self.objects.join("pack").join(&name);
+                moved += usize::from(move_object(&from, &pack_dir.join(&name))?);
+            }
+        }
+        for (id, path) in commits.into_iter().chain(others) {
+            moved += usize::from(move_loose_object(&target, &id, &path)?);
+        }
+        Ok(moved)
+    }
+
+    /// The loose objects (`(id, file)`) and pack file names written here.
+    fn contents(&self) -> Result<(Vec<(String, PathBuf)>, Vec<String>)> {
+        let mut loose = Vec::new();
+        let mut packs = Vec::new();
+        for entry in std::fs::read_dir(&self.objects)
+            .with_context(|| format!("failed to read quarantine {:?}", self.objects))?
+        {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            if name == "pack" {
+                for file in std::fs::read_dir(entry.path())? {
+                    let file = file?;
+                    let file_name = file.file_name().to_string_lossy().to_string();
+                    if file.file_type()?.is_file() && is_pack_file_name(&file_name) {
+                        packs.push(file_name);
+                    }
+                }
+                continue;
+            }
+            if name.len() != 2 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            for file in std::fs::read_dir(entry.path())? {
+                let file = file?;
+                let file_name = file.file_name().to_string_lossy().to_string();
+                let is_object = matches!(file_name.len(), 38 | 62)
+                    && file_name.bytes().all(|byte| byte.is_ascii_hexdigit());
+                if is_object && file.file_type()?.is_file() {
+                    loose.push((format!("{name}{file_name}"), file.path()));
+                }
+            }
+        }
+        Ok((loose, packs))
+    }
+}
+
+/// Move the loose object `id` (at `path`) into the objects directory
+/// `target`. Returns whether it was new there.
+fn move_loose_object(target: &Path, id: &str, path: &Path) -> Result<bool> {
+    let fan_out = target.join(&id[..2]);
+    ensure_object_dir(&fan_out)?;
+    move_object(path, &fan_out.join(&id[2..]))
+}
+
+/// `commits` (loose quarantined commits, `(id, file)`) ordered so that every
+/// commit comes after the parents among them.
+fn parents_first(
+    staged: &WorkspaceGit<'_>,
+    commits: Vec<(String, PathBuf)>,
+) -> Result<Vec<(String, PathBuf)>> {
+    if commits.len() < 2 {
+        return Ok(commits);
+    }
+    let ids: Vec<String> = commits.iter().map(|(id, _)| id.clone()).collect();
+    let objects = staged.read_objects(&ids)?;
+    let mut waiting: Vec<((String, PathBuf), Vec<String>)> = commits
+        .into_iter()
+        .zip(objects)
+        .map(|(commit, object)| {
+            let header_end = object
+                .data
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .unwrap_or(object.data.len());
+            let parents = String::from_utf8_lossy(&object.data[..header_end])
+                .lines()
+                .filter_map(|line| line.strip_prefix("parent "))
+                .map(|parent| parent.trim().to_string())
+                .filter(|parent| ids.contains(parent))
+                .collect();
+            (commit, parents)
+        })
+        .collect();
+    let mut ordered: Vec<(String, PathBuf)> = Vec::with_capacity(waiting.len());
+    while !waiting.is_empty() {
+        let ready = waiting.iter().position(|(_, parents)| {
+            parents
+                .iter()
+                .all(|parent| ordered.iter().any(|(id, _)| id == parent))
+        });
+        let Some(ready) = ready else {
+            bail!("quarantined commits name each other as parents");
+        };
+        ordered.push(waiting.remove(ready).0);
+    }
+    Ok(ordered)
+}
+
+impl Drop for Quarantine {
+    fn drop(&mut self) {
+        // Does not follow links inside the directory.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn is_pack_file_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("pack-") else {
+        return false;
+    };
+    let Some((hash, extension)) = rest.split_once('.') else {
+        return false;
+    };
+    matches!(hash.len(), 40 | 64)
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && matches!(extension, "pack" | "idx" | "rev" | "mtimes")
+}
+
+/// Make sure `dir` (an object fan-out or pack directory of a bare
+/// repository) exists and is a real directory.
+fn ensure_object_dir(dir: &Path) -> Result<()> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error).with_context(|| format!("failed to create {dir:?}")),
+    }
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.file_type().is_dir() {
+        bail!("{dir:?} is not a directory");
+    }
+    Ok(())
+}
+
+/// Move one object file without replacing an existing one: a hard link (the
+/// quarantine's own name goes when it is dropped), or a rename where the
+/// filesystem has no hard links. Returns whether the object was new.
+fn move_object(from: &Path, to: &Path) -> Result<bool> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => Ok(true),
+        // Objects are named by their content: the one there is the same.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => match std::fs::symlink_metadata(to) {
+            Ok(_) => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(from, to)
+                    .with_context(|| format!("failed to move {from:?} to {to:?}"))?;
+                Ok(true)
+            }
+            Err(error) => Err(error).with_context(|| format!("failed to inspect {to:?}")),
+        },
+    }
 }
 
 /// How long a command that ran out of time has to exit after SIGTERM.
@@ -723,5 +1249,887 @@ mod blob_tests {
             super::blob_oid(b""),
             "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::io::{Read as _, Write as _};
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+    use crate::publish_policy::RejectReason;
+    use crate::push::{push, PushClass};
+    use crate::test_support::{git_in, git_output, install_shard_hook};
+    use crate::tree_merge::three_way;
+
+    /// A canonical bare repository with one commit on `main`, a mirror the
+    /// server's own handle created and filled from it, and a directory for
+    /// quarantines.
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        canonical: PathBuf,
+        mirror: PathBuf,
+        quarantines: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self::under("")
+        }
+
+        /// The fixture inside a folder named `name` ("" for none).
+        fn under(name: &str) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap().join(name);
+            std::fs::create_dir_all(&root).unwrap();
+            let canonical = root.join("canonical.git");
+            git_in(
+                &root,
+                &["init", "--quiet", "--bare", "-b", "main", "canonical.git"],
+            );
+            let seed = root.join("seed");
+            git_in(&root, &["init", "--quiet", "-b", "main", "seed"]);
+            std::fs::write(seed.join("README.md"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+            std::fs::create_dir_all(seed.join("src")).unwrap();
+            std::fs::write(seed.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+            git_in(&seed, &["add", "."]);
+            git_in(
+                &seed,
+                &[
+                    "-c",
+                    "user.name=Seed",
+                    "-c",
+                    "user.email=seed@instafy.dev",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "seed",
+                ],
+            );
+            git_in(
+                &seed,
+                &["push", "--quiet", canonical.to_str().unwrap(), "main"],
+            );
+
+            let mirror = root.join("mirror.git");
+            WorkspaceGit::init_bare(&mirror).unwrap();
+            let fixture = Self {
+                _dir: dir,
+                quarantines: root.join("quarantine"),
+                root,
+                canonical,
+                mirror,
+            };
+            std::fs::create_dir(&fixture.quarantines).unwrap();
+            fixture.fetch_main();
+            fixture
+        }
+
+        fn url(&self) -> String {
+            self.canonical.to_string_lossy().to_string()
+        }
+
+        fn git(&self) -> WorkspaceGit<'_> {
+            WorkspaceGit::bare(&self.mirror, None)
+        }
+
+        fn fetch_main(&self) {
+            self.git()
+                .ok(&[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    &self.url(),
+                    "+refs/heads/main:refs/heads/main",
+                ])
+                .unwrap();
+        }
+
+        fn main(&self) -> String {
+            self.git().commit_id("refs/heads/main").unwrap().unwrap()
+        }
+
+        fn canonical_main(&self) -> String {
+            git_in(&self.canonical, &["rev-parse", "refs/heads/main"])
+        }
+    }
+
+    fn identity() -> GitIdentity {
+        GitIdentity::new("Instafy Origin", "origin@instafy.dev")
+    }
+
+    /// A child of `parent` with `path` set to `content`, built through `git`.
+    fn commit_in(git: &WorkspaceGit<'_>, parent: &str, path: &str, content: &[u8]) -> String {
+        let blob = git
+            .stdout_opts(
+                &["hash-object", "-w", "--stdin"],
+                &RunOpts {
+                    stdin: Some(content),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+        let scratch = temp_index_dir(git).unwrap();
+        let index = scratch.path().join("index");
+        let opts = RunOpts {
+            index_file: Some(&index),
+            ..RunOpts::default()
+        };
+        git.ok_opts(&["read-tree", parent], &opts).unwrap();
+        let cacheinfo = format!("100644,{blob},{path}");
+        git.ok_opts(&["update-index", "--add", "--cacheinfo", &cacheinfo], &opts)
+            .unwrap();
+        let tree = git.stdout_opts(&["write-tree"], &opts).unwrap();
+        git.commit_tree(&tree, &[parent], &identity(), &identity(), b"change\n")
+            .unwrap()
+    }
+
+    /// Every loose object and pack file of a repository.
+    fn object_files(git_dir: &Path) -> BTreeSet<String> {
+        let mut files = BTreeSet::new();
+        let objects = git_dir.join("objects");
+        for entry in std::fs::read_dir(&objects).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "info" || !entry.file_type().unwrap().is_dir() {
+                continue;
+            }
+            for file in std::fs::read_dir(entry.path()).unwrap() {
+                let file = file.unwrap().file_name().to_string_lossy().to_string();
+                files.insert(format!("{name}/{file}"));
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn init_bare_makes_a_private_repository_without_hooks() {
+        let fixture = Fixture::new();
+        let git = fixture.git();
+        assert_eq!(
+            git.stdout(&["rev-parse", "--is-bare-repository"]).unwrap(),
+            "true"
+        );
+        assert_eq!(
+            git.stdout(&["symbolic-ref", "HEAD"]).unwrap(),
+            "refs/heads/main"
+        );
+        assert!(!fixture.mirror.join("hooks").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&fixture.mirror)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        assert_eq!(git.git_dir(), fixture.mirror);
+        assert_eq!(fixture.main(), fixture.canonical_main());
+
+        // Never over an existing name, and only at an absolute path.
+        assert!(WorkspaceGit::init_bare(&fixture.mirror).is_err());
+        assert!(WorkspaceGit::init_bare(Path::new("relative.git")).is_err());
+    }
+
+    /// Plan test 8: a refused push leaves no object in the mirror, and a
+    /// promoted write is readable without the canonical repository.
+    #[test]
+    fn a_refused_push_leaves_nothing_and_a_promoted_write_needs_no_download() {
+        let fixture = Fixture::new();
+        install_shard_hook(&fixture.canonical, &[]);
+        let git = fixture.git();
+        let main = fixture.main();
+        let before = object_files(&fixture.mirror);
+
+        let refused = {
+            let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+            let staged = git.with_quarantine(&quarantine);
+            let commit = commit_in(&staged, &main, "node_modules/left.js", b"blocked\n");
+            // Readable through the quarantine, absent from the mirror.
+            assert!(staged.commit_id(&commit).unwrap().is_some());
+            assert!(git.commit_id(&commit).unwrap().is_none());
+            let result = push(
+                &staged,
+                &fixture.url(),
+                &[format!("{commit}:refs/heads/main")],
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                result.class,
+                PushClass::PathRejected {
+                    path: "node_modules/left.js".to_string(),
+                    reason: RejectReason::Policy
+                }
+            );
+            assert!(quarantine.path().exists());
+            quarantine.path().to_path_buf()
+        };
+        assert!(!refused.exists(), "the quarantine outlived its drop");
+        assert_eq!(object_files(&fixture.mirror), before);
+        assert_eq!(fixture.canonical_main(), main);
+
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let staged = git.with_quarantine(&quarantine);
+        let commit = commit_in(&staged, &main, "notes.md", b"kept\n");
+        let result = push(
+            &staged,
+            &fixture.url(),
+            &[format!("{commit}:refs/heads/main")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result.class, PushClass::Pushed);
+        // Blob, tree and commit.
+        assert_eq!(quarantine.promote(&git).unwrap(), 3);
+        // Promoting again finds every object already there.
+        assert_eq!(quarantine.promote(&git).unwrap(), 0);
+        drop(quarantine);
+        git.update_ref("refs/heads/main", &commit, Some(&main), "test")
+            .unwrap();
+        assert_eq!(object_files(&fixture.mirror).len(), before.len() + 3);
+
+        std::fs::rename(&fixture.canonical, fixture.root.join("gone.git")).unwrap();
+        assert_eq!(
+            git.stdout(&["cat-file", "-p", &format!("{commit}:notes.md")])
+                .unwrap(),
+            "kept"
+        );
+        assert_eq!(fixture.main(), commit);
+    }
+
+    /// The quarantine's fan-out directories in the order a directory read
+    /// lists them: the order a promotion that ignored object types followed.
+    fn read_dir_order(quarantine: &Quarantine) -> Vec<String> {
+        std::fs::read_dir(quarantine.objects_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.len() == 2)
+            .collect()
+    }
+
+    /// A promotion that stops partway (here a fan-out directory that cannot
+    /// be made, standing in for a full disk) never leaves a commit in the
+    /// mirror without its tree, or without a parent quarantined with it,
+    /// whatever order the quarantine's directories are read in; promoting
+    /// again finishes.
+    #[test]
+    fn a_promotion_that_stops_partway_never_leaves_a_commit_without_its_objects() {
+        let fixture = Fixture::new();
+        let git = fixture.git();
+        let main = fixture.main();
+        let objects = fixture.mirror.join("objects");
+        let prefix = |id: &str| id[..2].to_string();
+
+        // A commit whose fan-out is read before its tree's; the tree's
+        // fan-out cannot be made.
+        let mut found = false;
+        for attempt in 0..1000 {
+            let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+            let staged = git.with_quarantine(&quarantine);
+            let content = format!("v{attempt}\n");
+            let commit = commit_in(&staged, &main, "notes.md", content.as_bytes());
+            let tree = staged.tree_id(&commit).unwrap();
+            let (tree_at, commit_at) = (prefix(&tree), prefix(&commit));
+            let order = read_dir_order(&quarantine);
+            let position = |name: &String| order.iter().position(|entry| entry == name);
+            if tree_at == commit_at
+                || objects.join(&tree_at).exists()
+                || position(&commit_at) > position(&tree_at)
+            {
+                continue;
+            }
+            std::fs::write(objects.join(&tree_at), b"").unwrap();
+            assert!(quarantine.promote(&git).is_err());
+            assert!(
+                git.commit_id(&commit).unwrap().is_none(),
+                "the commit reached the mirror before its tree"
+            );
+            std::fs::remove_file(objects.join(&tree_at)).unwrap();
+            quarantine.promote(&git).unwrap();
+            assert_eq!(git.commit_id(&commit).unwrap(), Some(commit.clone()));
+            assert!(git.test(&["cat-file", "-e", &tree]).unwrap());
+            found = true;
+            break;
+        }
+        assert!(found, "no commit was read before its tree");
+
+        // A child whose fan-out is read before its quarantined parent's;
+        // the parent's fan-out cannot be made.
+        let main = fixture.main();
+        let mut found = false;
+        for attempt in 0..1000 {
+            let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+            let staged = git.with_quarantine(&quarantine);
+            let parent = commit_in(&staged, &main, "a.md", format!("a{attempt}\n").as_bytes());
+            let child = commit_in(&staged, &parent, "b.md", format!("b{attempt}\n").as_bytes());
+            let others = [
+                staged.tree_id(&parent).unwrap(),
+                staged.tree_id(&child).unwrap(),
+                staged
+                    .stdout(&["rev-parse", &format!("{child}:a.md")])
+                    .unwrap(),
+                staged
+                    .stdout(&["rev-parse", &format!("{child}:b.md")])
+                    .unwrap(),
+                child.clone(),
+            ];
+            let (parent_at, child_at) = (prefix(&parent), prefix(&child));
+            let order = read_dir_order(&quarantine);
+            let position = |name: &String| order.iter().position(|entry| entry == name);
+            if others.iter().any(|id| prefix(id) == parent_at)
+                || objects.join(&parent_at).exists()
+                || position(&child_at) > position(&parent_at)
+            {
+                continue;
+            }
+            std::fs::write(objects.join(&parent_at), b"").unwrap();
+            assert!(quarantine.promote(&git).is_err());
+            assert!(
+                git.commit_id(&child).unwrap().is_none(),
+                "the child reached the mirror before its parent"
+            );
+            std::fs::remove_file(objects.join(&parent_at)).unwrap();
+            quarantine.promote(&git).unwrap();
+            assert_eq!(git.commit_id(&child).unwrap(), Some(child.clone()));
+            assert_eq!(git.commit_id(&parent).unwrap(), Some(parent.clone()));
+            found = true;
+            break;
+        }
+        assert!(found, "no child was read before its parent");
+    }
+
+    /// Git splits the alternates list on `:`: a mirror under a folder
+    /// whose name holds one still lends its objects to the quarantine.
+    #[test]
+    fn a_quarantine_works_under_a_path_with_a_colon() {
+        let fixture = Fixture::under("instafy:data \"x\" \\y");
+        let git = fixture.git();
+        let main = fixture.main();
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let staged = git.with_quarantine(&quarantine);
+        let commit = commit_in(&staged, &main, "notes.md", b"kept\n");
+        let result = push(
+            &staged,
+            &fixture.url(),
+            &[format!("{commit}:refs/heads/main")],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(result.class, PushClass::Pushed);
+        assert_eq!(quarantine.promote(&git).unwrap(), 3);
+        assert_eq!(git.commit_id(&commit).unwrap(), Some(commit.clone()));
+
+        // A control character cannot be quoted for git: refused.
+        let fixture = Fixture::under("line\nbreak");
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let error = fixture
+            .git()
+            .with_quarantine(&quarantine)
+            .run(&["rev-parse", "HEAD"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("control character"), "{error}");
+    }
+
+    #[test]
+    fn promotion_moves_packs_with_their_index() {
+        let fixture = Fixture::new();
+        let main = fixture.canonical_main();
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let base = quarantine.objects_dir().join("pack").join("pack");
+        let output = git_output(
+            &fixture.canonical,
+            &["pack-objects", "--revs", "-q", base.to_str().unwrap()],
+            Some(b"refs/heads/main\n"),
+        );
+        assert!(output.status.success(), "{output:?}");
+
+        let empty = fixture.root.join("empty.git");
+        WorkspaceGit::init_bare(&empty).unwrap();
+        let git = WorkspaceGit::bare(&empty, None);
+        assert!(git.commit_id(&main).unwrap().is_none());
+        // The pack and its index (and, on newer git, its reverse index).
+        let written = std::fs::read_dir(quarantine.objects_dir().join("pack"))
+            .unwrap()
+            .count();
+        assert!(written >= 2, "{written}");
+        assert_eq!(quarantine.promote(&git).unwrap(), written);
+        drop(quarantine);
+        assert_eq!(
+            git.commit_id(&main).unwrap().as_deref(),
+            Some(main.as_str())
+        );
+        assert_eq!(
+            git.stdout(&["cat-file", "-p", &format!("{main}:src/lib.rs")])
+                .unwrap(),
+            "pub fn lib() {}"
+        );
+    }
+
+    #[test]
+    fn a_quarantined_handle_never_moves_a_ref() {
+        let fixture = Fixture::new();
+        let main = fixture.main();
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let staged = fixture.git().with_quarantine(&quarantine);
+        let commit = commit_in(&staged, &main, "a.txt", b"a\n");
+        for args in [
+            vec![
+                "update-ref",
+                "refs/heads/main",
+                commit.as_str(),
+                main.as_str(),
+            ],
+            vec!["fetch", fixture.canonical.to_str().unwrap(), "main"],
+            vec!["gc"],
+        ] {
+            let error = staged.run(&args).unwrap_err().to_string();
+            assert!(error.contains("quarantine"), "{error}");
+        }
+        assert_eq!(fixture.main(), main);
+
+        // A checkout takes neither a quarantine nor a separate work tree.
+        let workspace = fixture.root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        crate::test_support::init_workspace_repo(&workspace);
+        let checkout = WorkspaceGit::new(&workspace, None);
+        assert!(checkout
+            .with_quarantine(&quarantine)
+            .run(&["status"])
+            .is_err());
+        assert!(checkout
+            .with_work_tree(&fixture.root)
+            .run(&["status"])
+            .is_err());
+        assert!(checkout.run(&["status"]).unwrap().status.success());
+    }
+
+    #[test]
+    #[should_panic(expected = "has no workspace root")]
+    fn a_bare_repository_has_no_workspace_root() {
+        let fixture = Fixture::new();
+        fixture.git().root();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_repository_is_never_reached_through_a_link_or_borrows_objects() {
+        let fixture = Fixture::new();
+        assert!(WorkspaceGit::bare(Path::new("mirror.git"), None)
+            .run(&["rev-parse", "HEAD"])
+            .is_err());
+
+        let link = fixture.root.join("link.git");
+        std::os::unix::fs::symlink(&fixture.mirror, &link).unwrap();
+        assert!(WorkspaceGit::bare(&link, None)
+            .run(&["rev-parse", "HEAD"])
+            .is_err());
+
+        let borrowing = fixture.root.join("borrowing.git");
+        WorkspaceGit::init_bare(&borrowing).unwrap();
+        std::fs::create_dir_all(borrowing.join("objects/info")).unwrap();
+        std::fs::write(
+            borrowing.join("objects/info/alternates"),
+            format!("{}\n", fixture.mirror.join("objects").display()),
+        )
+        .unwrap();
+        let error = WorkspaceGit::bare(&borrowing, None)
+            .run(&["rev-parse", "HEAD"])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("never writes"), "{error}");
+
+        let linked_config = fixture.root.join("linked-config.git");
+        WorkspaceGit::init_bare(&linked_config).unwrap();
+        std::fs::remove_file(linked_config.join("config")).unwrap();
+        std::os::unix::fs::symlink(fixture.mirror.join("config"), linked_config.join("config"))
+            .unwrap();
+        assert!(WorkspaceGit::bare(&linked_config, None)
+            .run(&["rev-parse", "HEAD"])
+            .is_err());
+
+        // A quarantine is only made inside a real directory.
+        assert!(Quarantine::create_in(&link).is_err());
+        assert!(Quarantine::create_in(Path::new("relative")).is_err());
+    }
+
+    /// Each file git would read to find another repository's objects or
+    /// history, and each link or wrong type where git reads refs, objects
+    /// or config, stops every command in the repository.
+    #[cfg(unix)]
+    #[test]
+    fn every_redirect_link_or_wrong_type_in_a_bare_repository_is_refused() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let elsewhere = fixture.root.join("elsewhere.git");
+        WorkspaceGit::init_bare(&elsewhere).unwrap();
+        let swap_for_link = |repository: &Path, name: &str| {
+            let path = repository.join(name);
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+            symlink(elsewhere.join(name), &path).unwrap();
+        };
+        type Setup<'s> = Box<dyn Fn(&Path) + 's>;
+        let cases: Vec<(&str, Setup<'_>, &str)> = vec![
+            (
+                "commondir",
+                Box::new(|repository: &Path| {
+                    std::fs::write(repository.join("commondir"), "../elsewhere.git\n").unwrap()
+                }),
+                "\"commondir\"",
+            ),
+            (
+                "grafts",
+                Box::new(|repository: &Path| {
+                    std::fs::create_dir_all(repository.join("info")).unwrap();
+                    std::fs::write(repository.join("info/grafts"), "").unwrap();
+                }),
+                "\"info/grafts\"",
+            ),
+            (
+                "alternates",
+                Box::new(|repository: &Path| {
+                    std::fs::write(repository.join("objects/info/alternates"), "/x\n").unwrap()
+                }),
+                "\"objects/info/alternates\"",
+            ),
+            (
+                "linked HEAD",
+                Box::new(|repository: &Path| swap_for_link(repository, "HEAD")),
+                "\"HEAD\" in bare repository",
+            ),
+            (
+                "linked config",
+                Box::new(|repository: &Path| swap_for_link(repository, "config")),
+                "\"config\" in bare repository",
+            ),
+            (
+                "linked packed-refs",
+                Box::new(|repository: &Path| {
+                    std::fs::write(elsewhere.join("packed-refs"), "").unwrap();
+                    std::fs::write(repository.join("packed-refs"), "").unwrap();
+                    swap_for_link(repository, "packed-refs");
+                }),
+                "\"packed-refs\" in bare repository",
+            ),
+            (
+                "linked refs",
+                Box::new(|repository: &Path| swap_for_link(repository, "refs")),
+                "\"refs\" in bare repository",
+            ),
+            (
+                "objects is a file",
+                Box::new(|repository: &Path| {
+                    std::fs::remove_dir_all(repository.join("objects")).unwrap();
+                    std::fs::write(repository.join("objects"), "").unwrap();
+                }),
+                "\"objects\" in bare repository",
+            ),
+            (
+                "HEAD is a folder",
+                Box::new(|repository: &Path| {
+                    std::fs::remove_file(repository.join("HEAD")).unwrap();
+                    std::fs::create_dir(repository.join("HEAD")).unwrap();
+                }),
+                "\"HEAD\" in bare repository",
+            ),
+        ];
+        for (index, (label, setup, expected)) in cases.iter().enumerate() {
+            let repository = fixture.root.join(format!("case-{index}.git"));
+            WorkspaceGit::init_bare(&repository).unwrap();
+            WorkspaceGit::bare(&repository, None)
+                .run(&["rev-parse", "--git-dir"])
+                .unwrap();
+            setup(&repository);
+            let error = WorkspaceGit::bare(&repository, None)
+                .run(&["rev-parse", "--git-dir"])
+                .err()
+                .unwrap_or_else(|| panic!("{label}: not refused"))
+                .to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+    }
+
+    /// Ignore and attribute files in the server user's home never change
+    /// what a bare repository's commands see.
+    #[test]
+    fn a_bare_repository_ignores_the_server_users_git_files() {
+        let fixture = Fixture::new();
+        let home = fixture.root.join("home");
+        std::fs::create_dir_all(home.join("git")).unwrap();
+        std::fs::write(home.join("git/ignore"), "b.txt\n").unwrap();
+        std::fs::write(home.join("git/attributes"), "*.md -diff\n").unwrap();
+        let env = || -> Vec<(&'static str, OsString)> {
+            vec![
+                ("XDG_CONFIG_HOME", home.clone().into_os_string()),
+                ("HOME", home.clone().into_os_string()),
+            ]
+        };
+        let work_tree = fixture.root.join("ignore-check");
+        std::fs::create_dir_all(&work_tree).unwrap();
+        let ignored = fixture
+            .git()
+            .with_work_tree(&work_tree)
+            .run_opts(
+                &["check-ignore", "--no-index", "-z", "--stdin"],
+                &RunOpts {
+                    stdin: Some(b"b.txt\0"),
+                    env: env(),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(ignored.status.code(), Some(1), "{ignored:?}");
+        assert!(ignored.stdout.is_empty(), "{ignored:?}");
+        let attributes = fixture
+            .git()
+            .stdout_opts(
+                &["check-attr", "--all", "--", "README.md"],
+                &RunOpts {
+                    env: env(),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(attributes, "");
+
+        // The same files do reach a git that is not pinned, so the test
+        // would see them.
+        let plain = git_output_env(
+            &work_tree,
+            &[
+                "--git-dir",
+                fixture.mirror.to_str().unwrap(),
+                "--work-tree",
+                ".",
+                "check-ignore",
+                "--no-index",
+                "b.txt",
+            ],
+            &home,
+        );
+        assert_eq!(String::from_utf8_lossy(&plain.stdout).trim(), "b.txt");
+    }
+
+    /// Plain git in `dir` with the given home, outside the server's handle.
+    fn git_output_env(dir: &Path, args: &[&str], home: &Path) -> std::process::Output {
+        std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("XDG_CONFIG_HOME", home)
+            .env("HOME", home)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    /// A wrapper around git that records each command line and the
+    /// `GIT_CONFIG_*` entries it was given, for the current thread only.
+    struct RecordingGit {
+        log: PathBuf,
+    }
+
+    impl RecordingGit {
+        fn install(dir: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            let log = dir.join("git-calls.log");
+            let script = dir.join("recording-git");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\n\
+                     {{ printf 'argv'; for arg in \"$@\"; do printf ' [%s]' \"$arg\"; done; \
+                     printf '\\n'; env | grep -E '^GIT_CONFIG_(COUNT|KEY_|VALUE_)' | sort; \
+                     printf 'end\\n'; }} >> '{}'\n\
+                     exec git \"$@\"\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(script));
+            Self { log }
+        }
+
+        /// The recorded calls whose command line contains `needle`.
+        fn calls_with(&self, needle: &str) -> Vec<String> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .split("end\n")
+                .filter(|call| {
+                    call.lines()
+                        .next()
+                        .is_some_and(|argv| argv.contains(needle))
+                })
+                .map(str::to_string)
+                .collect()
+        }
+    }
+
+    impl Drop for RecordingGit {
+        fn drop(&mut self) {
+            crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_repository_passes_the_token_only_in_the_environment() {
+        let fixture = Fixture::new();
+        let recording = RecordingGit::install(&fixture.root);
+        let token = "token-for-this-test";
+        let git = WorkspaceGit::bare(&fixture.mirror, Some(token));
+
+        assert!(git
+            .run(&["ls-remote", &fixture.url()])
+            .unwrap()
+            .status
+            .success());
+        assert!(git.run(&["rev-parse", "HEAD"]).unwrap().status.success());
+
+        let listed = recording.calls_with("[ls-remote]");
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        let (argv, env) = listed[0].split_once('\n').unwrap();
+        assert!(!argv.contains(token), "{argv}");
+        assert!(argv.contains("[--git-dir] [.]"), "{argv}");
+        assert_eq!(
+            env.lines().collect::<Vec<_>>(),
+            vec![
+                "GIT_CONFIG_COUNT=1",
+                "GIT_CONFIG_KEY_0=http.extraHeader",
+                &format!("GIT_CONFIG_VALUE_0=Authorization: Bearer {token}"),
+            ]
+        );
+        // Local commands never get the token at all.
+        let parsed = recording.calls_with("[rev-parse]");
+        assert_eq!(parsed.len(), 1, "{parsed:?}");
+        assert!(!parsed[0].contains(token), "{parsed:?}");
+        assert!(!parsed[0].contains("GIT_CONFIG_COUNT"), "{parsed:?}");
+
+        // A checkout keeps its command line: the token in a `-c` argument.
+        let workspace = fixture.root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        crate::test_support::init_workspace_repo(&workspace);
+        WorkspaceGit::new(&workspace, Some(token))
+            .run(&["ls-remote", &fixture.url()])
+            .unwrap();
+        let checkout = recording.calls_with(&format!("[ls-remote] [{}]", fixture.url()));
+        assert_eq!(checkout.len(), 2, "{checkout:?}");
+        let argv = checkout[1].lines().next().unwrap();
+        assert!(
+            argv.contains(&format!(
+                "[--git-dir] [.instafy/.git] [--work-tree] [.] [-c] \
+                 [http.extraHeader=Authorization: Bearer {token}] [ls-remote]"
+            )),
+            "{argv}"
+        );
+    }
+
+    /// The environment entry is a real header on the wire.
+    #[test]
+    fn a_bare_repository_sends_the_token_as_an_http_header() {
+        let fixture = Fixture::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(20)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+                }
+            }
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            String::from_utf8_lossy(&request).to_string()
+        });
+        let git = WorkspaceGit::bare(&fixture.mirror, Some("header-token")).with_stall_limit(20);
+        let output = git
+            .run_opts(
+                &["ls-remote", &format!("http://127.0.0.1:{port}/repo.git")],
+                &RunOpts {
+                    // The request must reach this listener, not a proxy.
+                    env: vec![("no_proxy", "*".into()), ("NO_PROXY", "*".into())],
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+        assert!(!output.status.success());
+        let request = server.join().unwrap();
+        assert!(
+            request
+                .lines()
+                .any(|line| line.trim() == "Authorization: Bearer header-token"),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn merges_and_ignore_checks_run_on_a_bare_repository() {
+        let fixture = Fixture::new();
+        let git = fixture.git();
+        let main = fixture.main();
+        let quarantine = Quarantine::create_in(&fixture.quarantines).unwrap();
+        let staged = git.with_quarantine(&quarantine);
+        let ours = commit_in(
+            &staged,
+            &main,
+            "README.md",
+            b"ONE\ntwo\nthree\nfour\nfive\n",
+        );
+        let theirs = commit_in(
+            &staged,
+            &main,
+            "README.md",
+            b"one\ntwo\nthree\nfour\nFIVE\n",
+        );
+        let merged = three_way(&staged, Some(&main), &ours, &theirs).unwrap();
+        assert!(merged.conflicts.is_empty(), "{merged:?}");
+        let readme = staged
+            .stdout(&["rev-parse", &format!("{}:README.md", merged.tree)])
+            .unwrap();
+        assert_eq!(
+            staged.stdout(&["cat-file", "-p", &readme]).unwrap(),
+            "ONE\ntwo\nthree\nfour\nFIVE"
+        );
+        // The merged file exists only in the quarantine.
+        assert!(!git.test(&["cat-file", "-e", &readme]).unwrap());
+
+        let work_tree = fixture.root.join("ignore-check");
+        std::fs::create_dir_all(work_tree.join("keep")).unwrap();
+        std::fs::write(work_tree.join(".gitignore"), "*.env\n").unwrap();
+        std::fs::write(work_tree.join("keep/.gitignore"), "!x.env\n").unwrap();
+        let ignored = git
+            .with_work_tree(&work_tree)
+            .bytes_opts(
+                &["check-ignore", "--no-index", "-z", "--stdin"],
+                &RunOpts {
+                    stdin: Some(b"a.env\0keep/x.env\0b.txt\0"),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(ignored, b"a.env\0");
+        assert!(git
+            .with_work_tree(Path::new("relative"))
+            .run(&["check-ignore", "--no-index", "x"])
+            .is_err());
     }
 }

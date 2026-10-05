@@ -90,7 +90,7 @@ describe("StudioMobileContextHeader", () => {
 
   it("opens the shared account sheet without navigating and keeps Home and search separate", async () => {
     await render();
-    expect(document.querySelectorAll('[aria-label="Home — all teams"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[aria-label="Home, all teams"]')).toHaveLength(1);
     expect(button("topbar-home-button").getAttribute("aria-current")).toBe("page");
     expect(button("topbar-home-button").getAttribute("aria-describedby")).toBeTruthy();
     expect(document.getElementById(button("topbar-home-button").getAttribute("aria-describedby")!)?.textContent).toBe("3 unread updates across teams");

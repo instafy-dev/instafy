@@ -21,6 +21,8 @@ export interface DrawerHeaderProps {
   className?: string;
   contentClassName?: string;
   titleClassName?: string;
+  /** Attributes for the title element, such as an id and tabIndex so focus can land on it. */
+  titleProps?: { id?: string; tabIndex?: number; "aria-describedby"?: string };
   subtitleClassName?: string;
   actionsClassName?: string;
 }
@@ -39,6 +41,7 @@ export function DrawerHeader({
   className,
   contentClassName,
   titleClassName,
+  titleProps,
   subtitleClassName,
   actionsClassName,
 }: DrawerHeaderProps) {
@@ -46,10 +49,15 @@ export function DrawerHeader({
   const hideTitle = pageTitle && titleInNavigation;
   const railFrame = frame === "rail";
   const touchDensity = !railFrame && density === "touch";
+  // Mode changes may need to return keyboard focus here even when navigation
+  // owns the visible title. Keep the named target with the drawer body.
+  const hiddenTitle = (hideTitle || actionsPortalTarget) && titleProps?.id ? (
+    <Text {...titleProps} as={titleAs} className="sr-only">{title}</Text>
+  ) : null;
   if (actionsPortalTarget) {
-    return actions ? createPortal(<div className="flex shrink-0 items-center gap-1">{actions}</div>, actionsPortalTarget) : null;
+    return <>{hiddenTitle}{actions ? createPortal(<div className="flex shrink-0 items-center gap-1">{actions}</div>, actionsPortalTarget) : null}</>;
   }
-  if (hideTitle && !subtitle && !actions) return null;
+  if (hideTitle && !subtitle && !actions) return hiddenTitle;
   const header = (
     <div className={["flex min-w-0 items-center gap-3", hideTitle && !subtitle ? "justify-end" : "justify-between", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>
       {!hideTitle || subtitle ? <div
@@ -64,6 +72,7 @@ export function DrawerHeader({
         {icon && !hideTitle ? <div className="shrink-0">{icon}</div> : null}
         <div className="min-w-0">
           {!hideTitle ? <Text
+            {...titleProps}
             as={titleAs}
             variant={touchDensity ? "title" : "bodyStrong"}
             tone="primary"
@@ -98,5 +107,5 @@ export function DrawerHeader({
       ) : null}
     </div>
   );
-  return portalTarget ? createPortal(header, portalTarget) : header;
+  return <>{hiddenTitle}{portalTarget ? createPortal(header, portalTarget) : header}</>;
 }

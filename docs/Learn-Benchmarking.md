@@ -5,8 +5,8 @@ This document is the entry point for anyone working on Instafy's `/learn` flow, 
 Read this before changing:
 
 - `packages/runtime-agent/src/jobs/learn.rs`
+- `packages/runtime-agent/src/jobs/learn/memory_optimizer.rs`
 - `packages/runtime-agent/src/jobs/mod.rs`
-- `packages/runtime-agent/assets/instafy/learnings/_pinned/learning-policy.md`
 - `packages/frontend/tests/playwright/bench/README.md`
 
 ## What `/learn` is supposed to do
@@ -26,6 +26,19 @@ The desired behavior is:
 
 The memory should help the next run choose better. It should not try to replay the old run step by step.
 
+`/learn` is an optional authoring shortcut, not a prerequisite for using memory. Authorized
+ordinary edits to project memory and skills feed the same readers. `/learn apply` selects
+recent history, invokes the learning workflow and then runs the deterministic optimizer.
+`/learn collect` only displays supplied recent conversation history; it does not extract
+candidate updates or provide a preview of model edits. Evaluate acquisition in a disposable
+workspace and inspect the resulting files before promoting any memory to a real project.
+
+The runtime asks the existing policy to decide which edits are worthwhile; it does not require
+a new learning after every review. It must not turn an individual language preference into a
+shared project rule by prescribing that edit in the `/learn` wrapper. Semantic learning quality
+still needs outcome evaluation; removing a conflicting wrapper instruction is not proof that
+the model will always preserve scope or choose the right no-op.
+
 ## What lives where
 
 Keep the responsibilities split cleanly.
@@ -41,7 +54,6 @@ These should own behavioral guidance:
 
 Important files:
 
-- `packages/runtime-agent/assets/instafy/learnings/_pinned/learning-policy.md`
 - `packages/runtime-agent/assets/instafy/.agents/skills/instafy-learning-policy/SKILL.md`
 - `packages/runtime-agent/assets/instafy/.agents/skills/instafy-browser-automation/SKILL.md`
 
@@ -102,7 +114,20 @@ It currently does three important things:
 2. Archives lower-value blocks instead of keeping them all active.
 3. Demotes replay-style memory that looks like copied commands or one-off execution logs.
 
+The optimizer also caps ordinary `INSTAFY.md` memory at 10,000 bytes, including its overflow
+notice, while keeping the explicit [project preferences](Project-Preferences.md) section whole.
+It reads at most 64 KiB and skips unavailable or ambiguous sources instead of partially applying
+defaults. A skipped source remains untouched, with the reason recorded in the optimizer artifact.
+This bound replaces the former unbounded source read; files above 64 KiB require an explicit edit
+before trimming can resume.
+
 The optimizer should act like downward pressure, not like a second agent inventing new behavior.
+
+Its penalties use formatting heuristics, not semantic judgments. A useful procedure can be
+demoted because it includes fenced commands or an unrecognized verification heading. Inspect
+the saved files and generated index when evaluating acquisition. An archive entry currently
+does not exclude a block from automatic directory discovery; enforcing that exclusion needs
+separate validation of the demotion policy.
 
 ## What good learned memory looks like
 
@@ -255,15 +280,17 @@ Do not tune everything at once.
 
 ## Current status
 
-As of the current branch state:
+The repository has opt-in learning benchmarks and deterministic tests for routing, memory
+budgets and archiving. These establish specific mechanical behavior; they do not establish
+semantic acquisition quality, private personalization, or reduced human correction effort.
+Compare `/learn` with ordinary skill-guided authoring on the same history and starting files
+before attributing a benefit to the command itself. Evaluate retrieval separately with
+known-correct memory.
 
-- `/learn` is meaningful and benchmarked.
-- The deterministic fixture suite is producing useful signals.
-- The router is bounded and behaving credibly.
-- The optimizer is doing real downward pressure.
-- New projects can pick up current repo-pinned defaults without runtime image rebuilds.
-
-This is good enough for internal / beta use.
+Learning-policy files are seeded when absent. Updating the bundled template does not replace
+an existing workspace's policy, including an older unmodified template. Existing workspaces need
+an intentional policy update that preserves their customizations; there is no automatic migration.
+Evaluations must record the policy actually used.
 
 It is still worth improving:
 

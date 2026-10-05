@@ -19,6 +19,7 @@ mod agent_write_scopes;
 mod ai_agents;
 mod ai_metering;
 mod auth;
+mod author_identity;
 mod automations;
 mod billing;
 mod browser_profile;
@@ -58,6 +59,7 @@ mod operator_metrics;
 mod org_limits;
 mod origins;
 mod ota;
+mod project_memory_origin;
 mod projects;
 mod provider_devices;
 mod provider_identifiers;
@@ -415,6 +417,16 @@ async fn main() -> anyhow::Result<()> {
                 headers.insert(
                     "x-instafy-has-service-role-key",
                     HeaderValue::from_static(if state.config.supabase_service_role_key.is_some() {
+                        "1"
+                    } else {
+                        "0"
+                    }),
+                );
+                // Without the keyring, saves keep the origin's own identity
+                // (see author_identity.rs); this shows which one applies.
+                headers.insert(
+                    "x-instafy-has-author-pseudonym-keys",
+                    HeaderValue::from_static(if state.config.author_pseudonym_keys.is_some() {
                         "1"
                     } else {
                         "0"

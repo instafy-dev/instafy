@@ -1374,6 +1374,76 @@ export async function listWorkspaceEntries(
   }
 }
 
+/** Why no origin token could be minted for a request. */
+export type OriginTokenFailure =
+  /** No controller URL or service role key is configured. */
+  | { reason: "unconfigured" }
+  /** `/access_token` answered with a non-2xx status. */
+  | { reason: "mint_failed"; statusCode: number }
+  /** `/access_token` answered without an endpoint or token. */
+  | { reason: "mint_empty" };
+
+/**
+ * `GET /git/status?limit=1` on the project's default origin (no preferred
+ * runtime), as the Studio's versioning probe asks it. The stateless gateway
+ * answers `stateless: true`; anything else is the stateful gateway or a
+ * Desktop origin. Returns the HTTP status and parsed body, or why no token
+ * could be minted.
+ */
+export async function fetchDefaultOriginGitStatus(
+  page: Page,
+  options: { projectId: string }
+): Promise<{ statusCode: number; payload: Record<string, unknown> | null } | { tokenFailure: OriginTokenFailure }> {
+  const controllerUrl = resolveControllerUrl();
+  const serviceRole = resolveServiceRoleKey();
+  if (!controllerUrl || !serviceRole) {
+    return { tokenFailure: { reason: "unconfigured" } };
+  }
+  const token = await mintOriginAccessToken(page, {
+    controllerUrl,
+    serviceRole,
+    projectId: options.projectId,
+    scopes: ["fs.read"],
+  });
+  if ("tokenFailure" in token) {
+    return token;
+  }
+  const base = `${token.endpoint.replace(/\/+$/, "")}/`;
+  const url = new URL("git/status", base);
+  url.searchParams.set("limit", "1");
+  const parse = (body: string): Record<string, unknown> | null => {
+    try {
+      const parsed = body ? (JSON.parse(body) as unknown) : null;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  if (shouldResolveLocalTunnelHost(url.hostname)) {
+    const port = resolveUrlPort(url);
+    const resolveTarget = `${url.hostname}:${port}:${resolveLocalTunnelIngressIp()}`;
+    const { statusCode, body } = runCurlWithHttpStatus([
+      "--insecure",
+      "--resolve",
+      resolveTarget,
+      "--header",
+      `Host: ${url.hostname}`,
+      "--header",
+      `authorization: Bearer ${token.token}`,
+      "--header",
+      "accept: application/json",
+      url.toString(),
+    ]);
+    return { statusCode, payload: parse(body) };
+  }
+  const response = await page.context().request.get(url.toString(), {
+    headers: { authorization: `Bearer ${token.token}`, accept: "application/json" },
+  });
+  return { statusCode: response.status(), payload: parse(await response.text().catch(() => "")) };
+}
+
 export async function fetchWorkspaceRawText(
   page: Page,
   rawPath: string,
@@ -4920,17 +4990,28 @@ async function applyWorkspaceChanges(
   }
 }
 
+type OriginAccessTokenRequest = {
+  controllerUrl: string;
+  serviceRole: string;
+  projectId: string;
+  scopes: string[];
+  leaseId?: string | null;
+  preferRuntimeId?: string | null;
+};
+
 async function requestOriginAccessToken(
   page: Page,
-  options: {
-    controllerUrl: string;
-    serviceRole: string;
-    projectId: string;
-    scopes: string[];
-    leaseId?: string | null;
-    preferRuntimeId?: string | null;
-  }
+  options: OriginAccessTokenRequest
 ): Promise<{ endpoint: string; token: string } | null> {
+  const minted = await mintOriginAccessToken(page, options);
+  return "tokenFailure" in minted ? null : minted;
+}
+
+/** `requestOriginAccessToken`, saying why a mint failed. */
+async function mintOriginAccessToken(
+  page: Page,
+  options: OriginAccessTokenRequest
+): Promise<{ endpoint: string; token: string } | { tokenFailure: OriginTokenFailure }> {
   const response = await page.context().request.post(`${options.controllerUrl}/access_token`, {
     headers: {
       authorization: `Bearer ${options.serviceRole}`,
@@ -4945,18 +5026,18 @@ async function requestOriginAccessToken(
     }
   });
   if (!response.ok()) {
-    return null;
+    return { tokenFailure: { reason: "mint_failed", statusCode: response.status() } };
   }
   const payload = (await response.json().catch(() => null)) as
     | { endpoint?: string; token?: string }
     | null;
   if (!payload) {
-    return null;
+    return { tokenFailure: { reason: "mint_empty" } };
   }
   const endpoint = normalizeOriginEndpoint(payload.endpoint);
   const token = typeof payload.token === "string" ? payload.token : "";
   if (!endpoint || !token) {
-    return null;
+    return { tokenFailure: { reason: "mint_empty" } };
   }
   return { endpoint, token };
 }

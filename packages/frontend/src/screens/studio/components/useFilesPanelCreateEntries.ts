@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { controllerClient, type ControllerWorkspaceEntry } from "../../../sdk/instafy";
+import {
+  isVersionedFilesMode,
+  LEGACY_FILES_VERSIONING,
+  type FilesVersioning,
+  type OwnRevisions,
+} from "./filesVersioning";
+import type { OpenTextFileOptions } from "./useFilesPanelViewerState";
+import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./versioningCopy";
 
 export type CreateEntryDraftState = {
   parentPath: string;
@@ -14,8 +22,22 @@ type LoadDirectory = (
 
 type OpenTextFile = (
   entry: ControllerWorkspaceEntry,
-  options?: { forceFetch?: boolean },
+  options?: OpenTextFileOptions,
 ) => Promise<void>;
+
+/** Versioned-mode wiring; absent in legacy mode. */
+export type FilesCreateVersionedOptions = {
+  ownRevisions: OwnRevisions;
+  /** Listing revs and listings, from the explorer. */
+  directoryRevsRef: MutableRefObject<Record<string, string | null>>;
+  directoryEntriesRef: MutableRefObject<Record<string, ControllerWorkspaceEntry[]>>;
+  keepFoldersRef: MutableRefObject<Set<string>>;
+  /** True when a buffer already holds this path. */
+  hasBuffer: (path: string) => boolean;
+  /** Add a never-saved, empty buffer for a new file. */
+  createBuffer: (path: string) => void;
+  onWriteFailure: (copy: SaveCopy, retry: () => void) => void;
+};
 
 type UseFilesPanelCreateEntriesOptions = {
   activeProjectId: string | null;
@@ -43,6 +65,8 @@ type UseFilesPanelCreateEntriesOptions = {
   setMobileView: Dispatch<SetStateAction<"tree" | "viewer">>;
   clearExplorerMenu: () => void;
   readOnly?: boolean;
+  versioning?: FilesVersioning;
+  versionedOptions?: FilesCreateVersionedOptions | null;
 };
 
 export function useFilesPanelCreateEntries({
@@ -67,7 +91,14 @@ export function useFilesPanelCreateEntries({
   setMobileView,
   clearExplorerMenu,
   readOnly = false,
+  versioning = LEGACY_FILES_VERSIONING,
+  versionedOptions = null,
 }: UseFilesPanelCreateEntriesOptions) {
+  const versioned = isVersionedFilesMode(versioning) && versionedOptions !== null;
+  const versionedMode = versioned ? versioning.mode : "legacy";
+  const pinnedOriginId = versioned ? versioning.originId : null;
+  const versionedOptionsRef = useRef(versionedOptions);
+  versionedOptionsRef.current = versionedOptions;
   const [createFileState, setCreateFileState] = useState<CreateEntryDraftState | null>(null);
   const createFileInputRef = useRef<HTMLInputElement | null>(null);
   const [createFolderState, setCreateFolderState] = useState<CreateEntryDraftState | null>(null);
@@ -174,6 +205,37 @@ export function useFilesPanelCreateEntries({
       return;
     }
 
+    const versionedHooks = versioned ? versionedOptionsRef.current : null;
+    if (versionedHooks) {
+      // A new file is a local buffer until its first Save (no request now);
+      // the save sends `expected: {path: null}`, so it cannot overwrite a
+      // file that appears meanwhile.
+      const parentPath = getParentPath(fullPath) ?? "";
+      const listed = versionedHooks.directoryEntriesRef.current[parentPath] ?? [];
+      if (versionedHooks.hasBuffer(fullPath) || listed.some((entry) => normalizePath(entry.path) === fullPath)) {
+        showStatus("A file with that name already exists.", "warning", 3500);
+        return;
+      }
+      const createdEntry = {
+        name: fullPath.split("/").pop() ?? fullPath,
+        path: fullPath,
+        kind: "file" as const,
+      } satisfies ControllerWorkspaceEntry;
+      versionedHooks.createBuffer(fullPath);
+      setDirectoryEntries((prev) => {
+        const existingEntries = prev[parentPath];
+        if (!existingEntries || existingEntries.some((entry) => normalizePath(entry.path) === fullPath)) {
+          return prev;
+        }
+        return { ...prev, [parentPath]: sortEntries([...existingEntries, createdEntry]) };
+      });
+      setCreateFileState(null);
+      if (!await ensureEntryVisible(createdEntry)) return;
+      await openTextFile(createdEntry, { localBuffer: true });
+      focusEditorWhenReady();
+      return;
+    }
+
     setCreateFileState((current) => (current ? { ...current, busy: true } : current));
     try {
       const parentPath = getParentPath(fullPath) ?? "";
@@ -241,6 +303,7 @@ export function useFilesPanelCreateEntries({
     setDirectoryEntries,
     showStatus,
     sortEntries,
+    versioned,
   ]);
 
   const handleStartCreateFolder = useCallback(
@@ -317,17 +380,56 @@ export function useFilesPanelCreateEntries({
       }
 
       const placeholderPath = normalizePath(`${folderPath}/${emptyDirectoryPlaceholder}`);
-      const response = await controllerClient.workspace.files.write({
-        projectId: activeProjectId,
-        path: placeholderPath,
-        content: "",
-        runtimeId: effectiveRuntimeId ?? null,
-      });
-      if (!response?.ok) {
-        throw new Error("Unable to create folder.");
-      }
-      if (typeof response.rev === "string" && response.rev.trim().length > 0) {
-        onLocalCommit(response.rev.trim());
+      const versionedHooks = versioned ? versionedOptionsRef.current : null;
+      if (versionedHooks) {
+        // One commit: the placeholder, which must not exist yet, on top of
+        // the parent listing's rev (stateless gateway).
+        const baseRev = versionedHooks.directoryRevsRef.current[parentPath] ?? null;
+        const folderName = folderPath.split("/").pop() ?? folderPath;
+        const failCreate = (copy: SaveCopy) => {
+          versionedHooks.onWriteFailure(copy, () => {
+            setCreateFolderState({ parentPath: normalizedParent, draft, busy: false });
+          });
+          setCreateFolderState((current) => (current ? { ...current, busy: false } : current));
+        };
+        if (versionedMode === "stateless" && !baseRev) {
+          failCreate({ message: SAVE_COPY.deleteRequiresBaseRev });
+          return;
+        }
+        const result = await controllerClient.workspace.save.changes({
+          projectId: activeProjectId,
+          originId: pinnedOriginId,
+          files: [{ path: placeholderPath, content: "", encoding: "utf8" }],
+          expected: { [placeholderPath]: null },
+          ...(versionedMode === "stateless" && baseRev ? { baseRev } : {}),
+        });
+        if (!result.ok) {
+          failCreate(describeSaveFailure({ error: result.error, mode: versionedMode, label: folderName, operation: "create" }));
+          return;
+        }
+        // Every Files panel shows the folder and moves its listings past the commit.
+        versionedHooks.ownRevisions.recordCommit({
+          projectId: activeProjectId,
+          originId: pinnedOriginId,
+          parentRev: versionedMode === "stateless" ? result.baseRev ?? null : null,
+          rev: result.rev ?? null,
+          writes: [{ path: placeholderPath, blobOid: null }],
+          deletes: [],
+        });
+        versionedHooks.keepFoldersRef.current.add(folderPath);
+      } else {
+        const response = await controllerClient.workspace.files.write({
+          projectId: activeProjectId,
+          path: placeholderPath,
+          content: "",
+          runtimeId: effectiveRuntimeId ?? null,
+        });
+        if (!response?.ok) {
+          throw new Error("Unable to create folder.");
+        }
+        if (typeof response.rev === "string" && response.rev.trim().length > 0) {
+          onLocalCommit(response.rev.trim());
+        }
       }
 
       const createdEntry = {
@@ -372,9 +474,12 @@ export function useFilesPanelCreateEntries({
     loadDirectory,
     normalizePath,
     onLocalCommit,
+    pinnedOriginId,
     setDirectoryEntries,
     showStatus,
     sortEntries,
+    versioned,
+    versionedMode,
   ]);
 
   return {

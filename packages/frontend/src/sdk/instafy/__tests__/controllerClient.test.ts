@@ -24,6 +24,14 @@ describe("instafy sdk controller client", () => {
       "function",
     );
     expect(typeof controllerClient.workspace.files.delete).toBe("function");
+    expect(typeof controllerClient.workspace.files.listAt).toBe("function");
+    expect(typeof controllerClient.workspace.files.readAt).toBe("function");
+    expect(typeof controllerClient.workspace.git.fetchRecovery).toBe("function");
+    expect(typeof controllerClient.workspace.git.restoreRecovery).toBe("function");
+    expect(typeof controllerClient.workspace.git.dismissRecovery).toBe("function");
+    expect(typeof controllerClient.workspace.save.changes).toBe("function");
+    expect(typeof controllerClient.workspace.versioning.probe).toBe("function");
+    expect(typeof controllerClient.workspace.versioning.noteSignal).toBe("function");
     expect(typeof controllerClient.organizations.createInvitationStrict).toBe("function");
     expect(typeof controllerClient.notifications.listInbox).toBe("function");
     expect(typeof controllerClient.automations.runNow).toBe("function");

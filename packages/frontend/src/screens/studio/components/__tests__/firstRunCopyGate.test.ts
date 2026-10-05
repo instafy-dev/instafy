@@ -62,6 +62,13 @@ const GATED_FILES = [
   resolve(frontend, "src/screens/__tests__/LoginPagePendingState.test.tsx"),
   resolve(frontend, "src/screens/login/__tests__/useNativeGithubAuthPending.test.tsx"),
   resolve(repo, "docs/Product.md"),
+  // Chat attachments: the composer's image rules, the copy for a failed or
+  // refused upload, and the merge snapshots sent as attached files.
+  resolve(frontend, "src/lib/chatAttachments.ts"),
+  resolve(frontend, "src/lib/chatAttachmentPreviews.ts"),
+  resolve(components, "useChatComposerAttachments.ts"),
+  resolve(components, "workspaceFileStaleMerge.ts"),
+  resolve(repo, "docs/Chat-Attachments.md"),
 ];
 
 // Lines that are agent prompts, not labels: the assistant is asked politely

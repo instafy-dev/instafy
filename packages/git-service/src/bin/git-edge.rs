@@ -16,8 +16,8 @@ use git_service::auth::{extract_token, TokenValidator};
 use git_service::config::{GitEdgeConfig, GitEdgeRoutingMode};
 use git_service::error::ServiceError;
 use git_service::routing::{
-    is_forwardable_request_header, parse_repo_segment, pick_shard_index, required_scope,
-    GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER,
+    authorize_request_claims, is_forwardable_request_header, parse_repo_segment, pick_shard_index,
+    required_scope, GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER,
     GIT_DELETE_SCOPE,
 };
 
@@ -99,18 +99,10 @@ async fn handle_proxy(
             .validator
             .validate(&token, Some(&state.config.audience))
             .await?;
-
-        if claims.protocol.as_deref() != Some("git") {
-            return Err(ServiceError::forbidden("token protocol mismatch"));
-        }
-        if claims.project_id != repo_name {
-            return Err(ServiceError::forbidden("project mismatch"));
-        }
-        if !claims.scopes.iter().any(|value| value == scope) {
-            return Err(ServiceError::forbidden(format!(
-                "missing required scope {scope}"
-            )));
-        }
+        // The two requests of a push also accept the exact salvage
+        // credential; the shard checks it again and limits that push to
+        // creating salvage refs.
+        authorize_request_claims(&claims, &parts.method, uri.path(), uri.query(), &repo_name)?;
     }
 
     let shard_idx = pick_shard_index(&repo_name, state.config.shards.len());

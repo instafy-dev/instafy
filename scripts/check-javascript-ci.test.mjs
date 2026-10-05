@@ -63,12 +63,13 @@ function route(key, github, enabled = '') {
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget and read-reference selectors, the
-  // code-mode host build, the per-model proxy_retry_budget runs and the runtime
-  // provider unit tests, independently bound by check-rust-ci, and the CLI git
-  // wrapper suite bound below; other commands and authority are exact.
+  // code-mode host build, per-model proxy_retry_budget runs, inert native compaction
+  // and provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // wrapper suite bound below, and the local author pseudonym key test in the
+  // contracts lane; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: '0ca0310f55cd19ce4264543c9cba158f94fe27aa7006a7665b482ce946cafc62' },
+    previousHash: '4f6678a485eb5f0550c9d1600aa81502a34e4dec556155640daa5923ba4d6da7' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
@@ -128,7 +129,7 @@ function aggregateResult(text, github, isCancelled, results) {
   }
 }
 
-test('only four job if lines differ from the complete reviewed workflows plus the runtime retry and read-reference test selectors and main-only caches', () => {
+test('only four job if lines differ from the complete reviewed workflows plus the runtime retry, read-reference and compaction test selectors and main-only caches', () => {
   for (const workflow of cancellationWorkflows) {
     assert.equal(workflow.text.split(aggregateIf).length - 1, workflow.keys.length, workflow.file);
     for (const key of workflow.keys) {
@@ -351,7 +352,8 @@ test('the complete pre-split command inventory and working directories are uncha
   const original = {
     'Install dependencies': 'e77ccc60f79964794528b62d01c6c28548ed751c0da9fb1ed7f94c1ed7e8ce17',
     'Validate public migration ordering': '7d8920702565c08045672b91f0a08a35295ef2bf65e7ea9f464fe3bc173a195e',
-    'Test public migration and self-host contracts': '2fc2836399636c2f6038bdfff42c91fa1b133335e9132e2ba6701469733e34cb',
+    // Reviewed addition: scripts/lib/localAuthorPseudonymKeys.test.mjs.
+    'Test public migration and self-host contracts': 'da14771d8c781591dff8b01f4b7723901b1c621dadda1beadc4d3fb60a1c6814',
     'Ensure Supabase Postgres image': 'fcb66564f9c4cb18b6612898669e1f23c0c21328f9f69a0771e7b3980dfaf930',
     'Apply public migrations to an empty database': '945388b69cfddc6f588f366844e61ffecaee1106b92b3bb4e88d9f89902a395a',
     'Lint frontend': 'a23bfd0831c63f63e596b3d19225888a844d89f50bf043891c3c005b5b42480b',

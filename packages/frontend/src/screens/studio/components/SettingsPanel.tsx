@@ -31,10 +31,10 @@ import { getOrgDisplayName, isPersonalOrgName } from "../../../org/orgNaming";
 import { useStatus } from "../../../status/useStatus";
 import { ProfileEditor } from "../../../profile/ProfileEditor";
 import { NotificationPreferencesSettings } from "../../../notifications/NotificationPreferencesSettings";
-import { PersonalPreferencesSettings } from "./PersonalPreferencesSettings";
 import { PersonalAppearanceSettings } from "./PersonalAppearanceSettings";
 import { PersonalAdvancedSettings } from "./PersonalAdvancedSettings";
 import { SettingsSection } from "./SettingsSection";
+import { describeProjectMemoryBootstrapResult } from "./projectMemoryBootstrapStatus";
 import { TeamProfileSettings } from "./TeamProfileSettings";
 import { useSettingsOrganization } from "./useSettingsOrganization";
 import { useWorkspaceControls } from "../workspaceControls";
@@ -46,10 +46,6 @@ import {
 import { ProjectSettingsSections } from "./ProjectSettingsSections";
 import { SettingsSurface } from "./SettingsSurface";
 import { SettingsShell, type SettingsCategory } from "./SettingsShell";
-import {
-  getGitAutoSyncAfterApplyPreference,
-  setGitAutoSyncAfterApplyPreference,
-} from "../../../conversations/gitAutoSyncPreference";
 import { type ProjectSpeechMode } from "../../../voice/speechPreference";
 import { useProjectSpeechCapabilityState } from "../../../voice/useProjectSpeechCapabilityState";
 import { useProjectSpeechPreferencesState } from "../../../voice/useProjectSpeechPreferencesState";
@@ -152,9 +148,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
   const orgCategory = activeTab === "org" ? settingsRoute.category : "profile";
   const projectCategory = activeTab === "project" ? settingsRoute.category : "overview";
   const profileCategory = activeTab === "profile" ? settingsRoute.category : "account";
-  const [gitAutoSyncAfterApply, setGitAutoSyncAfterApply] = useState<boolean>(() =>
-    getGitAutoSyncAfterApplyPreference()
-  );
   const settingsProvidersRequestVersionRef = useRef(0);
   const orgSelectorTriggerRef = useRef<HTMLButtonElement | null>(null);
   const audioDiagnosticsEnabled = activeTab === "project" && projectCategory === "ai";
@@ -923,9 +916,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
                 ? "Notifications"
                 : profileCategory === "appearance"
                   ? "Appearance"
-                  : profileCategory === "advanced"
-                    ? "Advanced"
-                    : "Preferences";
+                  : "Advanced";
 
   const settingsScope =
     activeTab === "profile" ? null : activeTab === "org" ? (
@@ -1027,21 +1018,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       goToStudio({ kind: "panel", panel });
     },
     [goToStudio],
-  );
-
-  const handleGitAutoSyncChange = useCallback(
-    (enabled: boolean) => {
-      setGitAutoSyncAfterApply(enabled);
-      setGitAutoSyncAfterApplyPreference(enabled);
-      showStatus(
-        enabled
-          ? "Auto-save is on for assistant file changes."
-          : "Auto-save is off. Assistant changes stay in Changes until you save version.",
-        "info",
-        3000
-      );
-    },
-    [showStatus]
   );
 
   const handleProjectSpeechModeChange = useCallback(
@@ -1258,7 +1234,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       { id: "account", label: "Profile", testId: "settings-category-profile-account" },
       { id: "appearance", label: "Appearance", testId: "settings-category-profile-appearance" },
       { id: "notifications", label: "Notifications", testId: "settings-category-profile-notifications" },
-      { id: "preferences", label: "Preferences", testId: "settings-category-profile-preferences" },
       { id: "advanced", label: "Advanced", testId: "settings-category-profile-advanced" },
     ];
   }, [activeTab, projectAiItems]);
@@ -1293,23 +1268,13 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
         throw new Error("Unable to reach project defaults service.");
       }
 
-      if (result.seeded) {
-        showStatus(
-          `Defaults refreshed${result.fileCount > 0 ? ` (${result.fileCount} ${result.fileCount === 1 ? "file" : "files"})` : ""}.`,
-          "success",
-          3500,
-        );
-        if (typeof window !== "undefined") {
-          window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
-        }
-      } else if (result.reason === "already-present") {
-        showStatus("No default files changed.", "info", 3000);
-      } else if (result.reason === "workspace-busy") {
-        showStatus("Workspace is busy. Retry in a moment.", "warning", 3500);
-      } else if (result.reason === "no-origin") {
-        showStatus("Start or connect a runtime before refreshing defaults.", "warning", 3500);
-      } else {
+      const status = describeProjectMemoryBootstrapResult(result, "refresh-defaults");
+      if (!status) {
         throw new Error(result.reason ?? "Unable to refresh project defaults.");
+      }
+      showStatus(status.message, status.intent, status.duration);
+      if (status.committed && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("instafy:workspace-commit", { detail: { projectId } }));
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to refresh project defaults.";
@@ -1576,10 +1541,8 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
             <NotificationPreferencesSettings userId={user?.id ?? null} accessToken={session?.access_token ?? null} />
           ) : profileCategory === "appearance" ? (
             <PersonalAppearanceSettings />
-          ) : profileCategory === "advanced" ? (
-            <PersonalAdvancedSettings />
           ) : (
-            <PersonalPreferencesSettings gitAutoSyncAfterApply={gitAutoSyncAfterApply} onGitAutoSyncChange={handleGitAutoSyncChange} />
+            <PersonalAdvancedSettings />
           )}
         </div>
         ) : activeTab === "project" ? (

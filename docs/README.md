@@ -18,6 +18,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Multi-human + Octo participation: `docs/Group-Conversation-Participation.md`
 - Chat-first onboarding + benchmarking: `docs/Onboarding-Benchmarking.md`
 - /learn and benchmark system: `docs/Learn-Benchmarking.md`
+- Explicit shared project preferences: [Project preferences](Project-Preferences.md)
 - Multi-agent evaluation: `docs/Multi-Agent-Evaluation.md`
 - AI-driven diagnostics and support consent: `docs/Agent-Diagnostics.md`
 - npm package versioning and release automation: `docs/Package-Releases.md`

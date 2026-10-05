@@ -2,6 +2,12 @@ import { createContext, useCallback, useContext, useEffect, useId, useRef, useSt
 import type { StudioPanel } from "../screens/studio/types";
 
 type Draft = { key: string; panel: StudioPanel; value: unknown; base: unknown };
+
+/** Draft keys of unsaved Files buffers: `files:<projectId>:<path>`. */
+export const FILE_BUFFER_DRAFT_PREFIX = "files:";
+export function isFileBufferDraftKey(key: string): boolean {
+  return key.startsWith(FILE_BUFFER_DRAFT_PREFIX);
+}
 type Protection = { id: string; panel: StudioPanel; label: string; discard?: () => void };
 type Snapshot = { drafts: Draft[]; protections: Protection[] };
 const EMPTY: Snapshot = { drafts: [], protections: [] };

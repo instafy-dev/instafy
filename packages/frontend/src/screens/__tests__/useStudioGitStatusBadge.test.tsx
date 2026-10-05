@@ -97,6 +97,21 @@ describe("useStudioGitStatusBadge", () => {
     expect(badge()?.getAttribute("data-supported")).toBe("true");
   });
 
+  it("makes no status call while paused (stateless and Desktop spaces) and clears the count", async () => {
+    await render(ready);
+    expect(badge()?.textContent).toBe("3");
+    await render({ ...ready, paused: true });
+    expect(badge()?.textContent).toBe("0");
+    await act(async () => {
+      dispatch(WORKSPACE_CHANGE_EVENT, { projectId: "project-1", kind: "workspace.file_changed" });
+      dispatch(WORKSPACE_COMMIT_EVENT, { projectId: "project-1" });
+      dispatch(CONTROLLER_STREAM_RECONNECTED_EVENT);
+      window.dispatchEvent(new Event("focus"));
+    });
+    await advance(GIT_STATUS_FALLBACK_INTERVAL_MS * 2);
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(1);
+  });
+
   it("does not fetch before the project is ready", async () => {
     await render({ ...ready, projectReadyForWorkspace: false });
     expect(mocks.fetchStatus).not.toHaveBeenCalled();

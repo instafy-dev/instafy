@@ -15,10 +15,11 @@ including when Studio has another panel open.
   for screen readers without repeating it visually. Descriptions, actions and other section
   headings remain visible. Wide category lists and compact tabs retain content headings.
 
-Your settings has Profile, Appearance, Notifications, Preferences and Advanced categories.
-Appearance owns the device's System/Light/Dark theme; Preferences owns assistant file-saving
-behavior. Theme changes apply immediately. Team and space colors remain in their scoped
-identity settings. On mobile the five categories use the shared anchored picker.
+Your settings has Profile, Appearance, Notifications and Advanced categories.
+Appearance owns the device's System/Light/Dark theme. Theme changes apply immediately. Team and
+space colors remain in their scoped identity settings. On mobile the four categories use the
+shared anchored picker. There is no file-saving preference: every agent turn saves its files,
+so the former Preferences category is gone and an old link to it opens Profile.
 
 Advanced keeps Developer tools collapsed until opened. Its diagnostics action and Support's
 diagnostics action open the same Studio-owned dialog for logs, build information, runtime

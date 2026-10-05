@@ -302,6 +302,26 @@ describe("useRuntimeControllerSync controller access results", () => {
     expect(dependencies.dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "pushConversationMessage" }));
   });
 
+  it("records which project a hydrated origin summary belongs to", async () => {
+    const dependencies = createHookDependencies();
+    const summary = { originId: "desk-origin", mode: "desktop", endpoint: "http://desk" };
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockReturnValue(() => {});
+    controllerMocks.fetchOriginSummary.mockResolvedValue(summary);
+    await act(async () => root.render(<Harness projectId="project-current" dependencies={dependencies} />));
+    await act(async () => {
+      for (let i = 0; i < 6; i += 1) {
+        await Promise.resolve();
+      }
+    });
+    expect(dependencies.dispatch).toHaveBeenCalledWith({
+      type: "applyOriginSummary",
+      summary,
+      derivedPresence: null,
+      projectId: "project-current",
+    });
+  });
+
   it("clears every project-derived runtime slice when there is no active project", async () => {
     const dependencies = createHookDependencies();
 

@@ -551,8 +551,8 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
             variant="ghost"
             radius="full"
             size="md"
-            aria-label="Home — all teams"
-            title="Home — all teams"
+            aria-label="Home, all teams"
+            title="Home, all teams"
             aria-current={navigationPage === "home" ? "page" : undefined}
             data-testid="topbar-home-button"
             className={`!min-h-12 !min-w-12 shrink-0 text-slate-600 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS} aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/15 dark:aria-[current=page]:text-primary-400`}
@@ -645,7 +645,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
               primaryActions={mobilePageHeader?.actions ?? participantsControl}
               pageMenuActions={[
                 ...(compactMobileContext ? [
-                  ...(onOpenHome ? [{ label: "Home — all teams", icon: <span aria-hidden="true"><OctoMark className="h-5 w-5" /></span>, onPress: onOpenHome }] : []),
+                  ...(onOpenHome ? [{ label: "Home, all teams", icon: <span aria-hidden="true"><OctoMark className="h-5 w-5" /></span>, onPress: onOpenHome }] : []),
                   { label: "Search", icon: <Search className="h-5 w-5" aria-hidden="true" />, onPress: compactMobileContext.onSearch, testId: "mobile-header-search" },
                 ] : []),
                 ...(mobilePageHeader?.menuActions ?? []),

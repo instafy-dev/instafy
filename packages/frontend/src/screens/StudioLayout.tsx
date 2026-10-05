@@ -4,6 +4,7 @@ import { chatListDestination } from "../navigation/studioNavigation";
 import { DEFAULT_HOME_LIST_STATE, StudioListNavigationProvider, useStudioListNavigation } from "../navigation/StudioListNavigation";
 import { StudioDraftsProvider, StudioDraftPanel } from "../workspace/StudioDrafts";
 import { StudioDraftNavigationGuard } from "../navigation/StudioDraftNavigationGuard";
+import { StudioFileBufferDrafts } from "../workspace/StudioFileBufferDrafts";
 import { buildHomeFeed } from "./studio/homeFeed";
 import { getHomeNotificationTarget } from "./studio/homeNotifications";
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
@@ -147,7 +148,8 @@ import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
-import { useStudioGitStatusBadge } from "./useStudioGitStatusBadge";
+import { useWorkspaceVersioningBadge } from "./useWorkspaceVersioningBadge";
+import { sourceControlTitle as resolveSourceControlTitle, useActiveWorkspaceVersioning } from "../workspace/useActiveWorkspaceVersioning";
 import { canRememberTeamWorkspace, resolveActiveTeamName, resolveStudioSearchContext, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
@@ -196,6 +198,7 @@ export function StudioLayout() {
   const restorePanelDestination = useStudioNavigation();
   return (
     <StudioDraftsProvider key={user?.id ?? "signed-out"}>
+      <StudioFileBufferDrafts />
       <StudioDraftNavigationGuard>
         <StudioStartupGate>
           <WorkspaceTabsProvider
@@ -425,7 +428,7 @@ function StudioLayoutInner() {
     activeWorkspaceTab?.kind === "jobThread" ||
     (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat");
   // The participants drawer is an overlay opened from the chat roster facepile,
-  // so it needs no width gate — it renders over the workspace content when open.
+  // so it needs no width gate: it renders over the workspace content when open.
   const participantsDrawerOpen = useParticipantsDrawerOpen();
   const visibleConversationControllerId = useMemo((): string | null => {
     if (!isChatSurfaceVisible || searchHidesWorkspace) {
@@ -704,7 +707,7 @@ function StudioLayoutInner() {
       }
       lastControllerAuthErrorRef.current = now;
 
-      showStatus(`${message} Please sign in again.`, "error", 6000);
+      showStatus(`${message} Sign in again.`, "error", 6000);
       clearControllerAccessTokenOverride();
       void signOut().catch(() => {});
       navigate("/login");
@@ -966,8 +969,8 @@ function StudioLayoutInner() {
     const balance = creditBilling.creditBalance ?? 0;
     showStatus(
       level === "out"
-        ? "You're out of credits — refill to keep going."
-        : `Low on credits — ${balance} left. Refill to keep chatting.`,
+        ? "You're out of credits. Refill to keep going."
+        : `Low on credits: ${balance} left. Refill to keep chatting.`,
       level === "out" ? "error" : "warning",
       8000,
       {
@@ -1035,7 +1038,7 @@ function StudioLayoutInner() {
       } else if (reason === "idle") {
         markIdlePaused(projectId);
         showStatus(
-          "Hosted machine paused after inactivity. Your files and caches are kept — it wakes when you continue.",
+          "Hosted machine paused after inactivity. Your files and caches are kept, and it wakes when you continue.",
           "info",
           8000,
           { id: "runtime-paused-idle", forceVisible: true },
@@ -1068,7 +1071,7 @@ function StudioLayoutInner() {
         );
       } else {
         showStatus(
-          "Hosted machine paused — this team is out of credits for today. They refill at 00:00 UTC.",
+          "Hosted machine paused: this team is out of credits for today. They refill at 00:00 UTC.",
           "error",
           10000,
           {
@@ -1167,7 +1170,7 @@ function StudioLayoutInner() {
       if (minutesLeft <= 30 && minutesLeft > 0 && !runwayWarnedRef.current) {
         runwayWarnedRef.current = true;
         showStatus(
-          `Heads up: today's credits cover about ${Math.max(1, Math.round(minutesLeft))} more minutes — the hosted machine pauses when they run out. Credits refill at 00:00 UTC.`,
+          `Heads up: today's credits cover about ${Math.max(1, Math.round(minutesLeft))} more minutes. The hosted machine pauses when they run out. Credits refill at 00:00 UTC.`,
           "warning",
           10000,
           {
@@ -1192,12 +1195,22 @@ function StudioLayoutInner() {
     showStatus,
   ]);
 
-  const { gitDirtyCount, gitSupported } = useStudioGitStatusBadge({
+  // Changes (legacy) or History (stateless and Desktop spaces): the nav
+  // label, the topbar title and the badge's source follow the mode.
+  const workspaceVersioning = useActiveWorkspaceVersioning({
+    enabled: projectReadyForWorkspace && !controllerProjectMissing,
+  });
+  const sourceControlTitle = resolveSourceControlTitle(workspaceVersioning.chromeMode);
+  const { badge: sourceControlBadge } = useWorkspaceVersioningBadge({
     activeProjectId,
     controllerProjectMissing,
     projectReadyForWorkspace,
     effectiveRuntimeId,
     runtimeReady,
+    chromeMode: workspaceVersioning.chromeMode,
+    historyReady: workspaceVersioning.historyReady,
+    originId: workspaceVersioning.originId,
+    userId: currentUserId,
   });
 
     useEffect(() => {
@@ -1277,22 +1290,14 @@ function StudioLayoutInner() {
     setMobileGitReviewSheet,
   ]);
 
-  const sourceControlBadge = useMemo(() => {
-    if (!gitSupported || gitDirtyCount <= 0) {
-      return null;
-    }
-    const label = `${gitDirtyCount} uncommitted ${gitDirtyCount === 1 ? "change" : "changes"}`;
-    return { count: gitDirtyCount, label };
-  }, [gitDirtyCount, gitSupported]);
-
     const sidebarItems = useMemo(() => {
       return navItems.map((item) => {
         if (item.id === "sourceControl") {
-          return { ...item, badge: sourceControlBadge };
+          return { ...item, label: sourceControlTitle, badge: sourceControlBadge };
         }
         return item;
       });
-    }, [sourceControlBadge]);
+    }, [sourceControlBadge, sourceControlTitle]);
 
     const sidebarMoreItems = useMemo(() => {
       return navMoreItems.map((item) => item.id === "credits" ? { ...item, indicator: creditsIndicator ?? null } : item);
@@ -1417,7 +1422,7 @@ function StudioLayoutInner() {
       }
       if (result.status === "error") {
         const message =
-          result.error instanceof Error ? result.error.message : "Unable to send prompt. Please try again.";
+          result.error instanceof Error ? result.error.message : "Unable to send prompt. Try again.";
         showStatus(message, "error", 4000);
       }
     },
@@ -1611,8 +1616,8 @@ function StudioLayoutInner() {
     });
   }, [activeProjectSummary?.orgId, navigateToDestination, orgSettingsTitle, runStudioNavigation, setPanelTabMeta]);
 
-  // ChatPanel's read-only notice cannot open a workspace tab itself —
-  // WorkspaceTabsProvider is mounted below the providers that panel runs in — so
+  // ChatPanel's read-only notice cannot open a workspace tab itself:
+  // WorkspaceTabsProvider is mounted below the providers that panel runs in, so
   // it asks here, the same way "instafy:open-source-control" does.
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1748,7 +1753,11 @@ function StudioLayoutInner() {
     drawerOverlay: showMobileLeftDrawerOverlay ? leftDrawer : null,
     loadingChats: workspaceLoadingChats,
   });
-  const topbarLocationOverride = topbarLocation ? topbarLocations[topbarLocation] : null;
+  const topbarLocationOverride = topbarLocation
+    ? topbarLocation === "sourceControl"
+      ? { ...topbarLocations.sourceControl, title: sourceControlTitle }
+      : topbarLocations[topbarLocation]
+    : null;
 
   const showChatActions = !projectAccessBlocked;
 
@@ -1858,7 +1867,7 @@ function StudioLayoutInner() {
       workspaceContentIsLazy = true;
       workspaceContent = (
         <div className="flex h-full flex-col overflow-hidden">
-          <SourceControlDrawer openRequest={sourceControlOpenRequest} />
+          <SourceControlDrawer openRequest={sourceControlOpenRequest} title={sourceControlTitle} />
         </div>
       );
     } else if (activeWorkspaceTab.panel === "projects") {
@@ -2040,7 +2049,7 @@ function StudioLayoutInner() {
   />;
 
   const mobileDrawerPageHeader = !isLargeScreen && leftDrawer === "sourceControl"
-    ? { title: "Changes", actions: <div ref={setMobileDrawerActionsTarget} /> }
+    ? { title: sourceControlTitle, actions: <div ref={setMobileDrawerActionsTarget} /> }
     : undefined;
 
   const renderMobileWorkspaceHeader = (pageHeader?: MobilePageHeader) => (
@@ -2207,6 +2216,7 @@ function StudioLayoutInner() {
                   <SourceControlDrawer
                     headerPortalTarget={desktopPaneHeaderTarget}
                     openRequest={sourceControlOpenRequest}
+                    title={sourceControlTitle}
                     onRequestClose={() => {
                       requestHistoryPush();
                       setLeftDrawer(null);
@@ -2290,7 +2300,7 @@ function StudioLayoutInner() {
                   aria-label="Close navigation" title="Close navigation" aria-expanded="true"
                   data-testid="mobile-navigation-close" className="!min-h-12 !min-w-12 shrink-0">
                   <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" />
-                </IconButton> : <IconButton variant="ghost" onPress={handleOpenHome} aria-label="Home — all teams" aria-current={contextHomeActive ? "page" : undefined} className="relative !min-h-12 !min-w-11 shrink-0">
+                </IconButton> : <IconButton variant="ghost" onPress={handleOpenHome} aria-label="Home, all teams" aria-current={contextHomeActive ? "page" : undefined} className="relative !min-h-12 !min-w-11 shrink-0">
                   <OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" />
                   <AttentionBadge count={homeAttentionCount} aria-hidden className="absolute right-0 top-0" />
                 </IconButton>}
@@ -2380,6 +2390,7 @@ function StudioLayoutInner() {
                   <SourceControlDrawer
                     actionsPortalTarget={mobileDrawerActionsTarget}
                     openRequest={sourceControlOpenRequest}
+                    title={sourceControlTitle}
                     onRequestClose={() => {
                       requestHistoryPush();
                       setLeftDrawer(null);

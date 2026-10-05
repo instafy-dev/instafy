@@ -262,7 +262,7 @@ export function FilesExplorerTree({
                       </span>
                     )}
                     {isDirty ? (
-                      <span className="text-xs text-rose-500 dark:text-rose-400">●</span>
+                      <span className="text-xs text-rose-500 dark:text-rose-400" role="img" aria-label="Unsaved changes">●</span>
                     ) : null}
                   </div>
                 </Button>

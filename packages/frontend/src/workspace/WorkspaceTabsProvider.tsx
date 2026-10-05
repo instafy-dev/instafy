@@ -715,7 +715,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       tabsRef.current = nextTabs;
       setTabs(nextTabs);
       // Pruning a stale tab can leave activeTabId pointing at nothing, and the
-      // repair below only runs on the chat panel — on Home the workspace would
+      // repair below only runs on the chat panel. On Home the workspace would
       // sit blank until the next click.
       const activeId = activeTabIdRef.current;
       if (activeId && !nextTabs.some((tab) => tab.id === activeId)) {
@@ -783,7 +783,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     const dirtyLookup = new Map<string, boolean>();
     const titleLookup = new Map<string, string>();
     workspace.files.forEach((file) => {
-      dirtyLookup.set(file.id, file.modified !== file.generated);
+      dirtyLookup.set(file.id, file.modified !== file.generated || file.isNew === true);
       titleLookup.set(file.id, file.label ?? file.path);
     });
     const currentTabs = tabsRef.current;

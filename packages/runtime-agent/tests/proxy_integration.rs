@@ -33,6 +33,9 @@ use uuid::Uuid;
 
 static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
+#[path = "proxy_integration/native_compaction.rs"]
+mod native_compaction;
+
 async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().await
 }

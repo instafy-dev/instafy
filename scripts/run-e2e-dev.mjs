@@ -33,6 +33,7 @@ import {
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
 import { computeGitServicesImageFingerprint } from "./lib/gitServicesImageFingerprint.mjs";
 import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
+import { ensureLocalAuthorPseudonymKeys } from "./lib/localAuthorPseudonymKeys.mjs";
 import { ensureLocalUserTokenSecret } from "./lib/localUserTokenSecret.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -68,6 +69,7 @@ const credentialEncryptionKeyPath = path.join(
   "credential-encryption-key.b64"
 );
 const userTokenSecretPath = path.join(repoRoot, "tmp", "user-token-secret");
+const authorPseudonymKeysPath = path.join(repoRoot, "tmp", "author-pseudonym-keys");
 const runtimeProvenancePath = path.join(repoRoot, "tmp", "runtime-provenance.json");
 const runtimePruneScript = path.join(repoRoot, "scripts", "prune-runtime-agents.mjs");
 const UUID_PATTERN =
@@ -3136,6 +3138,12 @@ async function startControllerIfNeeded(
   env.USER_TOKEN_SECRET = ensureLocalUserTokenSecret({
     explicit: process.env.USER_TOKEN_SECRET,
     filePath: userTokenSecretPath,
+  });
+  // Without this keyring the controller still starts, but saves keep the
+  // origin's own git identity instead of per-space author pseudonyms.
+  env.INSTAFY_AUTHOR_PSEUDONYM_KEYS = ensureLocalAuthorPseudonymKeys({
+    explicit: process.env.INSTAFY_AUTHOR_PSEUDONYM_KEYS,
+    filePath: authorPseudonymKeysPath,
   });
   const proxyAuthPath = resolveProxyAuthPath(resolveProxyCodexHome());
   if (fileExists(proxyAuthPath)) {

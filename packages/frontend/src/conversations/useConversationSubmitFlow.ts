@@ -19,7 +19,6 @@ import {
 } from "./agentCollaborationPolicy";
 import { runLocalCapabilityConversationFlow } from "./localCapabilityConversationFlow";
 import { parseTerminalCommandRequest } from "./terminalCommand";
-import { getGitAutoSyncAfterApplyPreference } from "./gitAutoSyncPreference";
 import { createConversationTaskQueue } from "./conversationTaskQueue";
 import {
   buildGroupParticipationMetadata,
@@ -52,8 +51,13 @@ import {
   patchConversationMessageMetadata,
   resolveSubmittedImageFiles,
   sleep,
-  uploadConversationImageAttachments,
+  uploadConversationAttachments,
 } from "./conversationSubmitHelpers";
+import {
+  ChatAttachmentUploadError,
+  describeChatAttachmentUploadError,
+  isChatAttachmentUploadError,
+} from "../lib/chatAttachments";
 import { withRuntimeExpectations } from "./conversationRuntimeExpectations";
 import {
   activeGoalPromptMetadata,
@@ -119,6 +123,18 @@ export function buildAssistantCapabilityContextForTargets(
 
 function detectWebdevRuntimeNeed(): WebdevRuntimeNeed | null {
   return null;
+}
+
+// The removed "Auto-save assistant file changes" setting stored its choice
+// here. Runtimes ignore an off choice, so it is cleared on the next prompt.
+const RETIRED_GIT_AUTO_SYNC_STORAGE_KEY = "instafy.git.autoSyncAfterApply";
+
+function forgetRetiredGitAutoSyncPreference(): void {
+  try {
+    window.localStorage.removeItem(RETIRED_GIT_AUTO_SYNC_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable (private windows, blocked site data).
+  }
 }
 
 export function useConversationSubmitFlow({
@@ -403,7 +419,9 @@ export function useConversationSubmitFlow({
       }
       const conversation = ensureConversation();
       const requestedConversationId = conversationId ?? conversation.localId;
-      const sourceConversation =
+      // Rebound below once an attachment upload has created the conversation
+      // on the controller, so the rest of this send reuses that conversation.
+      let sourceConversation =
         conversations.find(
           (entry) =>
             entry.localId === requestedConversationId ||
@@ -559,14 +577,13 @@ export function useConversationSubmitFlow({
         targetConversation = learnConversation;
         displayConversationId = parentConversation.localId;
       }
-      const autoSyncAfterApply = getGitAutoSyncAfterApplyPreference();
+      // Every turn saves, so prompts no longer carry an auto-save choice;
+      // the stored choice from the removed setting is dropped here.
+      forgetRetiredGitAutoSyncPreference();
       let promptMetadata: Record<string, unknown> | null = {
         ...submittedMetadata,
         client: buildConversationClientMetadata(chatClientSessionId, currentUserId),
         clientMessageId: generateUUID(),
-        git: {
-          autoSyncAfterApply,
-        },
       };
       const goalMetadata = activeGoalPromptMetadata(targetConversation.activeGoal);
       if (goalMetadata) {
@@ -595,6 +612,68 @@ export function useConversationSubmitFlow({
           { commandExecution: true },
         );
       }
+      const imageFiles = resolveSubmittedImageFiles(options?.imageFile, options?.imageFiles);
+      const attachmentFiles = [
+        ...imageFiles,
+        ...(options?.textFiles ?? []).filter((file): file is File => file instanceof File),
+      ];
+
+      if (attachmentFiles.length > 0) {
+        // Attachments are stored in the conversation's own Storage folder, and
+        // Storage refuses a folder whose conversation does not exist yet, so a
+        // new chat is created on the controller first. Nothing is shown or
+        // sent until every attachment is stored: a failure leaves no message
+        // behind and the composer gets the draft back (useChatSubmitDispatch).
+        const failSend = (failure: ChatAttachmentUploadError): never => {
+          if (!options?.callerReportsAttachmentErrors) {
+            showStatus(`Your message wasn't sent. ${failure.message}`, "error", 6000);
+          }
+          throw failure;
+        };
+        let attachmentConversationId: string | null = null;
+        try {
+          attachmentConversationId = await ensureControllerConversationId(
+            projectId,
+            targetConversation,
+          );
+        } catch (error) {
+          console.warn("Failed to create the conversation for attachments", error);
+        }
+        if (!attachmentConversationId) {
+          return failSend(
+            new ChatAttachmentUploadError("Couldn't start this chat. Try again in a moment."),
+          );
+        }
+        const conversationWithController = {
+          ...targetConversation,
+          controllerId: attachmentConversationId,
+        };
+        if (sourceConversation.localId === targetConversation.localId) {
+          sourceConversation = conversationWithController;
+          displayConversationControllerId = attachmentConversationId;
+        }
+        targetConversation = conversationWithController;
+
+        let attachments: Awaited<ReturnType<typeof uploadConversationAttachments>>;
+        try {
+          attachments = await uploadConversationAttachments({
+            projectId,
+            conversationId: attachmentConversationId,
+            files: attachmentFiles,
+          });
+        } catch (error) {
+          return failSend(
+            isChatAttachmentUploadError(error)
+              ? error
+              : new ChatAttachmentUploadError(describeChatAttachmentUploadError(error)),
+          );
+        }
+        promptMetadata = {
+          ...(promptMetadata ?? {}),
+          attachments,
+        };
+      }
+
       const shouldAttemptAutoTitle = shouldAutoTitleConversation(targetConversation, trimmed);
       const userMessage = createConversationMessage(
         "user",
@@ -606,40 +685,14 @@ export function useConversationSubmitFlow({
       // failed run, and only for a run it started (useRunFailureAutoRetry).
       rememberPromptSentFromThisPage(userMessage);
       appendMessages(displayConversationId, [userMessage]);
+      if (attachmentFiles.length > 0) {
+        options?.onAttachmentsStored?.();
+      }
       // What the list will hold once this message lands; null for a chat whose
       // history lives on the controller.
       const autoTitleOpeningMessage = shouldAttemptAutoTitle
         ? getOpeningUserMessage({ ...targetConversation, messages: [...targetConversation.messages, userMessage] })
         : null;
-
-      const imageFiles = resolveSubmittedImageFiles(options?.imageFile, options?.imageFiles);
-
-      if (imageFiles.length > 0) {
-        try {
-          const { runtimeId } = resolveRuntimeTarget(targetConversation);
-          const attachments = await uploadConversationImageAttachments({
-            projectId,
-            runtimeId,
-            imageFiles,
-          });
-
-          promptMetadata = {
-            ...(promptMetadata ?? {}),
-            attachments,
-          };
-
-          patchConversationMessageMetadata(
-            updateMessage,
-            displayConversationId,
-            userMessage.id,
-            promptMetadata,
-          );
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          showStatus(`Image upload failed: ${message}`, "error", 5000);
-          return;
-        }
-      }
 
       const configuredAgentHandles =
         options?.agentHandles
@@ -688,7 +741,7 @@ export function useConversationSubmitFlow({
           ? decideTopLevelAgentCollaborationModes({
               prompt: trimmed,
               explicitHandles: explicitTopLevelAgentHandles,
-              hasAttachments: imageFiles.length > 0,
+              hasAttachments: attachmentFiles.length > 0,
               hasTerminalIntent: Boolean(terminalRequest),
             })
           : {};
@@ -1117,7 +1170,7 @@ export function useConversationSubmitFlow({
                 return {
                   ...previous,
                   content:
-                    "Switching to the Webdev runtime (Playwright) — it’s already ready; running your request now…",
+                    "Switching to the Webdev runtime (Playwright). It’s already ready; running your request now…",
                   metadata: {
                     ...previousMetadata,
                     details: {
@@ -1151,7 +1204,7 @@ export function useConversationSubmitFlow({
                 return {
                   ...previous,
                   content:
-                    "Switching to the Webdev runtime (Playwright) — starting it now; I’ll run your request as soon as it’s ready…",
+                    "Switching to the Webdev runtime (Playwright). Starting it now; I’ll run your request as soon as it’s ready…",
                   metadata: {
                     ...previousMetadata,
                     details: {
@@ -1211,7 +1264,7 @@ export function useConversationSubmitFlow({
                       return {
                         ...previous,
                         content:
-                          "Switching to the Webdev runtime (Playwright) — it’s ready; running your request now…",
+                          "Switching to the Webdev runtime (Playwright). It’s ready; running your request now…",
                         metadata: {
                           ...previousMetadata,
                           details: {

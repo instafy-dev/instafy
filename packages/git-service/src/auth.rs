@@ -187,9 +187,76 @@ pub fn extract_token(headers: &HeaderMap) -> Result<String, ServiceError> {
     ))
 }
 
+/// Whether a compact JWT's payload lists `scope`, read **without** verifying
+/// the token. Use it only to decide that a token needs a full check, never to
+/// grant anything: a token it reports must still pass [`TokenValidator`].
+pub fn token_lists_scope_unverified(token: &str, scope: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ListedScopes {
+        #[serde(default)]
+        scopes: Vec<String>,
+    }
+
+    let mut segments = token.split('.');
+    let (Some(_header), Some(payload), Some(_signature), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+    let Ok(payload) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
+        return false;
+    };
+    serde_json::from_slice::<ListedScopes>(&payload)
+        .map(|listed| listed.scopes.iter().any(|value| value == scope))
+        .unwrap_or(false)
+}
+
 fn algorithm_for_decode(header_alg: Algorithm) -> Algorithm {
     match header_alg {
         Algorithm::EdDSA => Algorithm::EdDSA,
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compact(payload: &str) -> String {
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        format!(
+            "{}.{}.{}",
+            engine.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#),
+            engine.encode(payload),
+            engine.encode("signature")
+        )
+    }
+
+    #[test]
+    fn unverified_scope_listing_reads_only_the_scopes_claim() {
+        let salvage = compact(r#"{"sub":"s","scopes":["git.salvage"],"exp":1}"#);
+        assert!(token_lists_scope_unverified(&salvage, "git.salvage"));
+        assert!(!token_lists_scope_unverified(&salvage, "git.write"));
+
+        let mixed = compact(r#"{"scopes":["git.write","git.salvage"]}"#);
+        assert!(token_lists_scope_unverified(&mixed, "git.salvage"));
+
+        for token in [
+            compact(r#"{"scopes":["git.write"]}"#),
+            compact(r#"{"scope":"git.salvage"}"#),
+            compact(r#"{"scopes":"git.salvage"}"#),
+            compact("not json"),
+            "git.salvage".to_string(),
+            format!("{}.extra", compact(r#"{"scopes":["git.salvage"]}"#)),
+            String::new(),
+        ] {
+            assert!(
+                !token_lists_scope_unverified(&token, "git.salvage"),
+                "{token:?}"
+            );
+        }
     }
 }

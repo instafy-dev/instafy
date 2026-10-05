@@ -61,7 +61,10 @@ vi.mock("../../../../status/useStatus", () => ({
 
 // The runtime's final job artifacts for a turn that edited one file, with the
 // git sync outcome the runtime recorded for its save.
-function assistantTurn(gitSyncStatus: "synced" | "failed" | "disabled") {
+function assistantTurn(
+  gitSyncStatus: "synced" | "failed" | "disabled" | "partial",
+  report: { conflictedPaths?: string[]; rejectedPaths?: Array<Record<string, unknown>> } = {},
+) {
   return mapControllerMessageToChat({
     id: "14141414-1414-1414-1414-141414141414",
     conversationId: "44444444-4444-4444-4444-444444444444",
@@ -86,6 +89,8 @@ function assistantTurn(gitSyncStatus: "synced" | "failed" | "disabled") {
             gitSyncAttempted: gitSyncStatus !== "disabled",
             gitSyncError: gitSyncStatus === "failed" ? "git remote is not configured for this project" : null,
             paths: [],
+            conflictedPaths: report.conflictedPaths ?? [],
+            rejectedPaths: report.rejectedPaths ?? [],
           },
         },
       ],
@@ -124,19 +129,24 @@ describe("assistant file changes and their save state", () => {
     expect(bubble?.querySelector('[data-testid="chat-file-change-file-chip"]')?.textContent).toBe("profile.json");
     const state = bubble?.querySelector<HTMLElement>('[data-testid="chat-file-change-unsaved"]');
     expect(state?.textContent).toContain("Not saved");
-    expect(state?.getAttribute("title")).toContain("could be lost when it restarts");
+    expect(state?.getAttribute("title")).toContain("The agent saves them at its next turn");
   });
 
-  it("marks them Not saved when auto-save was off for the run", async () => {
+  it("marks them Not saved when saving was off for the run, without naming a cause or promising a later save", async () => {
+    // A turn recorded while a user's own auto-save preference was off looks
+    // the same as one a runtime-wide setting left unsaved.
     const message = assistantTurn("disabled");
 
     await act(async () => {
       root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
     });
 
-    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')?.getAttribute("title")).toContain(
-      "Auto-save was off when this turn ran.",
+    // Until the space's mode is known the card behaves as it does today.
+    const title = container.querySelector('[data-testid="chat-file-change-unsaved"]')?.getAttribute("title");
+    expect(title).toBe(
+      "Auto-save was off when this turn ran. Until you save a version, these changes are only on this space's machine and could be lost when it restarts.",
     );
+    expect(title).not.toMatch(/next turn|runtime/);
   });
 
   it("looks like a normal change when the save worked", async () => {
@@ -149,5 +159,20 @@ describe("assistant file changes and their save state", () => {
     expect(container.querySelector('[data-testid="chat-file-change-file-chip"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')).toBeNull();
     expect(container.textContent).not.toContain("Not saved");
+  });
+
+  it("marks only the file a partial save left out", async () => {
+    const message = assistantTurn("partial", { conflictedPaths: ["bookkeeping/profile.json"] });
+
+    await act(async () => {
+      root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
+    });
+
+    expect(container.querySelector('[data-testid="chat-file-change-unsaved"]')).toBeNull();
+    const chip = container.querySelector<HTMLElement>('[data-testid="chat-file-change-not-saved-chip"]');
+    expect(chip?.previousElementSibling?.getAttribute("data-testid")).toBe("chat-file-change-file-chip");
+    expect(chip?.getAttribute("title")).toBe(
+      "Changed in the space while the agent worked. The agent's version is kept as unsaved work.",
+    );
   });
 });

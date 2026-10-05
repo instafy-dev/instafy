@@ -402,6 +402,14 @@ plan limit, a rate limit window too long to wait out, quota exhaustion and every
 keep their HTTP error, and a request that does not stream, every Chat Completions request
 included, keeps the HTTP 429.
 
+### Compaction output
+
+When a ChatGPT upstream emits a `compaction` item in `response.output_item.done`, the proxy
+retains it even if the final response has an empty output array. The encrypted content stays
+opaque, is not extracted as assistant text, and is not duplicated if the final output already
+contains it. This transport behavior does not itself validate a client's compaction and resume
+lifecycle.
+
 ### Responses the upstream cuts short
 
 The upstream can stop a response before it finishes, at `max_output_tokens` or by a content

@@ -66,7 +66,12 @@ import {
   type ConversationGoal,
   type ConversationGoalHealth,
 } from "../../../conversations/conversationGoals";
-import type { PendingChatImageAttachment } from "./useChatComposerAttachments";
+import {
+  describeSendingImages,
+  formatAttachmentSize,
+  type PendingChatImageAttachment,
+} from "./useChatComposerAttachments";
+import { CHAT_IMAGE_ACCEPT } from "../../../lib/chatAttachments";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { useTouchSendModePicker } from "./useTouchSendModePicker";
 import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
@@ -118,6 +123,8 @@ type ChatComposerSurfaceProps = {
     "triggerClassName" | "triggerIconClassName"
   >;
   onOpenImagePicker: () => void;
+  /** Why images can't be attached here (no attachment storage), or null. */
+  imageUploadUnavailableReason?: string | null;
   sendingAttachment: boolean;
   showMobileGhostSuggestionAcceptButton: boolean;
   onAcceptGhostSuggestion: () => void;
@@ -251,6 +258,7 @@ export function ChatComposerSurface({
   homeAttentionBadge,
   composerActionMenuProps,
   onOpenImagePicker,
+  imageUploadUnavailableReason = null,
   sendingAttachment,
   showMobileGhostSuggestionAcceptButton,
   onAcceptGhostSuggestion,
@@ -474,7 +482,9 @@ export function ChatComposerSurface({
   const mobileChatsNavigation = showComposerNavigationButton && composerNavigationDestination === "chats";
   const compactNavigationLayout = showComposerNavigationButton && composerNavigationDestination !== "drawer";
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
-  const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
+  const imageUploadDisabled =
+    mutationDisabled || sendingAttachment || onboardingInputLocked || Boolean(imageUploadUnavailableReason);
+  const sendingImageCount = imageAttachments.filter((attachment) => attachment.sending).length;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -863,6 +873,7 @@ export function ChatComposerSurface({
       mutationDisabled={mutationDisabled}
       onUploadImage={onOpenImagePicker}
       uploadImageDisabled={imageUploadDisabled}
+      uploadImageUnavailableReason={imageUploadUnavailableReason}
       onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
       onStartVoiceInput={
         voiceInputAvailable && !showInlineVoiceAction && voiceConversationActionStripProps.onVoiceTap
@@ -1414,8 +1425,9 @@ export function ChatComposerSurface({
               <input
                 ref={imageInputRef}
                 type="file"
-                accept="image/*"
+                accept={CHAT_IMAGE_ACCEPT}
                 multiple
+                disabled={Boolean(imageUploadUnavailableReason)}
                 onChange={onImageInputChange}
                 className="hidden"
                 data-testid="chat-image-upload-input"
@@ -1423,10 +1435,15 @@ export function ChatComposerSurface({
               {imageAttachments.length > 0 ? (
                 <div
                   className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)] ${draftExpanded ? "max-h-24 shrink-0 overflow-y-auto" : ""}`}
+                  aria-busy={sendingImageCount > 0 ? true : undefined}
                   data-testid="chat-image-upload-preview"
                 >
                   {imageAttachments.map((attachment, index) => (
-                    <div key={attachment.id} className="flex items-center gap-3">
+                    <div
+                      key={attachment.id}
+                      className={`flex items-center gap-3 ${attachment.sending ? "opacity-60" : ""}`}
+                      data-sending={attachment.sending ? "true" : undefined}
+                    >
                       <button
                         type="button"
                         onClick={() => onOpenImage(attachment.previewUrl, attachment.file.name)}
@@ -1445,7 +1462,7 @@ export function ChatComposerSurface({
                           {attachment.file.name}
                         </Text>
                         <Text as="div" variant="caption" tone="muted" className="text-xxs">
-                          {Math.max(1, Math.round(attachment.file.size / 1024))} KB
+                          {formatAttachmentSize(attachment.file.size)}
                         </Text>
                       </div>
                       <IconButton
@@ -1454,6 +1471,7 @@ export function ChatComposerSurface({
                         size="sm"
                         radius="full"
                         onPress={() => onRemoveImageAttachment(attachment.id)}
+                        isDisabled={Boolean(attachment.sending)}
                         aria-label="Remove image"
                         data-testid="chat-image-upload-remove"
                       >
@@ -1461,6 +1479,19 @@ export function ChatComposerSurface({
                       </IconButton>
                     </div>
                   ))}
+                  {/* Mounted with the tray so the announcement is heard when a send starts;
+                      last, so the idle (screen-reader only) region adds no spacing. */}
+                  <Text
+                    as="div"
+                    role="status"
+                    aria-live="polite"
+                    variant="caption"
+                    tone="muted"
+                    className={sendingImageCount > 0 ? "text-xs" : "sr-only"}
+                    data-testid="chat-image-upload-status"
+                  >
+                    {sendingImageCount > 0 ? describeSendingImages(sendingImageCount) : ""}
+                  </Text>
                 </div>
               ) : null}
               {showVoiceStatus ? (

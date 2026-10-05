@@ -505,6 +505,127 @@ fn startup_accepts_previous_credential_keys_without_echoing_them() {
 }
 
 #[test]
+fn startup_with_a_hosted_gateway_runs_without_author_pseudonym_keys() {
+    // A missing keyring must not become a controller outage: tokens then
+    // carry no author, so commits keep the origin's own identity. It warns,
+    // with or without DEV_MODE.
+    for dev_mode in [false, true] {
+        for configured in [None, Some("  ")] {
+            let server = MockServer::start();
+            let jwks = jwks_fixture(&server);
+            let result = run_controller(&server, |command| {
+                command
+                    .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+                    .env("HOSTED_ORIGIN_ENDPOINT", "http://127.0.0.1:9");
+                if dev_mode {
+                    command.env("DEV_MODE", "1");
+                }
+                if let Some(value) = configured {
+                    command.env("INSTAFY_AUTHOR_PSEUDONYM_KEYS", value);
+                }
+            });
+            // Configuration completed: startup got as far as the database.
+            assert_normal_error(&result, "failed to parse DATABASE_URL");
+            assert!(result.output.contains(
+                "INSTAFY_AUTHOR_PSEUDONYM_KEYS is unset: workspace-write tokens carry no author, \
+                 so commits use the origin's own git identity"
+            ));
+            jwks.assert_hits(1);
+        }
+    }
+}
+
+#[test]
+fn startup_refuses_malformed_author_pseudonym_keys_without_echoing_them() {
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let valid = BASE64.encode([0x5cu8; 32]);
+    let short = BASE64.encode([0x5du8; 16]);
+    for (configured, diagnostic) in [
+        (
+            format!("v1:{valid},v2:{short}"),
+            "INSTAFY_AUTHOR_PSEUDONYM_KEYS entry 2 (v2) must be a base64-encoded key",
+        ),
+        (
+            valid.clone(),
+            "INSTAFY_AUTHOR_PSEUDONYM_KEYS entry 1 must look like v<version>:<base64 key>",
+        ),
+        (
+            format!("v1:{valid},v2:{valid}"),
+            "INSTAFY_AUTHOR_PSEUDONYM_KEYS v1 and v2 are the same key",
+        ),
+    ] {
+        let result = run_controller(&server, |command| {
+            command.env("INSTAFY_AUTHOR_PSEUDONYM_KEYS", &configured);
+        });
+        assert_normal_error(&result, diagnostic);
+        assert!(!result.output.contains(&valid));
+        assert!(!result.output.contains(&short));
+    }
+    requests.assert_hits(0);
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_refuses_author_pseudonym_keys_that_are_not_utf8() {
+    // Not unset: a value that cannot be read is a malformed one.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let result = run_controller(&server, |command| {
+        command.env(
+            "INSTAFY_AUTHOR_PSEUDONYM_KEYS",
+            OsStr::from_bytes(b"v1:\xffq7Zmarker"),
+        );
+    });
+    assert_normal_error(&result, "INSTAFY_AUTHOR_PSEUDONYM_KEYS is not valid UTF-8");
+    assert!(!result.output.contains("q7Zmarker"));
+    requests.assert_hits(0);
+}
+
+#[test]
+fn startup_accepts_author_pseudonym_keys_without_echoing_them() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let retired = BASE64.encode(rand::random::<[u8; 32]>());
+    let current = BASE64.encode(rand::random::<[u8; 32]>());
+    let result = run_controller(&server, |command| {
+        command
+            .env("SERVICE_RUNTIME_USER_ID", SERVICE_ID)
+            .env("HOSTED_ORIGIN_ENDPOINT", "http://127.0.0.1:9")
+            .env(
+                "INSTAFY_AUTHOR_PSEUDONYM_KEYS",
+                format!(" v1:{retired} , v2:{current} ,"),
+            );
+    });
+    // Configuration completed: startup got as far as the database.
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result.output.contains("author pseudonym keys configured"));
+    assert!(!result.output.contains(&retired));
+    assert!(!result.output.contains(&current));
+    jwks.assert_hits(1);
+}
+
+#[test]
+fn startup_without_a_hosted_gateway_runs_without_author_pseudonym_keys() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let result = run_controller(&server, |command| {
+        command.env("SERVICE_RUNTIME_USER_ID", SERVICE_ID);
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result.output.contains(
+        "INSTAFY_AUTHOR_PSEUDONYM_KEYS is unset: workspace-write tokens carry no author"
+    ));
+    jwks.assert_hits(1);
+}
+
+#[test]
 fn startup_refuses_an_unvalidated_jwks_url_before_network_io() {
     // The JWKS decides which access tokens are accepted: it must come from
     // the Supabase project's own https endpoint (or loopback in development).

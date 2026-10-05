@@ -68,7 +68,7 @@ vi.mock("../WorkspaceGitRollingDiffPanel", () => ({
   WorkspaceGitRollingDiffPanel: () => null,
 }));
 
-import { SourceControlDrawer } from "../SourceControlDrawer";
+import { LegacyChangesDrawer } from "../LegacyChangesDrawer";
 
 async function flushAsyncWork() {
   await act(async () => {
@@ -77,7 +77,7 @@ async function flushAsyncWork() {
   });
 }
 
-describe("SourceControlDrawer project access", () => {
+describe("LegacyChangesDrawer project access", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -129,7 +129,7 @@ describe("SourceControlDrawer project access", () => {
   it.each([899, 900, 960, 1024])("uses Studio's responsive review layout at %ipx", async (width) => {
     Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
     await act(async () => {
-      root.render(<SourceControlDrawer openRequest={{ key: 1, previewPath: "src/app.ts", reviewMode: "focused" }} />);
+      root.render(<LegacyChangesDrawer openRequest={{ key: 1, previewPath: "src/app.ts", reviewMode: "focused" }} />);
     });
     await flushAsyncWork();
 
@@ -152,7 +152,7 @@ describe("SourceControlDrawer project access", () => {
     document.body.append(header);
     const close = vi.fn();
     try {
-      await act(async () => root.render(<SourceControlDrawer headerPortalTarget={header} onRequestClose={close} />));
+      await act(async () => root.render(<LegacyChangesDrawer headerPortalTarget={header} onRequestClose={close} />));
       await flushAsyncWork();
       const target = width >= 900 ? header : container;
       const other = width >= 900 ? container : header;
@@ -172,7 +172,7 @@ describe("SourceControlDrawer project access", () => {
 
   it("omits version and selection controls for a clean workspace but retains saved versions", async () => {
     mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyCount: 0, dirtyPaths: [], busy: false });
-    await act(async () => root.render(<SourceControlDrawer />));
+    await act(async () => root.render(<LegacyChangesDrawer />));
     await flushAsyncWork();
     expect(container.textContent).toContain("No pending changes.");
     expect(container.querySelector('[data-testid="source-control-commit-message"]')).toBeNull();
@@ -188,7 +188,7 @@ describe("SourceControlDrawer project access", () => {
   it("does not report a clean workspace when status is unavailable", async () => {
     mocks.fetchStatus.mockResolvedValue(null);
     mocks.fetchHistory.mockResolvedValue(null);
-    await act(async () => root.render(<SourceControlDrawer />));
+    await act(async () => root.render(<LegacyChangesDrawer />));
     await flushAsyncWork();
     expect(container.textContent).toContain("Changes are unavailable");
     expect(container.textContent).not.toContain("No pending changes.");
@@ -198,7 +198,7 @@ describe("SourceControlDrawer project access", () => {
     const header = document.createElement("div");
     document.body.append(header);
     try {
-      await act(async () => root.render(<SourceControlDrawer actionsPortalTarget={header} onRequestClose={vi.fn()} />));
+      await act(async () => root.render(<LegacyChangesDrawer actionsPortalTarget={header} onRequestClose={vi.fn()} />));
       await flushAsyncWork();
       expect(header.querySelector('[data-testid="source-control-refresh"]')).not.toBeNull();
       expect(container.querySelector('[data-testid="source-control-refresh"]')).toBeNull();
@@ -209,7 +209,7 @@ describe("SourceControlDrawer project access", () => {
 
   it("keeps review available but disables every destructive version-control action for a viewer", async () => {
     await act(async () => {
-      root.render(<SourceControlDrawer />);
+      root.render(<LegacyChangesDrawer />);
     });
     await flushAsyncWork();
 
@@ -229,5 +229,82 @@ describe("SourceControlDrawer project access", () => {
     expect(mocks.syncToRemote).not.toHaveBeenCalled();
     expect(mocks.revertPaths).not.toHaveBeenCalled();
     expect(mocks.revertCommit).not.toHaveBeenCalled();
+  });
+
+  describe("title", () => {
+    const title = () =>
+      Array.from(container.querySelectorAll("p")).find((element) => element.textContent === "Changes") ?? null;
+
+    it("renders as it always has when it did not replace History", async () => {
+      await act(async () => {
+        root.render(<LegacyChangesDrawer />);
+      });
+      await flushAsyncWork();
+      expect(title()).not.toBeNull();
+      expect(title()?.hasAttribute("tabindex")).toBe(false);
+      expect(title()?.hasAttribute("id")).toBe(false);
+      expect(title()?.hasAttribute("aria-describedby")).toBe(false);
+      expect(container.textContent).not.toContain("instead of History");
+    });
+
+    it("takes the focus History dropped and says why, until focus moves on", async () => {
+      // As in Studio: the drawer mounts first, and the note follows once
+      // the swap is known to have dropped focus.
+      await act(async () => {
+        root.render(<LegacyChangesDrawer />);
+      });
+      await flushAsyncWork();
+      (document.activeElement as HTMLElement | null)?.blur();
+      await act(async () => {
+        root.render(<LegacyChangesDrawer arrivalNotice="This space shows Changes instead of History." />);
+      });
+      await flushAsyncWork();
+      const heading = title();
+      expect(document.activeElement).toBe(heading);
+      const describedBy = heading?.getAttribute("aria-describedby") ?? "";
+      expect(document.getElementById(describedBy)?.textContent).toBe("This space shows Changes instead of History.");
+
+      // Once focus moves on, the title is plain text again.
+      const refresh = container.querySelector<HTMLButtonElement>('[data-testid="source-control-refresh"]');
+      await act(async () => refresh?.focus());
+      await flushAsyncWork();
+      expect(heading?.hasAttribute("tabindex")).toBe(false);
+      expect(heading?.hasAttribute("aria-describedby")).toBe(false);
+      expect(container.textContent).not.toContain("instead of History");
+    });
+
+    it("keeps the note when only the window loses focus", async () => {
+      (document.activeElement as HTMLElement | null)?.blur();
+      await act(async () => {
+        root.render(<LegacyChangesDrawer arrivalNotice="This space shows Changes instead of History." />);
+      });
+      await flushAsyncWork();
+      const heading = title();
+      expect(document.activeElement).toBe(heading);
+      // Switching to another app blurs the title but leaves it the active element.
+      await act(async () => {
+        heading?.dispatchEvent(new FocusEvent("blur"));
+      });
+      await flushAsyncWork();
+      expect(document.activeElement).toBe(heading);
+      expect(heading?.getAttribute("tabindex")).toBe("-1");
+      expect(container.textContent).toContain("This space shows Changes instead of History.");
+    });
+
+    it("leaves focus where the person put it", async () => {
+      const outside = document.createElement("button");
+      document.body.appendChild(outside);
+      outside.focus();
+      try {
+        await act(async () => {
+          root.render(<LegacyChangesDrawer arrivalNotice="This space shows Changes instead of History." />);
+        });
+        await flushAsyncWork();
+        expect(document.activeElement).toBe(outside);
+        expect(title()?.hasAttribute("tabindex")).toBe(false);
+      } finally {
+        outside.remove();
+      }
+    });
   });
 });

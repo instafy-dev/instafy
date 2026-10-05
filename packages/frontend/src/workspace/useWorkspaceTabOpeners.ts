@@ -338,6 +338,28 @@ export function useWorkspaceTabOpeners({
   const openGitReviewTab = useCallback(
     (review: WorkspaceGitReviewSource) => {
       const returnTabId = activeTabIdRef.current;
+      if (review.kind === "unsavedWork") {
+        // One review per kept ref in this conversation: reopening refreshes it.
+        const existing = tabsRef.current.find(
+          (tab): tab is WorkspaceGitReviewTabState =>
+            tab.kind === "gitReview" &&
+            tab.review.kind === "unsavedWork" &&
+            tab.review.ref === review.ref && sameOwner(tab),
+        );
+        if (existing) {
+          const updated: WorkspaceGitReviewTabState = {
+            ...existing,
+            review,
+            returnTabId,
+            title: review.title,
+          };
+          commitTabs(
+            tabsRef.current.map((tab) => (tab.id === existing.id ? updated : tab)),
+          );
+          setActiveTabInternal(updated);
+          return;
+        }
+      }
       if (review.kind === "savedVersion") {
         const existing = tabsRef.current.find(
           (tab): tab is WorkspaceGitReviewTabState =>

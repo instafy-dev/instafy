@@ -49,24 +49,29 @@ describe("Studio lazy panel fallbacks", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it.each(["files", "editor", "changes"])("keeps %s loading controls in the docked header", async (kind) => {
+  it.each(["files", "editor", "changes", "history"])("keeps %s loading controls in the docked header", async (kind) => {
     const header = document.createElement("div");
     document.body.append(header);
     const close = vi.fn();
     try {
-      await act(async () => root.render(kind === "changes"
-        ? <SourceControlDrawer headerPortalTarget={header} onRequestClose={close} />
+      await act(async () => root.render(kind === "changes" || kind === "history"
+        ? <SourceControlDrawer title={kind === "history" ? "History" : "Changes"} headerPortalTarget={header} onRequestClose={close} />
         : <FilesPanel previewOwnerId="user" renderMode={kind === "files" ? "portal" : "workspace"}
           explorerPortalTarget={portal} explorerHeaderPortalTarget={header} onRequestCloseExplorer={close} />));
-      expect(header.textContent).toContain(kind === "changes" ? "Changes" : "Files");
+      expect(header.textContent).toContain(kind === "history" ? "History" : kind === "changes" ? "Changes" : "Files");
       expect(header.querySelector('[role="status"]')).toBeNull();
       expect(header.querySelector("button")).not.toBeNull();
-      expect((kind === "changes" ? container : portal).querySelector("button")).toBeNull();
+      expect(((kind === "changes" || kind === "history") ? container : portal).querySelector("button")).toBeNull();
       await act(async () => header.querySelector("button")?.click());
       expect(close).toHaveBeenCalledOnce();
     } finally {
       header.remove();
     }
+  });
+
+  it("names the loading frame after the drawer it opens", async () => {
+    await act(async () => root.render(<SourceControlDrawer title="History" onRequestClose={vi.fn()} />));
+    expect(container.querySelector('[aria-label="Close history"]')).not.toBeNull();
   });
 
   it("allows closing Changes while its panel downloads", async () => {

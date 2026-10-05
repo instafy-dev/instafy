@@ -1,6 +1,21 @@
 import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
-import { prepareStudio, resetRuntimeUserState, writeWorkspaceFile, readWorkspaceFileText } from "../utils/harness.js";
+import {
+  filesEntryTestId,
+  openFileInFiles,
+  pressSaveShortcut,
+  replaceEditorText,
+  waitForApply,
+  waitForFilesConnected,
+} from "../utils/filesEditor.js";
+import { assertGatewayMode, gatewayMode } from "../utils/gatewayMode.js";
+import {
+  prepareStudio,
+  pushGitRemoteFileText,
+  readWorkspaceFileText,
+  resetRuntimeUserState,
+  writeWorkspaceFile,
+} from "../utils/harness.js";
 
 async function waitForWorkspaceOriginConnected(page: Page, timeoutMs = 180_000) {
   await expect(page.getByText(/Opening files…|Still opening files…|Reconnecting to your files…/)).toHaveCount(0, {
@@ -40,6 +55,7 @@ test.describe("File concurrency", () => {
   });
 
   test("warns before clobbering a dirty editor when the workspace file changes", async ({ page, browser }) => {
+    test.skip(gatewayMode() !== "legacy", "Stateful gateway flow (Save draft); the stateless variant is below.");
     test.setTimeout(240_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 1280, height: 720 });
@@ -161,5 +177,93 @@ test.describe("File concurrency", () => {
       timeout: 60_000,
     });
     await expect(page.getByTestId("code-save-draft-button")).toBeDisabled({ timeout: 30_000 });
+  });
+});
+
+test.describe("File concurrency on the stateless gateway", () => {
+  test.skip(
+    gatewayMode() !== "stateless",
+    "Requires the stateless gateway (PLAYWRIGHT_GATEWAY_MODE=stateless).",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await resetRuntimeUserState(page, { source: "file-concurrency-chat:stateless:cleanup" }).catch(() => {});
+  });
+
+  async function openSeededFile(page: Page) {
+    page.setDefaultTimeout(60_000);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    const projectId = await prepareStudio(page);
+    if (!projectId) {
+      throw new Error("Active project id missing for the stateless file concurrency test.");
+    }
+    await assertGatewayMode(page, projectId);
+    const unique = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const filePath = `pw-concurrency-${unique}.txt`;
+    await pushGitRemoteFileText(page, filePath, `initial ${unique}\n`, {
+      projectId,
+      message: `playwright: seed ${filePath}`,
+      requireGitRemote: true,
+    });
+    await openFileInFiles(page, projectId, filePath);
+    await expect(page.getByTestId("monaco-editor")).toContainText(`initial ${unique}`, { timeout: 60_000 });
+    await dismissAnyToast(page);
+    await replaceEditorText(page, `local unsaved ${unique}\n`);
+    await expect(page.getByTestId("code-save-button")).toBeEnabled({ timeout: 30_000 });
+    return { projectId, unique, filePath };
+  }
+
+  test("a save over a newer version of the same file is refused and the edits stay", async ({ page }) => {
+    test.setTimeout(240_000);
+    const { projectId, unique, filePath } = await openSeededFile(page);
+
+    // Another writer saves the same file: this buffer's baseRev is now stale.
+    await pushGitRemoteFileText(page, filePath, `peer update ${unique}\n`, {
+      projectId,
+      message: `playwright: peer ${filePath}`,
+      requireGitRemote: true,
+    });
+
+    await page.getByTestId("monaco-editor").locator("textarea.inputarea").click({ force: true });
+    const applied = waitForApply(page);
+    await pressSaveShortcut(page);
+    const response = await applied;
+    expect(response.status()).toBe(409);
+    expect(((await response.json()) as { code?: string }).code).toBe("head_moved");
+
+    await expect(page.getByTestId("monaco-editor")).toContainText(`local unsaved ${unique}`, { timeout: 10_000 });
+    await expect(page.getByTestId("status-toast")).toContainText("changed while you were editing. Your edits are kept.", {
+      timeout: 30_000,
+    });
+    await page.getByTestId("sidebar-nav-chat").click();
+    await expect(page.getByTestId("workspace-file-stale-card")).toBeVisible({ timeout: 60_000 });
+  });
+
+  test("a commit to another file raises no card and the save goes through", async ({ page }) => {
+    test.setTimeout(240_000);
+    const { projectId, unique, filePath } = await openSeededFile(page);
+    const otherPath = `pw-concurrency-other-${unique}.txt`;
+
+    await pushGitRemoteFileText(page, otherPath, `other ${unique}\n`, {
+      projectId,
+      message: `playwright: other ${otherPath}`,
+      requireGitRemote: true,
+    });
+    await waitForFilesConnected(page);
+    await expect(page.getByTestId(filesEntryTestId(otherPath))).toBeVisible({ timeout: 120_000 });
+
+    await page.getByTestId("monaco-editor").locator("textarea.inputarea").click({ force: true });
+    const applied = waitForApply(page);
+    await pressSaveShortcut(page);
+    const response = await applied;
+    expect(response.status()).toBe(200);
+    expect(((await response.json()) as { committed?: boolean }).committed).toBe(true);
+    await expect(page.getByTestId("code-save-button")).toBeDisabled({ timeout: 30_000 });
+
+    await expect.poll(async () => (await readWorkspaceFileText(page, filePath, { projectId })) ?? "", {
+      timeout: 60_000,
+    }).toBe(`local unsaved ${unique}\n`);
+    await page.getByTestId("sidebar-nav-chat").click();
+    await expect(page.getByTestId("workspace-file-stale-card")).toHaveCount(0);
   });
 });

@@ -1,9 +1,12 @@
 import {
+  ControllerApiError,
+  readControllerApiError,
   readControllerError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
   safeJson,
 } from "./core";
+import { isLeaseConflictMessage, redactLeaseHolder } from "./originErrors";
 
 export interface AcquireWorkspaceLeaseParams {
   projectId: string;
@@ -90,12 +93,20 @@ export async function acquireWorkspaceLease(
   });
 
   if (!response.ok) {
-    const message = await readControllerError(
+    // The status lets callers tell a lease held by someone else (409) from
+    // other failures. The holder's id is dropped from the message so it never
+    // reaches a toast or a log.
+    const failure = await readControllerApiError(
       response,
       "project lock acquisition failed",
       requestContext,
     );
-    throw new Error(message);
+    const leaseConflict = failure.status === 409 && isLeaseConflictMessage(failure.message);
+    throw new ControllerApiError({
+      ...failure,
+      message: redactLeaseHolder(failure.message),
+      code: failure.code ?? (leaseConflict ? "lease_conflict" : null),
+    });
   }
 
   const payload = (await response.json()) as Record<string, unknown>;
