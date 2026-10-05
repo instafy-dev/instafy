@@ -24,6 +24,10 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 
+mod legacy_export;
+
+pub(crate) use legacy_export::router;
+
 pub(crate) const BUCKET: &str = "chat-attachments";
 /// The leased payload key the runtime downloads from. Only the lease route
 /// writes it; anything a job row carries under it is dropped first.

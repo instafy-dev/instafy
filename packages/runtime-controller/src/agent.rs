@@ -4600,6 +4600,18 @@ fn format_image_attachment_context_for_agent(metadata: &JsonValue) -> Option<Str
             if kind != "image" {
                 continue;
             }
+            // An image a salvage exported to Storage keeps its old
+            // `workspacePath`, but the file is gone from the space: the
+            // Storage section names it instead.
+            let in_storage = ["storagePath", "storage_path"].iter().any(|key| {
+                entry
+                    .get(*key)
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
+            if in_storage {
+                continue;
+            }
             let workspace_path = entry
                 .get("workspacePath")
                 .and_then(JsonValue::as_str)
@@ -5380,6 +5392,34 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn exported_legacy_images_are_named_only_by_their_storage_entry() {
+        let metadata = json!({
+            "attachments": [
+                { "kind": "image", "workspacePath": "chat-upload-1-a.png" },
+                { "kind": "image", "workspacePath": "chat-upload-2-b.png",
+                  "storagePath": "p/c/6a000000-0000-4000-8000-000000000001.png" },
+            ],
+            "prompt_metadata": { "attachments": [
+                { "kind": "image", "workspace_path": "chat-upload-3-c.png",
+                  "storage_path": "p/c/6a000000-0000-4000-8000-000000000002.png" },
+            ] },
+        });
+        let section = format_image_attachment_context_for_agent(&metadata).unwrap();
+        assert!(
+            section.contains("workspacePath: chat-upload-1-a.png"),
+            "{section}"
+        );
+        assert!(!section.contains("chat-upload-2-b.png"), "{section}");
+        assert!(!section.contains("chat-upload-3-c.png"), "{section}");
+
+        let exported = json!({ "attachments": [
+            { "kind": "image", "workspacePath": "chat-upload-2-b.png",
+              "storagePath": "p/c/6a000000-0000-4000-8000-000000000001.png" },
+        ] });
+        assert_eq!(format_image_attachment_context_for_agent(&exported), None);
+    }
 
     #[test]
     fn managed_ai_failure_classifier_matches_only_proxy_rejections() {
