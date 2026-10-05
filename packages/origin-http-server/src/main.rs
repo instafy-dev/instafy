@@ -4,12 +4,12 @@ use std::process;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use origin_http_server::config::{
-    ServerConfig, DEFAULT_GATEWAY_AUTHOR_EMAIL, DEFAULT_ORIGIN_AUTHOR_EMAIL,
+    resolve_gateway_identity, ServerConfig, DEFAULT_ORIGIN_AUTHOR_EMAIL,
 };
 use origin_http_server::hosted::HostedGatewayConfig;
 use origin_http_server::server::OriginHttpServer;
@@ -94,18 +94,26 @@ fn load_config() -> Result<ServerConfig> {
     let git_branch = read_env("ORIGIN_GIT_BRANCH").unwrap_or_else(|| "main".to_string());
     let git_remote_name =
         read_env("ORIGIN_GIT_REMOTE_NAME").unwrap_or_else(|| "origin".to_string());
-    let git_author_name =
-        read_env("ORIGIN_GIT_AUTHOR_NAME").unwrap_or_else(|| "instafy-origin".to_string());
     // The gateway trusts commits under its own address (restores, import
-    // receipts), so by default it never shares the runtimes' address.
-    let git_author_email = read_env("ORIGIN_GIT_AUTHOR_EMAIL").unwrap_or_else(|| {
-        if multi_tenant {
-            DEFAULT_GATEWAY_AUTHOR_EMAIL
-        } else {
-            DEFAULT_ORIGIN_AUTHOR_EMAIL
+    // receipts), so it never commits under the runtimes' default address.
+    let (git_author_name, git_author_email) = if multi_tenant {
+        let identity = resolve_gateway_identity(
+            read_env("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL").as_deref(),
+            read_env("ORIGIN_GATEWAY_GIT_AUTHOR_NAME").as_deref(),
+            read_env("ORIGIN_GIT_AUTHOR_EMAIL").as_deref(),
+            read_env("ORIGIN_GIT_AUTHOR_NAME").as_deref(),
+        )?;
+        if let Some(warning) = &identity.warning {
+            warn!("{warning}");
         }
-        .to_string()
-    });
+        (identity.name, identity.email)
+    } else {
+        (
+            read_env("ORIGIN_GIT_AUTHOR_NAME").unwrap_or_else(|| "instafy-origin".to_string()),
+            read_env("ORIGIN_GIT_AUTHOR_EMAIL")
+                .unwrap_or_else(|| DEFAULT_ORIGIN_AUTHOR_EMAIL.to_string()),
+        )
+    };
     let bind_host = read_env("ORIGIN_BIND_HOST").unwrap_or_else(|| "0.0.0.0".to_string());
     let bind_port: u16 = read_env("ORIGIN_BIND_PORT")
         .as_deref()

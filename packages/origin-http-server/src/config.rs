@@ -19,6 +19,64 @@ pub const DEFAULT_ORIGIN_AUTHOR_EMAIL: &str = "origin@instafy.dev";
 /// as its restores and import receipts.
 pub const DEFAULT_GATEWAY_AUTHOR_EMAIL: &str = "gateway@instafy.dev";
 
+/// The multi-tenant gateway's committer identity, from its environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GatewayIdentity {
+    pub name: String,
+    pub email: String,
+    /// Said once at start when the environment's address was set aside.
+    pub warning: Option<String>,
+}
+
+/// The gateway's committer identity: `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL` /
+/// `_NAME` when set (`gateway_*`); otherwise `ORIGIN_GIT_AUTHOR_EMAIL` /
+/// `_NAME` (`origin_*`), which a self-hoster may have set to an identity of
+/// their own; otherwise [`DEFAULT_GATEWAY_AUTHOR_EMAIL`]. The runtimes'
+/// default address ([`DEFAULT_ORIGIN_AUTHOR_EMAIL`]) is never used: from
+/// `ORIGIN_GIT_AUTHOR_EMAIL` (an existing deployment sets it for runtimes
+/// and gateway alike) it is replaced by the gateway's default with a
+/// warning; as the explicit gateway address it is refused. Blank values
+/// count as unset.
+pub fn resolve_gateway_identity(
+    gateway_email: Option<&str>,
+    gateway_name: Option<&str>,
+    origin_email: Option<&str>,
+    origin_name: Option<&str>,
+) -> Result<GatewayIdentity> {
+    fn set(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    let is_runtime_default = |email: &str| email.eq_ignore_ascii_case(DEFAULT_ORIGIN_AUTHOR_EMAIL);
+    let name = set(gateway_name)
+        .or(set(origin_name))
+        .unwrap_or("instafy-origin")
+        .to_string();
+    let (email, warning) = match (set(gateway_email), set(origin_email)) {
+        (Some(email), _) if is_runtime_default(email) => anyhow::bail!(
+            "ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL is the address hosted runtimes commit under; the \
+             multi-tenant gateway needs its own (unset it for {DEFAULT_GATEWAY_AUTHOR_EMAIL}), \
+             since it trusts commits under its address as its restores and import receipts"
+        ),
+        (Some(email), _) => (email.to_string(), None),
+        (None, Some(email)) if is_runtime_default(email) => (
+            DEFAULT_GATEWAY_AUTHOR_EMAIL.to_string(),
+            Some(format!(
+                "ORIGIN_GIT_AUTHOR_EMAIL is the runtimes' default address \
+                 ({DEFAULT_ORIGIN_AUTHOR_EMAIL}); the multi-tenant gateway commits as \
+                 {DEFAULT_GATEWAY_AUTHOR_EMAIL} instead (set ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL to \
+                 choose its address)"
+            )),
+        ),
+        (None, Some(email)) => (email.to_string(), None),
+        (None, None) => (DEFAULT_GATEWAY_AUTHOR_EMAIL.to_string(), None),
+    };
+    Ok(GatewayIdentity {
+        name,
+        email,
+        warning,
+    })
+}
+
 /// How long a rejected caller waits for a renewed controller token before it
 /// gives up on this attempt. Short on purpose: the caller is a periodic loop,
 /// so giving up just means retrying on the next tick.
@@ -492,6 +550,61 @@ mod controller_token_store_tests {
         config
             .validate_multi_tenant()
             .expect("the gateway's own address");
+    }
+
+    /// An existing deployment that sets the runtimes' default address for
+    /// every origin keeps starting: the gateway commits under its own
+    /// default and says so once. A self-hoster's own address set only in
+    /// `ORIGIN_GIT_AUTHOR_EMAIL` is kept. Only an explicit gateway address
+    /// that is the runtimes' is refused.
+    #[test]
+    fn the_gateway_identity_never_crash_loops_an_existing_environment() {
+        let resolve = |gateway: Option<&str>, origin: Option<&str>| {
+            resolve_gateway_identity(gateway, None, origin, Some("Origin Bot"))
+        };
+        let production = resolve(None, Some(DEFAULT_ORIGIN_AUTHOR_EMAIL)).unwrap();
+        assert_eq!(production.email, DEFAULT_GATEWAY_AUTHOR_EMAIL);
+        assert!(production.warning.is_some());
+        assert_eq!(production.name, "Origin Bot");
+        let spelled = resolve(Some(" "), Some(" Origin@Instafy.dev ")).unwrap();
+        assert_eq!(spelled.email, DEFAULT_GATEWAY_AUTHOR_EMAIL);
+
+        let custom = resolve(None, Some("bot@example.com")).unwrap();
+        assert_eq!(
+            (custom.email.as_str(), custom.warning.as_deref()),
+            ("bot@example.com", None)
+        );
+        let unset = resolve(None, None).unwrap();
+        assert_eq!(
+            (unset.email.as_str(), unset.warning.as_deref()),
+            (DEFAULT_GATEWAY_AUTHOR_EMAIL, None)
+        );
+        let explicit = resolve_gateway_identity(
+            Some("gw@example.com"),
+            Some("Gateway"),
+            Some(DEFAULT_ORIGIN_AUTHOR_EMAIL),
+            Some("Origin Bot"),
+        )
+        .unwrap();
+        assert_eq!(
+            (explicit.name.as_str(), explicit.email.as_str()),
+            ("Gateway", "gw@example.com")
+        );
+        assert_eq!(explicit.warning, None);
+
+        let conflicting = resolve(Some("origin@instafy.dev"), Some("bot@example.com"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            conflicting.contains("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL"),
+            "{conflicting}"
+        );
+        // Whatever the resolution, the gateway passes its start checks.
+        for identity in [production, custom, unset, explicit] {
+            let mut config = gateway_config();
+            config.git_author_email = identity.email;
+            config.validate_multi_tenant().expect("starts");
+        }
     }
 
     #[test]
