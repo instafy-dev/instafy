@@ -1837,6 +1837,19 @@ fn a_rerun_reuses_the_ref_recorded_for_the_same_work() {
     let reference = first["salvageRef"].as_str().unwrap().to_string();
     let salvaged = first["salvageRev"].as_str().unwrap().to_string();
     assert_eq!(stub.salvage_tokens.get(), 1);
+    // What the ref changes from HEAD.
+    let held = git_in(
+        &gateway.canonical(),
+        &[
+            "diff",
+            "--name-only",
+            first["head"].as_str().unwrap(),
+            &salvaged,
+        ],
+    );
+    let held: Vec<String> = held.lines().map(str::to_string).collect();
+    assert_eq!(held, ["a.txt", "c.txt", "d.txt"]);
+    assert_eq!(paths(&first["archivedPaths"]), held);
 
     // The person restores the ref in Studio, leaving d.txt out: a new commit
     // on main (not a merge) with local.md, a1, and no c.txt.
@@ -1855,6 +1868,10 @@ fn a_rerun_reuses_the_ref_recorded_for_the_same_work() {
     assert_eq!(dry[0]["salvageRef"], reference.as_str(), "{:#}", dry[0]);
     assert_eq!(dry[0]["salvageRev"], salvaged.as_str());
     assert_eq!(dry[0]["canonicalVerified"], true);
+    // The line describes the ref it names, not what a new W would hold now
+    // that main has part of it.
+    assert_eq!(paths(&dry[0]["archivedPaths"]), held, "{:#}", dry[0]);
+    assert_eq!(dry[0]["stalePaths"], serde_json::json!([]), "{:#}", dry[0]);
 
     // The checklist's removal run, on a gateway that changed its name.
     let mut settings = gateway.settings(true, true, &[]);
@@ -1865,6 +1882,8 @@ fn a_rerun_reuses_the_ref_recorded_for_the_same_work() {
     assert_eq!(report["salvageRef"], reference.as_str(), "{report:#}");
     assert_eq!(report["salvageRev"], salvaged.as_str());
     assert_eq!(report["canonicalVerified"], true);
+    assert_eq!(paths(&report["archivedPaths"]), held, "{report:#}");
+    assert_eq!(report["stalePaths"], serde_json::json!([]), "{report:#}");
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
     assert_eq!(
