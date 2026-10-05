@@ -58,6 +58,7 @@ pub(super) fn salvage_folder(
                     path: ".git/".to_string(),
                     size: tree_size(&plain_git),
                     reason: "unsupported",
+                    commit: None,
                 });
                 report
                     .notes
@@ -168,6 +169,7 @@ fn salvage_files_only(
             path: ".instafy/.git/".to_string(),
             size: tree_size(&root.join(".instafy/.git")),
             reason: "unsupported",
+            commit: None,
         });
     }
     report.skipped_paths.extend(sorted.skipped);
@@ -216,6 +218,7 @@ fn salvage_repository(
             path: name,
             size: 0,
             reason: "unsupported",
+            commit: None,
         });
     }
     let index = WorkIndex::new(&git, head.as_deref())?;
@@ -228,6 +231,7 @@ fn salvage_repository(
                 path,
                 size: 0,
                 reason: "unsupported",
+                commit: None,
             }));
     }
     report.skipped_paths.append(&mut sorted.skipped);
@@ -286,6 +290,8 @@ fn salvage_repository(
     // The history check: what may go to canonical as it is.
     let mut tip = raw_tip.clone();
     let mut filtered: BTreeMap<String, RejectReason> = BTreeMap::new();
+    // Paths whose version at the tip goes, though an earlier one may not.
+    let mut tip_versions_kept: BTreeSet<String> = BTreeSet::new();
     if !on_main(raw_tip.as_deref())? && canonical != Canonical::Missing {
         let raw = raw_tip.clone().context("a tip off main must exist")?;
         let mut scanned = work::scan(&git, &raw, main.as_deref())?;
@@ -309,6 +315,17 @@ fn salvage_repository(
             }
             report.history_filtered = true;
             for (path, hit) in fresh {
+                if !hit.at_tip
+                    && work::publishable_path(&path)
+                    && tip_versions_kept.insert(path.clone())
+                {
+                    // Only versions the tip no longer holds were refused
+                    // (over the size cap, or a gitlink): the tip's own
+                    // version goes, and the squash leaves out the commits
+                    // that held the others. A second hit filters the path.
+                    skip_history_versions(&path, &hit, &mut report.skipped_paths, &git)?;
+                    continue;
+                }
                 filtered.insert(path.clone(), hit.reason);
                 keep_history(
                     &path,
@@ -514,6 +531,7 @@ fn push_salvage_ref(
                     path,
                     size: 0,
                     reason: reason_name(RejectReason::Policy),
+                    commit: None,
                 });
                 let raw = push.raw.context("a tip off main must exist")?;
                 let keys: Vec<String> = push.filtered.keys().cloned().collect();
@@ -653,12 +671,14 @@ fn keep_history(
                     RejectReason::TooLarge => "too_large",
                     _ => "excluded",
                 },
+                commit: None,
             });
         }
         _ if versions.is_empty() => skipped.push(Skipped {
             path: path.to_string(),
             size: 0,
             reason: reason_name(reason),
+            commit: None,
         }),
         _ => {
             for version in versions {
@@ -676,6 +696,41 @@ fn keep_history(
                 });
             }
         }
+    }
+    Ok(())
+}
+
+/// Report the versions of `path` that only local commits held and that may
+/// not reach canonical, each with its commit; the path's version at the tip
+/// goes to canonical.
+fn skip_history_versions(
+    path: &str,
+    hit: &work::Hit,
+    skipped: &mut Vec<Skipped>,
+    git: &WorkspaceGit<'_>,
+) -> Result<()> {
+    if hit.versions.is_empty() {
+        skipped.push(Skipped {
+            path: path.to_string(),
+            size: 0,
+            reason: reason_name(hit.reason),
+            commit: Some(hit.commit.clone()),
+        });
+        return Ok(());
+    }
+    let ids: Vec<String> = hit
+        .versions
+        .iter()
+        .map(|version| version.oid.clone())
+        .collect();
+    let sizes = git.object_sizes(&ids)?;
+    for (version, size) in hit.versions.iter().zip(sizes) {
+        skipped.push(Skipped {
+            path: path.to_string(),
+            size: size.map(|(_, size)| size).unwrap_or(0),
+            reason: reason_name(hit.reason),
+            commit: Some(version.commit.clone()),
+        });
     }
     Ok(())
 }
