@@ -814,6 +814,72 @@ describe("mapControllerMessageToChat", () => {
     expect(mapped.messageType).toBe("integration_request");
     expect(mapped.metadata?.["messageType"]).toBe("integration_request");
   });
+
+  describe("read references", () => {
+    // A turn's apply/files artifact as the runtime records it.
+    function mapTurnFiles(files: Array<Record<string, unknown>>) {
+      return mapControllerMessageToChat({
+        id: "15151515-1515-1515-1515-151515151515",
+        conversationId: "44444444-4444-4444-4444-444444444444",
+        projectId: "55555555-5555-5555-5555-555555555555",
+        sessionId: null,
+        createdBy: null,
+        promptId: null,
+        runId: null,
+        role: "assistant",
+        content: "Here is what the notes say.",
+        metadata: { artifacts: [{ kind: "apply/files", files }] },
+        createdAt: "2026-10-02T00:00:00.000Z",
+      });
+    }
+
+    it("leaves a file the turn only read out of the message's file changes", () => {
+      const mapped = mapTurnFiles([
+        {
+          path: "notes/a.md",
+          workspacePath: "notes/a.md",
+          change: "read",
+          changeType: "read",
+          source: "workspace",
+        },
+      ]);
+
+      expect(mapped.files).toBeNull();
+    });
+
+    it("recognizes every read marker shape, including untrimmed ones from older runtimes", () => {
+      expect(mapTurnFiles([{ path: "notes/a.md", change: " READ " }]).files).toBeNull();
+      expect(mapTurnFiles([{ path: "notes/a.md", change: { type: "read", lines: null } }]).files).toBeNull();
+      expect(mapTurnFiles([{ path: "notes/a.md", changeType: "read" }]).files).toBeNull();
+      expect(mapTurnFiles([{ path: "notes/a.md", change: null, changeType: " read " }]).files).toBeNull();
+    });
+
+    it("keeps the real changes of a turn that also read files", () => {
+      const mapped = mapTurnFiles([
+        { path: "notes/a.md", workspacePath: "notes/a.md", change: "read", changeType: "read", source: "workspace" },
+        { path: "notes/todo.md", change: "created", changeType: "created" },
+        { path: "notes/b.md", change: { type: "read" }, changeType: "read" },
+        { path: "README.md", change: { type: "changed", lines: [{ from: 1, to: 2 }] } },
+      ]);
+
+      expect(mapped.files?.map((file) => [file.path, file.changeType])).toEqual([
+        ["notes/todo.md", "created"],
+        ["README.md", "changed"],
+      ]);
+    });
+
+    it("keeps a change whose marker it does not recognize, and one with no marker", () => {
+      const mapped = mapTurnFiles([
+        { path: "src/app.ts", change: "modified" },
+        { path: "src/legacy.ts" },
+      ]);
+
+      expect(mapped.files?.map((file) => [file.path, file.changeType])).toEqual([
+        ["src/app.ts", "unknown"],
+        ["src/legacy.ts", "unknown"],
+      ]);
+    });
+  });
 });
 
 describe("extractWorkspaceCommitRangeFromMetadata", () => {

@@ -133,7 +133,8 @@ surrounding whitespace. An explicit read marker takes precedence over a conflict
 The runtime keeps the sanitized reference in the file artifacts, discards its inline content,
 and never writes, deletes, moves, mirrors, or uploads a file because of that reference. References
 also do not satisfy required file-change evidence or exempt a path from read-only restoration.
-This applies to both the initial response and recovery responses.
+This applies to both the initial response and recovery responses. Studio leaves read references
+out of the chat change card, so they never show Review changes, Undo or Revert.
 
 Existing created/changed/deleted descriptors and legacy inline-write descriptors retain their
 behavior. References do not change the controller's workspace permissions or the separate
