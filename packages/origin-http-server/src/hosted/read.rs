@@ -10,12 +10,12 @@ use crate::git::{
 };
 use crate::publish_policy::MAX_PUBLISH_BLOB_BYTES;
 use crate::recovery_view::{
-    absence_at, describe, fetch_refs, first_parent_history, list_remote_refs, mark_restored,
-    read_blob_at, read_tree_at, resolve, restore_committers, Absence, BlobRead, ObjectEntry,
-    ObjectKind, ReadAt, RecoveryItem, TreeRead, ViewError,
+    absence_at, decimal, describe, fetch_refs, first_parent_history, list_remote_refs,
+    mark_restored, read_blob_at, read_tree_at, resolve, restore_committers, Absence, BlobRead,
+    ObjectEntry, ObjectKind, ReadAt, RecoveryItem, TreeRead, ViewError,
 };
 use crate::routes::{mime_type_for_extension, FileEntryResponse};
-use crate::workspace_git::{RunOpts, WorkspaceGit};
+use crate::workspace_git::{parse_ls_tree, temp_index_dir, RunOpts, WorkspaceGit};
 
 /// The largest file a read returns (the largest a save accepts).
 pub(crate) const MAX_READ_BYTES: u64 = MAX_PUBLISH_BLOB_BYTES;
@@ -162,7 +162,7 @@ fn has_commit_after(git: &WorkspaceGit<'_>, head: &str, skip: usize) -> Result<b
     if skip > i32::MAX as usize {
         return Ok(false);
     }
-    let skip = skip.to_string();
+    let skip = decimal(skip);
     let listed = git.stdout(&[
         "rev-list",
         "--first-parent",
@@ -268,6 +268,9 @@ fn parse_name_status(raw: &[u8]) -> Vec<DirtyPathEntry> {
 /// - `base` only: from `base` to `main`;
 /// - neither: the last first-parent change of the path on `main`.
 ///
+/// The path reaches git only on stdin: each side is a tree holding just
+/// what that version has at the path ([`path_tree`]), and the trees are
+/// diffed whole, which gives what `git diff <a> <b> -- <path>` gives.
 /// Returns the text (cut at [`MAX_DIFF_BYTES`]) and whether it was cut.
 pub(crate) fn diff(
     git: &WorkspaceGit<'_>,
@@ -278,67 +281,143 @@ pub(crate) fn diff(
 ) -> Result<(String, bool), ViewError> {
     let text = match (base, commit, main) {
         (Some(base), Some(commit), _) | (Some(base), None, Some(commit)) => {
-            diff_between(git, base, commit, path)?
+            diff_between(git, Some(base), commit, path)?
         }
-        (None, Some(commit), _) => match parents(git, commit)?.first() {
-            Some(first) => diff_between(git, first, commit, path)?,
-            None => {
-                let empty = git.empty_tree()?;
-                diff_between(git, &empty, commit, path)?
-            }
+        (None, Some(commit), _) => {
+            let parent = parents(git, commit)?.into_iter().next();
+            diff_between(git, parent.as_deref(), commit, path)?
+        }
+        (None, None, Some(main)) => match last_change(git, main, path)? {
+            Some((commit, parent)) => diff_between(git, parent.as_deref(), &commit, path)?
+                .trim_start()
+                .to_string(),
+            None => String::new(),
         },
-        (None, None, Some(main)) => {
-            let raw = git.bytes_opts(
-                &[
-                    "log",
-                    "-1",
-                    "--first-parent",
-                    "--format=",
-                    "--patch",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    "--no-color",
-                    "--end-of-options",
-                    main,
-                    "--",
-                    path,
-                ],
-                &RunOpts {
-                    literal_pathspecs: true,
-                    ..RunOpts::default()
-                },
-            )?;
-            String::from_utf8_lossy(&raw).trim_start().to_string()
-        }
         (_, None, None) => String::new(),
     };
     Ok(cut_diff(text))
 }
 
+/// The diff at `path` from `base` (the empty tree when `None`) to `head`.
 fn diff_between(
     git: &WorkspaceGit<'_>,
-    base: &str,
+    base: Option<&str>,
     head: &str,
     path: &str,
 ) -> Result<String, ViewError> {
-    let raw = git.bytes_opts(
-        &[
-            "diff",
-            "--patch",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-color",
-            base,
-            head,
-            "--",
-            path,
-        ],
+    let before = match base {
+        Some(base) => path_tree(git, base, path)?,
+        None => git.empty_tree()?,
+    };
+    let after = path_tree(git, head, path)?;
+    let raw = git.bytes(&[
+        "diff",
+        "--patch",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-color",
+        "--end-of-options",
+        &before,
+        &after,
+    ])?;
+    Ok(String::from_utf8_lossy(&raw).to_string())
+}
+
+/// A tree holding only what `tree_ish` has at `path` (a file, a link, a
+/// submodule, or a folder with everything below it), at that path: the
+/// empty tree when it has nothing there. Built in a temporary index from
+/// lines on stdin.
+fn path_tree(git: &WorkspaceGit<'_>, tree_ish: &str, path: &str) -> Result<String, ViewError> {
+    let Some(entry) = git
+        .entries_by_path(tree_ish, &[path.to_string()])?
+        .remove(path)
+    else {
+        return Ok(git.empty_tree()?);
+    };
+    let mut info = Vec::new();
+    if entry.kind == "tree" {
+        let raw = git.bytes(&["ls-tree", "-r", "-z", "--end-of-options", &entry.oid])?;
+        for below in parse_ls_tree(&raw) {
+            info.extend_from_slice(
+                format!("{} {}\t{path}/{}", below.mode, below.oid, below.path).as_bytes(),
+            );
+            info.push(0);
+        }
+    } else {
+        info.extend_from_slice(format!("{} {}\t{path}", entry.mode, entry.oid).as_bytes());
+        info.push(0);
+    }
+    let scratch = temp_index_dir(git)?;
+    let index = scratch.path().join("index");
+    git.ok_opts(
+        &["update-index", "-z", "--index-info"],
         &RunOpts {
-            literal_pathspecs: true,
+            index_file: Some(&index),
+            stdin: Some(&info),
             ..RunOpts::default()
         },
     )?;
-    Ok(String::from_utf8_lossy(&raw).to_string())
+    Ok(git.stdout_opts(
+        &["write-tree"],
+        &RunOpts {
+            index_file: Some(&index),
+            ..RunOpts::default()
+        },
+    )?)
+}
+
+/// Commits of `main`'s first-parent chain read per step of the walk for
+/// the last change of a path.
+const CHANGE_WALK_STEP: usize = 256;
+
+/// The newest commit of `main`'s first-parent chain whose entry at `path`
+/// (mode and id; a folder's tree id) differs from its first parent's, with
+/// that parent (`None` for a root commit that has the path), as `git log -1
+/// --first-parent -- <path>` finds it. Each step lists commit ids and reads
+/// the folder of the path in each with names on stdin.
+fn last_change(
+    git: &WorkspaceGit<'_>,
+    main: &str,
+    path: &str,
+) -> Result<Option<(String, Option<String>)>, ViewError> {
+    let step = decimal(CHANGE_WALK_STEP);
+    let mut skip = 0usize;
+    let mut newer: Option<(String, Option<(String, String)>)> = None;
+    loop {
+        let skipped = decimal(skip);
+        let listed = git.stdout(&[
+            "rev-list",
+            "--first-parent",
+            "--max-count",
+            &step,
+            "--skip",
+            &skipped,
+            "--end-of-options",
+            main,
+            "--",
+        ])?;
+        let commits: Vec<String> = listed
+            .lines()
+            .map(str::trim)
+            .filter(|id| is_full_object_id(id))
+            .map(str::to_string)
+            .collect();
+        let entries = git.entry_in_each(&commits, path)?;
+        for (commit, entry) in commits.iter().zip(entries) {
+            let entry = entry.map(|entry| (entry.mode, entry.oid));
+            if let Some((child, child_entry)) = newer.take() {
+                if child_entry != entry {
+                    return Ok(Some((child, Some(commit.clone()))));
+                }
+            }
+            newer = Some((commit.clone(), entry));
+        }
+        if commits.len() < CHANGE_WALK_STEP {
+            // The root: a change when it has the path.
+            return Ok(newer.and_then(|(root, entry)| entry.map(|_| (root, None))));
+        }
+        skip += commits.len();
+    }
 }
 
 /// `text` cut at [`MAX_DIFF_BYTES`] on a character boundary, with a note.

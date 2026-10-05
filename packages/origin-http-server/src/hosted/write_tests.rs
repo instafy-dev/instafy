@@ -1420,14 +1420,14 @@ async fn a_bootstrap_seeds_managed_files_the_space_ignores() {
         assert!(show(&sc, &seeded, path).is_some(), "{path}");
     }
 
-    let secret = apply(
+    let refused = apply(
         &served,
         bootstrap_manifest(&seeded, &[".env"]),
         &zip(&[(".env", b"KEY=1\n")]),
     )
     .await;
     assert_eq!(
-        (secret.status, secret.code().as_str()),
+        (refused.status, refused.code().as_str()),
         (422, "excluded_path")
     );
 }

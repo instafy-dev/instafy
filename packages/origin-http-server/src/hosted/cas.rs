@@ -29,7 +29,7 @@ use crate::error::OriginError;
 use crate::git::is_full_object_id;
 use crate::publish::parse_raw_changes;
 use crate::push::{self, PushClass};
-use crate::recovery_view::{without_origin_trailers, MAIN_REF};
+use crate::recovery_view::{copy_from_alphabet, without_origin_trailers, MAIN_REF};
 use crate::workspace_git::{GitIdentity, Quarantine, WorkspaceGit};
 
 /// How long a person's save keeps trying before it answers `main_busy`.
@@ -591,6 +591,10 @@ pub(crate) struct AppliedImport {
     pub counts: Option<(usize, u64)>,
 }
 
+/// Every byte an idempotency key may hold.
+const APPLY_KEY_BYTES: &[u8] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz:._-";
+
 /// The newest commit on `main`'s first-parent chain from the last 31 days
 /// that the gateway committed (committer address exactly
 /// `gateway_email`) with exactly `key` in [`APPLY_KEY_TRAILER`].
@@ -612,7 +616,11 @@ pub(crate) fn find_applied(
         "--pretty=format:%H%x1f{token}%x1f%P%x1f{token}%x1f%cE%x1f{token}%x1f%(trailers:key={APPLY_KEY_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FINGERPRINT_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FILES_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_BYTES_TRAILER},valueonly)%x1e{token}%x1e"
     );
     let committer = format!("--committer=<{gateway_email}>");
-    let grep = format!("--grep={APPLY_KEY_TRAILER}: {key}");
+    // The key comes from the caller: git is handed a copy built from the
+    // bytes a key may hold (`normalize_apply_idempotency_key`).
+    let copied = copy_from_alphabet(key, APPLY_KEY_BYTES)
+        .ok_or_else(|| OriginError::bad_request("invalid idempotencyKey"))?;
+    let grep = format!("--grep={APPLY_KEY_TRAILER}: {copied}");
     let raw = git
         .stdout(&[
             "log",

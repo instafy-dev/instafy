@@ -677,6 +677,168 @@ impl<'a> WorkspaceGit<'a> {
             .collect())
     }
 
+    /// Entries of `tree_ish` (a full commit or tree id) at exactly `paths`
+    /// (relative and `/`-separated, as reads normalize them): a folder, a
+    /// file, a link or a submodule. A path that is absent, or lies below a
+    /// file, has none. Folders are read by id from the root down
+    /// ([`Self::folder_listings`]), with ids on stdin, so a path is never an
+    /// argument of git, and a folder whose object cannot be read is an
+    /// error, never an absent path. A path holding a newline is found in one
+    /// full listing instead.
+    pub(crate) fn entries_by_path(
+        &self,
+        tree_ish: &str,
+        paths: &[String],
+    ) -> Result<std::collections::BTreeMap<String, TreeEntry>> {
+        let mut found = std::collections::BTreeMap::new();
+        if paths.is_empty() {
+            return Ok(found);
+        }
+        if paths.iter().any(|path| path.contains('\n')) {
+            let raw = self.bytes(&[
+                "ls-tree",
+                "-r",
+                "-t",
+                "-z",
+                "--full-tree",
+                "--end-of-options",
+                tree_ish,
+            ])?;
+            let wanted: std::collections::HashSet<&str> =
+                paths.iter().map(String::as_str).collect();
+            for entry in parse_ls_tree(&raw) {
+                if wanted.contains(entry.path.as_str()) {
+                    found.insert(entry.path.clone(), entry);
+                }
+            }
+            return Ok(found);
+        }
+        let folders: Vec<&str> = paths.iter().map(|path| folder_of(path)).collect();
+        let listings = self
+            .folder_listings(std::slice::from_ref(&tree_ish.to_string()), &folders)?
+            .pop()
+            .unwrap_or_default();
+        for path in paths {
+            let entry = listings
+                .get(folder_of(path))
+                .and_then(|entries| entries.iter().find(|entry| entry.path == *path));
+            if let Some(entry) = entry {
+                found.insert(path.clone(), entry.clone());
+            }
+        }
+        Ok(found)
+    }
+
+    /// The entry at `path` in each of `tree_ishes` (full commit or tree
+    /// ids), in order, as [`Self::entries_by_path`] finds one, with one
+    /// `cat-file --batch` per folder level for all of them.
+    pub(crate) fn entry_in_each(
+        &self,
+        tree_ishes: &[String],
+        path: &str,
+    ) -> Result<Vec<Option<TreeEntry>>> {
+        if path.contains('\n') {
+            let wanted = [path.to_string()];
+            return tree_ishes
+                .iter()
+                .map(|tree_ish| Ok(self.entries_by_path(tree_ish, &wanted)?.remove(path)))
+                .collect();
+        }
+        let folder = folder_of(path);
+        Ok(self
+            .folder_listings(tree_ishes, &[folder])?
+            .into_iter()
+            .map(|listings| {
+                listings
+                    .get(folder)
+                    .and_then(|entries| entries.iter().find(|entry| entry.path == path))
+                    .cloned()
+            })
+            .collect())
+    }
+
+    /// For each of `tree_ishes`, the listings of `folders` and of every
+    /// folder above them that it has, by folder path ("" is the root). Each
+    /// level is one `cat-file --batch` of tree ids (the root's from the
+    /// commit itself), so a tree a listing names but the repository cannot
+    /// give is an error (`git object <id> is missing`) rather than a folder
+    /// that is not there.
+    fn folder_listings(
+        &self,
+        tree_ishes: &[String],
+        folders: &[&str],
+    ) -> Result<Vec<std::collections::HashMap<String, Vec<TreeEntry>>>> {
+        let mut levels: std::collections::BTreeMap<usize, std::collections::BTreeSet<&str>> =
+            std::collections::BTreeMap::new();
+        for folder in folders {
+            let mut current = *folder;
+            while !current.is_empty() {
+                levels
+                    .entry(current.matches('/').count() + 1)
+                    .or_default()
+                    .insert(current);
+                current = folder_of(current);
+            }
+        }
+        // The root trees.
+        let mut roots = Vec::with_capacity(tree_ishes.len());
+        for (tree_ish, object) in tree_ishes.iter().zip(self.read_objects(tree_ishes)?) {
+            roots.push(match object.kind.as_str() {
+                "tree" => object,
+                "commit" => {
+                    let tree = String::from_utf8_lossy(&object.data)
+                        .lines()
+                        .next()
+                        .and_then(|line| line.strip_prefix("tree "))
+                        .map(str::to_string)
+                        .with_context(|| format!("commit {tree_ish} names no tree"))?;
+                    self.read_objects(std::slice::from_ref(&tree))?
+                        .pop()
+                        .with_context(|| format!("tree {tree} was not read"))?
+                }
+                other => bail!("{tree_ish} is a {other}, not a commit or tree"),
+            });
+        }
+        let id_bytes = |tree_ish: &str| if tree_ish.len() == 64 { 32 } else { 20 };
+        let mut listings = Vec::with_capacity(tree_ishes.len());
+        for (tree_ish, root) in tree_ishes.iter().zip(roots) {
+            if root.kind != "tree" {
+                bail!("the tree of {tree_ish} is a {}", root.kind);
+            }
+            let mut by_folder = std::collections::HashMap::new();
+            by_folder.insert(
+                String::new(),
+                parse_tree_object(&root.data, id_bytes(tree_ish), "")?,
+            );
+            listings.push(by_folder);
+        }
+        for level in levels.values() {
+            let mut wanted: Vec<(usize, &str)> = Vec::new();
+            let mut ids: Vec<String> = Vec::new();
+            for (index, by_folder) in listings.iter().enumerate() {
+                for folder in level {
+                    let tree = by_folder
+                        .get(folder_of(folder))
+                        .and_then(|entries| entries.iter().find(|entry| entry.path == *folder))
+                        .filter(|entry| entry.kind == "tree");
+                    if let Some(tree) = tree {
+                        wanted.push((index, folder));
+                        ids.push(tree.oid.clone());
+                    }
+                }
+            }
+            for ((index, folder), object) in wanted.into_iter().zip(self.read_objects(&ids)?) {
+                if object.kind != "tree" {
+                    bail!("the folder {folder} is a {}", object.kind);
+                }
+                let entries =
+                    parse_tree_object(&object.data, id_bytes(&tree_ishes[index]), folder)?;
+                listings[index].insert(folder.to_string(), entries);
+            }
+        }
+        Ok(listings)
+    }
+
     /// Entries of `tree` at exactly the given paths.
     pub(crate) fn tree_entries(
         &self,
@@ -784,6 +946,67 @@ pub(crate) fn parse_ls_tree(raw: &[u8]) -> Vec<TreeEntry> {
             })
         })
         .collect()
+}
+
+/// The folder `path` lies in ("" for the root).
+fn folder_of(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(folder, _)| folder)
+}
+
+/// The entries of a raw tree object (`<mode> <name>\0<id>` records, ids of
+/// `id_bytes` bytes) of the folder at `folder`, as `ls-tree` shows them:
+/// full paths, canonical six-digit modes and the object type. Names that
+/// are not UTF-8 are left out, as [`parse_ls_tree`] leaves them out.
+fn parse_tree_object(data: &[u8], id_bytes: usize, folder: &str) -> Result<Vec<TreeEntry>> {
+    let mut entries = Vec::new();
+    let mut rest = data;
+    while !rest.is_empty() {
+        let space = rest
+            .iter()
+            .position(|byte| *byte == b' ')
+            .context("malformed tree object")?;
+        let mode = std::str::from_utf8(&rest[..space])
+            .ok()
+            .and_then(|mode| u32::from_str_radix(mode, 8).ok())
+            .context("malformed tree object")?;
+        rest = &rest[space + 1..];
+        let nul = rest
+            .iter()
+            .position(|byte| *byte == 0)
+            .context("malformed tree object")?;
+        let name = &rest[..nul];
+        rest = &rest[nul + 1..];
+        if rest.len() < id_bytes {
+            bail!("malformed tree object");
+        }
+        let oid: String = rest[..id_bytes]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        rest = &rest[id_bytes..];
+        let Ok(name) = std::str::from_utf8(name) else {
+            continue;
+        };
+        // Git's `canon_mode`.
+        let (mode, kind) = match mode & 0o170000 {
+            0o100000 if mode & 0o100 != 0 => ("100755", "blob"),
+            0o100000 => ("100644", "blob"),
+            0o120000 => ("120000", "blob"),
+            0o040000 => ("040000", "tree"),
+            _ => ("160000", "commit"),
+        };
+        entries.push(TreeEntry {
+            mode: mode.to_string(),
+            kind: kind.to_string(),
+            oid,
+            path: if folder.is_empty() {
+                name.to_string()
+            } else {
+                format!("{folder}/{name}")
+            },
+        });
+    }
+    Ok(entries)
 }
 
 fn size_or_missing(kind: &str) -> bool {
@@ -2146,5 +2369,136 @@ mod tests {
             .with_work_tree(Path::new("relative"))
             .run(&["check-ignore", "--no-index", "x"])
             .is_err());
+    }
+
+    /// Entries found with their paths on stdin are exactly what `ls-tree`
+    /// with the path as an argument finds, for names git reads specially
+    /// elsewhere (blanks, `:`, a word git prints for a missing object,
+    /// non-ASCII, a newline), for links, submodules, executables and folders,
+    /// and for paths that are absent or below a file.
+    #[test]
+    fn paths_found_on_stdin_match_ls_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = dir.path().canonicalize().unwrap().join("r.git");
+        WorkspaceGit::init_bare(&repository).unwrap();
+        let git = WorkspaceGit::bare(&repository, None);
+        let blob = |content: &str| {
+            git.stdout_opts(
+                &["hash-object", "-w", "--stdin"],
+                &RunOpts {
+                    stdin: Some(content.as_bytes()),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap()
+        };
+        let commit_of = |entries: &[(&str, String, &str)], parents: &[&str]| {
+            let scratch = temp_index_dir(&git).unwrap();
+            let index = scratch.path().join("index");
+            let mut info = Vec::new();
+            for (mode, oid, path) in entries {
+                info.extend_from_slice(format!("{mode} {oid}\t{path}").as_bytes());
+                info.push(0);
+            }
+            git.ok_opts(
+                &["update-index", "-z", "--index-info"],
+                &RunOpts {
+                    index_file: Some(&index),
+                    stdin: Some(&info),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap();
+            let tree = git
+                .stdout_opts(
+                    &["write-tree"],
+                    &RunOpts {
+                        index_file: Some(&index),
+                        ..RunOpts::default()
+                    },
+                )
+                .unwrap();
+            let identity = GitIdentity::new("t", "t@example.com");
+            git.commit_tree(&tree, parents, &identity, &identity, b"c\n")
+                .unwrap()
+        };
+        let gitlink = "0123456789abcdef0123456789abcdef01234567".to_string();
+        let first = commit_of(
+            &[
+                ("100644", blob("a\n"), "a b.txt"),
+                ("100644", blob("b\n"), "x:y"),
+                ("100644", blob("c\n"), "dir/sub file"),
+                ("100644", blob("d\n"), "dir/nested/deep.txt"),
+                ("100644", blob("e\n"), "caf\u{e9} \u{2713}.md"),
+                ("100644", blob("f\n"), "nothing missing"),
+                ("100644", blob("g\n"), " lead"),
+                ("100644", blob("h\n"), "new\nline.txt"),
+                ("100755", blob("#!/bin/sh\n"), "run.sh"),
+                ("120000", blob("a b.txt"), "link"),
+                ("160000", gitlink.clone(), "dir/sub"),
+            ],
+            &[],
+        );
+        let second = commit_of(&[("100644", blob("other\n"), "x:y")], &[&first]);
+        let paths = [
+            "a b.txt",
+            "x:y",
+            "dir",
+            "dir/nested",
+            "dir/sub file",
+            "dir/nested/deep.txt",
+            "caf\u{e9} \u{2713}.md",
+            "nothing missing",
+            " lead",
+            "run.sh",
+            "link",
+            "dir/sub",
+            "absent.txt",
+            "a b.txt/below",
+            "dir/absent/x",
+            "new\nline.txt",
+        ]
+        .map(str::to_string);
+        let listed = |commit: &str, path: &str| -> Option<TreeEntry> {
+            let raw = git
+                .bytes_opts(
+                    &["ls-tree", "-z", "--full-tree", commit, "--", path],
+                    &RunOpts {
+                        literal_pathspecs: true,
+                        ..RunOpts::default()
+                    },
+                )
+                .unwrap();
+            parse_ls_tree(&raw)
+                .into_iter()
+                .find(|entry| entry.path == path)
+        };
+        // One lookup with every path, and with the newline path left out (its
+        // own fallback is a full listing).
+        for wanted in [&paths[..], &paths[..paths.len() - 1]] {
+            let found = git.entries_by_path(&first, wanted).unwrap();
+            for path in wanted {
+                assert_eq!(found.get(path), listed(&first, path).as_ref(), "{path:?}");
+            }
+        }
+        assert_eq!(
+            git.entries_by_path(&first, &["link".to_string()]).unwrap()["link"].mode,
+            "120000"
+        );
+        assert_eq!(
+            git.entries_by_path(&first, &["dir/sub".to_string()])
+                .unwrap()["dir/sub"]
+                .kind,
+            "commit"
+        );
+        let both = [second.clone(), first.clone()];
+        for path in ["x:y", "dir/sub file", "absent.txt", "new\nline.txt"] {
+            let each = git.entry_in_each(&both, path).unwrap();
+            assert_eq!(
+                each,
+                vec![listed(&second, path), listed(&first, path)],
+                "{path:?}"
+            );
+        }
     }
 }

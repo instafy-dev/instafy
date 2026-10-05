@@ -51,8 +51,6 @@ use crate::workspace_git::{parse_ls_tree, zero_oid, RunOpts, TreeEntry, Workspac
 
 /// Above this many paths, one full listing is cheaper than lookups.
 const FULL_LISTING_ABOVE: usize = 2_000;
-/// Argument bytes per lookup command.
-const LOOKUP_CHUNK_BYTES: usize = 64 * 1024;
 
 // ---------------------------------------------------------------------------
 // Tree lookups.
@@ -74,12 +72,9 @@ fn ancestors(path: &str) -> Vec<String> {
 }
 
 /// The entries of `commit` at exactly `paths`, for every path that exists
-/// there (a folder, a file, a link or a submodule).
-///
-/// `ls-tree` with path arguments descends into a folder instead of showing
-/// it when another argument lies below it, so paths are looked up in layers
-/// of equal depth (no path in a layer contains another). Many paths are
-/// read from one full listing instead.
+/// there (a folder, a file, a link or a submodule). Paths reach git only on
+/// stdin ([`WorkspaceGit::entries_by_path`]); many paths are read from one
+/// full listing instead.
 pub(super) fn entries_at(
     git: &WorkspaceGit<'_>,
     commit: &str,
@@ -100,74 +95,37 @@ pub(super) fn entries_at(
         }
         return Ok(found);
     }
-    let mut layers: BTreeMap<usize, Vec<&str>> = BTreeMap::new();
-    for path in paths {
-        layers
-            .entry(path.matches('/').count())
-            .or_default()
-            .push(path.as_str());
-    }
-    for layer in layers.values() {
-        let mut start = 0;
-        while start < layer.len() {
-            let mut end = start;
-            let mut bytes = 0;
-            while end < layer.len()
-                && (end == start || bytes + layer[end].len() < LOOKUP_CHUNK_BYTES)
-            {
-                bytes += layer[end].len() + 1;
-                end += 1;
-            }
-            let mut args = vec!["ls-tree", "-z", "--full-tree", commit, "--"];
-            args.extend(&layer[start..end]);
-            let raw = git
-                .bytes_opts(
-                    &args,
-                    &RunOpts {
-                        literal_pathspecs: true,
-                        ..RunOpts::default()
-                    },
-                )
-                .map_err(internal)?;
-            for entry in parse_ls_tree(&raw) {
-                if paths.contains(&entry.path) {
-                    found.insert(entry.path.clone(), entry);
-                }
-            }
-            start = end;
-        }
-    }
-    Ok(found)
+    let wanted: Vec<String> = paths.iter().cloned().collect();
+    Ok(git
+        .entries_by_path(commit, &wanted)
+        .map_err(internal)?
+        .into_iter()
+        .collect())
 }
 
 /// Every file, link and submodule below `folders` (which do not contain
-/// each other) in `commit`.
+/// each other) in `commit`. Each folder is found with
+/// [`WorkspaceGit::entries_by_path`] and listed by its tree id, so no path
+/// is an argument of git.
 fn entries_below(
     git: &WorkspaceGit<'_>,
     commit: &str,
     folders: &[String],
 ) -> Result<Vec<String>, OriginError> {
+    let found = git.entries_by_path(commit, folders).map_err(internal)?;
     let mut below = Vec::new();
-    for chunk in folders.chunks(256) {
-        let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit, "--"];
-        args.extend(chunk.iter().map(String::as_str));
+    for folder in folders {
+        let Some(tree) = found.get(folder).filter(|entry| is_tree(entry)) else {
+            continue;
+        };
         let raw = git
-            .bytes_opts(
-                &args,
-                &RunOpts {
-                    literal_pathspecs: true,
-                    ..RunOpts::default()
-                },
-            )
+            .bytes(&["ls-tree", "-r", "-z", "--end-of-options", &tree.oid])
             .map_err(internal)?;
-        for entry in parse_ls_tree(&raw) {
-            if chunk
-                .iter()
-                .any(|folder| entry.path.starts_with(&format!("{folder}/")))
-            {
-                below.push(entry.path);
-            }
-        }
+        below.extend(
+            parse_ls_tree(&raw)
+                .into_iter()
+                .map(|entry| format!("{folder}/{}", entry.path)),
+        );
     }
     Ok(below)
 }
