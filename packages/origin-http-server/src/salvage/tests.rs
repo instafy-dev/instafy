@@ -1158,11 +1158,28 @@ fn replacement_refs_in_reftable_storage_never_hide_history() {
     );
 }
 
-/// Each entry's line reaches stdout before `report.jsonl`; when the journal
-/// cannot take a line, the run stops before the next entry, and a journal
-/// that cannot be opened stops it before the first.
+/// A writer whose reader went away: every write fails as a closed pipe's
+/// does (the operator's `docker exec` session ended, or `| head` stopped
+/// reading).
+struct ClosedPipe;
+
+impl std::io::Write for ClosedPipe {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+}
+
+/// Each entry's line goes to stdout and to `report.jsonl`, whatever the
+/// other does: when either cannot take it, the other still has it, and the
+/// run stops before the next entry with an error naming the entry. A
+/// journal that cannot be opened for appending stops the run before the
+/// first entry.
 #[test]
-fn a_report_line_is_never_lost_when_the_journal_fails() {
+fn a_report_line_is_never_lost_when_one_of_its_sinks_fails() {
     let gateway = Gateway::new();
     let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
     let entry = gateway.park_checkout_at(&c1);
@@ -1206,23 +1223,76 @@ fn a_report_line_is_never_lost_when_the_journal_fails() {
         .join(format!("{}-20261005T000000Z.private.tar", gateway.project))
         .exists());
 
-    // A journal that cannot be opened stops the run before any entry.
-    let other = Gateway::new();
-    let c1 = other.publish(&[("README.md", Some("one\n"))], "c1");
-    let entry = other.park_checkout_at(&c1);
+    // Stdout closes while the first entry is handled: its line still
+    // reaches the journal, and the run stops before the next entry.
+    let closed = Gateway::new();
+    let c1 = closed.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = closed.park_checkout_at(&c1);
     write(&entry.join("README.md"), b"edited\n");
-    other.salvage_mode_hook(&[]);
-    std::fs::create_dir_all(other.root.join(".salvage/report.jsonl")).unwrap();
+    let second = closed
+        .root
+        .join(".legacy")
+        .join(format!("{}-20261005T000000Z", closed.project));
+    write(&second.join("notes.md"), b"draft\n");
+    closed.salvage_mode_hook(&[]);
     let stub = Stub::default();
-    let mut out = Vec::new();
-    let error = run(&other.settings(true, true, &[]), &stub, &mut out)
+    let error = run(&closed.settings(true, true, &[]), &stub, &mut ClosedPipe)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("report.jsonl"), "{error}");
-    assert!(out.is_empty());
-    assert_eq!(stub.read_tokens.get(), 0);
-    assert!(entry.join("README.md").is_file());
-    assert!(other.salvage_refs().is_empty());
+    let journaled: Vec<JsonValue> =
+        std::fs::read_to_string(closed.root.join(".salvage/report.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(journaled.len(), 1, "{error}");
+    assert_eq!(journaled[0]["entry"], closed.project.to_string());
+    assert_eq!(journaled[0]["removed"], true, "{:#}", journaled[0]);
+    let refs = closed.salvage_refs();
+    assert_eq!(refs.len(), 1);
+    assert!(refs.contains_key(journaled[0]["salvageRef"].as_str().unwrap()));
+    assert!(error.contains("stdout"), "{error}");
+    assert!(error.contains(&closed.project.to_string()), "{error}");
+    assert!(!entry.exists());
+    assert!(second.join("notes.md").is_file());
+
+    // A journal that cannot be opened for appending stops the run before
+    // any entry: a read-only one, and a link to a folder that does not
+    // exist (which the read of earlier refs takes as no journal yet).
+    for broken in ["read-only", "dangling link"] {
+        let other = Gateway::new();
+        let c1 = other.publish(&[("README.md", Some("one\n"))], "c1");
+        let entry = other.park_checkout_at(&c1);
+        write(&entry.join("README.md"), b"edited\n");
+        other.salvage_mode_hook(&[]);
+        let journal = other.root.join(".salvage/report.jsonl");
+        std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        if broken == "read-only" {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::write(&journal, b"").unwrap();
+            std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o400)).unwrap();
+            if std::fs::OpenOptions::new()
+                .append(true)
+                .open(&journal)
+                .is_ok()
+            {
+                eprintln!("skipped the read-only journal: this user may write any file");
+                continue;
+            }
+        } else {
+            std::os::unix::fs::symlink(other.root.join("missing/report.jsonl"), &journal).unwrap();
+        }
+        let stub = Stub::default();
+        let mut out = Vec::new();
+        let error = run(&other.settings(true, true, &[]), &stub, &mut out)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("report.jsonl"), "{broken}: {error}");
+        assert!(out.is_empty(), "{broken}");
+        assert_eq!(stub.read_tokens.get(), 0, "{broken}");
+        assert!(entry.join("README.md").is_file(), "{broken}");
+        assert!(other.salvage_refs().is_empty(), "{broken}");
+    }
 }
 
 /// An existing salvage ref with another tip stops the entry before any

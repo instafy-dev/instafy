@@ -51,8 +51,8 @@
 //! 6. `.salvage/<entry>.bundle` holds the entry's local history (all of it
 //!    when canonical is missing), `.salvage/<entry>.private.tar` (0600) the
 //!    private files, and `.salvage/report.jsonl` one line per entry and run.
-//!    Each line goes to stdout first; when the journal cannot take it, the
-//!    run stops before the next entry. Private files carry their sizes
+//!    Each line goes to stdout and to the journal, whatever the other does;
+//!    when either cannot take it, the run stops before the next entry. Private files carry their sizes
 //!    (`privateArchiveBytes` per entry, a total in the summary), and an
 //!    entry whose outputs would leave the volume with less than the free
 //!    space the gateway keeps (the mirror cache's 2 GiB floor) stops before
@@ -347,22 +347,45 @@ pub(crate) fn run(
             },
         };
         let line = serde_json::to_string(&report).context("failed to encode a report")?;
-        // Stdout first: the entry may be pushed or removed already, so its
-        // line must reach the operator even when the journal fails.
-        writeln!(out, "{line}").context("failed to write the report")?;
         summary.count(&report);
-        if settings.apply {
-            // A line the journal could not take stops the run here, before
-            // any later entry is pushed or removed.
-            journal::append(settings, &line).with_context(|| {
-                format!(
-                    "{name} was handled (its line is on stdout) but report.jsonl did not take \
-                     its line, so the run stopped: {line}"
-                )
-            })?;
-        }
+        report_line(settings, out, &name, &line)?;
     }
     Ok(summary)
+}
+
+/// Write an entry's line to stdout and, with `--apply`, to `report.jsonl`,
+/// each whatever the other does: the entry may be pushed or removed
+/// already, and the line is the only record of where its work went. A sink
+/// that could not take it (a closed stdout, a full disk) stops the run
+/// before the next entry, with an error that names the entry and carries
+/// the line.
+fn report_line(settings: &Settings, out: &mut dyn Write, name: &str, line: &str) -> Result<()> {
+    let printed = writeln!(out, "{line}").and_then(|()| out.flush());
+    let journaled = if settings.apply {
+        Some(journal::append(settings, line))
+    } else {
+        None
+    };
+    let mut failed = Vec::new();
+    if let Err(error) = &printed {
+        failed.push(format!("stdout ({error})"));
+    }
+    if let Some(Err(error)) = &journaled {
+        failed.push(format!("report.jsonl ({error:#})"));
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    let kept = match (printed.is_ok(), matches!(journaled, Some(Ok(())))) {
+        (true, _) => "it is on stdout",
+        (false, true) => "it is in report.jsonl",
+        (false, false) => "it is only here",
+    };
+    bail!(
+        "{name} was handled, but {} did not take its line ({kept}), so the run stopped \
+         before the next entry: {line}",
+        failed.join(" and ")
+    )
 }
 
 /// The space id an entry name starts with: `<id>` or `<id>-<suffix>`, the
