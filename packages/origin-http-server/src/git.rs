@@ -2088,6 +2088,9 @@ pub fn list_commit_files(
     if normalized_commit.is_empty() || !is_git_repo(workspace_root) {
         return Ok(Vec::new());
     }
+    if !is_safe_git_rev(normalized_commit) {
+        return Err(OriginError::bad_request("invalid git rev"));
+    }
 
     let stdout = git_stdout(
         workspace_root,
@@ -2097,6 +2100,7 @@ pub fn list_commit_files(
             "--name-status",
             "--find-renames",
             "--find-copies",
+            "--end-of-options",
             normalized_commit,
         ],
         bearer_token,
