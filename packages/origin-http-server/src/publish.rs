@@ -2632,19 +2632,21 @@ impl Publisher<'_> {
             .map_err(internal)?
             .into_iter()
             .collect();
-        // Left out on request (`keep`), or refused because it can never
-        // come back here. Only the person's own choices let the ref go.
+        // Refused because it can never come back here, or left out on
+        // request (`keep`). Only the person's own choices let the ref go,
+        // so refusal is decided first: a secret or ignored file below a
+        // kept folder (which no conflict showed them) is refused, not kept.
         let mut not_restored = Vec::new();
         let mut refused = Vec::new();
         for change in &changes {
-            if keep.covers(&change.path) {
-                not_restored.push(change.path.clone());
-            } else if crate::paths::is_reserved_path(&change.path)
+            if crate::paths::is_reserved_path(&change.path)
                 || self.policy_reason(change, &sizes).is_some()
                 || ignored.contains(&change.path)
             {
                 not_restored.push(change.path.clone());
                 refused.push(change.path.clone());
+            } else if keep.covers(&change.path) {
+                not_restored.push(change.path.clone());
             }
         }
         // A conflict (which keeps `HEAD`'s entry) is settled when the work

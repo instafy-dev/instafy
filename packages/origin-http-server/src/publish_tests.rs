@@ -3684,6 +3684,62 @@ async fn keep_clears_a_file_and_folder_conflict() {
     server.abort();
 }
 
+/// Keeping a folder settles its clash, but a file below it that can never
+/// come back here (a secret, which the conflict never showed) is still
+/// refused, not kept on request: the ref stays, so that work is not
+/// removed on the person's behalf.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_folder_never_lets_refused_work_below_it_go() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    let commit = push_to_ref(
+        &sc,
+        &[
+            ("docs/readme.md", Some(b"work\n")),
+            ("docs/.env", Some(b"TOKEN=1\n")),
+            ("other.md", Some(b"other\n")),
+        ],
+        &[],
+        "Unsaved edits",
+        &reference,
+    );
+    sc.push_other(&[("docs", Some(b"a file now\n"))], "docs is a file");
+    sc.publish(Selection::None);
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let restore =
+        |body: serde_json::Value| post_json(&client, format!("{base}/git/recovery/restore"), body);
+
+    let (status, body) = restore(serde_json::json!({ "ref": reference, "rev": commit })).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["paths"], serde_json::json!(["docs", "docs/readme.md"]));
+
+    let (status, body) = restore(serde_json::json!({
+        "ref": reference,
+        "rev": commit,
+        "keep": ["docs", "docs/readme.md"],
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!(["docs/.env", "docs/readme.md"])
+    );
+    assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(sc.remote_refs(&reference).len(), 1);
+    assert_eq!(
+        sc.recovery_file(&reference, "docs/.env").as_deref(),
+        Some("TOKEN=1\n")
+    );
+    assert_eq!(sc.remote_file("other.md").as_deref(), Some("other\n"));
+    assert_eq!(sc.remote_file("docs").as_deref(), Some("a file now\n"));
+    server.abort();
+}
+
 /// Work that `main` started to ignore after it was kept cannot be restored
 /// here. The restore says so and keeps the ref, the only copy of that work
 /// on canonical, so the person can still review or remove it.
