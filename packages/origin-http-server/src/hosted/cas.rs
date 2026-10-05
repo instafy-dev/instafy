@@ -29,7 +29,7 @@ use crate::error::OriginError;
 use crate::git::is_full_object_id;
 use crate::publish::parse_raw_changes;
 use crate::push::{self, PushClass};
-use crate::recovery_view::MAIN_REF;
+use crate::recovery_view::{without_origin_trailers, MAIN_REF};
 use crate::workspace_git::{GitIdentity, Quarantine, WorkspaceGit};
 
 /// How long a person's save keeps trying before it answers `main_busy`.
@@ -79,36 +79,31 @@ pub(crate) fn save_author(claims: &OriginClaims, gateway: &GitIdentity) -> GitId
         .unwrap_or_else(|| GitIdentity::new(gateway.name.clone(), gateway.email.clone()))
 }
 
-/// A caller's commit message with control characters other than newlines
-/// and tabs dropped, and then every line that starts with `Instafy-` (any
-/// letter case, after leading blanks) removed, since those trailers mean
-/// something to the gateway. `None` when nothing is left.
+/// A caller's commit message as the gateway commits it: control characters
+/// other than newlines and tabs dropped, trailing blanks of each line
+/// trimmed, at most [`MAX_MESSAGE_BYTES`], and then the `Instafy-` trailers
+/// git reads taken out by the rule Desktop saves by
+/// ([`without_origin_trailers`]): prose stays word for word, and so does
+/// `Instafy-Resolved-By`. `None` when nothing is left.
 ///
-/// The order matters: a line checked before its control characters are
-/// dropped (`\u{1}Instafy-Restored-From: ...`) would pass the check and
-/// then become a real trailer of a commit the gateway makes.
+/// The order matters. Control characters go first, so a trailer cannot hide
+/// behind one (`\u{1}Instafy-Restored-From: ...`). The trailers go last, so
+/// nothing changes the text after they were looked for: a cut at the length
+/// cap could otherwise leave a paragraph that read as prose last, and git
+/// would then read it as trailers.
 pub(crate) fn caller_message(text: Option<&str>) -> Option<String> {
     let text = text?;
-    let kept: Vec<String> = text
+    let cleaned: Vec<String> = text
         .lines()
         .map(|line| {
             line.chars()
                 .filter(|c| *c == '\t' || !c.is_control())
                 .collect::<String>()
+                .trim_end()
+                .to_string()
         })
-        .filter(|line| {
-            !line
-                .trim_start()
-                .get(..8)
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("instafy-"))
-        })
-        .map(|line| line.trim_end().to_string())
         .collect();
-    let joined = kept.join("\n");
-    let mut message = joined.trim().to_string();
-    if message.is_empty() {
-        return None;
-    }
+    let mut message = cleaned.join("\n").trim().to_string();
     if message.len() > MAX_MESSAGE_BYTES {
         let mut end = MAX_MESSAGE_BYTES;
         while !message.is_char_boundary(end) {
@@ -116,7 +111,8 @@ pub(crate) fn caller_message(text: Option<&str>) -> Option<String> {
         }
         message.truncate(end);
     }
-    Some(message)
+    let message = without_origin_trailers(&message);
+    (!message.is_empty()).then_some(message)
 }
 
 /// The plain subject of a save: `Update <path>`, `Delete <path>` or
