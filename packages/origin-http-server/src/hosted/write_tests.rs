@@ -3074,7 +3074,7 @@ fn a_patient_change_is_answered_by_the_fetch_it_waited_for() {
     let mut cache = sc
         .open_cache()
         .with_waits(Duration::from_millis(400), Duration::from_millis(400));
-    cache.test_fetch_delay = Some(Duration::from_millis(2000));
+    cache.test_fetch_delay = Some(Duration::from_millis(4000));
     let cache = Arc::new(cache);
     use super::cas::Canonical as _;
 
@@ -3101,8 +3101,8 @@ fn a_patient_change_is_answered_by_the_fetch_it_waited_for() {
     let answered = waiting.join().unwrap().unwrap();
     let elapsed = started.elapsed();
     assert_eq!(answered.as_deref(), Some(head.as_str()));
-    // One fetch (2 s), not that one and the queued one after it (4 s).
-    assert!(elapsed < Duration::from_millis(3500), "{elapsed:?}");
+    // One fetch (4 s), not that one and the queued one after it (8 s).
+    assert!(elapsed < Duration::from_millis(7000), "{elapsed:?}");
     // The later write waited its own short while for its own fetch.
     let later = runtime.block_on(later).unwrap();
     assert!(
