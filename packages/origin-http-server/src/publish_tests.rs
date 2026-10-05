@@ -1927,6 +1927,10 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
     ("tree_merge.rs", include_str!("tree_merge.rs")),
     ("publish_policy.rs", include_str!("publish_policy.rs")),
     ("workspace_git.rs", include_str!("workspace_git.rs")),
+    ("salvage.rs", include_str!("salvage.rs")),
+    ("salvage/canonical.rs", include_str!("salvage/canonical.rs")),
+    ("salvage/classify.rs", include_str!("salvage/classify.rs")),
+    ("salvage/work.rs", include_str!("salvage/work.rs")),
 ];
 
 /// Modules under `src/` written before these rules: the command builder
