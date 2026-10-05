@@ -48,7 +48,9 @@ use futures_util::future::{BoxFuture, FutureExt, Shared};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use super::answers::{is_disk_full, or_disk_full};
 use super::disk::{ensure_private_dir, modified, remove_entry, rename_no_replace, tree_size};
+use super::legacy::LEGACY_DIR;
 use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git_tokens;
@@ -95,6 +97,8 @@ pub(crate) const EVICT_IDLE_AFTER: Duration = Duration::from_secs(3600);
 pub(crate) const MISSING_REV_MEMORY: Duration = Duration::from_secs(30);
 /// At most this many such commits are remembered.
 const MISSING_REVS_REMEMBERED: usize = 4096;
+/// How often the size of `.legacy/` is measured, at most.
+const LEGACY_MEASURE_EVERY: Duration = Duration::from_secs(3600);
 /// Scratch older than this belongs to a request that is gone.
 const SCRATCH_STALE_AFTER: Duration = Duration::from_secs(3600);
 /// Below this much free space on the cache's disk the sweeper removes
@@ -141,7 +145,17 @@ impl FetchError {
             Self::Unreachable | Self::BadPack => canonical_unreachable(),
             Self::Broken => mirror_reset(),
             Self::DiskFull => disk_full(),
-            Self::Local(message) => OriginError::internal(message),
+            Self::Local(message) => or_disk_full(OriginError::internal(message)),
+        }
+    }
+
+    /// A failure on the gateway's own disk: [`Self::DiskFull`] when it
+    /// says the disk is full.
+    fn local(message: String) -> Self {
+        if says_disk_full(&message) {
+            Self::DiskFull
+        } else {
+            Self::Local(message)
         }
     }
 
@@ -333,6 +347,8 @@ pub(crate) struct MirrorCache {
     missing_revs: Mutex<HashMap<(Uuid, String), Instant>>,
     next_fetch: AtomicU64,
     fetches_started: AtomicU64,
+    /// How many sweeps ran (not counting those that found one running).
+    sweeps_run: AtomicU64,
     fetch_wait: Duration,
     first_clone_wait: Duration,
     /// When the sweeper packs a mirror: (loose objects, packs).
@@ -341,8 +357,16 @@ pub(crate) struct MirrorCache {
     min_free_bytes: u64,
     /// The free space on the disk of a path (`None`: unknown).
     free_space: Box<dyn Fn(&Path) -> Option<u64> + Send + Sync>,
-    /// Held while a sweep runs: one at a time.
+    /// Held while a sweep evicts: one at a time.
     sweeping: Mutex<()>,
+    /// A sweep was asked for while one ran: the running one goes again.
+    sweep_again: AtomicBool,
+    /// Held while mirrors are packed (outside the sweep's lock).
+    packing: Mutex<()>,
+    /// The size of `.legacy/` and when it was measured.
+    legacy_bytes: Mutex<Option<(Instant, Option<u64>)>>,
+    #[cfg(test)]
+    test_packed_while_sweeping: Mutex<Option<bool>>,
     #[cfg(test)]
     pub(crate) test_fetch_delay: Option<Duration>,
 }
@@ -399,6 +423,7 @@ impl MirrorCache {
             missing_revs: Mutex::new(HashMap::new()),
             next_fetch: AtomicU64::new(1),
             fetches_started: AtomicU64::new(0),
+            sweeps_run: AtomicU64::new(0),
             fetch_wait: FETCH_WAIT,
             first_clone_wait: FIRST_CLONE_WAIT,
             pack_limits: (LOOSE_OBJECT_LIMIT, PACK_LIMIT),
@@ -409,6 +434,11 @@ impl MirrorCache {
             #[cfg(test)]
             free_space: Box::new(|_| None),
             sweeping: Mutex::new(()),
+            sweep_again: AtomicBool::new(false),
+            packing: Mutex::new(()),
+            legacy_bytes: Mutex::new(None),
+            #[cfg(test)]
+            test_packed_while_sweeping: Mutex::new(None),
             #[cfg(test)]
             test_fetch_delay: None,
         })
@@ -451,6 +481,12 @@ impl MirrorCache {
     #[cfg(test)]
     pub(crate) fn fetches_started(&self) -> u64 {
         self.fetches_started.load(Ordering::SeqCst)
+    }
+
+    /// How many sweeps ran.
+    #[cfg(test)]
+    pub(crate) fn sweeps_run(&self) -> u64 {
+        self.sweeps_run.load(Ordering::SeqCst)
     }
 
     /// Hold a mirror's ref lock, as a running fetch does.
@@ -650,6 +686,9 @@ impl MirrorCache {
             cache.fetch_started(&guard.entry, id);
             let outcome = cache.fetch_main(&guard, caller_token).await;
             cache.fetch_finished(&guard.entry, id, &outcome);
+            if matches!(outcome, Err(FetchError::DiskFull)) {
+                cache.request_sweep();
+            }
             drop(guard);
             outcome
         });
@@ -737,7 +776,6 @@ impl MirrorCache {
                     warn!(%project, ?failure, "threw away a mirror the gateway's disk broke");
                     entry.resets.fetch_add(1, Ordering::SeqCst);
                     if matches!(failure, FetchError::DiskFull) {
-                        cache.request_sweep();
                         return Err(failure);
                     }
                     let dir = cache.open_mirror(&entry)?;
@@ -933,8 +971,12 @@ impl MirrorCache {
     ) -> Result<T, OriginError> {
         let error = match result {
             Ok(value) => return Ok(value),
-            Err(error) => error,
+            Err(error) => or_disk_full(error),
         };
+        if is_disk_full(&error) {
+            self.request_sweep();
+            return Err(error);
+        }
         let damaged = match &error {
             OriginError::Internal(message) => says_mirror_damaged(message),
             _ => false,
@@ -987,7 +1029,7 @@ impl MirrorCache {
 
     fn open_mirror(&self, entry: &MirrorEntry) -> Result<PathBuf, FetchError> {
         let dir = self.mirror_dir(entry.project);
-        let local = |error: anyhow::Error| FetchError::Local(format!("{error:#}"));
+        let local = |error: anyhow::Error| FetchError::local(format!("{error:#}"));
         match std::fs::symlink_metadata(&dir) {
             Ok(metadata) if metadata.file_type().is_dir() => {}
             Ok(_) => {
@@ -1058,11 +1100,13 @@ impl MirrorCache {
         let cache = self.clone();
         runtime.spawn_blocking(move || {
             let report = cache.sweep(SystemTime::now());
-            info!(
-                evicted = report.evicted.len(),
-                bytes = report.total_bytes,
-                "swept the mirror cache after the disk filled up"
-            );
+            if report.ran {
+                info!(
+                    evicted = report.evicted.len(),
+                    bytes = report.total_bytes,
+                    "swept the mirror cache after the disk filled up"
+                );
+            }
         });
     }
 
@@ -1101,11 +1145,46 @@ impl MirrorCache {
     /// trash, forget expired credentials, and, while the mirrors together
     /// are over the cap, remove the least recently used mirror that nobody
     /// has used for an hour and nobody holds. The cap is soft: mirrors in
-    /// use are never removed for it.
+    /// use are never removed for it. Below [`MIN_FREE_BYTES`] free on the
+    /// cache's disk, mirrors nobody holds are removed however recent. Then
+    /// mirrors over git's packing limits are packed, outside the sweep's
+    /// lock (packing a large mirror takes minutes).
+    ///
+    /// One sweep at a time: a sweep asked for while one runs (a write that
+    /// found the disk full) makes the running one go over the cache again
+    /// when it is done, and is itself `ran: false`.
     pub(crate) fn sweep(&self, now: SystemTime) -> SweepReport {
-        let Ok(_sweeping) = self.sweeping.try_lock() else {
-            return SweepReport::default();
-        };
+        let mut report = SweepReport::default();
+        let mut stats: Vec<MirrorStat>;
+        loop {
+            let Ok(sweeping) = self.sweeping.try_lock() else {
+                self.sweep_again.store(true, Ordering::SeqCst);
+                return report;
+            };
+            self.sweep_again.store(false, Ordering::SeqCst);
+            let now = if report.ran { SystemTime::now() } else { now };
+            stats = self.sweep_once(now, &mut report);
+            report.ran = true;
+            drop(sweeping);
+            if !self.sweep_again.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        // One mirror at a time, the ones that crossed git's own limits.
+        if let Ok(_packing) = self.packing.try_lock() {
+            for stat in &stats {
+                if !report.evicted.contains(&stat.project) && self.pack_mirror(stat.project) {
+                    report.packed.push(stat.project);
+                }
+            }
+        }
+        report
+    }
+
+    /// One pass of [`Self::sweep`] under its lock: what it removed goes into
+    /// `report`; returns what it knew of each mirror.
+    fn sweep_once(&self, now: SystemTime, report: &mut SweepReport) -> Vec<MirrorStat> {
+        self.sweeps_run.fetch_add(1, Ordering::SeqCst);
         for folder in [QUARANTINE_DIR, STAGING_DIR] {
             remove_older_than(&self.root.join(folder), now, SCRATCH_STALE_AFTER);
         }
@@ -1128,6 +1207,9 @@ impl MirrorCache {
         let total_bytes = stats
             .iter()
             .fold(0u64, |total, stat| total.saturating_add(stat.bytes));
+        if !report.ran {
+            report.total_bytes = total_bytes;
+        }
         let mut evicted = Vec::new();
         for project in plan_eviction(&stats, self.max_bytes, now) {
             if self.evict(project, now, true) {
@@ -1137,6 +1219,8 @@ impl MirrorCache {
         // A disk short of space (the cache shares it with `.legacy/` and
         // anything else): mirrors nobody holds go, least recently used
         // first, however recently used. Deleting one only costs a fetch.
+        // `.legacy/` (working copies of the old gateway, kept for salvage)
+        // is never touched; its size is reported.
         if let Some(free) = (self.free_space)(&self.root).filter(|free| *free < self.min_free_bytes)
         {
             let left: Vec<MirrorStat> = stats
@@ -1151,11 +1235,15 @@ impl MirrorCache {
                     evicted.push(project);
                 }
             }
+            let legacy_bytes = self.legacy_size();
+            report.legacy_bytes = legacy_bytes;
             warn!(
                 free,
                 floor = self.min_free_bytes,
                 removed = freed,
-                "the mirror cache's disk is low on space; removed mirrors nobody holds"
+                legacy_bytes,
+                "the mirror cache's disk is low on space; removed mirrors nobody holds \
+                 (.legacy/ is kept)"
             );
         }
         let kept: u64 = stats
@@ -1170,18 +1258,33 @@ impl MirrorCache {
                 "the mirror cache stays over its cap: the rest is in use or used within the hour"
             );
         }
-        // One mirror at a time, the ones that crossed git's own limits.
-        let mut packed = Vec::new();
-        for stat in &stats {
-            if !evicted.contains(&stat.project) && self.pack_mirror(stat.project) {
-                packed.push(stat.project);
+        report.evicted.extend(evicted);
+        stats
+    }
+
+    /// The size of `.legacy/` next to the cache, measured at most once an
+    /// hour (`None`: there is none).
+    fn legacy_size(&self) -> Option<u64> {
+        let mut known = locked(&self.legacy_bytes);
+        if let Some((measured, bytes)) = *known {
+            if measured.elapsed() < LEGACY_MEASURE_EVERY {
+                return bytes;
             }
         }
-        SweepReport {
-            evicted,
-            packed,
-            total_bytes,
-        }
+        let legacy = self.root.parent().map(|root| root.join(LEGACY_DIR));
+        let bytes = legacy
+            .filter(|legacy| {
+                std::fs::symlink_metadata(legacy).is_ok_and(|metadata| metadata.is_dir())
+            })
+            .map(|legacy| tree_size(&legacy));
+        *known = Some((Instant::now(), bytes));
+        bytes
+    }
+
+    /// Whether the last packing ran while a sweep held its lock.
+    #[cfg(test)]
+    pub(crate) fn packed_while_sweeping(&self) -> Option<bool> {
+        *locked(&self.test_packed_while_sweeping)
     }
 
     /// Pack `project`'s mirror when it holds about [`LOOSE_OBJECT_LIMIT`]
@@ -1214,6 +1317,10 @@ impl MirrorCache {
             "--auto",
             "--quiet",
         ];
+        #[cfg(test)]
+        {
+            *locked(&self.test_packed_while_sweeping) = Some(self.sweeping.try_lock().is_err());
+        }
         let ran = WorkspaceGit::bare(&dir, None).run(&args);
         self.size_changed(project);
         match ran {
@@ -1549,11 +1656,17 @@ pub(crate) struct MirrorStat {
 /// What one sweep did.
 #[derive(Debug, Default)]
 pub(crate) struct SweepReport {
+    /// Whether it ran (not when another sweep was running: that one goes
+    /// over the cache again instead).
+    pub ran: bool,
     pub evicted: Vec<Uuid>,
     /// Mirrors that crossed git's packing limits and were packed.
     pub packed: Vec<Uuid>,
     /// The mirrors' total size before any was removed.
     pub total_bytes: u64,
+    /// The size of `.legacy/`, reported (never reduced) when the disk is
+    /// short of space.
+    pub legacy_bytes: Option<u64>,
 }
 
 /// The mirrors to remove to free `needed` bytes on a disk short of space:
@@ -1634,6 +1747,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(free_bytes(dir.path()).is_some_and(|free| free > 0));
         assert_eq!(free_bytes(&dir.path().join("missing")), None);
+    }
+
+    /// A mirror that cannot be made on a full disk (a first read of a
+    /// space) is 503 `disk_full`, not a server failure.
+    #[test]
+    fn a_mirror_that_cannot_be_made_on_a_full_disk_is_asked_to_retry() {
+        let text =
+            "failed to create the mirror \"/c/x.git\": No space left on device (os error 28)";
+        assert!(matches!(
+            FetchError::local(text.to_string()),
+            FetchError::DiskFull
+        ));
+        let status = |error: OriginError| {
+            axum::response::IntoResponse::into_response(error)
+                .status()
+                .as_u16()
+        };
+        assert_eq!(
+            status(FetchError::Local(text.to_string()).into_origin()),
+            503
+        );
+        assert_eq!(
+            status(FetchError::Local("permission denied".to_string()).into_origin()),
+            500
+        );
     }
 
     #[test]

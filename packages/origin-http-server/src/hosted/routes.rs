@@ -29,8 +29,8 @@ use uuid::Uuid;
 
 use super::answers::recovery_ref_moved;
 use super::cache::{
-    canonical_unreachable, fetch_failure, FetchFailure, Freshness, MirrorCache, MirrorLease,
-    RETRY_AFTER_SECONDS,
+    canonical_unreachable, disk_full, fetch_failure, FetchFailure, Freshness, MirrorCache,
+    MirrorLease, RETRY_AFTER_SECONDS,
 };
 use super::read::{self, EntriesRead, FileRead};
 use super::{recovery, write};
@@ -335,8 +335,7 @@ pub(super) async fn on_mirror<T: Send + 'static>(
     let token = token.map(str::to_string);
     blocking(move || {
         let resets = mirror.resets();
-        let dir = cache.ensure_mirror(&mirror)?;
-        let result = work(&dir);
+        let result = cache.ensure_mirror(&mirror).and_then(|dir| work(&dir));
         cache.checked(&mirror, resets, token.as_deref(), result)
     })
     .await
@@ -398,8 +397,10 @@ pub(super) fn ref_error(error: ViewError) -> OriginError {
     match error {
         ViewError::Git(error) => {
             let text = format!("{error:#}");
-            if fetch_failure(&text) == Some(FetchFailure::Damaged) {
-                return OriginError::internal(text);
+            match fetch_failure(&text) {
+                Some(FetchFailure::Damaged) => return OriginError::internal(text),
+                Some(FetchFailure::DiskFull) => return disk_full(),
+                None => {}
             }
             warn!(error = %text, "fetching a recovery ref failed");
             canonical_unreachable()

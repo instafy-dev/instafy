@@ -895,6 +895,10 @@ impl Quarantine {
         WorkspaceDir::open(parent)
             .with_context(|| format!("failed to open quarantine parent {parent:?}"))?;
         let dir = parent.join(uuid::Uuid::new_v4().as_hyphenated().to_string());
+        #[cfg(test)]
+        if let Some(error) = crate::test_support::quarantine_failure(parent) {
+            return Err(error).with_context(|| format!("failed to create quarantine {dir:?}"));
+        }
         create_private_dir(&dir).with_context(|| format!("failed to create quarantine {dir:?}"))?;
         let quarantine = Self {
             objects: dir.join("objects"),

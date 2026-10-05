@@ -362,11 +362,16 @@ async fn commit(
     let runtime = tokio::runtime::Handle::current();
     let deadline = Instant::now() + budget;
     let paused = admission.clone();
-    let committed = blocking(move || {
+    blocking(move || {
         let resets = mirror.resets();
-        let dir = cache.ensure_mirror(&mirror)?;
         let checker = cache.clone();
         let token = read_token.clone();
+        let dir = checker.checked(
+            &mirror,
+            resets,
+            token.as_deref(),
+            cache.ensure_mirror(&mirror),
+        )?;
         let mut canonical = CachedCanonical::new(cache, lease, read_token, runtime)
             .caller_expires(caller_expires)
             .wait_until(deadline)
@@ -388,12 +393,12 @@ async fn commit(
             &mut canonical,
         );
         drop(staging);
-        // A mirror found damaged while building is made again.
+        // A mirror found damaged while building is made again; a full disk
+        // starts a sweep.
         let outcome = checker.checked(&mirror, resets, token.as_deref(), outcome);
         Ok((outcome?, change))
     })
-    .await;
-    noting_disk_full(state, committed)
+    .await
 }
 
 #[derive(Debug, Deserialize)]
