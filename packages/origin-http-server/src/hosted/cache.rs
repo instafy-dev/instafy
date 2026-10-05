@@ -79,6 +79,11 @@ pub(crate) const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 pub(crate) const EVICT_IDLE_AFTER: Duration = Duration::from_secs(3600);
 /// Scratch older than this belongs to a request that is gone.
 const SCRATCH_STALE_AFTER: Duration = Duration::from_secs(3600);
+/// About this many loose objects in a mirror, or more packs than
+/// [`PACK_LIMIT`], and the sweeper packs it (git's own `gc --auto` limits;
+/// git never packs a mirror by itself).
+const LOOSE_OBJECT_LIMIT: u64 = 6_700;
+const PACK_LIMIT: u64 = 50;
 
 /// How fresh a request needs `main` to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,10 +172,12 @@ pub(crate) struct MirrorEntry {
 }
 
 /// A request's hold on one space's mirror. While any exists the mirror is
-/// never removed; letting go records the use.
+/// never removed; letting go records the use (except the sweeper's own
+/// hold, which is not a use).
 pub(crate) struct MirrorLease {
     entry: Arc<MirrorEntry>,
     dir: PathBuf,
+    record_use: bool,
 }
 
 impl MirrorLease {
@@ -204,7 +211,9 @@ impl Drop for MirrorLease {
     fn drop(&mut self) {
         // Record the use before the lease count drops, so the sweeper never
         // sees an unused mirror with an old last use.
-        touch(&self.dir.join(LAST_USE_FILE));
+        if self.record_use {
+            touch(&self.dir.join(LAST_USE_FILE));
+        }
         self.entry.leases.fetch_sub(1, Ordering::SeqCst);
     }
 }
@@ -239,6 +248,8 @@ pub(crate) struct MirrorCache {
     fetches_started: AtomicU64,
     fetch_wait: Duration,
     first_clone_wait: Duration,
+    /// When the sweeper packs a mirror: (loose objects, packs).
+    pack_limits: (u64, u64),
     #[cfg(test)]
     pub(crate) test_fetch_delay: Option<Duration>,
 }
@@ -285,9 +296,17 @@ impl MirrorCache {
             fetches_started: AtomicU64::new(0),
             fetch_wait: FETCH_WAIT,
             first_clone_wait: FIRST_CLONE_WAIT,
+            pack_limits: (LOOSE_OBJECT_LIMIT, PACK_LIMIT),
             #[cfg(test)]
             test_fetch_delay: None,
         })
+    }
+
+    /// Lower packing limits, for tests.
+    #[cfg(test)]
+    pub(crate) fn with_pack_limits(mut self, loose_objects: u64, packs: u64) -> Self {
+        self.pack_limits = (loose_objects, packs);
+        self
     }
 
     /// Shorter waits, for tests.
@@ -349,6 +368,11 @@ impl MirrorCache {
 
     /// Hold `project`'s mirror for the length of a request.
     pub(crate) fn lease(&self, project: Uuid) -> MirrorLease {
+        self.hold(project, true)
+    }
+
+    /// Hold `project`'s mirror; letting go records a use when `record_use`.
+    fn hold(&self, project: Uuid, record_use: bool) -> MirrorLease {
         let mut mirrors = locked(&self.mirrors);
         let entry = mirrors
             .entry(project)
@@ -366,6 +390,7 @@ impl MirrorCache {
         MirrorLease {
             dir: self.mirror_dir(project),
             entry,
+            record_use,
         }
     }
 
@@ -472,6 +497,7 @@ impl MirrorCache {
         let guard = MirrorLease {
             entry: entry.clone(),
             dir: self.mirror_dir(entry.project),
+            record_use: true,
         };
         let queued = before.is_some();
         let cache = self.clone();
@@ -756,12 +782,18 @@ impl MirrorCache {
                 ticker.tick().await;
                 let cache = cache.clone();
                 match tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now())).await {
-                    Ok(report) if !report.evicted.is_empty() => info!(
-                        evicted = report.evicted.len(),
-                        bytes = report.total_bytes,
-                        "removed unused mirrors to stay under the cache cap"
-                    ),
-                    Ok(_) => {}
+                    Ok(report) => {
+                        if !report.evicted.is_empty() {
+                            info!(
+                                evicted = report.evicted.len(),
+                                bytes = report.total_bytes,
+                                "removed unused mirrors to stay under the cache cap"
+                            );
+                        }
+                        if !report.packed.is_empty() {
+                            info!(packed = report.packed.len(), "packed mirrors");
+                        }
+                    }
                     Err(error) => warn!(%error, "the cache sweep failed"),
                 }
             }
@@ -801,10 +833,62 @@ impl MirrorCache {
                 evicted.push(project);
             }
         }
+        // One mirror at a time, the ones that crossed git's own limits.
+        let mut packed = Vec::new();
+        for stat in &stats {
+            if !evicted.contains(&stat.project) && self.pack_mirror(stat.project) {
+                packed.push(stat.project);
+            }
+        }
         SweepReport {
             evicted,
+            packed,
             total_bytes,
         }
+    }
+
+    /// Pack `project`'s mirror when it holds about [`LOOSE_OBJECT_LIMIT`]
+    /// loose objects or more than [`PACK_LIMIT`] packs, as `git gc --auto`
+    /// would, but here: in the foreground, held against eviction, and one
+    /// mirror at a time. Refs are left as they are (fetches move them
+    /// meanwhile), and no commit-graph is written. Blocking; whether it ran.
+    fn pack_mirror(&self, project: Uuid) -> bool {
+        let (loose_limit, pack_limit) = self.pack_limits;
+        let held = self.hold(project, false);
+        let dir = held.dir().to_path_buf();
+        if !needs_packing(&dir, loose_limit, pack_limit) {
+            return false;
+        }
+        // git reads both as an `int`; 0 would turn `gc --auto` off.
+        let auto = format!("gc.auto={}", loose_limit.clamp(1, i32::MAX as u64));
+        let packs = format!("gc.autoPackLimit={}", pack_limit.clamp(1, i32::MAX as u64));
+        let args = [
+            "-c",
+            auto.as_str(),
+            "-c",
+            packs.as_str(),
+            "-c",
+            "gc.autoDetach=false",
+            "-c",
+            "gc.packRefs=false",
+            "-c",
+            "gc.writeCommitGraph=false",
+            "gc",
+            "--auto",
+            "--quiet",
+        ];
+        match WorkspaceGit::bare(&dir, None).run(&args) {
+            Ok(output) if output.status.success() => {
+                info!(%project, "packed a mirror");
+            }
+            Ok(output) => {
+                warn!(%project, error = %failure(&args, &output), "packing a mirror failed");
+            }
+            Err(error) => {
+                warn!(%project, error = %format!("{error:#}"), "packing a mirror failed");
+            }
+        }
+        true
     }
 
     /// Size, last use and holders of every mirror on disk.
@@ -934,6 +1018,28 @@ fn fetch_main_into(
     Err(FetchError::Unreachable)
 }
 
+/// Whether the mirror at `dir` holds about `loose_limit` loose objects or
+/// more than `pack_limit` packs. Loose objects are estimated as `git gc
+/// --auto` does: from one of the 256 fan-out folders.
+fn needs_packing(dir: &Path, loose_limit: u64, pack_limit: u64) -> bool {
+    let count = |folder: &Path, keep: &dyn Fn(&str) -> bool| -> u64 {
+        std::fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| keep(&entry.file_name().to_string_lossy()))
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    };
+    let objects = dir.join("objects");
+    let sampled = count(&objects.join("17"), &|name| {
+        name.len() >= 38 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+    });
+    let packs = count(&objects.join("pack"), &|name| name.ends_with(".pack"));
+    sampled.saturating_mul(256) > loose_limit || packs > pack_limit
+}
+
 /// The space a cache entry named `<space id>.git` belongs to.
 fn mirror_project(name: &str) -> Option<Uuid> {
     let id = name.strip_suffix(".git")?;
@@ -975,6 +1081,8 @@ pub(crate) struct MirrorStat {
 #[derive(Debug, Default)]
 pub(crate) struct SweepReport {
     pub evicted: Vec<Uuid>,
+    /// Mirrors that crossed git's packing limits and were packed.
+    pub packed: Vec<Uuid>,
     /// The mirrors' total size before any was removed.
     pub total_bytes: u64,
 }

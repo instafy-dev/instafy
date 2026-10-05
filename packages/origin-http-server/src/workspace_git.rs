@@ -318,6 +318,17 @@ impl<'a> WorkspaceGit<'a> {
                     .arg("core.excludesFile=/dev/null")
                     .arg("-c")
                     .arg("core.attributesFile=/dev/null");
+                // No automatic maintenance: after a fetch git would start a
+                // detached `maintenance run` that repacks the repository
+                // once the request is answered, outside any bound the
+                // server keeps (and, under a PID 1 that does not reap, as a
+                // zombie). The owner packs on purpose instead; a caller's
+                // own `-c` comes later and wins.
+                command
+                    .arg("-c")
+                    .arg("maintenance.auto=false")
+                    .arg("-c")
+                    .arg("gc.auto=0");
                 for key in SCRUBBED_ENV {
                     command.env_remove(key);
                 }
