@@ -32,8 +32,9 @@ each entry is classified and reported as one JSON line on stdout.
 Environment: ORIGIN_GIT_REMOTE_BASE_URL (required), ORIGIN_CONTROLLER_URL,
 ORIGIN_INTERNAL_TOKEN, ORIGIN_GIT_AUTHOR_NAME, ORIGIN_GIT_AUTHOR_EMAIL.
 
-Exit status: 0 when every entry was handled, 1 when an entry failed or was not
-removed, 2 for a usage or configuration error.";
+Exit status: 0 when every entry was handled, 1 when an entry failed, was not
+removed, or has a chat image a rerun may still export, 2 for a usage or
+configuration error.";
 
 /// The flags as given.
 #[derive(Debug, Default, PartialEq, Eq)]

@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use super::options::Settings;
-use super::services::{ExportOutcome, ExportedTo, Services};
+use super::services::{interpret_export, ExportOutcome, ExportedTo, Services};
 use super::{entry_project, run, Summary};
 use crate::test_support::{git_in, git_output, ig, init_workspace_repo, install_shard_hook};
 use crate::workspace_git::GitIdentity;
@@ -24,7 +24,9 @@ struct Stub {
     read_tokens: Cell<usize>,
     salvage_tokens: Cell<usize>,
     exports: RefCell<Vec<(String, Vec<u8>)>>,
-    keep_exports: Cell<bool>,
+    /// The controller's answer to each export (status and body), read the
+    /// way the salvage reads it; `None` exports to one conversation.
+    export_answer: RefCell<Option<(u16, JsonValue)>>,
     /// Runs before each `git.read` mint.
     on_read_token: RefCell<Option<Box<dyn FnMut()>>>,
 }
@@ -45,10 +47,8 @@ impl Services for Stub {
 
     fn export_attachment(&self, project: &Uuid, path: &str, bytes: Vec<u8>) -> ExportOutcome {
         self.exports.borrow_mut().push((path.to_string(), bytes));
-        if self.keep_exports.get() {
-            return ExportOutcome::Kept(
-                "the controller answered 409 (attachments_unavailable)".into(),
-            );
+        if let Some((status, body)) = self.export_answer.borrow().as_ref() {
+            return interpret_export(*status, body);
         }
         let conversation = Uuid::new_v4();
         ExportOutcome::Exported(vec![ExportedTo {
@@ -1316,7 +1316,10 @@ fn unexported_images_are_archived_and_bootstrap_work_is_marked() {
     write(&entry.join("chat-upload-1-b.png"), PNG);
     gateway.salvage_mode_hook(&[]);
     let stub = Stub::default();
-    stub.keep_exports.set(true);
+    *stub.export_answer.borrow_mut() = Some((
+        200,
+        serde_json::json!({ "exported": [], "unreferenced": true }),
+    ));
 
     let (_, lines) = salvage(&gateway.settings(true, false, &[]), &stub);
     let report = &lines[0];
@@ -1334,6 +1337,65 @@ fn unexported_images_are_archived_and_bootstrap_work_is_marked() {
         .as_str()
         .unwrap()
         .contains("chat-upload-1-b.png was not exported"));
+    // The controller's final answer: nothing to retry.
+    assert_eq!(report["exportFailed"], serde_json::json!([]));
+}
+
+/// An export that may succeed later (Storage off, the route not deployed
+/// yet, a timeout or a server error) keeps the image privately, fails the
+/// run, and holds up `--remove` until a rerun exports it or the entry is
+/// acknowledged: once the entry is gone nothing can export it.
+#[test]
+fn an_export_that_may_succeed_later_holds_up_removal() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("chat-upload-1-b.png"), PNG);
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+    for (status, body) in [
+        (
+            409,
+            serde_json::json!({ "code": "attachments_unavailable" }),
+        ),
+        (404, JsonValue::Null),
+        (502, serde_json::json!({ "code": "storage_upload_failed" })),
+    ] {
+        *stub.export_answer.borrow_mut() = Some((status, body));
+        let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+        let report = &lines[0];
+        assert!(report["error"].is_null(), "{report:#}");
+        assert_eq!(report["clean"], true, "{report:#}");
+        assert_eq!(report["removed"], false, "{status} {report:#}");
+        assert!(entry.join("chat-upload-1-b.png").is_file());
+        assert_eq!(summary.exit_code(), 1, "{status}");
+        assert!(
+            report["removeRefused"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not exported"),
+            "{status} {report:#}"
+        );
+        assert_eq!(
+            report["exportFailed"],
+            serde_json::json!(["chat-upload-1-b.png"]),
+            "{status} {report:#}"
+        );
+        let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+        assert_eq!(
+            tar_listing(&archive),
+            vec!["worktree/chat-upload-1-b.png".to_string()]
+        );
+    }
+
+    // The rerun exports it, and the entry goes.
+    *stub.export_answer.borrow_mut() = None;
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert_eq!(report["exportFailed"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+    assert!(!entry.exists());
 }
 
 /// A credential file `main` itself holds and changed after the shared

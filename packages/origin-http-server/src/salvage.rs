@@ -24,7 +24,8 @@
 //!    copies of versions `main` already has are left out (`stalePaths`);
 //!    ignored files, credentials and merge snapshots go to the owner-only
 //!    archive; root `chat-upload-*` images are exported to the conversations
-//!    that name them (and archived when they cannot be); build output, deny
+//!    that name them (and archived when they cannot be; when a rerun may
+//!    still export one, `exportFailed`); build output, deny
 //!    listed paths, files over 20 MiB and anything git cannot store are
 //!    `skippedPaths`; the rest goes into W.
 //! 4. W is HEAD plus those paths, committed under the gateway's identity at
@@ -51,8 +52,9 @@
 //! each entry is still fetched into its own repository and W's objects are
 //! written there, so the report can name W. `--remove` (with `--apply`)
 //! deletes an entry only when it was clean, or canonical now holds its
-//! salvage ref at W and nothing was skipped outside build output, or the
-//! entry is named with `--ack`. Salvage refs and private archives are never
+//! salvage ref at W, nothing was skipped outside build output and every
+//! chat image was exported or given a final answer, or the entry is named
+//! with `--ack`. Salvage refs and private archives are never
 //! removed; a bundle only once its ref is verified on canonical.
 
 mod archive;
@@ -81,8 +83,9 @@ use crate::hosted::{ensure_private_dir, remove_entry, rename_no_replace};
 pub(crate) use self::work::PRIVATE_PATH_TRAILER;
 
 /// Run the subcommand with the arguments after `salvage`; returns the exit
-/// status: 0 when every entry was handled, 1 when an entry failed or was not
-/// removed, 2 for a usage or configuration error.
+/// status: 0 when every entry was handled, 1 when an entry failed, was not
+/// removed, or has a chat image a rerun may still export, 2 for a usage or
+/// configuration error.
 pub async fn cli(args: Vec<String>) -> i32 {
     let flags = match options::parse_flags(&args) {
         Ok(flags) => flags,
@@ -171,6 +174,9 @@ pub(crate) struct EntryReport {
     pub exported_attachments: Vec<ExportedAttachment>,
     /// Chat images a run with `--apply` would export.
     pub attachments_to_export: Vec<String>,
+    /// Chat images whose export a rerun may still make (they are in the
+    /// private archive meanwhile); they hold up `--remove`.
+    pub export_failed: Vec<String>,
     pub skipped_paths: Vec<Skipped>,
     pub history_filtered: bool,
     pub bootstrap_only: bool,
@@ -201,6 +207,8 @@ pub(crate) struct Summary {
     pub removed: usize,
     pub refused: usize,
     pub errors: usize,
+    /// Entries with a chat image a rerun may still export.
+    pub export_failed: usize,
 }
 
 impl Summary {
@@ -221,16 +229,19 @@ impl Summary {
         if report.remove_refused.is_some() {
             self.refused += 1;
         }
+        if !report.export_failed.is_empty() {
+            self.export_failed += 1;
+        }
     }
 
     pub(crate) fn exit_code(&self) -> i32 {
-        i32::from(self.errors > 0 || self.refused > 0)
+        i32::from(self.errors > 0 || self.refused > 0 || self.export_failed > 0)
     }
 
     fn describe(&self) -> String {
         format!(
             "salvage{}: {} entries, {} clean, {} on canonical, {} need review, {} removed, \
-             {} not removed, {} failed",
+             {} not removed, {} failed, {} with chat images not exported",
             if self.dry_run { " (dry run)" } else { "" },
             self.entries,
             self.clean,
@@ -238,7 +249,8 @@ impl Summary {
             self.open,
             self.removed,
             self.refused,
-            self.errors
+            self.errors,
+            self.export_failed
         )
     }
 }
@@ -445,6 +457,9 @@ fn removal_blocker(settings: &Settings, report: &EntryReport) -> Option<String> 
         .any(|skipped| !skipped.rebuildable())
     {
         "paths outside build output were left out"
+    } else if !report.export_failed.is_empty() {
+        "chat images were not exported (they are in the private archive; a rerun may export \
+         them)"
     } else if report.clean || report.canonical_verified {
         return None;
     } else if report.canonical_missing {
