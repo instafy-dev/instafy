@@ -6,6 +6,10 @@ import {
   type WorkspaceSaveResult,
 } from "../../../sdk/instafy";
 import type { UpdateWorkspaceOptions } from "../../../code/useCode";
+import {
+  originAutoRetryDelayMs,
+  type OriginAutoRetryBudget,
+} from "../../../services/runtimeController/originErrors";
 import { useWorkspaceStore } from "../../../store";
 import type { CodeFile, CodeWorkspace } from "../../../types";
 import { gitBlobOid } from "../../../utils/gitBlobOid";
@@ -28,9 +32,15 @@ import {
   type SaveCopy,
 } from "./versioningCopy";
 
-/** The longest wait for a `503 fetch_pending` before the one retry. */
-export const SAVE_FETCH_PENDING_RETRY_CAP_MS = 5_000;
-const SAVE_FETCH_PENDING_DEFAULT_MS = 1_000;
+/**
+ * The longest wait before the one retry a save makes on its own, after a
+ * `503 fetch_pending`, `writes_busy` or `mirror_reset`.
+ */
+export const SAVE_RETRY_LATER_CAP_MS = 5_000;
+const SAVE_AUTO_RETRY_BUDGET: OriginAutoRetryBudget = {
+  defaultDelayMs: 1_000,
+  maxDelayMs: SAVE_RETRY_LATER_CAP_MS,
+};
 
 export interface UseFilesPanelSaveOptions {
   /** Only the stateless and desktop modes save through this hook. */
@@ -59,7 +69,7 @@ export interface UseFilesPanelSaveOptions {
   ownRevisions: OwnRevisions;
   /** Show a failure (or a partial save) with its copy; `retry` saves again. */
   presentFailure: (copy: SaveCopy, retry: () => void) => void;
-  /** Test seam for the fetch_pending wait. */
+  /** Test seam for the wait before the save's own retry. */
   wait?: (ms: number) => Promise<void>;
 }
 
@@ -284,12 +294,16 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     const releaseWrite = current.ownRevisions.addWrite(path, savedOid);
     try {
       let result: WorkspaceSaveResult = await controllerClient.workspace.save.changes(request);
-      if (!result.ok && result.error.code === "fetch_pending") {
-        const delay = Math.min(
-          result.error.retryAfterMs ?? SAVE_FETCH_PENDING_DEFAULT_MS,
-          SAVE_FETCH_PENDING_RETRY_CAP_MS,
-        );
-        await (current.wait ?? defaultWait)(Math.max(0, delay));
+      // The gateway could not take the save yet and wrote nothing: it was
+      // still fetching the space (fetch_pending), every write slot stayed
+      // taken (writes_busy) or its copy of the space is being made again
+      // (mirror_reset). The save asks once more after Retry-After (at most
+      // 5 s). A full disk (disk_full) is left to the person, and an apply
+      // that already landed (a Desktop folder) is never sent twice.
+      const retryDelay =
+        !result.ok && !result.applied ? originAutoRetryDelayMs(result.error, SAVE_AUTO_RETRY_BUDGET) : null;
+      if (retryDelay !== null) {
+        await (current.wait ?? defaultWait)(retryDelay);
         result = await controllerClient.workspace.save.changes(request);
       }
       const saved = result.ok

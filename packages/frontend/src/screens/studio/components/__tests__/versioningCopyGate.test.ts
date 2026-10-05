@@ -81,6 +81,8 @@ const GATED_FILES = [
   resolve(components, "__tests__/versioningCopy.save.test.ts"),
   resolve(components, "__tests__/versioningCopy.shared.test.ts"),
   resolve(components, "__tests__/filesViewerFooter.test.ts"),
+  resolve(components, "__tests__/useFilesPanelSave.test.tsx"),
+  resolve(components, "__tests__/FilesPanel.save.test.tsx"),
   // Docs.
   // Settings categories and the chat runtime-switch notes this work touched.
   resolve(components, "SettingsPanel.tsx"),
