@@ -863,6 +863,10 @@ async fn a_save_without_a_base_changes_exact_paths_only_and_is_logged() {
         .with_ansi(false)
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
+    // Another test's thread may have registered the log line's callsite
+    // while this subscriber was being set up, caching "no subscriber is
+    // interested"; ask every callsite again now that it exists.
+    tracing::callsite::rebuild_interest_cache();
 
     let sc = HostedScenario::new();
     sc.push(
