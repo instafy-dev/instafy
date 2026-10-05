@@ -273,6 +273,188 @@ impl HostedScenario {
     }
 }
 
+/// Canonical reached over smart HTTP, as the gateway reaches it in
+/// production: `git http-backend` behind a small server over the folder of
+/// canonical repositories. With [`Self::cut_after`] set, the answer to a
+/// fetch's `git-upload-pack` request that is longer than that stops after
+/// that many bytes, as a connection dropped part way through a pack does.
+pub(super) struct SmartHttpCanonical {
+    /// The base URL to put in `git_remote_base_url`.
+    pub base_url: String,
+    shared: Arc<SmartHttpShared>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+struct SmartHttpShared {
+    root: PathBuf,
+    cut_after: std::sync::atomic::AtomicUsize,
+    cuts: std::sync::atomic::AtomicUsize,
+}
+
+impl Drop for SmartHttpCanonical {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl SmartHttpCanonical {
+    pub(super) async fn start(root: &Path) -> Self {
+        use std::sync::atomic::AtomicUsize;
+        let shared = Arc::new(SmartHttpShared {
+            root: root.to_path_buf(),
+            cut_after: AtomicUsize::new(0),
+            cuts: AtomicUsize::new(0),
+        });
+        let app = axum::Router::new()
+            .fallback(smart_http_backend)
+            .with_state(shared.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            shared,
+            server,
+        }
+    }
+
+    /// Cut every later pack answer after `bytes` (0: never).
+    pub(super) fn cut_after(&self, bytes: usize) {
+        self.shared
+            .cut_after
+            .store(bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many answers were cut so far.
+    pub(super) fn cuts(&self) -> usize {
+        self.shared.cuts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// One request to [`SmartHttpCanonical`]: run `git http-backend` as a CGI
+/// program and answer what it printed.
+async fn smart_http_backend(
+    axum::extract::State(shared): axum::extract::State<Arc<SmartHttpShared>>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use std::io::Write as _;
+    use std::sync::atomic::Ordering;
+
+    let (parts, body) = request.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let header = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    let path = parts.uri.path().to_string();
+    let pack_answer =
+        parts.method == axum::http::Method::POST && path.ends_with("/git-upload-pack");
+    let mut command = std::process::Command::new("git");
+    command
+        .arg("http-backend")
+        .env("GIT_PROJECT_ROOT", &shared.root)
+        .env("GIT_HTTP_EXPORT_ALL", "1")
+        .env("PATH_INFO", &path)
+        .env("REQUEST_METHOD", parts.method.as_str())
+        .env("QUERY_STRING", parts.uri.query().unwrap_or(""))
+        .env("CONTENT_TYPE", header("content-type").unwrap_or_default())
+        .env("CONTENT_LENGTH", body.len().to_string())
+        .env("REMOTE_ADDR", "127.0.0.1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    if let Some(encoding) = header("content-encoding") {
+        command.env("HTTP_CONTENT_ENCODING", encoding);
+    }
+    if let Some(protocol) = header("git-protocol") {
+        command.env("GIT_PROTOCOL", protocol);
+    }
+    let output = tokio::task::spawn_blocking(move || {
+        let mut child = command.spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&body);
+        });
+        let output = child.wait_with_output().unwrap();
+        writer.join().unwrap();
+        output.stdout
+    })
+    .await
+    .unwrap();
+
+    // A CGI answer: header lines, an empty line, the body.
+    let split = output
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| (at, at + 4))
+        .or_else(|| {
+            output
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|at| (at, at + 2))
+        })
+        .unwrap_or((output.len(), output.len()));
+    let head = String::from_utf8_lossy(&output[..split.0]).to_string();
+    let data = output[split.1..].to_vec();
+    let mut builder = axum::http::Response::builder();
+    for line in head.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("status") {
+            let code = value.split_whitespace().next().unwrap_or("200");
+            builder = builder.status(code.parse::<u16>().unwrap_or(200));
+        } else {
+            builder = builder.header(name.trim(), value);
+        }
+    }
+    let cut_after = shared.cut_after.load(Ordering::SeqCst);
+    if pack_answer && cut_after > 0 && data.len() > cut_after {
+        shared.cuts.fetch_add(1, Ordering::SeqCst);
+        // The whole length is promised and only part of it sent (and
+        // flushed) before the connection is dropped: the client sees it
+        // close mid-transfer.
+        let sent = axum::body::Bytes::copy_from_slice(&data[..cut_after]);
+        let chunks = futures_util::stream::unfold(Some(sent), |sent| async move {
+            match sent {
+                Some(sent) => Some((Ok(sent), None)),
+                None => {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let cut = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "cut off");
+                    Some((Err::<axum::body::Bytes, _>(cut), None))
+                }
+            }
+        });
+        return builder
+            .header("content-length", data.len().to_string())
+            .body(axum::body::Body::from_stream(chunks))
+            .unwrap();
+    }
+    builder.body(axum::body::Body::from(data)).unwrap()
+}
+
+/// `count` bytes git cannot compress much (a fixed pseudo-random sequence
+/// from `seed`).
+pub(super) fn noise(seed: u64, count: usize) -> Vec<u8> {
+    let mut state = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    (0..count)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as u8
+        })
+        .collect()
+}
+
 fn set_last_use(mirror: &Path, at: SystemTime) {
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -694,6 +876,68 @@ async fn a_fetch_that_fails_against_a_damaged_base_is_made_again_from_scratch() 
         );
         assert!(decoded(&answer).ends_with(b"one more\n"));
     }
+}
+
+/// A transfer from canonical that is cut off part way (curl 18 over smart
+/// HTTP: "early EOF", "invalid index-pack output") is the network's
+/// failure, never the mirror's: the mirror and its `main` stay as they were
+/// and the fetch is answered 502 `canonical_unreachable`. Throwing the
+/// mirror away for it would only make the next fetch, on the same link, a
+/// full clone that is cut off too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_cut_off_part_way_keeps_a_healthy_mirror() {
+    let mut sc = HostedScenario::new();
+    let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+    let canonical = SmartHttpCanonical::start(&sc.canonical).await;
+    sc.config.git_remote_base_url = Some(canonical.base_url.clone());
+    let cache = Arc::new(sc.open_cache());
+    let lease = cache.lease(sc.project);
+    let main = cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap();
+    assert_eq!(main.as_deref(), Some(first.as_str()));
+    let mirror = lease.mirror();
+    let resets = mirror.resets();
+
+    let files: Vec<(String, Vec<u8>)> = (0..200)
+        .map(|n| (format!("big/{n}.bin"), noise(n, 20_000)))
+        .collect();
+    let files: Vec<(&str, Option<&[u8]>)> = files
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), Some(bytes.as_slice())))
+        .collect();
+    sc.push(&files, "many");
+    canonical.cut_after(150_000);
+    let error = cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap_err();
+    assert!(canonical.cuts() >= 1);
+    match &error {
+        crate::error::OriginError::WithReport { status, code, .. } => {
+            assert_eq!(
+                (status.as_u16(), *code),
+                (502, "canonical_unreachable"),
+                "{error:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(mirror.resets(), resets, "the mirror was thrown away");
+    assert_eq!(
+        git_in(&sc.mirror(), &["rev-parse", "refs/heads/main"]),
+        first,
+        "the mirror lost its main"
+    );
+
+    // Once the link holds again, the same mirror catches up.
+    canonical.cut_after(0);
+    let main = cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap();
+    assert_ne!(main.as_deref(), Some(first.as_str()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
