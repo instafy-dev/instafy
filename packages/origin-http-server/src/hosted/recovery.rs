@@ -117,7 +117,15 @@ pub(super) async fn handle_restore(
 
     // Held for the whole restore, so the ref's objects stay in the mirror.
     let lease = state.cache.lease(project);
-    let fetched = fetch_ref(&state, &lease, caller_token(&token), reference.clone()).await?;
+    // Fetching the ref waits on canonical: not work that needs the slot.
+    let fetched = admission
+        .paused(fetch_ref(
+            &state,
+            &lease,
+            caller_token(&token),
+            reference.clone(),
+        ))
+        .await?;
     let fetched = match (fetched, rev) {
         (None, Some(_)) => return Err(recovery_ref_moved(None)),
         (None, None) => return Err(ViewError::RefNotFound.into()),

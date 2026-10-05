@@ -52,14 +52,18 @@ use crate::workspace_git::WorkspaceGit;
 pub(crate) const INSTAFY_REV_HEADER: &str = "x-instafy-rev";
 
 /// How many writes (uploads, reverts, restores) are read, staged and built
-/// at once, across all spaces. A slot is let go before the push to
-/// canonical, which may wait on a slow shard for minutes.
+/// at once, across all spaces. A slot is let go while the write waits on
+/// canonical (a fetch) and for good before the push, which may wait on a
+/// slow shard for minutes.
 const APPLY_SLOTS: usize = 4;
 /// Imports have slots of their own, so a person's save never waits behind
 /// one (an import stages and hashes up to thousands of files).
 const IMPORT_SLOTS: usize = 2;
 /// How long a write waits for a slot before it is told to try again.
 const ADMISSION_WAIT: Duration = Duration::from_secs(10);
+/// How long an import waits for one: imports are background work, whose
+/// controller retries a busy answer, so they wait longer than a person.
+const IMPORT_ADMISSION_WAIT: Duration = Duration::from_secs(60);
 
 /// How long a `?ref=` read may spend listing and fetching the ref.
 pub(super) const REF_FETCH_DEADLINE: Duration = Duration::from_secs(60);
@@ -75,6 +79,8 @@ pub(crate) struct HostedState {
     pub(crate) import_slots: Arc<Semaphore>,
     /// How long a write waits for a slot.
     pub(crate) admission_wait: Duration,
+    /// How long an import waits for one.
+    pub(crate) import_admission_wait: Duration,
 }
 
 impl HostedState {
@@ -85,13 +91,15 @@ impl HostedState {
             apply_slots: Arc::new(Semaphore::new(APPLY_SLOTS)),
             import_slots: Arc::new(Semaphore::new(IMPORT_SLOTS)),
             admission_wait: ADMISSION_WAIT,
+            import_admission_wait: IMPORT_ADMISSION_WAIT,
         }
     }
 
-    /// A shorter wait for a slot, for tests.
+    /// A shorter wait for a slot (saves and imports alike), for tests.
     #[cfg(test)]
     pub(crate) fn with_admission_wait(mut self, wait: Duration) -> Self {
         self.admission_wait = wait;
+        self.import_admission_wait = wait;
         self
     }
 
@@ -176,24 +184,95 @@ async fn require_write(
 }
 
 /// A write's admission slot. It covers reading and staging the upload and
-/// building the change (the CPU and disk work), and is let go before the
-/// push to canonical ([`Admission::release`]) or when the request ends,
-/// whichever comes first. Work the request started keeps it until then,
-/// also when the client is gone.
+/// building the change (the CPU and disk work on this server). It is let
+/// go while the write waits on canonical (a fetch of `main` or of a ref,
+/// [`Admission::pause`]) and taken again after ([`Admission::resume`]), so
+/// a slow fetch, such as a space's first clone, never keeps other writes
+/// out. It is let go for good before the push to canonical
+/// ([`Admission::release`]) or when the request ends, whichever comes
+/// first. Work the request started keeps it until then, also when the
+/// client is gone.
 #[derive(Clone)]
-pub(crate) struct Admission(Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>);
+pub(crate) struct Admission(Arc<std::sync::Mutex<AdmissionSlot>>);
+
+struct AdmissionSlot {
+    permit: Option<OwnedSemaphorePermit>,
+    /// The pool the slot comes from and how long it is waited for.
+    pool: Arc<Semaphore>,
+    wait: Duration,
+    /// Let go for good.
+    ended: bool,
+}
 
 impl Admission {
-    fn new(permit: OwnedSemaphorePermit) -> Self {
-        Self(Arc::new(std::sync::Mutex::new(Some(permit))))
+    fn new(permit: OwnedSemaphorePermit, pool: Arc<Semaphore>, wait: Duration) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(AdmissionSlot {
+            permit: Some(permit),
+            pool,
+            wait,
+            ended: false,
+        })))
     }
 
-    /// Let the slot go (again: nothing).
-    pub(crate) fn release(&self) {
+    fn slot(&self) -> std::sync::MutexGuard<'_, AdmissionSlot> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+    }
+
+    /// Let the slot go for good (again: nothing).
+    pub(crate) fn release(&self) {
+        let mut slot = self.slot();
+        slot.ended = true;
+        slot.permit = None;
+    }
+
+    /// Let the slot go while the write waits on canonical; [`Self::resume`]
+    /// takes one again.
+    pub(crate) fn pause(&self) {
+        self.slot().permit = None;
+    }
+
+    /// Take a slot again after [`Self::pause`], waiting at most as long as
+    /// admission does (then 503 `writes_busy`). Nothing to do once the slot
+    /// was let go for good.
+    pub(crate) async fn resume(&self) -> Result<(), OriginError> {
+        let (pool, wait) = {
+            let slot = self.slot();
+            if slot.ended || slot.permit.is_some() {
+                return Ok(());
+            }
+            (slot.pool.clone(), slot.wait)
+        };
+        let permit = acquire_slot(pool, wait).await?;
+        let mut slot = self.slot();
+        if !slot.ended {
+            slot.permit = Some(permit);
+        }
+        Ok(())
+    }
+
+    /// `work` (waiting on canonical) without the slot, then the slot again.
+    pub(crate) async fn paused<T>(
+        &self,
+        work: impl std::future::Future<Output = Result<T, OriginError>>,
+    ) -> Result<T, OriginError> {
+        self.pause();
+        let value = work.await?;
+        self.resume().await?;
+        Ok(value)
+    }
+}
+
+/// A slot of `pool`, waited for at most `wait` (then 503 `writes_busy`).
+async fn acquire_slot(
+    pool: Arc<Semaphore>,
+    wait: Duration,
+) -> Result<OwnedSemaphorePermit, OriginError> {
+    match tokio::time::timeout(wait, pool.acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(OriginError::unavailable("apply admission is unavailable")),
+        Err(_) => Err(writes_busy()),
     }
 }
 
@@ -206,9 +285,9 @@ pub(super) fn writes_busy() -> OriginError {
     )
 }
 
-/// Admit a write: a slot from the import pool for an import token, from
-/// the save pool otherwise, waited for at most [`ADMISSION_WAIT`] (then
-/// 503 `writes_busy` with `Retry-After`).
+/// Admit a write: a slot from the import pool for an import token (waited
+/// for at most [`IMPORT_ADMISSION_WAIT`]), from the save pool otherwise (at
+/// most [`ADMISSION_WAIT`]); then 503 `writes_busy` with `Retry-After`.
 async fn limit_apply_concurrency(
     State(state): State<HostedState>,
     mut request: Request,
@@ -218,18 +297,13 @@ async fn limit_apply_concurrency(
         .extensions()
         .get::<OriginClaims>()
         .is_some_and(|claims| claims.has_scope(WORKSPACE_IMPORT_SCOPE));
-    let slots = if import {
-        &state.import_slots
+    let (pool, wait) = if import {
+        (state.import_slots.clone(), state.import_admission_wait)
     } else {
-        &state.apply_slots
+        (state.apply_slots.clone(), state.admission_wait)
     };
-    let permit =
-        match tokio::time::timeout(state.admission_wait, slots.clone().acquire_owned()).await {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => return Err(OriginError::unavailable("apply admission is unavailable")),
-            Err(_) => return Err(writes_busy()),
-        };
-    let admission = Admission::new(permit);
+    let permit = acquire_slot(pool.clone(), wait).await?;
+    let admission = Admission::new(permit, pool, wait);
     request.extensions_mut().insert(admission.clone());
     let response = next.run(request).await;
     admission.release();

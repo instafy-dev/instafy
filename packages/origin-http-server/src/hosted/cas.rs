@@ -245,6 +245,8 @@ pub(crate) struct CachedCanonical {
     /// Until then, a fetch that is still running is waited for rather than
     /// answered as `fetch_pending` (the change's own budget).
     patience: Option<Instant>,
+    /// The request's write slot: let go while a fetch runs.
+    admission: Option<Admission>,
 }
 
 impl CachedCanonical {
@@ -263,13 +265,36 @@ impl CachedCanonical {
             held: None,
             exchanged: false,
             patience: None,
+            admission: None,
         }
     }
 
-    /// Wait out a slow fetch (a space's first clone) until `deadline`.
+    /// Wait out a slow fetch (a space's first clone) until `deadline`, or
+    /// until shortly before the caller's bearer expires, whichever comes
+    /// first: past that no credential could be exchanged for the push, so
+    /// the caller is better told `fetch_pending` and asks again.
     pub(crate) fn wait_until(mut self, deadline: Instant) -> Self {
         self.patience = Some(deadline);
         self
+    }
+
+    /// Let `admission` go while each fetch runs, and take it again after.
+    pub(crate) fn admission(mut self, admission: Option<Admission>) -> Self {
+        self.admission = admission;
+        self
+    }
+
+    /// Until when a fetch that is still running is waited for.
+    fn patience_until(&self) -> Option<Instant> {
+        let patience = self.patience?;
+        let Some(expires) = self.caller_expires else {
+            return Some(patience);
+        };
+        let left = expires
+            .duration_since(SystemTime::now())
+            .unwrap_or_default()
+            .saturating_sub(CREDENTIAL_MARGIN);
+        Some(patience.min(Instant::now() + left))
     }
 
     /// The caller's bearer expires at `expires` (its `exp` claim).
@@ -282,7 +307,13 @@ impl CachedCanonical {
 impl Canonical for CachedCanonical {
     fn fetch_main(&mut self) -> Result<Option<String>, OriginError> {
         let arrived = Instant::now();
-        loop {
+        let patience = self.patience_until();
+        // Waiting on canonical is not work on this server: other writes may
+        // take the slot meanwhile.
+        if let Some(admission) = &self.admission {
+            admission.pause();
+        }
+        let main = loop {
             let fetched = self.runtime.block_on(self.cache.resolve_main_since(
                 &self.lease,
                 Freshness::Fresh,
@@ -294,10 +325,14 @@ impl Canonical for CachedCanonical {
                 // while the change has time left.
                 Err(error)
                     if is_fetch_pending(&error)
-                        && self.patience.is_some_and(|until| Instant::now() < until) => {}
-                other => return other,
+                        && patience.is_some_and(|until| Instant::now() < until) => {}
+                other => break other?,
             }
+        };
+        if let Some(admission) = &self.admission {
+            self.runtime.block_on(admission.resume())?;
         }
+        Ok(main)
     }
 
     fn write_token(&mut self) -> Result<Option<String>, OriginError> {
@@ -318,9 +353,21 @@ impl Canonical for CachedCanonical {
             return Err(main_busy());
         }
         let project = self.lease.project();
-        let minted = self
+        let minted = match self
             .runtime
-            .block_on(self.cache.write_token(project, self.token.as_deref()))?;
+            .block_on(self.cache.write_token(project, self.token.as_deref()))
+        {
+            Ok(minted) => minted,
+            // The first attempt outlived the caller's bearer (a slow build):
+            // the controller refuses to exchange it. Nothing was pushed, so
+            // this is the same answer as a later attempt that stops here,
+            // not a server failure.
+            Err(error) if caller_ending => {
+                info!(%error, "the caller's write access ended before the first push");
+                return Err(main_busy());
+            }
+            Err(error) => return Err(error),
+        };
         self.exchanged = true;
         self.held = minted.map(|(token, lifetime)| HeldCredential {
             token,
