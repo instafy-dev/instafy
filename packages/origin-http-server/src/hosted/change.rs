@@ -1,7 +1,8 @@
 //! What a change does to a space's `main`: an upload (files written and
-//! paths deleted, with what the client read) or the revert of a saved
-//! commit. Each builds the new tree from `main` in the change's quarantine
-//! and refuses what cannot be saved as asked:
+//! paths deleted, with what the client read), the revert of a saved
+//! commit, or the restore of unsaved work ([`super::restore`]). Each builds
+//! the new tree from `main` in the change's quarantine and refuses what
+//! cannot be saved as asked (an upload's rules below):
 //!
 //! - a link or submodule written over (400 `unsupported_entry`), a folder
 //!   deleted without the version it was read at (400
@@ -28,6 +29,7 @@ use super::answers::{
     unsupported_entry,
 };
 use super::read::readable;
+use super::restore::Restore;
 use crate::apply::StagedFile;
 use crate::error::OriginError;
 use crate::git::is_full_object_id;
@@ -200,6 +202,8 @@ pub(crate) enum Change {
     Edits(Edits),
     /// The inverse of a commit already on `main`.
     Revert(Revert),
+    /// Unsaved work merged onto `main`.
+    Restore(Restore),
 }
 
 impl Change {
@@ -212,6 +216,7 @@ impl Change {
         match self {
             Self::Edits(edits) => edits.build(git, scratch, main),
             Self::Revert(revert) => revert.build(git, main),
+            Self::Restore(restore) => restore.build(git, scratch, main),
         }
     }
 
@@ -223,11 +228,12 @@ impl Change {
         match self {
             Self::Edits(edits) => edits.check(git, main),
             Self::Revert(_) => Ok(()),
+            Self::Restore(restore) => restore.check(git, main),
         }
     }
 
-    /// The shard refused `path`: an import leaves it out and tries again;
-    /// anything else is answered with the refusal.
+    /// The shard refused `path`: an import or a restore leaves it out and
+    /// tries again; anything else is answered with the refusal.
     pub(super) fn refused(
         &mut self,
         path: String,
@@ -238,6 +244,7 @@ impl Change {
                 edits.skipped.insert(path, reason);
                 Ok(())
             }
+            Self::Restore(restore) => restore.refused(path, reason),
             _ => Err(hook_refusal(path, reason)),
         }
     }

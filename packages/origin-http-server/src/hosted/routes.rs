@@ -27,9 +27,10 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::warn;
 use uuid::Uuid;
 
+use super::answers::recovery_ref_moved;
 use super::cache::{canonical_unreachable, Freshness, MirrorCache, MirrorLease};
 use super::read::{self, EntriesRead, FileRead};
-use super::write;
+use super::{recovery, write};
 use crate::apply::normalize_relative_path;
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
@@ -52,7 +53,7 @@ pub(crate) const INSTAFY_REV_HEADER: &str = "x-instafy-rev";
 const APPLY_SLOTS: usize = 4;
 
 /// How long a `?ref=` read may spend listing and fetching the ref.
-const REF_FETCH_DEADLINE: Duration = Duration::from_secs(60);
+pub(super) const REF_FETCH_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Everything a gateway request needs.
 #[derive(Clone)]
@@ -109,7 +110,7 @@ pub(crate) fn router(state: HostedState) -> Router {
         )
         .route("/apply-json", post(write::handle_apply_json))
         .route("/git/revert-commit", post(write::handle_git_revert_commit))
-        .route("/git/recovery/restore", post(handle_not_available))
+        .route("/git/recovery/restore", post(recovery::handle_restore))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             limit_apply_concurrency,
@@ -120,7 +121,7 @@ pub(crate) fn router(state: HostedState) -> Router {
         .route("/apply/status", post(write::handle_apply_status))
         .route("/git/sync", post(handle_git_sync))
         .route("/git/revert", post(handle_git_revert))
-        .route("/git/recovery/dismiss", post(handle_not_available))
+        .route("/git/recovery/dismiss", post(recovery::handle_dismiss))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_write,
@@ -224,7 +225,7 @@ fn missing(absence: Absence) -> OriginError {
 }
 
 /// A `?ref=` read that could not reach canonical is a 502, like a fetch.
-fn ref_error(error: ViewError) -> OriginError {
+pub(super) fn ref_error(error: ViewError) -> OriginError {
     match error {
         ViewError::Git(error) => {
             warn!(error = %format!("{error:#}"), "fetching a recovery ref failed");
@@ -332,6 +333,19 @@ async fn resolve_ref(
     reference: &str,
 ) -> Result<FetchedRef, OriginError> {
     let reference = RecoveryRef::parse(reference)?;
+    fetch_ref(state, lease, token, reference)
+        .await?
+        .ok_or_else(|| ViewError::RefNotFound.into())
+}
+
+/// [`resolve_ref`] for a ref already parsed; `None` when canonical does
+/// not have it (any more).
+pub(super) async fn fetch_ref(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    reference: RecoveryRef,
+) -> Result<Option<FetchedRef>, OriginError> {
     let project = lease.project();
     let git_token = state.cache.read_token(project, token).await?;
     let url = state.cache.remote_url(project)?;
@@ -343,13 +357,12 @@ async fn resolve_ref(
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
         let reference = RecoveryRef::validate(&git, reference.as_str())?;
         let Some(tip) = remote_tip(&git, &url, &reference).map_err(ref_error)? else {
-            return Err(ViewError::RefNotFound.into());
+            return Ok(None);
         };
-        fetch_refs(&git, &url, &[(reference, tip)])
+        Ok(fetch_refs(&git, &url, &[(reference, tip)])
             .map_err(ref_error)?
             .fetched
-            .pop()
-            .ok_or_else(|| ViewError::RefNotFound.into())
+            .pop())
     })
     .await
 }
@@ -654,12 +667,7 @@ async fn reviewed_commit(
             let fetched = resolve_ref(state, lease, token, reference).await?;
             if let Some(requested) = requested {
                 if requested != fetched.tip && requested != fetched.commit {
-                    return Err(OriginError::with_report(
-                        StatusCode::CONFLICT,
-                        "recovery_ref_moved",
-                        "this unsaved work changed since it was listed; refresh and try again",
-                        serde_json::json!({ "rev": fetched.tip }),
-                    ));
+                    return Err(recovery_ref_moved(Some(&fetched.tip)));
                 }
             }
             Ok(Some(fetched.commit))
@@ -932,14 +940,5 @@ async fn handle_git_revert() -> OriginError {
         StatusCode::BAD_REQUEST,
         "not_supported",
         "discarding changes is not available on a cloud space",
-    )
-}
-
-/// Writes that are not served by this gateway yet.
-async fn handle_not_available() -> OriginError {
-    coded(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "this change is not available on this gateway yet",
     )
 }
