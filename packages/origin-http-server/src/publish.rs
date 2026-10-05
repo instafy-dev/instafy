@@ -2564,11 +2564,13 @@ impl Publisher<'_> {
     ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
     ///   and committed by the origin, then published.
     /// - With nothing left to bring back (the branch already holds the
-    ///   work, or the rest was kept or refused), the same commit is still
-    ///   made, empty, unless one of this ref is on the branch already: the
-    ///   marker records the restore on `main` for good, so the list shows
-    ///   the entry restored whatever `main` holds later (salvage refs are
-    ///   never removed). Such a restore is `marked`, not `committed`.
+    ///   work, or the rest was kept or refused) from a salvage ref, the
+    ///   same commit is still made, empty, unless one of this ref is on the
+    ///   branch already: the marker records the restore on `main` for good,
+    ///   so the list shows the entry restored whatever `main` holds later
+    ///   (salvage refs are never removed). Such a restore is `marked`, not
+    ///   `committed`. A recovery ref gets no marker: it is removed once its
+    ///   work is on `main`, so the marker would only add an empty commit.
     /// - Once the work is on `main`, a recovery ref is deleted under a
     ///   lease on its tip, so the same work is not restored twice, but only
     ///   when every path left out was kept on request: a path refused here
@@ -2715,9 +2717,13 @@ impl Publisher<'_> {
             || self
                 .unpublished_changes(&head, tracked.as_deref())
                 .map_err(internal)?;
-        // With nothing new to commit, the restore is still recorded once:
-        // an empty restore commit, unless the branch has one of this ref.
-        let earlier = if made {
+        // With nothing new to commit, a salvage ref's restore is still
+        // recorded once: an empty restore commit, unless the branch has one
+        // of this ref. A salvage ref is never removed, so only that record
+        // tells the list it was restored. A recovery ref needs none: it goes
+        // once its work is on `main`, so an empty commit would only be noise
+        // in history.
+        let earlier = if made || !reference.is_salvage() {
             None
         } else {
             let made_at = self
@@ -2735,7 +2741,7 @@ impl Publisher<'_> {
                 &self.config.git_author_email,
             )?
         };
-        let marker = !made && earlier.is_none();
+        let marker = !made && reference.is_salvage() && earlier.is_none();
         // An earlier marker whose publish failed goes out with this call.
         let earlier_pending = match earlier.as_deref() {
             Some(earlier) => !self

@@ -3764,7 +3764,8 @@ async fn a_restore_counts_only_once_main_has_it() {
 /// could not reach `main` publishes that save: `main` takes the work, so
 /// the answer is `committed: true` (a new version), and the ref, which the
 /// publish retired because its commits are on `main` now, is reported as
-/// removed.
+/// removed. The save itself is the new version: no empty restore commit
+/// lands on top of it.
 #[tokio::test(flavor = "multi_thread")]
 async fn restoring_this_checkouts_own_unpublished_save_reports_the_new_version() {
     let sc = Scenario::new(Options {
@@ -3813,6 +3814,13 @@ async fn restoring_this_checkouts_own_unpublished_save_reports_the_new_version()
     assert_eq!(body["refDeleted"], true, "{body}");
     assert_eq!(body["rev"], sc.main().as_str(), "{body}");
     assert_ne!(sc.main(), main_before);
+    assert_eq!(
+        git_in(
+            &sc.remote,
+            &["log", "--format=%s", &format!("{main_before}..main")]
+        ),
+        "Save workspace changes"
+    );
     assert_eq!(sc.remote_file("draft.md").as_deref(), Some("draft\n"));
     assert!(sc.remote_refs("refs/instafy/recovery").is_empty());
     let listed: serde_json::Value = client
@@ -4017,8 +4025,9 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
 
 /// Work that `main` started to ignore after it was kept cannot be restored
 /// here. The restore says so and keeps the ref, the only copy of that work
-/// on canonical, so the person can still review or remove it; the empty
-/// restore commit marks the entry restored.
+/// on canonical, so the person can still review or remove it. A recovery
+/// ref gets no empty restore commit (only a salvage ref, which can never be
+/// removed, does): `main` stays where it was and the entry stays pending.
 #[tokio::test(flavor = "multi_thread")]
 async fn restoring_work_main_now_ignores_keeps_its_ref() {
     let sc = Scenario::new(Options {
@@ -4039,6 +4048,7 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
     assert_eq!(sc.disk(".gitignore").as_deref(), Some("notes/\n"));
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
+    let main_before = sc.main();
 
     let (status, body) = post_json(
         &client,
@@ -4048,14 +4058,16 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], true, "{body}");
+    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(body["notRestored"], serde_json::json!(["notes/plan.md"]));
     assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(body["rev"], main_before.as_str(), "{body}");
+    assert_eq!(sc.main(), main_before);
     assert_eq!(sc.remote_refs(&reference).len(), 1);
     assert!(sc.remote_file("notes/plan.md").is_none());
 
-    // Still listed (marked restored, and dismissible), and still readable
-    // at the ref.
+    // Still listed (pending, and dismissible), and still readable at the
+    // ref.
     let listed: serde_json::Value = client
         .get(format!("{base}/git/recovery"))
         .send()
@@ -4071,7 +4083,7 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
         .find(|entry| entry["ref"] == reference.as_str())
         .cloned()
         .unwrap_or_else(|| panic!("{reference} not listed in {listed}"));
-    assert_eq!(entry["restoredRev"], sc.main().as_str(), "{entry}");
+    assert!(entry.get("restoredRev").is_none(), "{entry}");
     assert_eq!(entry["dismissible"], true, "{entry}");
     let response = client
         .get(format!("{base}/files/notes/plan.md"))

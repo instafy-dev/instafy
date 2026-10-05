@@ -123,9 +123,9 @@ pub(crate) fn fetch_ref_for_review(
 /// [`recovery_view::MAX_RECOVERY_ITEMS`]), each with its merge base with
 /// the checkout's `HEAD` (which a review and a restore compare against)
 /// and, when a restore commit this origin (`service_email`) made names it,
-/// `restoredRev` (see [`recovery_view::mark_restored`]). Every restore that
-/// lands leaves one, so a salvage ref stays marked whatever `main` holds
-/// later.
+/// `restoredRev` (see [`recovery_view::mark_restored`]). Every restore of a
+/// salvage ref that lands leaves one, so a salvage ref stays marked
+/// whatever `main` holds later.
 ///
 /// A restore counts only once canonical `main` has it: restore commits are
 /// looked for on `canonical_main` (the checkout's tracking ref of the

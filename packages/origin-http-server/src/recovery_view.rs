@@ -1652,9 +1652,10 @@ const RESTORE_CLOCK_SLACK_SECONDS: i64 = 24 * 60 * 60;
 /// Give every item a commit `main` reaches restored its `restored_rev`: the
 /// newest commit whose whole message is [`restore_commit_message`] of the
 /// item's ref and whose committer is `committer_email` (this origin's own
-/// identity). Every restore that lands leaves one, an empty one when the
-/// saved version already held the work (see `publish::restore`), so a
-/// salvage ref, which is never removed, shows as restored for good. The
+/// identity). Every restore of a salvage ref that lands leaves one, an
+/// empty one when the saved version already held the work (see
+/// `publish::restore`), so a salvage ref, which is never removed, shows as
+/// restored for good. The
 /// origin commits saves as itself too, but drops the trailer from their
 /// text ([`without_origin_trailers`]), so no save message is the restore
 /// message. The walk covers all of `main`'s history since the oldest item
