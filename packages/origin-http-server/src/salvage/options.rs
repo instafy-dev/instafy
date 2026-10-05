@@ -25,7 +25,8 @@ each entry is classified and reported as one JSON line on stdout.
                     An entry with paths left out, a chat image a rerun may
                     still export, or a filtered history needs --ack
   --ack <entry>     remove this entry even without a canonical record
-                    (repeatable; the entry's folder name under .legacy/)
+                    (repeatable; the entry's folder name under .legacy/);
+                    never one whose run stopped with an error
   --root <dir>      the gateway's workspace root (default: ORIGIN_WORKSPACE_ROOT)
   --node <name>     this gateway's name in salvage refs (default: INSTAFY_NODE_NAME;
                     one of the two is required with --apply, and a dry run

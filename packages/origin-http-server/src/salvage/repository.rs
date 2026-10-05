@@ -73,6 +73,7 @@ pub(super) fn salvage_folder(
                 report
                     .notes
                     .push("its .git is moved to .instafy/.git, and read, only with --apply".into());
+                report.finished = true;
                 return Ok(());
             }
             move_plain_git(root)?;
@@ -187,6 +188,7 @@ fn salvage_files_only(
         report.private_archive =
             write_private_archive(settings, root, None, &report.entry, &items)?;
     }
+    report.finished = true;
     Ok(())
 }
 
@@ -481,7 +483,9 @@ fn salvage_repository(
         report.private_archive =
             write_private_archive(settings, root, Some(&git), &report.entry, &items)?;
     }
-    pushed
+    pushed?;
+    report.finished = true;
+    Ok(())
 }
 
 fn private_bytes(private: &[PrivatePath]) -> u64 {
