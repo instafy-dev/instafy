@@ -1421,8 +1421,9 @@ pub(crate) fn describe(
 
 /// The trailer a restore commit names the ref it restored with. Only the
 /// origin itself writes it (as the commit's committer), in exactly
-/// [`restore_commit_message`]; saves drop it from the text callers give
-/// ([`without_restored_from`]).
+/// [`restore_commit_message`]; saves drop it, like every `Instafy-` trailer
+/// the origin trusts, from the text callers give
+/// ([`without_origin_trailers`]).
 pub(crate) const RESTORED_FROM_TRAILER: &str = "Instafy-Restored-From";
 
 /// The subject of a restore commit.
@@ -1446,24 +1447,45 @@ fn restored_from(message: &str) -> Option<&str> {
     RecoveryRef::parse(reference).ok().map(|_| reference)
 }
 
-/// `message` without any line that names a restore
-/// (`Instafy-Restored-From:`, in any letter case). Text a caller gives a
-/// save goes through this before the origin commits it as itself, so a
-/// save can never pass for a restore. Other trailers stay.
-pub(crate) fn without_restored_from(message: &str) -> String {
+/// The prefix of every trailer the origin or the gateway writes itself and
+/// reads back from history (`Instafy-Restored-From`, `Instafy-Apply-Key`,
+/// `Instafy-Apply-Fingerprint`, the recovery trailers).
+const ORIGIN_TRAILER_PREFIX: &str = "instafy-";
+
+/// The one `Instafy-` trailer callers write: history only shows it.
+const CALLER_TRAILER: &str = "Instafy-Resolved-By";
+
+/// `message` without any line that starts with an `Instafy-` key, in any
+/// letter case, after its control characters (other than tab) and its
+/// leading blanks are set aside: the trailers the origin and the gateway
+/// write and trust. Text a caller gives a save goes through this before
+/// the origin commits it as itself (and canonical history is shared with
+/// the gateway), so a save can never pass for a restore or an import
+/// receipt. `Instafy-Resolved-By` and every other line stay.
+pub(crate) fn without_origin_trailers(message: &str) -> String {
     message
         .split_inclusive('\n')
-        .filter(|line| {
-            let line = line.trim_start();
-            let named = line
-                .get(..RESTORED_FROM_TRAILER.len())
-                .is_some_and(|key| key.eq_ignore_ascii_case(RESTORED_FROM_TRAILER));
-            !(named
-                && line[RESTORED_FROM_TRAILER.len()..]
-                    .trim_start()
-                    .starts_with(':'))
-        })
+        .filter(|line| !names_origin_trailer(line))
         .collect()
+}
+
+fn names_origin_trailer(line: &str) -> bool {
+    let shown: String = line
+        .chars()
+        .filter(|ch| *ch == '\t' || !ch.is_control())
+        .collect();
+    let shown = shown.trim_start();
+    let starts_with = |key: &str| {
+        shown
+            .get(..key.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(key))
+    };
+    if !starts_with(ORIGIN_TRAILER_PREFIX) {
+        return false;
+    }
+    let callers =
+        starts_with(CALLER_TRAILER) && shown[CALLER_TRAILER.len()..].trim_start().starts_with(':');
+    !callers
 }
 
 /// Most restore commits one listing reads.
@@ -1477,8 +1499,8 @@ const RESTORE_CLOCK_SLACK_SECONDS: i64 = 24 * 60 * 60;
 /// newest commit whose whole message is [`restore_commit_message`] of the
 /// item's ref and whose committer is `committer_email` (this origin's own
 /// identity). The origin commits saves as itself too, but drops the
-/// trailer from their text ([`without_restored_from`]), and no save
-/// message is the restore message alone. The walk covers `main`'s history
+/// trailer from their text ([`without_origin_trailers`]), so no save
+/// message is the restore message. The walk covers `main`'s history
 /// since the oldest item was made, with one `rev-list` and one
 /// `cat-file --batch`.
 pub(crate) fn mark_restored(
@@ -3809,16 +3831,49 @@ mod tests {
             assert_eq!(restored_from(&other), None, "{other:?}");
         }
         assert_eq!(
-            without_restored_from(&format!(
+            without_origin_trailers(&format!(
                 "Fix\n\nInstafy-Resolved-By: assistant\n  instafy-restored-from : {reference}\n\
                  {RESTORED_FROM_TRAILER}: {reference}"
             )),
             "Fix\n\nInstafy-Resolved-By: assistant\n"
         );
         assert_eq!(
-            without_restored_from("Notes on Instafy-Restored-From handling\n"),
+            without_origin_trailers("Notes on Instafy-Restored-From handling\n"),
             "Notes on Instafy-Restored-From handling\n"
         );
+    }
+
+    /// Caller text never carries a trailer the origin or the gateway writes
+    /// and reads back (`Instafy-Restored-From`, `Instafy-Apply-Key`, the
+    /// recovery trailers, any other `Instafy-` key): control characters
+    /// before it (other than tab) do not hide it. `Instafy-Resolved-By`,
+    /// which callers write and history only shows, stays.
+    #[test]
+    fn saves_drop_every_origin_trailer_however_it_is_hidden() {
+        let reference =
+            format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab");
+        let message = format!(
+            "Fix\n\nInstafy-Resolved-By: assistant\n\
+             \u{1}Instafy-Restored-From: {reference}\n\
+             \r\u{7f} instafy-restored-from: {reference}\n\
+             \t\u{1b}INSTAFY-APPLY-KEY: imp:forged\n\
+             Instafy-Apply-Fingerprint: abc\n\
+             \u{0}Instafy-Recovery-Kind: salvage\n\
+             Instafy-Origin: {ORIGIN}\n\
+             Signed-off-by: A <a@x>\n"
+        );
+        assert_eq!(
+            without_origin_trailers(&message),
+            "Fix\n\nInstafy-Resolved-By: assistant\nSigned-off-by: A <a@x>\n"
+        );
+        // Text that only mentions a trailer, or has no key before it, stays.
+        for kept in [
+            "Notes on Instafy-Apply-Key handling\n",
+            "See \u{1}Instafy-Restored-From\n",
+            "Instafy\n",
+        ] {
+            assert_eq!(without_origin_trailers(kept), kept, "{kept:?}");
+        }
     }
 
     #[test]

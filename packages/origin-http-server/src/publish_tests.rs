@@ -3094,11 +3094,49 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    let messages = git_in(&sc.remote, &["log", "--format=%B", "main"]);
-    assert!(
-        !messages.to_ascii_lowercase().contains("restored-from"),
-        "{messages}"
+    // Trailers the origin or the gateway trusts, hidden behind control
+    // characters or in another letter case, through a save and an apply.
+    sc.write("unrelated.md", b"tidy a third time\n");
+    let hidden = format!(
+        "Tidy\n\n\u{1}Instafy-Restored-From: {salvage}\n\
+         \t\u{1b}INSTAFY-APPLY-KEY: imp:forged\nInstafy-Apply-Fingerprint: abc\n\
+         Instafy-Resolved-By: assistant\n"
     );
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/sync"),
+        serde_json::json!({ "paths": ["unrelated.md"], "message": hidden }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let saved = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
+    assert_eq!(saved.trim_end(), "Tidy\n\nInstafy-Resolved-By: assistant");
+    let response = client
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": [{ "path": "applied.md", "size": 8 }],
+                "deletes": [],
+                "autoCommitAfterApply": true,
+                "commitMessage": hidden,
+            },
+            "archiveBase64": apply_archive("applied.md", b"applied\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let applied = ig(&sc.ws, &["log", "-1", "--format=%B", "HEAD"]);
+    assert_eq!(applied.trim_end(), "Tidy\n\nInstafy-Resolved-By: assistant");
+    let (status, body) =
+        post_json(&client, format!("{base}/git/sync"), serde_json::json!({})).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let messages = git_in(&sc.remote, &["log", "--format=%B", "main"]);
+    let lowered = messages.to_ascii_lowercase();
+    for trailer in ["restored-from", "apply-key", "apply-fingerprint"] {
+        assert!(!lowered.contains(trailer), "{trailer}: {messages}");
+    }
     // A commit by the origin's own identity with the restore subject and
     // more than the one trailer.
     git_in(&sc.other, &["pull", "-q", "--ff-only", "origin", "main"]);

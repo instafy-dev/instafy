@@ -2069,12 +2069,12 @@ async fn apply_manifest_archive(
     };
     let manifest_deletes = manifest.deletes.clone();
     let auto_commit_after_apply = manifest.auto_commit_after_apply;
-    // Committed by the origin's identity: the caller's text never names a
-    // restore.
+    // Committed by the origin's identity: the caller's text never carries
+    // a trailer the origin or the gateway trusts (a restore, a receipt).
     let commit_message = manifest
         .commit_message
         .as_deref()
-        .map(recovery_view::without_restored_from)
+        .map(recovery_view::without_origin_trailers)
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "instafy: apply imported files".to_string());
 
@@ -2661,10 +2661,11 @@ async fn handle_git_sync(
         mode,
     } = payload;
     // Saves are committed by the origin's identity: the caller's text never
-    // names a restore (see `recovery_view::mark_restored`).
+    // carries a trailer the origin or the gateway trusts (see
+    // `recovery_view::without_origin_trailers`).
     let message_override = message_override
         .as_deref()
-        .map(recovery_view::without_restored_from);
+        .map(recovery_view::without_origin_trailers);
 
     let refresh = match mode
         .as_deref()
