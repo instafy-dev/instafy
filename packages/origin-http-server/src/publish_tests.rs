@@ -3429,6 +3429,60 @@ async fn a_salvage_entry_main_already_holds_is_restored() {
     server.abort();
 }
 
+/// A restore that reaches `main` only in part (the repository policy
+/// refused one of its files) keeps the recovery ref: what was refused is
+/// still only there. (A restore that does not reach `main` at all keeps it
+/// too; see `a_restore_counts_only_once_main_has_it`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partly_published_restore_keeps_its_ref() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        hook: true,
+        hook_env: vec![("GIT_DENY_PATHS", "*.zip")],
+        ..Options::default()
+    });
+    // Stored on canonical without the hook, as an older client could have.
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    git_in(&sc.other, &["fetch", "-q", "origin", "main"]);
+    git_in(&sc.other, &["checkout", "-q", "--detach", "origin/main"]);
+    write(&sc.other, "ok.md", b"ok\n");
+    write(&sc.other, "data.zip", b"PK fake archive\n");
+    git_in(&sc.other, &["add", "-A"]);
+    git_in(&sc.other, &["commit", "-q", "-m", "Unsaved edits"]);
+    let commit = git_in(&sc.other, &["rev-parse", "HEAD"]);
+    git_in(
+        &sc.remote,
+        &[
+            "fetch",
+            "-q",
+            sc.other.to_str().unwrap(),
+            &format!("{commit}:{reference}"),
+        ],
+    );
+    git_in(&sc.other, &["checkout", "-q", "-f", "main"]);
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": reference, "rev": commit }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["gitSyncStatus"], "partial", "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(sc.remote_file("ok.md").as_deref(), Some("ok\n"));
+    assert!(sc.remote_file("data.zip").is_none());
+    assert_eq!(sc.remote_refs(&reference).len(), 1);
+    assert_eq!(
+        sc.recovery_file(&reference, "data.zip").as_deref(),
+        Some("PK fake archive\n")
+    );
+    server.abort();
+}
+
 /// A restore whose publish did not reach `main` is not restored yet: the
 /// ref stays, the list shows no `restoredRev` until canonical `main` has
 /// the restore commit, and the retry that publishes it reports
