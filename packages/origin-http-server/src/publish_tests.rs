@@ -5844,6 +5844,60 @@ fn apply_archive(path: &str, content: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(archive)
 }
 
+/// A Desktop apply that commits (`autoCommitAfterApply`) stages exactly the
+/// paths it names, read as names, never as patterns: removing `notes[1].md`
+/// keeps a committed `notes1.md`, and writing `local[1].md` never commits
+/// an ignored `local1.md` that the pattern also matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apply_commit_stages_its_paths_as_names_not_patterns() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        seed: vec![(".gitignore", b"local1.md\n".to_vec())],
+        ..Options::default()
+    });
+    sc.push_other(
+        &[
+            ("notes1.md", Some(b"keep me\n")),
+            ("notes[1].md", Some(b"remove me\n")),
+        ],
+        "notes",
+    );
+    sc.publish(Selection::None);
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("keep me\n"));
+    sc.write("local1.md", b"mine only\n");
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": [{ "path": "local[1].md", "size": 8 }],
+                "deletes": ["notes[1].md"],
+                "autoCommitAfterApply": true,
+            },
+            "archiveBase64": apply_archive("local[1].md", b"applied\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let listed = ig(&sc.ws, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    let tracked: Vec<&str> = listed.lines().collect();
+    for path in ["notes1.md", "local[1].md"] {
+        assert!(tracked.contains(&path), "{path}: {tracked:?}");
+    }
+    for path in ["notes[1].md", "local1.md"] {
+        assert!(!tracked.contains(&path), "{path}: {tracked:?}");
+    }
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("keep me\n"));
+    assert_eq!(sc.disk("notes[1].md"), None);
+    assert_eq!(sc.disk("local[1].md").as_deref(), Some("applied\n"));
+    assert_eq!(sc.disk("local1.md").as_deref(), Some("mine only\n"));
+    server.abort();
+}
+
 /// A Desktop `/apply` whose `expected` blob id is stale (the agent edited
 /// the file since the client read it) is refused with the path, and the
 /// agent's edit stays.
