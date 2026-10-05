@@ -273,6 +273,37 @@ impl Space {
         self.main()
     }
 
+    /// Put `path` on canonical `main` as `mode` naming `oid` (a submodule
+    /// names a commit that need not exist), as [`Space::push`] does.
+    fn push_entry(&self, path: &str, mode: &str, oid: &str, message: &str) -> String {
+        self.sync_work();
+        let info = format!("{mode},{oid},{path}");
+        git_in(&self.work, &["update-index", "--add", "--cacheinfo", &info]);
+        git_in(&self.work, &["commit", "-q", "-m", message]);
+        git_in(
+            &self.work,
+            &[
+                "push",
+                "-q",
+                self.remote.to_str().unwrap(),
+                "HEAD:refs/heads/main",
+            ],
+        );
+        for server in &self.servers {
+            server.catch_up();
+        }
+        self.main()
+    }
+
+    /// The mode of the entry at `path` on canonical `main`, if any.
+    fn mode_on_main(&self, path: &str) -> Option<String> {
+        let listed = git_in(
+            &self.remote,
+            &["ls-tree", "--full-tree", "refs/heads/main", "--", path],
+        );
+        listed.split_whitespace().next().map(str::to_string)
+    }
+
     /// Unsaved work: `files` (`None` deletes) committed on top of canonical
     /// `main` and pushed to `reference` only.
     fn park(&self, files: &[(&str, Option<&[u8]>)], reference: &str) -> String {
@@ -866,6 +897,91 @@ async fn work_main_already_holds_is_not_judged() {
         assert_eq!(body["notRestored"], json!([]), "{mode:?}: {body}");
         assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
         assert_eq!(space.on_main("extra.md").as_deref(), Some(&b"extra\n"[..]));
+    }
+}
+
+/// `main` holds a submodule entry, and on Desktop the person's folder holds
+/// their own repository there: its history and an uncommitted edit. Work
+/// that turns that entry into a file, or removes it, is never restored in
+/// either mode (reads hide submodules, and Desktop's restore would delete
+/// the nested repository): it is listed `unsupported`, the rest comes back,
+/// the ref stays, `main` keeps the submodule entry and the nested
+/// repository is untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_over_a_submodule_entry_is_never_restored() {
+    for mode in MODES {
+        for (case, change) in [("into a file", Some(&b"a file\n"[..])), ("removed", None)] {
+            let space = Space::new(mode, &[]).await;
+            let seed = space.main();
+            space.push_entry("vendor", "160000", &seed, "a submodule");
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let mut files: Vec<(&str, Option<&[u8]>)> = vec![("vendor", None)];
+            if let Some(bytes) = change {
+                files.push(("vendor", Some(bytes)));
+            }
+            files.push(("other.md", Some(b"other\n")));
+            let commit = space.park(&files, &reference);
+            let nested = (mode == Mode::Desktop).then(|| {
+                let folder = space
+                    .server(Mode::Desktop)
+                    .config
+                    .workspace_root
+                    .join("vendor");
+                std::fs::create_dir_all(&folder).unwrap();
+                git_in(&folder, &["init", "-q", "-b", "main"]);
+                std::fs::write(folder.join("notes.txt"), b"committed\n").unwrap();
+                git_in(&folder, &["add", "notes.txt"]);
+                git_in(
+                    &folder,
+                    &[
+                        "-c",
+                        "user.name=Person",
+                        "-c",
+                        "user.email=person@example.com",
+                        "commit",
+                        "-q",
+                        "-m",
+                        "mine",
+                    ],
+                );
+                std::fs::write(folder.join("notes.txt"), b"committed\nunsaved\n").unwrap();
+                folder
+            });
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {case}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[("vendor", "unsupported")]),
+                "{mode:?} {case}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{mode:?} {case}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {case}"
+            );
+            assert_eq!(
+                space.mode_on_main("vendor").as_deref(),
+                Some("160000"),
+                "{mode:?} {case}"
+            );
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} {case}"
+            );
+            if let Some(folder) = nested {
+                assert!(folder.join(".git").is_dir(), "{case}: nested history");
+                assert_eq!(
+                    std::fs::read(folder.join("notes.txt")).ok().as_deref(),
+                    Some(&b"committed\nunsaved\n"[..]),
+                    "{case}: nested edit"
+                );
+            }
+        }
     }
 }
 

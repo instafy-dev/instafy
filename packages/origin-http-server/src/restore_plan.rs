@@ -16,7 +16,9 @@
 //!   at ([`left_out_reason`]): an earlier refusal (Desktop's frozen paths,
 //!   the shard's refusal on an earlier attempt), then
 //!   [`restore_refusal`] (`excluded`, `secret`, `attachment`,
-//!   `unsupported`, `too_large`), then `ignored`;
+//!   `unsupported`, `too_large`), then `unsupported` for any change of a
+//!   submodule entry `onto` holds (reads hide it, and a Desktop folder
+//!   there may hold a repository of the person's own), then `ignored`;
 //! - is otherwise `kept` when the person keeps it or a folder above it;
 //! - keeps `onto`'s entry when it is left out, and is reported in
 //!   `notRestored` with why.
@@ -204,14 +206,25 @@ pub(crate) fn plan(
             nothing_in.insert(path.clone());
             continue;
         }
-        let refusal = input.refused_before.get(path).copied().or_else(|| {
-            restore_refusal(
-                path,
-                deleted,
-                &change.new_mode,
-                sizes.get(&change.new_oid).copied(),
-            )
-        });
+        let refusal = input
+            .refused_before
+            .get(path)
+            .copied()
+            .or_else(|| {
+                restore_refusal(
+                    path,
+                    deleted,
+                    &change.new_mode,
+                    sizes.get(&change.new_oid).copied(),
+                )
+            })
+            // A submodule entry on `onto` is never replaced or removed:
+            // reads hide it, and on Desktop its folder may hold a
+            // repository of the person's own that the change would delete.
+            .or_else(|| {
+                held.is_some_and(|(mode, _)| mode == "160000")
+                    .then_some(RejectReason::Unsupported)
+            });
         if let Some(reason) = left_out_reason(refusal, input.keep.covers(path)) {
             left_out.insert(path.clone(), reason);
             if refusal.is_some() {
