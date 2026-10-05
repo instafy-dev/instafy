@@ -949,7 +949,7 @@ fn missing_at_version(kind: recovery_view::PathKind, absent: &str) -> OriginErro
             OriginError::unsupported_entry("a folder is at this path, not a file")
         }
         recovery_view::PathKind::File | recovery_view::PathKind::Unsupported => {
-            OriginError::unsupported_entry("a symlink or submodule is at this path")
+            OriginError::unsupported_entry("a symlink, submodule or reserved entry is at this path")
         }
     }
 }

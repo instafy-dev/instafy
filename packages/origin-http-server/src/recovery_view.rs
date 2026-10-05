@@ -384,14 +384,15 @@ pub(crate) fn resolve_rev_fetching_main(
 /// it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathKind {
-    /// Nothing, a reserved path, or a path below a file, symlink or
-    /// submodule: absent from what reads show.
+    /// Nothing, or a path below a file, symlink or submodule: not in the
+    /// tree.
     Absent,
     /// A regular file.
     File,
     /// A folder.
     Directory,
-    /// A symlink, a submodule or another entry reads never serve.
+    /// A symlink, a submodule, a reserved path that is there, or another
+    /// entry reads never serve.
     Unsupported,
 }
 
@@ -409,9 +410,6 @@ pub(crate) fn path_kind_at(
         return Ok(PathKind::Directory);
     }
     let path = checked_path(path)?;
-    if is_reserved_path(&path) {
-        return Ok(PathKind::Absent);
-    }
     let raw = git.bytes_opts(
         &[
             "ls-tree",
@@ -427,10 +425,15 @@ pub(crate) fn path_kind_at(
             ..RunOpts::default()
         },
     )?;
+    // The tree first: a reserved path that is there is hidden from reads
+    // but never absent, as on the hosted gateway (`not_found` only when
+    // the tree has no entry).
+    let reserved = is_reserved_path(&path);
     let kind = crate::workspace_git::parse_ls_tree(&raw)
         .into_iter()
         .find(|entry| entry.path == path)
         .map(|entry| match (entry.mode.as_str(), entry.kind.as_str()) {
+            _ if reserved => PathKind::Unsupported,
             ("100644" | "100755", "blob") => PathKind::File,
             ("040000", "tree") => PathKind::Directory,
             _ => PathKind::Unsupported,
@@ -2152,8 +2155,12 @@ mod tests {
                 ("README.md/x", PathKind::Absent),
                 ("link/x", PathKind::Absent),
                 ("vendor/sub/x", PathKind::Absent),
-                // Reserved paths are never shown.
-                (".instafy/state.json", PathKind::Absent),
+                // Reserved paths are never shown, but one that is there is
+                // never reported absent (a client could turn it into a
+                // delete).
+                (".instafy/state.json", PathKind::Unsupported),
+                (".instafy", PathKind::Unsupported),
+                (".instafy/missing.json", PathKind::Absent),
             ] {
                 assert_eq!(path_kind_at(&git, &head, path).unwrap(), kind, "{path}");
             }

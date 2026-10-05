@@ -2531,6 +2531,63 @@ fn recovery_ref_name(sc: &Scenario, name: &str) -> String {
     )
 }
 
+/// A reserved path that a version holds (pushed by another client) is never
+/// served, and never reported absent: 404 `unsupported_entry`, as on the
+/// hosted gateway. One the version does not hold is 404 `not_found`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reserved_path_a_version_holds_is_an_unsupported_entry() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    let commit = push_to_ref(
+        &sc,
+        &[
+            (".instafy/x", Some(b"metadata\n")),
+            ("notes.md", Some(b"notes\n")),
+        ],
+        &[],
+        "Unsaved edits",
+        &reference,
+    );
+    assert_eq!(
+        sc.recovery_file(&reference, ".instafy/x").as_deref(),
+        Some("metadata\n")
+    );
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    for (route, path, code) in [
+        ("files", ".instafy/x", "unsupported_entry"),
+        ("raw", ".instafy/x", "unsupported_entry"),
+        ("files", ".instafy", "unsupported_entry"),
+        ("files", ".instafy/absent", "not_found"),
+    ] {
+        let response = client
+            .get(format!("{base}/{route}/{path}"))
+            .query(&[("ref", reference.as_str())])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "{route} {path}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-instafy-rev")
+                .and_then(|value| value.to_str().ok()),
+            Some(commit.as_str()),
+            "{route} {path}"
+        );
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["code"], code, "{route} {path}: {body}");
+    }
+    server.abort();
+}
+
 /// `?ref=` reads serve exactly what the recovery or salvage ref's commit
 /// holds (never the folder), report the ref's tip in `X-Instafy-Rev` (also
 /// on a 404) and the blob in `X-Instafy-Blob`; `?rev=` reads serve a commit
