@@ -1930,6 +1930,11 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
     ("salvage.rs", include_str!("salvage.rs")),
     ("salvage/canonical.rs", include_str!("salvage/canonical.rs")),
     ("salvage/classify.rs", include_str!("salvage/classify.rs")),
+    ("salvage/outputs.rs", include_str!("salvage/outputs.rs")),
+    (
+        "salvage/repository.rs",
+        include_str!("salvage/repository.rs"),
+    ),
     ("salvage/work.rs", include_str!("salvage/work.rs")),
 ];
 
