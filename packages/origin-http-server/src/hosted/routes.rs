@@ -647,7 +647,23 @@ struct ReviewResponse {
     parent_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
+
+/// The code of a commit or ref this space does not have.
+const REV_NOT_FOUND: &str = "rev_not_found";
+
+/// Whether `error` says the commit or ref asked for is not here.
+fn is_rev_not_found(error: &OriginError) -> bool {
+    matches!(error, OriginError::WithReport { code, .. } if *code == REV_NOT_FOUND)
+}
+
+/// What review and diff say about a commit (or ref) this space does not
+/// have: an answer in their usual shape with `error` and `code`, as the
+/// earlier gateway gave. Clients read any 404 on these two routes as "this
+/// space has no version tracking".
+const REV_NOT_FOUND_MESSAGE: &str = "that version is not in this space's saved history";
 
 /// The commit a review or diff names: with `ref`, the ref's commit, and a
 /// `commit` that names neither the ref's id nor its commit means the ref
@@ -698,18 +714,32 @@ async fn handle_git_history_review(
             entries: Vec::new(),
             parent_count: None,
             error: Some("missing commit".to_string()),
+            code: None,
         }));
     };
     let lease = state.cache.lease(project);
-    let commit = reviewed_commit(
+    let commit = match reviewed_commit(
         &state,
         &lease,
         caller_token(&token),
         Some(requested),
         query.reference.as_deref(),
     )
-    .await?
-    .ok_or_else(|| OriginError::from(ViewError::InvalidRev))?;
+    .await
+    {
+        Ok(commit) => commit.ok_or_else(|| OriginError::from(ViewError::InvalidRev))?,
+        Err(error) if is_rev_not_found(&error) => {
+            return Ok(Json(ReviewResponse {
+                supported: true,
+                commit: Some(requested.to_ascii_lowercase()),
+                entries: Vec::new(),
+                parent_count: None,
+                error: Some(REV_NOT_FOUND_MESSAGE.to_string()),
+                code: Some(REV_NOT_FOUND),
+            }))
+        }
+        Err(error) => return Err(error),
+    };
     let cache = state.cache.clone();
     let mirror = lease.mirror();
     let (entries, parents) = blocking(move || {
@@ -723,6 +753,7 @@ async fn handle_git_history_review(
         entries,
         parent_count: Some(parents),
         error: None,
+        code: None,
     }))
 }
 
@@ -745,6 +776,10 @@ struct DiffResponse {
     diff: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
 
 async fn handle_git_diff(
@@ -769,6 +804,8 @@ async fn handle_git_diff(
                 commit: requested,
                 diff: String::new(),
                 truncated: None,
+                error: None,
+                code: None,
             }))
         }
     };
@@ -781,16 +818,38 @@ async fn handle_git_diff(
     }
     let token = caller_token(&token);
     let lease = state.cache.lease(project);
-    let commit = reviewed_commit(
+    let commit = match reviewed_commit(
         &state,
         &lease,
         token,
         requested.as_deref(),
         query.reference.as_deref(),
     )
-    .await?;
+    .await
+    {
+        Ok(commit) => commit,
+        Err(error) if is_rev_not_found(&error) => {
+            return Ok(Json(DiffResponse {
+                supported: true,
+                path: Some(path),
+                commit: requested,
+                diff: String::new(),
+                truncated: None,
+                error: Some(REV_NOT_FOUND_MESSAGE.to_string()),
+                code: Some(REV_NOT_FOUND),
+            }))
+        }
+        Err(error) => return Err(error),
+    };
+    // A base this space does not have is left out: the change is shown
+    // against the commit's first parent instead, as the earlier gateway
+    // did.
     let base = match query.base.as_deref().map(str::trim) {
-        Some(base) if !base.is_empty() => Some(resolve_rev(&state, &lease, token, base).await?),
+        Some(base) if !base.is_empty() => match resolve_rev(&state, &lease, token, base).await {
+            Ok(base) => Some(base),
+            Err(error) if is_rev_not_found(&error) => None,
+            Err(error) => return Err(error),
+        },
         _ => None,
     };
     let main = if commit.is_none() {
@@ -821,6 +880,8 @@ async fn handle_git_diff(
         commit: requested,
         diff,
         truncated: truncated.then_some(true),
+        error: None,
+        code: None,
     }))
 }
 
