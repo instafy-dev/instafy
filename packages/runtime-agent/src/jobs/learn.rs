@@ -811,7 +811,7 @@ pub fn build_learn_ai_prompt(
     format!(
         "You are running `/learn` for this space.\n\
 \n\
-Goal: update this workspace’s long-term memory (persistent context files / skills) based on the recent conversation.\n\
+Goal: review recent conversation for worthwhile updates to this workspace’s long-term memory, following the existing learning policy.\n\
 \n\
 Must-do (in order):\n\
 1) Load the memory snapshot:\n\
@@ -836,15 +836,13 @@ Must-do (in order):\n\
    - Treat \"narrow the state\" (search/filter/pagination/tab/menu/listing) -> \"enter final detail page and retrieve\" as a default split boundary unless the final entry is inseparable from the narrowing step.\n\
 \n\
 4) Apply safe edits:\n\
-   - Update `INSTAFY.md` with stable, space-specific preferences/facts.\n\
+   - Make only the memory edits justified by the learning policy; no changes may be needed.\n\
    - Before editing memory files, measure their sizes so you can keep them small:\n\
      - `wc -c INSTAFY.md .agents/skills/instafy-learned/SKILL.md`\n\
    - Enforce hard budgets:\n\
      - `INSTAFY.md` <= ~10k bytes\n\
      - `.agents/skills/instafy-learned/SKILL.md` <= ~6k bytes and a short list (prefer <= 20 blocks)\n\
      If you need more detail, write it into a learned block (SKILL + optional DETAILS) and keep only a short pointer in the index.\n\
-   - If the User expressed a stable preference about assistant language, write it as a plain sentence (not a config variable), exactly like:\n\
-     - \"Users want AI agents to reply in <Language>\" (example: \"Users want AI agents to reply in German\")\n\
    - Prefer writing new learnings as small persistent context files (memory blocks) under:\n\
      - `.agents/skills/instafy-learned/blocks/<kebab-name>/SKILL.md`\n\
    - Keep each learned skill small. If you need extra detail, create a sibling file:\n\
