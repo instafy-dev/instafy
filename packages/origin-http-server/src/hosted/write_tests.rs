@@ -3155,6 +3155,84 @@ fn a_push_without_an_answer_is_settled_by_fetching() {
     assert_eq!(show(&sc, &saved, "retried.txt").unwrap(), b"r\n");
 }
 
+/// A push settled by fetching (its answer was lost, the fetch showed it
+/// landed) moves the change's objects into the mirror after that fetch:
+/// the mirror is marked as grown again, so the sweeper does not keep a
+/// size measured in between.
+#[test]
+fn a_push_settled_by_fetching_counts_the_objects_it_moved_in() {
+    use super::cas::Canonical;
+    struct Watching {
+        inner: CachedCanonical,
+        grew_after_fetch: bool,
+    }
+    impl Canonical for Watching {
+        fn fetch_main(&mut self) -> Result<Option<String>, OriginError> {
+            self.grew_after_fetch = false;
+            self.inner.fetch_main()
+        }
+        fn write_token(&mut self) -> Result<Option<String>, OriginError> {
+            self.inner.write_token()
+        }
+        fn write_token_refused(&mut self) {
+            self.inner.write_token_refused()
+        }
+        fn pushed(&mut self, commit: &str, old: Option<&str>, promoted: bool) {
+            self.inner.pushed(commit, old, promoted)
+        }
+        fn grew(&mut self) {
+            self.grew_after_fetch = true;
+            self.inner.grew()
+        }
+    }
+
+    let sc = HostedScenario::new();
+    sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let direct = Direct::new(&sc);
+    let _hook = HookGuard;
+    let mut first = true;
+    set_push_hook(move |_| {
+        if std::mem::take(&mut first) {
+            PushHookAction::LoseResponse
+        } else {
+            PushHookAction::Proceed
+        }
+    });
+    let mut change = direct.edits(&[("landed.txt", b"l\n")], &[], None);
+    let lease = direct.cache.lease(direct.project);
+    let dir = direct.cache.ensure_mirror(&lease.mirror()).unwrap();
+    let quarantine = direct.cache.quarantine_dir().unwrap();
+    let committer = gateway();
+    let mut canonical = Watching {
+        inner: CachedCanonical::new(
+            direct.cache.clone(),
+            lease,
+            None,
+            direct.runtime.handle().clone(),
+        ),
+        grew_after_fetch: false,
+    };
+    let target = CasTarget {
+        mirror: &dir,
+        quarantine_parent: &quarantine,
+        remote: &direct.remote,
+        committer: &committer,
+        deadline: Instant::now() + Duration::from_secs(60),
+        admission: None,
+    };
+    let outcome = cas_commit(
+        &target,
+        &mut change,
+        &gateway(),
+        "Update landed.txt",
+        None,
+        &mut canonical,
+    )
+    .unwrap();
+    assert!(outcome.committed);
+    assert!(canonical.grew_after_fetch);
+}
+
 /// r3 test 12: two first saves into a space without main leave one root.
 #[test]
 fn the_first_save_race_leaves_one_root() {
