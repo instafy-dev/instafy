@@ -122,8 +122,9 @@ pub(crate) fn fetch_ref_for_review(
 /// Every recovery and salvage ref on `remote`, newest first (at most
 /// [`recovery_view::MAX_RECOVERY_ITEMS`]), each with its merge base with
 /// the checkout's `HEAD` (which a review and a restore compare against)
-/// and, when a restore commit this origin (`service_email`) made names it,
-/// `restoredRev`.
+/// and, when a restore commit this origin (`service_email`) made names it
+/// (or, for salvage, when `main` already holds its work; see
+/// [`recovery_view::mark_held_salvage`]), `restoredRev`.
 ///
 /// A restore counts only once canonical `main` has it: restore commits are
 /// looked for on `canonical_main` (the checkout's tracking ref of the
@@ -142,5 +143,6 @@ pub(crate) fn list_unsaved_work(
     let mut items = describe(git, &fetched.fetched, head.as_deref())?;
     let main = git.commit_id(canonical_main)?;
     recovery_view::mark_restored(git, &mut items, main.as_deref(), service_email)?;
+    recovery_view::mark_held_salvage(git, &mut items, main.as_deref())?;
     Ok(items)
 }

@@ -1521,6 +1521,71 @@ pub(crate) fn mark_restored(
     Ok(())
 }
 
+/// Give every salvage item that no restore commit names, and whose changes
+/// `main` already holds, `restored_rev = main`. Salvage refs are never
+/// removed, and a restore that finds nothing left to commit writes no
+/// restore commit (the person saved its files one by one with "Use this
+/// version", or someone saved the same work), so this is how such an entry
+/// stops showing as pending. The changes are the paths the item's commit
+/// changes since its merge base with `main`, less the ones a restore never
+/// brings back (reserved, excluded, secret, legacy attachments, unsafe
+/// paths, submodules, deletes a publish may not make); each must have the
+/// same entry in `main` as in the commit. Work kept out of a restore as
+/// the current version is not held, so it does not count as restored.
+/// Two `diff-tree` per salvage item that no restore commit names.
+pub(crate) fn mark_held_salvage(
+    git: &WorkspaceGit<'_>,
+    items: &mut [RecoveryItem],
+    main: Option<&str>,
+) -> Result<(), ViewError> {
+    let Some(main) = main else {
+        return Ok(());
+    };
+    let main = parse_rev(main)?;
+    for item in items.iter_mut() {
+        if item.kind != ItemKind::Salvage || item.restored_rev.is_some() {
+            continue;
+        }
+        let base = match git.merge_base(&item.commit, &main)? {
+            Some(base) => base,
+            None => git.empty_tree()?,
+        };
+        let raw = git.bytes(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--raw",
+            &base,
+            &item.commit,
+        ])?;
+        let changes = crate::publish::parse_raw_changes(&raw);
+        let differs: std::collections::HashSet<String> =
+            crate::tree_merge::changed_paths(git, &main, &item.commit)?
+                .into_iter()
+                .collect();
+        let held = changes
+            .iter()
+            .filter(|change| restorable(change))
+            .all(|change| !differs.contains(&change.path));
+        if held {
+            item.restored_rev = Some(main.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Whether a restore can ever bring `change` back, from its path and mode.
+fn restorable(change: &crate::publish::RawChange) -> bool {
+    use crate::publish_policy::{deletion_allowed, is_unsafe_path, unpublishable_reason};
+    if change.status == 'D' {
+        return deletion_allowed(&change.path);
+    }
+    unpublishable_reason(&change.path).is_none()
+        && !is_unsafe_path(&change.path)
+        && change.new_mode != "160000"
+}
+
 /// `(id, ref)` of each of `ids` that is a restore commit
 /// ([`restore_commit_message`] of `ref`) committed by `committer_email`,
 /// in the order given, with one `cat-file --batch`.

@@ -3256,6 +3256,122 @@ async fn restore_route_restores_unsaved_work_once() {
     server.abort();
 }
 
+/// A salvage ref stays for good, so the list marks it restored once `main`
+/// holds what it changes, even when no restore commit was needed: after
+/// "Use this version" saved the conflicted file, the restore of the rest
+/// has nothing to commit. Paths that can never be restored (a secret) do
+/// not count; work `main` does not hold (kept as the current version) is
+/// not restored.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_salvage_entry_main_already_holds_is_restored() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let salvage_commit = push_to_ref(
+        &sc,
+        &[("salvaged.md", Some(b"salvaged\n"))],
+        &[],
+        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: salvaged.md",
+        salvage,
+    );
+    let kept = "refs/instafy/salvage/gateway/node-1-0123abce";
+    let kept_commit = push_to_ref(
+        &sc,
+        &[("other.md", Some(b"salvaged other\n"))],
+        &[],
+        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: other.md",
+        kept,
+    );
+    let secret = "refs/instafy/salvage/gateway/node-1-0123abcf";
+    push_to_ref(
+        &sc,
+        &[("held.md", Some(b"held\n")), (".env", Some(b"TOKEN=1\n"))],
+        &[],
+        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage",
+        secret,
+    );
+    sc.push_other(
+        &[
+            ("salvaged.md", Some(b"saved since\n")),
+            ("other.md", Some(b"other saved since\n")),
+            ("held.md", Some(b"held\n")),
+        ],
+        "saved since",
+    );
+    sc.publish(Selection::None);
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let list = || {
+        let client = client.clone();
+        let url = format!("{base}/git/recovery");
+        async move {
+            let response = client.get(url).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            response.json::<serde_json::Value>().await.unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+    };
+    let restored_rev = |entries: &[serde_json::Value], reference: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["ref"] == reference)
+            .unwrap_or_else(|| panic!("{reference} not listed in {entries:?}"))
+            .get("restoredRev")
+            .cloned()
+    };
+    let restore =
+        |body: serde_json::Value| post_json(&client, format!("{base}/git/recovery/restore"), body);
+
+    let entries = list().await;
+    assert_eq!(restored_rev(&entries, salvage), None);
+    assert_eq!(restored_rev(&entries, kept), None);
+    // Everything it can restore is on `main` already; the secret never is.
+    assert_eq!(
+        restored_rev(&entries, secret),
+        Some(serde_json::Value::String(sc.main()))
+    );
+
+    let (status, body) = restore(serde_json::json!({ "ref": salvage })).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["paths"], serde_json::json!(["salvaged.md"]));
+    // "Use this version": the salvaged file is saved as it is there.
+    sc.write("salvaged.md", b"salvaged\n");
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/sync"),
+        serde_json::json!({ "paths": ["salvaged.md"] }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let (status, body) =
+        restore(serde_json::json!({ "ref": salvage, "rev": salvage_commit })).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
+
+    // "Keep current" for everything: `main` does not hold that work.
+    let (status, body) = restore(serde_json::json!({
+        "ref": kept,
+        "rev": kept_commit,
+        "keep": ["other.md"],
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+
+    let entries = list().await;
+    let main = serde_json::Value::String(sc.main());
+    assert_eq!(restored_rev(&entries, salvage), Some(main.clone()));
+    assert_eq!(restored_rev(&entries, kept), None);
+    assert_eq!(restored_rev(&entries, secret), Some(main));
+    assert_eq!(sc.remote_refs(salvage).len(), 1);
+    server.abort();
+}
+
 /// A restore whose publish did not reach `main` is not restored yet: the
 /// ref stays, the list shows no `restoredRev` until canonical `main` has
 /// the restore commit, and the retry that publishes it reports
