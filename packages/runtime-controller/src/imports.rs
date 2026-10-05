@@ -64,7 +64,21 @@ const GITHUB_IMPORT_TOTAL_PATH_MAX_BYTES: usize = 12 * 1024 * 1024;
 const ORIGIN_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
 const ORIGIN_APPLY_TIMEOUT_SECS: u64 = 900;
 const ORIGIN_APPLY_STATUS_TIMEOUT_SECS: u64 = 30;
+/// How long an import status check keeps asking an origin that answers
+/// busy (each request still gets at most [`ORIGIN_APPLY_STATUS_TIMEOUT_SECS`]).
+const ORIGIN_APPLY_STATUS_BUDGET_SECS: u64 = 90;
 const ORIGIN_GIT_SYNC_TIMEOUT_SECS: u64 = 180;
+/// How long to leave a busy origin alone when it names no `Retry-After`.
+const ORIGIN_BUSY_DEFAULT_RETRY: Duration = Duration::from_secs(2);
+/// The longest `Retry-After` honoured.
+const ORIGIN_BUSY_MAX_RETRY: Duration = Duration::from_secs(30);
+/// A busy origin is asked again only when at least this much of the budget
+/// is left after the wait.
+const ORIGIN_BUSY_MIN_ATTEMPT: Duration = Duration::from_secs(5);
+/// 503 codes of an origin that is busy and saved nothing: out of write
+/// slots, still fetching the space, remaking its copy of the space, or out
+/// of disk space for a moment. Any 503 with `Retry-After` counts too.
+const ORIGIN_BUSY_CODES: [&str; 4] = ["writes_busy", "fetch_pending", "mirror_reset", "disk_full"];
 const ORIGIN_GIT_REMOTE_NOT_CONFIGURED: &str = "git remote is not configured for this project";
 const GITHUB_IMPORT_IDEMPOTENCY_KEY_MAX_LEN: usize = 256;
 const GITHUB_IMPORT_OPERATION_LEASE_MINUTES: i64 = 5;
@@ -75,7 +89,9 @@ const GITHUB_IMPORT_ORIGIN_TOKEN_TTL_SECONDS: i64 =
     (ORIGIN_APPLY_TIMEOUT_SECS + ORIGIN_GIT_SYNC_TIMEOUT_SECS + 120) as i64;
 const GITHUB_IMPORT_WORKSPACE_LEASE_SECONDS: i64 = GITHUB_IMPORT_ORIGIN_TOKEN_TTL_SECONDS;
 const GITHUB_IMPORT_APPLY_TOKEN_TTL_SECONDS: i64 = 180;
-const GITHUB_IMPORT_STATUS_TOKEN_TTL_SECONDS: i64 = 60;
+/// Covers a status check that asks a busy origin again
+/// ([`ORIGIN_APPLY_STATUS_BUDGET_SECS`]).
+const GITHUB_IMPORT_STATUS_TOKEN_TTL_SECONDS: i64 = 120;
 const GITHUB_IMPORT_SYNC_TOKEN_TTL_SECONDS: i64 = 300;
 /// Extra scope on every origin token an import mints, next to `fs.write`.
 /// It marks a controller-run import: an origin honours `idempotencyKey`
@@ -2134,21 +2150,28 @@ async fn request_origin_apply_status(
     request_fingerprint: &str,
 ) -> Result<OriginApplyStatus, (StatusCode, Json<ApiError>)> {
     let status_url = format!("{}/apply/status", origin_base.trim_end_matches('/'));
-    let mut request = http_client
-        .post(status_url)
-        .bearer_auth(bearer_token)
-        .json(&json!({
-            "idempotencyKey": origin_key,
-            "requestFingerprint": request_fingerprint,
-        }));
-    if let Some(host) = host_override.filter(|value| !value.trim().is_empty()) {
-        request = request.header("host", host);
-    }
+    let build = || {
+        let mut request = http_client
+            .post(&status_url)
+            .bearer_auth(bearer_token)
+            .json(&json!({
+                "idempotencyKey": origin_key,
+                "requestFingerprint": request_fingerprint,
+            }));
+        if let Some(host) = host_override.filter(|value| !value.trim().is_empty()) {
+            request = request.header("host", host);
+        }
+        Ok(request)
+    };
 
-    let (status, body) = execute_bounded_origin_request(
-        request,
+    // An origin still fetching the space (a cold copy after a restart or
+    // an eviction) answers 503 quickly: ask again as it says.
+    let (status, body) = send_origin_request_while_busy(
+        build,
         "apply status",
         Duration::from_secs(ORIGIN_APPLY_STATUS_TIMEOUT_SECS),
+        Duration::from_secs(ORIGIN_APPLY_STATUS_BUDGET_SECS),
+        None,
     )
     .await
     .map_err(|error| internal_error(error.message))?;
@@ -2260,14 +2283,16 @@ async fn import_github_zip_and_apply(
 
     let origin = load_prepared_github_import_origin(state, project_id, prepared_state).await?;
     let author = author_claims_for_user(&state.config, &state.pool, project_id, user_id).await;
-    let scoped_token = mint_github_import_origin_token(
+    // Minted here so a configuration problem fails before anything is sent;
+    // each later attempt gets a token of its own.
+    let first_token = mint_github_import_origin_token(
         &state.config,
         project_id,
         user_id,
         lease_id,
         &origin,
         GITHUB_IMPORT_APPLY_TOKEN_TTL_SECONDS,
-        author,
+        author.clone(),
     )?;
 
     let canonical_repo = format!("{owner}/{repo}");
@@ -2292,38 +2317,32 @@ async fn import_github_zip_and_apply(
         .map_err(|error| internal_error(format!("failed to encode origin manifest: {error}")))?;
     let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(&origin.endpoint);
     let apply_url = format!("{}/apply", origin_base.trim_end_matches('/'));
-    let form = reqwest::multipart::Form::new()
-        .part(
-            "manifest",
-            Part::bytes(manifest_json)
-                .file_name("manifest.json")
-                .mime_str("application/json")
-                .map_err(|error| {
-                    internal_error(format!("failed to build manifest part: {error}"))
-                })?,
+    let mut first_token = Some(first_token);
+    let mint = || match first_token.take() {
+        Some(token) => Ok(token),
+        None => mint_github_import_origin_token(
+            &state.config,
+            project_id,
+            user_id,
+            lease_id,
+            &origin,
+            GITHUB_IMPORT_APPLY_TOKEN_TTL_SECONDS,
+            author.clone(),
         )
-        .part(
-            "archive",
-            Part::bytes(prepared_archive.archive)
-                .file_name("workspace.zip")
-                .mime_str("application/zip")
-                .map_err(|error| {
-                    internal_error(format!("failed to build archive part: {error}"))
-                })?,
-        );
-
-    let mut request = state.http_client.post(apply_url).bearer_auth(&scoped_token);
-    if let Some(host) = host_override
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        request = request.header("host", host);
-    }
-    let (status, response_body) = execute_bounded_mutating_origin_request(
-        request.multipart(form),
-        "apply",
+        .map_err(|error| OriginRequestError {
+            message: error.1 .0.message.clone(),
+            ambiguous: false,
+        }),
+    };
+    let (status, response_body) = post_import_apply(
+        &state.http_client,
+        &apply_url,
+        host_override.as_deref(),
+        mint,
+        axum::body::Bytes::from(manifest_json),
+        axum::body::Bytes::from(prepared_archive.archive),
         Duration::from_secs(ORIGIN_APPLY_TIMEOUT_SECS),
-        Some(mutation_started),
+        mutation_started,
     )
     .await
     .map_err(|error| internal_error(error.message))?;
@@ -2484,21 +2503,24 @@ async fn sync_origin_git_after_apply(
     mutation_started: Option<&AtomicBool>,
 ) -> Result<Option<String>, OriginRequestError> {
     let sync_url = format!("{}/git/sync", origin_base.trim_end_matches('/'));
-    let mut request = http_client
-        .post(sync_url)
-        .bearer_auth(bearer_token)
-        .json(&json!({
-            "message": commit_message,
-            "expectedRev": expected_rev,
-        }));
+    let build = || {
+        let mut request = http_client
+            .post(&sync_url)
+            .bearer_auth(bearer_token)
+            .json(&json!({
+                "message": commit_message,
+                "expectedRev": expected_rev,
+            }));
+        if let Some(host) = host_override.filter(|value| !value.trim().is_empty()) {
+            request = request.header("host", host);
+        }
+        Ok(request)
+    };
 
-    if let Some(host) = host_override.filter(|value| !value.trim().is_empty()) {
-        request = request.header("host", host);
-    }
-
-    let (status, response_body) = execute_bounded_mutating_origin_request(
-        request,
+    let (status, response_body) = send_origin_request_while_busy(
+        build,
         "git sync",
+        Duration::from_secs(ORIGIN_GIT_SYNC_TIMEOUT_SECS),
         Duration::from_secs(ORIGIN_GIT_SYNC_TIMEOUT_SECS),
         mutation_started,
     )
@@ -2536,11 +2558,18 @@ async fn sync_origin_git_after_apply(
     Ok(Some(rev))
 }
 
-async fn execute_bounded_origin_request(
+/// An origin's answer: status, body and the `Retry-After` it named.
+struct OriginAnswer {
+    status: reqwest::StatusCode,
+    body: Vec<u8>,
+    retry_after: Option<Duration>,
+}
+
+async fn execute_bounded_origin_answer(
     request: reqwest::RequestBuilder,
     operation: &'static str,
     request_timeout: Duration,
-) -> Result<(reqwest::StatusCode, Vec<u8>), OriginRequestError> {
+) -> Result<OriginAnswer, OriginRequestError> {
     let response_received = AtomicBool::new(false);
     let result = timeout(request_timeout, async {
         let response = request.send().await.map_err(|error| OriginRequestError {
@@ -2555,6 +2584,12 @@ async fn execute_bounded_origin_request(
         // a body decoding/size failure is no longer an ambiguous write.
         response_received.store(true, Ordering::Release);
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs);
         let mut stream = response.bytes_stream();
         let mut body = Vec::new();
         while let Some(chunk) = stream.next().await {
@@ -2579,7 +2614,11 @@ async fn execute_bounded_origin_request(
             }
             body.extend_from_slice(&chunk);
         }
-        Ok((status, body))
+        Ok(OriginAnswer {
+            status,
+            body,
+            retry_after,
+        })
     })
     .await;
     match result {
@@ -2591,16 +2630,33 @@ async fn execute_bounded_origin_request(
     }
 }
 
+#[cfg(test)]
 async fn execute_bounded_mutating_origin_request(
     request: reqwest::RequestBuilder,
     operation: &'static str,
     request_timeout: Duration,
     mutation_may_be_in_flight: Option<&AtomicBool>,
 ) -> Result<(reqwest::StatusCode, Vec<u8>), OriginRequestError> {
+    execute_bounded_mutating_origin_answer(
+        request,
+        operation,
+        request_timeout,
+        mutation_may_be_in_flight,
+    )
+    .await
+    .map(|answer| (answer.status, answer.body))
+}
+
+async fn execute_bounded_mutating_origin_answer(
+    request: reqwest::RequestBuilder,
+    operation: &'static str,
+    request_timeout: Duration,
+    mutation_may_be_in_flight: Option<&AtomicBool>,
+) -> Result<OriginAnswer, OriginRequestError> {
     if let Some(flag) = mutation_may_be_in_flight {
         flag.store(true, Ordering::Release);
     }
-    let result = execute_bounded_origin_request(request, operation, request_timeout).await;
+    let result = execute_bounded_origin_answer(request, operation, request_timeout).await;
     if let Some(flag) = mutation_may_be_in_flight {
         if matches!(
             &result,
@@ -2614,6 +2670,125 @@ async fn execute_bounded_mutating_origin_request(
         }
     }
     result
+}
+
+/// How long to wait before asking again, when an origin's answer says it is
+/// busy and saved nothing: a 503 with `Retry-After` or one of
+/// [`ORIGIN_BUSY_CODES`], or a 409 `main_busy` (other saves kept landing
+/// first). `None` for any other answer.
+fn origin_busy_retry_delay(answer: &OriginAnswer) -> Option<Duration> {
+    let code = || {
+        serde_json::from_slice::<JsonValue>(&answer.body)
+            .ok()
+            .and_then(|body| body.get("code")?.as_str().map(str::to_string))
+    };
+    let busy = match answer.status {
+        reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+            answer.retry_after.is_some()
+                || code().is_some_and(|code| ORIGIN_BUSY_CODES.contains(&code.as_str()))
+        }
+        reqwest::StatusCode::CONFLICT => code().as_deref() == Some("main_busy"),
+        _ => false,
+    };
+    busy.then(|| {
+        answer
+            .retry_after
+            .unwrap_or(ORIGIN_BUSY_DEFAULT_RETRY)
+            .clamp(Duration::from_secs(1), ORIGIN_BUSY_MAX_RETRY)
+    })
+}
+
+/// Send the request `build` makes (made again for every attempt, so each
+/// can carry a bearer of its own) until the origin answers anything but
+/// busy ([`origin_busy_retry_delay`]), waiting as long as it asks, within
+/// `budget`. Each attempt gets what is left of the budget, at most
+/// `attempt_timeout`. The last answer is returned as it is.
+async fn send_origin_request_while_busy<F>(
+    mut build: F,
+    operation: &'static str,
+    attempt_timeout: Duration,
+    budget: Duration,
+    mutation_may_be_in_flight: Option<&AtomicBool>,
+) -> Result<(reqwest::StatusCode, Vec<u8>), OriginRequestError>
+where
+    F: FnMut() -> Result<reqwest::RequestBuilder, OriginRequestError>,
+{
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let answer = execute_bounded_mutating_origin_answer(
+            build()?,
+            operation,
+            attempt_timeout.min(left),
+            mutation_may_be_in_flight,
+        )
+        .await?;
+        let Some(delay) = origin_busy_retry_delay(&answer) else {
+            return Ok((answer.status, answer.body));
+        };
+        if tokio::time::Instant::now() + delay + ORIGIN_BUSY_MIN_ATTEMPT > deadline {
+            return Ok((answer.status, answer.body));
+        }
+        tracing::info!(
+            operation,
+            status = answer.status.as_u16(),
+            delay_seconds = delay.as_secs(),
+            "origin is busy; asking again"
+        );
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// POST an import's apply to `apply_url`, asking a busy origin again within
+/// `budget` ([`send_origin_request_while_busy`]) with a bearer `mint` makes
+/// for each attempt. A busy origin (out of write slots, still fetching the
+/// space) saved nothing; the import's key makes a repeat safe either way.
+#[allow(clippy::too_many_arguments)]
+async fn post_import_apply(
+    http_client: &reqwest::Client,
+    apply_url: &str,
+    host_override: Option<&str>,
+    mut mint: impl FnMut() -> Result<String, OriginRequestError>,
+    manifest_json: axum::body::Bytes,
+    archive: axum::body::Bytes,
+    budget: Duration,
+    mutation_started: &AtomicBool,
+) -> Result<(reqwest::StatusCode, Vec<u8>), OriginRequestError> {
+    let build = || {
+        let form = import_apply_form(manifest_json.clone(), archive.clone())?;
+        let mut request = http_client.post(apply_url).bearer_auth(mint()?);
+        if let Some(host) = host_override.filter(|value| !value.trim().is_empty()) {
+            request = request.header("host", host);
+        }
+        Ok(request.multipart(form))
+    };
+    send_origin_request_while_busy(build, "apply", budget, budget, Some(mutation_started)).await
+}
+
+/// The multipart body of an import apply.
+fn import_apply_form(
+    manifest_json: axum::body::Bytes,
+    archive: axum::body::Bytes,
+) -> Result<reqwest::multipart::Form, OriginRequestError> {
+    let part = |bytes: axum::body::Bytes, file_name: &'static str, mime: &str| {
+        let length = bytes.len() as u64;
+        Part::stream_with_length(reqwest::Body::from(bytes), length)
+            .file_name(file_name)
+            .mime_str(mime)
+            .map_err(|error| OriginRequestError {
+                message: format!("failed to build the {file_name} part: {error}"),
+                ambiguous: false,
+            })
+    };
+    Ok(reqwest::multipart::Form::new()
+        .part(
+            "manifest",
+            part(manifest_json, "manifest.json", "application/json")?,
+        )
+        .part(
+            "archive",
+            part(archive, "workspace.zip", "application/zip")?,
+        ))
 }
 
 async fn download_github_zipball(
@@ -3388,14 +3563,14 @@ mod tests {
         github_import_request_fingerprint, github_import_role_can_write,
         lookup_origin_apply_status, mint_github_import_origin_token,
         normalize_github_import_idempotency_key, parse_github_ref, parse_github_repo,
-        parse_import_target_path, parse_origin_apply_status_response, read_github_zipball_body,
-        repack_github_zip, repack_github_zip_with_limits, request_origin_apply_status,
-        resolve_github_import_auth, resolve_project_github_auth_policy,
-        sync_origin_git_after_apply, GithubImportArchiveLimits, GithubImportAuthSource,
-        GithubImportPreparedState, OriginApplyStatus, ProjectGithubAuthPolicy,
-        GITHUB_IMPORT_RATE_WINDOW_SECONDS, GITHUB_IMPORT_WORKSPACE_BUSY_MESSAGE,
-        ORIGIN_APPLY_KEY_VERSION, ORIGIN_GIT_REMOTE_NOT_CONFIGURED, ORIGIN_RESPONSE_MAX_BYTES,
-        WORKSPACE_IMPORT_SCOPE,
+        parse_import_target_path, parse_origin_apply_status_response, post_import_apply,
+        read_github_zipball_body, repack_github_zip, repack_github_zip_with_limits,
+        request_origin_apply_status, resolve_github_import_auth,
+        resolve_project_github_auth_policy, sync_origin_git_after_apply, GithubImportArchiveLimits,
+        GithubImportAuthSource, GithubImportPreparedState, OriginApplyStatus,
+        ProjectGithubAuthPolicy, GITHUB_IMPORT_RATE_WINDOW_SECONDS,
+        GITHUB_IMPORT_WORKSPACE_BUSY_MESSAGE, ORIGIN_APPLY_KEY_VERSION,
+        ORIGIN_GIT_REMOTE_NOT_CONFIGURED, ORIGIN_RESPONSE_MAX_BYTES, WORKSPACE_IMPORT_SCOPE,
     };
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
@@ -4902,6 +5077,261 @@ mod tests {
 
         mock.assert_async().await;
         assert_eq!(result, Some("synced-rev".to_string()));
+    }
+
+    /// What a scripted origin saw of one request: its bearer and body size.
+    type SeenRequests = std::sync::Arc<std::sync::Mutex<Vec<(String, usize)>>>;
+
+    /// An origin serving `path` that answers `answers` in turn (status,
+    /// `Retry-After`, body), the last one from then on.
+    async fn scripted_origin(
+        path: &'static str,
+        answers: Vec<(u16, Option<u64>, serde_json::Value)>,
+    ) -> (String, SeenRequests, tokio::task::JoinHandle<()>) {
+        use axum::response::IntoResponse as _;
+        let seen: SeenRequests = Default::default();
+        let recorded = seen.clone();
+        let answers = std::sync::Arc::new(answers);
+        let app = axum::Router::new().route(
+            path,
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let recorded = recorded.clone();
+                    let answers = answers.clone();
+                    async move {
+                        let bearer = headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        let n = {
+                            let mut seen = recorded.lock().unwrap();
+                            seen.push((bearer, body.len()));
+                            seen.len() - 1
+                        };
+                        let (status, retry_after, body) = answers[n.min(answers.len() - 1)].clone();
+                        let mut response =
+                            (StatusCode::from_u16(status).unwrap(), axum::Json(body))
+                                .into_response();
+                        if let Some(seconds) = retry_after {
+                            response.headers_mut().insert(
+                                axum::http::header::RETRY_AFTER,
+                                seconds.to_string().parse().unwrap(),
+                            );
+                        }
+                        response
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, seen, server)
+    }
+
+    /// Bearers `t1`, `t2`, ... one per call.
+    fn counting_mint() -> impl FnMut() -> Result<String, super::OriginRequestError> {
+        let mut n = 0;
+        move || {
+            n += 1;
+            Ok(format!("t{n}"))
+        }
+    }
+
+    async fn post_apply(
+        base: &str,
+        budget: Duration,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), super::OriginRequestError> {
+        let mutation_started = AtomicBool::new(false);
+        let answer = post_import_apply(
+            &reqwest::Client::new(),
+            &format!("{base}/apply"),
+            None,
+            counting_mint(),
+            axum::body::Bytes::from_static(b"{\"files\":[]}"),
+            axum::body::Bytes::from(vec![b'z'; 4096]),
+            budget,
+            &mutation_started,
+        )
+        .await;
+        assert!(!mutation_started.load(Ordering::Acquire));
+        answer
+    }
+
+    /// A gateway out of write slots or still fetching the space saved
+    /// nothing and says when to ask again: the import is sent again, whole
+    /// and with a new bearer, instead of failing.
+    #[tokio::test]
+    async fn a_busy_origin_gets_the_import_again_with_a_new_bearer() {
+        let (base, seen, _server) = scripted_origin(
+            "/apply",
+            vec![
+                (
+                    503,
+                    Some(1),
+                    json!({ "code": "writes_busy", "error": "busy" }),
+                ),
+                (
+                    503,
+                    Some(1),
+                    json!({ "code": "fetch_pending", "error": "fetching" }),
+                ),
+                (
+                    200,
+                    None,
+                    json!({ "rev": "abc", "fileCount": 1, "bytesWritten": 2 }),
+                ),
+            ],
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let (status, body) = post_apply(&base, Duration::from_secs(60)).await.unwrap();
+        assert_eq!(status.as_u16(), 200, "{}", String::from_utf8_lossy(&body));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        let seen = seen.lock().unwrap().clone();
+        let bearers: Vec<&str> = seen.iter().map(|(bearer, _)| bearer.as_str()).collect();
+        assert_eq!(bearers, ["Bearer t1", "Bearer t2", "Bearer t3"]);
+        assert!(seen
+            .iter()
+            .all(|(_, size)| *size == seen[0].1 && *size > 4096));
+    }
+
+    /// Only "busy, nothing saved" answers are asked again: 503 with
+    /// `Retry-After` or a busy code, and 409 `main_busy`.
+    #[tokio::test]
+    async fn only_busy_origin_answers_are_asked_again() {
+        for (answers, hits) in [
+            (vec![(500, None, json!({ "error": "boom" }))], 1),
+            (vec![(503, None, json!({ "error": "unavailable" }))], 1),
+            (
+                vec![(409, None, json!({ "code": "head_moved", "error": "moved" }))],
+                1,
+            ),
+            (vec![(413, None, json!({ "error": "too large" }))], 1),
+            (
+                vec![
+                    (
+                        503,
+                        None,
+                        json!({ "code": "mirror_reset", "error": "remaking" }),
+                    ),
+                    (200, None, json!({ "rev": "abc" })),
+                ],
+                2,
+            ),
+            (
+                vec![
+                    (409, None, json!({ "code": "main_busy", "error": "busy" })),
+                    (200, None, json!({ "rev": "abc" })),
+                ],
+                2,
+            ),
+        ] {
+            let last = answers.last().unwrap().0;
+            let (base, seen, _server) = scripted_origin("/apply", answers).await;
+            let (status, _) = post_apply(&base, Duration::from_secs(60)).await.unwrap();
+            assert_eq!(status.as_u16(), last);
+            assert_eq!(seen.lock().unwrap().len(), hits, "answer {last}");
+        }
+    }
+
+    /// An origin that stays busy is answered as it last answered once the
+    /// budget is spent.
+    #[tokio::test]
+    async fn a_busy_origin_is_left_alone_once_the_budget_is_spent() {
+        let (base, seen, _server) = scripted_origin(
+            "/apply",
+            vec![(
+                503,
+                Some(1),
+                json!({ "code": "writes_busy", "error": "busy" }),
+            )],
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let (status, _) = post_apply(&base, Duration::from_secs(8)).await.unwrap();
+        assert_eq!(status.as_u16(), 503);
+        assert!(started.elapsed() < Duration::from_secs(8));
+        assert!((2..=4).contains(&seen.lock().unwrap().len()));
+    }
+
+    /// An import status check against a gateway still fetching the space
+    /// (a cold copy) asks again instead of failing the import.
+    #[tokio::test]
+    async fn apply_status_asks_a_busy_origin_again() {
+        let (base, seen, _server) = scripted_origin(
+            "/apply/status",
+            vec![
+                (
+                    503,
+                    Some(1),
+                    json!({ "code": "fetch_pending", "error": "fetching" }),
+                ),
+                (
+                    200,
+                    None,
+                    json!({
+                        "status": "succeeded",
+                        "rev": "abc",
+                        "fileCount": 3,
+                        "bytesWritten": 9,
+                    }),
+                ),
+            ],
+        )
+        .await;
+        let status = request_origin_apply_status(
+            &reqwest::Client::new(),
+            &base,
+            None,
+            "import-token",
+            "imp:key",
+            "sha256:fingerprint",
+        )
+        .await
+        .expect("apply status");
+        assert_eq!(
+            status,
+            OriginApplyStatus::Succeeded {
+                rev: "abc".to_string(),
+                file_count: 3,
+                bytes_written: 9,
+            }
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    /// The sync after an import asks a busy gateway again too.
+    #[tokio::test]
+    async fn sync_after_apply_asks_a_busy_origin_again() {
+        let (base, seen, _server) = scripted_origin(
+            "/git/sync",
+            vec![
+                (
+                    503,
+                    Some(1),
+                    json!({ "code": "fetch_pending", "error": "fetching" }),
+                ),
+                (200, None, json!({ "rev": "synced-rev" })),
+            ],
+        )
+        .await;
+        let result = sync_origin_git_after_apply(
+            &reqwest::Client::new(),
+            &base,
+            None,
+            "test-token",
+            "instafy: import octocat/hello-world@HEAD",
+            "applied-rev",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Some("synced-rev".to_string()));
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
