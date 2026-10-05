@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use origin_http_server::config::ServerConfig;
+use origin_http_server::hosted::HostedGatewayConfig;
 use origin_http_server::server::OriginHttpServer;
 
 #[tokio::main]
@@ -22,7 +23,14 @@ async fn main() {
 async fn real_main() -> Result<()> {
     init_tracing()?;
     let config = load_config()?;
-    let mut server = OriginHttpServer::new(config.clone())?;
+    let mut server = if config.multi_tenant {
+        let hosted = HostedGatewayConfig::from_cache_max_bytes(
+            read_env("ORIGIN_CACHE_MAX_BYTES").as_deref(),
+        )?;
+        OriginHttpServer::new_hosted(config.clone(), hosted)?
+    } else {
+        OriginHttpServer::new(config.clone())?
+    };
 
     let start = server.start().await?;
     info!(

@@ -189,6 +189,48 @@ impl ServerConfig {
             .join(self.origin_id.to_string())
     }
 
+    /// The checks a multi-tenant gateway must pass before it starts (a
+    /// single-tenant origin passes trivially). Every space's repository is
+    /// `<ORIGIN_GIT_REMOTE_BASE_URL>/<space id>.git`, so the base URL is
+    /// required, and the single-repository settings are refused: a set
+    /// `ORIGIN_GIT_REMOTE_URL` would send every space to one repository, and
+    /// the gateway stages nothing outside its own cache.
+    pub fn validate_multi_tenant(&self) -> Result<()> {
+        if !self.multi_tenant {
+            return Ok(());
+        }
+        if self
+            .git_remote_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+        {
+            anyhow::bail!(
+                "ORIGIN_GIT_REMOTE_URL routes every space to one repository; unset it for the \
+                 multi-tenant gateway (it uses ORIGIN_GIT_REMOTE_BASE_URL)"
+            );
+        }
+        if self
+            .git_remote_base_url
+            .as_deref()
+            .is_none_or(|base| base.trim().trim_end_matches('/').is_empty())
+        {
+            anyhow::bail!("ORIGIN_GIT_REMOTE_BASE_URL is required for the multi-tenant gateway");
+        }
+        if self.staging_base.is_some() {
+            anyhow::bail!(
+                "ORIGIN_STAGING_ROOT is not used by the multi-tenant gateway; unset it (uploads \
+                 are staged in the gateway's own cache)"
+            );
+        }
+        if self.git_branch != "main" {
+            anyhow::bail!(
+                "the multi-tenant gateway serves each space's main branch; unset ORIGIN_GIT_BRANCH \
+                 or set it to main"
+            );
+        }
+        Ok(())
+    }
+
     pub fn canonical_workspace_root(&self) -> Result<PathBuf> {
         canonicalize(&self.workspace_root)
     }
@@ -382,6 +424,58 @@ mod controller_token_store_tests {
         config.controller_token_source = None;
 
         assert!(!config.refresh_controller_token(IMMEDIATE).await);
+    }
+
+    fn gateway_config() -> ServerConfig {
+        let mut config = test_config();
+        config.multi_tenant = true;
+        config.git_remote_base_url = Some("http://git-edge:8080".into());
+        config
+    }
+
+    #[test]
+    fn a_gateway_needs_the_base_url_and_refuses_one_repository_for_every_space() {
+        gateway_config()
+            .validate_multi_tenant()
+            .expect("base url only");
+
+        let mut config = gateway_config();
+        config.git_remote_url = Some("http://git-edge:8080/one.git".into());
+        let error = config.validate_multi_tenant().unwrap_err().to_string();
+        assert!(error.contains("ORIGIN_GIT_REMOTE_URL"), "{error}");
+
+        // Blank values count as unset.
+        let mut config = gateway_config();
+        config.git_remote_url = Some("  ".into());
+        config.validate_multi_tenant().expect("blank remote url");
+
+        for base in [None, Some(""), Some(" / ")] {
+            let mut config = gateway_config();
+            config.git_remote_base_url = base.map(str::to_string);
+            let error = config.validate_multi_tenant().unwrap_err().to_string();
+            assert!(error.contains("ORIGIN_GIT_REMOTE_BASE_URL"), "{error}");
+        }
+
+        let mut config = gateway_config();
+        config.staging_base = Some(PathBuf::from("/var/staging"));
+        let error = config.validate_multi_tenant().unwrap_err().to_string();
+        assert!(error.contains("ORIGIN_STAGING_ROOT"), "{error}");
+
+        let mut config = gateway_config();
+        config.git_branch = "master".into();
+        let error = config.validate_multi_tenant().unwrap_err().to_string();
+        assert!(error.contains("ORIGIN_GIT_BRANCH"), "{error}");
+    }
+
+    #[test]
+    fn a_single_tenant_origin_keeps_its_one_repository_settings() {
+        let mut config = test_config();
+        config.git_remote_url = Some("http://git-edge:8080/one.git".into());
+        config.staging_base = Some(PathBuf::from("/var/staging"));
+        config.git_branch = "trunk".into();
+        config
+            .validate_multi_tenant()
+            .expect("single-tenant origins are not checked");
     }
 
     fn test_config() -> ServerConfig {

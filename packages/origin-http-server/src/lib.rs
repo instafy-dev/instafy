@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod git;
 pub mod git_tokens;
+pub mod hosted;
 pub mod jwks;
 pub mod paths;
 pub mod publish;
