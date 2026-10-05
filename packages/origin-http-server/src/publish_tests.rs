@@ -3627,6 +3627,92 @@ async fn a_marker_that_did_not_reach_main_goes_out_with_the_retry() {
     server.abort();
 }
 
+/// The first publish of a checkout whose history is unrelated to `main`
+/// replays its commits onto `main`, leaving out those that change nothing
+/// there. A salvage restore's empty marker is replayed all the same, so
+/// the first restore is recorded on `main`, and a second one adds nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_salvage_marker_survives_the_first_publish_of_an_unrelated_history() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        empty: true,
+        ..Options::default()
+    });
+    sc.write("LICENSE", b"license\n");
+    sc.agent_commit(&["LICENSE"], "agent bootstrap");
+    write(&sc.other, "LICENSE", b"license\n");
+    git_in(&sc.other, &["add", "-A"]);
+    git_in(&sc.other, &["commit", "-q", "-m", "first"]);
+    git_in(&sc.other, &["push", "-q", "origin", "main"]);
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    push_to_ref(
+        &sc,
+        &[(".env", Some(b"TOKEN=1\n"))],
+        &[],
+        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage",
+        salvage,
+    );
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let restore = || {
+        post_json(
+            &client,
+            format!("{base}/git/recovery/restore"),
+            serde_json::json!({ "ref": salvage }),
+        )
+    };
+    let main_before = sc.main();
+
+    let (status, body) = restore().await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["notRestored"], serde_json::json!([".env"]), "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
+    let marker = sc.main();
+    assert_ne!(marker, main_before, "{body}");
+    assert_eq!(body["rev"], marker.as_str(), "{body}");
+    assert_eq!(
+        git_in(
+            &sc.remote,
+            &["rev-list", "--count", &format!("{main_before}..main")]
+        ),
+        "1"
+    );
+    assert_eq!(
+        git_in(&sc.remote, &["log", "-1", "--format=%ce%n%B", "main"]),
+        format!("origin@instafy.dev\nRestore unsaved work\n\nInstafy-Restored-From: {salvage}")
+    );
+    assert_eq!(
+        git_in(&sc.remote, &["rev-parse", "main^{tree}"]),
+        git_in(
+            &sc.remote,
+            &["rev-parse", &format!("{main_before}^{{tree}}")]
+        )
+    );
+    let listed: serde_json::Value = client
+        .get(format!("{base}/git/recovery"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["ref"] == salvage)
+        .cloned()
+        .unwrap_or_else(|| panic!("{salvage} not listed in {listed}"));
+    assert_eq!(entry["restoredRev"], marker.as_str(), "{entry}");
+
+    let (status, body) = restore().await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["marked"], false, "{body}");
+    assert_eq!(sc.main(), marker);
+    server.abort();
+}
+
 /// A restore that reaches `main` only in part (the repository policy
 /// refused one of its files) keeps the recovery ref: what was refused is
 /// still only there. (A restore that does not reach `main` at all keeps it

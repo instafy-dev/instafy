@@ -34,7 +34,7 @@ use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
     parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
-    restore_of, without_origin_trailers, RecoveryRef, ViewError,
+    restore_commits, restore_of, without_origin_trailers, RecoveryRef, ViewError,
 };
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
@@ -1490,13 +1490,27 @@ impl<'a> Publisher<'a> {
                 Vec::new(),
             ));
         }
+        // A commit that changes nothing on `main` is left out, except the
+        // record of a salvage ref's restore (`restore`): its empty marker is
+        // what tells the list the salvage ref was restored.
+        let records: BTreeSet<String> = if commits.is_empty() {
+            BTreeSet::new()
+        } else {
+            restore_commits(&self.git, &commits, &self.config.git_author_email)?
+                .into_iter()
+                .filter(|(_, reference)| {
+                    RecoveryRef::parse(reference).is_ok_and(|reference| reference.is_salvage())
+                })
+                .map(|(id, _)| id)
+                .collect()
+        };
         let mut current = main.to_string();
         let mut conflicts = Vec::new();
         for commit in &commits {
             let parent = self.git.commit_id(&format!("{commit}^"))?;
             let merged = three_way(&self.git, parent.as_deref(), &current, commit)?;
             conflicts.extend(merged.conflicts);
-            if merged.tree == self.git.tree_id(&current)? {
+            if merged.tree == self.git.tree_id(&current)? && !records.contains(commit) {
                 continue;
             }
             let parsed = self.parse_commit(commit)?;
