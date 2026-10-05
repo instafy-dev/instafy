@@ -4,11 +4,15 @@
 //! the new tree from `main` in the change's quarantine and refuses what
 //! cannot be saved as asked (an upload's rules below):
 //!
-//! - a link or submodule written over (400 `unsupported_entry`), a folder
+//! - a link or submodule written over (400 `unsupported_entry`; 409
+//!   `head_moved` when the request says what the client read there, since
+//!   a link or submodule never matches a blob id or "absent"), a folder
 //!   deleted without the version it was read at (400
 //!   `delete_requires_base_rev`), a file where a folder is or the other way
 //!   round (409 `path_type_conflict`);
-//! - a new file the space's `.gitignore` ignores (422 `ignored_path`), a
+//! - a new file the space's `.gitignore` ignores (422 `ignored_path`;
+//!   not for imports and `autoCommitAfterApply` applies, which add tracked
+//!   content as `git add --force` does), a
 //!   path that may never be saved: Instafy metadata, build output and
 //!   dependencies, secrets, legacy chat uploads (422 `excluded_path`), or a
 //!   file over the size cap (422 `policy_rejected`);
@@ -280,6 +284,11 @@ pub(crate) struct Edits {
     /// (reported as skipped) instead of refusing the import, and tracked
     /// content is taken as is (no ignore check), as `git add --force` did.
     import: bool,
+    /// New files are added even where the space's `.gitignore` ignores
+    /// them (an `autoCommitAfterApply` apply: the controller seeding the
+    /// managed project files, which the single-tenant apply force-adds).
+    /// Every other rule still applies.
+    add_ignored: bool,
     /// Blob ids of the files not skipped, by path, hashed on the first
     /// attempt. A skipped file is never hashed, so it never reaches the
     /// mirror.
@@ -315,10 +324,18 @@ impl Edits {
             base_rev,
             expected,
             import,
+            add_ignored: false,
             blobs: None,
             skipped: BTreeMap::new(),
             attempt: None,
         }
+    }
+
+    /// New files are added even where the space's `.gitignore` ignores
+    /// them (see the field).
+    pub(crate) fn adding_ignored(mut self, add_ignored: bool) -> Self {
+        self.add_ignored = add_ignored;
+        self
     }
 
     /// The paths an import left out.
@@ -440,11 +457,12 @@ impl Edits {
             None => None,
         };
 
+        let check_ignores = !self.import && !self.add_ignored;
         let mut wanted = BTreeSet::new();
         for (file, _) in &writes {
             wanted.insert(file.path.clone());
             wanted.extend(ancestors(&file.path));
-            if !self.import {
+            if check_ignores {
                 wanted.extend(gitignores_for(&file.path));
             }
         }
@@ -459,6 +477,9 @@ impl Edits {
         };
 
         let mut unsupported = Vec::new();
+        // Written over a link or submodule with a condition on what the
+        // client read there: that read cannot have been of this entry.
+        let mut unmatched = Vec::new();
         let mut clashes = Vec::new();
         let mut refused: Vec<(String, RejectReason)> = Vec::new();
         let mut too_large = Vec::new();
@@ -473,7 +494,11 @@ impl Edits {
                     continue;
                 }
                 if !is_regular(&entry.mode) {
-                    unsupported.push(path.clone());
+                    if self.expected.contains_key(path) {
+                        unmatched.push(path.clone());
+                    } else {
+                        unsupported.push(path.clone());
+                    }
                     continue;
                 }
             }
@@ -491,7 +516,7 @@ impl Edits {
             };
             let changed = current.map_or(true, |entry| entry.mode != mode || entry.oid != *blob);
             if changed && !self.import {
-                if current.is_none() {
+                if current.is_none() && check_ignores {
                     new_paths.push(path.clone());
                 }
                 if let Some(reason) = unpublishable_reason(path) {
@@ -556,6 +581,11 @@ impl Edits {
             }
         }
 
+        // A 409 the client can act on (read again, leave the path alone)
+        // rather than a refusal of the whole request.
+        if !unmatched.is_empty() {
+            return Err(head_moved(main, unmatched));
+        }
         if !unsupported.is_empty() {
             return Err(unsupported_entry(unsupported));
         }
