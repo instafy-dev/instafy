@@ -1540,9 +1540,24 @@ pub(crate) fn fetch_failure(text: &str) -> Option<FetchFailure> {
     }
 }
 
+/// What git says when the transfer from canonical broke off: the
+/// connection closed or stalled part way (curl 18 and 28 over smart HTTP),
+/// or the other end hung up. A pack that did not arrive whole fails to
+/// index too; that never says anything about the mirror.
+const TRANSPORT_MARKERS: &[&str] = &[
+    "early eof",
+    "unexpected disconnect",
+    "rpc failed",
+    "the remote end hung up",
+    "bytes of body are still expected",
+    "transfer closed",
+    "operation too slow",
+];
+
 /// What a failed fetch's stderr says about the gateway's own disk: full,
 /// or a mirror damaged there; or that the pack sent did not index. Lines
-/// from canonical (`remote:`) never count.
+/// from canonical (`remote:`) never count, and a transfer that broke off
+/// is canonical's (or the network's) whatever else git printed after it.
 fn local_failure(stderr: &str) -> Option<FetchError> {
     let text = stderr
         .lines()
@@ -1550,17 +1565,26 @@ fn local_failure(stderr: &str) -> Option<FetchError> {
         .filter(|line| !line.starts_with("remote:"))
         .collect::<Vec<_>>()
         .join("\n");
+    if says_disk_full(&text) {
+        return Some(FetchError::DiskFull);
+    }
+    let names_local_object = ["stored in ", "./objects/"]
+        .iter()
+        .any(|marker| text.contains(marker));
+    // An object file of the mirror git could not read: the mirror's damage,
+    // whatever the transport printed after it.
+    if names_local_object && says_mirror_damaged(&text) {
+        return Some(FetchError::Broken);
+    }
+    if TRANSPORT_MARKERS.iter().any(|marker| text.contains(marker)) {
+        return None;
+    }
     // A pack that does not index: canonical's, unless git names an object
     // file of the mirror it could not read to resolve the pack's deltas.
     let from_pack = ["index-pack", "pack has bad object", "unresolved delta"]
         .iter()
         .any(|marker| text.contains(marker));
-    let names_local_object = ["stored in ", "./objects/"]
-        .iter()
-        .any(|marker| text.contains(marker));
-    if says_disk_full(&text) {
-        Some(FetchError::DiskFull)
-    } else if from_pack && !names_local_object {
+    if from_pack && !names_local_object {
         Some(FetchError::BadPack)
     } else if says_mirror_damaged(&text) {
         Some(FetchError::Broken)
@@ -1900,7 +1924,39 @@ mod tests {
                 "fatal: unable to access 'https://edge/x.git/': Could not resolve host: edge",
                 "unreachable",
             ),
-            ("error: RPC failed; curl 18 transfer closed", "unreachable"),
+            // A transfer cut off part way, as git tells it over smart HTTP
+            // (curl 18: the connection closed; curl 28: too slow) and over
+            // a local transport: the pack that did not arrive whole never
+            // says the mirror is damaged.
+            (
+                "error: RPC failed; curl 18 transfer closed with 1877460 bytes remaining to read\n\
+                 error: 46572 bytes of body are still expected\n\
+                 fetch-pack: unexpected disconnect while reading sideband packet\n\
+                 fatal: early EOF\n\
+                 fatal: fetch-pack: invalid index-pack output",
+                "unreachable",
+            ),
+            (
+                "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds\n\
+                 fetch-pack: unexpected disconnect while reading sideband packet\n\
+                 fatal: early EOF\n\
+                 fatal: fetch-pack: invalid index-pack output",
+                "unreachable",
+            ),
+            (
+                "fatal: the remote end hung up unexpectedly\n\
+                 fatal: early EOF\n\
+                 fatal: index-pack failed",
+                "unreachable",
+            ),
+            // A damaged object file of the mirror stays the mirror's when the
+            // other end hangs up after it.
+            (
+                "fatal: loose object 7627 (stored in ./objects/76/27) is corrupt\n\
+                 fatal: the remote end hung up unexpectedly\n\
+                 fatal: fetch-pack: invalid index-pack output",
+                "broken",
+            ),
             (
                 "fatal: pack has bad object at offset 12: inflate returned -3\nfatal: index-pack failed",
                 "bad_pack",
