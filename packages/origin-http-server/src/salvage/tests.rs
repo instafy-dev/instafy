@@ -151,6 +151,7 @@ impl Gateway {
         let entry = self.entry();
         std::fs::create_dir_all(&entry).unwrap();
         init_workspace_repo(&entry);
+        exclude_own_repository(&entry);
         ig(
             &entry,
             &[
@@ -199,6 +200,20 @@ impl Gateway {
         .map(|(name, id)| (name.to_string(), id.to_string()))
         .collect()
     }
+}
+
+/// git 2.34 (the oldest the origin supports) takes the layout's own
+/// `.instafy` repository as an embedded repository on `add -A` once HEAD
+/// has a commit, and records it as a gitlink; newer git leaves it out. The
+/// fixtures' local commits must hold the same paths on both.
+fn exclude_own_repository(entry: &Path) {
+    use std::io::Write as _;
+    let mut exclude = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(entry.join(".instafy/.git/info/exclude"))
+        .unwrap();
+    exclude.write_all(b"/.instafy/\n").unwrap();
 }
 
 fn commit_all(dir: &Path, message: &str) -> String {
@@ -1072,6 +1087,8 @@ fn replacement_refs_in_reftable_storage_never_hide_history() {
     );
     ig(&entry, &["config", "user.name", "Fixture"]);
     ig(&entry, &["config", "user.email", "fixture@instafy.dev"]);
+    std::fs::create_dir_all(entry.join(".instafy/.git/info")).unwrap();
+    exclude_own_repository(&entry);
     ig(
         &entry,
         &[
