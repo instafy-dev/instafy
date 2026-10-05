@@ -13,7 +13,9 @@ const MAX_REPORTED_PATHS: usize = 200;
 /// An unexpected failure: 500, or 503 `disk_full` when it says the
 /// gateway's disk is full.
 pub(super) fn internal(error: impl std::fmt::Display) -> OriginError {
-    or_disk_full(OriginError::internal(error.to_string()))
+    // `{:#}` keeps the causes of an error that has them (a quarantine or
+    // staging folder that could not be made because the disk is full).
+    or_disk_full(OriginError::internal(format!("{error:#}")))
 }
 
 /// `error`, or 503 `disk_full` when it is an unexpected failure that says
@@ -275,6 +277,11 @@ mod tests {
                 Some("2")
             );
         }
+        // The OS error under the context a step added (creating a
+        // quarantine, staging) counts too.
+        let quarantine = anyhow::Error::from(std::io::Error::from_raw_os_error(28))
+            .context("failed to create quarantine \"/c/.quarantine/x\"");
+        assert!(is_disk_full(&internal(quarantine)));
         let other = internal("git write-tree failed: fatal: unable to read tree");
         assert!(!is_disk_full(&other));
         assert_eq!(

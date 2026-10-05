@@ -877,6 +877,119 @@ async fn the_sweeper_keeps_free_space_on_the_disk() {
 /// A sweep measures only mirrors that changed since the last one: a mirror
 /// nothing fetched into keeps its size (bytes written behind the server's
 /// back are not seen), and a fetch has it measured again.
+/// A write that runs out of disk on this server (here: creating its
+/// object quarantine) is told 503 `disk_full` with `Retry-After`, never a
+/// server failure, and starts a sweep at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_on_a_full_disk_is_asked_to_retry_and_sweeps() {
+    let sc = HostedScenario::new();
+    let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let served = serve(&sc).await;
+    let quarantines = sc.root.join(".git-cache/.quarantine");
+    crate::test_support::fail_quarantines_in(&quarantines, 28);
+    let sweeps = served.cache.sweeps_run();
+    let request =
+        super::write_tests::manifest(&["b.txt"], &[], serde_json::json!({ "baseRev": head }));
+    let archive = super::write_tests::zip(&[("b.txt", b"b\n")]);
+    let answer = super::write_tests::apply(&served, request.clone(), &archive).await;
+    crate::test_support::clear_quarantine_failure(&quarantines);
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (503, "disk_full"),
+        "{}",
+        String::from_utf8_lossy(&answer.body)
+    );
+    assert_eq!(answer.header("retry-after").as_deref(), Some("2"));
+    let started = std::time::Instant::now();
+    while served.cache.sweeps_run() == sweeps {
+        assert!(started.elapsed() < Duration::from_secs(10), "no sweep ran");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let answer = super::write_tests::apply(&served, request, &archive).await;
+    assert_eq!(
+        answer.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&answer.body)
+    );
+}
+
+/// A `?ref=` or recovery-list fetch that fails on this server's disk is
+/// not canonical's: a full disk is 503 `disk_full`, a damaged mirror keeps
+/// git's words (so it is made again), the rest is 502.
+#[test]
+fn ref_fetches_tell_this_servers_disk_from_canonical() {
+    use crate::recovery_view::ViewError;
+    let code = |error: crate::error::OriginError| {
+        let response = axum::response::IntoResponse::into_response(error);
+        response.status().as_u16()
+    };
+    let full = ViewError::Git(anyhow::anyhow!(
+        "git fetch failed: error: unable to write file ./objects/ab/cd: No space left on device"
+    ));
+    assert_eq!(code(super::routes::ref_error(full)), 503);
+    let damaged = ViewError::Git(anyhow::anyhow!(
+        "git fetch failed: error: cannot lock ref 'refs/instafy/fetched/x': File exists"
+    ));
+    assert_eq!(code(super::routes::ref_error(damaged)), 500);
+    let away = ViewError::Git(anyhow::anyhow!(
+        "git fetch failed: fatal: unable to access 'https://edge/x.git/': Could not resolve host"
+    ));
+    assert_eq!(code(super::routes::ref_error(away)), 502);
+}
+
+/// The sweeper never touches `.legacy/` (working copies of the old gateway,
+/// kept for salvage); when the disk is short of space it reports its size.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sweeper_reports_and_never_removes_legacy_working_copies() {
+    let sc = HostedScenario::new();
+    let legacy = sc.root.join(".legacy").join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("draft.md"), vec![b'd'; 4096]).unwrap();
+    let cache = Arc::new(sc.open_cache().with_free_space(1 << 30, |_| Some(1)));
+    let report = {
+        let cache = cache.clone();
+        tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
+            .await
+            .unwrap()
+    };
+    assert!(legacy.join("draft.md").is_file());
+    assert!(
+        report.legacy_bytes.is_some_and(|bytes| bytes >= 4096),
+        "{report:?}"
+    );
+}
+
+/// A sweep asked for while another runs (a write that found the disk full)
+/// is not lost: the running sweep goes over the cache again when done.
+#[test]
+fn a_sweep_asked_for_during_a_sweep_runs_after_it() {
+    let sc = HostedScenario::new();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let cache = Arc::new(sc.open_cache().with_free_space(1, move |_| {
+        // The first sweep waits here, holding the sweep lock.
+        if counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv().unwrap();
+        }
+        Some(u64::MAX)
+    }));
+    let running = {
+        let cache = cache.clone();
+        std::thread::spawn(move || cache.sweep(SystemTime::now()))
+    };
+    entered_rx.recv().unwrap();
+    let asked = cache.sweep(SystemTime::now());
+    assert!(!asked.ran);
+    release_tx.send(()).unwrap();
+    assert!(running.join().unwrap().ran);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sweeps_measure_only_mirrors_that_changed() {
     let sc = HostedScenario::new();
@@ -973,6 +1086,9 @@ async fn only_the_sweeper_packs_mirrors() {
     };
     assert_eq!(swept.packed, vec![sc.project]);
     assert_eq!(packs(&mirror), 1);
+    // Packing (minutes for a large mirror) runs outside the sweep's lock,
+    // so a sweep a full disk asks for meanwhile still runs.
+    assert_eq!(cache.packed_while_sweeping(), Some(false));
     assert_eq!(
         std::fs::metadata(mirror.join("instafy-last-use"))
             .unwrap()

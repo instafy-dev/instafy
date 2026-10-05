@@ -336,3 +336,34 @@ impl Drop for GitWrapper {
         crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
     }
 }
+
+/// Quarantines created under these parents fail with this OS error (a full
+/// disk is error 28), for tests of what a write does when the disk fills.
+static QUARANTINE_FAILURES: std::sync::Mutex<Vec<(PathBuf, i32)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Make every quarantine created under `parent` fail with OS error `code`
+/// until [`clear_quarantine_failure`].
+pub(crate) fn fail_quarantines_in(parent: &Path, code: i32) {
+    QUARANTINE_FAILURES
+        .lock()
+        .unwrap()
+        .push((parent.to_path_buf(), code));
+}
+
+pub(crate) fn clear_quarantine_failure(parent: &Path) {
+    QUARANTINE_FAILURES
+        .lock()
+        .unwrap()
+        .retain(|(failing, _)| failing != parent);
+}
+
+/// The OS error a quarantine under `parent` fails with, if any.
+pub(crate) fn quarantine_failure(parent: &Path) -> Option<std::io::Error> {
+    QUARANTINE_FAILURES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(failing, _)| failing == parent)
+        .map(|(_, code)| std::io::Error::from_raw_os_error(*code))
+}
