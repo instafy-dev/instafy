@@ -1114,6 +1114,158 @@ async fn links_submodules_and_reserved_paths_are_not_written() {
     assert_eq!(sc.canonical_main().as_deref(), Some(head.as_str()));
 }
 
+/// The controller's managed-files bootstrap (5.3): it reads each file,
+/// writes the missing ones with `expected: null`, `baseRev` and
+/// `autoCommitAfterApply`, and on a 409 reads again and leaves alone a path
+/// the 409 named that still reads as missing.
+fn bootstrap_manifest(head: &str, paths: &[&str]) -> serde_json::Value {
+    let expected: serde_json::Map<String, serde_json::Value> = paths
+        .iter()
+        .map(|path| (path.to_string(), serde_json::Value::Null))
+        .collect();
+    manifest(
+        paths,
+        &[],
+        json!({
+            "baseRev": head,
+            "expected": expected,
+            "autoCommitAfterApply": true,
+            "commitMessage": "instafy: bootstrap project memory",
+        }),
+    )
+}
+
+/// A managed file that is a link or a submodule on `main` reads as 404
+/// `unsupported_entry`; writing it with "it was absent" is a 409 naming it
+/// (so the bootstrap leaves it alone and seeds the rest), never a refusal
+/// of the whole write. Without a condition it stays 400.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrap_leaves_linked_managed_files_alone_and_seeds_the_rest() {
+    let sc = HostedScenario::new();
+    sc.push(&[("AGENTS.md", Some(b"agents\n"))], "seed");
+    let target = sc.blob("AGENTS.md");
+    sc.push_entry("CLAUDE.md", "120000", &target, "a link");
+    let any = git_in(&sc.work, &["rev-parse", "HEAD"]);
+    let head = sc.push_entry("INSTAFY.md", "160000", &any, "a submodule");
+    let served = serve(&sc).await;
+    let skill = ".agents/skills/x/SKILL.md";
+
+    for linked in ["CLAUDE.md", "INSTAFY.md"] {
+        let read = get(&served, &format!("/files/{linked}?encoding=base64")).await;
+        assert_eq!(
+            (read.status, read.code().as_str()),
+            (404, "unsupported_entry")
+        );
+        assert_eq!(read.rev().as_deref(), Some(head.as_str()));
+    }
+    let paths = ["CLAUDE.md", "INSTAFY.md", skill];
+    let answer = apply(
+        &served,
+        bootstrap_manifest(&head, &paths),
+        &zip(&[
+            ("CLAUDE.md", b"c\n"),
+            ("INSTAFY.md", b"i\n"),
+            (skill, b"s\n"),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (409, "head_moved"),
+        "{}",
+        answer.json()
+    );
+    assert_eq!(answer.json()["paths"], json!(["CLAUDE.md", "INSTAFY.md"]));
+    assert_eq!(answer.json()["head"], head.as_str());
+    assert_eq!(sc.canonical_main().as_deref(), Some(head.as_str()));
+
+    // Read again: still missing, so the retry leaves both alone.
+    let read = get(&served, "/files/CLAUDE.md?encoding=base64").await;
+    assert_eq!(
+        (read.status, read.code().as_str()),
+        (404, "unsupported_entry")
+    );
+    let answer = apply(
+        &served,
+        bootstrap_manifest(&head, &[skill]),
+        &zip(&[(skill, b"s\n")]),
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
+    assert_eq!(answer.json()["committed"], true);
+    let seeded = rev(&answer);
+    assert_eq!(show(&sc, &seeded, skill).unwrap(), b"s\n");
+    assert!(canonical(&sc, &["ls-tree", &seeded, "CLAUDE.md"]).starts_with("120000 "));
+
+    // Without a condition, writing over a link is still refused outright.
+    let answer = apply(
+        &served,
+        manifest(&["CLAUDE.md"], &[], json!({ "baseRev": seeded })),
+        &zip(&[("CLAUDE.md", b"c\n")]),
+    )
+    .await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (400, "unsupported_entry")
+    );
+}
+
+/// A managed file the space's `.gitignore` ignores is seeded like tracked
+/// content when the controller writes it (`autoCommitAfterApply`, as the
+/// single-tenant apply force-adds); a person's save of a new ignored file
+/// is still 422 `ignored_path`, and secrets stay out either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bootstrap_seeds_managed_files_the_space_ignores() {
+    let sc = HostedScenario::new();
+    let head = sc.push(
+        &[
+            ("README.md", Some(b"r\n")),
+            (".gitignore", Some(b"CLAUDE.md\n.agents/\n")),
+        ],
+        "seed",
+    );
+    let served = serve(&sc).await;
+    let skill = ".agents/skills/x/SKILL.md";
+    let state = ".agents/.instafy-managed-defaults-state.json";
+
+    let plain = apply(
+        &served,
+        manifest(&["CLAUDE.md"], &[], json!({ "baseRev": head })),
+        &zip(&[("CLAUDE.md", b"c\n")]),
+    )
+    .await;
+    assert_eq!((plain.status, plain.code().as_str()), (422, "ignored_path"));
+
+    let paths = ["AGENTS.md", "CLAUDE.md", skill, state];
+    let answer = apply(
+        &served,
+        bootstrap_manifest(&head, &paths),
+        &zip(&[
+            ("AGENTS.md", b"a\n"),
+            ("CLAUDE.md", b"c\n"),
+            (skill, b"s\n"),
+            (state, b"{}\n"),
+        ]),
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
+    let seeded = rev(&answer);
+    for path in paths {
+        assert!(show(&sc, &seeded, path).is_some(), "{path}");
+    }
+
+    let secret = apply(
+        &served,
+        bootstrap_manifest(&seeded, &[".env"]),
+        &zip(&[(".env", b"KEY=1\n")]),
+    )
+    .await;
+    assert_eq!(
+        (secret.status, secret.code().as_str()),
+        (422, "excluded_path")
+    );
+}
+
 /// Executable bits come from the upload, or stay as they were.
 #[tokio::test(flavor = "multi_thread")]
 async fn modes_follow_the_upload_or_stay() {

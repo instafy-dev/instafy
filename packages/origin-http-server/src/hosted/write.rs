@@ -226,6 +226,9 @@ async fn apply(
     let gateway = gateway_identity(&state);
     let author = save_author(&claims, &gateway);
     let caller_text = manifest.commit_message.clone();
+    // `autoCommitAfterApply` is what the controller sends when it seeds the
+    // managed project files; they are added like tracked content.
+    let auto_commit = manifest.auto_commit_after_apply;
 
     // Stage the upload under the cache, never in a space folder.
     let staging = Staging::create(&state.cache.staging_dir()?)?;
@@ -258,14 +261,17 @@ async fn apply(
 
     let write_token = write_token(&state, project, &token).await?;
     let budget = if import { IMPORT_BUDGET } else { SAVE_BUDGET };
-    let change = Change::Edits(Edits::new(
-        staging.0.clone(),
-        staged.files,
-        staged.deletes,
-        base_rev,
-        expected,
-        import,
-    ));
+    let change = Change::Edits(
+        Edits::new(
+            staging.0.clone(),
+            staged.files,
+            staged.deletes,
+            base_rev,
+            expected,
+            import,
+        )
+        .adding_ignored(auto_commit),
+    );
     let (outcome, change) = commit(
         &state,
         project,
