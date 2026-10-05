@@ -78,8 +78,10 @@ services:
       ORIGIN_GIT_REMOTE_BASE_URL: ${ORIGIN_GIT_REMOTE_BASE_URL:-http://git-edge:8080}
       ORIGIN_GIT_BRANCH: ${ORIGIN_GIT_BRANCH:-main}
       ORIGIN_GIT_REMOTE_NAME: ${ORIGIN_GIT_REMOTE_NAME:-origin}
-      ORIGIN_GIT_AUTHOR_NAME: ${ORIGIN_GIT_AUTHOR_NAME:-instafy-origin}
-      ORIGIN_GIT_AUTHOR_EMAIL: ${ORIGIN_GIT_AUTHOR_EMAIL:-origin@instafy.dev}
+      # The gateway's own committer address: it must differ from the runtimes'
+      # (ORIGIN_GIT_AUTHOR_EMAIL), or the gateway refuses to start.
+      ORIGIN_GIT_AUTHOR_NAME: ${ORIGIN_GATEWAY_GIT_AUTHOR_NAME:-instafy-origin}
+      ORIGIN_GIT_AUTHOR_EMAIL: ${ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL:-gateway@instafy.dev}
       ORIGIN_MAX_ARCHIVE_BYTES: ${ORIGIN_MAX_ARCHIVE_BYTES:-134217728}
     volumes:
       - ${ORIGIN_GATEWAY_WORKSPACE_VOLUME:-../tmp/origin-gateway-workspaces}:/workspaces

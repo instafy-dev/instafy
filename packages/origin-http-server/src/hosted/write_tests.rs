@@ -301,7 +301,7 @@ impl StubController {
 
 /// The gateway's identity in [`HostedScenario`].
 fn gateway() -> GitIdentity {
-    GitIdentity::new("instafy-origin", "origin@instafy.dev")
+    GitIdentity::new("instafy-origin", "gateway@instafy.dev")
 }
 
 /// The commit-and-push loop run on the test thread, so a push hook or a
@@ -447,7 +447,7 @@ async fn a_save_lands_on_what_a_runtime_pushed() {
             &sc,
             &["log", "-1", "--format=%s%n%an <%ae>%n%cn <%ce>", &saved]
         ),
-        "Update notes.md\ninstafy-origin <origin@instafy.dev>\ninstafy-origin <origin@instafy.dev>"
+        "Update notes.md\ninstafy-origin <gateway@instafy.dev>\ninstafy-origin <gateway@instafy.dev>"
     );
 
     // The mirror moved with the push: a read right after needs no fetch.
@@ -1388,16 +1388,30 @@ async fn imports_are_committed_once_and_found_by_their_key() {
     );
 
     // Commits carrying a key the gateway did not commit never count: one
-    // by a runtime, and one claiming the gateway's address with a key
-    // nobody but the controller knows.
+    // by a runtime under the address runtimes commit under by default (a
+    // copy of a key already on main, too), and one claiming the gateway's
+    // address with a key nobody but the controller knows.
     let planted = "imp:planted";
     let message =
         format!("Planted\n\nInstafy-Apply-Key: {planted}\nInstafy-Apply-Fingerprint: sha256:aaaa");
-    sc.push_as("Runtime", "agent@instafy.dev", &message);
-    let forged_key = "imp:forged";
+    sc.push_as("instafy-origin", "origin@instafy.dev", &message);
     sc.push_as(
         "instafy-origin",
         "origin@instafy.dev",
+        &format!("Copied\n\nInstafy-Apply-Key: {key}\nInstafy-Apply-Fingerprint: sha256:aaaa"),
+    );
+    let status = post_as(
+        &served,
+        "/apply/status",
+        json!({ "idempotencyKey": key, "requestFingerprint": "sha256:aaaa" }),
+        &import,
+    )
+    .await;
+    assert_eq!(status.json()["rev"], imported.as_str(), "{}", status.json());
+    let forged_key = "imp:forged";
+    sc.push_as(
+        "instafy-origin",
+        "gateway@instafy.dev",
         &format!(
             "Forged\n\nInstafy-Apply-Key: {forged_key}x\nInstafy-Apply-Fingerprint: sha256:aaaa"
         ),
@@ -1487,7 +1501,7 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
         "{raw}"
     );
     assert!(
-        raw.contains("committer instafy-origin <origin@instafy.dev>"),
+        raw.contains("committer instafy-origin <gateway@instafy.dev>"),
         "{raw}"
     );
     assert!(!raw.contains(&controller.user.to_string()), "{raw}");
@@ -1520,7 +1534,7 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
     assert_eq!(answer.status, 200, "{}", answer.json());
     assert_eq!(
         canonical(&sc, &["log", "-1", "--format=%an <%ae>", &rev(&answer)]),
-        "instafy-origin <origin@instafy.dev>"
+        "instafy-origin <gateway@instafy.dev>"
     );
 }
 

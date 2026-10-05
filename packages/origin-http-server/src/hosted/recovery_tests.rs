@@ -139,7 +139,7 @@ async fn a_restore_saves_the_work_on_main_and_removes_its_ref() {
     }
     let raw = canonical(&sc, &["cat-file", "commit", &restored]);
     assert!(
-        raw.contains("committer instafy-origin <origin@instafy.dev>"),
+        raw.contains("committer instafy-origin <gateway@instafy.dev>"),
         "{raw}"
     );
     assert!(
@@ -639,7 +639,7 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
         "{raw}"
     );
     assert!(
-        raw.contains("committer instafy-origin <origin@instafy.dev>"),
+        raw.contains("committer instafy-origin <gateway@instafy.dev>"),
         "{raw}"
     );
     assert!(!raw.contains(&controller.user.to_string()), "{raw}");

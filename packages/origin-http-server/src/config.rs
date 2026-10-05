@@ -9,6 +9,16 @@ use uuid::Uuid;
 
 pub const MAX_APPLY_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 
+/// The address a single-tenant origin (hosted runtime, Desktop) commits
+/// under when `ORIGIN_GIT_AUTHOR_EMAIL` is unset.
+pub const DEFAULT_ORIGIN_AUTHOR_EMAIL: &str = "origin@instafy.dev";
+
+/// The address the multi-tenant gateway commits under when
+/// `ORIGIN_GIT_AUTHOR_EMAIL` is unset. It must differ from every
+/// single-tenant origin's: the gateway trusts commits under its own address
+/// as its restores and import receipts.
+pub const DEFAULT_GATEWAY_AUTHOR_EMAIL: &str = "gateway@instafy.dev";
+
 /// How long a rejected caller waits for a renewed controller token before it
 /// gives up on this attempt. Short on purpose: the caller is a periodic loop,
 /// so giving up just means retrying on the next tick.
@@ -226,6 +236,18 @@ impl ServerConfig {
             anyhow::bail!(
                 "the multi-tenant gateway serves each space's main branch; unset ORIGIN_GIT_BRANCH \
                  or set it to main"
+            );
+        }
+        if self
+            .git_author_email
+            .trim()
+            .eq_ignore_ascii_case(DEFAULT_ORIGIN_AUTHOR_EMAIL)
+        {
+            anyhow::bail!(
+                "ORIGIN_GIT_AUTHOR_EMAIL is the address hosted runtimes commit under by default; \
+                 the multi-tenant gateway needs its own (unset it for \
+                 {DEFAULT_GATEWAY_AUTHOR_EMAIL}), since it trusts commits under its address as its \
+                 restores and import receipts"
             );
         }
         Ok(())
@@ -457,6 +479,19 @@ mod controller_token_store_tests {
         config.git_branch = "master".into();
         let error = config.validate_multi_tenant().unwrap_err().to_string();
         assert!(error.contains("ORIGIN_GIT_BRANCH"), "{error}");
+
+        // The address runtimes commit under by default, in any spelling.
+        for email in [DEFAULT_ORIGIN_AUTHOR_EMAIL, " Origin@Instafy.dev "] {
+            let mut config = gateway_config();
+            config.git_author_email = email.into();
+            let error = config.validate_multi_tenant().unwrap_err().to_string();
+            assert!(error.contains("ORIGIN_GIT_AUTHOR_EMAIL"), "{error}");
+        }
+        let mut config = gateway_config();
+        config.git_author_email = DEFAULT_GATEWAY_AUTHOR_EMAIL.into();
+        config
+            .validate_multi_tenant()
+            .expect("the gateway's own address");
     }
 
     #[test]
@@ -465,6 +500,7 @@ mod controller_token_store_tests {
         config.git_remote_url = Some("http://git-edge:8080/one.git".into());
         config.staging_base = Some(PathBuf::from("/var/staging"));
         config.git_branch = "trunk".into();
+        config.git_author_email = DEFAULT_ORIGIN_AUTHOR_EMAIL.into();
         config
             .validate_multi_tenant()
             .expect("single-tenant origins are not checked");

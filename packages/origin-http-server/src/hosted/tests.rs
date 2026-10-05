@@ -60,7 +60,7 @@ impl HostedScenario {
             git_branch: "main".into(),
             git_remote_name: "origin".into(),
             git_author_name: "instafy-origin".into(),
-            git_author_email: "origin@instafy.dev".into(),
+            git_author_email: "gateway@instafy.dev".into(),
             bind_host: "127.0.0.1".into(),
             bind_port: 0,
             controller_base_url: "http://127.0.0.1:1/".parse().unwrap(),
@@ -1082,7 +1082,7 @@ async fn a_file_over_the_read_limit_is_too_large() {
 #[tokio::test(flavor = "multi_thread")]
 async fn history_pages_follow_first_parents_with_actors_and_merges() {
     let sc = HostedScenario::new();
-    let root = sc.push_as("instafy-origin", "origin@instafy.dev", "bootstrap");
+    let root = sc.push_as("instafy-origin", "gateway@instafy.dev", "bootstrap");
     let saved = sc.push_as(
         "Ada Lovelace",
         "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev",
@@ -1356,18 +1356,24 @@ async fn the_recovery_list_marks_work_the_gateway_restored() {
     );
     let salvage_ref = "refs/instafy/salvage/gateway/node-1-0123abcd";
     sc.push_ref(&salvaged, salvage_ref);
-    // The gateway restored the salvage ref; an agent forged a restore of
-    // the conflict ref.
+    // The gateway restored the salvage ref; agents forged a restore of the
+    // conflict ref, one under the address hosted runtimes commit under by
+    // default (a runtime save keeps its committer when it lands on main).
     let restore = sc.push_as(
-        "instafy-origin",
-        "origin@instafy.dev",
+        &sc.config.git_author_name,
+        &sc.config.git_author_email,
         &format!("Restore unsaved work\n\nInstafy-Restored-From: {salvage_ref}"),
     );
-    sc.push_as(
-        "instafy-origin",
+    for forger in [
         "agent@instafy.dev",
-        &format!("Restore unsaved work\n\nInstafy-Restored-From: {conflict_ref}"),
-    );
+        crate::config::DEFAULT_ORIGIN_AUTHOR_EMAIL,
+    ] {
+        sc.push_as(
+            "instafy-origin",
+            forger,
+            &format!("Restore unsaved work\n\nInstafy-Restored-From: {conflict_ref}"),
+        );
+    }
     let served = serve(&sc).await;
 
     let answer = get(&served, "/git/recovery").await;
