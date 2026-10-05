@@ -9,6 +9,7 @@ use axum::routing::get;
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 
+use super::cache::MirrorCache;
 use super::config::HostedGatewayConfig;
 use crate::route_auth::RouteAuth;
 
@@ -19,6 +20,7 @@ use crate::route_auth::RouteAuth;
 pub(crate) struct HostedState {
     pub(crate) auth: RouteAuth,
     pub(crate) hosted: Arc<HostedGatewayConfig>,
+    pub(crate) cache: Arc<MirrorCache>,
 }
 
 pub(crate) fn router(state: HostedState) -> Router {
