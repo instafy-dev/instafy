@@ -18,7 +18,7 @@ use super::outputs::{
 use super::services::{ExportOutcome, Services};
 use super::work::{self, Version, WorkIndex};
 use super::{EntryReport, ExportedAttachment};
-use crate::hosted::{rename_no_replace, tree_size};
+use crate::hosted::{free_bytes, rename_no_replace, tree_size};
 use crate::publish_policy::RejectReason;
 use crate::tree_merge::changed_paths;
 use crate::workspace_git::WorkspaceGit;
@@ -181,7 +181,9 @@ fn salvage_files_only(
         .map(|kept| ArchiveItem::Worktree(kept.path.clone()))
         .collect();
     report.private_archived_paths = sorted.private;
+    report.private_archive_bytes = private_bytes(&report.private_archived_paths);
     if settings.apply {
+        ensure_room(settings, report.private_archive_bytes)?;
         report.private_archive =
             write_private_archive(settings, root, None, &report.entry, &items)?;
     }
@@ -389,6 +391,7 @@ fn salvage_repository(
             AttachmentSource::Worktree => read_worktree_file(root, &path)?.0,
             AttachmentSource::Blob(oid) => read_blob(&git, oid)?,
         };
+        let size = bytes.len() as u64;
         match services.export_attachment(&project, &path, bytes) {
             ExportOutcome::Exported(conversations) => {
                 report.exported_attachments.push(ExportedAttachment {
@@ -420,6 +423,7 @@ fn salvage_repository(
         private.push(PrivatePath {
             path,
             reason: "attachment",
+            size,
             commit: match source {
                 AttachmentSource::Worktree => None,
                 AttachmentSource::Blob(_) => head.clone(),
@@ -460,7 +464,9 @@ fn salvage_repository(
         && (canonical != Canonical::Missing || tip.is_none())
         && report.skipped_paths.iter().all(Skipped::rebuildable);
     report.private_archived_paths = private;
+    report.private_archive_bytes = private_bytes(&report.private_archived_paths);
     if settings.apply {
+        ensure_room(settings, report.private_archive_bytes)?;
         report.bundle = write_bundle(
             settings,
             &git,
@@ -476,6 +482,29 @@ fn salvage_repository(
             write_private_archive(settings, root, Some(&git), &report.entry, &items)?;
     }
     pushed
+}
+
+fn private_bytes(private: &[PrivatePath]) -> u64 {
+    private.iter().map(|kept| kept.size).sum()
+}
+
+/// Stop before an entry's outputs would take the volume below the free
+/// space the gateway keeps (its mirror cache shares the volume): `bytes` of
+/// private files, and the floor itself as room for the bundle.
+fn ensure_room(settings: &Settings, bytes: u64) -> Result<()> {
+    let Some(free) = free_bytes(&settings.root) else {
+        return Ok(());
+    };
+    let needed = bytes.saturating_add(settings.min_free_bytes);
+    if free < needed {
+        bail!(
+            "the volume has {free} bytes free, and this entry's outputs ({bytes} bytes of \
+             private files, and its bundle) would leave less than the {} bytes the gateway \
+             keeps free: make room, then rerun",
+            settings.min_free_bytes
+        );
+    }
+    Ok(())
 }
 
 /// What pushing one entry's salvage ref needs.
@@ -763,7 +792,9 @@ fn keep_history(
             commit: None,
         }),
         _ => {
-            for version in versions {
+            let ids: Vec<String> = versions.iter().map(|version| version.oid.clone()).collect();
+            let sizes = git.object_sizes(&ids)?;
+            for (version, size) in versions.iter().zip(sizes) {
                 items.push(ArchiveItem::Blob {
                     commit: version.commit.clone(),
                     path: path.to_string(),
@@ -774,6 +805,7 @@ fn keep_history(
                 private.push(PrivatePath {
                     path: path.to_string(),
                     reason: reason_name(reason),
+                    size: size.map(|(_, size)| size).unwrap_or(0),
                     commit: Some(version.commit.clone()),
                 });
             }

@@ -114,6 +114,9 @@ pub(crate) struct Settings {
     pub remote_base: String,
     /// The gateway's own identity, which salvage commits are made under.
     pub identity: GitIdentity,
+    /// Free space the volume keeps after an entry's outputs are written
+    /// (the mirror cache's own floor), or the entry stops.
+    pub min_free_bytes: u64,
 }
 
 impl Settings {
@@ -164,6 +167,7 @@ impl Settings {
             acks: flags.acks.clone(),
             remote_base,
             identity,
+            min_free_bytes: crate::hosted::MIN_FREE_BYTES,
         })
     }
 

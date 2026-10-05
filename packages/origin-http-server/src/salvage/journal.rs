@@ -115,6 +115,7 @@ mod tests {
             acks: Vec::new(),
             remote_base: "file:///nowhere".to_string(),
             identity: crate::workspace_git::GitIdentity::new("a", "b@example.com"),
+            min_free_bytes: 0,
         };
         assert!(verified_refs(&settings).unwrap().is_empty());
         let lines = [
