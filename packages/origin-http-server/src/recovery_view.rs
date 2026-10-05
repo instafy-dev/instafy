@@ -4065,6 +4065,7 @@ mod tests {
             "Tidy\n\ninstafy-cli: now prints JSON.\nIt also fixes the flag parsing.".to_string(),
             "Tidy\n\ninstafy-cli: now prints JSON.\n\nMore detail here".to_string(),
             format!("Tidy\n\nInstafy-Restored-From: {reference}\n\nQuoted above, not a trailer."),
+            "Tidy\n\nInstafy-style note in a trailer block\nSigned-off-by: A <a@x>".to_string(),
             "Notes on Instafy-Apply-Key handling".to_string(),
             "See \u{1}Instafy-Restored-From".to_string(),
             "Instafy".to_string(),
@@ -4114,6 +4115,13 @@ mod tests {
             (
                 format!("Tidy\n\nInstafy-Restored-From: {reference}\n\n# a comment"),
                 "Tidy\n\n\n# a comment".to_string(),
+            ),
+            (
+                format!(
+                    "Tidy\n\nInstafy-Restored-From: {reference}\n\n# a comment\n\
+                     Conflicts:\n\tpath.md"
+                ),
+                "Tidy\n\n\n# a comment\nConflicts:\n\tpath.md".to_string(),
             ),
             (
                 format!(
