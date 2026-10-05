@@ -99,8 +99,8 @@ pub(crate) use self::work::PRIVATE_PATH_TRAILER;
 
 /// Run the subcommand with the arguments after `salvage`; returns the exit
 /// status: 0 when every entry was handled, 1 when an entry failed, was not
-/// removed, or has a chat image a rerun may still export, 2 for a usage or
-/// configuration error.
+/// removed, or is still there with a chat image a rerun may export, 2 for a
+/// usage or configuration error.
 pub async fn cli(args: Vec<String>) -> i32 {
     let flags = match options::parse_flags(&args) {
         Ok(flags) => flags,
@@ -243,6 +243,9 @@ pub(crate) struct Summary {
     pub errors: usize,
     /// Entries with a chat image a rerun may still export.
     pub export_failed: usize,
+    /// Those of them still under `.legacy/`: one removed was acknowledged
+    /// with `--ack` as it is, and nothing can export its images any more.
+    pub export_open: usize,
     /// Bytes of private files over every entry.
     pub private_bytes: u64,
 }
@@ -267,12 +270,15 @@ impl Summary {
         }
         if !report.export_failed.is_empty() {
             self.export_failed += 1;
+            if !report.removed {
+                self.export_open += 1;
+            }
         }
         self.private_bytes += report.private_archive_bytes;
     }
 
     pub(crate) fn exit_code(&self) -> i32 {
-        i32::from(self.errors > 0 || self.refused > 0 || self.export_failed > 0)
+        i32::from(self.errors > 0 || self.refused > 0 || self.export_open > 0)
     }
 
     fn describe(&self) -> String {
