@@ -2592,7 +2592,8 @@ async fn history_review_counts_the_parents_of_a_version() {
     let merge = report.rev.expect("a merge was published");
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
-    for (commit, parents) in [(merge.clone(), 2), (format!("{merge}^2"), 1)] {
+    let second = git_in(&sc.remote, &["rev-parse", &format!("{merge}^2")]);
+    for (commit, parents) in [(merge.clone(), 2), (second, 1)] {
         let body: serde_json::Value = client
             .get(format!("{base}/git/history/review"))
             .query(&[("commit", commit.as_str())])
@@ -2604,6 +2605,71 @@ async fn history_review_counts_the_parents_of_a_version() {
             .unwrap();
         assert_eq!(body["parentCount"], parents, "{commit}: {body}");
     }
+    server.abort();
+}
+
+/// The review's `commit` is a version id, full or abbreviated, in either
+/// case. Anything else (an option such as `--output=<file>`, a name or a
+/// revision expression) is answered with an error and never reaches git:
+/// no file is written. `list_commit_files` refuses such a value itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_review_takes_a_version_id_never_an_option() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let review = |commit: String| {
+        let request = client
+            .get(format!("{base}/git/history/review"))
+            .query(&[("commit", commit)]);
+        async move {
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            response.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+    let written = sc.root.join("written-by-review.txt");
+    for commit in [
+        format!("--output={}", written.display()),
+        "HEAD".to_string(),
+        format!("{}^", sc.main()),
+        "-p".to_string(),
+    ] {
+        let body = review(commit.clone()).await;
+        assert_eq!(body["supported"], true, "{commit}: {body}");
+        assert_eq!(body["entries"], serde_json::json!([]), "{commit}: {body}");
+        assert!(body["error"].is_string(), "{commit}: {body}");
+        assert!(body.get("parentCount").is_none(), "{commit}: {body}");
+    }
+    assert!(!written.exists(), "git wrote {written:?}");
+
+    let head = sc.main();
+    for commit in [
+        head.clone(),
+        head[..12].to_string(),
+        head.to_ascii_uppercase(),
+    ] {
+        let body = review(commit.clone()).await;
+        assert!(body.get("error").is_none(), "{commit}: {body}");
+        assert_eq!(body["parentCount"], 0, "{commit}: {body}");
+        let paths: Vec<&str> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["README.md", "doc.md", "logo.bin"],
+            "{commit}: {body}"
+        );
+    }
+
+    let option = format!("--output={}", written.display());
+    assert!(crate::git::list_commit_files(&sc.ws, &option, None).is_err());
+    assert!(!written.exists(), "git wrote {written:?}");
     server.abort();
 }
 

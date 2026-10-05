@@ -1292,6 +1292,25 @@ async fn handle_git_history_review(
             error: Some("missing commit".to_string()),
         }));
     }
+    // A version id, full or abbreviated: git gets a copy of its digits, never
+    // the request's text (which could be an option such as `--output=`).
+    let Some(commit_id) = git::is_safe_git_rev(normalized_commit)
+        .then(|| {
+            recovery_view::copy_from_alphabet(
+                &normalized_commit.to_ascii_lowercase(),
+                b"0123456789abcdef",
+            )
+        })
+        .flatten()
+    else {
+        return Ok(Json(GitHistoryReviewResponse {
+            supported: true,
+            commit: Some(normalized_commit.to_string()),
+            entries: Vec::new(),
+            parent_count: None,
+            error: Some("invalid commit: expected a version id".to_string()),
+        }));
+    };
 
     if state
         .config
@@ -1342,7 +1361,7 @@ async fn handle_git_history_review(
     }
 
     let canonical_root = Arc::new(workspace_root);
-    let commit = normalized_commit.to_string();
+    let commit = commit_id;
     let review = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
