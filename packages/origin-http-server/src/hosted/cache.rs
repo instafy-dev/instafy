@@ -490,6 +490,12 @@ impl MirrorCache {
         self.fetches_started.load(Ordering::SeqCst)
     }
 
+    /// How many mirrors' sizes the sweeper keeps.
+    #[cfg(test)]
+    pub(crate) fn known_sizes(&self) -> usize {
+        locked(&self.sizes).len()
+    }
+
     /// How many sweeps ran.
     #[cfg(test)]
     pub(crate) fn sweeps_run(&self) -> u64 {
@@ -943,6 +949,12 @@ impl MirrorCache {
         known.generation = known.generation.wrapping_add(1);
     }
 
+    /// What the sweeper keeps about `project`'s mirror, once it is gone.
+    fn forget(&self, project: Uuid) {
+        locked(&self.sizes).remove(&project);
+        locked(&self.pack_skipped).remove(&project);
+    }
+
     /// `project`'s mirror at `path`: the size kept since it last changed,
     /// or measured now.
     fn mirror_size(&self, project: Uuid, path: &Path) -> u64 {
@@ -1211,6 +1223,12 @@ impl MirrorCache {
         locked(&self.missing_revs).retain(|_, found| found.elapsed() < MISSING_REV_MEMORY);
 
         let stats = self.mirror_stats();
+        // What is kept per space goes with its mirror (one removed behind
+        // the server's back, or never made).
+        let on_disk: std::collections::HashSet<Uuid> =
+            stats.iter().map(|stat| stat.project).collect();
+        locked(&self.sizes).retain(|project, _| on_disk.contains(project));
+        locked(&self.pack_skipped).retain(|project, _| on_disk.contains(project));
         let total_bytes = stats
             .iter()
             .fold(0u64, |total, stat| total.saturating_add(stat.bytes));
@@ -1438,7 +1456,7 @@ impl MirrorCache {
             }
             mirrors.remove(&project);
         }
-        self.size_changed(project);
+        self.forget(project);
         if let Err(error) = remove_entry(&trash) {
             warn!(%project, %error, "could not delete a removed mirror; the next sweep retries");
         }
