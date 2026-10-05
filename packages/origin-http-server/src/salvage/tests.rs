@@ -1525,6 +1525,28 @@ fn an_export_that_may_succeed_later_holds_up_removal() {
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
     assert!(!entry.exists());
+
+    // An operator who acknowledges the entry removes it with the image only
+    // in the private archive; that is what they acknowledged, so the run
+    // succeeds, and the summary still counts the image.
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("chat-upload-2-b.png"), PNG);
+    *stub.export_answer.borrow_mut() = Some((
+        409,
+        serde_json::json!({ "code": "attachments_unavailable" }),
+    ));
+    let entry_name = gateway.project.to_string();
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[&entry_name]), &stub);
+    let report = &lines[0];
+    assert_eq!(
+        report["exportFailed"],
+        serde_json::json!(["chat-upload-2-b.png"]),
+        "{report:#}"
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.export_failed, 1);
+    assert_eq!(summary.exit_code(), 0, "{summary:?}");
+    assert!(!entry.exists());
 }
 
 /// Every private file carries its size, and the entry and the run their
