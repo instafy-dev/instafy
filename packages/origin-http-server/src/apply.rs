@@ -102,6 +102,11 @@ pub struct ApplyManifest {
     /// the path must not exist. Any mismatch fails the whole apply with 409.
     #[serde(default)]
     pub expected: Option<std::collections::BTreeMap<String, Option<String>>>,
+    /// The commit the client's view was read at (`X-Instafy-Rev`). The
+    /// hosted gateway refuses the change when a path it touches changed on
+    /// `main` since; single-tenant origins ignore it.
+    #[serde(default, rename = "baseRev")]
+    pub base_rev: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,36 +157,19 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
         }
     }
 
-    if archive_size > config.max_archive_bytes {
-        return Err(OriginError::bad_request("archive exceeds size limit"));
-    }
-    let combined_entry_count = manifest
-        .files
-        .len()
-        .checked_add(manifest.deletes.len())
-        .ok_or_else(|| OriginError::bad_request("manifest entry count overflow"))?;
-    if combined_entry_count > MAX_APPLY_ENTRY_COUNT {
-        return Err(OriginError::bad_request(format!(
-            "manifest exceeds combined entry count limit ({MAX_APPLY_ENTRY_COUNT})"
-        )));
-    }
-
-    // Validate the entire destination set before staging or mutating anything.
-    // This rejects portable case collisions and ancestor overlaps that would
-    // otherwise make a sequential apply order-dependent.
-    let (validated_files, delete_paths) =
-        validate_manifest_destinations(manifest.files, manifest.deletes)?;
+    let paths = validate_apply_paths(
+        manifest.files,
+        manifest.deletes,
+        archive_size,
+        config.max_archive_bytes,
+    )?;
     let rollback_dir_capability_limit = apply_rollback_dir_capability_limit();
-    let validated_install_paths = validated_files
-        .iter()
-        .map(|(path, _)| path.as_str())
-        .collect::<Vec<_>>();
+    let validated_install_paths = paths.file_paths().collect::<Vec<_>>();
     validate_install_parent_capability_limit(
         &validated_install_paths,
         rollback_dir_capability_limit,
     )?;
     let lease_id = manifest.lease_id;
-    let max_uncompressed_bytes = config.max_archive_bytes.saturating_mul(4);
 
     let workspace = open_workspace_root(workspace_root)
         .map_err(|error| OriginError::bad_request(format!("workspace root is unsafe: {error}")))?;
@@ -206,6 +194,151 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
     let temp_dir = ScopedTempDir::new(&staging_parent, "apply-").map_err(|error| {
         OriginError::internal(format!("failed to create apply staging dir: {error}"))
     })?;
+
+    let staged = stage_archive(
+        archive_reader,
+        paths,
+        config.max_archive_bytes,
+        temp_dir.dir(),
+    )?;
+    let StagedArchive {
+        files,
+        deletes: delete_paths,
+        bytes_written,
+        file_count,
+    } = staged;
+    let staged_files: Vec<(String, OsString)> = files
+        .into_iter()
+        .map(|file| (file.path, file.staged_name))
+        .collect();
+
+    let install_paths = staged_files
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>();
+    let mutation_paths = install_paths
+        .iter()
+        .copied()
+        .chain(delete_paths.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    let mut rollback = ApplyRollback::capture_with_limit(
+        &workspace,
+        &mutation_paths,
+        &install_paths,
+        rollback_dir_capability_limit,
+        config.origin_id,
+    )?;
+    if let Err(apply_error) = install_staged_files(temp_dir.dir(), &staged_files, &rollback) {
+        if let Err(rollback_error) = rollback.rollback() {
+            return Err(OriginError::internal(format!(
+                "apply failed ({apply_error}); workspace rollback also failed ({rollback_error})"
+            )));
+        }
+        return Err(apply_error);
+    }
+    // Existing delete targets were atomically moved into the rollback area.
+    // Finishing discards those backups only after every file install succeeded.
+    let rev = DateTime::<Utc>::from(SystemTime::now())
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    Ok((
+        ApplySummary {
+            rev,
+            bytes_written,
+            file_count,
+            lease_id,
+            applied_paths: staged_files.into_iter().map(|(path, _)| path).collect(),
+            deleted_paths: delete_paths,
+        },
+        ApplyTransaction { rollback },
+    ))
+}
+
+/// An apply's destinations after every manifest check: the files to write
+/// (with their manifest entries) and the paths to delete, normalized.
+pub(crate) struct ApplyPaths {
+    files: Vec<(String, ManifestFileEntry)>,
+    deletes: Vec<String>,
+}
+
+impl ApplyPaths {
+    /// The paths of the files to write, in manifest order.
+    pub(crate) fn file_paths(&self) -> impl Iterator<Item = &str> {
+        self.files.iter().map(|(path, _)| path.as_str())
+    }
+}
+
+/// Check an apply request before anything is staged or changed: the
+/// archive's size, the number of entries, and every destination (forward
+/// slashes, no reserved or non-portable name, no case or Unicode alias of
+/// another destination, no destination inside another).
+pub(crate) fn validate_apply_paths(
+    files: Vec<ManifestFileEntry>,
+    deletes: Vec<String>,
+    archive_size: u64,
+    max_archive_bytes: u64,
+) -> Result<ApplyPaths, OriginError> {
+    if archive_size > max_archive_bytes {
+        return Err(OriginError::bad_request("archive exceeds size limit"));
+    }
+    let combined_entry_count = files
+        .len()
+        .checked_add(deletes.len())
+        .ok_or_else(|| OriginError::bad_request("manifest entry count overflow"))?;
+    if combined_entry_count > MAX_APPLY_ENTRY_COUNT {
+        return Err(OriginError::bad_request(format!(
+            "manifest exceeds combined entry count limit ({MAX_APPLY_ENTRY_COUNT})"
+        )));
+    }
+
+    // Validate the entire destination set before staging or mutating anything.
+    // This rejects portable case collisions and ancestor overlaps that would
+    // otherwise make a sequential apply order-dependent.
+    let (files, deletes) = validate_manifest_destinations(files, deletes)?;
+    Ok(ApplyPaths { files, deletes })
+}
+
+/// One manifest file, extracted from the archive into a staging directory.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct StagedFile {
+    /// The normalized destination path.
+    pub path: String,
+    /// The file's name in the staging directory (`entry-<n>`), never the
+    /// destination's, so names that differ only in case cannot collide.
+    pub staged_name: OsString,
+    pub size: u64,
+    /// The archive gave the file an executable bit.
+    pub executable: bool,
+}
+
+/// Everything an apply needs after its archive was read: staged files and
+/// the (normalized) paths to delete.
+#[derive(Debug)]
+pub(crate) struct StagedArchive {
+    pub files: Vec<StagedFile>,
+    pub deletes: Vec<String>,
+    pub bytes_written: u64,
+    pub file_count: usize,
+}
+
+/// Extract the files `paths` names from a zip archive into `staging`, with
+/// every archive limit: each file exactly once in the archive and not a
+/// folder, the declared size equal to the manifest's and to what was
+/// written, and the expanded total under four times `max_archive_bytes`.
+/// A file the archive marks executable is staged executable. Nothing
+/// outside `staging` is touched.
+pub(crate) fn stage_archive<R: Read + Seek>(
+    archive_reader: R,
+    paths: ApplyPaths,
+    max_archive_bytes: u64,
+    staging: &Dir,
+) -> Result<StagedArchive, OriginError> {
+    let ApplyPaths {
+        files: validated_files,
+        deletes,
+    } = paths;
+    let max_uncompressed_bytes = max_archive_bytes.saturating_mul(4);
 
     let mut archive = ZipArchive::new(archive_reader)
         .map_err(|error| OriginError::bad_request(format!("invalid workspace archive: {error}")))?;
@@ -251,7 +384,7 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
 
     // Stage each file under a synthetic filename so case-only path differences
     // in upstream repos do not collide on case-insensitive workspace mounts.
-    let mut staged_files: Vec<(String, OsString)> = Vec::new();
+    let mut staged_files: Vec<StagedFile> = Vec::new();
     let mut bytes_written: u64 = 0;
     let mut file_count: usize = 0;
 
@@ -283,8 +416,7 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
 
         let staged_index = staged_files.len();
         let staging_name = OsString::from(format!("entry-{staged_index:08}"));
-        let mut staging_file = temp_dir
-            .dir()
+        let mut staging_file = staging
             .open_with(&staging_name, &create_new_content_options())
             .map_err(|error| {
                 OriginError::internal(format!("failed to open staging file: {error}"))
@@ -320,49 +452,20 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
             .context("failed to flush staging file")
             .map_err(|error| OriginError::internal(error.to_string()))?;
 
-        staged_files.push((normalized, staging_name));
+        staged_files.push(StagedFile {
+            path: normalized,
+            staged_name: staging_name,
+            size: written,
+            executable: archive_mode.is_some_and(|mode| mode & 0o111 != 0),
+        });
     }
 
-    let install_paths = staged_files
-        .iter()
-        .map(|(path, _)| path.as_str())
-        .collect::<Vec<_>>();
-    let mutation_paths = install_paths
-        .iter()
-        .copied()
-        .chain(delete_paths.iter().map(String::as_str))
-        .collect::<Vec<_>>();
-    let mut rollback = ApplyRollback::capture_with_limit(
-        &workspace,
-        &mutation_paths,
-        &install_paths,
-        rollback_dir_capability_limit,
-        config.origin_id,
-    )?;
-    if let Err(apply_error) = install_staged_files(temp_dir.dir(), &staged_files, &rollback) {
-        if let Err(rollback_error) = rollback.rollback() {
-            return Err(OriginError::internal(format!(
-                "apply failed ({apply_error}); workspace rollback also failed ({rollback_error})"
-            )));
-        }
-        return Err(apply_error);
-    }
-    // Existing delete targets were atomically moved into the rollback area.
-    // Finishing discards those backups only after every file install succeeded.
-    let rev = DateTime::<Utc>::from(SystemTime::now())
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-
-    Ok((
-        ApplySummary {
-            rev,
-            bytes_written,
-            file_count,
-            lease_id,
-            applied_paths: staged_files.into_iter().map(|(path, _)| path).collect(),
-            deleted_paths: delete_paths,
-        },
-        ApplyTransaction { rollback },
-    ))
+    Ok(StagedArchive {
+        files: staged_files,
+        deletes,
+        bytes_written,
+        file_count,
+    })
 }
 
 fn validate_manifest_destinations(
@@ -1120,8 +1223,9 @@ mod tests {
         apply_changes_transactional, apply_rollback_dir_capability_limit,
         apply_rollback_dir_capability_limit_for_nofile, install_staged_file_at_parent,
         install_staged_files, install_staged_files_with_hook, normalize_relative_path,
-        validate_install_parent_capability_limit, ApplyManifest, ApplyRollback, ApplySummary,
-        ManifestFileEntry, MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
+        stage_archive, validate_apply_paths, validate_install_parent_capability_limit,
+        ApplyManifest, ApplyRollback, ApplySummary, ManifestFileEntry, StagedArchive,
+        MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
     };
     use crate::config::ServerConfig;
     use crate::error::OriginError;
@@ -1193,6 +1297,7 @@ mod tests {
             idempotency_key: None,
             request_fingerprint: None,
             expected: None,
+            base_rev: None,
         }
     }
 
@@ -1216,6 +1321,7 @@ mod tests {
             idempotency_key: None,
             request_fingerprint: None,
             expected: None,
+            base_rev: None,
         }
     }
 
@@ -1996,6 +2102,7 @@ mod tests {
                 idempotency_key: None,
                 request_fingerprint: None,
                 expected: None,
+                base_rev: None,
             },
             &archive,
         )
@@ -2037,5 +2144,141 @@ mod tests {
             "unexpected error: {error}"
         );
         assert!(!workspace.path().join("large.txt").exists());
+    }
+
+    fn entries(paths: &[&str]) -> Vec<ManifestFileEntry> {
+        paths
+            .iter()
+            .map(|path| ManifestFileEntry {
+                path: (*path).to_string(),
+                size: None,
+                encoding: None,
+            })
+            .collect()
+    }
+
+    /// Stage `archive` for `files`/`deletes` into a fresh folder, the way
+    /// the hosted gateway does (no workspace involved).
+    fn stage(
+        archive: &[u8],
+        files: Vec<ManifestFileEntry>,
+        deletes: &[&str],
+        max_archive_bytes: u64,
+    ) -> (TempDir, Result<StagedArchive, OriginError>) {
+        let staging = TempDir::new().unwrap();
+        let dir = Dir::open_ambient_dir(staging.path(), ambient_authority()).unwrap();
+        let result = validate_apply_paths(
+            files,
+            deletes.iter().map(|path| path.to_string()).collect(),
+            archive.len() as u64,
+            max_archive_bytes,
+        )
+        .and_then(|paths| stage_archive(Cursor::new(archive), paths, max_archive_bytes, &dir));
+        (staging, result)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_extracts_only_into_the_given_folder_with_sizes_and_exec_bits() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "tools/run",
+                FileOptions::<()>::default().unix_permissions(0o100755),
+            )
+            .unwrap();
+        writer.write_all(b"#!/bin/sh\ntrue\n").unwrap();
+        writer
+            .start_file("Docs/Read Me.md", FileOptions::<()>::default())
+            .unwrap();
+        writer.write_all(b"hello\n").unwrap();
+        writer
+            .start_file("ignored-extra.txt", FileOptions::<()>::default())
+            .unwrap();
+        writer.write_all(b"not in the manifest\n").unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+
+        let (staging, staged) = stage(
+            &archive,
+            entries(&["./tools/run", "Docs/Read Me.md"]),
+            &["old/file.txt", "gone"],
+            1024 * 1024,
+        );
+        let staged = staged.unwrap();
+        assert_eq!(staged.file_count, 2);
+        assert_eq!(staged.bytes_written, 15 + 6);
+        assert_eq!(staged.deletes, vec!["old/file.txt", "gone"]);
+        let described: Vec<(&str, u64, bool)> = staged
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.size, file.executable))
+            .collect();
+        assert_eq!(
+            described,
+            vec![("tools/run", 15, true), ("Docs/Read Me.md", 6, false)]
+        );
+        // Synthetic names only, side by side in the staging folder.
+        let mut names: Vec<String> = std::fs::read_dir(staging.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["entry-00000000", "entry-00000001"]);
+        assert_eq!(
+            std::fs::read(staging.path().join("entry-00000001")).unwrap(),
+            b"hello\n"
+        );
+        let mode = std::fs::metadata(staging.path().join("entry-00000000"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111);
+    }
+
+    #[test]
+    fn staging_keeps_every_archive_limit() {
+        let archive = zip_archive(&[("a.txt", b"12345"), ("b.txt", b"x")]);
+        let refused =
+            |files: Vec<ManifestFileEntry>, deletes: &[&str], max: u64, archive: &[u8]| {
+                let (staging, staged) = stage(archive, files, deletes, max);
+                let error = staged.expect_err("must be refused");
+                assert!(matches!(error, OriginError::BadRequest(_)), "{error}");
+                assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
+            };
+        // Archive larger than allowed.
+        refused(entries(&["a.txt"]), &[], 8, &archive);
+        // Missing member, member that is a folder, declared size mismatch.
+        refused(entries(&["missing.txt"]), &[], 1 << 20, &archive);
+        refused(
+            vec![ManifestFileEntry {
+                path: "a.txt".into(),
+                size: Some(4),
+                encoding: None,
+            }],
+            &[],
+            1 << 20,
+            &archive,
+        );
+        // Destinations: overlap, collision, reserved, traversal.
+        refused(entries(&["a.txt"]), &["a.txt"], 1 << 20, &archive);
+        refused(entries(&["a.txt", "A.TXT"]), &[], 1 << 20, &archive);
+        refused(entries(&[".instafy/x"]), &[], 1 << 20, &archive);
+        refused(entries(&["../a.txt"]), &[], 1 << 20, &archive);
+        refused(entries(&["x"]), &["x/y"], 1 << 20, &archive);
+        // More than four times the archive limit once expanded.
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "bomb.txt",
+                FileOptions::<()>::default().compression_method(zip::CompressionMethod::Deflated),
+            )
+            .unwrap();
+        writer.write_all(&vec![b'x'; 64 * 1024]).unwrap();
+        let bomb = writer.finish().unwrap().into_inner();
+        let (staging, staged) = stage(&bomb, entries(&["bomb.txt"]), &[], 1024);
+        assert!(staged.unwrap_err().to_string().contains("size limit"));
+        // A partly written file is all that remains, in the caller's
+        // folder; the gateway removes the folder.
+        assert!(std::fs::read_dir(staging.path()).unwrap().count() <= 1);
     }
 }

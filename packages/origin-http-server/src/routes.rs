@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, Request, State};
 use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::middleware::Next;
@@ -14,7 +14,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use serde::Serialize;
 use std::fs::Metadata;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
@@ -30,10 +30,13 @@ use crate::apply_idempotency::{
     lookup_apply_idempotency, normalize_apply_idempotency_key, normalize_apply_request_fingerprint,
     ApplyIdempotencyClaimOutcome, ApplyIdempotencyLookup, ApplyIdempotencySuccess,
 };
+use crate::apply_request::{
+    read_apply_json, read_apply_multipart, validate_apply_lease, ApplyArchive,
+};
 use crate::auth::{OriginClaims, TokenValidator};
 use crate::browser;
 use crate::checkout_versions;
-use crate::config::{ServerConfig, MAX_APPLY_MANIFEST_BYTES};
+use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git;
 use crate::git_tokens;
@@ -49,8 +52,6 @@ use crate::workspace_git::{
 use crate::workspace_lock::try_acquire_workspace_apply_lock;
 
 const GIT_WORKSPACE_SYNC_TTL_SECONDS: u64 = 120;
-const MAX_APPLY_JSON_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_APPLY_JSON_REQUEST_BYTES: usize = 24 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -1574,96 +1575,9 @@ async fn handle_apply(
     Extension(access_token): Extension<OriginAccessToken>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    let mut manifest: Option<ApplyManifest> = None;
-    let mut archive: Option<ApplyArchive> = None;
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| OriginError::bad_request(format!("invalid multipart payload: {error}")))?
-    {
-        let name = field
-            .name()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        if name == "manifest" {
-            if manifest.is_some() {
-                return Err(OriginError::bad_request("duplicate manifest part"));
-            }
-            let mut field = field;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = field.chunk().await.map_err(|error| {
-                OriginError::bad_request(format!("manifest read failed: {error}"))
-            })? {
-                let next_len = bytes
-                    .len()
-                    .checked_add(chunk.len())
-                    .ok_or_else(|| OriginError::bad_request("manifest size overflow"))?;
-                if next_len > MAX_APPLY_MANIFEST_BYTES {
-                    return Err(OriginError::bad_request("manifest exceeds size limit"));
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            let parsed: ApplyManifest = serde_json::from_slice(&bytes).map_err(|error| {
-                OriginError::bad_request(format!("manifest parse failed: {error}"))
-            })?;
-            manifest = Some(parsed);
-        } else if name == "archive" {
-            if archive.is_some() {
-                return Err(OriginError::bad_request("duplicate archive part"));
-            }
-            let std_file = tempfile::tempfile().map_err(|error| {
-                OriginError::internal(format!("failed to create archive staging file: {error}"))
-            })?;
-            let mut staged_file = tokio::fs::File::from_std(std_file);
-            let mut field = field;
-            let mut archive_size = 0u64;
-            while let Some(chunk) = field.chunk().await.map_err(|error| {
-                OriginError::bad_request(format!("archive read failed: {error}"))
-            })? {
-                archive_size = archive_size
-                    .checked_add(chunk.len() as u64)
-                    .ok_or_else(|| OriginError::bad_request("archive size overflow"))?;
-                if archive_size > state.config.max_archive_bytes {
-                    return Err(OriginError::bad_request("archive exceeds size limit"));
-                }
-                staged_file.write_all(&chunk).await.map_err(|error| {
-                    OriginError::internal(format!("archive staging write failed: {error}"))
-                })?;
-            }
-            staged_file.flush().await.map_err(|error| {
-                OriginError::internal(format!("archive staging flush failed: {error}"))
-            })?;
-            staged_file.sync_all().await.map_err(|error| {
-                OriginError::internal(format!("archive staging sync failed: {error}"))
-            })?;
-            archive = Some(ApplyArchive::TempFile {
-                file: staged_file.into_std().await,
-                size: archive_size,
-            });
-        } else {
-            return Err(OriginError::bad_request(format!(
-                "unexpected multipart part {name:?}"
-            )));
-        }
-    }
-
-    let manifest = manifest.ok_or_else(|| OriginError::bad_request("manifest part missing"))?;
-    let archive = archive.ok_or_else(|| OriginError::bad_request("archive part missing"))?;
-
+    let (manifest, archive) =
+        read_apply_multipart(&mut multipart, state.config.max_archive_bytes, None).await?;
     apply_manifest_archive(state, claims, access_token, manifest, archive).await
-}
-
-enum ApplyArchive {
-    InMemory(Vec<u8>),
-    TempFile { file: std::fs::File, size: u64 },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ApplyJsonRequest {
-    manifest: ApplyManifest,
-    archive_base64: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1720,42 +1634,8 @@ async fn handle_apply_json(
     Extension(access_token): Extension<OriginAccessToken>,
     request: Request,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    let body = to_bytes(request.into_body(), MAX_APPLY_JSON_REQUEST_BYTES)
-        .await
-        .map_err(|error| {
-            OriginError::bad_request(format!("apply JSON body exceeds size limit: {error}"))
-        })?;
-    let payload: ApplyJsonRequest = serde_json::from_slice(&body)
-        .map_err(|error| OriginError::bad_request(format!("invalid apply JSON: {error}")))?;
-    let archive_raw = payload.archive_base64.trim();
-    if archive_raw.is_empty() {
-        return Err(OriginError::bad_request("archiveBase64 is required"));
-    }
-    let max_archive_bytes = state
-        .config
-        .max_archive_bytes
-        .min(MAX_APPLY_JSON_ARCHIVE_BYTES);
-    let max_encoded_len = max_archive_bytes
-        .saturating_add(2)
-        .saturating_div(3)
-        .saturating_mul(4);
-    if archive_raw.len() as u64 > max_encoded_len {
-        return Err(OriginError::bad_request("archiveBase64 exceeds size limit"));
-    }
-    let archive_bytes = BASE64_STANDARD
-        .decode(archive_raw)
-        .map_err(|error| OriginError::bad_request(format!("archive decode failed: {error}")))?;
-    if archive_bytes.len() as u64 > max_archive_bytes {
-        return Err(OriginError::bad_request("archive exceeds size limit"));
-    }
-    apply_manifest_archive(
-        state,
-        claims,
-        access_token,
-        payload.manifest,
-        ApplyArchive::InMemory(archive_bytes),
-    )
-    .await
+    let (manifest, archive) = read_apply_json(request, state.config.max_archive_bytes).await?;
+    apply_manifest_archive(state, claims, access_token, manifest, archive).await
 }
 
 async fn apply_manifest_archive(
@@ -2124,24 +2004,6 @@ fn files_below(workspace: &WorkspaceDir, directory: &str) -> Vec<String> {
         }
     }
     files
-}
-
-fn validate_apply_lease(
-    manifest_lease_id: Option<&str>,
-    claims_lease_id: Option<&str>,
-) -> Result<(), OriginError> {
-    let manifest = manifest_lease_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let trusted = claims_lease_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if manifest != trusted {
-        return Err(OriginError::unauthorized(
-            "manifest leaseId does not match the authenticated lease",
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -3808,8 +3670,9 @@ mod tests {
                     idempotency_key: Some(key.to_string()),
                     request_fingerprint: Some(fingerprint.to_string()),
                     expected: None,
+                    base_rev: None,
                 },
-                super::ApplyArchive::InMemory(Vec::new()),
+                crate::apply_request::ApplyArchive::InMemory(Vec::new()),
             ),
         )
         .await
