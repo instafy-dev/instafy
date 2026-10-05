@@ -76,6 +76,9 @@ pub(crate) struct RunOpts<'b> {
     /// Run once: no wait-and-retry when a lock is held. For best-effort
     /// housekeeping that must never hold up its caller.
     pub single_attempt: bool,
+    /// Stop the command at this time, local ones too, as a network
+    /// deadline stops a fetch ([`WorkspaceGit::with_network_deadline`]).
+    pub deadline: Option<Instant>,
 }
 
 /// An identity for a commit's author or committer.
@@ -244,7 +247,10 @@ impl<'a> WorkspaceGit<'a> {
     }
 
     fn spawn(&self, args: &[&str], opts: &RunOpts<'_>, network: bool) -> Result<Output> {
-        let deadline = self.network_deadline.filter(|_| network);
+        let deadline = match (self.network_deadline.filter(|_| network), opts.deadline) {
+            (Some(network), Some(own)) => Some(network.min(own)),
+            (network, own) => network.or(own),
+        };
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             bail!("no time left to run git {}", describe(args));
         }
@@ -2170,6 +2176,47 @@ mod tests {
             .args(args)
             .output()
             .unwrap()
+    }
+
+    /// A local command given a deadline is stopped there, as a fetch is at
+    /// its network deadline, and one with no time left is never started.
+    #[cfg(unix)]
+    #[test]
+    fn a_local_command_stops_at_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = dir.path().canonicalize().unwrap().join("r.git");
+        WorkspaceGit::init_bare(&repository).unwrap();
+        let git = WorkspaceGit::bare(&repository, None);
+        let _slow = crate::test_support::GitWrapper::install(dir.path(), "sleep 20");
+        let started = Instant::now();
+        let error = git
+            .run_opts(
+                &["rev-list", "--all"],
+                &RunOpts {
+                    deadline: Some(Instant::now() + Duration::from_millis(300)),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("ran out of time"),
+            "{error:#}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let error = git
+            .run_opts(
+                &["rev-list", "--all"],
+                &RunOpts {
+                    deadline: Some(Instant::now()),
+                    ..RunOpts::default()
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("no time left"), "{error:#}");
     }
 
     /// A wrapper around git that records each command line and the
