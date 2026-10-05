@@ -2462,6 +2462,51 @@ async fn write_slots_are_bounded_and_end_before_the_push() {
     assert_eq!(served.state.import_slots.available_permits(), 2);
 }
 
+/// A change with time left (an import's minutes) waits out a slow fetch
+/// of `main`, such as a space's first clone, instead of failing on
+/// `fetch_pending`; one without is told to retry.
+#[test]
+fn a_change_with_time_left_waits_out_a_slow_fetch() {
+    let sc = HostedScenario::new();
+    let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut cache = sc
+        .open_cache()
+        .with_waits(Duration::from_millis(200), Duration::from_millis(200));
+    cache.test_fetch_delay = Some(Duration::from_millis(1200));
+    let cache = Arc::new(cache);
+    use super::cas::Canonical as _;
+
+    let mut hurried = CachedCanonical::new(
+        cache.clone(),
+        cache.lease(sc.project),
+        None,
+        runtime.handle().clone(),
+    );
+    let error = hurried.fetch_main().unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let mut patient = CachedCanonical::new(
+        cache.clone(),
+        cache.lease(sc.project),
+        None,
+        runtime.handle().clone(),
+    )
+    .wait_until(Instant::now() + Duration::from_secs(30));
+    assert_eq!(
+        patient.fetch_main().unwrap().as_deref(),
+        Some(head.as_str())
+    );
+}
+
 /// r3 test 5: a push whose answer was lost is settled by fetching: it
 /// landed (one commit, no duplicate), or it did not and is tried again.
 #[test]

@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::answers::{idempotency_conflict, internal, main_busy, push_rejected, reason_name};
-use super::cache::{Freshness, MirrorCache, MirrorLease};
+use super::cache::{is_fetch_pending, Freshness, MirrorCache, MirrorLease};
 use super::change::Change;
 use super::routes::Admission;
 use crate::auth::OriginClaims;
@@ -242,6 +242,9 @@ pub(crate) struct CachedCanonical {
     held: Option<HeldCredential>,
     /// Whether any `git.write` credential was exchanged for this change.
     exchanged: bool,
+    /// Until then, a fetch that is still running is waited for rather than
+    /// answered as `fetch_pending` (the change's own budget).
+    patience: Option<Instant>,
 }
 
 impl CachedCanonical {
@@ -259,7 +262,14 @@ impl CachedCanonical {
             caller_expires: None,
             held: None,
             exchanged: false,
+            patience: None,
         }
+    }
+
+    /// Wait out a slow fetch (a space's first clone) until `deadline`.
+    pub(crate) fn wait_until(mut self, deadline: Instant) -> Self {
+        self.patience = Some(deadline);
+        self
     }
 
     /// The caller's bearer expires at `expires` (its `exp` claim).
@@ -271,11 +281,23 @@ impl CachedCanonical {
 
 impl Canonical for CachedCanonical {
     fn fetch_main(&mut self) -> Result<Option<String>, OriginError> {
-        self.runtime.block_on(self.cache.resolve_main(
-            &self.lease,
-            Freshness::Fresh,
-            self.token.as_deref(),
-        ))
+        let arrived = Instant::now();
+        loop {
+            let fetched = self.runtime.block_on(self.cache.resolve_main_since(
+                &self.lease,
+                Freshness::Fresh,
+                self.token.as_deref(),
+                arrived,
+            ));
+            match fetched {
+                // The fetch goes on (a space's first clone): wait again
+                // while the change has time left.
+                Err(error)
+                    if is_fetch_pending(&error)
+                        && self.patience.is_some_and(|until| Instant::now() < until) => {}
+                other => return other,
+            }
+        }
     }
 
     fn write_token(&mut self) -> Result<Option<String>, OriginError> {
