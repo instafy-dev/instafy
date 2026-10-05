@@ -10,6 +10,7 @@ import {
   waitForHostedRuntimeReady,
   writeWorkspaceFile,
 } from "../utils/harness.js";
+import { assertGatewayMode, readGatewayModeEnv, requireGatewayMode } from "../utils/gatewayMode.js";
 
 async function ensureHostedRuntimeReady(page: Page, projectId: string) {
   const ready = await waitForHostedRuntimeReady(page, 10_000).then(() => true).catch(() => false);
@@ -17,15 +18,6 @@ async function ensureHostedRuntimeReady(page: Page, projectId: string) {
     await requestHostedRuntime(page, { projectId }).catch(() => {});
   }
   await waitForHostedRuntimeReady(page, 120_000);
-}
-
-// Which gateway the stack runs, as the person running the suite declares it:
-// "legacy" (stateful) or "stateless". Unset means either; the stateless case
-// then does not run. A declared mode the stack does not match fails the
-// mode-specific assertions instead of skipping them.
-function declaredGatewayMode(): "legacy" | "stateless" | null {
-  const mode = (process.env.PLAYWRIGHT_GATEWAY_MODE ?? "").trim();
-  return mode === "legacy" || mode === "stateless" ? mode : null;
 }
 
 async function sendChatAndWait(page: Page, message: string, options?: { timeoutMs?: number }) {
@@ -82,6 +74,11 @@ test.describe("Agent + Source Control UI (opt-in)", () => {
       throw new Error("Active project id missing in agent source control UI test.");
     }
 
+    // A named gateway mode must match the stack (PLAYWRIGHT_GATEWAY_MODE,
+    // see utils/gatewayMode.ts). Unset makes no claim, and this case then
+    // checks only what both gateways do.
+    await assertGatewayMode(page, activeProjectId);
+
     const unique = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const filePath = `playwright/agent-saved-${unique}.md`;
     const contents = `hello saved ${unique}`;
@@ -118,20 +115,19 @@ test.describe("Agent + Source Control UI (opt-in)", () => {
     // Chip labels are middle-truncated past 28 characters, and this name is
     // longer: the full path is the chip's title.
     await expect(card.locator(`[data-testid="chat-file-change-file-chip"][title="${filePath}"]`)).toBeVisible();
-    if (declaredGatewayMode() === "legacy") {
+    if (readGatewayModeEnv() === "legacy") {
       // The stateful gateway keeps today's card: no saved-version revert.
       await expect(card.getByTestId("chat-file-change-revert")).toHaveCount(0);
     }
   });
 
   test("stateless gateway: the chat card reverts the agent's change as a new version", async ({ page }) => {
-    test.skip(
-      declaredGatewayMode() !== "stateless",
-      "Run against a stateless gateway with PLAYWRIGHT_GATEWAY_MODE=stateless."
-    );
     if (!activeProjectId) {
       throw new Error("Active project id missing in agent source control UI test.");
     }
+    // Skips unless PLAYWRIGHT_GATEWAY_MODE=stateless, and fails when the
+    // stack's gateway answers as another mode.
+    await requireGatewayMode(page, activeProjectId, "stateless");
 
     const unique = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const filePath = `playwright/agent-revert-${unique}.md`;
