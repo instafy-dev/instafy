@@ -2941,6 +2941,153 @@ async fn recovery_list_describes_unsaved_work_and_restored_salvage() {
     server.abort();
 }
 
+/// Only a restore marks unsaved work restored. The origin commits every
+/// save as itself, so a trailer in a save's message, the restore message
+/// sent as a save, or a commit with the restore subject and more text never
+/// counts: saves drop the trailer, and only the exact restore message does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_message_never_marks_unsaved_work_restored() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let salvage_commit = push_to_ref(
+        &sc,
+        &[("salvaged.md", Some(b"salvaged\n"))],
+        &[],
+        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: salvaged.md",
+        salvage,
+    );
+    let unsaved = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    push_to_ref(
+        &sc,
+        &[("notes.md", Some(b"notes\n"))],
+        &[],
+        "Unsaved edits",
+        &unsaved,
+    );
+    let other = recovery_ref_name(&sc, "20261005T121500Z-unsaved-0123456789ac");
+    push_to_ref(
+        &sc,
+        &[("other.md", Some(b"other\n"))],
+        &[],
+        "Unsaved edits",
+        &other,
+    );
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let list = || {
+        let client = client.clone();
+        let url = format!("{base}/git/recovery");
+        async move {
+            let response = client.get(url).send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            response.json::<serde_json::Value>().await.unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+    };
+    let restored_rev = |entries: &[serde_json::Value], reference: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["ref"] == reference)
+            .unwrap_or_else(|| panic!("{reference} not listed in {entries:?}"))
+            .get("restoredRev")
+            .cloned()
+    };
+
+    // A save whose message carries the trailer.
+    sc.write("unrelated.md", b"tidy\n");
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/sync"),
+        serde_json::json!({
+            "paths": ["unrelated.md"],
+            "message": format!(
+                "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {salvage}"
+            ),
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let saved = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
+    assert!(!saved.contains("Restored-From"), "{saved}");
+    assert!(saved.contains("Instafy-Resolved-By: assistant"), "{saved}");
+    // Saves whose whole message is the restore message, in any letter case.
+    sc.write("another.md", b"another\n");
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/sync"),
+        serde_json::json!({
+            "message": format!("Restore unsaved work\n\ninstafy-restored-from: {unsaved}\n"),
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    sc.write("unrelated.md", b"tidy again\n");
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/sync"),
+        serde_json::json!({
+            "paths": ["unrelated.md"],
+            "message": format!("Restore unsaved work\n\nInstafy-Restored-From: {unsaved}\n"),
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let messages = git_in(&sc.remote, &["log", "--format=%B", "main"]);
+    assert!(
+        !messages.to_ascii_lowercase().contains("restored-from"),
+        "{messages}"
+    );
+    // A commit by the origin's own identity with the restore subject and
+    // more than the one trailer.
+    git_in(&sc.other, &["pull", "-q", "--ff-only", "origin", "main"]);
+    git_in(
+        &sc.other,
+        &[
+            "-c",
+            "user.name=Instafy Origin",
+            "-c",
+            "user.email=origin@instafy.dev",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!(
+                "Restore unsaved work\n\nInstafy-Restored-From: {other}\nInstafy-Resolved-By: assistant"
+            ),
+        ],
+    );
+    git_in(&sc.other, &["push", "-q", "origin", "main"]);
+    sc.publish(Selection::None);
+
+    let entries = list().await;
+    for reference in [salvage, unsaved.as_str(), other.as_str()] {
+        assert_eq!(restored_rev(&entries, reference), None, "{reference}");
+    }
+    assert!(sc.remote_file("salvaged.md").is_none());
+    assert!(sc.remote_file("notes.md").is_none());
+
+    // A real restore still counts.
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": salvage, "rev": salvage_commit }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    let entries = list().await;
+    assert_eq!(
+        restored_rev(&entries, salvage),
+        Some(serde_json::Value::String(sc.main()))
+    );
+    server.abort();
+}
+
 /// Restore on a Desktop checkout: the work lands on `main` as one commit
 /// committed by the origin with an `Instafy-Restored-From` trailer, the
 /// recovery ref is removed once all of it is restored or kept on request

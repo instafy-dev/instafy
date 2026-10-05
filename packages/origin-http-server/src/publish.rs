@@ -33,7 +33,8 @@ use crate::publish_policy::{
 use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
-    parse_rev, recovery_ref_moved, resolve_ref, RecoveryRef, ViewError, RESTORED_FROM_TRAILER,
+    parse_rev, recovery_ref_moved, resolve_ref, restore_commit_message, without_restored_from,
+    RecoveryRef, ViewError,
 };
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
@@ -1136,6 +1137,9 @@ impl<'a> Publisher<'a> {
             return Ok(head.map(str::to_string));
         }
         let author = author.unwrap_or_else(|| self.identity.clone());
+        // The origin commits this as itself: a caller's text never names a
+        // restore (see `recovery_view::mark_restored`).
+        let message = without_restored_from(message);
         let message = if message.trim().is_empty() {
             "Save workspace changes".to_string()
         } else {
@@ -2677,10 +2681,7 @@ impl Publisher<'_> {
             self.git
                 .ok(&["read-tree", "-m", "-u", &head, &tree])
                 .map_err(internal)?;
-            let message = format!(
-                "Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: {}\n",
-                reference.as_str()
-            );
+            let message = restore_commit_message(reference.as_str());
             let author = request.author.unwrap_or_else(|| self.identity.clone());
             let restored = self
                 .git

@@ -1417,8 +1417,51 @@ pub(crate) fn describe(
 }
 
 /// The trailer a restore commit names the ref it restored with. Only the
-/// origin itself writes it (as the commit's committer).
+/// origin itself writes it (as the commit's committer), in exactly
+/// [`restore_commit_message`]; saves drop it from the text callers give
+/// ([`without_restored_from`]).
 pub(crate) const RESTORED_FROM_TRAILER: &str = "Instafy-Restored-From";
+
+/// The subject of a restore commit.
+const RESTORE_COMMIT_SUBJECT: &str = "Restore unsaved work";
+
+/// The whole message of the commit that restores `reference`.
+pub(crate) fn restore_commit_message(reference: &str) -> String {
+    format!("{RESTORE_COMMIT_SUBJECT}\n\n{RESTORED_FROM_TRAILER}: {reference}\n")
+}
+
+/// The ref a restore commit's message names, when the message is exactly
+/// [`restore_commit_message`] of a recovery or salvage ref; any other text
+/// (another subject, more lines, a second trailer) is not a restore.
+fn restored_from(message: &str) -> Option<&str> {
+    let reference = message
+        .strip_prefix(RESTORE_COMMIT_SUBJECT)?
+        .strip_prefix("\n\n")?
+        .strip_prefix(RESTORED_FROM_TRAILER)?
+        .strip_prefix(": ")?
+        .strip_suffix('\n')?;
+    RecoveryRef::parse(reference).ok().map(|_| reference)
+}
+
+/// `message` without any line that names a restore
+/// (`Instafy-Restored-From:`, in any letter case). Text a caller gives a
+/// save goes through this before the origin commits it as itself, so a
+/// save can never pass for a restore. Other trailers stay.
+pub(crate) fn without_restored_from(message: &str) -> String {
+    message
+        .split_inclusive('\n')
+        .filter(|line| {
+            let line = line.trim_start();
+            let named = line
+                .get(..RESTORED_FROM_TRAILER.len())
+                .is_some_and(|key| key.eq_ignore_ascii_case(RESTORED_FROM_TRAILER));
+            !(named
+                && line[RESTORED_FROM_TRAILER.len()..]
+                    .trim_start()
+                    .starts_with(':'))
+        })
+        .collect()
+}
 
 /// Most restore commits one listing reads.
 const MAX_RESTORE_COMMITS: usize = 500;
@@ -1428,11 +1471,13 @@ const MAX_RESTORE_COMMITS: usize = 500;
 const RESTORE_CLOCK_SLACK_SECONDS: i64 = 24 * 60 * 60;
 
 /// Give every item a commit `main` reaches restored its `restored_rev`: the
-/// newest commit whose last-paragraph `Instafy-Restored-From` trailer names
-/// the item's ref and whose committer is `committer_email` (this origin's
-/// own identity; anyone can write the trailer, only the origin commits
-/// restores as itself). The walk covers `main`'s history since the oldest
-/// item was made, with one `rev-list` and one `cat-file --batch`.
+/// newest commit whose whole message is [`restore_commit_message`] of the
+/// item's ref and whose committer is `committer_email` (this origin's own
+/// identity). The origin commits saves as itself too, but drops the
+/// trailer from their text ([`without_restored_from`]), and no save
+/// message is the restore message alone. The walk covers `main`'s history
+/// since the oldest item was made, with one `rev-list` and one
+/// `cat-file --batch`.
 pub(crate) fn mark_restored(
     git: &WorkspaceGit<'_>,
     items: &mut [RecoveryItem],
@@ -1471,11 +1516,15 @@ pub(crate) fn mark_restored(
         if object.kind != "commit" || committer_of(&object.data) != Some(committer_email.clone()) {
             continue;
         }
-        for (key, value) in parse_commit(&object.data).trailers {
+        let text = String::from_utf8_lossy(&object.data);
+        let Some((_, message)) = text.split_once("\n\n") else {
+            continue;
+        };
+        if let Some(reference) = restored_from(message) {
             // Newest first: the first commit seen for a ref wins.
-            if key == RESTORED_FROM_TRAILER && !restored.contains_key(&value) {
-                restored.insert(value, id.clone());
-            }
+            restored
+                .entry(reference.to_string())
+                .or_insert_with(|| id.clone());
         }
     }
     for item in items.iter_mut() {
@@ -3601,6 +3650,34 @@ mod tests {
             Some(revs[0].as_str())
         );
         assert!(peel_to_commits(&git, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_the_exact_restore_message_names_a_ref_and_saves_drop_it() {
+        let reference =
+            format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab");
+        let message = restore_commit_message(&reference);
+        assert_eq!(restored_from(&message), Some(reference.as_str()));
+        for other in [
+            format!("Tidy\n\n{RESTORED_FROM_TRAILER}: {reference}\n"),
+            format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: {reference}\nX-Other: y\n"),
+            format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: {reference}"),
+            format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: refs/heads/main\n"),
+            format!("Restore unsaved work\nmore\n\n{RESTORED_FROM_TRAILER}: {reference}\n"),
+        ] {
+            assert_eq!(restored_from(&other), None, "{other:?}");
+        }
+        assert_eq!(
+            without_restored_from(&format!(
+                "Fix\n\nInstafy-Resolved-By: assistant\n  instafy-restored-from : {reference}\n\
+                 {RESTORED_FROM_TRAILER}: {reference}"
+            )),
+            "Fix\n\nInstafy-Resolved-By: assistant\n"
+        );
+        assert_eq!(
+            without_restored_from("Notes on Instafy-Restored-From handling\n"),
+            "Notes on Instafy-Restored-From handling\n"
+        );
     }
 
     #[test]
