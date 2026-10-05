@@ -23,6 +23,14 @@
 //! - keeps `onto`'s entry when it is left out, and is reported in
 //!   `notRestored` with why.
 //!
+//! Keeping `onto`'s entry at one path can undo a change at another: a file
+//! the work made of a folder goes when a path below it is put back, and
+//! work below a folder left out gives way to `onto`'s entries there. Such a
+//! change is never dropped unlisted, whether or not `onto` moved since the
+//! work's base: it is left out for the reason a path above or below it was
+//! refused, or, when only kept paths undid it, it is a clash the person
+//! settles.
+//!
 //! `ignored` comes from one snapshot: the `.gitignore` files of the
 //! restored tree itself (the merge with every path left out so far as
 //! `onto` has it), checked with `check-ignore --no-index` against a scratch
@@ -52,7 +60,7 @@ use anyhow::{Context as _, Result};
 use uuid::Uuid;
 
 use crate::error::OriginError;
-use crate::publish::parse_raw_changes;
+use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
 use crate::recovery_view::{left_out_reason, restore_marker, NotRestored, RecoveryRef};
 use crate::tree_merge::{three_way, tree_with_entries_from};
@@ -263,6 +271,32 @@ pub(crate) fn plan(
         tree = tree_with_entries_from(git, &tree, Some(&onto_tree), &newly)?;
     }
 
+    // A change those resets undid is never dropped unlisted: a file of the
+    // work taken away to make room for a path left out below it (an entry
+    // put back clears every file above it), or work below a path left out,
+    // where `onto`'s entries are back. It cannot come in while that path
+    // stays as `onto` has it: refused for the same reason when such a path
+    // was refused, and otherwise (only kept paths) a clash to settle.
+    let mut undone_clashes = Vec::new();
+    if !left_out.is_empty() {
+        let conflicted: BTreeSet<&str> = merged.conflicts.iter().map(String::as_str).collect();
+        let pending: Vec<&RawChange> = changes
+            .iter()
+            .filter(|change| {
+                !left_out.contains_key(&change.path) && !nothing_in.contains(&change.path)
+            })
+            .collect();
+        for path in undone(git, &pending, &conflicted, &merged.tree, &tree)? {
+            match refused_around(&left_out, &refused, &path) {
+                Some(reason) => {
+                    left_out.insert(path.clone(), reason);
+                    refused.insert(path);
+                }
+                None => undone_clashes.push(path),
+            }
+        }
+    }
+
     // A clash is settled when it lies below a path left out, or when the
     // work brings nothing in at or below it. A change already on `onto`
     // settles only its own path: below a file both sides removed for a
@@ -272,7 +306,7 @@ pub(crate) fn plan(
         nothing_in.insert(path.clone());
     }
     let work: PathRoots = changed.into_iter().collect();
-    let conflicts: Vec<String> = merged
+    let mut conflicts: Vec<String> = merged
         .conflicts
         .iter()
         .filter(|path| {
@@ -284,7 +318,10 @@ pub(crate) fn plan(
             !(any_inside && inside.all(|path| nothing_in.contains(path)))
         })
         .cloned()
+        .chain(undone_clashes)
         .collect();
+    conflicts.sort();
+    conflicts.dedup();
     if !conflicts.is_empty() {
         return Err(PlanError::Conflict(conflicts));
     }
@@ -315,6 +352,85 @@ pub(crate) fn plan(
         marker,
         earlier_marker,
     })
+}
+
+/// The paths of `pending` (changes neither left out nor already on `onto`)
+/// that `tree` does not hold as the restore means to bring them: as the
+/// work has them, or, for a file both sides edited that the merge combined
+/// (a path of `merged` in no conflict), as `merged` has it. Sorted, so a
+/// folder comes before what lies below it.
+fn undone(
+    git: &WorkspaceGit<'_>,
+    pending: &[&RawChange],
+    conflicted: &BTreeSet<&str>,
+    merged: &str,
+    tree: &str,
+) -> Result<Vec<String>> {
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    // A file, a link or a submodule at each path (a folder is none).
+    let leaves = |tree: &str, paths: &[String]| -> Result<BTreeMap<String, (String, String)>> {
+        Ok(git
+            .entries_by_path(tree, paths)?
+            .into_iter()
+            .filter(|(_, entry)| entry.kind != "tree")
+            .map(|(path, entry)| (path, (entry.mode, entry.oid)))
+            .collect())
+    };
+    let paths: Vec<String> = pending.iter().map(|change| change.path.clone()).collect();
+    let now = leaves(tree, &paths)?;
+    let unlike_work: Vec<&RawChange> = pending
+        .iter()
+        .copied()
+        .filter(|change| {
+            let work =
+                (change.status != 'D').then(|| (change.new_mode.clone(), change.new_oid.clone()));
+            now.get(&change.path) != work.as_ref()
+        })
+        .collect();
+    let combined: Vec<String> = unlike_work
+        .iter()
+        .filter(|change| !conflicted.contains(change.path.as_str()))
+        .map(|change| change.path.clone())
+        .collect();
+    let as_merged = leaves(merged, &combined)?;
+    let mut undone: Vec<String> = unlike_work
+        .into_iter()
+        .filter(|change| {
+            conflicted.contains(change.path.as_str())
+                || now.get(&change.path) != as_merged.get(&change.path)
+        })
+        .map(|change| change.path.clone())
+        .collect();
+    undone.sort();
+    Ok(undone)
+}
+
+/// Why a path left out at a folder above `path`, or below `path`, was
+/// refused, if one was: the nearest folder above first, then the first
+/// path below.
+fn refused_around(
+    left_out: &BTreeMap<String, &'static str>,
+    refused: &BTreeSet<String>,
+    path: &str,
+) -> Option<&'static str> {
+    let above = path
+        .match_indices('/')
+        .map(|(index, _)| &path[..index])
+        .rev();
+    let below_prefix = format!("{path}/");
+    let below = left_out
+        .range::<str, _>((
+            std::ops::Bound::Included(below_prefix.as_str()),
+            std::ops::Bound::Unbounded,
+        ))
+        .map(|(path, _)| path.as_str())
+        .take_while(|path| path.starts_with(&below_prefix));
+    above
+        .chain(below)
+        .find(|path| refused.contains(*path))
+        .and_then(|path| left_out.get(path).copied())
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +580,45 @@ impl FromIterator<String> for PathRoots {
 
 #[cfg(test)]
 mod tests {
-    use super::{gitignores_for, PathRoots};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use super::{gitignores_for, refused_around, PathRoots};
+
+    #[test]
+    fn a_refusal_above_or_below_a_path_says_why_it_was_undone() {
+        let left_out: BTreeMap<String, &'static str> = [
+            ("a", "kept"),
+            ("a/b/c", "secret"),
+            ("k/a.txt", "kept"),
+            ("libs-x", "excluded"),
+            ("libs/vendor", "unsupported"),
+            ("x", "ignored"),
+            ("x/y/z", "kept"),
+        ]
+        .into_iter()
+        .map(|(path, reason)| (path.to_string(), reason))
+        .collect();
+        let refused: BTreeSet<String> = ["a/b/c", "libs-x", "libs/vendor", "x"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        // A refused folder above, the nearest first; kept ones are passed.
+        assert_eq!(refused_around(&left_out, &refused, "x/y"), Some("ignored"));
+        assert_eq!(
+            refused_around(&left_out, &refused, "x/y/z/w"),
+            Some("ignored")
+        );
+        // A refused path below, never a sibling that only shares a prefix.
+        assert_eq!(
+            refused_around(&left_out, &refused, "libs"),
+            Some("unsupported")
+        );
+        assert_eq!(refused_around(&left_out, &refused, "a/b"), Some("secret"));
+        // Only kept paths around, or none.
+        assert_eq!(refused_around(&left_out, &refused, "k"), None);
+        assert_eq!(refused_around(&left_out, &refused, "lib"), None);
+        assert_eq!(refused_around(&left_out, &refused, "q/r"), None);
+    }
 
     #[test]
     fn path_roots_match_a_path_and_what_lies_below_it() {

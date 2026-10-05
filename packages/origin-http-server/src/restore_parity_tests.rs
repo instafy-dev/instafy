@@ -412,6 +412,11 @@ fn commit_files(work: &Path, files: &[(&str, Option<&[u8]>)], message: &str) {
         match content {
             Some(bytes) => {
                 std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                // A folder the removal of its entries left behind (`git rm`
+                // keeps one that held a submodule) gives way to the file.
+                if target.is_dir() {
+                    std::fs::remove_dir_all(&target).unwrap();
+                }
                 std::fs::write(&target, bytes).unwrap();
                 git_in(work, &["add", "-f", "--", path]);
             }
@@ -1100,6 +1105,201 @@ async fn work_over_a_submodule_entry_is_never_restored() {
                     "{case}: nested edit"
                 );
             }
+        }
+    }
+}
+
+/// Work that turns the folder `cfg/` into a file `cfg`, restored while the
+/// person keeps `main`'s `cfg/a.txt`: that file needs the folder, so the
+/// work's `cfg` file cannot come in with it, and `cfg` is a clash the
+/// person settles. That holds whether `main` moved since the work's base or
+/// not: a restore onto the base takes the work's tree whole, and putting
+/// the kept file back used to take the work's `cfg` away without a word,
+/// then delete the ref, its only copy. Keeping `cfg` too restores the rest
+/// and lets the ref go.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_the_work_made_of_a_folder_is_never_dropped_for_a_path_kept_below_it() {
+    for mode in MODES {
+        for moved in [false, true] {
+            let space = Space::new(mode, &[("cfg/a.txt", b"a\n"), ("cfg/b.txt", b"b\n")]).await;
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park(
+                &[
+                    ("cfg", None),
+                    ("cfg", Some(b"the work's cfg file\n")),
+                    ("other.md", Some(b"other\n")),
+                ],
+                &reference,
+            );
+            if moved {
+                space.push(
+                    &[("unrelated.md", Some(b"unrelated\n"))],
+                    "an unrelated save",
+                );
+            }
+            let before = space.main();
+
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit, "keep": ["cfg/a.txt"] }))
+                    .await,
+                json!(["cfg"]),
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(space.main(), before, "{mode:?} moved {moved}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} moved {moved}"
+            );
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": ["cfg", "cfg/a.txt"] }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} moved {moved}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[
+                    ("cfg", "kept"),
+                    ("cfg/a.txt", "kept"),
+                    ("cfg/b.txt", "kept"),
+                ]),
+                "{mode:?} moved {moved}: {body}"
+            );
+            assert_eq!(body["refDeleted"], true, "{mode:?} moved {moved}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference),
+                None,
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(space.on_main("cfg/a.txt").as_deref(), Some(&b"a\n"[..]));
+            assert_eq!(space.on_main("cfg/b.txt").as_deref(), Some(&b"b\n"[..]));
+        }
+    }
+}
+
+/// Work that turns the folder `libs/`, where `main` holds the submodule
+/// entry `libs/vendor`, into a file `libs`. The submodule entry stays (as
+/// in `work_over_a_submodule_entry_is_never_restored`), so the work's `libs`
+/// file can never come in either: both are listed `unsupported`, never
+/// dropped unlisted, the rest of the work (`other.md` and its removal of
+/// `libs/other.txt`) is restored, and the ref, the file's only copy, stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_over_a_submodule_entry_below_it_is_listed_not_restored() {
+    for mode in MODES {
+        for moved in [false, true] {
+            let space = Space::new(mode, &[("libs/other.txt", b"other\n")]).await;
+            let seed = space.main();
+            space.push_entry("libs/vendor", "160000", &seed, "a submodule");
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park(
+                &[
+                    ("libs", None),
+                    ("libs", Some(b"a file\n")),
+                    ("other.md", Some(b"other\n")),
+                ],
+                &reference,
+            );
+            if moved {
+                space.push(
+                    &[("unrelated.md", Some(b"unrelated\n"))],
+                    "an unrelated save",
+                );
+            }
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} moved {moved}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[("libs", "unsupported"), ("libs/vendor", "unsupported")]),
+                "{mode:?} moved {moved}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{mode:?} moved {moved}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(
+                space.mode_on_main("libs/vendor").as_deref(),
+                Some("160000"),
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(
+                space.on_main("libs/other.txt"),
+                None,
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} moved {moved}"
+            );
+        }
+    }
+}
+
+/// Work that turns the folder `scratch/` into a file `scratch` the space
+/// ignores: the file is refused, so `main`'s folder stays, and the work's
+/// removal of `scratch/a.txt` below it cannot come in either. It is listed
+/// with the same reason, never dropped unlisted, and the ref stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_below_a_refused_file_is_listed_with_its_reason() {
+    for mode in MODES {
+        for moved in [false, true] {
+            let space = Space::new(
+                mode,
+                &[(".gitignore", b"scratch\n"), ("scratch/a.txt", b"a\n")],
+            )
+            .await;
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park(
+                &[
+                    ("scratch", None),
+                    ("scratch", Some(b"a file\n")),
+                    ("other.md", Some(b"other\n")),
+                ],
+                &reference,
+            );
+            if moved {
+                space.push(
+                    &[("unrelated.md", Some(b"unrelated\n"))],
+                    "an unrelated save",
+                );
+            }
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} moved {moved}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[("scratch", "ignored"), ("scratch/a.txt", "ignored")]),
+                "{mode:?} moved {moved}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{mode:?} moved {moved}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(
+                space.on_main("scratch/a.txt").as_deref(),
+                Some(&b"a\n"[..]),
+                "{mode:?} moved {moved}"
+            );
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} moved {moved}"
+            );
         }
     }
 }
