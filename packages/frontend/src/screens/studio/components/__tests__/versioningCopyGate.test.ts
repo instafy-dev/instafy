@@ -80,7 +80,11 @@ const GATED_FILES = [
   resolve(components, "__tests__/versioningCopy.shared.test.ts"),
   resolve(components, "__tests__/filesViewerFooter.test.ts"),
   // Docs.
+  // Settings categories and the chat runtime-switch notes this work touched.
+  resolve(components, "SettingsPanel.tsx"),
+  resolve(src, "conversations/useConversationSubmitFlow.ts"),
   resolve(repo, "docs/Git-Service.md"),
+  resolve(repo, "docs/Notifications.md"),
   resolve(repo, "docs/Settings-UI.md"),
   resolve(repo, "docs/Testing.md"),
 ];
