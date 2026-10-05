@@ -3590,6 +3590,72 @@ async fn a_restore_counts_only_once_main_has_it() {
     server.abort();
 }
 
+/// Restoring the `unpublished` entry of this checkout's own save that
+/// could not reach `main` publishes that save: `main` takes the work, so
+/// the answer is `committed: true` (a new version), and the ref, which the
+/// publish retired because its commits are on `main` now, is reported as
+/// removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn restoring_this_checkouts_own_unpublished_save_reports_the_new_version() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let hook = close_main(&sc);
+    let main_before = sc.main();
+    sc.write("draft.md", b"draft\n");
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/sync"),
+        serde_json::json!({ "paths": ["draft.md"] }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "not_saved", "{body}");
+    fs::remove_file(hook).unwrap();
+
+    let listed: serde_json::Value = client
+        .get(format!("{base}/git/recovery"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entries = listed["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{listed}");
+    assert_eq!(entries[0]["kind"], "unpublished", "{listed}");
+    let reference = entries[0]["ref"].as_str().unwrap().to_string();
+    let rev = entries[0]["rev"].as_str().unwrap().to_string();
+
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": reference, "rev": rev }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["gitSyncStatus"], "published", "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(body["refDeleted"], true, "{body}");
+    assert_eq!(body["rev"], sc.main().as_str(), "{body}");
+    assert_ne!(sc.main(), main_before);
+    assert_eq!(sc.remote_file("draft.md").as_deref(), Some("draft\n"));
+    assert!(sc.remote_refs("refs/instafy/recovery").is_empty());
+    let listed: serde_json::Value = client
+        .get(format!("{base}/git/recovery"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["entries"], serde_json::json!([]), "{listed}");
+    server.abort();
+}
+
 /// A restore's `keep` list is bounded: past the bound the request is
 /// refused before anything is fetched or restored, so no list can hold the
 /// project's apply lock for long. Within it, entries are matched by path.

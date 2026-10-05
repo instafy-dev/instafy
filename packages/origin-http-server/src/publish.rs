@@ -33,8 +33,8 @@ use crate::publish_policy::{
 use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
-    parse_rev, recovery_ref_moved, resolve_ref, restore_commit_message, restore_commits,
-    without_origin_trailers, RecoveryRef, ViewError, RESTORED_FROM_TRAILER,
+    parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
+    without_origin_trailers, RecoveryRef, ViewError,
 };
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
@@ -326,20 +326,24 @@ pub struct RestoreRequest {
 pub struct RestoreReport {
     #[serde(flatten)]
     pub publish: PublishReport,
-    /// This call made the restore's new version: it committed one, or it
-    /// published the restore commit an earlier call of the same ref made
-    /// and could not publish. False when the saved version already held
-    /// this work, or the rest of it was kept or refused.
+    /// This call brings changes to `main`: it committed the restore, or
+    /// it publishes changes the branch held that `main` did not (an
+    /// earlier restore whose publish failed, or this checkout's own save
+    /// that could not reach `main`, as when its `unpublished` entry is
+    /// restored). False when the saved version already held the work, or
+    /// the rest of it was kept or refused.
     pub committed: bool,
     /// Paths the work changes that kept the saved version: kept on request,
     /// or never restorable here (ignored, excluded, secret, legacy
     /// attachments, too large).
     pub not_restored: Vec<String>,
-    /// The recovery ref was removed after the restore reached `main`. It is
-    /// removed only when everything it holds was restored or kept on
-    /// request: work refused here (ignored, secret, excluded, too large)
-    /// keeps the ref, the only copy of that work on canonical, for the
-    /// person to review or remove. Salvage refs are never removed.
+    /// The recovery ref is gone from canonical after the restore reached
+    /// `main`: this call removed it, or found it already removed (the
+    /// publish retires a ref whose commits reached `main`). It is removed
+    /// only when everything it holds was restored or kept on request: work
+    /// refused here (ignored, secret, excluded, too large) keeps the ref,
+    /// the only copy of that work on canonical, for the person to review
+    /// or remove. Salvage refs are never removed.
     pub ref_deleted: bool,
 }
 
@@ -2683,14 +2687,16 @@ impl Publisher<'_> {
 
         let mut local = head.clone();
         let made = tree != head_tree;
-        // With nothing new to commit, an earlier restore of this ref whose
-        // publish did not reach `main` may still be on the branch: this
-        // call publishes it, so it is this call's new version.
+        // The branch may hold changes canonical `main` (as just fetched)
+        // does not: an earlier restore whose publish failed, or a save of
+        // this checkout that could not reach `main` (as when the person
+        // restores that save's own `unpublished` entry). This call
+        // publishes them, so they are its new version too.
+        let tracked = self.tracked_main().map_err(internal)?;
         let committed = made
             || self
-                .unpublished_restore(&head, reference.as_str())
-                .map_err(internal)?
-                .is_some();
+                .unpublished_changes(&head, tracked.as_deref())
+                .map_err(internal)?;
         if made {
             let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
             let dirty: Vec<String> = self
@@ -2753,6 +2759,14 @@ impl Publisher<'_> {
         if landed && refused.is_empty() && !reference.is_salvage() && self.can_write {
             match delete_with_lease(&self.git, &remote, reference.as_str(), &fetched.tip) {
                 Ok(result) if result.class == PushClass::Pushed => ref_deleted = true,
+                // Gone already: the publish retired it (its commits reached
+                // `main`), or someone removed it first.
+                Ok(result)
+                    if matches!(result.class, PushClass::LostRace(_))
+                        && matches!(remote_tip(&self.git, &remote, &reference), Ok(None)) =>
+                {
+                    ref_deleted = true
+                }
                 Ok(result) => {
                     warn!(reference = reference.as_str(), class = ?result.class, "restored work's ref was not removed")
                 }
@@ -2766,40 +2780,22 @@ impl Publisher<'_> {
         Ok((committed, not_restored, ref_deleted))
     }
 
-    /// A restore commit of `reference` that this origin committed on
-    /// `head`'s history and canonical `main` (as last fetched) does not
-    /// have yet, if any.
-    fn unpublished_restore(&self, head: &str, reference: &str) -> Result<Option<String>> {
-        let grep = format!("--grep={RESTORED_FROM_TRAILER}: {reference}");
-        let mut args = vec![
-            "rev-list".to_string(),
-            "--fixed-strings".to_string(),
-            grep,
-            "--end-of-options".to_string(),
-            head.to_string(),
-        ];
-        if let Some(main) = self.tracked_main()? {
-            args.push(format!("^{main}"));
+    /// Whether `head` holds changes canonical `main` does not: it is not
+    /// published, and its tree differs from its merge base with `main`
+    /// (the empty tree when they share none).
+    fn unpublished_changes(&self, head: &str, main: Option<&str>) -> Result<bool> {
+        if self.is_published(head, main)? {
+            return Ok(false);
         }
-        if let Some(frontier) = self.git.commit_id(PUBLISHED_FRONTIER_REF)? {
-            args.push(format!("^{frontier}"));
-        }
-        args.push("--".to_string());
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let ids: Vec<String> = self
-            .git
-            .stdout(&args)?
-            .lines()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .collect();
-        Ok(
-            restore_commits(&self.git, &ids, &self.config.git_author_email)?
-                .into_iter()
-                .find(|(_, restored)| restored == reference)
-                .map(|(id, _)| id),
-        )
+        let base = match main {
+            Some(main) => self.git.merge_base(head, main)?,
+            None => None,
+        };
+        let base_tree = match base {
+            Some(base) => self.git.tree_id(&base)?,
+            None => self.git.empty_tree()?,
+        };
+        Ok(self.git.tree_id(head)? != base_tree)
     }
 }
 
