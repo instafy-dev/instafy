@@ -52,7 +52,11 @@
 //!    when canonical is missing), `.salvage/<entry>.private.tar` (0600) the
 //!    private files, and `.salvage/report.jsonl` one line per entry and run.
 //!    Each line goes to stdout first; when the journal cannot take it, the
-//!    run stops before the next entry.
+//!    run stops before the next entry. Private files carry their sizes
+//!    (`privateArchiveBytes` per entry, a total in the summary), and an
+//!    entry whose outputs would leave the volume with less than the free
+//!    space the gateway keeps (the mirror cache's 2 GiB floor) stops before
+//!    writing them.
 //!
 //! Without `--apply` nothing is pushed, minted for writing, exported, or
 //! written under `.salvage/`, and no file of an entry's work tree changes;
@@ -185,6 +189,9 @@ pub(crate) struct EntryReport {
     pub archived_paths: Vec<String>,
     pub stale_paths: Vec<String>,
     pub private_archived_paths: Vec<PrivatePath>,
+    /// What the private files take, in bytes: the private archive's size,
+    /// near enough (a dry run says how much room `.salvage/` needs).
+    pub private_archive_bytes: u64,
     pub exported_attachments: Vec<ExportedAttachment>,
     /// Chat images a run with `--apply` would export.
     pub attachments_to_export: Vec<String>,
@@ -226,6 +233,8 @@ pub(crate) struct Summary {
     pub errors: usize,
     /// Entries with a chat image a rerun may still export.
     pub export_failed: usize,
+    /// Bytes of private files over every entry.
+    pub private_bytes: u64,
 }
 
 impl Summary {
@@ -249,6 +258,7 @@ impl Summary {
         if !report.export_failed.is_empty() {
             self.export_failed += 1;
         }
+        self.private_bytes += report.private_archive_bytes;
     }
 
     pub(crate) fn exit_code(&self) -> i32 {
@@ -258,7 +268,8 @@ impl Summary {
     fn describe(&self) -> String {
         format!(
             "salvage{}: {} entries, {} clean, {} on canonical, {} need review, {} removed, \
-             {} not removed, {} failed, {} with chat images not exported",
+             {} not removed, {} failed, {} with chat images not exported, {} bytes of \
+             private files",
             if self.dry_run { " (dry run)" } else { "" },
             self.entries,
             self.clean,
@@ -267,7 +278,8 @@ impl Summary {
             self.removed,
             self.refused,
             self.errors,
-            self.export_failed
+            self.export_failed,
+            self.private_bytes
         )
     }
 }

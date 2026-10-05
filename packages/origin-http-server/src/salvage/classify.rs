@@ -75,6 +75,8 @@ impl Skipped {
 pub(crate) struct PrivatePath {
     pub path: String,
     pub reason: &'static str,
+    /// Bytes it takes in the archive (a link's target only).
+    pub size: u64,
     /// For a version taken from a local commit rather than the work tree.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
@@ -230,6 +232,7 @@ fn sort_file(path: &str, listed: Listed, kind: Kind, sorted: &mut Sorted) {
         sorted.private.push(PrivatePath {
             path: path.to_string(),
             reason,
+            size,
             commit: None,
         })
     };
@@ -315,7 +318,7 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                         commit: None,
                     })
                 }
-                Kind::File { .. } | Kind::Link => {
+                kind @ (Kind::File { .. } | Kind::Link) => {
                     let reason = if is_secret_path(&child) {
                         "secret"
                     } else {
@@ -324,6 +327,10 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                     sorted.private.push(PrivatePath {
                         path: child,
                         reason,
+                        size: match kind {
+                            Kind::File { size } => size,
+                            _ => 0,
+                        },
                         commit: None,
                     });
                 }

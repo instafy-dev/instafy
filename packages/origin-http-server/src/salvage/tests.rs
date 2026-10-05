@@ -180,6 +180,8 @@ impl Gateway {
             acks: acks.iter().map(|ack| ack.to_string()).collect(),
             remote_base: format!("file://{}", self.base.display()),
             identity: GitIdentity::new("instafy-origin", "gateway@instafy.dev"),
+            // The tests' disk may be nearly full; one test sets a floor.
+            min_free_bytes: 0,
         }
     }
 
@@ -608,6 +610,11 @@ fn a_diverged_checkout_is_salvaged_once_and_kept_private_where_it_must() {
                 Some(diverged.local_commits[1].clone())
             ),
         ]
+    );
+    // .env, debug.log, and the local commit's .env.production.
+    assert_eq!(
+        report["privateArchiveBytes"],
+        "SECRET=1\n".len() + "log\n".len() + "API_KEY=leaked\n".len()
     );
     let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
     assert_eq!(
@@ -1424,6 +1431,78 @@ fn an_export_that_may_succeed_later_holds_up_removal() {
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
     assert!(!entry.exists());
+}
+
+/// Every private file carries its size, and the entry and the run their
+/// totals, so a dry run says how much room `.salvage/` needs; an entry whose
+/// outputs would take the volume below the floor the gateway keeps free
+/// stops before writing them.
+#[test]
+fn private_files_are_sized_and_the_volume_keeps_its_floor() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            (".gitignore", Some(".venv/\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("README.md"), b"edited\n");
+    write(&entry.join(".env"), b"SECRET=1\n");
+    write(&entry.join(".venv/lib/a.py"), &[b'a'; 1000]);
+    write(&entry.join(".venv/bin/python"), &[b'p'; 3000]);
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(false, false, &[]), &stub);
+    let report = &lines[0];
+    let mut sizes: Vec<(String, u64)> = report["privateArchivedPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["path"].as_str().unwrap().to_string(),
+                item["size"].as_u64().unwrap_or(u64::MAX),
+            )
+        })
+        .collect();
+    sizes.sort();
+    assert_eq!(
+        sizes,
+        vec![
+            (".env".to_string(), 9),
+            (".venv/bin/python".to_string(), 3000),
+            (".venv/lib/a.py".to_string(), 1000),
+        ],
+        "{report:#}"
+    );
+    assert_eq!(report["privateArchiveBytes"], 4009);
+    assert_eq!(summary.private_bytes, 4009);
+
+    // No room above the floor: the entry stops before its outputs.
+    let mut cramped = gateway.settings(true, false, &[]);
+    cramped.min_free_bytes = u64::MAX / 2;
+    let (summary, lines) = salvage(&cramped, &stub);
+    let report = &lines[0];
+    let error = report["error"].as_str().unwrap_or_default();
+    assert!(error.contains("free"), "{report:#}");
+    assert_eq!(summary.exit_code(), 1);
+    assert!(report["privateArchive"].is_null() && report["bundle"].is_null());
+    let salvage_dir = gateway.root.join(".salvage");
+    let written: Vec<String> = std::fs::read_dir(&salvage_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".tar") || name.ends_with(".bundle"))
+        .collect();
+    assert!(written.is_empty(), "{written:?}");
+
+    let (summary, lines) = salvage(&gateway.settings(true, false, &[]), &stub);
+    assert!(lines[0]["error"].is_null(), "{:#}", lines[0]);
+    assert_eq!(summary.private_bytes, 4009);
+    let archive = PathBuf::from(lines[0]["privateArchive"].as_str().unwrap());
+    assert!(std::fs::metadata(archive).unwrap().len() >= 4009);
 }
 
 /// A path git refuses to add (`cfg/x` while the index holds the file

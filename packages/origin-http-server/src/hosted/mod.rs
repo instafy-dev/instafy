@@ -28,7 +28,7 @@ mod write;
 #[cfg(test)]
 mod write_tests;
 
-pub(crate) use cache::MirrorCache;
+pub(crate) use cache::{free_bytes, MirrorCache, MIN_FREE_BYTES};
 pub use config::HostedGatewayConfig;
 pub(crate) use disk::{ensure_private_dir, remove_entry, rename_no_replace, tree_size};
 pub(crate) use legacy::{park_legacy_checkouts, LEGACY_DIR};

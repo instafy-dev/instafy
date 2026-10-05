@@ -2263,13 +2263,13 @@ pub(crate) fn plan_space_eviction(stats: &[MirrorStat], needed: u64) -> Vec<Uuid
 
 /// The free space on the disk of `path` for the server's user.
 #[cfg(unix)]
-fn free_bytes(path: &Path) -> Option<u64> {
+pub(crate) fn free_bytes(path: &Path) -> Option<u64> {
     let stats = rustix::fs::statvfs(path).ok()?;
     Some(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
 #[cfg(not(unix))]
-fn free_bytes(_path: &Path) -> Option<u64> {
+pub(crate) fn free_bytes(_path: &Path) -> Option<u64> {
     None
 }
 

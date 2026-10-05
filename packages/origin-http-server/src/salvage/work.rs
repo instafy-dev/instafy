@@ -541,11 +541,13 @@ mod tests {
             PrivatePath {
                 path: ".env".to_string(),
                 reason: "secret",
+                size: 9,
                 commit: None,
             },
             PrivatePath {
                 path: "old/.env".to_string(),
                 reason: "secret",
+                size: 9,
                 commit: Some("abc".to_string()),
             },
         ];
