@@ -33,7 +33,10 @@
 //! settled (Desktop's rule) when it is kept, lies below a path left out, or
 //! every change the work makes at or below it brings nothing in (left out
 //! or already on `onto`), as when the work adds a folder where `onto` has a
-//! file; any other is a conflict the person must choose for.
+//! file; any other is a conflict the person must choose for. A change
+//! already on `onto` settles only its own path, never what lies below it:
+//! when both sides replaced a file with a folder, the files inside may
+//! still differ.
 //!
 //! The ref may go once the restore is on `main` only when nothing was left
 //! out but on request: work refused here exists only on the ref, which then
@@ -247,7 +250,11 @@ pub(crate) fn plan(
         tree = tree_with_entries_from(git, &tree, Some(&onto_tree), &newly)?;
     }
 
-    // A clash is settled when the work brings nothing in at or below it.
+    // A clash is settled when it lies below a path left out, or when the
+    // work brings nothing in at or below it. A change already on `onto`
+    // settles only its own path: below a file both sides removed for a
+    // folder, the folders may still differ.
+    let left_out_roots: PathRoots = left_out.keys().cloned().collect();
     for path in left_out.keys() {
         nothing_in.insert(path.clone());
     }
@@ -256,7 +263,7 @@ pub(crate) fn plan(
         .conflicts
         .iter()
         .filter(|path| {
-            if nothing_in.covers(path) || input.keep.covers(path) {
+            if left_out_roots.covers(path) || input.keep.covers(path) {
                 return false;
             }
             let mut inside = work.at_or_below(path).peekable();
