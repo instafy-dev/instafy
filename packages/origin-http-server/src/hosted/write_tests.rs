@@ -33,7 +33,7 @@ use crate::workspace_git::GitIdentity;
 // Helpers.
 // ---------------------------------------------------------------------------
 
-fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+pub(super) fn zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
     zip_modes(
         &entries
             .iter()
@@ -55,7 +55,11 @@ fn zip_modes(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
 }
 
 /// A manifest writing `files` and deleting `deletes`, with `extra` fields.
-fn manifest(files: &[&str], deletes: &[&str], extra: serde_json::Value) -> serde_json::Value {
+pub(super) fn manifest(
+    files: &[&str],
+    deletes: &[&str],
+    extra: serde_json::Value,
+) -> serde_json::Value {
     let mut manifest = json!({
         "files": files.iter().map(|path| json!({ "path": path })).collect::<Vec<_>>(),
         "deletes": deletes,
@@ -93,7 +97,7 @@ async fn apply_as(
     }
 }
 
-async fn apply(served: &Served, manifest: serde_json::Value, archive: &[u8]) -> Answer {
+pub(super) async fn apply(served: &Served, manifest: serde_json::Value, archive: &[u8]) -> Answer {
     apply_as(served, manifest, archive, None, None).await
 }
 

@@ -2260,6 +2260,122 @@ fn the_spawn_rule_catches_a_module_that_runs_git_itself() {
     .is_empty());
 }
 
+/// What keeps or moves a working copy: the checkout handle, the per-space
+/// folder and its locks, receipts and staging, the checkout refresh and
+/// local commits, the runtime publish over a checkout, and the
+/// single-tenant routes themselves.
+const WORKING_COPY_NAMES: &[&str] = &[
+    "AppState",
+    "EmbeddedGitDirGuard",
+    "PublishContext",
+    "WorkspaceDir",
+    "abort_apply_idempotency_claim",
+    "apply_changes_transactional",
+    "apply_changes_transactional_file",
+    "claim_apply_idempotency",
+    "cleanup_origin_staging",
+    "commit_apply_locally",
+    "complete_apply_idempotency_claim",
+    "ensure_git_checkout",
+    "ensure_workspace_ready",
+    "instafy_git_dir",
+    "list_dirty_files",
+    "lookup_apply_idempotency",
+    "push_existing_head",
+    "repair_stale_checkout",
+    "revert_paths",
+    "stale_align",
+    "try_acquire_workspace_apply_lock",
+    "workspace_fs",
+    "workspace_lock",
+];
+
+/// Uses of working-copy machinery in the production code of a gateway
+/// module: any name in [`WORKING_COPY_NAMES`], a checkout `WorkspaceGit`
+/// (`WorkspaceGit::new`; the gateway opens bare mirrors only), the runtime
+/// recovery module, or the single-tenant router.
+fn working_copy_violations(name: &str, source: &str) -> Vec<String> {
+    let code = production_source(source);
+    let mut violations = Vec::new();
+    for identifier in code
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty())
+    {
+        if WORKING_COPY_NAMES.contains(&identifier) {
+            violations.push(format!("{name} names {identifier}"));
+        }
+    }
+    let compact: String = code.split_whitespace().collect();
+    for path in [
+        "WorkspaceGit::new(",
+        "crate::recovery::",
+        "crate::recovery::{",
+        "crate::routes::router",
+        "crate::routes::{router",
+        "crate::publish::publish(",
+        "crate::publish::refresh(",
+        "crate::publish::flush(",
+        "crate::publish::revert_commit(",
+    ] {
+        if compact.contains(path) {
+            violations.push(format!("{name} uses {path}"));
+        }
+    }
+    violations
+}
+
+/// The gateway keeps no working copy: no production module under
+/// `src/hosted/` reaches the checkout machinery single-tenant origins use.
+#[test]
+fn the_gateway_never_reaches_working_copy_machinery() {
+    let hosted = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hosted");
+    let mut checked = 0;
+    for entry in fs::read_dir(&hosted).unwrap() {
+        let path = entry.unwrap().path();
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !file.ends_with(".rs") || file == "tests.rs" || file.ends_with("_tests.rs") {
+            continue;
+        }
+        let name = format!("hosted/{file}");
+        let violations = working_copy_violations(&name, &fs::read_to_string(&path).unwrap());
+        assert!(violations.is_empty(), "{violations:#?}");
+        checked += 1;
+    }
+    assert!(checked >= 10, "checked {checked} gateway modules");
+
+    // The rule catches each kind of use.
+    for source in [
+        "use crate::git::ensure_git_checkout;\n",
+        "fn f(root: &Path) { let _ = crate::workspace_git::WorkspaceGit::new(root, None); }\n",
+        "fn f(root: &Path) { let _ = WorkspaceGit :: new (root, None); }\n",
+        "use crate::recovery::{park, RecoveryKind};\n",
+        "fn f(s: AppState) -> Router { crate::routes::router(s) }\n",
+        "use crate::routes::{router as single};\n",
+        "use crate::workspace_lock::try_acquire_workspace_apply_lock;\n",
+        "use crate::apply::{apply_changes_transactional, ApplyManifest};\n",
+        "fn f(dir: &WorkspaceDir) {}\n",
+        "fn f(c: &PublishContext) { let _ = crate::publish::publish(c, r); }\n",
+    ] {
+        assert!(
+            !working_copy_violations("hosted/new.rs", source).is_empty(),
+            "not caught: {source}"
+        );
+    }
+    for source in [
+        "use crate::recovery_view::{parse_rev, RecoveryRef};\n",
+        "fn f(dir: &Path) { let _ = WorkspaceGit::bare(dir, None); }\n",
+        "use crate::publish::parse_raw_changes;\n",
+        "use crate::routes::{mime_type_for_path, FileContentResponse};\n",
+        "pub(crate) use routes::{router, HostedState};\n",
+        "#[cfg(test)]\nmod tests {\n    use crate::git::ensure_git_checkout;\n}\n",
+    ] {
+        assert!(
+            working_copy_violations("hosted/new.rs", source).is_empty(),
+            "flagged: {source}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The HTTP routes on a single-tenant origin.
 // ---------------------------------------------------------------------------
