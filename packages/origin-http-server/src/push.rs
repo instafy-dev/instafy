@@ -458,6 +458,83 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_under_a_lease_removes_only_the_listed_tip() {
+        use crate::test_support::git_in;
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let remote = base.join("remote.git");
+        git_in(
+            &base,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        let work = base.join("work");
+        git_in(&base, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        let commit = |message: &str| {
+            git_in(
+                &work,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.com",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ],
+            );
+            git_in(&work, &["rev-parse", "HEAD"])
+        };
+        let first = commit("one");
+        let second = commit("two");
+        let listed = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/a";
+        let moved = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/b";
+        let remote_url = remote.to_str().unwrap();
+        git_in(
+            &work,
+            &[
+                "push",
+                "-q",
+                remote_url,
+                &format!("{first}:{listed}"),
+                &format!("{second}:{moved}"),
+            ],
+        );
+        let mirror = base.join("mirror.git");
+        WorkspaceGit::init_bare(&mirror).unwrap();
+        let git = WorkspaceGit::bare(&mirror, None);
+
+        // Listed at `first`, still there: deleted.
+        let deleted = delete_with_lease(&git, remote_url, listed, &first).unwrap();
+        assert_eq!(deleted.class, PushClass::Pushed);
+        assert_eq!(deleted.refs[0].flag, '-');
+        // Gone now, and one that moved since it was listed: both refused
+        // as stale, and the moved one stays.
+        for (reference, rev) in [(listed, &first), (moved, &first)] {
+            let refused = delete_with_lease(&git, remote_url, reference, rev).unwrap();
+            assert!(
+                matches!(refused.class, PushClass::LostRace(_)),
+                "{reference}: {:?}",
+                refused.class
+            );
+        }
+        let left = git_in(
+            &remote,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        );
+        assert!(left.contains(&format!("{moved} {second}")), "{left}");
+        assert!(!left.contains(listed), "{left}");
+    }
+
+    #[test]
     fn porcelain_lines_are_parsed() {
         let refs = parse_porcelain(
             b"To ../remote.git\n*\tabc:refs/instafy/recovery/x/y\t[new reference]\n=\tdef:refs/instafy/recovery/x/z\t[up to date]\n!\tHEAD:refs/heads/main\t[rejected] (fetch first)\nDone\n",

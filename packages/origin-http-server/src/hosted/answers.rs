@@ -197,6 +197,35 @@ pub(super) fn revert_conflict(head: &str, paths: Vec<String>) -> OriginError {
     )
 }
 
+pub(super) fn restore_conflict(head: Option<&str>, paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "restore_conflict",
+        "the saved version changed these files too; choose a version for each",
+        with_fields(listed(paths), serde_json::json!({ "head": head })),
+    )
+}
+
+/// The unsaved work moved (or went) since the client listed it: `rev` is
+/// what the ref names now (`None`: it is gone).
+pub(super) fn recovery_ref_moved(rev: Option<&str>) -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "recovery_ref_moved",
+        "this unsaved work changed since it was listed; refresh and try again",
+        serde_json::json!({ "rev": rev }),
+    )
+}
+
+pub(super) fn salvage_ref_kept() -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "salvage_ref_kept",
+        "work kept from a retired workspace stays available and cannot be removed",
+        serde_json::json!({}),
+    )
+}
+
 /// What the shard refused about one path, as an answer.
 pub(super) fn hook_refusal(path: String, reason: RejectReason) -> OriginError {
     match reason {

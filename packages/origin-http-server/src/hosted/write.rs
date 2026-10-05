@@ -2,6 +2,7 @@
 //! receipts (`/apply/status`) and reverting a saved change
 //! (`/git/revert-commit`). Each becomes one commit on canonical `main`
 //! through [`super::cas::cas_commit`]; nothing is kept on the gateway.
+//! Restoring unsaved work goes the same way ([`super::recovery`]).
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -97,7 +98,7 @@ impl Drop for Staging {
 }
 
 /// The gateway's own identity: every commit's committer.
-fn gateway_identity(state: &HostedState) -> GitIdentity {
+pub(super) fn gateway_identity(state: &HostedState) -> GitIdentity {
     GitIdentity::new(
         state.auth.config.git_author_name.clone(),
         state.auth.config.git_author_email.clone(),
@@ -106,7 +107,7 @@ fn gateway_identity(state: &HostedState) -> GitIdentity {
 
 /// The `git.write` credential for this request, exchanged from the
 /// caller's own `fs.write` token (never the gateway's machine credential).
-async fn write_token(
+pub(super) async fn write_token(
     state: &HostedState,
     project: Uuid,
     token: &OriginAccessToken,
@@ -514,7 +515,7 @@ pub(super) async fn handle_git_revert_commit(
 }
 
 /// [`commit`] for a person's change (the save budget, no import key).
-async fn commit_change(
+pub(super) async fn commit_change(
     state: &HostedState,
     project: Uuid,
     token: &OriginAccessToken,

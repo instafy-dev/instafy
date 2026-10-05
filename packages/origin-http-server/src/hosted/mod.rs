@@ -15,6 +15,8 @@ pub mod config;
 mod disk;
 mod legacy;
 mod read;
+mod recovery;
+mod restore;
 mod routes;
 #[cfg(test)]
 mod tests;
