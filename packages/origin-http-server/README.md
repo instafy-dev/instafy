@@ -22,6 +22,7 @@ Set `ORIGIN_GIT_REMOTE_URL` to enable git-backed persistence:
 - `ORIGIN_GIT_BRANCH`: branch to track/push (default: `main`)
 - `ORIGIN_GIT_REMOTE_NAME`: remote name (default: `origin`)
 - `ORIGIN_GIT_AUTHOR_NAME` / `ORIGIN_GIT_AUTHOR_EMAIL`: commit identity defaults
+- `ORIGIN_GATEWAY_GIT_AUTHOR_NAME` / `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL` (multi-tenant gateway only): the gateway's own committer identity. The gateway trusts commits under its address as its restores and import receipts, so it never commits under the runtimes' default address `origin@instafy.dev`. Without these it uses `ORIGIN_GIT_AUTHOR_*` when that holds an address of your own, and `gateway@instafy.dev` in place of the runtimes' default (logging a warning). It refuses to start only when `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL` is set to `origin@instafy.dev`.
 
 In this mode:
 - The origin bootstraps a checkout on start (`git clone`/`git fetch`).
