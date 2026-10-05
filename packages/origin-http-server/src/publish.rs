@@ -344,7 +344,8 @@ pub struct RestoreReport {
     /// Paths the work changes that kept the saved version, each with why:
     /// `kept` on request, or the reason it is never restorable here
     /// (`ignored`, `excluded`, `secret`, `attachment`, `too_large`,
-    /// `unsupported`), as the hosted gateway answers them.
+    /// `unsupported`, or the shard's own reason when it refused the path),
+    /// as the hosted gateway answers them.
     pub not_restored: Vec<NotRestored>,
     /// The recovery ref is gone from canonical after the restore reached
     /// `main`: this call removed it, or found it already removed (the
@@ -2594,6 +2595,10 @@ impl Publisher<'_> {
     ///   when every path left out was kept on request: a path refused here
     ///   keeps the ref, so work the person did not choose to leave out is
     ///   never removed. Salvage refs are kept.
+    /// - A path the restore changes that the shard refuses when the restore
+    ///   is published stays as `main` has it, like one the plan refused: it
+    ///   is listed in `notRestored` with the shard's reason, and the ref
+    ///   stays.
     fn restore(&mut self, request: RestoreRequest) -> Result<Restored, OriginError> {
         let reference = RecoveryRef::validate(&self.git, request.reference.trim())?;
         let expected = match request.rev.as_deref().map(str::trim) {
@@ -2704,8 +2709,13 @@ impl Publisher<'_> {
             None => false,
         };
         let marked = !committed && (marker || earlier_pending);
+        // The paths this restore changes.
+        let touched = if made {
+            changed_paths(&self.git, &head_tree, &tree).map_err(internal)?
+        } else {
+            Vec::new()
+        };
         if made {
-            let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
             let mut dirty: Vec<String> = self
                 .status()
                 .map_err(internal)?
@@ -2763,14 +2773,34 @@ impl Publisher<'_> {
         ) && self
             .is_published(&local, self.report.rev.as_deref())
             .map_err(internal)?;
+        // A path this restore changed that the shard refused stays as
+        // `main` has it: it is listed with the shard's reason, as the
+        // gateway lists it, and the ref, its only copy, stays.
+        let planned_ref_go = plan.lets_ref_go();
+        let mut not_restored = plan.not_restored;
+        let touched: BTreeSet<&str> = touched.iter().map(String::as_str).collect();
+        let mut refused_on_save = false;
+        for rejected in &self.report.rejected_paths {
+            if touched.contains(rejected.path.as_str())
+                && !not_restored.iter().any(|entry| entry.path == rejected.path)
+            {
+                not_restored.push(NotRestored {
+                    path: rejected.path.clone(),
+                    reason: rejected.reason.name(),
+                });
+                refused_on_save = true;
+            }
+        }
+        not_restored.sort_by(|left, right| left.path.cmp(&right.path));
+        let lets_ref_go = planned_ref_go && !refused_on_save;
         let mut ref_deleted = false;
-        if landed && !plan.lets_ref_go() && !reference.is_salvage() {
+        if landed && !lets_ref_go && !reference.is_salvage() {
             info!(
                 reference = reference.as_str(),
                 "kept the restored work's ref: part of it cannot be restored here"
             );
         }
-        if landed && plan.lets_ref_go() && !reference.is_salvage() && self.can_write {
+        if landed && lets_ref_go && !reference.is_salvage() && self.can_write {
             match delete_with_lease(&self.git, &remote, reference.as_str(), &fetched.tip) {
                 Ok(result) if result.class == PushClass::Pushed => ref_deleted = true,
                 // Gone already: the publish retired it (its commits reached
@@ -2792,7 +2822,7 @@ impl Publisher<'_> {
         Ok(Restored {
             committed,
             marked,
-            not_restored: plan.not_restored,
+            not_restored,
             ref_deleted,
         })
     }
