@@ -14,7 +14,9 @@
 //!   file over the size cap (422 `policy_rejected`);
 //! - after the no-op check, a path the client read at another version
 //!   (`expected`, or a `baseRev` other than `main`) that changed since
-//!   (409 `head_moved`).
+//!   (409 `head_moved`); a change that would need nothing is still 409
+//!   `head_moved` when one of its deletes names a path that turned from a
+//!   file into a folder (or back) since the client read it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -232,6 +234,22 @@ impl Change {
         }
     }
 
+    /// Before a change whose tree equals `main`'s is answered as needing
+    /// nothing: whether that is true. It is not for an upload deleting a
+    /// path that is now a folder where it was a file (or the other way
+    /// round): the delete removed nothing, and the path changed since the
+    /// client read it (409 `head_moved`).
+    pub(super) fn settled(
+        &self,
+        git: &WorkspaceGit<'_>,
+        main: Option<&str>,
+    ) -> Result<(), OriginError> {
+        match self {
+            Self::Edits(edits) => edits.settled(git, main),
+            Self::Revert(_) | Self::Restore(_) => Ok(()),
+        }
+    }
+
     /// The shard refused `path`: an import or a restore leaves it out and
     /// tries again; anything else is answered with the refusal.
     pub(super) fn refused(
@@ -275,6 +293,10 @@ struct Attempt {
     main_entries: HashMap<String, TreeEntry>,
     /// Written paths and deleted paths (folders expanded).
     touched: Vec<String>,
+    /// Deletes looked up at the version the client read whose path `main`
+    /// holds as the other kind now (a file became a folder, or a folder a
+    /// file): there the delete removes nothing.
+    swapped: Vec<String>,
 }
 
 impl Edits {
@@ -510,6 +532,16 @@ impl Edits {
                 _ => removals.push(delete.clone()),
             }
         }
+        let swapped: Vec<String> = self
+            .deletes
+            .iter()
+            .filter(|delete| {
+                at_main
+                    .get(delete.as_str())
+                    .is_some_and(|entry| is_tree(entry) != folders.contains(delete))
+            })
+            .cloned()
+            .collect();
         let expand_at = if at_base_deletes.is_some() {
             base
         } else {
@@ -557,6 +589,7 @@ impl Edits {
         self.attempt = Some(Attempt {
             main_entries: at_main,
             touched,
+            swapped,
         });
         Ok(tree)
     }
@@ -565,6 +598,36 @@ impl Edits {
     /// path holds that blob (or nothing), and with a `baseRev` other than
     /// `main`, no touched path (or a folder it lies in) changed since.
     fn check(&self, git: &WorkspaceGit<'_>, main: Option<&str>) -> Result<(), OriginError> {
+        let stale = self.stale(git, main)?;
+        if stale.is_empty() {
+            Ok(())
+        } else {
+            Err(head_moved(main, stale.into_iter().collect()))
+        }
+    }
+
+    /// A tree equal to `main`'s needs nothing, unless a delete's path is
+    /// now the other kind of entry: then the delete did nothing, and the
+    /// client is told what changed since it read (with what [`Self::check`]
+    /// finds).
+    fn settled(&self, git: &WorkspaceGit<'_>, main: Option<&str>) -> Result<(), OriginError> {
+        let Some(attempt) = &self.attempt else {
+            return Err(internal("a change was checked before it was built"));
+        };
+        if attempt.swapped.is_empty() {
+            return Ok(());
+        }
+        let mut stale = self.stale(git, main)?;
+        stale.extend(attempt.swapped.iter().cloned());
+        Err(head_moved(main, stale.into_iter().collect()))
+    }
+
+    /// The paths whose condition no longer holds on `main`.
+    fn stale(
+        &self,
+        git: &WorkspaceGit<'_>,
+        main: Option<&str>,
+    ) -> Result<BTreeSet<String>, OriginError> {
         let Some(attempt) = &self.attempt else {
             return Err(internal("a change was checked before it was built"));
         };
@@ -584,11 +647,7 @@ impl Edits {
         if let Some(base) = self.base_rev.as_deref().filter(|base| Some(*base) != main) {
             stale.extend(moved_since(git, base, main, &attempt.touched)?);
         }
-        if stale.is_empty() {
-            Ok(())
-        } else {
-            Err(head_moved(main, stale.into_iter().collect()))
-        }
+        Ok(stale)
     }
 }
 

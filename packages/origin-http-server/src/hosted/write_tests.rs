@@ -645,6 +645,104 @@ async fn a_retried_save_changes_nothing() {
     assert_eq!(sc.canonical_main().as_deref(), Some(saved.as_str()));
 }
 
+/// A delete made on an old read of a path that is now the other kind of
+/// entry (a file that became a folder, a folder that became a file)
+/// removes nothing, and is answered as a change since the read, never as
+/// done. A delete of a file that is simply gone stays a no-op, also when
+/// retried with its first conditions.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_delete_of_a_path_that_changed_kind_is_head_moved() {
+    let sc = HostedScenario::new();
+    let read_at = sc.push(
+        &[
+            ("p", Some(b"x\n")),
+            ("d/a.txt", Some(b"a\n")),
+            ("d/b.txt", Some(b"b\n")),
+            ("gone.txt", Some(b"g\n")),
+            ("keep.txt", Some(b"k\n")),
+        ],
+        "seed",
+    );
+    let served = serve(&sc).await;
+    let x = sc.blob("x\n");
+    // Someone else turns the file p into a folder and the folder d into a
+    // file, and deletes gone.txt.
+    sc.push(
+        &[
+            ("p", None),
+            ("d/a.txt", None),
+            ("d/b.txt", None),
+            ("gone.txt", None),
+        ],
+        "clear",
+    );
+    let swapped = sc.push(
+        &[("p/q.txt", Some(b"q\n")), ("d", Some(b"now a file\n"))],
+        "swap",
+    );
+
+    for extra in [
+        json!({ "baseRev": read_at, "expected": { "p": x } }),
+        json!({ "baseRev": read_at }),
+    ] {
+        let answer = apply(&served, manifest(&[], &["p"], extra.clone()), &zip(&[])).await;
+        assert_eq!(
+            (answer.status, answer.code().as_str()),
+            (409, "head_moved"),
+            "{extra}: {}",
+            answer.json()
+        );
+        assert_eq!(answer.json()["head"], swapped.as_str());
+        assert!(
+            answer.json()["paths"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("p")),
+            "{}",
+            answer.json()
+        );
+    }
+    let answer = apply(
+        &served,
+        manifest(&[], &["d"], json!({ "baseRev": read_at })),
+        &zip(&[]),
+    )
+    .await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (409, "head_moved"),
+        "{}",
+        answer.json()
+    );
+    assert!(
+        answer.json()["paths"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("d")),
+        "{}",
+        answer.json()
+    );
+    assert_eq!(sc.canonical_main().as_deref(), Some(swapped.as_str()));
+    assert_eq!(show(&sc, &swapped, "p/q.txt").unwrap(), b"q\n");
+    assert_eq!(show(&sc, &swapped, "d").unwrap(), b"now a file\n");
+
+    // A file deleted elsewhere: nothing to do.
+    let gone = sc.blob("g\n");
+    let answer = apply(
+        &served,
+        manifest(
+            &[],
+            &["gone.txt"],
+            json!({ "baseRev": read_at, "expected": { "gone.txt": gone } }),
+        ),
+        &zip(&[]),
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
+    assert_eq!(answer.json()["committed"], false);
+    assert_eq!(answer.json()["rev"], swapped.as_str());
+}
+
 /// `expected` holds what each path held when the client read it.
 #[tokio::test(flavor = "multi_thread")]
 async fn expected_blobs_must_still_be_on_main() {

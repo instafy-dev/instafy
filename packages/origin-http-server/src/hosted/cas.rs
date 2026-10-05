@@ -339,6 +339,7 @@ pub(crate) fn cas_commit(
         // answer would find no receipt and write the import again, over
         // whatever was saved in between.
         if tree == main_tree && key.is_none() {
+            change.settled(&staged, main.as_deref())?;
             return Ok(CasOutcome {
                 rev: main.clone(),
                 base_rev: main,
