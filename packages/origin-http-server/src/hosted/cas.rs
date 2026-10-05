@@ -229,6 +229,9 @@ pub(crate) trait Canonical {
     /// `commit`, on top of `old`, is canonical `main` now; its objects are
     /// in the mirror when `promoted`.
     fn pushed(&mut self, commit: &str, old: Option<&str>, promoted: bool);
+    /// A change's objects were moved into the mirror after the fetch that
+    /// found its push had landed: the mirror's size changed again.
+    fn grew(&mut self);
 }
 
 /// A `git.write` credential and when it runs out.
@@ -393,6 +396,10 @@ impl Canonical for CachedCanonical {
     fn pushed(&mut self, commit: &str, old: Option<&str>, promoted: bool) {
         self.cache
             .record_push(&self.lease.mirror(), commit, old, promoted);
+    }
+
+    fn grew(&mut self) {
+        self.cache.size_changed(self.lease.project());
     }
 }
 
@@ -591,8 +598,11 @@ pub(crate) fn cas_commit(
                 warn!(attempt, detail = %detail, "a push ended without an answer; checking main");
                 if let Some(after) = canonical.fetch_main()? {
                     if staged.is_ancestor(&commit, &after).map_err(internal)? {
-                        // The fetch already moved the mirror's main past it.
-                        promote(&quarantine, &plain);
+                        // The fetch already moved the mirror's main past it;
+                        // what is moved in now came after that fetch.
+                        if promote(&quarantine, &plain) {
+                            canonical.grew();
+                        }
                         return Ok(CasOutcome {
                             rev: Some(commit),
                             base_rev: main,
