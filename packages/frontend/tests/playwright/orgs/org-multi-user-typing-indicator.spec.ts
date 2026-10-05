@@ -1,3 +1,4 @@
+import { openChats, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState, waitForStoreProjectId } from "../utils/harness.js";
@@ -12,8 +13,8 @@ async function openProjectSettings(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("project-access-section")).toBeVisible();
 }
 
-function conversationTabLocator(page: import("@playwright/test").Page) {
-  return page.getByTestId("workspace-tabs").locator('[data-tab-kind="conversation"]');
+function conversationRows(page: import("@playwright/test").Page) {
+  return page.getByTestId("conversation-history-item");
 }
 
 async function waitForConversationControllerId(page: import("@playwright/test").Page) {
@@ -47,10 +48,11 @@ test.describe("Org multi-user typing indicator", () => {
       throw new Error("Invite link URL missing.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
-    const ownerConversationTabs = conversationTabLocator(page);
-    await expect(ownerConversationTabs).toHaveCount(1);
+    await openChats(page);
+    const ownerConversationRows = conversationRows(page);
+    await expect(ownerConversationRows).toHaveCount(1);
 
     const guestContext = await browser.newContext();
     const guestPage = await guestContext.newPage();
@@ -58,10 +60,11 @@ test.describe("Org multi-user typing indicator", () => {
     await guestPage.goto(inviteLinkUrl, { waitUntil: "domcontentloaded" });
     await guestPage.waitForURL((url) => url.pathname.includes("/studio"), { timeout: 60_000 });
     await waitForStoreProjectId(guestPage, projectId, 20_000);
-    await guestPage.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(guestPage);
 
-    const guestConversationTabs = conversationTabLocator(guestPage);
-    await expect(guestConversationTabs).toHaveCount(1);
+    await openChats(guestPage);
+    const guestConversationRows = conversationRows(guestPage);
+    await expect(guestConversationRows).toHaveCount(1);
 
     const ownerCreateConversation = page.waitForResponse(
       (response) =>
@@ -71,12 +74,12 @@ test.describe("Org multi-user typing indicator", () => {
     );
     await createPublicChatFromTopBar(page);
     await ownerCreateConversation;
-    await expect(ownerConversationTabs).toHaveCount(2);
-    await expect(guestConversationTabs).toHaveCount(2, { timeout: 30_000 });
+    await expect(ownerConversationRows).toHaveCount(2);
+    await expect(guestConversationRows).toHaveCount(2, { timeout: 30_000 });
 
-    await ownerConversationTabs.nth(1).click();
+    await ownerConversationRows.filter({ hasText: "Conversation 2" }).first().click();
     await waitForConversationControllerId(page);
-    await guestConversationTabs.nth(1).click();
+    await guestConversationRows.filter({ hasText: "Conversation 2" }).first().click();
     await waitForConversationControllerId(guestPage);
 
     await guestPage.getByTestId("chat-input").fill("typing…");

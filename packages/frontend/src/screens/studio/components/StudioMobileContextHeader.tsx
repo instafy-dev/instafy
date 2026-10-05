@@ -1,5 +1,6 @@
 import { type RefObject, useId } from "react";
-import { Search } from "iconoir-react";
+import { NavArrowLeft, Search, ViewGrid } from "iconoir-react";
+import { normalizeOrgAccent } from "../../../org/orgAccent";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { IconButton } from "../../../components/Button";
 import { OctoMark } from "../../../components/OctoMark";
@@ -22,6 +23,9 @@ export interface StudioMobileContextHeaderProps {
   activeProjectId: string | null;
   attentionCounts: Record<string, number>;
   homeActive: boolean;
+  homeOverview?: boolean;
+  orgContext?: boolean;
+  onHomeReturn?: () => void;
   homeAttentionCount: number;
   searchRef: RefObject<HTMLButtonElement | null>;
   onHome: () => void;
@@ -46,6 +50,9 @@ export function StudioMobileContextHeader({
   activeProjectId,
   attentionCounts,
   homeActive,
+  homeOverview = false,
+  orgContext = true,
+  onHomeReturn,
   homeAttentionCount,
   searchRef,
   onHome,
@@ -70,13 +77,27 @@ export function StudioMobileContextHeader({
 
   return (
     <header
-      className={`studio-mobile-context-header border-b border-transparent bg-slate-50 text-slate-900 dark:text-slate-100 ${DARK_RAIL_BG_CLASS}`}
+      data-org-accent={!homeOverview && orgContext ? normalizeOrgAccent(accentColor) ?? "slate" : undefined}
+      className={`studio-mobile-context-header org-context-tint border-b border-transparent bg-slate-50 text-slate-900 dark:text-slate-100 ${DARK_RAIL_BG_CLASS}`}
       style={{
         paddingTop: "calc(var(--instafy-safe-area-inset-top, env(safe-area-inset-top, 0px)) + 4px)",
       }}
-      aria-label="Working context"
+      aria-label={homeOverview ? "Home" : "Working context"}
       data-testid="studio-mobile-context-header"
     >
+      {homeOverview ? <>
+        {onHomeReturn ? <IconButton variant="ghost" radius="lg" onPress={onHomeReturn}
+          aria-label="Back to previous page" title="Back to previous page" data-testid="home-return-navigation"
+          className="!min-h-12 !min-w-11 shrink-0">
+          <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
+        </IconButton> : null}
+        <h1 className="min-w-0 flex-1 truncate px-2 text-sm font-semibold" data-testid="studio-home-title">Home</h1>
+        <IconButton variant="ghost" radius="lg" onPress={onSwitchTeam}
+          aria-label="Browse teams and spaces" title="Browse teams and spaces" data-testid="home-browse-navigation"
+          className="!min-h-12 !min-w-11 shrink-0">
+          <ViewGrid className="h-5 w-5" aria-hidden="true" />
+        </IconButton>
+      </> : <>
       <IconButton
         variant="ghost" radius="lg" onPress={onHome}
         aria-label="Home, all teams" title="Home, all teams"
@@ -110,6 +131,7 @@ export function StudioMobileContextHeader({
           onSelectSpace={onSpace} onBrowseAll={onBrowseSpaces ?? onSwitchTeam}
         />
       </div>
+      </>}
       <IconButton
         ref={searchRef}
         variant="ghost" onPress={() => { searchRef.current?.focus(); onSearch(); }}

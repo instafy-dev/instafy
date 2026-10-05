@@ -1,3 +1,4 @@
+import { activeConversationId } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { randomUUID } from "node:crypto";
@@ -394,13 +395,7 @@ test.describe.serial("Projects - multi workspace flow", () => {
     const assistantCreatedAt = new Date(Date.now() + 1000).toISOString();
     const userMessageId = randomUUID();
     const assistantMessageId = randomUUID();
-    const conversationTabs = page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-    await expect(conversationTabs).toHaveCount(1);
-    const activeConversationTabId = await conversationTabs.first().getAttribute("data-tab-id");
-    if (!activeConversationTabId) {
-      throw new Error("Conversation tab missing data-tab-id.");
-    }
-    const localConversationId = activeConversationTabId.replace("workspace-conversation-", "");
+    const localConversationId = await activeConversationId(page);
     const controllerConversationId = await page.evaluate(
       async ({ projectId, localId }) =>
         await (window as any).__INSTAFY_E2E__?.createBlankConversation?.({

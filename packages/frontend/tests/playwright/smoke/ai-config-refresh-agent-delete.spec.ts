@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { expect, test, type Page } from "@playwright/test";
 import { prepareStudio } from "../utils/harness.js";
 import { openSidebarSecondaryItem } from "../utils/sidebar.js";
@@ -116,7 +117,7 @@ test.describe("AI config refresh (agent delete)", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await openRuntimeAiMenu(page);
     await page.getByRole("button", { name: "Agents" }).click();
     await page.getByRole("button", { name: /@sloth/i }).first().click();
@@ -140,7 +141,7 @@ test.describe("AI config refresh (agent delete)", () => {
     await deleteResponse;
     await expect(page.getByTestId(`bots-delete-${SLOTH_AGENT_ID}`)).toHaveCount(0);
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await openRuntimeAiMenu(page);
     await expect(popover.getByText(/@sloth/i)).toHaveCount(0);
 

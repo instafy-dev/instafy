@@ -60,6 +60,30 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     vi.unstubAllGlobals();
   });
 
+  it("moves space actions into the docked header without repeating the section title", async () => {
+    const header = document.createElement("div");
+    document.body.append(header);
+    const search = vi.fn();
+    const create = vi.fn();
+    try {
+      await render(root, { mode: "spaces", spaceHeaderExternal: true, spaceHeaderActionsTarget: header,
+        canSearchSpaces: true, onToggleProjectSearch: search, onCreateProject: create });
+      expect(header.querySelector('[data-testid="sidebar-project-search-toggle"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="sidebar-project-search-toggle"]')).toBeNull();
+      expect(container.querySelector("section")).toBeNull();
+      await act(async () => header.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-search-toggle"]')?.click());
+      await act(async () => header.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-new"]')?.click());
+      expect(search).toHaveBeenCalledOnce();
+      expect(create).toHaveBeenCalledOnce();
+      await render(root, { mode: "spaces", spaceHeaderExternal: true, spaceHeaderActionsTarget: header,
+        canSearchSpaces: true, showProjectSearch: true, workspaceProjectQuery: "test" });
+      expect(container.querySelector<HTMLInputElement>("input")?.value).toBe("test");
+      expect(header.querySelector("input")).toBeNull();
+    } finally {
+      header.remove();
+    }
+  });
+
   it("lists every team by name, with the selected one marked current", async () => {
     await render(root);
 
@@ -77,6 +101,23 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     expect(container.querySelector('[data-testid="sidebar-org-chip-fp"] img')?.getAttribute("src")).toBe(
       "https://example.test/fp.png",
     );
+  });
+
+  it("filters many teams by name or slug and keeps the selected team and its actions explicit", async () => {
+    const select = vi.fn();
+    const overview = vi.fn();
+    await render(root, { orgOptions: [...teams, ...Array.from({ length: 4 }, (_, index) => ({ key: `extra-${index}`, name: `Team ${index}`, label: `Team ${index}`, slug: `group-${index}`, count: 1 }))], onWorkspaceOrgChange: select, onOpenOrgOverview: overview });
+    const input = container.querySelector<HTMLInputElement>('[data-testid="sidebar-team-search"]')!;
+    expect(input.getAttribute("aria-label")).toBe("Find a team");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "GROUP-2");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(container.querySelectorAll('[data-testid^="sidebar-org-chip-"]')).toHaveLength(1);
+    await act(async () => (container.querySelector('[data-testid="sidebar-org-chip-extra-2"]') as HTMLButtonElement).click());
+    expect(select).toHaveBeenCalledWith("extra-2");
+    await act(async () => (container.querySelector('[data-testid="sidebar-org-overview-button"]') as HTMLButtonElement).click());
+    expect(overview).toHaveBeenCalledOnce();
   });
 
   it("switches teams from a row and rolls attention up onto the all-teams row", async () => {

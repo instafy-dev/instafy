@@ -1,4 +1,4 @@
-import { useLayoutEffect, useId, useRef, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useLayoutEffect, useId, useRef, type KeyboardEvent, type ReactNode, type Ref, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
@@ -12,6 +12,8 @@ interface StudioSidebarWorkspacePanelProps {
   open: boolean;
   desktop: boolean;
   portalTarget: HTMLDivElement | null;
+  headerPortalTarget?: HTMLElement | null;
+  headerActionsRef?: Ref<HTMLDivElement>;
   triggerRef: RefObject<HTMLButtonElement | null>;
   onClose: () => void;
   children: ReactNode;
@@ -23,6 +25,8 @@ export function StudioSidebarWorkspacePanel({
   open,
   desktop,
   portalTarget,
+  headerPortalTarget,
+  headerActionsRef,
   triggerRef,
   onClose,
   children,
@@ -84,12 +88,14 @@ export function StudioSidebarWorkspacePanel({
       className="flex h-full min-h-0 min-w-0 flex-col outline-none"
       data-testid="sidebar-project-switcher-menu"
     >
-      <div className={`shrink-0 border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`}>
+      <div className={headerPortalTarget ? undefined : `shrink-0 border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`}>
         <DrawerHeader
+          portalTarget={headerPortalTarget}
           title={<span id={titleId}>{title}</span>}
           titleAs="h2"
           frame="rail"
-          actions={
+          actions={<>
+            {headerActionsRef ? <div ref={headerActionsRef} className="flex items-center gap-1" /> : null}
             <IconButton
               variant="ghost"
               size="sm"
@@ -101,7 +107,7 @@ export function StudioSidebarWorkspacePanel({
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>
-          }
+          </>}
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">{children}</div>

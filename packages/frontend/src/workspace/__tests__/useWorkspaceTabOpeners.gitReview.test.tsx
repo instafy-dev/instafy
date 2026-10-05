@@ -28,15 +28,18 @@ describe("openGitReviewTab with unsaved work", () => {
   let tabs: WorkspaceTabState[] = [];
   let active: WorkspaceTabState | null = null;
 
-  function Harness() {
+  function Harness({ conversationId = null, userId = null, projectId = "project-1" }: {
+    conversationId?: string | null; userId?: string | null; projectId?: string;
+  }) {
     const tabsRef = useRef<WorkspaceTabState[]>([]);
     const activeTabIdRef = useRef<string | null>(null);
     const persistedRef = useRef(null);
     openers = useWorkspaceTabOpeners({
-      activeConversationId: null,
+      activeConversationId: conversationId,
+      conversationWorkspaceUserId: userId,
       conversations: [],
       createConversation: vi.fn(),
-      workspaceProjectId: "project-1",
+      workspaceProjectId: projectId,
       tabsRef,
       activeTabIdRef,
       persistedGitReviewStateRef: persistedRef,
@@ -78,4 +81,28 @@ describe("openGitReviewTab with unsaved work", () => {
     expect(active?.title).toBe("First again");
     expect(tabs[0]?.id).toBe(active?.id);
   });
+
+  it("keeps the same unsaved ref scoped to its conversation, space and account", async () => {
+    const ref = "refs/instafy/recovery/o/a";
+    const scopes = [
+      { userId: "user-a", projectId: "project-1", conversationId: "chat-a" },
+      { userId: "user-a", projectId: "project-1", conversationId: "chat-b" },
+      { userId: "user-a", projectId: "project-2", conversationId: "chat-a" },
+      { userId: "user-b", projectId: "project-1", conversationId: "chat-a" },
+    ];
+    for (const scope of scopes) {
+      await act(async () => root.render(<Harness {...scope} />));
+      act(() => openers?.openGitReviewTab(unsavedWork(ref, "Kept work")));
+      expect(active?.workspaceOwner).toEqual(scope);
+    }
+    expect(tabs).toHaveLength(4);
+    const firstId = tabs[0]?.id;
+    await act(async () => root.render(<Harness {...scopes[0]} />));
+    act(() => openers?.openGitReviewTab(unsavedWork(ref, "Refreshed work")));
+    expect(tabs).toHaveLength(4);
+    expect(active?.id).toBe(firstId);
+    expect(active?.title).toBe("Refreshed work");
+    expect(tabs[1]?.title).toBe("Kept work");
+  });
+
 });

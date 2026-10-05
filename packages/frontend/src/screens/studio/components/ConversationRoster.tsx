@@ -13,8 +13,8 @@ import type {
 const MAX_STACK_AVATARS = 5;
 
 /**
- * "Who is in this room": a compact overlapping avatar stack pinned to the top
- * right of the conversation surface — humans first, then AI participants —
+ * "Who is in this room": a compact overlapping avatar stack in the conversation
+ * header or at the top right of the conversation surface — humans first, then AI participants —
  * with a "+N" overflow after {@link MAX_STACK_AVATARS}. It is the entry point
  * for the participants drawer: clicking it opens/closes the drawer (which
  * lists every member with their model, credential, and status, plus the shared
@@ -30,13 +30,19 @@ export function ConversationRoster({
   agents,
   humans,
   hasCredentialWarning = false,
+  placement = "transcript",
+  maxAvatars = MAX_STACK_AVATARS,
 }: {
   agents: readonly ConversationRosterAgent[];
   humans: readonly ConversationRosterHuman[];
   hasCredentialWarning?: boolean;
+  placement?: "transcript" | "header";
+  maxAvatars?: number;
 }) {
   const drawerOpen = useParticipantsDrawerOpen();
   const totalCount = humans.length + agents.length;
+  const headerPlacement = placement === "header";
+  const spacingClass = headerPlacement ? "!min-h-11 !min-w-11 shrink-0 px-2 py-1" : "px-1 py-0.5";
   // Persistent entry point: even before anyone has joined (a brand-new chat),
   // keep a plain icon so the participants/config panel is always reachable —
   // otherwise there is no way to open it until a member appears.
@@ -50,10 +56,11 @@ export function ConversationRoster({
         aria-label="Open participants"
         aria-expanded={drawerOpen}
         data-testid="conversation-roster"
+        title="Participants"
         onPress={() => toggleParticipantsDrawer()}
-        className="border-0 bg-transparent px-1 py-0.5 text-slate-400 shadow-none hover:text-slate-600 data-[hovered]:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 dark:data-[hovered]:text-slate-300"
+        className={`border-0 bg-transparent text-slate-400 shadow-none hover:text-slate-600 data-[hovered]:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 dark:data-[hovered]:text-slate-300 ${spacingClass}`}
       >
-        <Group className="h-4 w-4" aria-hidden="true" />
+        <Group className={headerPlacement ? "h-5 w-5" : "h-4 w-4"} aria-hidden="true" />
       </Button>
     );
   }
@@ -76,7 +83,7 @@ export function ConversationRoster({
       ),
     })),
   ];
-  const visibleStackEntries = stackEntries.slice(0, MAX_STACK_AVATARS);
+  const visibleStackEntries = stackEntries.slice(0, maxAvatars);
   const overflowCount = totalCount - visibleStackEntries.length;
 
   return (
@@ -88,8 +95,9 @@ export function ConversationRoster({
       aria-label={`Conversation members (${totalCount})`}
       aria-expanded={drawerOpen}
       data-testid="conversation-roster"
+      title="Participants"
       onPress={() => toggleParticipantsDrawer()}
-      className="relative gap-1 border-0 bg-transparent px-1 py-0.5 shadow-none"
+      className={`relative gap-1 border-0 bg-transparent shadow-none ${spacingClass}`}
     >
       <span className="flex items-center -space-x-1.5">
         {visibleStackEntries.map((entry) => (
@@ -113,7 +121,7 @@ export function ConversationRoster({
         <span
           aria-hidden="true"
           data-testid="conversation-roster-warning"
-          className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-secondary-500 dark:border-[var(--color-studio-dark-panel)]"
+          className={`absolute h-2.5 w-2.5 rounded-full border-2 border-white bg-secondary-500 dark:border-[var(--color-studio-dark-panel)] ${headerPlacement ? "right-1 top-1" : "-right-0.5 -top-0.5"}`}
         />
       ) : null}
     </Button>

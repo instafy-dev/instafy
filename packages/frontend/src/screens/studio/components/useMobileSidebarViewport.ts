@@ -88,5 +88,9 @@ export function useMobileSidebarViewport() {
     // any nonzero visual offset while the backdrop continues to cover the screen.
     height: `max(0px, calc(min(100%, calc(${bounds.bottom}px - var(--instafy-safe-area-inset-top))) - ${top}))`,
   } : undefined;
-  return { controlsRef, style };
+  const sheetStyle: CSSProperties | undefined = bounds ? {
+    bottom: Math.max(0, window.innerHeight - bounds.bottom),
+    height: `min(36rem, ${(bounds.bottom - bounds.top) * 0.78}px)`,
+  } : undefined;
+  return { controlsRef, style, sheetStyle };
 }

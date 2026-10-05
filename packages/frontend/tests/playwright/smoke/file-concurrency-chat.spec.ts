@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   filesEntryTestId,
@@ -103,7 +104,7 @@ test.describe("File concurrency", () => {
     await fileEntry.click();
 
     await expect(page.getByTestId("code-save-draft-button")).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByTestId("workspace-tabs")).toContainText(fileName, { timeout: 60_000 });
+    await expect(page.getByTestId("conversation-workspace-views")).toContainText(fileName, { timeout: 60_000 });
     await expect(page.getByTestId("monaco-editor")).toContainText(`initial ${unique}`, { timeout: 60_000 });
 
     await dismissAnyToast(page);
@@ -155,7 +156,7 @@ test.describe("File concurrency", () => {
     const staleCard = page.getByTestId("workspace-file-stale-card");
     const staleCardVisible = await staleCard.isVisible().catch(() => false);
     if (!staleCardVisible) {
-      await page.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(page);
     }
     await expect(staleCard).toBeVisible({ timeout: 60_000 });
     await expect(page.getByTestId("workspace-file-stale-reload")).toBeVisible({ timeout: 10_000 });

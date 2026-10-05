@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import {
@@ -75,7 +76,7 @@ async function waitForAssistantReply(
   });
   await page.waitForURL((next) => next.pathname.includes("/studio"), { timeout: 60_000 }).catch(() => {});
   await waitForStoreProjectId(page, options.projectId, 20_000).catch(() => {});
-  await page.getByTestId("sidebar-nav-chat").click().catch(() => {});
+  await returnToConversation(page).catch(() => {});
 
   await expectAssistantReplyOrSkipRateLimit(page, options.expectedText, { timeout: recoveryTimeoutMs });
 }
@@ -224,7 +225,7 @@ test.describe("Org invite link chat", () => {
       await memberPage.getByTestId("chat-send-button").click();
       await waitForAssistantReply(memberPage, { projectId, expectedText: /\b5\b/, recoveryTimeoutMs: 180_000 });
 
-      await page.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(page);
       await expect(
         page.locator('[data-testid="chat-bubble-user"]').filter({ hasText: /now add 3/i }).first()
       ).toBeVisible({ timeout: 60_000 });

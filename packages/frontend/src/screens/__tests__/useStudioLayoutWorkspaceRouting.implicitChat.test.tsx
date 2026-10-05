@@ -3,7 +3,7 @@ import { act, useCallback, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { BrowserRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useStudioLayoutWorkspaceRouting } from "../useStudioLayoutWorkspaceRouting";
+import { resolveOwnedChatView, useStudioLayoutWorkspaceRouting } from "../useStudioLayoutWorkspaceRouting";
 import type { StudioPanel } from "../studio/types";
 import type { LeftDrawerPanel } from "../useStudioLayoutChromeState";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
@@ -12,11 +12,12 @@ const PROJECT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CONTROLLER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LOCAL = "local-chat";
 const conversation = { localId: LOCAL, controllerId: CONTROLLER, title: "Conversation 1", lifecycleStatus: "active" } as ConversationState;
-type Tab = { id: string; kind: string; panel: StudioPanel | null; jobId: string | null };
+type Tab = { id: string; kind: string; panel: StudioPanel | null; jobId: string | null; workspaceOwner?: { userId: string; projectId: string; conversationId: string } };
 const chatTab: Tab = { id: "chat-tab", kind: "conversation", panel: null, jobId: null };
 const projectsTab: Tab = { id: "projects-tab", kind: "panel", panel: "projects", jobId: null };
 const reviewTab: Tab = { id: "review-tab", kind: "gitReview", panel: null, jobId: null };
 const jobTab: Tab = { id: "job-tab", kind: "jobThread", panel: null, jobId: "job-a" };
+const diffTab: Tab = { id: "diff-tab", kind: "gitDiff", panel: null, jobId: null, workspaceOwner: { userId: "user", projectId: PROJECT, conversationId: LOCAL } };
 
 describe("implicit chat route rendered-tab reconciliation", () => {
   let root: Root;
@@ -58,7 +59,7 @@ describe("implicit chat route rendered-tab reconciliation", () => {
       activeWorkspaceTabKind: tab?.kind ?? null, activeWorkspaceTabPanel: tab?.panel ?? null,
       conversationTabsReady: true,
       consumeUrlNavigation: consume, conversations: [{ ...conversation, controllerId: selectedControllerId }], conversationsProjectKey,
-      focusWorkspaceTab: focusedTabs, isLargeScreen: false, leftDrawer,
+      focusWorkspaceTab: id => { focusedTabs(id); if (id === diffTab.id) { setTab(diffTab); setPanel("chat"); } }, isLargeScreen: false, leftDrawer,
       locationPathname: location.pathname, locationSearch: location.search,
       locationKey: location.key, locationState: location.state,
       navigate: (to, options) => { navigations(to, options); void navigate(to, options); },
@@ -67,7 +68,7 @@ describe("implicit chat route rendered-tab reconciliation", () => {
       requestUrlNavigation: mode => { pendingIntent = mode ?? "push"; }, restoreGitReviewTab: restoredReviews,
       selectConversation: selectedConversations, setConversationControllerId: vi.fn(),
       setIsProjectLauncherOpen: vi.fn(), setLeftDrawer, setMobileSidebarOpen: vi.fn(),
-      workspaceTabs: [chatTab, projectsTab, reviewTab, jobTab],
+      workspaceTabs: [chatTab, projectsTab, reviewTab, jobTab, diffTab],
     });
     return <div data-testid="rendered-tab">{tab ? tab.kind === "panel" ? tab.panel : tab.kind : "pending"}</div>;
   }
@@ -86,6 +87,30 @@ describe("implicit chat route rendered-tab reconciliation", () => {
   });
   const render = () => act(async () => root.render(<BrowserRouter><Harness /></BrowserRouter>));
   const rendered = () => container.querySelector('[data-testid="rendered-tab"]')?.textContent;
+
+  it("restores a scoped resource view before generic chat hydration and keeps it selected", async () => {
+    const params = new URLSearchParams(window.location.search); params.set("chatView", diffTab.id);
+    window.history.replaceState(window.history.state, "", `/studio?${params}`);
+    initialTab = projectsTab; initialPanel = "projects";
+    await render();
+    expect(rendered()).toBe("gitDiff"); expect(focusedTabs).toHaveBeenCalledWith(diffTab.id);
+    expect(openedPanels).not.toHaveBeenCalled();
+    expect(new URLSearchParams(window.location.search).get("chatView")).toBe(diffTab.id);
+    pendingIntent = "push"; await act(async () => restoreTab(chatTab, "chat"));
+    expect(new URLSearchParams(window.location.search).has("chatView")).toBe(false);
+    expect(rendered()).toBe("conversation");
+  });
+
+  it("rejects a view belonging to a different chat or space and tolerates an expired reference", async () => {
+    expect(resolveOwnedChatView([diffTab], diffTab.id, PROJECT, "other")).toBeNull();
+    expect(resolveOwnedChatView([diffTab], diffTab.id, "other", LOCAL)).toBeNull();
+    expect(resolveOwnedChatView([diffTab], "expired", PROJECT, LOCAL)).toBeNull();
+    const params = new URLSearchParams(window.location.search); params.set("chatView", "expired");
+    window.history.replaceState(window.history.state, "", `/studio?${params}`);
+    await render();
+    expect(rendered()).toBe("conversation"); expect(focusedTabs).not.toHaveBeenCalled();
+    expect(new URLSearchParams(window.location.search).has("chatView")).toBe(false);
+  });
 
   it("retains an exact message through canonical hydration and clears it for a normal chat-tab visit", async () => {
     window.history.replaceState(window.history.state, "", `/studio?projectId=${PROJECT}&conversationControllerId=${CONTROLLER}&messageId=target-message`);

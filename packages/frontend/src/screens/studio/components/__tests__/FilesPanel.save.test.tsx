@@ -1206,7 +1206,8 @@ describe("FilesPanel one Save", () => {
 
   it("names the unsaved dot in search results for screen readers", async () => {
     await render([buffer()]);
-    const search = container.querySelector<HTMLInputElement>('input[type="search"], input[aria-label*="Search"]');
+    await act(async () => query("files-explorer-search-toggle")!.click());
+    const search = container.querySelector<HTMLInputElement>('[data-testid="code-search-input"]');
     expect(search).not.toBeNull();
     await act(async () => {
       const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;

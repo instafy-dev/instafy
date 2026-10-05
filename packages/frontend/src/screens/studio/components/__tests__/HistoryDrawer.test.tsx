@@ -180,6 +180,29 @@ describe("HistoryDrawer", () => {
     await flush();
   }
 
+  it.each(["desktop", "mobile"])("keeps %s controls in the navigation header", async (layout) => {
+    const header = document.createElement("div");
+    document.body.append(header);
+    const close = vi.fn();
+    try {
+      await act(async () => root.render(<HistoryDrawer versioning={versioning()} onRequestClose={close}
+        headerPortalTarget={layout === "desktop" ? header : null}
+        actionsPortalTarget={layout === "mobile" ? header : null} />));
+      await flush();
+      expect(q(header, "source-control-refresh")).not.toBeNull();
+      expect(q(container, "source-control-refresh")).toBeNull();
+      expect(q(header, "source-control-close") !== null).toBe(layout === "desktop");
+      if (layout === "desktop") {
+        expect(header.textContent).toContain("History");
+        await act(async () => q<HTMLButtonElement>(header, "source-control-close")?.click());
+        expect(close).toHaveBeenCalledOnce();
+      } else {
+        expect(header.textContent).not.toContain("History");
+        expect(container.querySelector("h2.sr-only")?.textContent).toBe("History");
+      }
+    } finally { header.remove(); }
+  });
+
   it("makes no request while the mode is only a guess", async () => {
     await render(versioning({ resolved: false, historyReady: false }));
     expect(container.textContent).toContain("Loading history");

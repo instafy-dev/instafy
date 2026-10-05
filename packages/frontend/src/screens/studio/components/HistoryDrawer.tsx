@@ -91,11 +91,15 @@ function eventTargetsProject(event: Event, projectId: string): boolean {
  * (debounced) and on focus after a minute.
  */
 export function HistoryDrawer({
+  headerPortalTarget,
+  actionsPortalTarget,
   versioning,
   onRequestClose,
   probeFailed = false,
   arrivalNotice = null,
 }: {
+  headerPortalTarget?: HTMLElement | null;
+  actionsPortalTarget?: HTMLElement | null;
   versioning: ActiveWorkspaceVersioning;
   onRequestClose?: () => void;
   /** The mode probe made when the drawer opened got no answer. */
@@ -550,6 +554,9 @@ export function HistoryDrawer({
   return (
     <div className="@container relative flex h-full min-h-0 flex-col" data-testid="source-control-drawer" data-mode="history">
       <DrawerHeader
+        portalTarget={headerPortalTarget}
+        actionsPortalTarget={actionsPortalTarget}
+        pageTitle
         frame="rail"
         title="History"
         titleAs="h2"
@@ -575,7 +582,7 @@ export function HistoryDrawer({
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
             </IconButton>
-            {onRequestClose ? (
+            {onRequestClose && !actionsPortalTarget ? (
               <IconButton
                 variant="ghost"
                 size="sm"

@@ -47,14 +47,15 @@ export function StudioSidebarTeamMenu({
   const [open, setOpen] = useState(false);
   const path = presentation === "path" && !compact;
   const menuItemClassName = mobile ? "min-h-12" : touchTargets ? "min-h-11" : undefined;
-  return (
-    <MenuTrigger isOpen={open} onOpenChange={setOpen}>
+  const directSwitch = mobile && Boolean(onSwitchTeam);
+  const trigger = (
       <Button
         ref={triggerRef}
         variant="ghost" size="sm" radius="lg" fullWidth={compact}
         data-testid="sidebar-team-menu-trigger"
-        aria-label={`Team menu: ${teamName}`} title={`Team menu: ${teamName}`}
-        aria-haspopup="menu"
+        aria-label={`${directSwitch ? "Choose team" : "Team menu"}: ${teamName}`} title={`${directSwitch ? "Choose team" : "Team menu"}: ${teamName}`}
+        aria-haspopup={directSwitch ? "dialog" : "menu"}
+        onPress={directSwitch ? onSwitchTeam : undefined}
         className={`${path ? `studio-breadcrumb-trigger studio-breadcrumb-avatar-trigger shrink-0 !px-0 ${mobile || touchTargets ? "!min-w-11 !w-11" : "!min-w-8 !w-8"}` : compact ? rowClassName : "min-w-0 flex-1 justify-between gap-1 py-2 pl-2 pr-3"} ${mobile ? "!min-h-12" : touchTargets ? "!min-h-11" : ""} data-[pressed]:!translate-y-0 data-[pressed]:!scale-100`}
       >
         {path ? (
@@ -72,6 +73,11 @@ export function StudioSidebarTeamMenu({
           </>
         )}
       </Button>
+  );
+  if (directSwitch) return trigger;
+  return (
+    <MenuTrigger isOpen={open} onOpenChange={setOpen}>
+      {trigger}
       <StudioPopover placement={compact ? "right top" : mobile || path ? "bottom start" : "bottom end"} offset={6}
         className={`${mobile ? "w-56" : "w-52"} max-w-[calc(100vw-1rem)] p-2`} data-testid="sidebar-team-menu">
         {path ? <div className="mb-1 break-words px-2 py-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{teamName}</div> : null}

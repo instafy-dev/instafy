@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { prepareStudio } from "../utils/harness.js";
 
@@ -29,7 +30,7 @@ test.describe("Chat slash-command typeahead", () => {
   test("accepts the highlighted slash command with Tab", async ({ page }) => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const chatInput = page.getByTestId("chat-input");
     await chatInput.click();
@@ -52,7 +53,7 @@ test.describe("Chat slash-command typeahead", () => {
   test("shows slash commands and inserts the selected command", async ({ page }) => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const chatInput = page.getByTestId("chat-input");
     await chatInput.click();
@@ -88,7 +89,7 @@ test.describe("Chat slash-command typeahead", () => {
   test("composer action menu inserts commands with the caret at the end", async ({ page }) => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const chatInput = page.getByTestId("chat-input");
     await page.getByTestId("composer-action-menu-trigger").click();
@@ -103,7 +104,7 @@ test.describe("Chat slash-command typeahead", () => {
   test("submitting /invite keeps the composer responsive", async ({ page }) => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const chatInput = page.getByTestId("chat-input");
     const inviteEmail = `invite-${Date.now()}@instafy.dev`;
@@ -163,7 +164,7 @@ test.describe("Chat slash-command typeahead", () => {
   test("accepts the highlighted assistant mention with Tab", async ({ page }) => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const chatInput = page.getByTestId("chat-input");
     await chatInput.click();

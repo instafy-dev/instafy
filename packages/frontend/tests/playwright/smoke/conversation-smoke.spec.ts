@@ -1,3 +1,4 @@
+import { openChats, activeConversationId, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import {
   prepareStudio,
@@ -14,8 +15,8 @@ import { clickQueuedSendNowIfAvailable, createPublicChatFromTopBar } from "../ut
 import { ensureProjectCreditsReadyForChat } from "../utils/projectCredits.js";
 import { openCreditsPanel } from "../utils/sidebar.js";
 
-function conversationTabButtons(page: Page) {
-  return page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
+function conversationRows(page: Page) {
+  return page.getByTestId("conversation-history-item");
 }
 
 function assistantBubbles(page: Page): Locator {
@@ -125,8 +126,9 @@ test.describe("Controller conversation smoke", () => {
       throw new Error("Active project id missing for conversation smoke.");
     }
 
-    const conversationTabs = conversationTabButtons(page);
-    await expect(conversationTabs).toHaveCount(1);
+    await openChats(page);
+    const conversationRowsLocator = conversationRows(page);
+    await expect(conversationRowsLocator).toHaveCount(1);
 
     const setupIndicator = page.getByTestId("assistant-setup-indicator");
     const typingIndicator = page.getByTestId("assistant-typing-indicator");
@@ -176,8 +178,9 @@ test.describe("Controller conversation smoke", () => {
       throw new Error("Active project id missing for conversation smoke.");
     }
 
-    const conversationTabs = conversationTabButtons(page);
-    await expect(conversationTabs).toHaveCount(1);
+    await openChats(page);
+    const conversationRowsLocator = conversationRows(page);
+    await expect(conversationRowsLocator).toHaveCount(1);
     const assistantResponses = assistantBubbles(page);
     const threadPreviews = agentJobThreadPreviews(page);
     const setupIndicator = page.getByTestId("assistant-setup-indicator");
@@ -217,8 +220,8 @@ test.describe("Controller conversation smoke", () => {
     await typingIndicator.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
 
     await createPublicChatFromTopBar(page);
-    await expect(conversationTabs).toHaveCount(2);
-    await expect(conversationTabs.last()).toContainText("Conversation 2");
+    await expect(conversationRowsLocator).toHaveCount(2);
+    await expect(conversationRowsLocator.filter({ hasText: "Conversation 2" }).first()).toContainText("Conversation 2");
 
     const secondPrompt = "@octo What is 1+2? Reply with just the number.";
     await page.getByTestId("chat-input").fill(secondPrompt);
@@ -247,8 +250,8 @@ test.describe("Controller conversation smoke", () => {
     await setupIndicator.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
     await typingIndicator.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
 
-    await conversationTabs.first().click();
-    await expect(conversationTabs.first()).toHaveAttribute("aria-current", "page");
+    await conversationRowsLocator.filter({ hasText: "Conversation 1" }).first().click();
+    await expect(conversationRowsLocator.filter({ hasText: "Conversation 1" }).first()).toHaveAttribute("aria-current", "page");
     await page.getByTestId("chat-input").fill("What is 2+2? Reply with just the number.");
     const baselineAnswerCount3 = await assistantResponses.filter({ hasText: numericReply }).count();
     const baselineAssistantCountSecond = await assistantResponses.count();
@@ -276,9 +279,10 @@ test.describe("Controller conversation smoke", () => {
     await typingIndicator.waitFor({ state: "detached", timeout: 10_000 }).catch(() => {});
 
     await reloadStudioSurface(page, activeProjectId);
-    await page.getByTestId("sidebar-nav-chat").click();
-    const reloadedTabs = conversationTabButtons(page);
-    await expect(reloadedTabs).toHaveCount(1);
+    await returnToConversation(page);
+    await openChats(page);
+    const reloadedRows = conversationRows(page);
+    await expect(reloadedRows).toHaveCount(2);
   });
 
   test.describe("live quick prompt switching", () => {
@@ -294,9 +298,10 @@ test.describe("Controller conversation smoke", () => {
       }
 
       await waitForHostedRuntimeReady(page);
-      const conversationTabs = conversationTabButtons(page);
+      await openChats(page);
+      const conversationRowsLocator = conversationRows(page);
       const userBubbles = page.locator('[data-testid="chat-bubble-user"]');
-      await expect(conversationTabs).toHaveCount(1);
+      await expect(conversationRowsLocator).toHaveCount(1);
 
       const firstPrompt = `What is 1+1? Reply with just the number. ${Date.now()}`;
       await page.getByTestId("chat-input").fill(firstPrompt);
@@ -304,21 +309,21 @@ test.describe("Controller conversation smoke", () => {
       await expect(userBubbles.last()).toContainText("What is 1+1?", { timeout: 15_000 });
 
       await createPublicChatFromTopBar(page);
-      await expect(conversationTabs).toHaveCount(2);
-      await expect(conversationTabs.last()).toContainText("Conversation 2");
+      await expect(conversationRowsLocator).toHaveCount(2);
+      await expect(conversationRowsLocator.filter({ hasText: "Conversation 2" }).first()).toContainText("Conversation 2");
 
       const secondPrompt = `What is 1+2? Reply with just the number. ${Date.now()}`;
       await page.getByTestId("chat-input").fill(secondPrompt);
       await page.getByTestId("chat-send-button").click();
       await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
 
-      await conversationTabs.first().click();
-      await expect(conversationTabs.first()).toHaveAttribute("aria-current", "page");
+      await conversationRowsLocator.filter({ hasText: "Conversation 1" }).first().click();
+      await expect(conversationRowsLocator.filter({ hasText: "Conversation 1" }).first()).toHaveAttribute("aria-current", "page");
       await expect(userBubbles.last()).toContainText("What is 1+1?", { timeout: 15_000 });
       await waitForAssistantNumberReplyInActiveConversation(page, 2);
 
-      await conversationTabs.last().click();
-      await expect(conversationTabs.last()).toHaveAttribute("aria-current", "page");
+      await conversationRowsLocator.filter({ hasText: "Conversation 2" }).first().click();
+      await expect(conversationRowsLocator.filter({ hasText: "Conversation 2" }).first()).toHaveAttribute("aria-current", "page");
       await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
       await waitForAssistantNumberReplyInActiveConversation(page, 3);
     });
@@ -387,8 +392,9 @@ test.describe("Controller conversation smoke", () => {
     }
 
     await waitForHostedRuntimeReady(page);
-    const conversationTabs = conversationTabButtons(page);
-    await expect(conversationTabs).toHaveCount(1);
+    await openChats(page);
+    const conversationRowsLocator = conversationRows(page);
+    await expect(conversationRowsLocator).toHaveCount(1);
 
     const setupIndicator = page.getByTestId("assistant-setup-indicator");
     const typingIndicator = page.getByTestId("assistant-typing-indicator");
@@ -448,7 +454,7 @@ test.describe("Controller conversation smoke", () => {
     }, { controllerId: conversationControllerId });
 
     await reloadStudioSurface(page, activeProjectId);
-    await expect(conversationTabs).toHaveCount(1);
+    await expect(conversationRowsLocator).toHaveCount(1);
     // Best-effort: ensure any assistant bubble persists after reload; content may vary.
     await expect.soft(assistantResponses.first()).toBeVisible({ timeout: 30_000 });
     await expect
@@ -487,8 +493,9 @@ test.describe("Controller conversation smoke", () => {
     }
 
     await waitForHostedRuntimeReady(page);
-    const conversationTabs = conversationTabButtons(page);
-    await expect(conversationTabs).toHaveCount(1);
+    await openChats(page);
+    const conversationRowsLocator = conversationRows(page);
+    await expect(conversationRowsLocator).toHaveCount(1);
 
     const storeProjectId = await page.evaluate(() => {
       return window["__INSTAFY_STORE__"]?.getState().activeProjectId ?? null;
@@ -496,30 +503,14 @@ test.describe("Controller conversation smoke", () => {
     expect(storeProjectId).not.toBeNull();
     await expect.poll(() => page.url()).toContain(`projectId=${storeProjectId as string}`);
 
-    const conversationTab = conversationTabs.first();
-    const conversationTabId = await conversationTab.getAttribute("data-tab-id");
-    expect(conversationTabId).not.toBeNull();
-    const conversationId =
-      conversationTabId && conversationTabId.startsWith("workspace-conversation-")
-        ? conversationTabId.replace("workspace-conversation-", "")
-        : conversationTabId;
-    expect(conversationId).not.toBeNull();
-    await expect.poll(() => page.url()).toContain(`conversationId=${conversationId as string}`);
-
+    const conversationId = await activeConversationId(page);
     await openCreditsPanel(page);
     await expect.poll(() => page.url()).toContain("panel=credits");
 
     await reloadStudioSurface(page, activeProjectId);
     await expect(page.getByTestId("sidebar-nav-credits")).toHaveAttribute("aria-current", "page");
 
-    await page.getByTestId("sidebar-nav-chat").click();
-    await expect(conversationTabs).toHaveCount(1);
-
-    const reloadedTabId = await conversationTabs.first().getAttribute("data-tab-id");
-    const reloadedConversationId =
-      reloadedTabId && reloadedTabId.startsWith("workspace-conversation-")
-        ? reloadedTabId.replace("workspace-conversation-", "")
-        : reloadedTabId;
-    expect(reloadedConversationId).toBe(conversationId);
+    await returnToConversation(page);
+    expect(await activeConversationId(page)).toBe(conversationId);
   });
 });

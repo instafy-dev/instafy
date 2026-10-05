@@ -1,44 +1,28 @@
 import { test, expect } from "@playwright/test";
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
+import { activeConversationId, openChats, selectConversation } from "../utils/conversationNavigation.js";
+import { createPublicChatFromTopBar } from "../utils/chatUi.js";
 
-test.describe("Mobile workspace tabs", () => {
+test.describe("Mobile conversation navigation", () => {
   test.afterEach(async ({ page }) => {
     await resetRuntimeUserState(page, { source: "mobile-tabs:cleanup" }).catch(() => {});
   });
 
-  test("uses a topbar tab selector below lg", async ({ page }) => {
+  test("switches through Chats below the desktop breakpoint", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
-
     await prepareStudio(page, { waitForHostedRuntime: false });
-
+    const first = await activeConversationId(page);
+    await expect(page.getByTestId("mobile-header-title")).toContainText("Conversation 1");
+    await openChats(page);
+    await createPublicChatFromTopBar(page);
+    await expect(page.getByTestId("mobile-header-title")).toContainText("Conversation 2");
+    expect(await activeConversationId(page)).not.toBe(first);
+    await selectConversation(page, first);
+    await expect(page.getByTestId("mobile-header-title")).toContainText("Conversation 1");
+    await expect(page.getByTestId("conversation-history-panel")).toHaveCount(0);
     await expect(page.getByTestId("workspace-tabs")).toHaveCount(0);
-
-    const tabSelector = page.getByTestId("topbar-tab-selector");
-    await expect(tabSelector).toBeVisible();
-    await expect(tabSelector).toContainText("Conversation 1");
-
-    await page.getByTestId("status-toast").waitFor({ state: "detached", timeout: 15_000 }).catch(() => {});
-
-    await page.getByTestId("topbar-new-conversation").click();
-    const newChatMenu = page.getByTestId("chat-new-chat-menu-popover");
-    await expect(newChatMenu).toBeVisible();
-    await newChatMenu.getByRole("button", { name: "Public chat" }).click();
-    await expect(tabSelector).toContainText("Conversation 2");
-
-    await tabSelector.click();
-    const tabMenu = page.getByTestId("topbar-tab-selector-menu");
-    await expect(tabMenu).toBeVisible();
-    await expect(tabMenu).not.toContainText("Tabs");
-    await expect(tabMenu).toContainText("Conversation 1");
-    await expect(tabMenu).toContainText("Conversation 2");
-
-    await tabMenu
-      .locator('[data-testid^="topbar-tab-item-"]')
-      .filter({ hasText: "Conversation 1" })
-      .first()
-      .click();
-    await expect(tabSelector).toContainText("Conversation 1");
+    await expect(page.getByTestId("topbar-tab-selector")).toHaveCount(0);
   });
 });

@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -51,7 +52,7 @@ test.describe("Token usage UI", () => {
     // Guest sessions have no AI access in the BYOC stack; onboard the
     // canonical local Codex login so the AI-targeted send is actually enabled.
     await ensureRealDefaultCodexCredentialWhenRequired(page);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "token-usage" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await ensureProjectCreditsReadyForChat(page, projectId);

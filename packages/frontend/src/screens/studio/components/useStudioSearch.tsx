@@ -21,6 +21,7 @@ export interface StudioSearchRequest {
   scope: StudioSearchScope;
   query: string;
   restoreMessagePages?: number;
+  restoreSpacePages?: number;
 }
 export interface StudioSearchSnapshot {
   query: string;
@@ -29,6 +30,7 @@ export interface StudioSearchSnapshot {
   resultId: string;
   resultLimit: number;
   messagePageCount: number;
+  spacePageCount?: number;
 }
 export interface StudioSearchProps {
   scopeKey: string;
@@ -47,6 +49,9 @@ export interface StudioSearchProps {
   restoreSession?: (StudioSearchSnapshot & { restoreKey: string }) | null;
   onBeforeResultActivate?: (snapshot: StudioSearchSnapshot) => void;
   onDismiss?: () => void;
+  remainingSpaces?: number;
+  onLoadMoreSpaces?: () => void;
+  spacePageCount?: number;
   hasMoreMessages?: boolean;
   loadingMoreMessages?: boolean;
   onLoadMoreMessages?: () => void;
@@ -72,7 +77,7 @@ function canFocusSearchTarget(candidate: HTMLElement | null | undefined): candid
 }
 
 /** A temporary search surface over records supplied by the authenticated Studio shell. */
-export function useStudioSearch({ scopeKey, org, space, records, loading = false, error, onRetry, notice, onOpen, onRequestChange, restoreSession, onBeforeResultActivate, onDismiss, hasMoreMessages, loadingMoreMessages, onLoadMoreMessages, messagePageCount = 1, fullPage = true, persistentControl = false, returnFocusRef }: StudioSearchProps) {
+export function useStudioSearch({ scopeKey, org, space, records, loading = false, error, onRetry, notice, onOpen, onRequestChange, restoreSession, onBeforeResultActivate, onDismiss, remainingSpaces = 0, onLoadMoreSpaces, spacePageCount = 1, hasMoreMessages, loadingMoreMessages, onLoadMoreMessages, messagePageCount = 1, fullPage = true, persistentControl = false, returnFocusRef }: StudioSearchProps) {
   const defaultScope: StudioSearchScope = space ? 'space' : org ? 'org' : 'all';
   const [search, setSearch] = useState<SearchState>({ scopeKey, open: false, query: '', scope: defaultScope });
   // Hide stale results synchronously; effects alone could expose the old scope for one paint.
@@ -182,7 +187,7 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
     setSearch({ scopeKey, open: true, query: restoreSession.query, scope: restoredScope });
     setResultPage({ key: JSON.stringify([scopeKey, restoredScope, restoreSession.query]), limit: restoreSession.resultLimit });
     pendingRestoreScroll.current = restoreSession;
-    onRequestChange?.({ open: true, scope: restoredScope, query: restoreSession.query, restoreMessagePages: restoreSession.messagePageCount });
+    onRequestChange?.({ open: true, scope: restoredScope, query: restoreSession.query, restoreMessagePages: restoreSession.messagePageCount, restoreSpacePages: restoreSession.spacePageCount });
   }, [onRequestChange, org, restoreSession, scopeKey, space]);
   useEffect(() => {
     if (!open || loading || loadingMoreMessages || !pendingRestoreScroll.current) return;
@@ -322,7 +327,7 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
               onKeyDown={event => onResultKeyDown(event, visibleMatches.indexOf(result))}
               onClick={() => {
                 onBeforeResultActivate?.({ query, scope, scrollTop: resultsScrollRef.current?.scrollTop ?? 0,
-                  resultId: result.id, resultLimit, messagePageCount });
+                  resultId: result.id, resultLimit, messagePageCount, spacePageCount });
                 closeSearch(false);
                 result.activate();
               }}>
@@ -334,10 +339,13 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
         {visibleMatches.length < matches.length ? <button type="button" className="studio-search-more" onClick={() => setResultPage({ key: resultPageKey, limit: resultLimit + 100 })}>
           Show {Math.min(100, matches.length - visibleMatches.length)} more results ({visibleMatches.length} of {matches.length} shown)
         </button> : null}
+        {remainingSpaces > 0 ? <button type="button" className="studio-search-more" disabled={loading} onClick={onLoadMoreSpaces}>
+          {loading ? 'Searching spaces…' : `Search more spaces (${remainingSpaces} remaining)`}
+        </button> : null}
         {hasMoreMessages ? <button type="button" className="studio-search-more" disabled={loadingMoreMessages} onClick={onLoadMoreMessages}>
           {loadingMoreMessages ? 'Loading more messages…' : 'Load more message results'}
         </button> : null}
-        {!matches.length && !loading && !error ? <p className="studio-search-empty">No results in this scope. Try another query or a wider scope.</p> : null}
+        {!matches.length && !loading && !error ? <p className="studio-search-empty">{remainingSpaces > 0 ? "No results in the spaces searched so far. Search more spaces to continue." : "No results in this scope. Try another query or a wider scope."}</p> : null}
       </div>
       <footer className="studio-search-footer">{notice ? <span>{notice}</span> : null}<span>↑ ↓ to move · Enter to open</span></footer>
     </section>

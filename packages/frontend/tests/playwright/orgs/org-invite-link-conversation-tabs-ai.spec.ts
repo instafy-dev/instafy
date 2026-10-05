@@ -1,3 +1,4 @@
+import { openChats, returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import {
@@ -39,11 +40,8 @@ async function ensureHostedRuntimeReady(page: import("@playwright/test").Page, p
   await waitForHostedRuntimeReady(page, 120_000, { projectId });
 }
 
-function conversationTabLocator(page: import("@playwright/test").Page) {
-  return page
-    .getByTestId("workspace-tabs")
-    .locator('[data-tab-kind="conversation"]')
-    .filter({ hasText: /^Conversation\s+\d+/ });
+function conversationRows(page: import("@playwright/test").Page) {
+  return page.getByTestId("conversation-history-item");
 }
 
 async function waitForConversationControllerId(page: import("@playwright/test").Page) {
@@ -80,7 +78,7 @@ async function waitForAssistantReply(
   });
   await page.waitForURL((next) => next.pathname.includes("/studio"), { timeout: 60_000 }).catch(() => {});
   await waitForStoreProjectId(page, options.projectId, 20_000).catch(() => {});
-  await page.getByTestId("sidebar-nav-chat").click().catch(() => {});
+  await returnToConversation(page).catch(() => {});
 
   await expectAssistantReplyOrSkipRateLimit(page, options.expectedText, { timeout: recoveryTimeoutMs });
 }
@@ -116,7 +114,7 @@ test.describe("Org invite link conversation tabs + AI", () => {
       throw new Error("Invite link URL missing.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const guestContext = await browser.newContext();
     const guestPage = await guestContext.newPage();
@@ -134,14 +132,16 @@ test.describe("Org invite link conversation tabs + AI", () => {
       await guestPage.goto(inviteLinkUrl, { waitUntil: "domcontentloaded" });
       await guestPage.waitForURL((url) => url.pathname.includes("/studio"), { timeout: 60_000 });
       await waitForStoreProjectId(guestPage, projectId, 20_000);
-      await guestPage.getByTestId("sidebar-nav-chat").click();
+      await returnToConversation(guestPage);
       await ensureHostedRuntimeReady(guestPage, projectId);
       await ensureProjectCreditsReadyForChat(guestPage, projectId);
 
-      const ownerConversationTabs = conversationTabLocator(page);
-      const guestConversationTabs = conversationTabLocator(guestPage);
-      await expect(ownerConversationTabs).toHaveCount(1);
-      await expect(guestConversationTabs).toHaveCount(1);
+      await openChats(page);
+      await openChats(guestPage);
+      const ownerConversationRows = conversationRows(page);
+      const guestConversationRows = conversationRows(guestPage);
+      await expect(ownerConversationRows).toHaveCount(1);
+      await expect(guestConversationRows).toHaveCount(1);
 
       const ownerCreateConversation = page.waitForResponse(
         (response) =>
@@ -156,14 +156,14 @@ test.describe("Org invite link conversation tabs + AI", () => {
       await ownerCreateConversation;
       await waitForConversationControllerId(page);
 
-      await expect(ownerConversationTabs).toHaveCount(2);
-      await expect(guestConversationTabs).toHaveCount(2, { timeout: 30_000 });
+      await expect(ownerConversationRows).toHaveCount(2);
+      await expect(guestConversationRows).toHaveCount(2, { timeout: 30_000 });
 
-      await expect(ownerConversationTabs.nth(1)).toContainText("Conversation 2");
-      await expect(guestConversationTabs.nth(1)).toContainText("Conversation 2");
+      await expect(ownerConversationRows.filter({ hasText: "Conversation 2" }).first()).toContainText("Conversation 2");
+      await expect(guestConversationRows.filter({ hasText: "Conversation 2" }).first()).toContainText("Conversation 2");
 
-      await ownerConversationTabs.nth(1).click();
-      await guestConversationTabs.nth(1).click();
+      await ownerConversationRows.filter({ hasText: "Conversation 2" }).first().click();
+      await guestConversationRows.filter({ hasText: "Conversation 2" }).first().click();
       await waitForConversationControllerId(guestPage);
 
       await guestPage.getByTestId("chat-input").fill("Typing…");

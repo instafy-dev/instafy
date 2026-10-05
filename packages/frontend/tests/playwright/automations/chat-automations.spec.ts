@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { randomUUID } from "node:crypto";
 
 import { expect, test, type Page } from "@playwright/test";
@@ -125,7 +126,7 @@ test.describe("Chat automation creation", () => {
     }
     await ensureRealDefaultCodexCredentialWhenRequired(page);
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "chat-automations" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await selectPrimaryAgentModel(page, AUTOMATION_MODEL);
@@ -180,7 +181,7 @@ test.describe("Chat automation creation", () => {
     }
     await ensureRealDefaultCodexCredentialWhenRequired(page);
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "chat-automations-once" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await selectPrimaryAgentModel(page, AUTOMATION_MODEL);

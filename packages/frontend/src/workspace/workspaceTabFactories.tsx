@@ -21,7 +21,16 @@ import type { ChatMessageCommitRange, StudioPanel } from "../screens/studio/type
 import type { ConversationState } from "../conversations/ConversationsProvider";
 import type { WorkspaceGitReviewSource } from "./gitReviewTypes";
 
-export interface WorkspaceConversationTabState {
+export interface ConversationWorkspaceOwner {
+  userId: string;
+  projectId: string;
+  conversationId: string;
+}
+interface WorkspaceOwnedView {
+  workspaceOwner?: ConversationWorkspaceOwner;
+}
+
+export interface WorkspaceConversationTabState extends WorkspaceOwnedView {
   kind: "conversation";
   /** A browsing tab that the next conversation selection may replace. */
   preview?: boolean;
@@ -35,7 +44,7 @@ export interface WorkspaceConversationTabState {
   draggable: boolean;
 }
 
-export interface WorkspaceJobThreadTabState {
+export interface WorkspaceJobThreadTabState extends WorkspaceOwnedView {
   kind: "jobThread";
   id: string;
   conversationId: string;
@@ -48,7 +57,7 @@ export interface WorkspaceJobThreadTabState {
   draggable: boolean;
 }
 
-export interface WorkspaceExplorerTabState {
+export interface WorkspaceExplorerTabState extends WorkspaceOwnedView {
   kind: "explorer";
   id: string;
   rootPath: string;
@@ -60,7 +69,7 @@ export interface WorkspaceExplorerTabState {
   draggable: boolean;
 }
 
-export interface WorkspaceGitDiffTabState {
+export interface WorkspaceGitDiffTabState extends WorkspaceOwnedView {
   kind: "gitDiff";
   id: string;
   path: string;
@@ -75,7 +84,7 @@ export interface WorkspaceGitDiffTabState {
   draggable: boolean;
 }
 
-export interface WorkspaceGitReviewTabState {
+export interface WorkspaceGitReviewTabState extends WorkspaceOwnedView {
   kind: "gitReview";
   id: string;
   review: WorkspaceGitReviewSource;
@@ -88,7 +97,7 @@ export interface WorkspaceGitReviewTabState {
   draggable: boolean;
 }
 
-export interface WorkspacePanelTabState {
+export interface WorkspacePanelTabState extends WorkspaceOwnedView {
   kind: "panel";
   preview?: boolean;
   id: string;
@@ -101,7 +110,7 @@ export interface WorkspacePanelTabState {
   draggable: boolean;
 }
 
-export interface WorkspaceFileTabState {
+export interface WorkspaceFileTabState extends WorkspaceOwnedView {
   kind: "file";
   preview?: boolean;
   id: string;

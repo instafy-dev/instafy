@@ -7,6 +7,7 @@ import { StudioTopBar, type StudioTopBarProps } from "../StudioTopBar";
 import { StudioSearchReturnProvider } from "../StudioSearchReturnContext";
 import { StudioMobileSidebarOverlay } from "../StudioMobileSidebarOverlay";
 import { useMobileSidebarHistory } from "../../../useMobileSidebarHistory";
+import { EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, publishChatParticipants, setParticipantsDrawerOpen } from "../chatParticipantsStore";
 import { getStudioVisitKey } from "../../../../navigation/studioVisit";
 
 const mocks = vi.hoisted(() => ({
@@ -39,6 +40,8 @@ describe("StudioTopBar mobile navigation integration", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    publishChatParticipants(EMPTY_CHAT_PARTICIPANTS_SNAPSHOT);
+    setParticipantsDrawerOpen(false);
     originToken = null;
     mocks.controls.mockReturnValue({ activeProjectName: "Alpha space", showChatActions: true, onStartNewConversation: vi.fn(), onStartPrivateConversation: vi.fn(), onToggleSidebar: vi.fn(), onOpenProjectSettings: vi.fn() });
     mocks.projects.mockReturnValue({ activeProjectId: "space-a", projectList: [{ id: "space-a", orgId: "org-a" }] });
@@ -52,6 +55,8 @@ describe("StudioTopBar mobile navigation integration", () => {
   });
   afterEach(async () => {
     await act(async () => root.unmount()); container.remove(); document.body.replaceChildren();
+    publishChatParticipants(EMPTY_CHAT_PARTICIPANTS_SNAPSHOT);
+    setParticipantsDrawerOpen(false);
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
@@ -60,6 +65,30 @@ describe("StudioTopBar mobile navigation integration", () => {
   async function click(testId: string) {
     expect(query(testId)).not.toBeNull(); await act(async () => query(testId)!.click());
   }
+
+  it("keeps a compact participants control beside the chat title, with page tools replacing it in explorers", async () => {
+    mocks.tabs.mockReturnValue({ ...mocks.tabs(), conversationWorkspace: true });
+    mocks.conversations.mockReturnValue({ conversations: [{ localId: "chat-a", controllerId: "controller-a", title: "Active chat" }] });
+    publishChatParticipants({ ...EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, conversationId: "controller-a",
+      humans: ["Alex", "Ada", "Grace"].map(name => ({ userId: name, label: name, isSelf: false })) });
+    await render();
+    expect(query("mobile-header-title")?.textContent).toBe("Active chat");
+    expect(query("conversation-roster")?.getAttribute("aria-label")).toBe("Conversation members (3)");
+    expect(query("conversation-roster")?.querySelectorAll('[data-testid="chat-avatar-human"]').length).toBe(2);
+    expect(query("conversation-roster-overflow")?.textContent).toBe("+1");
+    expect(query("conversation-roster")?.className).toContain("!min-h-11");
+    await click("conversation-roster");
+    expect(query("conversation-roster")?.getAttribute("aria-expanded")).toBe("true");
+
+    props.mobilePageHeader = { title: "Chats", actions: <button data-testid="page-search">Search</button> };
+    await render();
+    expect(query("conversation-roster")).toBeNull();
+    expect(query("page-search")).not.toBeNull();
+    props.mobilePageHeader = undefined;
+    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Files" } });
+    await render();
+    expect(query("conversation-roster")).toBeNull();
+  });
 
   it.each([true, false])("keeps search return and history available from the appropriate chat surface (touch=%s)", async touch => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
@@ -110,6 +139,25 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("mobile-header-location-icon")?.contains(query("chats-icon"))).toBe(true);
     expect(query("conversation-icon")).toBeNull();
     expect(query("studio-mobile-history-bar")).toBeNull();
+  });
+
+  it.each([true, false])("uses page tools and a single title with history in More (touch=%s)", async touch => {
+    mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
+    mocks.controls.mockReturnValue({ ...mocks.controls(), topbarLocationOverride: { title: "Chats", icon: <svg data-testid="chats-icon" /> } });
+    props.contextHeaderAbove = true;
+    props.mobileNavigation!.history.canGoBack = true;
+    props.mobilePageHeader = { title: "Archived chats", actions: <button data-testid="page-search">Search</button> };
+    await render();
+    expect(query("mobile-header-title")?.textContent).toBe("Archived chats");
+    expect(query("mobile-header-location-icon")).toBeNull();
+    expect(query("mobile-header-space")).toBeNull();
+    expect(query("mobile-header-primary-actions")?.contains(query("page-search"))).toBe(true);
+    expect(query("mobile-history-controls")).toBeNull();
+    await click("mobile-header-more");
+    expect(query("mobile-header-actions")?.contains(query("mobile-history-controls"))).toBe(true);
+    await click("mobile-header-back");
+    expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
+    expect(query("mobile-header-actions")).toBeNull();
   });
 
   it("names the space when no tab is open, and a chat that is still loading through the override", async () => {

@@ -4,17 +4,35 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BugReportScreenshotDraft } from "../bugReportDrafts";
+import type { BuildLogEntry } from "../../../../types";
 
 const mocks = vi.hoisted(() => ({
   capture: vi.fn(),
   showStatus: vi.fn(),
   hideStatus: vi.fn(),
   listPage: vi.fn(),
+  appLogs: [] as BuildLogEntry[],
+  logListeners: new Set<() => void>(),
+  hostRender: vi.fn(),
+  dialogRender: vi.fn(),
 }));
 
 vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform: () => true } }));
 vi.mock("../../../../debug/appLogs", () => ({ logAppInfo: vi.fn(), logAppWarn: vi.fn() }));
-vi.mock("../../../../debug/useAppLogs", () => ({ useAppLogs: () => ({ logs: [] }) }));
+vi.mock("../../../../debug/useAppLogs", async () => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    useAppLogs: () => ({
+      logs: useSyncExternalStore(
+        (listener) => {
+          mocks.logListeners.add(listener);
+          return () => { mocks.logListeners.delete(listener); };
+        },
+        () => mocks.appLogs,
+      ),
+    }),
+  };
+});
 vi.mock("../../../../status/useStatus", () => ({
   useStatus: () => ({ showStatus: mocks.showStatus, hideStatus: mocks.hideStatus }),
 }));
@@ -24,18 +42,22 @@ vi.mock("../../../../sdk/instafy", () => ({
 vi.mock("../bugReportCapture", () => ({ captureCurrentScreenBugReportDraft: mocks.capture }));
 vi.mock("../BugReportInboxDialog", () => ({ BugReportInboxDialog: () => null }));
 vi.mock("../BugReportDialog", () => ({
-  BugReportDialog: ({ isOpen, onOpenChange, initialMessage, initialScreenshots }: {
+  BugReportDialog: ({ isOpen, onOpenChange, initialMessage, initialScreenshots, appLogs }: {
     isOpen: boolean;
     onOpenChange: (open: boolean) => void;
     initialMessage?: string;
     initialScreenshots: BugReportScreenshotDraft[];
-  }) => isOpen ? (
+    appLogs: BuildLogEntry[];
+  }) => {
+    mocks.dialogRender(appLogs);
+    return isOpen ? (
     <div role="dialog">
       <span>{initialMessage ?? "Report issue"}</span>
       <span data-testid="screenshot-count">{initialScreenshots.length}</span>
       <button onClick={() => onOpenChange(false)}>Close report</button>
     </div>
-  ) : null,
+    ) : null;
+  },
 }));
 
 import { dispatchOpenBugReport } from "../bugReportEvents";
@@ -43,6 +65,7 @@ import { NATIVE_SHAKE_REPORT_EVENT } from "../useShakeToReport";
 import { useStudioBugReportController } from "../useStudioBugReportController";
 
 function Harness({ currentUserId = "00000000-0000-0000-0000-000000000001" }: { currentUserId?: string }) {
+  mocks.hostRender();
   return useStudioBugReportController({
     currentUserId,
     activeProjectId: null,
@@ -77,6 +100,8 @@ describe("shake issue report opening", () => {
     vi.useFakeTimers();
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.clearAllMocks();
+    mocks.appLogs = [];
+    mocks.logListeners.clear();
     mocks.capture.mockReset();
     mocks.listPage.mockResolvedValue({ reports: [], unreadCount: 0, unnotifiedResolutionCount: 0, hasMore: false, nextCursor: null });
     window.localStorage.clear();
@@ -112,6 +137,29 @@ describe("shake issue report opening", () => {
   async function closeReport() {
     await act(async () => container.querySelector<HTMLButtonElement>("button")?.click());
   }
+
+  it("updates report diagnostics without re-rendering the Studio host that may have logged a warning", async () => {
+    await mount();
+    const hostRenders = mocks.hostRender.mock.calls.length;
+    const entry: BuildLogEntry = { id: "warning", timestamp: 1, severity: "warn", message: "Missing control label" };
+
+    await act(async () => {
+      mocks.appLogs = [entry];
+      for (const listener of mocks.logListeners) listener();
+    });
+
+    expect(mocks.hostRender).toHaveBeenCalledTimes(hostRenders);
+    expect(mocks.dialogRender).toHaveBeenLastCalledWith([entry]);
+    await act(async () => dispatchOpenBugReport({ message: "Check filters" }));
+    const openHostRenders = mocks.hostRender.mock.calls.length;
+    await act(async () => {
+      mocks.appLogs = [entry, { ...entry, id: "next-warning" }];
+      for (const listener of mocks.logListeners) listener();
+    });
+    expect(mocks.hostRender).toHaveBeenCalledTimes(openHostRenders);
+    expect(mocks.dialogRender).toHaveBeenLastCalledWith(mocks.appLogs);
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  });
 
   it("receives a native shake and attaches a completed screenshot", async () => {
     await mount();

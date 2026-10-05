@@ -16,6 +16,10 @@ export type ConversationSurfaces = {
 export const DEFAULT_CONVERSATION_SURFACES: ConversationSurfaces = {
   activeId: "chat", resourceId: "browser", split: true, ratio: 0.55, files: [],
 };
+export function conversationSurfaceScope(userId: string | null, projectId: string | null, conversationId: string | null): string | null {
+  return userId && projectId && conversationId ? JSON.stringify([userId, projectId, conversationId]) : null;
+}
+
 const storageKey = (scope: string) => `instafy:conversation-views:${scope}`;
 
 export function readConversationSurfaces(scope: string): ConversationSurfaces {

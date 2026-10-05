@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Browser } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
-import {
 import { chooseOption } from "../utils/select.js";
+import {
   createControllerOrgAndProject,
   getControllerUrl,
   getSupabaseUrl,

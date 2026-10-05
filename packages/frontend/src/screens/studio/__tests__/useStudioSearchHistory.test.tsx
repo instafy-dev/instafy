@@ -105,7 +105,7 @@ describe("search result browser history", () => {
     expect(input().value).toBe("needle");
     expect(result()).not.toBeNull();
     expect(container.querySelector<HTMLElement>('[data-testid="studio-search-results"]')!.scrollTop).toBe(730);
-    expect(queryRequests).toContainEqual({ open: true, query: "needle", scope: "all", restoreMessagePages: 2 });
+    expect(queryRequests).toContainEqual({ open: true, query: "needle", scope: "all", restoreMessagePages: 2, restoreSpacePages: 1 });
     expect(container.querySelector('[data-testid="mobile-header-results"]')).toBeNull();
     await pressHistory("mobile-header-forward");
     expect(lastSearch.open).toBe(false);

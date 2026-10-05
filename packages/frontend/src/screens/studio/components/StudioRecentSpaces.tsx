@@ -59,6 +59,8 @@ export interface StudioRecentSpacesProps {
   iconClassName: string;
   triggerRef?: RefObject<HTMLButtonElement | null>;
   presentation?: "inline" | "path";
+  /** Prioritize the space name when a compact toolbar leaves little width. */
+  compactPath?: boolean;
 }
 
 export function StudioRecentSpaces({
@@ -75,6 +77,7 @@ export function StudioRecentSpaces({
   iconClassName,
   triggerRef,
   presentation = "inline",
+  compactPath = false,
 }: StudioRecentSpacesProps) {
   const listId = useId();
   const [popoverOpen, setPopoverOpen] = useState(false);
@@ -174,7 +177,7 @@ export function StudioRecentSpaces({
     >
       {pathPresentation && currentSpace ? <SpaceIdentity
         name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color} avatarUrl={currentSpace.avatarUrl}
-        className="!h-5 !w-5 !rounded-md !text-xs"
+        className={`!h-5 !w-5 !rounded-md !text-xs ${compactPath ? "max-[359px]:hidden" : ""}`}
       /> : null}
       {!pathPresentation ? <span className={`relative ${iconClassName}`}>
         {currentSpace ? <SpaceIdentity name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color} avatarUrl={currentSpace.avatarUrl}

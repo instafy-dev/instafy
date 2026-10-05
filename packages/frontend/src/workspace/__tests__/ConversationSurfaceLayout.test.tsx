@@ -22,6 +22,17 @@ describe("ConversationSurfaceTabs", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  it("places participants over Chat in a split and hides them when only Browser is visible", async () => {
+    const props = { chatPanelId: "chat-panel", resources: [{ id: "browser", label: "Browser", panelId: "browser-panel" }], activeId: "browser", resourceId: "browser", wide: true, ratio: .55, onSelect: vi.fn(), onSplitChange: vi.fn(), chatActions: <button>Participants</button> };
+    await act(async () => root.render(<ConversationSurfaceTabs {...props} split />));
+    expect(container.querySelector('[data-testid="conversation-chat-toolbar"]')?.textContent).toBe("ChatParticipants");
+    expect(container.querySelector('[role="tablist"]')?.textContent).not.toContain("Participants");
+    await act(async () => root.render(<ConversationSurfaceTabs {...props} split={false} />));
+    expect(container.textContent).not.toContain("Participants");
+    await act(async () => root.render(<ConversationSurfaceTabs {...props} resources={[]} activeId="chat" split={false} />));
+    expect(container.querySelector('[data-testid="conversation-chat-toolbar"]')?.textContent).toBe("ChatParticipants");
+  });
+
   it("exposes the selected surface as an accessible tab", async () => {
     const onTabChange = vi.fn();
     await act(async () => {
@@ -41,8 +52,7 @@ describe("ConversationSurfaceTabs", () => {
     expect(chatTab?.getAttribute("aria-selected")).toBe("false");
     expect(browserTab?.getAttribute("aria-selected")).toBe("true");
     expect(browserTab?.getAttribute("aria-controls")).toBe("browser-panel");
-    expect(browserTab?.className).toContain("max-[540px]:h-10");
-    expect(browserTab?.className).toContain("pointer-coarse:min-h-11");
+    expect(browserTab?.className).toContain("min-h-11");
 
     await act(async () => chatTab?.click());
     expect(onTabChange).toHaveBeenCalledWith("chat");

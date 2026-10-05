@@ -20,9 +20,13 @@ export const SOURCE_CONTROL_ARRIVAL_COPY: Record<DrawerKind, string> = {
  * History. Opening the drawer checks the mode again.
  */
 export function SourceControlDrawer({
+  headerPortalTarget,
+  actionsPortalTarget,
   onRequestClose,
   openRequest,
 }: {
+  headerPortalTarget?: HTMLElement | null;
+  actionsPortalTarget?: HTMLElement | null;
   onRequestClose?: () => void;
   openRequest?: {
     key: number;
@@ -82,6 +86,8 @@ export function SourceControlDrawer({
     const probeFailed = openProbe !== null && !openProbe.answered && openProbe.originId === versioning.originId;
     return (
       <HistoryDrawer
+        headerPortalTarget={headerPortalTarget}
+        actionsPortalTarget={actionsPortalTarget}
         versioning={versioning}
         onRequestClose={onRequestClose}
         probeFailed={probeFailed}
@@ -91,6 +97,8 @@ export function SourceControlDrawer({
   }
   return (
     <LegacyChangesDrawer
+      headerPortalTarget={headerPortalTarget}
+      actionsPortalTarget={actionsPortalTarget}
       onRequestClose={onRequestClose}
       openRequest={openRequest}
       arrivalNotice={arrival === "changes" ? SOURCE_CONTROL_ARRIVAL_COPY.changes : null}

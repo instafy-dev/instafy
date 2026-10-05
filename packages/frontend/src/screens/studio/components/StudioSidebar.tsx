@@ -51,9 +51,7 @@ import { StudioSidebarTeamMenu } from "./StudioSidebarTeamMenu";
 import { StudioSidebarWorkspaceSwitcher } from "./StudioSidebarWorkspaceSwitcher";
 import { StudioSidebarWorkspacePanel } from "./StudioSidebarWorkspacePanel";
 import { StudioOrganizationRail } from "./StudioOrganizationRail";
-import { SIDEBAR_RECENT_CHAT_LIMIT, StudioRecentChats } from "./StudioRecentChats";
 import { SIDEBAR_RECENT_SPACE_LIMIT, StudioRecentSpaces } from "./StudioRecentSpaces";
-import type { ConversationState } from "../../../conversations/conversationState";
 import {
   normalizeSidebarOrgUser,
   readCachedControllerOrgs,
@@ -80,18 +78,20 @@ export interface StudioSidebarProps {
   collapsed: boolean;
   pinnedPanel?: StudioPanel | null;
   onOpenConversationHistory?: () => void;
-  recentConversations?: ConversationState[];
-  activeConversationId?: string | null;
-  openConversationIds?: ReadonlySet<string>;
-  onSelectConversation?: (id: string) => void;
   isConversationHistoryActive?: boolean;
   workspaceSwitcherOpen: boolean;
   /** Scope for directory entry points owned by the surrounding mobile header. */
   workspaceSwitcherInitialMode?: "teams-and-spaces" | "spaces";
   onWorkspaceSwitcherOpenChange: (open: boolean) => void;
   workspaceSwitcherPortalTarget: HTMLDivElement | null;
+  workspaceSwitcherHeaderPortalTarget?: HTMLElement | null;
   onRequestClose?: () => void;
   mobileOverlay?: boolean;
+  mobileSheet?: boolean;
+  /** Bottom navigation can replace tools/account with a focused chat switcher. */
+  mobileSheetContent?: ReactNode;
+  /** The sheet shell places the shared New chat control after Search. */
+  navigationActionsPortalTarget?: HTMLElement | null;
   selectedOrgKey?: string;
   onOpenTeam?: (orgKey: string) => void;
   onReturnToTeam?: (orgKey: string) => void;
@@ -105,6 +105,8 @@ export interface StudioSidebarProps {
   navigationHeaderPortalTarget?: HTMLElement | null;
   /** The surrounding shell provides the team and space context header. */
   navigationHeaderExternal?: boolean;
+  /** The mobile shell owns the close button at the same position as its opener. */
+  navigationToggleExternal?: boolean;
   compactContextHeader?: boolean;
   renderNavigationHeader?: (context: StudioNavigationContext) => ReactNode;
   onNavigationHeaderAction?: () => void;
@@ -118,17 +120,17 @@ export function StudioSidebar({
   collapsed,
   pinnedPanel,
   onOpenConversationHistory,
-  recentConversations = [],
-  activeConversationId,
-  openConversationIds,
-  onSelectConversation,
   isConversationHistoryActive = false,
   workspaceSwitcherOpen: desktopWorkspaceSwitcherOpen,
   workspaceSwitcherInitialMode = "teams-and-spaces",
   onWorkspaceSwitcherOpenChange,
   workspaceSwitcherPortalTarget,
+  workspaceSwitcherHeaderPortalTarget,
   onRequestClose,
   mobileOverlay = false,
+  mobileSheet = false,
+  mobileSheetContent,
+  navigationActionsPortalTarget,
   selectedOrgKey,
   onOpenTeam,
   onReturnToTeam,
@@ -140,6 +142,7 @@ export function StudioSidebar({
   navigationPresentation = "tiles",
   navigationHeaderPortalTarget = null,
   navigationHeaderExternal = false,
+  navigationToggleExternal = false,
   compactContextHeader = false,
   renderNavigationHeader,
   onNavigationHeaderAction,
@@ -168,6 +171,7 @@ export function StudioSidebar({
   const browseTriggerRef = useRef<HTMLButtonElement | null>(null);
   const spaceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [workspaceHeaderActionsTarget, setWorkspaceHeaderActionsTarget] = useState<HTMLDivElement | null>(null);
   const [workspaceSwitcherMode, setWorkspaceSwitcherMode] = useState(workspaceSwitcherInitialMode);
   const requestedSwitcherModeRef = useRef<"teams-and-spaces" | "spaces" | null>(null);
   const [localWorkspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
@@ -197,7 +201,6 @@ export function StudioSidebar({
       action();
     }
   }, [onRequestClose, runSidebarAction]);
-  const [recentChatsExpanded, setRecentChatsExpanded] = useState(true);
   const [recentSpacesExpanded, setRecentSpacesExpanded] = useState(true);
   const projectRecency = useProjectRecency(userEmail);
   const navRef = useRef<HTMLElement | null>(null);
@@ -257,15 +260,11 @@ export function StudioSidebar({
     () => moreItems?.filter((item): item is StudioNavItem => Boolean(item)) ?? [],
     [moreItems],
   );
-  const hasRecentChats = Boolean(onSelectConversation);
   // External context already contains the space selector. Only compact
   // desktop navigation needs a second row for New chat below its toggle.
   const desktopHeaderRows = externalHeader ? showLabels ? 1 : 2 : pathHeader ? 1 : showLabels ? 2 : 3;
   const mobileHeaderRows = showLabels ? pathControls ? 1 : 2 : 4;
-  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
-  const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
-    ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
-    : 0;
+  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length;
   // Reserve the bounded two-row space grid before placing secondary tools.
   const recentSpacesReservePx = showLabels && !pathControls && recentSpacesExpanded
     ? Math.ceil(SIDEBAR_RECENT_SPACE_LIMIT / 3) * 96 + 48
@@ -277,7 +276,7 @@ export function StudioSidebar({
       ? Math.max(
           0,
           Math.floor(
-            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentChatsReservePx - recentSpacesReservePx - fixedEntryCount * estimatedRowHeightPx) /
+            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentSpacesReservePx - fixedEntryCount * estimatedRowHeightPx) /
               estimatedRowHeightPx,
           ),
         )
@@ -301,7 +300,7 @@ export function StudioSidebar({
   );
   const showInlineMoreItems = inlineMoreItems.length > 0;
   const sidebarMobileDrillInOpen = workspaceSwitcherOpen || moreMobileViewOpen;
-  const mobileExpandedWidthClass = externalHeader
+  const mobileExpandedWidthClass = mobileSheet ? "w-full" : externalHeader
     ? "w-[min(22rem,calc(100vw-2rem))]"
     : sidebarMobileDrillInOpen
     ? "w-[clamp(18rem,65vw,24rem)]"
@@ -354,11 +353,6 @@ export function StudioSidebar({
     return [`panel:${activePanel}`];
   }, [activePanel, collapsedMoreItems]);
 
-  useEffect(() => {
-    if (!isLargeScreen && sidebarOpen) {
-      setRecentChatsExpanded(true);
-    }
-  }, [isLargeScreen, sidebarOpen]);
 
   useEffect(() => {
     // Resizing the rail can move secondary tools between inline rows and
@@ -1033,11 +1027,11 @@ export function StudioSidebar({
   };
   const headerNewChat = canStartHeaderChat ? <StudioNewChatButton
     testId="sidebar-new-chat" size="sm" radius="lg"
-    label={desktopRail && !showLabels ? undefined : "New chat"}
+    label={mobileSheet || desktopRail && !showLabels ? undefined : "New chat"}
     isDisabled={mobileDrillInOpen}
     dismissalKey={JSON.stringify([activeOrgKey, activeProjectId, activePanel, navigationPage, mobileDrillInOpen])}
     runAction={runHeaderChatAction}
-    className={desktopRail && !showLabels
+    className={mobileSheet ? "!h-12 !w-11 !min-h-12 !min-w-11 shrink-0" : desktopRail && !showLabels
       ? "!h-11 !w-11 !min-h-11 !min-w-11 shrink-0"
       : "!h-11 !w-auto !min-h-11 min-w-0 flex-1 justify-start gap-2 px-3"}
   /> : null;
@@ -1072,10 +1066,11 @@ export function StudioSidebar({
       }}
       onBrowseAll={() => { onNavigationHeaderAction?.(); openWorkspaceSwitcher("spaces"); }}
       presentation={pathControls ? "path" : "inline"}
+      compactPath={mobileSheet}
       collapsed={!externalHeader && !showLabels}
       expanded={recentSpacesExpanded}
       onExpandedChange={setRecentSpacesExpanded}
-      rowClassName={pathControls ? desktopRail ? `gap-1 ${compactContextHeader ? "!px-2" : "!px-1"} min-h-9` : "!px-2 !min-h-12" : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
+      rowClassName={pathControls ? desktopRail ? `gap-1 ${compactContextHeader ? "!px-2" : "!px-1"} min-h-9` : `${mobileSheet ? "!px-1" : "!px-2"} !min-h-12` : `${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
       iconClassName={pathControls ? "flex h-5 w-5 shrink-0 items-center justify-center" : getSidebarNavIconClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}
       triggerRef={spaceTriggerRef}
     />
@@ -1091,8 +1086,11 @@ export function StudioSidebar({
   const selectedTeamRole = controllerOrgs.find((org) => org.id === activeOrgKey)?.role;
   const canCreateSelectedTeamSpace = activeOrgKey === "personal" || ["owner", "admin", "builder"].includes(selectedTeamRole ?? "");
 
+  const externalSpaceHeader = !!workspaceSwitcherHeaderPortalTarget && workspaceSwitcherMode === "spaces";
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
+      spaceHeaderExternal={externalSpaceHeader}
+      spaceHeaderActionsTarget={workspaceHeaderActionsTarget}
       mode={workspaceSwitcherMode}
       orgOptions={orgOptions}
       workspaceOrgKey={workspaceOrgKey}
@@ -1103,6 +1101,7 @@ export function StudioSidebar({
       projectsLoading={mergedProjectsLoading}
       onRetryProjects={retryWorkspaceProjects}
       onWorkspaceOrgChange={handleWorkspaceOrgChange}
+      onOpenOrgOverview={() => openTeamOverview(workspaceOrgKey === "all" ? activeOrgKey : workspaceOrgKey)}
       onCreateOrg={
         runtimeControllerEnabled
           ? () => {
@@ -1168,6 +1167,8 @@ export function StudioSidebar({
         mode={workspaceSwitcherMode}
         desktop={isLargeScreen}
         portalTarget={workspaceSwitcherPortalTarget}
+        headerPortalTarget={workspaceSwitcherHeaderPortalTarget}
+        headerActionsRef={externalSpaceHeader ? setWorkspaceHeaderActionsTarget : undefined}
         triggerRef={workspaceSwitcherMode === "spaces" ? spaceTriggerRef : !desktopRail || workspaceSwitcherSourceRef.current === "team" ? workspaceTriggerRef : browseTriggerRef}
         onClose={dismissWorkspaceSwitcher}
       >
@@ -1178,6 +1179,7 @@ export function StudioSidebar({
   return (
     <>
       {navigationHeaderPortalTarget ? createPortal(renderNavigationHeader ? renderNavigationHeader({ team: teamMenu, space: spaceControl, teamName: activeOrgName, accentColor: activeOrgAccentColor, onBrowseTeams: () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher(); } }) : navigationPath, navigationHeaderPortalTarget) : null}
+      {mobileSheet && navigationActionsPortalTarget ? createPortal(headerNewChat, navigationActionsPortalTarget) : null}
       {desktopRail ? <StudioOrganizationRail
         organizations={orgDeckTeams} selectedOrgKey={activeOrgKey}
         pendingOrgKey={mergedProjectsError ? null : pendingOrgSwitchKey}
@@ -1249,10 +1251,24 @@ export function StudioSidebar({
           {!externalHeader && showLabels ? pathHeader ? navigationPath : teamMenu : null}
         </div> : null}
         {desktopRail && !showLabels && headerNewChat ? <div className="flex shrink-0 justify-center">{headerNewChat}</div> : null}
-        {!desktopRail ? <div
-          className={`shrink-0 gap-x-1 px-1 py-1 ${pathHeader ? "flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "flex items-center gap-y-1"} ${showLabels ? "min-h-14" : "flex-col"} ${externalHeader ? "flex-row-reverse" : ""}`}
+        {!desktopRail && !mobileSheet ? <div
+          className={`shrink-0 gap-x-1 px-1 py-1 ${pathHeader ? "flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "flex items-center gap-y-1"} ${showLabels ? "min-h-14" : "flex-col"} ${externalHeader && !navigationToggleExternal ? "flex-row-reverse" : ""}`}
           inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}
           data-testid="sidebar-team-header">
+          {externalHeader && navigationToggleExternal ? <Button variant="ghost" size="sm" radius="lg"
+            onPress={() => {
+              resetWorkspaceSwitcher();
+              closeMoreMenu();
+              runDestination(() => onSelect("home"));
+            }}
+            data-testid="sidebar-home-button"
+            aria-current={activePanel === "home" ? "page" : undefined}
+            aria-label="Home — all teams" title="Home — all teams"
+            className="!min-h-12 shrink-0 gap-2 px-3 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
+            <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
+            <span>Home</span>
+            <AttentionBadge count={homeAttentionCount} testId="sidebar-home-badge" aria-hidden />
+          </Button> : null}
           {externalHeader ? headerNewChat ?? <span className="min-w-0 flex-1" aria-hidden="true" /> : <>
           <IconButton variant="ghost" size="sm" radius="lg"
             onPress={() => {
@@ -1270,15 +1286,18 @@ export function StudioSidebar({
           </IconButton>
           {pathHeader ? navigationPath : teamMenu}
           </>}
-          <IconButton variant="ghost" size="sm"
+          {!navigationToggleExternal ? <IconButton variant="ghost" size="sm"
             aria-label={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
             title={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
             data-testid="sidebar-drawer-toggle" onPress={onRequestClose ?? onToggleSidebar}
             isDisabled={!onRequestClose && !onToggleSidebar} className="!min-h-12 !min-w-12 shrink-0">
             {onRequestClose || showLabels ? <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" /> : <SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" />}
-          </IconButton>
+          </IconButton> : null}
         </div> : null}
-        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll"
+        {mobileSheet && mobileSheetContent ? <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-2" data-testid="sidebar-chat-switcher"
+          inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
+          {mobileSheetContent}
+        </div> : <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll"
           inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
           {desktopRail && !showLabels && !externalHeader ? <li>{teamMenu}</li> : null}
           {!pathControls ? <li className="border-t border-slate-200/70 pt-1 dark:border-[color:var(--color-studio-dark-divider)]">
@@ -1286,30 +1305,12 @@ export function StudioSidebar({
           </li> : null}
           {selectedTeamHasActiveSpace ? <>
           {items.map((item) => {
-          if (item.id === "chat" && onSelectConversation) {
-            return (
-              <li key={item.id}>
-                <StudioRecentChats
-                  key={JSON.stringify([activeTeamUserKey, activeProjectId])}
-                  conversations={recentConversations}
-                  activeConversationId={activeConversationId}
-                  openConversationIds={openConversationIds}
-                  onSelectConversation={(id) => runDestination(() => onSelectConversation(id))}
-                  onBrowseAll={onOpenConversationHistory ? () => runDestination(onOpenConversationHistory) : undefined}
-                  isHistoryActive={isConversationHistoryActive}
-                  collapsed={!showLabels}
-                  expanded={recentChatsExpanded}
-                  onExpandedChange={setRecentChatsExpanded}
-                  active={activePanel === "chat" || isConversationHistoryActive}
-                  rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass((!showLabels || !recentChatsExpanded) && (activePanel === "chat" || isConversationHistoryActive))}`}
-                  iconClassName={getSidebarNavIconClass(activePanel === "chat" || isConversationHistoryActive)}
-                />
-              </li>
-            );
-          }
-          const IconComponent = item.icon;
-          const isActive =
-            item.id === activePanel && !(item.id === "chat" && isConversationHistoryActive);
+          const opensChatExplorer = item.id === "chat" && Boolean(onOpenConversationHistory);
+          const togglesChatPane = desktopRail && opensChatExplorer;
+          const IconComponent = opensChatExplorer ? ChatsIcon : item.icon;
+          const label = opensChatExplorer ? "Chats" : item.label;
+          const isActive = opensChatExplorer ? isConversationHistoryActive
+            : item.id === activePanel && !(item.id === "chat" && isConversationHistoryActive);
           const isPinned = pinnedPanel === item.id;
           const badgeCount = item.badge?.count ?? 0;
           const badgeText = badgeCount > 9 ? "9+" : badgeCount.toString();
@@ -1318,20 +1319,21 @@ export function StudioSidebar({
             <Fragment key={item.id}>
               <li>
                 <Button
-                  onPress={() => runDestination(() => onSelect(item.id))}
+                  onPress={() => runDestination(() => opensChatExplorer ? onOpenConversationHistory?.() : onSelect(item.id))}
                   variant="ghost"
                   size="sm"
                   radius="lg"
                   fullWidth
-                  data-testid={`sidebar-nav-${item.id}`}
+                  data-testid={opensChatExplorer ? "sidebar-nav-history" : `sidebar-nav-${item.id}`}
                   className={[
                     "group/item relative py-1.5 transition focus-visible:ring-offset-0",
                     sidebarRowLayoutClass,
                     getSidebarRowToneClass(isActive),
                   ].join(" ")}
-                  aria-current={isActive ? "page" : undefined}
-                  aria-label={item.label}
-                  title={showLabels ? undefined : item.label}
+                  aria-current={!togglesChatPane && isActive ? "page" : undefined}
+                  aria-expanded={togglesChatPane ? isConversationHistoryActive : undefined}
+                  aria-label={label}
+                  title={showLabels ? undefined : label}
                 >
                   <span className={getSidebarNavIconClass(isActive, item.accent)}>
                     <IconComponent className="text-base" aria-hidden="true" />
@@ -1370,40 +1372,11 @@ export function StudioSidebar({
                   </span>
                   {showLabels ? (
                     <span className="flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                      <span>{item.label}</span>
+                      <span>{label}</span>
                     </span>
                   ) : null}
                 </Button>
               </li>
-              {item.id === "chat" && onOpenConversationHistory ? (
-                <li>
-                  <Button
-                    onPress={() => runDestination(onOpenConversationHistory)}
-                    variant="ghost"
-                    size="sm"
-                    radius="lg"
-                    fullWidth
-                    data-testid="sidebar-nav-history"
-                    className={[
-                      "group/item relative py-1.5 transition focus-visible:ring-offset-0",
-                      sidebarRowLayoutClass,
-                      getSidebarRowToneClass(isConversationHistoryActive),
-                    ].join(" ")}
-                    aria-current={isConversationHistoryActive ? "page" : undefined}
-                    aria-label="Open chats"
-                    title={showLabels ? undefined : "Open chats"}
-                  >
-                    <span className={getSidebarNavIconClass(isConversationHistoryActive)}>
-                      <ChatsIcon className="text-base" aria-hidden="true" />
-                    </span>
-                    {showLabels ? (
-                      <span className="flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                        <span>Chats</span>
-                      </span>
-                    ) : null}
-                  </Button>
-                </li>
-              ) : null}
             </Fragment>
           );
         })}
@@ -1451,9 +1424,9 @@ export function StudioSidebar({
               {showLabels ? "New space" : <span className={getSidebarNavIconClass(false)}><Plus className="h-5 w-5" aria-hidden="true" /></span>}
             </Button> : null}
           </li>}
-      </ul>
+      </ul>}
 
-      {!desktopRail ? <div className="shrink-0" data-testid="sidebar-account-navigation"
+      {!desktopRail && !(mobileSheet && mobileSheetContent) ? <div className="shrink-0" data-testid="sidebar-account-navigation"
         inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
         {accountSection}
       </div> : null}
