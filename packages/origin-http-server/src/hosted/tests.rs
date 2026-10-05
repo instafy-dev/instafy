@@ -93,23 +93,48 @@ impl HostedScenario {
     /// Commit `files` (`None` deletes) in the runtime clone on top of
     /// canonical `main` and push it there; returns the commit.
     pub(super) fn push(&self, files: &[(&str, Option<&[u8]>)], message: &str) -> String {
-        self.sync_work();
-        for (path, content) in files {
-            let target = self.work.join(path);
-            match content {
-                Some(bytes) => {
-                    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-                    std::fs::write(&target, bytes).unwrap();
-                    git_in(&self.work, &["add", "--", path]);
-                }
-                None => {
-                    git_in(&self.work, &["rm", "-q", "--", path]);
-                }
-            }
-        }
-        self.commit_and_push(message)
+        runtime_push(&self.work, &self.remote(), files, message)
     }
 
+    /// A handle for pushing from outside the scenario (a push hook).
+    pub(super) fn runtime(&self) -> (PathBuf, PathBuf) {
+        (self.work.clone(), self.remote())
+    }
+}
+
+/// Commit `files` (`None` deletes) in the runtime clone `work` on top of
+/// `remote`'s `main` and push it there; returns the commit.
+pub(super) fn runtime_push(
+    work: &Path,
+    remote: &Path,
+    files: &[(&str, Option<&[u8]>)],
+    message: &str,
+) -> String {
+    let remote = remote.to_str().unwrap();
+    let heads = git_in(work, &["ls-remote", "--heads", remote, "main"]);
+    if !heads.is_empty() {
+        git_in(work, &["fetch", "-q", remote, "main"]);
+        git_in(work, &["reset", "-q", "--hard", "FETCH_HEAD"]);
+    }
+    for (path, content) in files {
+        let target = work.join(path);
+        match content {
+            Some(bytes) => {
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(&target, bytes).unwrap();
+                git_in(work, &["add", "-f", "--", path]);
+            }
+            None => {
+                git_in(work, &["rm", "-q", "--", path]);
+            }
+        }
+    }
+    git_in(work, &["commit", "-q", "--allow-empty", "-m", message]);
+    git_in(work, &["push", "-q", remote, "HEAD:refs/heads/main"]);
+    git_in(work, &["rev-parse", "HEAD"])
+}
+
+impl HostedScenario {
     /// Put `path` in the index of the runtime clone as `mode` naming
     /// `oid` (links and submodules), then commit and push.
     pub(super) fn push_entry(&self, path: &str, mode: &str, oid: &str, message: &str) -> String {
@@ -601,9 +626,9 @@ async fn the_sweeper_keeps_mirrors_in_use_and_removes_idle_ones() {
 // The read routes.
 // ---------------------------------------------------------------------------
 
-struct Served {
-    base: String,
-    cache: Arc<MirrorCache>,
+pub(super) struct Served {
+    pub base: String,
+    pub cache: Arc<MirrorCache>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -613,7 +638,7 @@ impl Drop for Served {
     }
 }
 
-async fn serve(sc: &HostedScenario) -> Served {
+pub(super) async fn serve(sc: &HostedScenario) -> Served {
     let config = Arc::new(sc.config.clone());
     let http = reqwest::Client::new();
     let cache =
@@ -636,34 +661,34 @@ async fn serve(sc: &HostedScenario) -> Served {
     }
 }
 
-struct Answer {
-    status: u16,
-    headers: reqwest::header::HeaderMap,
-    body: Vec<u8>,
+pub(super) struct Answer {
+    pub status: u16,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: Vec<u8>,
 }
 
 impl Answer {
-    fn json(&self) -> serde_json::Value {
+    pub(super) fn json(&self) -> serde_json::Value {
         serde_json::from_slice(&self.body)
             .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&self.body)))
     }
 
-    fn header(&self, name: &str) -> Option<String> {
+    pub(super) fn header(&self, name: &str) -> Option<String> {
         self.headers
             .get(name)
             .map(|value| value.to_str().unwrap().to_string())
     }
 
-    fn rev(&self) -> Option<String> {
+    pub(super) fn rev(&self) -> Option<String> {
         self.header("x-instafy-rev")
     }
 
-    fn code(&self) -> String {
+    pub(super) fn code(&self) -> String {
         self.json()["code"].as_str().unwrap_or_default().to_string()
     }
 }
 
-async fn get(served: &Served, path: &str) -> Answer {
+pub(super) async fn get(served: &Served, path: &str) -> Answer {
     let response = reqwest::get(format!("{}{path}", served.base))
         .await
         .unwrap();
@@ -674,7 +699,7 @@ async fn get(served: &Served, path: &str) -> Answer {
     }
 }
 
-async fn post(served: &Served, path: &str, body: serde_json::Value) -> Answer {
+pub(super) async fn post(served: &Served, path: &str, body: serde_json::Value) -> Answer {
     let response = reqwest::Client::new()
         .post(format!("{}{path}", served.base))
         .json(&body)
@@ -688,7 +713,7 @@ async fn post(served: &Served, path: &str, body: serde_json::Value) -> Answer {
     }
 }
 
-fn decoded(answer: &Answer) -> Vec<u8> {
+pub(super) fn decoded(answer: &Answer) -> Vec<u8> {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD
         .decode(answer.json()["content_base64"].as_str().unwrap())

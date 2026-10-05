@@ -19,6 +19,8 @@ mod routes;
 #[cfg(test)]
 mod tests;
 mod write;
+#[cfg(test)]
+mod write_tests;
 
 pub(crate) use cache::MirrorCache;
 pub use config::HostedGatewayConfig;
