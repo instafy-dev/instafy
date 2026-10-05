@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import {
   clearNotificationInbox,
@@ -106,9 +107,9 @@ test.describe("Home attention", () => {
     await ensureRealDefaultCodexCredentialWhenRequired(page);
     await clearNotificationInbox(page);
     await clearRuntimePreference(page, { projectId, source: "home-attention" });
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const createConversationA = page.waitForResponse(
       (response) =>
@@ -172,9 +173,9 @@ test.describe("Home attention", () => {
     await ensureRealDefaultCodexCredentialWhenRequired(page);
     await clearNotificationInbox(page);
     await clearRuntimePreference(page, { projectId, source: "home-attention:active-conversation" });
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await ensureProjectCreditsReadyInUi(page, projectId);
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const createConversation = page.waitForResponse(
       (response) =>

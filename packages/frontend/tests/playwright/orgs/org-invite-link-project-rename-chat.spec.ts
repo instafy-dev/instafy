@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect } from "@playwright/test";
 import { openTeamDirectory } from "../utils/sidebar.js";
 import { loginAsGuest, prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
@@ -68,7 +69,7 @@ test.describe("Project invite link keeps project name", () => {
     const projectName = `Project ${Date.now()}`;
     await renameProject(page, projectId, projectName);
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await disableAssistantIfPossible(page);
 
     const ownerMessage = `hello from owner ${Date.now()}`;
@@ -87,7 +88,7 @@ test.describe("Project invite link keeps project name", () => {
 
     const inviteLinkUrl = await createProjectInviteLink(page);
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
 
     const guestContext = await browser.newContext();
     const guestPage = await guestContext.newPage();

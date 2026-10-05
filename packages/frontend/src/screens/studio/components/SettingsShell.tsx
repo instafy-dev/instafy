@@ -10,6 +10,7 @@ import {
 import { pickerListRowTextClassName } from "../../../components/listRowStyles";
 import { EntityRow } from "../../../components/EntityRow";
 import { Heading } from "../../../components/Heading";
+import { usePageTitleInNavigation } from "../../../components/PageTitleContext";
 import { Text } from "../../../components/Text";
 import { SettingsNavigationLabelContext } from "../../../components/SettingsNavigationLabelContext";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
@@ -29,7 +30,7 @@ export type SettingsCategory = {
 
 interface SettingsShellProps {
   title: string;
-  titleVisibility?: "always" | "desktop";
+  titleVisibility?: "auto" | "always" | "desktop";
   subtitle?: string;
   subtitleVisibility?: "always" | "desktop";
   hideTitle?: boolean;
@@ -52,7 +53,7 @@ interface SettingsShellProps {
 
 export function SettingsShell({
   title,
-  titleVisibility = "always",
+  titleVisibility = "auto",
   subtitle,
   subtitleVisibility = "always",
   hideTitle = false,
@@ -72,6 +73,7 @@ export function SettingsShell({
   compactCategoryNavigation = "auto",
 }: SettingsShellProps) {
   const isLargeScreen = useStudioDesktopLayout();
+  const titleInNavigation = usePageTitleInNavigation();
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [hasWideContainer, setHasWideContainer] = useState(false);
   const navigationFocusRef = useRef<HTMLElement | null>(null);
@@ -111,7 +113,9 @@ export function SettingsShell({
       <div className="@container/settings-content min-w-0 space-y-4">{children}</div>
     </SettingsNavigationLabelContext.Provider>
   );
-  const showTitle = !hideTitle && (titleVisibility === "always" || isLargeScreen);
+  const showTitle = !hideTitle && (titleVisibility === "auto"
+    ? !titleInNavigation
+    : titleVisibility === "always" || isLargeScreen);
   const subtitleAllowed = subtitleVisibility === "always" || isLargeScreen;
   const scopeAllowed = scopeVisibility === "always" || isLargeScreen;
   const showSubtitle = Boolean(

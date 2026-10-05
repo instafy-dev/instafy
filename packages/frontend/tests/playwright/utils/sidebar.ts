@@ -5,6 +5,12 @@ export async function openTeamDirectory(page: Page, timeout = 30_000) {
   const directory = page.getByTestId("sidebar-project-switcher-menu");
   if (await directory.isVisible()) return;
 
+  const homeBrowse = page.getByTestId("home-browse-navigation");
+  if (await homeBrowse.isVisible()) {
+    await homeBrowse.click();
+    await expect(directory).toBeVisible({ timeout });
+    return;
+  }
   const browseTeams = page.getByTestId("sidebar-browse-teams");
   const teamMenu = page.getByTestId("sidebar-team-menu-trigger");
   const globalNavigation = page.getByTestId("topbar-team-selector");

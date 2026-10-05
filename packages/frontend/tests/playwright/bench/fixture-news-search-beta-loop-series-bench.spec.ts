@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 
 import {
@@ -137,7 +138,7 @@ test.describe("Bench: repeated /learn loops for fixture search-beta (opt-in)", (
     const projectId = await prepareStudio(page);
     if (!projectId) throw new Error("Project id missing for fixture-news-search-beta loop bench.");
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:fixture-news-search-beta-loops" }).catch(() => {});
     await ensureHostedRuntimeReady(page, projectId);
     await selectPrimaryAgentModel(page, BENCH_MODEL);

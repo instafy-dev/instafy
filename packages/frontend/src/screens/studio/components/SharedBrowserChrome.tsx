@@ -34,7 +34,7 @@ export type SharedBrowserChromeProps = {
   onClearError: () => void;
   toolbarLeading?: ReactNode;
   toolbarStatus?: ReactNode;
-  /** Put compact history and page controls in the existing browser options menu. */
+  /** Put compact history and reload controls in the existing browser options menu. */
   toolbarActions?: ReactNode | ((compactNavigation: ReactNode) => ReactNode);
   controlOwner?: SharedBrowserControlOwner;
   interactionEnabled?: boolean;
@@ -190,12 +190,29 @@ export function SharedBrowserChrome({
       </ChromeButton>
     </span>
   );
-  const pageSelector = pages.length > 1 ? (
+  const reloadControl = (
+    <ChromeButton
+      disabled={controlsDisabled || !controls.reload}
+      label="Reload"
+      onClick={() => activePage && onReload(activePage.id)}
+      testId="shared-browser-reload"
+    >
+      <Refresh
+        aria-hidden="true"
+        className={`h-4 w-4 ${pendingAction === "reload" ? "animate-spin" : ""}`}
+      />
+    </ChromeButton>
+  );
+  const pageSelectionDisabled = !resolved || busy || !controls.focusPage || !humanHasControl;
+  const pageSelect = (
     <select
       aria-label="Shared browser tab"
-      className={`h-8 shrink-0 truncate rounded-md border border-slate-200 bg-white text-xs text-slate-700 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 max-[540px]:h-10 pointer-coarse:h-11 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-200 ${compact ? hasNavigationMenu ? "min-w-0 flex-1 px-2" : "w-10 px-1" : "w-36 px-2"}`}
+      aria-description={`${pages.length} tabs. Current tab: ${activePage ? pageOptionLabel(activePage) : "none"}`}
+      className={compact
+        ? "absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-default"
+        : "h-8 w-36 shrink-0 truncate rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700 outline-none focus:border-primary-400 focus:ring-2 focus:ring-primary-500/20 max-[540px]:h-10 pointer-coarse:h-11 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-slate-950 dark:text-slate-200"}
       data-testid="shared-browser-page-select"
-      disabled={!resolved || busy || !controls.focusPage || !humanHasControl}
+      disabled={pageSelectionDisabled}
       onChange={(event) => onFocusPage(event.target.value)}
       title={activePage ? pageOptionLabel(activePage) : "Shared browser tab"}
       value={activePage?.id ?? ""}
@@ -206,11 +223,30 @@ export function SharedBrowserChrome({
         </option>
       ))}
     </select>
+  );
+  // A native picker keeps page selection one tap away on mobile. The compact
+  // count avoids squeezing a long page title beside the address field.
+  const pageSelector = pages.length > 1 ? (
+    compact ? (
+      <label
+        title={`Switch browser tab (${pages.length} tabs)`}
+        data-testid="shared-browser-tabs-picker"
+        className={`relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-600 focus-within:ring-2 focus-within:ring-inset focus-within:ring-primary-500/50 dark:text-slate-300 ${pageSelectionDisabled ? "opacity-50" : "hover:bg-slate-200/60 dark:hover:bg-slate-800"}`}
+      >
+        <span
+          aria-hidden="true"
+          className="inline-flex h-5 min-w-5 items-center justify-center rounded-[5px] border-[1.5px] border-current px-0.5 text-[10px] font-semibold"
+        >
+          {pages.length}
+        </span>
+        {pageSelect}
+      </label>
+    ) : pageSelect
   ) : null;
   const compactNavigation = compact ? (
     <div className="flex min-w-0 items-center gap-2 px-1 py-1" aria-label="Browser navigation">
       {historyControls}
-      {pageSelector}
+      {reloadControl}
     </div>
   ) : null;
 
@@ -225,25 +261,15 @@ export function SharedBrowserChrome({
         label="Shared browser controls"
         compact={compact}
         leading={toolbarLeading}
-        navigation={
+        navigation={!compact || !hasNavigationMenu ? (
           <div className="flex items-center gap-0.5">
-            {!compact || !hasNavigationMenu ? historyControls : null}
-            <ChromeButton
-              disabled={controlsDisabled || !controls.reload}
-              label="Reload"
-              onClick={() => activePage && onReload(activePage.id)}
-              testId="shared-browser-reload"
-            >
-              <Refresh
-                aria-hidden="true"
-                className={`h-4 w-4 ${pendingAction === "reload" ? "animate-spin" : ""}`}
-              />
-            </ChromeButton>
+            {historyControls}
+            {reloadControl}
           </div>
-        }
+        ) : null}
         address={
           <div className="flex min-w-0 items-center gap-1">
-            {compact && hasNavigationMenu ? null : pageSelector}
+            {pageSelector}
             <div className="min-w-0 flex-1">
               <BrowserAddressField
                 ref={addressInputRef}

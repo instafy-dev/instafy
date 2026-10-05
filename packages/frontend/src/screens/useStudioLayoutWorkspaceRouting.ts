@@ -131,7 +131,15 @@ export function resolveProjectScopedWorkspaceRouteValues({
 type WorkspaceTabSummary = {
   id: string;
   kind: string;
+  workspaceOwner?: { userId: string; projectId: string; conversationId: string };
 };
+
+/** Tabs have already been filtered to the signed-in user's current workspace. */
+export function resolveOwnedChatView(tabs: readonly WorkspaceTabSummary[], id: string | null, projectId: string | null, conversationId: string | null) {
+  if (!id || !projectId || !conversationId) return null;
+  return tabs.find(tab => tab.id === id && tab.workspaceOwner?.projectId === projectId &&
+    tab.workspaceOwner.conversationId === conversationId) ?? null;
+}
 
 function isStudioPanel(value: string | null): value is StudioPanel {
   return (
@@ -438,6 +446,25 @@ export function useStudioLayoutWorkspaceRouting({
       return;
     }
     const panelParam = params.get("panel");
+    const viewConversation = conversations.find(chat => params.get("conversationControllerId")
+      ? chat.controllerId === params.get("conversationControllerId") : chat.localId === params.get("conversationId"));
+    const requestedView = !panelParam && conversationTabsReady && viewConversation
+      ? resolveOwnedChatView(workspaceTabs, params.get("chatView"), activeProjectId, viewConversation.localId) : null;
+    if (requestedView) {
+      // Restore the owned view before generic Chat reconciliation can focus
+      // its parent tab and overwrite the remembered resource selection.
+      lastHydratedSearchRef.current = locationSearch;
+      pendingConversationIdRef.current = null;
+      pendingConversationControllerIdRef.current = null;
+      const drawer = resolveLeftDrawerFromSearch(locationSearch);
+      if (activeWorkspaceTabId !== requestedView.id || activeConversationId !== viewConversation?.localId || leftDrawer !== drawer) {
+        applyingQueryParamsRef.current = true;
+        focusWorkspaceTab(requestedView.id);
+        if (leftDrawer !== drawer) setLeftDrawer(drawer);
+        clearApplyingQueryParamsSoon();
+      }
+      return;
+    }
     const panelRouteNeedsReconciliation =
       isStudioPanel(panelParam) &&
       (panelParam !== "chat" || conversationTabsReady) &&
@@ -942,6 +969,8 @@ export function useStudioLayoutWorkspaceRouting({
         : params.get("conversationId") === projectScopedRouteValues.conversationId) &&
       (params.get("jobId") || null) === projectScopedRouteValues.jobId;
     if (!preserveMessageTarget) changed = syncParam("messageId", null) || changed;
+    const selectedOwnedView = resolveOwnedChatView(workspaceTabs, activeWorkspaceTabId, resolvedProjectId, activeConversationId);
+    changed = syncParam("chatView", activePanel === "chat" ? selectedOwnedView?.id ?? null : null) || changed;
     changed = clearStaleSharedBrowserResumeTarget(params, resolvedProjectId) || changed;
     changed = syncParam("projectId", resolvedProjectId) || changed;
     changed = syncParam("conversationId", routeConversationValue("conversationId")) || changed;
@@ -998,6 +1027,8 @@ export function useStudioLayoutWorkspaceRouting({
     activePanel,
     activeProjectId,
     activeWorkspaceReviewTabId,
+    activeWorkspaceTabId,
+    workspaceTabs,
     activeWorkspaceTabJobId,
     conversationTabsReady,
     conversationsProjectKey,

@@ -342,17 +342,26 @@ author to approve their own PR.
 Keep the blanket required-approval count at **zero**, code-owner review
 **enabled**, and all required CI checks intact. Zero blanket approvals and
 CODEOWNERS membership do not by themselves exempt a bot-authored PR from review.
-The public repository's review-only ruleset grants both existing trusted bots
-the same **pull-request-only** exception. This permits an explicitly authorized
-merge of a trusted bot's own changes after review and exact-head CI, without
-fabricating an approving review. Keep required CI outside that exception and
-do not extend it to direct pushes, release tags or deployment. GitHub grants the
-exception to the merging account, not to a PR author: operators must still
+The public repository's review-only ruleset marks `instafy-bot` as **exempt**
+and retains `instafy-bot-2`'s **pull-request-only** exception. GitHub's
+[exemption mode](https://github.blog/changelog/2025-09-10-github-ruleset-exemptions-and-repository-insights-updates/)
+skips that ruleset for the exempt actor instead of requiring an explicit bypass;
+it does not create a self-approval or a bypass audit entry. A separate active
+`main-requires-pull-request` ruleset has **no bypass actors**, so the review
+exemption does not permit direct pushes. Required CI, up-to-date branches and
+conversation resolution stay in separate branch protection.
+
+This permits an explicitly authorized merge of a trusted bot's own changes
+after review and exact-head CI, without fabricating an approving review. Do not
+extend the exemption to CI, the PR requirement, release tags or deployment.
+GitHub grants the exception to the acting account, not to a PR author: operators must still
 require a trusted owner's approval for outside-authored changes. Never re-author
 outsider changes as a bot PR or add an auto-approve Action to evade review. A new
 trusted bot identity requires an explicit ownership-policy review; a name ending
 in `[bot]` does not confer trust.
 
+Enable native auto-merge only for a reviewed, authorized PR and verify its
+completion; an enabled auto-merge flag alone does not prove a PR will merge.
 If `gh pr merge` reports a branch-policy block despite passing CI, do not assume
 that the bot lacks its configured exception. The CLI can reject a `BLOCKED`
 merge state before asking GitHub to evaluate the merging account; enabling
@@ -377,8 +386,9 @@ to clear a merge block. If GitHub rejects the request, diagnose that rejection.
 
 Before making the repository public, verify the live branch settings (source
 tests do not configure GitHub): code-owner review enabled, blanket approvals
-zero, stale approvals dismissed after code changes, both trusted bots granted
-the same review-only PR exception, and existing required checks unchanged.
+zero, stale approvals dismissed after code changes, `instafy-bot` exempt from
+the review-only ruleset, `instafy-bot-2` retaining its PR-only review exception,
+the separate PR requirement with no bypass actors, and existing required checks unchanged.
 Confirm an unapproved outside contribution still needs review and both bots can
 review all protected paths. Inspect these settings without merging a PR merely
 to test them. Retain the self-hosted runner groups' server-side

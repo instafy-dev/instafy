@@ -223,6 +223,70 @@ describe("saveWorkspaceChanges", () => {
     expect(mocks.release).toHaveBeenCalledOnce();
   });
 
+  // The stateless gateway's answers that say to try again later. On /apply the
+  // client cannot tell whether the change landed (it usually did not; a push
+  // whose answer was lost and whose confirming fetch failed did), so it is
+  // reported as not applied: the lease is let go and no sync follows; the
+  // code and its wait reach the caller, which decides whether to ask again.
+  it.each(["fetch_pending", "writes_busy", "mirror_reset", "disk_full"])(
+    "returns 503 %s with its Retry-After, not applied and without a sync",
+    async (code) => {
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "try again in a moment", code }), {
+          status: 503,
+          headers: { "content-type": "application/json", "retry-after": "2" },
+        }),
+      );
+      const result = await saveWorkspaceChanges({
+        projectId: "p",
+        originId: "gateway",
+        files: [{ path: "README.md", content: "x" }],
+        baseRev: "r1",
+      });
+      expect(calls()).toHaveLength(1);
+      expect(result).toMatchObject({
+        ok: false,
+        stage: "apply",
+        applied: false,
+        appliedRev: null,
+        error: { status: 503, code, retryAfterMs: 2000 },
+      });
+      expect(mocks.release).toHaveBeenCalledOnce();
+    },
+  );
+
+  // An apply that changed nothing (main already held these bytes) is
+  // followed by /git/sync, whose fresh fetch of main can answer the same
+  // codes. The apply landed, and the code and its wait still reach the caller.
+  it.each(["fetch_pending", "mirror_reset"])(
+    "returns 503 %s from the sync after a no-op apply as applied, with its Retry-After",
+    async (code) => {
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(json(200, { rev: "r1", baseRev: "r1", committed: false }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: "try again in a moment", code }), {
+            status: 503,
+            headers: { "content-type": "application/json", "retry-after": "2" },
+          }),
+        );
+      const result = await saveWorkspaceChanges({
+        projectId: "p",
+        originId: "gateway",
+        files: [{ path: "README.md", content: "x" }],
+        baseRev: "r1",
+      });
+      expect(calls().map((call) => call.url)).toEqual([`${GATEWAY}/apply`, `${GATEWAY}/git/sync`]);
+      expect(result).toMatchObject({
+        ok: false,
+        stage: "sync",
+        applied: true,
+        appliedRev: "r1",
+        error: { status: 503, code, retryAfterMs: 2000 },
+      });
+      expect(mocks.release).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each([
     ["excluded_path", "secret"],
     ["excluded_path", undefined],

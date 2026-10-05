@@ -42,7 +42,7 @@ export type KnownOriginErrorCode =
   // 502 / 503
   | "canonical_unreachable"
   | "push_rejected"
-  | "fetch_pending"
+  | OriginRetryLaterCode
   | "workspace_stopping"
   // Client-side codes (never sent by a server).
   | "lease_conflict"
@@ -53,6 +53,79 @@ export type KnownOriginErrorCode =
   | "invalid_request";
 
 export type OriginErrorCode = KnownOriginErrorCode | (string & Record<never, never>);
+
+/**
+ * The stateless gateway's 503 answers, each with `Retry-After`:
+ * - `fetch_pending`: the space's saved versions are still being fetched;
+ * - `writes_busy`: every write slot stayed taken while the request waited;
+ * - `mirror_reset`: the gateway's copy of the space was damaged and is
+ *   being made again;
+ * - `disk_full`: the gateway's disk is full.
+ *
+ * `writes_busy` comes before any work. The other three usually mean nothing
+ * was written, but a write can also get them after its push landed, when the
+ * push's answer was lost and the fetch that confirms it failed. Asking again
+ * is safe either way: the gateway applies a change to `main` as it is then,
+ * and a change `main` already holds is answered `committed: false` with
+ * nothing written.
+ */
+export type OriginRetryLaterCode = "fetch_pending" | "writes_busy" | "mirror_reset" | "disk_full";
+
+const RETRY_LATER_CODES: ReadonlySet<string> = new Set<OriginRetryLaterCode>([
+  "fetch_pending",
+  "writes_busy",
+  "mirror_reset",
+  "disk_full",
+]);
+
+/**
+ * The ones that clear by themselves within seconds (a fetch finishing, a
+ * write slot freeing, a copy made again), so a client may ask once more on
+ * its own. `disk_full` is not one: a full disk does not clear in seconds,
+ * and asking again only adds work for a server that is out of room.
+ */
+const AUTO_RETRY_CODES: ReadonlySet<string> = new Set<OriginRetryLaterCode>([
+  "fetch_pending",
+  "writes_busy",
+  "mirror_reset",
+]);
+
+export function isOriginRetryLaterCode(code: string | null | undefined): code is OriginRetryLaterCode {
+  return typeof code === "string" && RETRY_LATER_CODES.has(code);
+}
+
+export function isOriginAutoRetryCode(code: string | null | undefined): boolean {
+  return typeof code === "string" && AUTO_RETRY_CODES.has(code);
+}
+
+/** How long a client waits before the one retry it makes on its own. */
+export interface OriginAutoRetryBudget {
+  /** The wait when the answer carries no `Retry-After`. */
+  defaultDelayMs: number;
+  /** The longest wait, whatever `Retry-After` asks for. */
+  maxDelayMs: number;
+}
+
+/**
+ * The wait before asking again on its own, after an answer that clears by
+ * itself: the origin's `Retry-After`, or the budget's default, never more
+ * than the budget's cap. Null for every other answer (`disk_full`
+ * included), which only the user retries.
+ */
+export function originAutoRetryDelayMs(
+  error: Pick<OriginError, "code" | "retryAfterMs"> | null | undefined,
+  budget: OriginAutoRetryBudget,
+): number | null {
+  if (!isOriginAutoRetryCode(error?.code)) {
+    return null;
+  }
+  const retryAfter = error?.retryAfterMs;
+  const delay =
+    typeof retryAfter === "number" && Number.isFinite(retryAfter) && retryAfter >= 0
+      ? retryAfter
+      : budget.defaultDelayMs;
+  return Math.max(0, Math.min(delay, budget.maxDelayMs));
+}
 
 export type OriginPublishStatus = "published" | "partial" | "unchanged" | "unpublished";
 

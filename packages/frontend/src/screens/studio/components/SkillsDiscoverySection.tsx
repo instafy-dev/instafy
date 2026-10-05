@@ -185,6 +185,7 @@ export function SkillsDiscoverySection({
           <div id={filtersId} className="grid gap-2 @min-[36rem]/settings-content:grid-cols-3" data-testid="skills-discovery-filters">
             <Field label="Source" htmlFor={`${fieldId}-skills-discovery-source-select`}>
               <Select id={`${fieldId}-skills-discovery-source-select`}
+                aria-label="Source"
                 value={discoveryLaneFilter}
                 onChange={(event) => onDiscoveryLaneFilterChange(event.target.value)}
                 disabled={!hasProject || discoveryLoading}
@@ -200,6 +201,7 @@ export function SkillsDiscoverySection({
 
             <Field label="Category" htmlFor={`${fieldId}-skills-discovery-category-select`}>
               <Select id={`${fieldId}-skills-discovery-category-select`}
+                aria-label="Category"
                 value={discoveryCategoryFilter}
                 onChange={(event) => onDiscoveryCategoryFilterChange(event.target.value)}
                 disabled={!hasProject || discoveryLoading || discoveryCategoryOptions.length === 0}
@@ -217,6 +219,7 @@ export function SkillsDiscoverySection({
 
             <Field label="Sort" htmlFor={`${fieldId}-skills-discovery-sort-select`}>
               <Select id={`${fieldId}-skills-discovery-sort-select`}
+                aria-label="Sort"
                 value={discoverySort}
                 onChange={(event) => onDiscoverySortChange(event.target.value)}
                 disabled={!hasProject || discoveryLoading}

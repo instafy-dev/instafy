@@ -8,11 +8,12 @@ import { StudioSidebarWorkspacePanel } from "../StudioSidebarWorkspacePanel";
 describe("StudioSidebarWorkspacePanel", () => {
   let container: HTMLDivElement;
   let portalTarget: HTMLDivElement;
+  let headerTarget: HTMLDivElement;
   let root: Root;
   const onClose = vi.fn();
   const onOuterKeyDown = vi.fn();
 
-  function Harness({ desktop = true, initialOpen = true }: { desktop?: boolean; initialOpen?: boolean }) {
+  function Harness({ desktop = true, initialOpen = true, externalHeader = false }: { desktop?: boolean; initialOpen?: boolean; externalHeader?: boolean }) {
     const [open, setOpen] = useState(initialOpen);
     const triggerRef = useRef<HTMLButtonElement | null>(null);
     const destinationRef = useRef<HTMLButtonElement | null>(null);
@@ -24,6 +25,7 @@ describe("StudioSidebarWorkspacePanel", () => {
           open={open}
           desktop={desktop}
           portalTarget={portalTarget}
+          headerPortalTarget={externalHeader ? headerTarget : null}
           triggerRef={triggerRef}
           onClose={() => {
             onClose();
@@ -44,7 +46,8 @@ describe("StudioSidebarWorkspacePanel", () => {
     vi.clearAllMocks();
     container = document.createElement("div");
     portalTarget = document.createElement("div");
-    document.body.append(container, portalTarget);
+    headerTarget = document.createElement("div");
+    document.body.append(container, portalTarget, headerTarget);
     root = createRoot(container);
   });
 
@@ -52,6 +55,7 @@ describe("StudioSidebarWorkspacePanel", () => {
     await act(async () => root.unmount());
     container.remove();
     portalTarget.remove();
+    headerTarget.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -74,6 +78,22 @@ describe("StudioSidebarWorkspacePanel", () => {
     expect(document.activeElement).toBe(panel);
     expect(onClose).not.toHaveBeenCalled();
     expect(document.querySelector('[data-studio-popover]')).toBeNull();
+  });
+
+  it("keeps the directory labelled and supports Escape from its external header", async () => {
+    await act(async () => root.render(<Harness externalHeader />));
+    const panel = portalTarget.querySelector('[data-testid="sidebar-project-switcher-menu"]')!;
+    expect(headerTarget.querySelector("h2")?.textContent).toBe("Browse teams");
+    expect(portalTarget.querySelector("h2")).toBeNull();
+    expect(document.getElementById(panel.getAttribute("aria-labelledby")!)?.textContent).toBe("Browse teams");
+    await act(async () => {
+      const close = headerTarget.querySelector("button")!;
+      close.focus();
+      close.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(headerTarget.textContent).toBe("");
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="trigger"]'));
   });
 
   it("does not dismiss when focus or a click moves to the adjacent workspace", async () => {

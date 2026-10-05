@@ -21,19 +21,19 @@ import type {
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
 import {
-  REVERT_CHECK_FAILED_MESSAGE,
-  REVERT_CHECK_STILL_LOADING_MESSAGE,
   REVERT_CHECKING_MESSAGE,
   REVERT_RUNNING_MESSAGE,
   REVERT_STILL_RUNNING_MESSAGE,
   REVERT_WAITING_AGAIN_MESSAGE,
+  autoRetryDelayMs,
   describeChangeRevertOutcome,
   describeFileNotSaved,
   describeRevertCombined,
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
-  fetchPendingRetryDelayMs,
+  revertAnswerCode,
+  revertCheckFailedCopy,
   revertRetryDelayMs,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
@@ -104,9 +104,10 @@ type ChatChangeRevertScope =
   // The version lists no files of its own: a merge, which the card cannot
   // bound to this turn's commits.
   | { status: "combined" }
-  // `stillLoading`: the gateway was still fetching the space's history, even
-  // after one retry.
-  | { status: "failed"; stillLoading?: boolean };
+  // `code`: the gateway's answer when it said to try again later: still
+  // fetching the space's history or making its copy again (even after one
+  // retry), or out of room (never retried).
+  | { status: "failed"; code?: string | null };
 
 type ResolvedChatFileChange = {
   file: ChatMessageFileChange;
@@ -901,9 +902,11 @@ export function ChatFileChangeList({
       return;
     }
     // A gateway whose copy of the space is cold fetches first and asks for a
-    // moment (503 fetch_pending). This check is the first request to meet
-    // it, so it waits that moment and asks once more.
-    const retryDelay = fetchPendingRetryDelayMs(review?.errorInfo);
+    // moment (503 fetch_pending); one whose copy was damaged makes it again
+    // (503 mirror_reset). This check is the first request to meet either,
+    // so it waits that moment and asks once more. A full disk (503
+    // disk_full) is not asked again.
+    const retryDelay = autoRetryDelayMs(review?.errorInfo);
     if (retryDelay !== null) {
       await new Promise((resolve) => setTimeout(resolve, retryDelay));
       if (revertScopeRequestRef.current !== request) {
@@ -915,7 +918,7 @@ export function ChatFileChangeList({
       }
     }
     if (!review || !review.supported || review.busy || review.error) {
-      setRevertScope({ status: "failed", stillLoading: review?.errorInfo?.code === "fetch_pending" });
+      setRevertScope({ status: "failed", code: review?.errorInfo?.code ?? null });
       return;
     }
     const cardPaths = new Set(uniquePaths);
@@ -1029,8 +1032,12 @@ export function ChatFileChangeList({
   // What a revert answered: mark the files it undid and say so. Also runs
   // for an answer that arrives after the card stopped waiting for it.
   const applyRevertOutcome = useCallback(
-    (result: RevertWorkspaceGitCommitResult | null, revertedVersionPaths: ReadonlySet<string>) => {
-      const outcome = describeChangeRevertOutcome(result);
+    (
+      result: RevertWorkspaceGitCommitResult | null,
+      revertedVersionPaths: ReadonlySet<string>,
+      retriedAfter: string | null,
+    ) => {
+      const outcome = describeChangeRevertOutcome(result, { retriedAfter });
       if (outcome.reverted) {
         const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));
         // A version revert only undoes what that version touched. Files the
@@ -1111,21 +1118,26 @@ export function ChatFileChangeList({
     const answer = (async () => {
       try {
         let result = await revert();
-        // A gateway still fetching the space's history asks for a moment.
-        // Nothing was committed, so one retry after that delay is safe.
+        let retriedAfter: string | null = null;
+        // A gateway still fetching the space's history, out of write slots
+        // or making its copy again asks for a moment, and the card asks once
+        // more after that delay (never for a full disk). The first revert
+        // may have landed even so (its push's answer was lost); a retry is
+        // still safe, because a revert main already holds writes nothing.
         const retryDelay = revertRetryDelayMs(result);
         if (retryDelay !== null) {
+          retriedAfter = revertAnswerCode(result);
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
           result = await revert();
         }
-        return result;
+        return { result, retriedAfter };
       } catch {
-        return null;
+        return { result: null, retriedAfter: null };
       }
     })();
-    const running = answer.then((result) => {
+    const running = answer.then(({ result, retriedAfter }) => {
       runningRevertRef.current = null;
-      applyRevertOutcomeRef.current(result, revertedVersionPaths);
+      applyRevertOutcomeRef.current(result, revertedVersionPaths, retriedAfter);
     });
     runningRevertRef.current = running;
     setRevertWaitingAgain(false);
@@ -1203,7 +1215,7 @@ export function ChatFileChangeList({
       case "combined":
         return describeRevertCombined(Boolean(messageId));
       case "failed":
-        return revertScope.stillLoading ? REVERT_CHECK_STILL_LOADING_MESSAGE : REVERT_CHECK_FAILED_MESSAGE;
+        return revertCheckFailedCopy(revertScope.code);
       default:
         return REVERT_CHECKING_MESSAGE;
     }

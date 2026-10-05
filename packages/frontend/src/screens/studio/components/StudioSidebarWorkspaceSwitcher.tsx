@@ -1,5 +1,7 @@
+import { useId, useState } from "react";
+import { createPortal } from "react-dom";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
-import { Check, Plus, Search, Settings } from "iconoir-react";
+import { Check, Group, Plus, Search, Settings } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { SearchInput } from "../../../components/SearchInput";
@@ -52,6 +54,8 @@ export type SidebarWorkspaceOrgOption = {
 };
 
 type StudioSidebarWorkspaceSwitcherProps = {
+  spaceHeaderExternal?: boolean;
+  spaceHeaderActionsTarget?: HTMLElement | null;
   mode?: "teams-and-spaces" | "spaces";
   orgOptions: SidebarWorkspaceOrgOption[];
   workspaceOrgKey: string;
@@ -65,6 +69,7 @@ type StudioSidebarWorkspaceSwitcherProps = {
   onRetryProjects?: () => void;
   onWorkspaceOrgChange: (orgKey: string) => void;
   onOpenOrgSettings?: () => void;
+  onOpenOrgOverview?: () => void;
   onCreateOrg?: () => void;
   canSearchSpaces: boolean;
   showProjectSearch: boolean;
@@ -89,6 +94,8 @@ type StudioSidebarWorkspaceSwitcherProps = {
  * list with the active space as its first, selected row.
  */
 export function StudioSidebarWorkspaceSwitcher({
+  spaceHeaderExternal = false,
+  spaceHeaderActionsTarget,
   mode = "teams-and-spaces",
   orgOptions,
   workspaceOrgKey,
@@ -100,6 +107,7 @@ export function StudioSidebarWorkspaceSwitcher({
   onRetryProjects,
   onWorkspaceOrgChange,
   onOpenOrgSettings,
+  onOpenOrgOverview,
   onCreateOrg,
   canSearchSpaces,
   showProjectSearch,
@@ -115,6 +123,9 @@ export function StudioSidebarWorkspaceSwitcher({
   projectAttentionCounts = {},
   orgAttentionCounts = {},
 }: StudioSidebarWorkspaceSwitcherProps) {
+  const [teamQuery, setTeamQuery] = useState("");
+  const teamSearchId = useId();
+  const visibleTeams = orgOptions.filter(org => `${org.name} ${org.slug ?? ""}`.toLocaleLowerCase().includes(teamQuery.trim().toLocaleLowerCase()));
   useStudioPerformanceContent({
     projectId: null,
     organizationId: pendingOrgKey === "personal" ? null : pendingOrgKey,
@@ -233,6 +244,50 @@ export function StudioSidebarWorkspaceSwitcher({
     </StudioMenuItem>
   );
 
+  const spaceActions = (
+    <div className="flex items-center gap-1">
+      {canSearchSpaces ? (
+        <IconButton
+          variant="ghost"
+          size="sm"
+          radius="full"
+          aria-label={showProjectSearch ? "Clear space search" : "Search spaces"}
+          data-testid="sidebar-project-search-toggle"
+          onPress={onToggleProjectSearch}
+          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+        >
+          <Search className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+        </IconButton>
+      ) : null}
+      {onOpenProjectSettings && currentOrgProject ? (
+        <IconButton
+          variant="ghost"
+          size="sm"
+          radius="full"
+          aria-label="Current space settings"
+          data-testid="sidebar-project-settings"
+          onPress={onOpenProjectSettings}
+          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+        >
+          <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+        </IconButton>
+      ) : null}
+      {onCreateProject ? (
+        <IconButton
+          variant="ghost"
+          size="sm"
+          radius="full"
+          aria-label="New space"
+          data-testid="sidebar-project-new"
+          onPress={onCreateProject}
+          className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+        >
+          <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+        </IconButton>
+      ) : null}
+    </div>
+  );
+
   return (
     <>
       {mode === "teams-and-spaces" ? <SidebarMenuSection
@@ -240,6 +295,7 @@ export function StudioSidebarWorkspaceSwitcher({
         headerClassName="pr-0"
         actions={
           <div className="flex items-center gap-1">
+            {onOpenOrgOverview ? <IconButton variant="ghost" size="sm" radius="full" aria-label="Team overview" data-testid="sidebar-org-overview-button" onPress={onOpenOrgOverview} className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}><Group className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" /></IconButton> : null}
             <IconButton
               variant="ghost"
               size="sm"
@@ -271,7 +327,9 @@ export function StudioSidebarWorkspaceSwitcher({
         }
       >
         <div className="mt-2 space-y-1" data-testid="sidebar-org-selector">
-          {orgOptions.map(renderTeamRow)}
+          {orgOptions.length > 5 ? <SearchInput id={teamSearchId} inputTestId="sidebar-team-search" label="Find a team" placeholder="Find a team" value={teamQuery} onChange={event => setTeamQuery(event.target.value)} /> : null}
+          {visibleTeams.map(renderTeamRow)}
+          {!visibleTeams.length ? <Text variant="caption">No matching teams.</Text> : null}
         </div>
       </SidebarMenuSection> : null}
 
@@ -288,68 +346,23 @@ export function StudioSidebarWorkspaceSwitcher({
         </div>
       ) : null}
 
-      <SidebarMenuSection
-        className="mt-4"
-        label="Spaces"
-        headerClassName="pr-0"
-        actions={
-          <div className="flex items-center gap-1">
-            {canSearchSpaces ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label={showProjectSearch ? "Clear space search" : "Search spaces"}
-                data-testid="sidebar-project-search-toggle"
-                onPress={onToggleProjectSearch}
-                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
-              >
-                <Search className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-              </IconButton>
-            ) : null}
-            {onOpenProjectSettings && currentOrgProject ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label="Current space settings"
-                data-testid="sidebar-project-settings"
-                onPress={onOpenProjectSettings}
-                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
-              >
-                <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-              </IconButton>
-            ) : null}
-            {onCreateProject ? (
-              <IconButton
-                variant="ghost"
-                size="sm"
-                radius="full"
-                aria-label="New space"
-                data-testid="sidebar-project-new"
-                onPress={onCreateProject}
-                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
-              >
-                <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-              </IconButton>
-            ) : null}
-          </div>
-        }
-      >
-        {showProjectSearch && canSearchSpaces ? (
-          <div className="mt-2">
-            <SearchInput
-              id="sidebar-project-switcher-search"
-              label="Search spaces"
-              value={workspaceProjectQuery}
-              onChange={(event) => onWorkspaceProjectQueryChange(event.target.value)}
-              placeholder="Search spaces…"
-              data-testid="sidebar-project-search"
-              autoFocus={workspaceProjectSearchOpen}
-            />
-          </div>
-        ) : null}
-      </SidebarMenuSection>
+      {spaceHeaderExternal
+        ? spaceHeaderActionsTarget ? createPortal(spaceActions, spaceHeaderActionsTarget) : null
+        : <SidebarMenuSection className="mt-4" label="Spaces" headerClassName="pr-0" actions={spaceActions} />}
+
+      {showProjectSearch && canSearchSpaces ? (
+        <div className="mt-2">
+          <SearchInput
+            id="sidebar-project-switcher-search"
+            label="Search spaces"
+            value={workspaceProjectQuery}
+            onChange={(event) => onWorkspaceProjectQueryChange(event.target.value)}
+            placeholder="Search spaces…"
+            data-testid="sidebar-project-search"
+            autoFocus={workspaceProjectSearchOpen}
+          />
+        </div>
+      ) : null}
 
       {!currentOrgProject && switcherProjects.length === 0 ? (
         projectsLoading ? null : (

@@ -20,7 +20,7 @@ test.describe("Project restore", () => {
 
     await page.goto("/studio", { waitUntil: "domcontentloaded" });
 
-    await expect(page.getByTestId("workspace-tabs")).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId("conversation-workspace-title")).toBeVisible({ timeout: 60_000 });
     await expect(page.getByTestId("project-missing-blocker")).toHaveCount(0);
 
     const url = new URL(page.url());

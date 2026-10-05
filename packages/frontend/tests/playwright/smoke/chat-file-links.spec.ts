@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import { prepareStudio, resetRuntimeUserState, writeWorkspaceFile } from "../utils/harness.js";
 import { disableAssistantIfPossible } from "../utils/runtimeAi.js";
@@ -56,7 +57,7 @@ test.describe("Chat file links", () => {
     const targetPath = "INSTAFY.md";
     await writeWorkspaceFile(page, targetPath, "hello", { projectId });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await disableAssistantIfPossible(page);
 
     await page.getByTestId("chat-input").fill(`Learn review complete; [Instafy.md] already reflects the workspace rules.`);

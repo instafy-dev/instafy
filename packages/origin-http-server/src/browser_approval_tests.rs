@@ -170,6 +170,8 @@ fn claims(subject: &str, runtime_id: &str, scopes: &[&str]) -> OriginClaims {
         jti: Some(Uuid::new_v4().to_string()),
         actor_label: Some("Approval test user".to_string()),
         browser_session_id: Some(Uuid::new_v4().to_string()),
+        author_name: None,
+        author_email: None,
     }
 }
 

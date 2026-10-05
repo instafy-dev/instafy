@@ -198,10 +198,10 @@ export function BrowserSessionPageStrip({
             onClick={onClearPendingNewBrowser}
             className="inline-flex h-10 min-w-fit shrink-0 items-center gap-2 rounded-full border border-primary-500/45 bg-primary-500/10 px-3.5 text-left text-primary-700 shadow-sm transition hover:border-primary-500/60 hover:bg-primary-500/14 dark:border-primary-400/45 dark:bg-primary-500/15 dark:text-primary-200 dark:hover:border-primary-300/60 dark:hover:bg-primary-500/20"
             data-testid="browser-session-page-new-pending"
-            aria-label="Clear next new site target"
-            title="Clear next new site target"
+            aria-label="Cancel new tab request"
+            title="Cancel new tab request"
           >
-            <span className="truncate text-sm font-medium">New shared site</span>
+            <span className="truncate text-sm font-medium">Next AI request: new tab</span>
             <span className="inline-flex h-5 w-5 flex-none items-center justify-center rounded-full border border-current/15 text-primary-600/75 dark:text-primary-200/75">
               <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
             </span>

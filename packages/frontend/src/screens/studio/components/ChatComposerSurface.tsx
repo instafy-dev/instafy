@@ -82,6 +82,8 @@ type ChatComposerSurfaceProps = {
   composerOverlayRef: RefObject<HTMLDivElement | null>;
   composerAutoHidden: boolean;
   aboveComposer?: ReactNode;
+  /** Compact conversation views stay in the measured overlay above the input. */
+  viewNavigation?: ReactNode;
   compactBrowserViewport: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
@@ -108,7 +110,8 @@ type ChatComposerSurfaceProps = {
   voiceStatusMessage: string;
   providerTriggerNoticeProps: ComponentProps<typeof ProviderTriggerNotice> | null;
   showComposerNavigationButton: boolean;
-  composerNavigationDestination?: "drawer" | "chats";
+  composerNavigationDestination?: "drawer" | "chats" | "sheet";
+  composerNavigationLabel?: string;
   onOpenNavigation: () => void;
   homeAttentionCount: number;
   homeAttentionBadge: string;
@@ -221,6 +224,7 @@ export function ChatComposerSurface({
   composerOverlayRef,
   composerAutoHidden,
   aboveComposer,
+  viewNavigation,
   compactBrowserViewport,
   onSubmit,
   queueSurfaceProps,
@@ -248,6 +252,7 @@ export function ChatComposerSurface({
   providerTriggerNoticeProps,
   showComposerNavigationButton,
   composerNavigationDestination = "drawer",
+  composerNavigationLabel = "Back to chats",
   onOpenNavigation,
   homeAttentionCount,
   homeAttentionBadge,
@@ -284,7 +289,7 @@ export function ChatComposerSurface({
     });
     return () => cancelAnimationFrame(frame);
   }, [composerOverlayRef, draftExpanded]);
-  const composerHidden = composerAutoHidden && !draftExpanded;
+  const composerHidden = composerAutoHidden && !draftExpanded && !viewNavigation;
   // A read-only composer swallows keystrokes at the Lexical layer; flash the
   // visible notice instead so a blocked attempt never feels like dead input.
   const [blockedInputFlash, setBlockedInputFlash] = useState(false);
@@ -475,6 +480,7 @@ export function ChatComposerSurface({
   // Chat and Browser keep the editor and controls in the same positions.
   const composerInlineControlsInTextRow = !showVoiceActiveStrip;
   const mobileChatsNavigation = showComposerNavigationButton && composerNavigationDestination === "chats";
+  const compactNavigationLayout = showComposerNavigationButton && composerNavigationDestination !== "drawer";
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled =
     mutationDisabled || sendingAttachment || onboardingInputLocked || Boolean(imageUploadUnavailableReason);
@@ -895,8 +901,8 @@ export function ChatComposerSurface({
       variant="ghost"
       size="md"
       radius="xl"
-      aria-label={mobileChatsNavigation ? "Back to chats" : "Open navigation and recent chats"}
-      title={mobileChatsNavigation ? "Back to chats" : "Open navigation and recent chats"}
+      aria-label={mobileChatsNavigation ? composerNavigationLabel : "Open navigation"}
+      title={mobileChatsNavigation ? composerNavigationLabel : "Open navigation"}
       aria-haspopup={mobileChatsNavigation ? undefined : "dialog"}
       data-testid="chat-composer-navigation-button"
       className={composerGhostActionClass}
@@ -1024,12 +1030,12 @@ export function ChatComposerSurface({
             }
           }}
           className={`${
-            mobileChatsNavigation
+            compactNavigationLayout
               ? `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3.5`
               : `pointer-events-auto ${CHAT_COMPOSER_COLUMN_CLASS_NAME} px-3 sm:px-4`
           } ${draftExpanded ? "h-full min-h-0" : ""}`}
           style={{
-            paddingInline: mobileChatsNavigation
+            paddingInline: compactNavigationLayout
               ? "clamp(0.875rem, var(--instafy-safe-area-inset-bottom), 1.125rem)"
               : undefined,
             paddingBottom: nativeKeyboardOpen
@@ -1336,14 +1342,15 @@ export function ChatComposerSurface({
                 ) : null}
               </div>
             ) : null}
+            {viewNavigation}
             <Surface
               tone="default"
-              radius={mobileChatsNavigation ? "none" : "3xl"}
+              radius={compactNavigationLayout ? "none" : "3xl"}
               shadow="none"
               // The composer keeps the raised-control background but borrows the
               // panel border tier: raised-control (13%) is meant for small
               // controls, and reads too hard along a full-width composer edge.
-              className={`${mobileChatsNavigation ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS} ${draftExpanded ? "min-h-0 flex-1" : ""}`}
+              className={`${compactNavigationLayout ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS} ${draftExpanded ? "min-h-0 flex-1" : ""}`}
               data-testid="chat-composer-surface"
             >
               {draftExpanded ? (
@@ -1371,7 +1378,7 @@ export function ChatComposerSurface({
               {/* The editor stays mounted while the primary slot switches from
                   mic to Send. Controls stay bottom-aligned as the text grows. */}
               <div
-                className={`relative ${draftExpanded ? "grid min-h-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto] gap-1" : `flex items-end ${mobileChatsNavigation ? "gap-1" : "gap-2"}`}`}
+                className={`relative ${draftExpanded ? "grid min-h-0 flex-1 grid-cols-[auto_minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)_auto] gap-1" : `flex items-end ${compactNavigationLayout ? "gap-1" : "gap-2"}`}`}
                 data-testid="chat-composer-text-row"
                 onDragOver={onDragOver}
                 onDrop={onDrop}
@@ -1382,7 +1389,7 @@ export function ChatComposerSurface({
                     data-testid="chat-composer-leading-controls"
                   >
                     {navigationButtonNode}
-                    {!mobileChatsNavigation ? actionMenuNode : null}
+                    {!compactNavigationLayout ? actionMenuNode : null}
                   </div>
                 ) : null}
                 <div
@@ -1409,7 +1416,7 @@ export function ChatComposerSurface({
                     className={`flex flex-none items-center justify-end gap-0.5 ${draftExpanded ? "col-start-3 row-start-2" : ""}`}
                     data-testid="chat-composer-trailing-controls"
                   >
-                    {mobileChatsNavigation ? actionMenuNode : null}
+                    {compactNavigationLayout ? actionMenuNode : null}
                     {voiceStripNode}
                     {renderSendButton()}
                   </div>

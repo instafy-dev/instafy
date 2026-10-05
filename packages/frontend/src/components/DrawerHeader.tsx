@@ -1,10 +1,18 @@
 import type { ElementType, ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Text } from "./Text";
+import { usePageTitleInNavigation } from "./PageTitleContext";
 
 export interface DrawerHeaderProps {
+  /** Place this header in the desktop shell while keeping its controls owned by the pane. */
+  portalTarget?: HTMLElement | null;
+  /** Move only the actions into an enclosing mobile navigation header. */
+  actionsPortalTarget?: HTMLElement | null;
   title: ReactNode;
   subtitle?: ReactNode;
   titleAs?: ElementType;
+  /** Opt in only when this drawer is the named page in the enclosing navigation. */
+  pageTitle?: boolean;
   icon?: ReactNode;
   actions?: ReactNode;
   density?: "compact" | "touch";
@@ -20,9 +28,12 @@ export interface DrawerHeaderProps {
 }
 
 export function DrawerHeader({
+  portalTarget,
+  actionsPortalTarget,
   title,
   subtitle,
   titleAs = "p",
+  pageTitle = false,
   icon,
   actions,
   density = "compact",
@@ -34,11 +45,22 @@ export function DrawerHeader({
   subtitleClassName,
   actionsClassName,
 }: DrawerHeaderProps) {
+  const titleInNavigation = usePageTitleInNavigation(title);
+  const hideTitle = pageTitle && titleInNavigation;
   const railFrame = frame === "rail";
   const touchDensity = !railFrame && density === "touch";
-  return (
-    <div className={["flex min-w-0 items-center justify-between gap-3", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>
-      <div
+  // Mode changes may need to return keyboard focus here even when navigation
+  // owns the visible title. Keep the named target with the drawer body.
+  const hiddenTitle = (hideTitle || actionsPortalTarget) && titleProps?.id ? (
+    <Text {...titleProps} as={titleAs} className="sr-only">{title}</Text>
+  ) : null;
+  if (actionsPortalTarget) {
+    return <>{hiddenTitle}{actions ? createPortal(<div className="flex shrink-0 items-center gap-1">{actions}</div>, actionsPortalTarget) : null}</>;
+  }
+  if (hideTitle && !subtitle && !actions) return hiddenTitle;
+  const header = (
+    <div className={["flex min-w-0 items-center gap-3", hideTitle && !subtitle ? "justify-end" : "justify-between", railFrame && "h-12 shrink-0 px-4", className].filter(Boolean).join(" ")}>
+      {!hideTitle || subtitle ? <div
         className={[
           "flex min-w-0 items-center",
           touchDensity ? "gap-3" : "gap-2",
@@ -47,29 +69,29 @@ export function DrawerHeader({
           .filter(Boolean)
           .join(" ")}
       >
-        {icon ? <div className="shrink-0">{icon}</div> : null}
+        {icon && !hideTitle ? <div className="shrink-0">{icon}</div> : null}
         <div className="min-w-0">
-          <Text
+          {!hideTitle ? <Text
             {...titleProps}
             as={titleAs}
             variant={touchDensity ? "title" : "bodyStrong"}
             tone="primary"
-            className={["min-w-0 truncate", railFrame && "!text-base !font-semibold", titleClassName].filter(Boolean).join(" ")}
+            className={["min-w-0 truncate", railFrame && "max-[899px]:!text-base max-[899px]:!font-semibold", titleClassName].filter(Boolean).join(" ")}
           >
             {title}
-          </Text>
+          </Text> : null}
           {subtitle ? (
             <Text
               as="p"
               variant={touchDensity ? "body" : "caption"}
               tone="muted"
-              className={["mt-0.5 min-w-0 truncate", subtitleClassName].filter(Boolean).join(" ")}
+              className={[!hideTitle && "mt-0.5", "min-w-0 truncate", subtitleClassName].filter(Boolean).join(" ")}
             >
               {subtitle}
             </Text>
           ) : null}
         </div>
-      </div>
+      </div> : null}
       {actions ? (
         <div
           className={[
@@ -85,4 +107,5 @@ export function DrawerHeader({
       ) : null}
     </div>
   );
+  return <>{hiddenTitle}{portalTarget ? createPortal(header, portalTarget) : header}</>;
 }

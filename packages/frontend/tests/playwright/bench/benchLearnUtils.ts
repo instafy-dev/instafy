@@ -1,3 +1,5 @@
+import { createPublicChatFromTopBar } from "../utils/chatUi.js";
+import { activeConversationId } from "../utils/conversationNavigation.js";
 import { expect, type Page } from "@playwright/test";
 import { getControllerUrl, getSupabaseAuthHeaders } from "../utils/harness.js";
 import { collectLearnRoutingSnapshot, type LearnRoutingSnapshot } from "./benchRoutingDebug.js";
@@ -35,46 +37,9 @@ export function summarizeBenchSignal(signal: string | null | undefined, max = 16
 }
 
 export async function openNewConversation(page: Page) {
-  const tabs = page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-  const previousCount = await tabs.count().catch(() => 0);
-  const previousUrl = page.url();
-
-  await page.getByTestId("chat-new-conversation").click();
-
-  await expect
-    .poll(
-      async () => {
-        const currentUrl = page.url();
-        const urlChanged = currentUrl !== previousUrl;
-
-        const tabCount = await tabs.count().catch(() => previousCount);
-        const countChanged = previousCount > 0 ? tabCount === previousCount + 1 : tabCount > previousCount;
-
-        let conversationChanged = false;
-        try {
-          const prev = new URL(previousUrl);
-          const next = new URL(currentUrl);
-          const prevKey = `${prev.searchParams.get("conversationId") ?? ""}:${prev.searchParams.get("conversationControllerId") ?? ""}`;
-          const nextKey = `${next.searchParams.get("conversationId") ?? ""}:${next.searchParams.get("conversationControllerId") ?? ""}`;
-          conversationChanged = prevKey !== nextKey && nextKey !== ":";
-        } catch {
-          conversationChanged = false;
-        }
-
-        return urlChanged || countChanged || conversationChanged;
-      },
-      { timeout: 60_000 },
-    )
-    .toBeTruthy();
-
-  if (previousCount > 0) {
-    await expect(tabs).toHaveCount(previousCount + 1, { timeout: 60_000 });
-  }
-
-  if (await tabs.last().isVisible().catch(() => false)) {
-    await expect(tabs.last()).toHaveAttribute("aria-current", "page", { timeout: 60_000 }).catch(() => {});
-  }
-
+  const previous = await activeConversationId(page);
+  await createPublicChatFromTopBar(page);
+  await expect.poll(() => new URL(page.url()).searchParams.get("conversationId")).not.toBe(previous);
   const conversationControllerId = await tryWaitForConversationControllerId(page, 10_000);
   if (conversationControllerId) {
     await expect

@@ -66,7 +66,8 @@ thread_local! {
     static PUSH_HOOK: std::cell::RefCell<Option<PushHook>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Run `hook` before every push made on this thread (tests only).
+/// Run `hook` before every push made on this thread, ref deletes included
+/// (tests only).
 #[cfg(test)]
 pub(crate) fn set_push_hook(hook: impl FnMut(&[String]) -> PushHookAction + 'static) {
     PUSH_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
@@ -117,6 +118,53 @@ pub(crate) fn push(
     let lose_response = matches!(run_push_hook(refspecs), PushHookAction::LoseResponse);
 
     let output = git.run(&args)?;
+
+    #[cfg(test)]
+    if lose_response {
+        let lost = Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"fatal: the remote end hung up unexpectedly\n".to_vec(),
+        };
+        return Ok(PushResult {
+            class: classify_output(&lost),
+            refs: Vec::new(),
+        });
+    }
+
+    Ok(PushResult {
+        class: classify_output(&output),
+        refs: parse_porcelain(&output.stdout),
+    })
+}
+
+/// Delete `destination` on `remote` only while it still names `rev`: a
+/// ref that moved or is gone is left alone and the push fails as a lost
+/// race. Used to dismiss unsaved work and to remove a restored recovery
+/// ref.
+pub(crate) fn delete_with_lease(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    destination: &str,
+    rev: &str,
+) -> Result<PushResult> {
+    let lease = format!("--force-with-lease={destination}:{rev}");
+    let delete = format!(":{destination}");
+
+    #[cfg(test)]
+    let lose_response = matches!(
+        run_push_hook(std::slice::from_ref(&delete)),
+        PushHookAction::LoseResponse
+    );
+
+    let output = git.run(&[
+        "push",
+        "--porcelain",
+        "--no-verify",
+        &lease,
+        remote,
+        &delete,
+    ])?;
 
     #[cfg(test)]
     if lose_response {
@@ -338,6 +386,75 @@ mod tests {
             classify_push("error: RPC failed; curl 28 Operation too slow"),
             PushClass::Ambiguous(_)
         ));
+    }
+
+    /// A delete goes through only while the ref still names what the
+    /// caller saw: a ref moved behind its back, or already gone, is a lost
+    /// race and stays as it is.
+    #[test]
+    fn a_ref_delete_holds_its_lease() {
+        use crate::test_support::git_in;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_in(&root, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
+        git_in(&root, &["init", "-q", "--bare", "-b", "main", "local.git"]);
+        let remote = root.join("remote.git");
+        let empty = git_in(&remote, &["mktree"]);
+        let commit = |message: &str| {
+            git_in(
+                &remote,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@instafy.dev",
+                    "commit-tree",
+                    &empty,
+                    "-m",
+                    message,
+                ],
+            )
+        };
+        let (seen, newer) = (commit("seen"), commit("newer"));
+        let reference = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/\
+                         20261004T120000Z-unsaved-0123456789ab";
+        let local_dir = root.join("local.git");
+        let local = WorkspaceGit::bare(&local_dir, None);
+        let url = format!("file://{}", remote.display());
+        let tip = || {
+            crate::test_support::git_output(
+                &remote,
+                &["rev-parse", "--verify", "-q", reference],
+                None,
+            )
+        };
+
+        // Moved after the caller saw it.
+        git_in(&remote, &["update-ref", reference, &newer]);
+        let result = delete_with_lease(&local, &url, reference, &seen).unwrap();
+        assert!(
+            matches!(result.class, PushClass::LostRace(_)),
+            "{:?}",
+            result.class
+        );
+        assert_eq!(String::from_utf8_lossy(&tip().stdout).trim(), newer);
+
+        // Already gone.
+        git_in(&remote, &["update-ref", "-d", reference]);
+        let result = delete_with_lease(&local, &url, reference, &seen).unwrap();
+        assert!(
+            matches!(result.class, PushClass::LostRace(_)),
+            "{:?}",
+            result.class
+        );
+        assert!(!tip().status.success());
+
+        // Still what the caller saw: removed.
+        git_in(&remote, &["update-ref", reference, &seen]);
+        let result = delete_with_lease(&local, &url, reference, &seen).unwrap();
+        assert_eq!(result.class, PushClass::Pushed);
+        assert!(!tip().status.success());
     }
 
     #[test]

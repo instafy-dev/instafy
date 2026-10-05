@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   clearRuntimePreference,
@@ -84,7 +85,7 @@ test.describe("Project secrets CLI inventory", () => {
       description: "Token used to verify CLI secret inventory path.",
     });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     const assistantBubbles = page.locator('[data-testid="chat-bubble-assistant"]');
     const baselineAssistantCount = await assistantBubbles.count();
 

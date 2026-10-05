@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { expect, test } from "@playwright/test";
 
 import {
@@ -120,7 +121,7 @@ test.describe("Bench: /learn anti-bloat optimizer (opt-in)", () => {
     const projectId = await prepareStudio(page);
     if (!projectId) throw new Error("Project id missing for anti-bloat bench.");
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await clearRuntimePreference(page, { projectId, source: "bench:learn-anti-bloat-seeded" }).catch(() => {});
     await ensureHostedRuntimeReadyForBench(page, projectId);
     await selectPrimaryAgentModel(page, FIXTURE_BENCH_MODEL);

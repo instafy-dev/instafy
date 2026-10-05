@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import {
   assertGitRemoteFileText,
@@ -262,7 +263,7 @@ test.describe("Source Control UI (git-canonical)", () => {
       throw new Error("Active project id missing for source control scaffold test.");
     }
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await page.getByTestId("chat-input").fill("/learn collect");
     await expect(page.getByTestId("chat-send-button")).toBeEnabled({ timeout: 120_000 });
     await page.getByTestId("chat-send-button").click();
@@ -288,7 +289,7 @@ test.describe("Source Control UI (git-canonical)", () => {
       message: `playwright: ensure clean assistant-autosync ${unique}`,
     });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await page
       .getByTestId("chat-input")
       .fill(`Create a new text file named "${filePath}" in the workspace that contains exactly "${contents}".`);
@@ -354,7 +355,7 @@ test.describe("Source Control UI (git-canonical)", () => {
     await page.keyboard.press("Enter");
     await expect(page.getByTestId("code-save-button")).toBeVisible({ timeout: 60_000 });
     await expect(page.getByTestId("code-save-draft-button")).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByTestId("workspace-tabs")).toContainText(fileA.split("/").pop() ?? fileA, { timeout: 60_000 });
+    await expect(page.getByTestId("conversation-workspace-views")).toContainText(fileA.split("/").pop() ?? fileA, { timeout: 60_000 });
     await expect(page.getByText(fileA, { exact: false })).toBeVisible({ timeout: 30_000 });
 
     const updatedContentsA = `${contentsA}\nupdated ${unique}\n`;
@@ -406,7 +407,7 @@ test.describe("Source Control UI (git-canonical)", () => {
     const commitMessage = `playwright: save ${unique}`;
     await page.getByTestId("source-control-commit-message").fill(commitMessage);
     await page.getByTestId("source-control-sync").click();
-    await expect(page.getByTestId("source-control-sync")).toBeEnabled({ timeout: 120_000 });
+    await expect(page.getByTestId("source-control-sync")).toHaveCount(0, { timeout: 120_000 });
 
     await assertGitRemoteFileText(page, fileB, {
       projectId: activeProjectId,

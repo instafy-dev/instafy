@@ -1,3 +1,4 @@
+import { returnToConversation } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,7 +87,7 @@ test.describe("Chat image upload", () => {
       await requestHostedRuntime(page, { projectId, source: "chat" }).catch(() => {});
       await waitForHostedRuntimeReady(page, 120_000).catch(() => {});
       await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
-      await page.getByTestId("sidebar-nav-chat").click().catch(() => {});
+      await returnToConversation(page).catch(() => {});
       await waitForQuack(120_000);
     }
   });

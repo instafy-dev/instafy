@@ -75,10 +75,14 @@ function sanitizeScopeTestId(value: string): string {
 }
 
 export function LegacyChangesDrawer({
+  headerPortalTarget,
+  actionsPortalTarget,
   onRequestClose,
   openRequest,
   arrivalNotice = null,
 }: {
+  headerPortalTarget?: HTMLElement | null;
+  actionsPortalTarget?: HTMLElement | null;
   onRequestClose?: () => void;
   openRequest?: {
     key: number;
@@ -156,7 +160,7 @@ export function LegacyChangesDrawer({
   const supported = status?.supported === true;
   const dirtyCount = supported ? (status?.dirtyCount ?? dirtyPaths.length) : 0;
   const historyEntries = history?.entries ?? [];
-  const historySupported = history?.supported !== false;
+  const historySupported = history !== null && history.supported !== false;
   const historyHeadLabel =
     typeof history?.branch === "string" && history.branch.trim().length > 0
       ? history.branch.trim()
@@ -1216,6 +1220,9 @@ export function LegacyChangesDrawer({
   return (
     <div className="@container relative flex h-full min-h-0 flex-col" data-testid="source-control-drawer" data-mode="legacy">
       <DrawerHeader
+        portalTarget={isLargeScreen ? headerPortalTarget : null}
+        actionsPortalTarget={!isLargeScreen ? actionsPortalTarget : null}
+        pageTitle
         frame="rail"
         title="Changes"
         titleProps={arrivalNote ? { id: titleId, tabIndex: -1, "aria-describedby": arrivalNoteId } : undefined}
@@ -1236,7 +1243,7 @@ export function LegacyChangesDrawer({
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
             </IconButton>
-            {onRequestClose ? (
+            {onRequestClose && (isLargeScreen || !actionsPortalTarget) ? (
               <IconButton
                 variant="ghost"
                 size="sm"
@@ -1315,7 +1322,7 @@ export function LegacyChangesDrawer({
               </div>
             ) : null}
 
-            <div className="flex flex-col gap-1.5">
+            {dirtyCount > 0 ? <div className="flex flex-col gap-1.5">
               <label htmlFor="source-control-commit-message" className="sr-only">
                 Version note
               </label>
@@ -1370,11 +1377,11 @@ export function LegacyChangesDrawer({
                   </IconButton>
                 </div>
               </div>
-            </div>
+            </div> : null}
 
             <div className="flex-1 overflow-hidden">
-              <div className={`flex h-full flex-col overflow-hidden border-t border-slate-200/70 pt-1 ${DARK_DIVIDER_BORDER_CLASS}`}>
-                <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5">
+              <div className={`flex h-full flex-col overflow-hidden ${dirtyCount > 0 ? `border-t border-slate-200/70 pt-1 ${DARK_DIVIDER_BORDER_CLASS}` : ""}`}>
+                {dirtyCount > 0 ? <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5">
                   <div className="flex min-w-0 items-center gap-2">
                     {workspaceBusy ? (
                       <span
@@ -1435,7 +1442,7 @@ export function LegacyChangesDrawer({
                       <MinusSquare className="h-4 w-4" aria-hidden="true" />
                     </IconButton>
                   </div>
-                </div>
+                </div> : null}
 
                 <div className="flex-1 overflow-hidden">
                   {dirtyCount === 0 ? (
@@ -1449,7 +1456,7 @@ export function LegacyChangesDrawer({
                           <Text tone="secondary">Checking changes…</Text>
                         </div>
                       ) : (
-                        <Text tone="secondary">No pending changes.</Text>
+                        <Text tone="secondary">{!status || status.error ? "Changes are unavailable. Connect to the workspace and refresh." : "No pending changes."}</Text>
                       )}
                     </div>
                   ) : showDesktopRollingDiffPreview ? (

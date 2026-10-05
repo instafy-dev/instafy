@@ -65,7 +65,7 @@ vi.mock("../../../../sdk/instafy", () => ({
 
 import { readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../../workspace/unsavedWorkSeen";
 import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
-import { HistoryDrawer } from "../HistoryDrawer";
+import { HISTORY_COMMIT_DEBOUNCE_MS, HistoryDrawer } from "../HistoryDrawer";
 
 const HEAD = "e".repeat(40);
 const NEW_HEAD = "f".repeat(40);
@@ -351,9 +351,90 @@ describe("HistoryDrawer: Unsaved work", () => {
       originMode: "hosted",
     });
     await render();
-    await press(row(container, SALVAGE), "unsaved-work-restore");
+    const commits: unknown[] = [];
+    const onCommit = (event: Event) => commits.push((event as CustomEvent).detail);
+    window.addEventListener("instafy:workspace-commit", onCommit);
+    try {
+      await press(row(container, SALVAGE), "unsaved-work-restore");
+    } finally {
+      window.removeEventListener("instafy:workspace-commit", onCommit);
+    }
     expect(q(container, "history-status")?.textContent).toBe(
       "Nothing to restore. The saved version already has this work.",
+    );
+    // No marked: main did not move, so nothing announces a new version.
+    expect(commits).toEqual([]);
+  });
+
+  it("reloads History at the empty version a marked restore made and marks the salvage entry restored", async () => {
+    const MARKER = "9".repeat(40);
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+    mocks.restoreRecovery.mockResolvedValue({
+      ok: true,
+      rev: MARKER,
+      baseRev: HEAD,
+      committed: false,
+      marked: true,
+      notRestored: [],
+      notRestoredReasons: {},
+      refDeleted: false,
+      originId: "origin-1",
+      originMode: "desktop",
+    });
+    await render(versioning({ mode: "desktop", firstPaintMode: "desktop", originMode: "desktop", stateless: false, chromeMode: "desktop" }));
+    expect(q(row(container, SALVAGE), "unsaved-work-restored")).toBeNull();
+    // The list after the restore has not answered: the mark comes from the answer.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    const loads = mocks.fetchHistory.mock.calls.length;
+    const commits: unknown[] = [];
+    const onCommit = (event: Event) => commits.push((event as CustomEvent).detail);
+    window.addEventListener("instafy:workspace-commit", onCommit);
+    vi.useFakeTimers();
+    try {
+      await press(row(container, SALVAGE), "unsaved-work-restore");
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Nothing to restore. The saved version already has this work.",
+      );
+      // main moved to the empty version that records the restore.
+      expect(commits).toEqual([{ projectId: "project-1", kind: "workspace.commit", data: { rev: MARKER } }]);
+      expect(q(row(container, SALVAGE), "unsaved-work-restored")?.textContent).toBe("Restored");
+      await act(async () => {
+        vi.advanceTimersByTime(HISTORY_COMMIT_DEBOUNCE_MS);
+      });
+      await flush();
+      expect(mocks.fetchHistory.mock.calls.length).toBe(loads + 1);
+    } finally {
+      window.removeEventListener("instafy:workspace-commit", onCommit);
+      vi.useRealTimers();
+    }
+  });
+
+  it("names old chat uploads the salvage kept privately apart from secret files", async () => {
+    mocks.fetchRecovery.mockResolvedValue(
+      list([
+        recoveryEntry(SALVAGE, {
+          kind: "salvage",
+          dismissible: false,
+          paths: ["src/a.ts", ".env", "chat-upload-1.png"],
+        }),
+      ]),
+    );
+    mocks.restoreRecovery.mockResolvedValue({
+      ok: true,
+      rev: NEW_HEAD,
+      baseRev: HEAD,
+      committed: true,
+      marked: false,
+      notRestored: [".env", "chat-upload-1.png"],
+      notRestoredReasons: { ".env": "secret", "chat-upload-1.png": "attachment" },
+      refDeleted: false,
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, SALVAGE), "unsaved-work-restore");
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Restored as a new version. Not restored: .env and chat-upload-1.png. Secret and ignored files stay out of the space. Old chat upload files aren't saved to the space.",
     );
   });
 
@@ -585,6 +666,28 @@ describe("HistoryDrawer: Unsaved work", () => {
         "Couldn't read this file from the unsaved work, so nothing was saved. Refreshing.",
       );
       expect(mocks.fetchRecovery.mock.calls.length).toBe(listsBefore + 1);
+    });
+
+    // The gateway's 503 answers to the read at the ref: nothing is saved.
+    it.each([
+      ["fetch_pending", "The space is still loading. Try again in a moment."],
+      ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],
+      ["disk_full", "The space is out of room right now. Try again later."],
+    ])("is not a delete when the read answers %s, and says so", async (code, copy) => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: false,
+        error: originError(503, code, { retryAfterMs: 2000 }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.listAt).not.toHaveBeenCalled();
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(copy);
     });
 
     it("is not a delete when the read route is missing", async () => {
@@ -987,6 +1090,45 @@ describe("HistoryDrawer: Unsaved work", () => {
     await press(row(container, RECOVERY), "unsaved-work-restore");
     expect(q(container, "history-status")?.textContent).toBe("This entry changed. Refreshing.");
     expect(mocks.fetchRecovery.mock.calls.length).toBe(before + 1);
+  });
+
+  // The gateway's 503 answers with Retry-After.
+  it.each([
+    ["writes_busy", "The server is busy saving other changes. Try again in a moment."],
+    ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],
+    ["disk_full", "The space is out of room right now. Try again later."],
+  ])("names a restore answered %s and keeps the entry", async (code, copy) => {
+    mocks.restoreRecovery.mockResolvedValueOnce({
+      ok: false,
+      stage: "request",
+      error: originError(503, code, { retryAfterMs: 2000 }),
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-restore");
+    expect(mocks.restoreRecovery).toHaveBeenCalledTimes(1);
+    expect(q(container, "history-status")?.textContent).toBe(copy);
+    expect(row(container, RECOVERY)).not.toBeNull();
+  });
+
+  it.each([
+    ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],
+    ["disk_full", "The space is out of room right now. Try again later."],
+  ])("names a removal answered %s and keeps the entry", async (code, copy) => {
+    mocks.dismissRecovery.mockResolvedValueOnce({
+      ok: false,
+      stage: "request",
+      error: originError(503, code, { retryAfterMs: 2000 }),
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-remove");
+    await press(document.body, "unsaved-work-remove-dialog-confirm");
+    expect(mocks.dismissRecovery).toHaveBeenCalledTimes(1);
+    expect(q(container, "history-status")?.textContent).toBe(copy);
+    expect(row(container, RECOVERY)).not.toBeNull();
   });
 
   it("retries a moved head once, then reports a busy space", async () => {

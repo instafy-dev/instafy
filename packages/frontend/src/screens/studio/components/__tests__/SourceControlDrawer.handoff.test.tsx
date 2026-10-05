@@ -82,6 +82,7 @@ async function flush() {
 describe("SourceControlDrawer: focus across a mode swap", () => {
   let container: HTMLDivElement;
   let root: Root;
+  let header: HTMLDivElement;
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -106,21 +107,24 @@ describe("SourceControlDrawer: focus across a mode swap", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    header = document.createElement("div");
+    document.body.append(header);
   });
 
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    header.remove();
     vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("lands on the Changes title, described by why, when Retry learns the space uses Changes", async () => {
+  it.each([false, true])("lands on the Changes title after a mode swap, with mobile header %s", async (mobileHeader) => {
     // The probe made on opening gets no answer; Retry's probe answers Changes.
     mocks.probeStatus
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
       .mockResolvedValue({ supported: true, dirtyCount: 0, dirtyPaths: [], pathGroups: [] });
-    await act(async () => root.render(<SourceControlDrawer />));
+    await act(async () => root.render(<SourceControlDrawer actionsPortalTarget={mobileHeader ? header : null} />));
     await flush();
     const retry = container.querySelector<HTMLButtonElement>('[data-testid="history-probe-retry"]');
     expect(retry).not.toBeNull();
@@ -133,6 +137,11 @@ describe("SourceControlDrawer: focus across a mode swap", () => {
     expect(drawer?.getAttribute("data-mode")).toBe("legacy");
     const title = Array.from(container.querySelectorAll("p")).find((element) => element.textContent === "Changes");
     expect(document.activeElement).toBe(title);
+    expect(title?.classList.contains("sr-only")).toBe(mobileHeader);
+    if (mobileHeader) {
+      expect(header.querySelector('[data-testid="source-control-refresh"]')).not.toBeNull();
+      expect(container.querySelector('[data-testid="source-control-refresh"]')).toBeNull();
+    }
     const describedBy = title?.getAttribute("aria-describedby") ?? "";
     expect(document.getElementById(describedBy)?.textContent).toBe("This space shows Changes instead of History.");
   });

@@ -180,6 +180,29 @@ describe("HistoryDrawer", () => {
     await flush();
   }
 
+  it.each(["desktop", "mobile"])("keeps %s controls in the navigation header", async (layout) => {
+    const header = document.createElement("div");
+    document.body.append(header);
+    const close = vi.fn();
+    try {
+      await act(async () => root.render(<HistoryDrawer versioning={versioning()} onRequestClose={close}
+        headerPortalTarget={layout === "desktop" ? header : null}
+        actionsPortalTarget={layout === "mobile" ? header : null} />));
+      await flush();
+      expect(q(header, "source-control-refresh")).not.toBeNull();
+      expect(q(container, "source-control-refresh")).toBeNull();
+      expect(q(header, "source-control-close") !== null).toBe(layout === "desktop");
+      if (layout === "desktop") {
+        expect(header.textContent).toContain("History");
+        await act(async () => q<HTMLButtonElement>(header, "source-control-close")?.click());
+        expect(close).toHaveBeenCalledOnce();
+      } else {
+        expect(header.textContent).not.toContain("History");
+        expect(container.querySelector("h2.sr-only")?.textContent).toBe("History");
+      }
+    } finally { header.remove(); }
+  });
+
   it("makes no request while the mode is only a guess", async () => {
     await render(versioning({ resolved: false, historyReady: false }));
     expect(container.textContent).toContain("Loading history");
@@ -663,6 +686,25 @@ describe("HistoryDrawer", () => {
       "a busy main",
       { ok: false, code: "main_busy", errorInfo: { status: 409, code: "main_busy", message: "busy", routeUnavailable: false } },
       "The space is busy saving other changes. Try again in a moment.",
+      false,
+    ],
+    // The gateway's 503 answers with Retry-After.
+    [
+      "taken write slots (writes_busy)",
+      { ok: false, code: "writes_busy", errorInfo: { status: 503, code: "writes_busy", message: "busy", retryAfterMs: 2000, routeUnavailable: false } },
+      "The server is busy saving other changes. Try again in a moment.",
+      false,
+    ],
+    [
+      "a copy being made again (mirror_reset)",
+      { ok: false, code: "mirror_reset", errorInfo: { status: 503, code: "mirror_reset", message: "reset", retryAfterMs: 2000, routeUnavailable: false } },
+      "The server is rebuilding its copy of this space. Try again in a moment.",
+      false,
+    ],
+    [
+      "a full disk (disk_full)",
+      { ok: false, code: "disk_full", errorInfo: { status: 503, code: "disk_full", message: "full", retryAfterMs: 2000, routeUnavailable: false } },
+      "The space is out of room right now. Try again later.",
       false,
     ],
   ])("maps %s to its copy", async (_label, result, copy, offersAgent) => {

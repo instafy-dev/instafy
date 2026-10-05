@@ -308,8 +308,20 @@ describe("useStudioSearchRecords", () => {
     expect(listChats).toHaveBeenCalledTimes(40);
     expect(listChats.mock.calls.every(([params]) => params.limit === 200)).toBe(true);
     expect(current.records.filter((record) => record.spaceId === "space-04" && record.group === "Chats")).toHaveLength(200);
-    expect(current.notice).toContain("first 40 spaces alphabetically");
+    expect(current.notice).toContain("5 more spaces");
     expect(current.loading).toBe(false);
+    await act(async () => current.loadMoreSpaces());
+    expect(listChats).toHaveBeenCalledTimes(45);
+    expect(current.records.filter(record => record.spaceId === "space-44" && record.group === "Chats")).toHaveLength(200);
+    expect(current.remainingSpaces).toBe(0);
+    expect(current.spacePageCount).toBe(2);
+    await render({ enabled: false });
+    await render({ enabled: true, restoreSpacePages: 2 });
+    expect(listChats).toHaveBeenCalledTimes(90);
+    expect(current.remainingSpaces).toBe(0);
+    discover.mockResolvedValue({ status: "success", projects: [project("space-00")] });
+    await act(async () => current.retry());
+    expect(current.records.some(record => record.spaceId === "space-44")).toBe(false);
   });
 
   it("debounces message search without repeating title discovery and opens the exact message", async () => {

@@ -1,7 +1,39 @@
 import { describe, expect, it } from "vitest";
-import { buildStudioDestinationSearch } from "../studioNavigation";
+import { buildStudioDestinationSearch, chatListDestination } from "../studioNavigation";
 
 describe("Studio destination construction", () => {
+  it("chains an organization tab selection and drawer click from the committed destination", () => {
+    const first = buildStudioDestinationSearch("?projectId=A&conversationId=old&workspaceTab=history", {
+      kind: "conversation", projectId: "B", conversationId: "next", viewTabId: "owned",
+    });
+    const returned = buildStudioDestinationSearch(first, { kind: "conversation", projectId: "A", conversationId: "selected" });
+    const drawer = new URLSearchParams(buildStudioDestinationSearch(returned, { kind: "drawer", workspaceTab: "history" }));
+    expect(Object.fromEntries(drawer)).toEqual({ projectId: "A", conversationId: "selected", workspaceTab: "history" });
+  });
+
+  it("carries a scoped resource reference only for the explicit chat destination", () => {
+    const next = buildStudioDestinationSearch("?projectId=A&chatView=old&panel=settings&browserRuntimeId=old", {
+      kind: "conversation", projectId: "B", conversationId: "chat", viewTabId: "owned-view",
+    });
+    expect(Object.fromEntries(new URLSearchParams(next))).toEqual({ projectId: "B", conversationId: "chat", chatView: "owned-view" });
+    expect(new URLSearchParams(buildStudioDestinationSearch(next, { kind: "panel", panel: "home" })).has("chatView")).toBe(false);
+    expect(new URLSearchParams(buildStudioDestinationSearch(next, { kind: "conversation", projectId: "B", conversationId: "chat" })).has("chatView")).toBe(false);
+  });
+
+  it("toggles desktop Chats without changing the open panel or its scope", () => {
+    const original = "?projectId=A&conversationId=C&panel=settings&settingsTab=profile&settingsCategory=appearance";
+    const opened = buildStudioDestinationSearch(original, chatListDestination(true, false));
+    expect(new URLSearchParams(opened).get("workspaceTab")).toBe("history");
+    expect(buildStudioDestinationSearch(opened, chatListDestination(true, true))).toBe(original);
+  });
+
+  it("keeps the mobile Chats destination open when selected again", () => {
+    const opened = buildStudioDestinationSearch("?projectId=A&panel=extensions", chatListDestination(false, false));
+    expect(new URLSearchParams(opened).has("panel")).toBe(false);
+    expect(new URLSearchParams(opened).get("workspaceTab")).toBe("history");
+    expect(buildStudioDestinationSearch(opened, chatListDestination(false, true))).toBe(opened);
+  });
+
   it("opens an exact message and clears its target on ordinary conversation or panel navigation", () => {
     const target = buildStudioDestinationSearch("?projectId=old&messageId=stale", {
       kind: "conversation", projectId: "A", conversationControllerId: "remote", messageId: "saved-message",

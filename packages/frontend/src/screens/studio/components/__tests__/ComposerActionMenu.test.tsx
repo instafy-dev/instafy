@@ -83,6 +83,7 @@ describe("ComposerActionMenu", () => {
       voiceRepliesEnabled?: boolean;
       voiceRepliesDisabled?: boolean;
       mutationDisabled?: boolean;
+      onOpenNewBrowser?: () => void;
       onSelectConnector?: (connector: ProductConnector) => void;
       onBrowseConnectors?: () => void;
       installedSkillNames?: ReadonlySet<string>;
@@ -271,18 +272,22 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector('[data-testid="composer-action-menu-voice-replies"]')).toBeNull();
   });
 
-  it("labels the additional-page action as Shared-specific", async () => {
-    await renderMenu(true);
+  it("explains that the additional-tab action prepares the next AI request", async () => {
+    const onOpenNewBrowser = vi.fn();
+    await renderMenu(true, true, { onOpenNewBrowser });
 
-    expect(container.querySelector('[data-testid="composer-action-menu-open-new-browser"]')).not.toBeNull();
-    expect(container.textContent).toContain("New shared site");
+    const newTabRequest = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-open-new-browser"]')!;
+    expect(newTabRequest.textContent).toContain("Ask AI for a new tab");
+    expect(newTabRequest.textContent).toContain("Uses your next message to request another tab.");
+    await act(async () => newTabRequest.click());
+    expect(onOpenNewBrowser).toHaveBeenCalledTimes(1);
   });
 
   it("hides the Shared-only additional-page action in Personal mode", async () => {
     await renderMenu(false);
 
     expect(container.querySelector('[data-testid="composer-action-menu-open-new-browser"]')).toBeNull();
-    expect(container.textContent).not.toContain("New shared site");
+    expect(container.textContent).not.toContain("Ask AI for a new tab");
     expect(container.querySelector('[data-testid="composer-action-menu-open-browser"]')).not.toBeNull();
   });
 

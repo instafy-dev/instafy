@@ -15,8 +15,11 @@ describe("mobile sidebar visible controls", () => {
   let container: HTMLDivElement;
   let viewport: TestViewport;
   let frames: Map<number, FrameRequestCallback>;
+  let sheetStyle: ReturnType<typeof useMobileSidebarViewport>["sheetStyle"];
   function Harness() {
-    const { controlsRef, style } = useMobileSidebarViewport();
+    const result = useMobileSidebarViewport();
+    const { controlsRef, style } = result;
+    sheetStyle = result.sheetStyle;
     return <div ref={controlsRef} style={style}>
       <div data-sidebar-scrollport><input type="search" defaultValue="local marker" /><button>Back</button></div>
     </div>;
@@ -60,6 +63,14 @@ describe("mobile sidebar visible controls", () => {
     expect(controls.style.width).toBe("");
     expect(container.style.height).toBe("");
     expect(window.innerHeight).toBe(762);
+  });
+
+  it("keeps the bottom sheet above the keyboard using the visible viewport", async () => {
+    await render();
+    viewport.height = 360; viewport.offsetTop = 20;
+    viewport.dispatchEvent(new Event("resize")); await flush();
+    expect(sheetStyle?.bottom).toBe(382);
+    expect(sheetStyle?.height).toBe("min(36rem, 280.8px)");
   });
 
   it("centers only the focused search with measured trailing space, preserving focus and value", async () => {

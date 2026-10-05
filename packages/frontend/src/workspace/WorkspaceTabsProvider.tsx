@@ -1,5 +1,5 @@
 import type { StudioNavigationOptions } from "../navigation/studioNavigation";
-import { useConversationSurfacesOwner } from "./conversationSurfaces";
+import { conversationSurfaceScope, openConversationFile, useConversationSurfacesOwner } from "./conversationSurfaces";
 import { readWorkspacePanelDestination, type WorkspacePanelDestination } from "./workspacePanelDestination";
 import { useStudioDraftSnapshot } from "./StudioDrafts";
 import { useStudioGuardedNavigation } from "../navigation/StudioDraftNavigationGuard";
@@ -48,16 +48,22 @@ import {
 } from "./workspaceTabPersistence";
 
 interface WorkspaceTabsContextValue {
+  conversationWorkspace: boolean;
+  conversationWorkspaceScope: string | null;
+  conversationBrowser: { available: boolean; attention: boolean };
+  setConversationBrowser: (scope: string | null, available: boolean, attention: boolean) => void;
   conversationSurfaces: ReturnType<typeof useConversationSurfacesOwner>;
   tabs: WorkspaceTabState[];
   activeTab: WorkspaceTabState | null;
   activeTabId: string | null;
   /** The tab owner can materialize this space's conversation tabs. */
   conversationTabsReady: boolean;
+  conversationTabsRestored: boolean;
+  updateInactiveConversationTab: (projectId: string, conversationId: string, action: "close" | "keep") => void;
   openPanelTab: (panel: StudioPanel, options?: { activate?: boolean }) => void;
   openConversationTab: (
     conversationId: string,
-    options?: { activate?: boolean; fallbackConversation?: ConversationState | null; preview?: boolean }
+    options?: { restoreWorkspace?: boolean; activate?: boolean; fallbackConversation?: ConversationState | null; preview?: boolean }
   ) => void;
   openJobThreadTab: (params: { conversationId: string; jobId: string; title?: string }, options?: { activate?: boolean }) => void;
   requestUrlNavigation: (mode?: "push" | "replace") => void;
@@ -101,18 +107,27 @@ declare global {
       openPanelTab: (panel: StudioPanel, options?: { activate?: boolean }) => void;
       openConversationTab: (
         conversationId: string,
-        options?: { activate?: boolean; fallbackConversation?: ConversationState | null; preview?: boolean },
+        options?: { restoreWorkspace?: boolean; activate?: boolean; fallbackConversation?: ConversationState | null; preview?: boolean },
       ) => void;
     };
   }
 }
 
-export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanelDestination }: {
+export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanelDestination, conversationWorkspaceUserId = null }: {
   children: ReactNode;
+  /** Authenticated owner of conversation views; null only before sign-in resolves. */
+  conversationWorkspaceUserId?: string | null;
   locationSearch?: string;
   onRestorePanelDestination?: (destination: WorkspacePanelDestination, options?: StudioNavigationOptions) => void;
 }) {
   const conversationSurfaces = useConversationSurfacesOwner();
+  const conversationWorkspace = Boolean(conversationWorkspaceUserId);
+  const [browsers, setBrowsers] = useState<Record<string, { available: boolean; attention: boolean }>>({});
+  const setConversationBrowser = useCallback((scope: string | null, available: boolean, attention: boolean) => {
+    if (!scope) return;
+    setBrowsers(current => current[scope]?.available === available && current[scope]?.attention === attention
+      ? current : { ...current, [scope]: { available, attention } });
+  }, []);
   const { activePanel, setActivePanel } = useWorkspaceUi();
   const draftSnapshot = useStudioDraftSnapshot();
   const guardNavigation = useStudioGuardedNavigation();
@@ -175,12 +190,17 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       if (requestedReviewTabId) {
         const persistedProject = persistedGitReviewStateRef.current?.projects?.[workspaceProjectId] ?? null;
         const persistedReview = persistedProject?.tabs.find((tab) => tab.id === requestedReviewTabId) ?? null;
-        if (persistedReview) {
+        if (persistedReview && (!persistedReview.workspaceOwner ||
+          (persistedReview.workspaceOwner.userId === conversationWorkspaceUserId &&
+            persistedReview.workspaceOwner.conversationId === activeConversationId))) {
           initialGitReviewTabRef.current = createGitReviewTab(
             persistedReview.review,
             persistedReview.returnTabId ?? null,
             { id: requestedReviewTabId },
           );
+          if (conversationWorkspaceUserId && activeConversationId) initialGitReviewTabRef.current.workspaceOwner = {
+            userId: conversationWorkspaceUserId, projectId: workspaceProjectId, conversationId: activeConversationId,
+          };
         }
       }
     } catch (_error) {
@@ -210,6 +230,8 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
   const seenConversationIdsRef = useRef<Set<string>>(new Set());
   const conversationAutoOpenStartRef = useRef<number>(Date.now());
   const tabsProjectRef = useRef(workspaceProjectId);
+  const tabsUserRef = useRef(conversationWorkspaceUserId);
+  const parkedViews = useRef(new Map<string, WorkspaceTabState[]>());
 
   // A space we have not opened before starts with a single local placeholder
   // while its real conversations are still being fetched. Giving that
@@ -227,6 +249,9 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
   const conversationsMatchProject =
     workspaceProjectId === null || conversationsProjectKey === workspaceProjectId;
   const conversationTabsReady = conversationsMatchProject && !conversationHistoryPending;
+  const conversationWorkspaceScope = conversationTabsReady
+    ? conversationSurfaceScope(conversationWorkspaceUserId, workspaceProjectId, activeConversationId) : null;
+  const conversationBrowser = useMemo(() => (conversationWorkspaceScope && browsers[conversationWorkspaceScope]) || { available: false, attention: false }, [conversationWorkspaceScope, browsers]);
   const savedConversationIds = workspaceProjectId
     ? persistedStateRef.current?.projects[workspaceProjectId]?.conversations ?? []
     : [];
@@ -284,6 +309,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     requestUrlPush,
     consumeUrlPush,
   } = useWorkspaceTabController({
+    conversationWorkspaceUserId,
     activeConversationId,
     conversations,
     createConversation,
@@ -317,36 +343,63 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     previousProtectedPanels.current = protectedPanels;
   }, [draftSnapshot, setTabDirty, tabs]);
 
+  const currentFileDestination = useRef({ userId: conversationWorkspaceUserId, projectId: workspaceProjectId, conversationId: activeConversationId });
+  currentFileDestination.current = { userId: conversationWorkspaceUserId, projectId: workspaceProjectId, conversationId: activeConversationId };
+  const openWorkspaceFile = useCallback((file: Pick<CodeFile, "id" | "path" | "label">, options?: { preview?: boolean }) => {
+    if (!conversationWorkspace) { openFileTab(file, options); return; }
+    // Never attach a late result to the next space while its history is hydrating.
+    const current = currentFileDestination.current;
+    if (conversationsProjectKey !== workspaceProjectId || current.projectId !== workspaceProjectId ||
+      current.userId !== conversationWorkspaceUserId || current.conversationId !== activeConversationId) return;
+    const conversation = conversations.find(item => item.localId === activeConversationId && item.lifecycleStatus !== "deleted");
+    const scope = conversationSurfaceScope(conversationWorkspaceUserId, workspaceProjectId, conversation?.localId ?? null);
+    if (!scope || !conversation) { openFileTab(file, options); return; }
+    conversationSurfaces.update(scope, state => openConversationFile(state, { id: `file:${file.path}`, path: file.path }));
+    openConversationTab(conversation.localId);
+  }, [conversationWorkspace, conversationWorkspaceUserId, workspaceProjectId, conversationsProjectKey,
+    conversations, activeConversationId, conversationSurfaces, openFileTab, openConversationTab]);
+
   const guardedActions = useMemo(() => {
     const guarded = <Args extends unknown[]>(action: (...args: Args) => void) =>
       (...args: Args) => guardNavigation(() => action(...args));
+    const scoped = <Args extends unknown[]>(action: (...args: Args) => void) => (...args: Args) => guardNavigation(() => {
+      const current = currentFileDestination.current;
+      if (conversationWorkspace && (!conversationTabsReady || current.projectId !== workspaceProjectId ||
+        current.userId !== conversationWorkspaceUserId || current.conversationId !== activeConversationId)) return;
+      action(...args);
+    });
     return {
       openPanelTab: guarded(openPanelTab),
       openConversationTab: guarded(openConversationTab),
-      openJobThreadTab: guarded(openJobThreadTab),
-      openFileTab: guarded(openFileTab),
-      openGitDiffTab: guarded(openGitDiffTab),
-      openGitReviewTab: guarded(openGitReviewTab),
-      openExplorerTab: guarded(openExplorerTab),
+      openJobThreadTab: scoped(openJobThreadTab),
+      openFileTab: guarded(openWorkspaceFile),
+      openGitDiffTab: scoped(openGitDiffTab),
+      openGitReviewTab: scoped(openGitReviewTab),
+      openExplorerTab: scoped(openExplorerTab),
       focusTab: (id: string) => id === activeTabIdRef.current ? focusTab(id) : guardNavigation(() => focusTab(id)),
       closeTab: (id: string) => id === activeTabIdRef.current ? guardNavigation(() => closeTab(id)) : closeTab(id),
     };
-  }, [guardNavigation, openPanelTab, openConversationTab, openJobThreadTab, openFileTab,
+  }, [conversationWorkspace, conversationWorkspaceUserId, conversationTabsReady, workspaceProjectId, activeConversationId, guardNavigation, openPanelTab, openConversationTab, openJobThreadTab, openWorkspaceFile,
     openGitDiffTab, openGitReviewTab, openExplorerTab, focusTab, closeTab]);
 
   useEffect(() => {
-    if (tabsProjectRef.current === workspaceProjectId) return;
+    if (tabsProjectRef.current === workspaceProjectId && tabsUserRef.current === conversationWorkspaceUserId) return;
+    const oldKey = JSON.stringify([tabsUserRef.current, tabsProjectRef.current]);
+    parkedViews.current.set(oldKey, tabsRef.current.filter(tab => tab.workspaceOwner));
+    const restored = parkedViews.current.get(JSON.stringify([conversationWorkspaceUserId, workspaceProjectId])) ?? [];
     tabsProjectRef.current = workspaceProjectId;
+    tabsUserRef.current = conversationWorkspaceUserId;
     appliedProjectRef.current = null;
     // Keep same-space tabs during a partial refresh, but never leave the old
     // space's chat/run tabs interactive while the destination is still loading.
     // This intentionally bypasses commitTabs: it must not rewrite either
     // space's saved conversation list before destination hydration finishes.
-    const nextTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && tab.kind !== "jobThread");
+    const nextTabs = [...tabsRef.current.filter(tab => conversationWorkspace
+      ? tab.kind === "panel" : tab.kind !== "conversation" && tab.kind !== "jobThread" && !tab.workspaceOwner), ...restored];
     tabsRef.current = nextTabs;
     setTabs(nextTabs);
     if (!nextTabs.some((tab) => tab.id === activeTabIdRef.current)) {
-      const fallback = nextTabs[0] ?? null;
+      const fallback = nextTabs.find(tab => !tab.workspaceOwner) ?? null;
       if (fallback) {
         setActiveTabInternal(fallback, { syncPanel: false, syncConversation: false });
       } else {
@@ -354,7 +407,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
         setActiveTabId(null);
       }
     }
-  }, [setActiveTabInternal, workspaceProjectId]);
+  }, [conversationWorkspace, conversationWorkspaceUserId, setActiveTabInternal, workspaceProjectId]);
 
   const applyPersistedTabs = useCallback(() => {
     if (!workspaceProjectId) {
@@ -367,7 +420,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     }
 
     const conversationLookup = new Map(conversations.map((conversation) => [conversation.localId, conversation]));
-    const nonConversationTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && tab.kind !== "jobThread");
+    const nonConversationTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && (tab.kind !== "jobThread" || Boolean(tab.workspaceOwner)));
     const nextConversationTabs: WorkspaceConversationTabState[] = [];
 
     projectState.conversations.forEach((conversationId) => {
@@ -453,7 +506,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     }
     const persisted = persistedStateRef.current;
     const projectState = persisted?.projects?.[workspaceProjectId] ?? null;
-    const nonConversationTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && tab.kind !== "jobThread");
+    const nonConversationTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && (tab.kind !== "jobThread" || Boolean(tab.workspaceOwner)));
 
     if (!projectState) {
       const targetConversationId = activeConversationId ?? conversations[0]?.localId ?? null;
@@ -700,7 +753,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     if (currentActiveTab?.kind === "jobThread") {
       return;
     }
-    if (currentActiveTab?.kind === "gitReview") {
+    if (currentActiveTab?.kind === "gitReview" || (conversationWorkspace && currentActiveTab?.workspaceOwner)) {
       return;
     }
     const targetId = getTabIdForConversation(resolvedActiveConversationId);
@@ -724,7 +777,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       return;
     }
     setActiveTabInternal(targetTab, { syncPanel: false, syncConversation: false });
-  }, [activeConversationId, activePanel, conversations, openConversationTab, setActiveTabInternal]);
+  }, [activeConversationId, activePanel, conversationWorkspace, conversations, openConversationTab, setActiveTabInternal]);
 
   useEffect(() => {
     const dirtyLookup = new Map<string, boolean>();
@@ -803,6 +856,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
             id: tab.id,
             review: tab.review,
             returnTabId: tab.returnTabId ?? null,
+            ...(tab.workspaceOwner ? { workspaceOwner: tab.workspaceOwner } : {}),
           })),
         },
       },
@@ -842,9 +896,12 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     }
   }, [activePanel, ensureTabForPanel, setActiveTabInternal]);
 
+  const visibleTabs = useMemo(() => tabs.filter(tab => !tab.workspaceOwner || (
+    tab.workspaceOwner.userId === conversationWorkspaceUserId && tab.workspaceOwner.projectId === workspaceProjectId
+  )), [tabs, conversationWorkspaceUserId, workspaceProjectId]);
   const activeTab = useMemo(
-    () => (activeTabId ? tabs.find((tab) => tab.id === activeTabId) ?? null : null),
-    [tabs, activeTabId]
+    () => (activeTabId ? visibleTabs.find((tab) => tab.id === activeTabId) ?? null : null),
+    [visibleTabs, activeTabId]
   );
 
   useEffect(() => {
@@ -873,13 +930,40 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
     };
   }, [activeTabId, openConversationTab, openPanelTab, tabs]);
 
+  const conversationTabsRestored = conversationTabsReady && canRestoreSavedTabs && appliedProjectRef.current === workspaceProjectId
+    && tabsProjectRef.current === workspaceProjectId && tabsUserRef.current === conversationWorkspaceUserId;
+  const updateInactiveConversationTab = useCallback((projectId: string, conversationId: string, action: "close" | "keep") => {
+    if (!conversationWorkspaceUserId || projectId === workspaceProjectId) return;
+    const current = persistedStateRef.current;
+    const project = current?.projects[projectId];
+    if (!current || !project) return;
+    const conversations = action === "close" ? project.conversations.filter(id => id !== conversationId) : project.conversations;
+    const next = { projects: { ...current.projects, [projectId]: { ...project, conversations,
+      activeConversationId: conversations.includes(project.activeConversationId ?? "") ? project.activeConversationId : conversations[0],
+      previewConversationId: project.previewConversationId === conversationId ? undefined : project.previewConversationId,
+    } } };
+    persistedStateRef.current = next;
+    persistWorkspaceTabsState(next);
+    if (action === "close") {
+      const scope = JSON.stringify([conversationWorkspaceUserId, projectId]);
+      const parked = parkedViews.current.get(scope);
+      if (parked) parkedViews.current.set(scope, parked.filter(tab => tab.kind !== "jobThread" || tab.conversationId !== conversationId));
+    }
+  }, [conversationWorkspaceUserId, workspaceProjectId]);
+
   const value = useMemo<WorkspaceTabsContextValue>(
     () => ({
+      conversationWorkspace,
+      conversationWorkspaceScope,
+      conversationBrowser,
+      setConversationBrowser,
       conversationSurfaces,
-      tabs,
+      tabs: visibleTabs,
       activeTab,
       activeTabId,
       conversationTabsReady,
+      conversationTabsRestored,
+      updateInactiveConversationTab,
       requestUrlNavigation,
       peekUrlNavigation,
       consumeUrlNavigation,
@@ -894,10 +978,16 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       ...guardedActions
     }),
     [
+      conversationWorkspace,
+      conversationWorkspaceScope,
+      conversationBrowser,
+      setConversationBrowser,
       conversationSurfaces,
       activeTab,
       activeTabId,
       conversationTabsReady,
+      conversationTabsRestored,
+      updateInactiveConversationTab,
       guardedActions,
       peekUrlNavigation,
       consumeUrlNavigation,
@@ -910,7 +1000,7 @@ export function WorkspaceTabsProvider({ children, locationSearch, onRestorePanel
       setPanelTabMeta,
       resetTabs,
       setTabDirty,
-      tabs
+      visibleTabs
     ]
   );
 

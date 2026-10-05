@@ -1,4 +1,4 @@
-import { useCallback, type MutableRefObject } from "react";
+import { useCallback, useRef, type MutableRefObject } from "react";
 import type { StudioPanel } from "../screens/studio/types";
 import type { ConversationState } from "../conversations/ConversationsProvider";
 import type { WorkspaceTabState } from "./workspaceTabFactories";
@@ -11,6 +11,7 @@ import { useWorkspaceTabOpeners } from "./useWorkspaceTabOpeners";
 import { useWorkspaceTabUrlIntents } from "./useWorkspaceTabUrlIntents";
 
 interface UseWorkspaceTabControllerArgs {
+  conversationWorkspaceUserId?: string | null;
   activeConversationId: string | null;
   conversations: ConversationState[];
   createConversation: (options?: { title?: string; select?: boolean }) => ConversationState;
@@ -33,6 +34,7 @@ interface UseWorkspaceTabControllerArgs {
 }
 
 export function useWorkspaceTabController({
+  conversationWorkspaceUserId = null,
   activeConversationId,
   conversations,
   createConversation,
@@ -53,6 +55,7 @@ export function useWorkspaceTabController({
   setTabs,
   setActiveTabId,
 }: UseWorkspaceTabControllerArgs) {
+  const lastConversationViewRef = useRef(new Map<string, string>());
   const {
     requestUrlNavigation,
     peekUrlNavigation,
@@ -95,6 +98,8 @@ export function useWorkspaceTabController({
     setPanelTabMeta,
     resetTabs,
   } = useWorkspaceTabMutationController({
+    conversationWorkspaceUserId,
+    lastConversationViewRef,
     activeConversationId,
     selectConversation,
     markConversationRead,
@@ -124,6 +129,8 @@ export function useWorkspaceTabController({
     restoreGitReviewTab,
     openExplorerTab,
   } = useWorkspaceTabOpeners({
+    conversationWorkspaceUserId,
+    lastConversationViewRef,
     activeConversationId,
     conversations,
     createConversation,

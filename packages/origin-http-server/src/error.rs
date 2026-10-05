@@ -7,7 +7,20 @@ use thiserror::Error;
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
     pub error: String,
+    /// A stable code for clients, where the error has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<&'static str>,
 }
+
+/// The code of a 404 for something that is not there at all. A read
+/// answers it only when the path is absent; see [`UNSUPPORTED_ENTRY_CODE`].
+pub const NOT_FOUND_CODE: &str = "not_found";
+
+/// The code of a 404 for a path that holds something a read never serves:
+/// a symlink, a submodule or nested repository, a folder where a file was
+/// asked for, or a special file. Clients must never take it for a missing
+/// path (and so never turn it into a delete).
+pub const UNSUPPORTED_ENTRY_CODE: &str = "unsupported_entry";
 
 #[derive(Debug, Error)]
 pub enum OriginError {
@@ -52,6 +65,16 @@ impl OriginError {
 
     pub fn not_found<T: Into<String>>(message: T) -> Self {
         Self::NotFound(message.into())
+    }
+
+    /// 404 `unsupported_entry` (see [`UNSUPPORTED_ENTRY_CODE`]).
+    pub fn unsupported_entry<T: Into<String>>(message: T) -> Self {
+        Self::with_report(
+            StatusCode::NOT_FOUND,
+            UNSUPPORTED_ENTRY_CODE,
+            message,
+            serde_json::json!({}),
+        )
     }
 
     pub fn conflict<T: Into<String>>(message: T) -> Self {
@@ -141,11 +164,56 @@ impl IntoResponse for OriginError {
                 (status, Json(serde_json::Value::Object(body))).into_response()
             }
             other => {
+                let code = matches!(other, Self::NotFound(_)).then_some(NOT_FOUND_CODE);
                 let body = Json(ErrorBody {
                     error: other.to_string(),
+                    code,
                 });
                 (status, body).into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn body(error: OriginError) -> (StatusCode, serde_json::Value) {
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn not_found_answers_carry_a_code_that_tells_absent_from_unsupported() {
+        assert_eq!(
+            body(OriginError::not_found("file not found")).await,
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({ "error": "file not found", "code": "not_found" })
+            )
+        );
+        assert_eq!(
+            body(OriginError::unsupported_entry("a symlink is at this path")).await,
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({
+                    "error": "a symlink is at this path",
+                    "code": "unsupported_entry"
+                })
+            )
+        );
+        // Other plain errors keep their body.
+        assert_eq!(
+            body(OriginError::bad_request("invalid path")).await,
+            (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": "invalid path" })
+            )
+        );
     }
 }

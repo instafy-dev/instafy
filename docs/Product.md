@@ -93,29 +93,66 @@ and interactive file references retain their behavior. Explicit fenced code bloc
 their source whitespace and scroll horizontally when needed.
 
 ## Header
-On wide screens, a slim global rail selects Home or a team. A persistent context/search
-field above the workspace contains selectable team and space chips separated by a muted slash.
-It stays in place when the inner sidebar collapses or search opens. The adjacent sidebar
-contains recent chats and workspace tools. Its expand/collapse control stays at the same
+On wide screens, a slim global rail selects Home or a team. Above the workspace,
+the active space picker sits beside Search; the selected team is already visible in the
+outer rail. Opening search shows the full team/space path for adjusting search scope.
+The controls stay in place when the inner sidebar collapses. The adjacent sidebar
+contains a Chats entry and workspace tools. Its expand/collapse control stays at the same
 position in either width, with **New chat** beside it when expanded and below it when compact.
 New chat stays available for the active accessible space when another tab, including personal
 Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
 Existing saved collapse preferences are preserved.
 
-Narrow layouts keep Home, the team/space path, Search and the signed-in profile in the context
-header. Home remains available from a workspace, and team/space controls remain available on
-Home. Workspace history, tab selection and secondary actions remain in the working header
-below it. Global pages provide an explicit Open navigation control. The navigation drawer
-shares the same team/space path and uses the sidebar-close icon in the fixed Close/New chat
-row. Expanded drawers show secondary destinations directly when their measured height allows
-it. On shorter screens, remaining destinations use an ellipsis-labelled More entry. Directories
-and overflow remain drill-ins with Back, without stacking navigation drawers. Opening navigation does not
-change the page behind it. Team overview/settings do not replace a space's remembered work.
+Desktop conversation shortcuts have a **+** after the last tab to start a chat
+in the current space. Its tooltip names that space, including when open chats span
+several spaces in the team. The action stays reachable at the edge when tabs overflow;
+mobile keeps its existing New chat controls.
+
+Desktop drawer headings such as Chats, Files and Changes use the shared 14px
+medium navigation typography, matching the sidebar labels and workspace tabs.
+Their 48px header frame supplies structure without promoting them to page titles.
+
+Desktop Chats, Files, Changes and the Spaces/Teams directory share the docked-pane
+header. With expanded navigation each pane's title and primary controls sit beside
+the tabs in the same top row. The tab strip starts at the workspace pane's edge,
+including after resizing the list. Chats stays open when selecting conversations; its sidebar entry toggles the pane
+without changing the current workspace tab. On mobile, Chats remains a destination.
+Chats and Files reveal their filters on demand from the header. The Files filter
+matches names and paths in already-loaded folders and states that scope beside the
+input. Closing it clears the query; Escape returns focus to its toggle. File
+breadcrumbs appear only below the workspace root. On mobile, Files shares the
+navigation header, with secondary file actions in its More menu. Changes shows
+version-note and selection controls only when there are pending changes, while
+saved versions remain available in a clean workspace. Collapsed navigation keeps these headers inside
+the pane so the team and space pickers remain usable. Phone layouts retain their
+full-screen lists and navigation.
+
+Narrow layouts use a single working header for the current chat or page. Global Home has
+its own header with Search and team browsing. The navigation drawer contains team/space
+pickers, Home, New chat and workspace tools. Opening it does not change the page behind it,
+and its close control stays aligned with the header's open control. Expanded drawers show
+secondary destinations directly when their measured height allows it. On shorter screens,
+remaining destinations use an ellipsis-labelled More entry. Directories and overflow remain
+drill-ins with Back, without stacking navigation drawers. Team overview/settings do not
+replace a space's remembered work.
+
+On narrow layouts the working header owns the page title. Home and management pages omit
+the repeated title in their content; sections, team filters, scope labels and page actions
+remain visible. Files and Changes retain their action toolbar without another copy of the
+title. Desktop panels and standalone panels keep their own headings. The mobile header
+provides a semantic page heading for assistive technology.
 
 Navigation uses a solid warm off-white surface in light mode and the dark rail
-surface in dark mode. The drawer and its team/space directory or More view keep
-the same background; dimming and blur belong to the backdrop. Content panels and
-floating menus retain their separate surface colours and elevation.
+surface in dark mode. On desktop, the selected team's icon connects to its inner
+navigation with a curved neutral bridge. The outer organization rail is slightly
+recessed and the inner controls use the lighter rail surface; organization color stays
+in the identity icons and organization label. Global Home and Search omit this connection.
+The desktop context header and inner rail share a flat surface without a divider
+between them. A quiet border follows the working area's left edge, turns through
+the inside curve, and continues beneath the header.
+Mobile navigation and its team/space directory or More view keep the neutral
+background; dimming and blur belong to the backdrop. Content panels remain neutral,
+and floating menus retain their separate surface colours and elevation.
 
 In wide desktop browsers, **Get desktop app** sits above the rail profile as
 an icon with a tooltip. Compact desktop browser windows keep
@@ -129,7 +166,7 @@ The space chip opens an anchored picker with up to six named space shortcuts and
 set is displayed alphabetically, with the current space highlighted in its alphabetical
 position. Choosing a shortcut does not move it to the front. Visiting another space can
 replace the oldest shortcut. Recent visits are remembered per account on this device.
-Chats retains its inline collapsible recent list scoped to the current space.
+Compact navigation provides a scrollable chat switcher and a separate Chats directory.
 
 Space icons use the same numbered unread badges as Home and the full space directory:
 chats with unread assistant replies for the signed-in user, excluding the visible chat.
@@ -296,11 +333,80 @@ new messages.
 
 ## Conversation views
 
-Workspace tabs select conversations. Within a conversation, Browser and workspace files opened
+Home has a global header with its title and Search, without the
+last space's breadcrumb. When reached from elsewhere in the signed-in session, a back arrow
+returns to that exact page and history visit, including after changing Home filters. A direct
+Home launch has no return arrow. Mobile keeps the account menu and a separate grid button for
+browsing teams and spaces in the same row. Team filters live in Home and still determine
+search scope, starting at All teams. Continue working offers the current accessible chat with
+its team and space, restores its conversation views, and follows the selected team filter.
+
+On desktop, the top navigation row and inner sidebar share a flat neutral surface, with the
+organization name visible on wide layouts. Organization color remains in its identity accents. Open-chat shortcuts in that row span visited spaces within the selected
+organization. When more than one space is represented, each shortcut includes its space name.
+Selecting a shortcut navigates to its space and restores that chat's remembered view; changing
+organizations shows that organization's own shortcuts. Chats remains the full directory.
+Preview chats can be kept open with the pin action or a double-click, and closing a shortcut
+does not delete the conversation or its draft. The per-space tab lists remain authoritative;
+a per-user browser-session cache holds only the references and labels needed to display
+background spaces. Inaccessible spaces are excluded, and a resource reference that is no
+longer available falls back to its chat. Background shortcuts do not claim live unread counts.
+
+Participant avatars sit in the selected chat's neutral view bar, above the chat pane when a
+resource is shown alongside it. They open the existing participants panel. Compact layouts
+keep a single chat title with participants beside it, without the desktop shortcut strip;
+compact headers show fewer avatars with a count for the remaining members. One view bar holds
+that chat's files, Browser, Git reviews, diffs and run threads. Files opened from the explorer or
+search join the selected conversation's views. Selecting a chat from Chats, or returning from a
+shared tool such as Settings, restores its last selected view. Explicit conversation, message,
+run and review links still select their requested destination rather than a remembered view.
+The sidebar has one **Chats** entry at every width, with no inline recent list or
+**Browse all chats** step. On compact screens it dismisses navigation and opens the full Chats
+destination; on desktop it toggles the docked explorer. Each chat menu retains New thread,
+Rename, lifecycle actions and, for private chats, Invite teammate.
+
+On compact screens, tapping the conversation title opens the same organization-scoped open
+chats shown in desktop tabs. The current chat is marked; space names distinguish chats from
+different spaces. Selecting a chat restores its workspace view. **Browse all chats** opens
+the current space's full Chats directory. Page titles such as Files and Chats remain plain headings.
+
+The conversation workspace uses one compact header below the desktop breakpoint, including
+Chats, Files and Changes. The page or conversation title has a small team/space caption;
+the full team and space pickers remain in the navigation drawer. Participants or page actions
+stay beside the title. Home, Search and chronological history remain available in More, without
+stacking a second context toolbar above the workspace. The single header owns the safe-area inset.
+Opening navigation from the header keeps its close control in the same top-left position as
+the workspace's open control. The composer opens the bottom-sheet presentation described below. The drawer shows a labeled Home action beside New chat below its team/space row.
+
+Open reviews and runs are retained across chat and space switching for the lifetime of the
+Studio session, scoped to the signed-in user and space. Closing an active review or run returns
+to a view in the same chat. File references and layout preferences retain their existing
+account/project/conversation session storage; editor drafts remain workspace-owned. A reload
+can reopen a review or run via its URL, but does not yet restore the whole work-view set.
+
+The expanded desktop navigation is 224px wide so the team/space picker remains readable,
+with a resizable Chats/Files/Changes pane
+starting at 280px. Its saved pane width is separate from the existing navigation's preference.
+This changes how work is organized, not runtime ownership: it creates no isolated runtimes,
+Git branches or copies of files.
+
+Within a conversation, Browser and workspace files opened
 from messages share a resource pane. With at least 1024 CSS pixels available to the conversation,
 Chat and its existing composer stay alongside that pane. A keyboard-accessible divider adjusts
 the width; **Show one view** switches back to tabs. Narrow layouts use the same views as tabs,
 without remounting the browser or composer on a resize.
+Below the desktop navigation breakpoint, Chat, Browser and file view tabs sit directly above
+the composer. They share its measured safe-area/keyboard placement and remain reachable when
+scrolling; a chat with no other views adds no row. Wide layouts keep the view bar at the top.
+Conversation-owned screens without a composer retain their header view bar.
+Chat and Browser share one conversation composer and draft. In a single Browser view, AI
+requests use the current browser context; selecting Chat returns to the conversation history.
+The Browser view contains its webpage tabs: compact browser controls expose a numbered tab
+picker beside the address when more than one page exists. Compact Browser options groups Back,
+Forward and Reload, keeping room for the address and page picker. The composer's **Ask AI for a new
+tab** action prepares the next AI request to ask for another page; it does not immediately
+create a blank browser tab. A cancellable **Next AI request: new tab** indicator makes that
+pending intent visible.
 
 The workspace tab owner remembers each conversation's selected resource, open file references,
 layout preference and divider width for this Studio tab, scoped by account and project. Closing
@@ -337,12 +443,25 @@ The current destination has one compact rounded accent surface around its icon a
 Hover and keyboard focus follow the compact icon-and-label group while the full column stays
 tappable. Keyboard focus uses a clear outline, separate from the filled selection indicator.
 
-In a touch conversation, the composer's leading chevron opens the full Chats overview in the
-current space. Its accessible name and tooltip are **Back to chats**; it is a fixed destination,
-not chronological Back, and it never sends or clears the draft. It stays in the single writing
-row while the keyboard is open. The header keeps the title and shared navigation drawer control;
+In compact conversations, the composer's leading hamburger opens navigation as a bottom sheet
+on both touch devices and narrow browser windows. The sheet lists the current team's open chats,
+using the same references and order as desktop tabs and the header title picker. The current chat
+is marked; space names appear when the list includes another space. Selecting the current chat
+only dismisses the sheet, while another chat restores its remembered workspace. One fixed toolbar
+places Home before the team/space breadcrumb, followed by Browse all chats, Search and New chat (+).
+Only conversation entries occupy the independently scrolling list below it.
+Browse all chats is a chat icon in the toolbar and opens the
+current space's complete history. Tool destinations and account controls remain in the side
+drawer opened from the top-left control. Both presentations share navigation history and
+team/space drill-ins.
+The sheet leaves the current chat and draft underneath, dismisses by tapping its handle,
+backdrop, Escape or a downward drag on its handle, and returns focus to its opener. It stays
+above the visible keyboard and respects the bottom safe area. No extra composer row is added.
+The handle is also a keyboard-accessible Close button. Team and space drill-ins retain a
+bottom Close control while the main toolbar is hidden.
+The header keeps the title and shared navigation drawer control;
 chronological Back, Forward and return to search results remain in its More menu. Other compact
-working areas retain their header history controls. Home, team and account pages retain their
+conversation-workspace areas also keep history in More. Home, team and account pages retain their
 global Home/team/profile controls. Secondary actions, including settings access and new chat,
 remain in the working header menu. Global touch pages offer Back and Forward in a compact
 history menu beside the profile action. Opening either menu leaves the forward route intact;
@@ -400,15 +519,21 @@ app visit, or removes only the picker from a direct-entry URL. Ordinary mobile s
 still use their own one-level Back behavior. Compact fine-pointer windows retain their existing
 composer navigation drawer control; touch conversations use the fixed Chats destination instead.
 
-The sidebar's **Chats** section starts expanded and shows up to three recently visited active
+On desktop, **Chats** toggles the full conversation pane directly in both expanded and compact
+navigation. It highlights while that pane is open, without replacing the active workspace tab.
+The sidebar has no separate recent-chat list, popover or Browse all chats link; tabs provide
+quick switching between open conversations. Selecting a conversation in the pane opens a
+preview or focuses its existing tab.
+
+The mobile sidebar's **Chats** section starts expanded and shows up to three recently visited active
 conversations in the current space. Selecting a row opens a preview or focuses its existing tab;
 closing a tab does not remove the conversation from recent chats. **Browse all chats** opens
 the existing searchable history. New chat creation lives in the top bar and full chat history;
 the sidebar Chats row only expands or collapses its recent list. Visit order is stored locally
 per account and space. Running or queued chats and the selected chat take priority in the
 bounded list; the remaining rows keep visit order. Other chats remain available through
-Browse all chats. The full history has an always-visible search field with its status
-filter inside, and New chat and Close actions beside the title. A non-default filter changes
+Browse all chats. The full history reveals search and status filters from its header, alongside
+New chat and a desktop Close action. A non-default filter changes
 the heading and marks the filter icon; counts live in the filter menu. Starting a chat clears
 the search and returns to active chats. Per-chat actions, including closing an open tab,
 live in its More menu.
@@ -416,8 +541,8 @@ live in its More menu.
 In fine-pointer windows below 900px, the composer's lower-left menu opens the navigation drawer
 with Chats expanded. Touch layouts open the full Chats overview from the composer and the
 navigation drawer from the header. Selecting
-a chat closes navigation, making chat switching two taps. On wider layouts, the expanded
-sidebar offers direct selection; a collapsed sidebar opens the same list in a popover. Home
+a chat closes navigation, making chat switching two taps. On wider layouts, the Chats button
+opens the full list beside the active workspace tab. Home
 remains in the sidebar, and the top menu remains available when the composer is hidden while
 scrolling.
 

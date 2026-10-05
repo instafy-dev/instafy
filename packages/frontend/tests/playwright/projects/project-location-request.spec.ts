@@ -1,3 +1,4 @@
+import { returnToConversation, activeConversationId as resolveActiveConversationLocalId } from "../utils/conversationNavigation.js";
 import { test, expect, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import {
@@ -8,21 +9,6 @@ import {
 } from "../utils/harness.js";
 import { disableAssistantIfPossible } from "../utils/runtimeAi.js";
 
-function conversationTabButtons(page: Page) {
-  return page.locator('[data-testid="workspace-tabs"] [data-tab-kind="conversation"]');
-}
-
-async function resolveActiveConversationLocalId(page: Page): Promise<string> {
-  const tabs = conversationTabButtons(page);
-  await expect(tabs).toHaveCount(1);
-  const tabId = await tabs.first().getAttribute("data-tab-id");
-  if (!tabId) {
-    throw new Error("Conversation tab missing data-tab-id.");
-  }
-  return tabId.startsWith("workspace-conversation-")
-    ? tabId.replace("workspace-conversation-", "")
-    : tabId;
-}
 
 async function createBlankControllerConversationId(params: {
   page: Page;
@@ -113,7 +99,7 @@ test.describe("Location request cards", () => {
       accuracy: 120,
     });
 
-    await page.getByTestId("sidebar-nav-chat").click();
+    await returnToConversation(page);
     await disableAssistantIfPossible(page);
 
     await expect

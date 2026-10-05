@@ -1,17 +1,25 @@
 import { expect, type Page } from "@playwright/test";
+import { returnToConversation } from "./conversationNavigation.js";
 
 export async function createPublicChatFromTopBar(page: Page) {
-  await page.getByTestId("chat-new-conversation").click();
+  const previous = new URL(page.url()).searchParams.get("conversationId");
+  await page.getByTestId("topbar-new-conversation")
+    .or(page.getByTestId("sidebar-new-chat"))
+    .or(page.getByTestId("conversation-history-new-chat"))
+    .filter({ visible: true }).first().click();
   const popover = page.getByTestId("chat-new-chat-menu-popover");
   const menuOpened = await popover
     .waitFor({ state: "visible", timeout: 1_500 })
     .then(() => true)
     .catch(() => false);
-  if (!menuOpened) {
-    return;
+  if (menuOpened) {
+    await page.getByRole("button", { name: "Public chat" }).click();
   }
-  await expect(popover).toBeVisible();
-  await page.getByRole("button", { name: "Public chat" }).click();
+  await expect.poll(() => {
+    const current = new URL(page.url()).searchParams.get("conversationId");
+    return Boolean(current && current !== previous);
+  }).toBe(true);
+  await expect(page.getByTestId("chat-input")).toBeVisible();
 }
 
 export async function clickQueuedSendNowIfAvailable(page: Page): Promise<boolean> {
@@ -45,24 +53,5 @@ export async function clickQueuedSendNowIfAvailable(page: Page): Promise<boolean
 }
 
 export async function focusLastConversationTab(page: Page) {
-  const conversationTabs = page
-    .getByTestId("workspace-tabs")
-    .locator('[data-tab-kind="conversation"]');
-  const conversationTab = conversationTabs.last();
-  const hasConversationTab = (await conversationTabs.count().catch(() => 0)) > 0;
-
-  if (hasConversationTab) {
-    await conversationTab.scrollIntoViewIfNeeded().catch(() => {});
-    const clickedConversation = await conversationTab
-      .click({ force: true })
-      .then(() => true)
-      .catch(() => false);
-    if (clickedConversation) {
-      await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
-      return;
-    }
-  }
-
-  await page.getByTestId("sidebar-nav-chat").click();
-  await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
+  await returnToConversation(page);
 }

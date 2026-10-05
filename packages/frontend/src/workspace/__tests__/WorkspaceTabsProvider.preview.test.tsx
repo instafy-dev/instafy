@@ -7,6 +7,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialConversation, type ConversationState } from "../../conversations/conversationState";
 import type { StudioPanel } from "../../screens/studio/types";
+import { publishChatParticipants, EMPTY_CHAT_PARTICIPANTS_SNAPSHOT } from "../../screens/studio/components/chatParticipantsStore";
+import { ConversationWorkspaceViews } from "../ConversationWorkspaceViews";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../WorkspaceTabsProvider";
 import { getTabIdForConversation, getTabIdForJobThread, getTabIdForPanel } from "../workspaceTabFactories";
 import { loadPersistedWorkspaceTabs, persistWorkspaceTabsState } from "../workspaceTabPersistence";
@@ -21,6 +23,7 @@ const fixture = vi.hoisted(() => ({
   activeConversationId: null as string | null,
   activePanel: "chat" as StudioPanel,
   historyResolved: true,
+  isLargeScreen: true,
   workspace: { files: [] as CodeFile[] },
   selectConversation: vi.fn((id: string) => { fixture.activeConversationId = id; }),
   setActivePanel: vi.fn((panel: StudioPanel) => { fixture.activePanel = panel; }),
@@ -40,6 +43,7 @@ vi.mock("../../conversations/ConversationsProvider", () => ({
     createConversation: fixture.createConversation,
   }),
 }));
+vi.mock("../../screens/studio/useStudioNavigationPosture", () => ({ useStudioNavigationPosture: () => ({ isLargeScreen: fixture.isLargeScreen }) }));
 vi.mock("../../projects/useProject", () => ({ useProject: () => ({ activeProjectId: fixture.projectId }) }));
 vi.mock("../useWorkspace", () => ({ useWorkspaceUi: () => ({
   activePanel: fixture.activePanel, setActivePanel: fixture.setActivePanel,
@@ -56,12 +60,16 @@ describe("conversation preview tabs", () => {
   let root: Root;
   let container: HTMLDivElement;
   let api: ReturnType<typeof useWorkspaceTabs>;
+  let showViewBar = false;
   let draftStore: ReturnType<typeof useStudioDraftStore>;
 
   function Probe() {
     api = useWorkspaceTabs();
     draftStore = useStudioDraftStore();
-    return null;
+    return showViewBar ? <>
+      <div data-testid="header-view-host"><ConversationWorkspaceViews /></div>
+      <div data-testid="composer-view-host"><ConversationWorkspaceViews placement="composer" /></div>
+    </> : null;
   }
   async function render(props: Omit<ComponentProps<typeof WorkspaceTabsProvider>, "children"> = {}) {
     await act(async () => root.render(<StudioDraftsProvider><WorkspaceTabsProvider {...props}><Probe /></WorkspaceTabsProvider></StudioDraftsProvider>));
@@ -75,6 +83,9 @@ describe("conversation preview tabs", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    showViewBar = false;
+    publishChatParticipants(EMPTY_CHAT_PARTICIPANTS_SNAPSHOT);
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
     window.localStorage.clear();
     window.sessionStorage.clear();
     fixture.projectId = projectA;
@@ -83,6 +94,7 @@ describe("conversation preview tabs", () => {
     fixture.activeConversationId = "a";
     fixture.activePanel = "chat";
     fixture.historyResolved = true;
+    fixture.isLargeScreen = true;
     fixture.workspace.files = [];
     vi.clearAllMocks();
     studioPerformance.clear();
@@ -94,8 +106,241 @@ describe("conversation preview tabs", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
     studioPerformance.clear();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("keeps desktop participants attached to the current conversation, including during snapshot handoff", async () => {
+    showViewBar = true;
+    publishChatParticipants({ ...EMPTY_CHAT_PARTICIPANTS_SNAPSHOT, conversationId: "remote-a", humans: [{ userId: "alex", label: "Alex", isSelf: true }] });
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    expect(container.querySelector('[data-testid="conversation-chat-toolbar"] [data-testid="conversation-roster"]')?.getAttribute("aria-label")).toBe("Conversation members (1)");
+    await openPreview("b");
+    await render(props);
+    expect(container.querySelector('[data-testid="conversation-roster"]')?.getAttribute("aria-label")).toBe("Open participants");
+    expect(container.querySelector('[data-testid="chat-avatar-human"]')).toBeNull();
+  });
+
+  it("shows one accessible view bar for this chat and returns from a run to its files", async () => {
+    showViewBar = true;
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    await act(async () => api.openJobThreadTab({ conversationId: "a", jobId: "run-a", title: "Implementation" }));
+    expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Implementation");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-file:a.ts"]')?.click());
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("a.ts");
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openFileTab({ id: "b.ts", path: "b.ts", label: "b.ts" }));
+    expect(container.textContent).not.toContain("Implementation");
+    expect(container.textContent).not.toContain("a.ts");
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("b.ts");
+  });
+
+  it("keeps exactly one Chat/Browser switcher at the composer on compact screens and moves it on resize", async () => {
+    showViewBar = true;
+    fixture.isLargeScreen = false;
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.setConversationBrowser(api.conversationWorkspaceScope, true, false));
+    const header = () => container.querySelector('[data-testid="header-view-host"]')!;
+    const composer = () => container.querySelector('[data-testid="composer-view-host"]')!;
+    expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
+    expect(header().querySelector('[role="tablist"]')).toBeNull();
+    expect(composer().querySelectorAll('[role="tab"]')).toHaveLength(2);
+    expect(composer().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Chat");
+
+    await act(async () => composer().querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-browser"]')?.click());
+    expect(api.conversationSurfaces.read(api.conversationWorkspaceScope).activeId).toBe("browser");
+    expect(api.consumeUrlPush()).toBe(true);
+    fixture.isLargeScreen = true;
+    await render(props);
+    expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
+    expect(composer().querySelector('[role="tablist"]')).toBeNull();
+    expect(header().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Browser");
+
+    fixture.isLargeScreen = false;
+    await render(props);
+    expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
+    expect(header().querySelector('[role="tablist"]')).toBeNull();
+    expect(composer().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Browser");
+    await act(async () => composer().querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-chat"]')?.click());
+    expect(api.conversationSurfaces.read(api.conversationWorkspaceScope).activeId).toBe("chat");
+  });
+
+  it("keeps a run's selected view and file navigation in the compact composer switcher", async () => {
+    showViewBar = true;
+    fixture.isLargeScreen = false;
+    await render({ conversationWorkspaceUserId: "user-a" });
+    await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    await act(async () => api.openJobThreadTab({ conversationId: "a", jobId: "run-a", title: "Implementation" }));
+    const composer = container.querySelector('[data-testid="composer-view-host"]')!;
+    expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="header-view-host"] [role="tablist"]')).toBeNull();
+    expect(composer.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("Implementation");
+    await act(async () => composer.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-file:a.ts"]')?.click());
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(composer.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("a.ts");
+  });
+
+  it.each(["gitReview", "gitDiff"] as const)("keeps a header fallback for compact %s routes without a composer", async (kind) => {
+    showViewBar = true;
+    fixture.isLargeScreen = false;
+    await render({ conversationWorkspaceUserId: "user-a" });
+    await act(async () => {
+      if (kind === "gitReview") api.openGitReviewTab({ kind: "workingTree", title: "Changes", entries: [] });
+      else api.openGitDiffTab({ path: "a.ts", title: "File changes" });
+    });
+    const header = container.querySelector('[data-testid="header-view-host"]')!;
+    expect(api.activeTab?.kind).toBe(kind);
+    expect(container.querySelectorAll('[role="tablist"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="composer-view-host"] [role="tablist"]')).toBeNull();
+    expect(header.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe(api.activeTab?.title);
+    await act(async () => header.querySelector<HTMLButtonElement>('[data-testid="conversation-subtab-chat"]')?.click());
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(header.querySelector('[role="tablist"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-view-host"] [role="tab"][aria-selected="true"]')?.textContent).toBe("Chat");
+  });
+
+  it("does not add a compact composer strip for a chat without resources", async () => {
+    showViewBar = true;
+    fixture.isLargeScreen = false;
+    await render({ conversationWorkspaceUserId: "user-a" });
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(container.querySelector('[data-testid="conversation-subtabs"]')).toBeNull();
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+  });
+
+  it("restores each chat's review or run, while explicit chat navigation still opens Chat", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openGitReviewTab({ kind: "workingTree", title: "Launch review", entries: [] }));
+    const reviewId = api.activeTabId;
+    expect(api.activeTab).toMatchObject({ kind: "gitReview", workspaceOwner: { userId: "user-a", projectId: projectA, conversationId: "a" } });
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openJobThreadTab({ conversationId: "b", jobId: "run-b" }));
+    const runId = api.activeTabId;
+    await act(async () => api.openConversationTab("a", { restoreWorkspace: true }));
+    expect(api.activeTabId).toBe(reviewId);
+    expect(fixture.activeConversationId).toBe("a");
+    await act(async () => api.openPanelTab("settings"));
+    await act(async () => api.openConversationTab("b", { restoreWorkspace: true }));
+    expect(api.activeTabId).toBe(runId);
+    expect(fixture.activeConversationId).toBe("b");
+    await act(async () => api.openConversationTab("a"));
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+  });
+
+  it("keeps the same diff and saved review separate between conversations", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    const review = { kind: "savedVersion" as const, commit: "abc123", shortCommit: "abc123", title: "Changes", committedAt: "2026-09-30" };
+    await render(props);
+    await act(async () => api.openGitDiffTab({ path: "app.ts", commitRange: { base: "a", head: "b" } }));
+    const diffA = api.activeTabId;
+    expect(api.activeTab?.kind).toBe("gitDiff");
+    await act(async () => api.openGitReviewTab(review));
+    const reviewA = api.activeTabId;
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openGitDiffTab({ path: "app.ts" }));
+    expect(api.activeTabId).not.toBe(diffA);
+    expect(api.tabs.find(tab => tab.id === diffA)).toMatchObject({ commitRange: { base: "a", head: "b" } });
+    await act(async () => api.openGitReviewTab(review));
+    expect(api.activeTabId).not.toBe(reviewA);
+    expect(api.tabs.filter(tab => tab.kind === "gitReview")).toHaveLength(2);
+    await act(async () => api.closeTab(api.activeTabId!));
+    expect(api.activeTab).toMatchObject({ kind: "gitDiff", workspaceOwner: { conversationId: "b" } });
+    await act(async () => api.closeTab(api.activeTabId!));
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "b" });
+  });
+
+  it("parks views across spaces and rejects late review openers and foreign view IDs", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openJobThreadTab({ conversationId: "a", jobId: "run-a" }));
+    const runId = api.activeTabId;
+    const lateReview = api.openGitReviewTab;
+    fixture.projectId = projectB;
+    await render(props);
+    expect(api.tabs.some(tab => tab.id === runId)).toBe(false);
+    await act(async () => lateReview({ kind: "workingTree", entries: [] }));
+    fixture.projectKey = projectB;
+    fixture.conversations = [conversation("x")];
+    fixture.activeConversationId = "x";
+    await render(props);
+    await act(async () => api.focusTab(runId!));
+    expect(api.activeTab).toMatchObject({ conversationId: "x" });
+    expect(api.tabs.filter(tab => tab.workspaceOwner)).toHaveLength(0);
+    fixture.projectId = projectA;
+    fixture.projectKey = projectA;
+    fixture.conversations = [conversation("a"), conversation("b")];
+    fixture.activeConversationId = "a";
+    await render(props);
+    await act(async () => api.openConversationTab("a", { restoreWorkspace: true }));
+    expect(api.activeTabId).toBe(runId);
+    await render({ conversationWorkspaceUserId: "user-b" });
+    expect(api.tabs.some(tab => tab.id === runId)).toBe(false);
+    expect(api.activeTab?.workspaceOwner).toBeUndefined();
+  });
+
+  it("keeps file views with their conversation across navigation", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    await act(async () => api.openFileTab({ id: "a.ts", path: "src/a.ts", label: "a.ts" }));
+    const scopeA = JSON.stringify(["user-a", projectA, "a"]);
+    expect(api.conversationSurfaces.read(scopeA)).toMatchObject({ activeId: "file:src/a.ts", files: [{ path: "src/a.ts" }] });
+    expect(api.tabs.filter(tab => tab.kind === "file")).toHaveLength(0);
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+
+    await openPreview("b");
+    await render(props);
+    await act(async () => api.openFileTab({ id: "b.ts", path: "src/b.ts", label: "b.ts" }));
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectA, "b"])).files).toEqual([{ id: "file:src/b.ts", path: "src/b.ts" }]);
+    await act(async () => api.openPanelTab("settings"));
+    await openPreview("a");
+    await render(props);
+    expect(api.activeTab).toMatchObject({ kind: "conversation", conversationId: "a" });
+    expect(api.conversationSurfaces.read(scopeA).activeId).toBe("file:src/a.ts");
+    expect(api.conversationSurfaces.read(scopeA).files).toHaveLength(1);
+  });
+
+  it("does not assign a file to stale conversation history during a space switch", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    fixture.projectId = projectB;
+    await render(props);
+    await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectB, "a"])).files).toEqual([]);
+    expect(api.tabs.filter(tab => tab.kind === "file")).toHaveLength(0);
+  });
+
+  it("ignores a file load completed after the user selected another chat", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    await render(props);
+    const delayedOpen = api.openFileTab;
+    await openPreview("b");
+    await render(props);
+    await act(async () => delayedOpen({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    expect(api.activeTab).toMatchObject({ conversationId: "b" });
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectA, "a"])).files).toEqual([]);
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectA, "b"])).files).toEqual([]);
+  });
+
+  it("isolates file references by account and space", async () => {
+    await render({ conversationWorkspaceUserId: "user-a" });
+    await act(async () => api.openFileTab({ id: "a.ts", path: "a.ts", label: "a.ts" }));
+    await render({ conversationWorkspaceUserId: "user-b" });
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-b", projectA, "a"])).files).toEqual([]);
+    fixture.projectId = projectB;
+    fixture.projectKey = projectB;
+    await render({ conversationWorkspaceUserId: "user-a" });
+    expect(api.conversationSurfaces.read(JSON.stringify(["user-a", projectB, "a"])).files).toEqual([]);
   });
 
   it("reuses a utility preview independently of chat browsing and route replay", async () => {
@@ -464,6 +709,28 @@ describe("conversation preview tabs", () => {
     expect(ids()).toEqual(["a", "b", "c"]);
     expect(previews()).toEqual([]);
     expect(api.tabs.some((tab) => tab.kind === "panel" && tab.panel === "home")).toBe(true);
+  });
+
+  it("keeps or closes background-space tabs without resurrecting them on return", async () => {
+    const props = { conversationWorkspaceUserId: "user-a" };
+    save(["a", "b", "c"], "b");
+    await render(props);
+    expect(api.conversationTabsRestored).toBe(true);
+    fixture.projectId = projectB;
+    await render(props);
+    expect(api.conversationTabsRestored).toBe(false);
+    fixture.projectKey = projectB;
+    fixture.conversations = [conversation("x")]; fixture.activeConversationId = "x";
+    await render(props);
+    await act(async () => api.updateInactiveConversationTab(projectA, "b", "keep"));
+    await act(async () => api.updateInactiveConversationTab(projectA, "c", "close"));
+    expect(loadPersistedWorkspaceTabs()?.projects[projectA]).toMatchObject({ conversations: ["a", "b"] });
+    expect(loadPersistedWorkspaceTabs()?.projects[projectA]?.previewConversationId).toBeUndefined();
+    fixture.projectId = projectA; fixture.projectKey = projectA;
+    fixture.conversations = [conversation("a"), conversation("b"), conversation("c")]; fixture.activeConversationId = "a";
+    await render(props);
+    expect(ids()).toEqual(["a", "b"]); expect(previews()).toEqual([]);
+    expect(api.conversationTabsRestored).toBe(true);
   });
 
   it("restores each space's own preview and kept tabs", async () => {

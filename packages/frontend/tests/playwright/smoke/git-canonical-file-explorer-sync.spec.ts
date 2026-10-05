@@ -1,4 +1,4 @@
-import { fileExplorerAction } from "../utils/filesExplorer.js";
+import { fileExplorerAction, fileExplorerSearch } from "../utils/filesExplorer.js";
 import { recordOriginRequests } from "../utils/filesEditor.js";
 import { assertGatewayMode, gatewayMode } from "../utils/gatewayMode.js";
 import { test, expect, type Page } from "@playwright/test";
@@ -76,7 +76,7 @@ test.describe("Git-canonical file explorer sync", () => {
     const fileContents = `external sync ${unique}`;
     const fileTestId = `files-entry-${filePath.replace(/[^a-zA-Z0-9]/g, "-")}`;
 
-    await page.getByTestId("code-search-input").fill(filePath);
+    await (await fileExplorerSearch(page)).fill(filePath);
     await expect(page.getByTestId(fileTestId)).toHaveCount(0);
 
     const recorded = recordOriginRequests(page);

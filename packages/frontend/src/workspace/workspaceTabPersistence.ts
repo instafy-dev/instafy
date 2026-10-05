@@ -16,6 +16,7 @@ export interface PersistedWorkspaceGitReviewProjectState {
     id: string;
     review: import("./gitReviewTypes").WorkspaceGitReviewSource;
     returnTabId: string | null;
+    workspaceOwner?: import("./workspaceTabFactories").ConversationWorkspaceOwner;
   }[];
 }
 

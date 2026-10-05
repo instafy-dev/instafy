@@ -8,20 +8,29 @@ import {
   describeFileNotSaved,
   describeRevertConfirm,
   describeSaveFailure,
+  desktopSaveFailureCopy,
+  DISK_FULL_COPY,
   DISMISSAL_NOT_APPLIED_COPY,
   FETCH_PENDING_COPY,
+  historyFailureCopy,
   formatPathList,
   keptOnComputerCopy,
   LEASE_CONFLICT_COPY,
   MAIN_BUSY_COPY,
+  MIRROR_RESET_COPY,
+  NOTHING_TO_RESTORE_COPY,
   rejectedPathCopy,
+  restoreSuccessCopy,
   REVERT_CONFLICT_COPY,
   REVERT_DIALOG,
+  revertCheckFailedCopy,
   revertFailureCopy,
   revertSuccessCopy,
+  retryLaterCopy,
   SAVE_COPY,
   sharedOriginErrorCopy,
   STATELESS_UNREACHABLE_COPY,
+  WRITES_BUSY_COPY,
 } from "../versioningCopy";
 
 // The sentences Save in Files, History and the chat change card share are
@@ -78,6 +87,66 @@ describe("versioning copy shared across surfaces", () => {
     }
     expect(saveMessage({ code: "dismissal_not_applied", status: 422 })).toBe(DISMISSAL_NOT_APPLIED_COPY);
     expect(historyMessage({ code: "dismissal_not_applied", status: 422 })).toBe(DISMISSAL_NOT_APPLIED_COPY);
+  });
+
+  // The gateway's 503 answers with Retry-After.
+  it.each([
+    ["writes_busy", WRITES_BUSY_COPY, "The server is busy saving other changes. Try again in a moment."],
+    ["mirror_reset", MIRROR_RESET_COPY, "The server is rebuilding its copy of this space. Try again in a moment."],
+    ["disk_full", DISK_FULL_COPY, "The space is out of room right now. Try again later."],
+  ] as const)("says the same %s sentence on every surface", (code, sentence, text) => {
+    expect(sentence).toBe(text);
+    expect(retryLaterCopy(code)).toBe(sentence);
+    // Deleting, creating a folder or a setting have no edits to keep.
+    expect(saveMessage({ code, status: 503 }, "delete")).toBe(sentence);
+    expect(historyMessage({ code, status: 503 })).toBe(sentence);
+    expect(historyMessage({ code, status: 503 }, "desktop")).toBe(sentence);
+    // History's Revert, and Unsaved work's Restore, Remove and file reads.
+    expect(historyRevertMessage(503, code)).toBe(sentence);
+    expect(historyFailureCopy(originError({ code, status: 503 }), "stateless", "Couldn't restore this work.")).toBe(
+      sentence,
+    );
+    expect(desktopSaveFailureCopy(originError({ code, status: 503 }))).toBe(sentence);
+    // The chat card's revert and the check before it.
+    expect(cardRevertMessage(503, code)).toBe(sentence);
+    expect(revertCheckFailedCopy(code)).toBe(sentence);
+    // Never the unreachable sentence.
+    expect(sentence).not.toBe(STATELESS_UNREACHABLE_COPY);
+  });
+
+  it("keeps the edits in the save's sentence and says when to try again", () => {
+    const save = (code: string) =>
+      describeSaveFailure({ error: originError({ code, status: 503 }), mode: "stateless", label: "a.md" });
+    expect(save("writes_busy")).toEqual({
+      message: "The server is busy saving other changes. Your edits are kept here. Try again in a moment.",
+      action: { kind: "retry", label: "Try again" },
+    });
+    expect(save("mirror_reset")).toEqual({
+      message: "The server is rebuilding its copy of this space. Your edits are kept here. Try again in a moment.",
+      action: { kind: "retry", label: "Try again" },
+    });
+    // Out of room: later, not in a moment, so no Try again.
+    expect(save("disk_full")).toEqual({
+      message: "The space is out of room right now. Your edits are kept here. Try again later.",
+    });
+    expect(SAVE_COPY.writesBusy).toBe(save("writes_busy").message);
+    expect(SAVE_COPY.mirrorReset).toBe(save("mirror_reset").message);
+    expect(SAVE_COPY.diskFull).toBe(save("disk_full").message);
+    // A Desktop space never gets these answers, but the words would be the same.
+    expect(
+      describeSaveFailure({ error: originError({ code: "disk_full", status: 503 }), mode: "desktop", label: "a.md" })
+        .message,
+    ).toBe(SAVE_COPY.diskFull);
+    expect(
+      describeSaveFailure({
+        error: originError({ code: "writes_busy", status: 503 }),
+        mode: "stateless",
+        label: "docs",
+        operation: "create",
+      }),
+    ).toEqual({ message: WRITES_BUSY_COPY, action: { kind: "retry", label: "Try again" } });
+    expect(retryLaterCopy("main_busy")).toBeNull();
+    expect(retryLaterCopy(undefined)).toBeNull();
   });
 
   it("reads a 503 without a code as unreachable on every surface", () => {
@@ -154,6 +223,51 @@ describe("versioning copy shared across surfaces", () => {
     expect(cardRevertMessage(422, "excluded_path", { reason: "secret" })).toBe(
       "This change can't be reverted here. Secret files aren't saved to the space. Ask the agent to undo it.",
     );
+  });
+
+  it("names old chat uploads a salvage kept privately in a sentence of their own on Restore", () => {
+    const placement = { unsavedWorkInHistory: true };
+    const attachmentRule = describeFileNotSaved({ reason: "attachment", keptSavedVersion: false }, placement);
+    expect(attachmentRule).toBe("Old chat upload files aren't saved to the space.");
+    // Only old chat uploads were left out: the secret and ignored sentence would be wrong.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["chat-upload-1.png"],
+        reasons: { "chat-upload-1.png": "attachment" },
+      }),
+    ).toBe(`Restored as a new version. Not restored: chat-upload-1.png. ${attachmentRule}`);
+    // Both kinds: one list, then one sentence for each.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: [".env", "chat-upload-1.png"],
+        reasons: { ".env": "secret", "chat-upload-1.png": "attachment" },
+      }),
+    ).toBe(
+      `Restored as a new version. Not restored: .env and chat-upload-1.png. Secret and ignored files stay out of the space. ${attachmentRule}`,
+    );
+    // Desktop lists paths without reasons: the one sentence as before.
+    expect(restoreSuccessCopy({ committed: true, notRestored: [".env", "chat-upload-1.png"] })).toBe(
+      "Restored as a new version. Not restored: .env and chat-upload-1.png. Secret and ignored files stay out of the space.",
+    );
+  });
+
+  it("never names a path the restore kept on request as refused", () => {
+    // Keep on a folder covers the files below it; the gateway names each one `kept`.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["src/lib/a.ts"],
+        kept: ["src/lib"],
+        reasons: { "src/lib/a.ts": "kept" },
+      }),
+    ).toBe("Restored as a new version. Kept the current version of src/lib.");
+  });
+
+  it("says there was nothing to restore when main already had the work, marked or not", () => {
+    expect(NOTHING_TO_RESTORE_COPY).toBe("Nothing to restore. The saved version already has this work.");
+    expect(restoreSuccessCopy({ committed: false, notRestored: [] })).toBe(NOTHING_TO_RESTORE_COPY);
   });
 
   it("lists paths one way", () => {

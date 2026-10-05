@@ -39,6 +39,67 @@ describe("MobileStudioNavigationHeader", () => {
     expect(target).toBeDefined(); await act(async () => target!.click());
   }
 
+  it("switches open chats across spaces and keeps the current chat selected without reopening it", async () => {
+    props.conversationSwitcher = {
+      tabs: [{ id: "a", title: "Current chat", spaceName: "Alpha space" }, { id: "b", title: "Other work", spaceName: "Design" }],
+      activeId: "a", onSelect: vi.fn(), onBrowseChats: vi.fn(),
+    };
+    await render();
+    const trigger = query("mobile-chat-switcher-trigger")!;
+    expect(trigger.closest("h1")).not.toBeNull();
+    expect(trigger.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(trigger.classList.contains("!min-h-12")).toBe(true);
+    await click("mobile-chat-switcher-trigger");
+    expect(query("mobile-chat-switcher")?.textContent).toContain("Chats");
+    expect(query("mobile-chat-switcher-tab-a")?.getAttribute("aria-current")).toBe("page");
+    expect(query("mobile-chat-switcher-tab-a")?.textContent).toContain("Alpha space");
+    expect(query("mobile-chat-switcher-tab-b")?.textContent).toContain("Design");
+    await click("mobile-chat-switcher-tab-a");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(props.conversationSwitcher.onSelect).not.toHaveBeenCalled();
+    await click("mobile-chat-switcher-trigger");
+    await click("mobile-chat-switcher-tab-b");
+    expect(props.conversationSwitcher.onSelect).toHaveBeenCalledExactlyOnceWith("b");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    await click("mobile-chat-switcher-trigger");
+    expect(query("mobile-chat-switcher-browse")?.textContent).toContain("In Alpha space");
+    await click("mobile-chat-switcher-browse");
+    expect(props.conversationSwitcher.onBrowseChats).toHaveBeenCalledOnce();
+    expect(props.onOpenPicker).not.toHaveBeenCalled();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("dismisses the chat picker on native Back and drops it when the navigation scope changes", async () => {
+    props.conversationSwitcher = { tabs: [{ id: "a", title: "Current chat", spaceName: "Alpha space" }], activeId: "a", onSelect: vi.fn() };
+    await render();
+    await click("mobile-chat-switcher-trigger");
+    const [enabled, dismiss] = mocks.nativeBack.mock.lastCall!;
+    expect(enabled).toBe(true);
+    await act(async () => dismiss());
+    expect(query("mobile-chat-switcher-trigger")?.getAttribute("aria-expanded")).toBe("false");
+    expect(props.history.goBack).not.toHaveBeenCalled();
+    for (const scope of ["visit-a", "visit-b", "other-account", "other-space"]) {
+      await act(async () => root.render(<MobileStudioNavigationHeader key={scope} {...props} />));
+      expect(query("mobile-chat-switcher-trigger")?.getAttribute("aria-expanded")).toBe("false");
+      await click("mobile-chat-switcher-trigger");
+      expect(query("mobile-chat-switcher-tab-a")?.textContent).toBe("Current chat");
+    }
+  });
+
+  it("keeps file actions in the shared overflow and closes it before running an action", async () => {
+    const fileActions = vi.fn();
+    props.title = "Files";
+    props.primaryActions = <Button aria-label="Filter loaded files">Search</Button>;
+    props.pageMenuActions = [{ label: "File actions", onPress: fileActions, testId: "file-actions" }];
+    await render();
+    expect(query("file-actions")).toBeNull();
+    await click("mobile-header-more");
+    expect(query("mobile-header-actions")?.contains(query("file-actions"))).toBe(true);
+    await click("file-actions");
+    expect(fileActions).toHaveBeenCalledOnce();
+    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("omits history controls at direct entry and keeps chats accessible through the sidebar", async () => {
     await render();
     expect(query("mobile-history-controls")).toBeNull();
@@ -93,6 +154,7 @@ describe("MobileStudioNavigationHeader", () => {
     expect(picker.getAttribute("aria-haspopup")).toBe("dialog");
     expect(picker.getAttribute("aria-expanded")).toBe("false");
     expect(query("mobile-header-title")?.textContent).toBe(props.title);
+    expect(query("mobile-header-title")?.tagName).toBe("H1");
     expect(query("mobile-header-space")?.textContent).toBe(props.spaceName);
     expect(query("mobile-header-title")?.classList.contains("truncate")).toBe(true);
     expect(query("mobile-header-space")?.classList.contains("truncate")).toBe(true);
