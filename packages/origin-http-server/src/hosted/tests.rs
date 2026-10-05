@@ -1669,6 +1669,55 @@ async fn review_and_diff_read_objects_only() {
     assert_eq!(bad.status, 400);
 }
 
+/// A chat card asks for the diff of every file of a turn: when the space
+/// does not have that commit (or base), the first ask fetches canonical
+/// once and the answer is remembered for a short while, so the rest of
+/// the card does not fetch again per file. Known commits never fetch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_card_of_an_unknown_version_fetches_once_not_per_file() {
+    let sc = HostedScenario::new();
+    let first = sc.push(&[("a.txt", Some(b"a\n")), ("b.txt", Some(b"b\n"))], "first");
+    let second = sc.push(
+        &[("a.txt", Some(b"a2\n")), ("b.txt", Some(b"b2\n"))],
+        "second",
+    );
+    let served = serve(&sc).await;
+    get(&served, "/entries").await;
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+
+    let before = served.cache.fetches_started();
+    for path in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        let answer = get(&served, &format!("/git/diff?path={path}&commit={gone}")).await;
+        assert_eq!(answer.json()["code"], "rev_not_found");
+    }
+    let review = get(&served, &format!("/git/history/review?commit={gone}")).await;
+    assert_eq!(review.json()["code"], "rev_not_found");
+    assert_eq!(served.cache.fetches_started() - before, 1);
+
+    let before = served.cache.fetches_started();
+    for path in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        let answer = get(
+            &served,
+            &format!("/git/diff?path={path}&commit={second}&base={gone}"),
+        )
+        .await;
+        assert_eq!(answer.status, 200, "{}", answer.json());
+        assert!(answer.json()["code"].is_null(), "{}", answer.json());
+    }
+    assert_eq!(served.cache.fetches_started() - before, 0);
+
+    let before = served.cache.fetches_started();
+    for path in ["a.txt", "b.txt"] {
+        let answer = get(
+            &served,
+            &format!("/git/diff?path={path}&commit={second}&base={first}"),
+        )
+        .await;
+        assert!(answer.json()["diff"].as_str().unwrap().contains("+a2") || path == "b.txt");
+    }
+    assert_eq!(served.cache.fetches_started() - before, 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn unsaved_work_is_reviewed_through_its_ref() {
     let sc = HostedScenario::new();

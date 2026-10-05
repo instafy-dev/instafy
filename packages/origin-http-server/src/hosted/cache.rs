@@ -84,6 +84,11 @@ const TOKEN_REUSE_MARGIN: Duration = Duration::from_secs(60);
 pub(crate) const SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 /// Only mirrors unused for longer than this are removed for space.
 pub(crate) const EVICT_IDLE_AFTER: Duration = Duration::from_secs(3600);
+/// How long diff and review remember a commit a space did not have after a
+/// fetch: a chat card asks once per file, and each ask would fetch again.
+pub(crate) const MISSING_REV_MEMORY: Duration = Duration::from_secs(30);
+/// At most this many such commits are remembered.
+const MISSING_REVS_REMEMBERED: usize = 4096;
 /// Scratch older than this belongs to a request that is gone.
 const SCRATCH_STALE_AFTER: Duration = Duration::from_secs(3600);
 /// Below this much free space on the cache's disk the sweeper removes
@@ -297,6 +302,8 @@ pub(crate) struct MirrorCache {
     mirrors: Mutex<HashMap<Uuid, Arc<MirrorEntry>>>,
     tokens: Mutex<HashMap<Uuid, CachedToken>>,
     sizes: Mutex<HashMap<Uuid, KnownSize>>,
+    /// Commits a space did not have after a fetch, and when that was found.
+    missing_revs: Mutex<HashMap<(Uuid, String), Instant>>,
     next_fetch: AtomicU64,
     fetches_started: AtomicU64,
     fetch_wait: Duration,
@@ -362,6 +369,7 @@ impl MirrorCache {
             mirrors: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             sizes: Mutex::new(HashMap::new()),
+            missing_revs: Mutex::new(HashMap::new()),
             next_fetch: AtomicU64::new(1),
             fetches_started: AtomicU64::new(0),
             fetch_wait: FETCH_WAIT,
@@ -824,6 +832,26 @@ impl MirrorCache {
         locked(&entry.fetches).refetch_since = Some(Instant::now());
     }
 
+    /// Whether `rev` was found missing from `project` after a fetch less
+    /// than [`MISSING_REV_MEMORY`] ago.
+    pub(crate) fn recently_missing(&self, project: Uuid, rev: &str) -> bool {
+        locked(&self.missing_revs)
+            .get(&(project, rev.to_string()))
+            .is_some_and(|found| found.elapsed() < MISSING_REV_MEMORY)
+    }
+
+    /// `rev` is not in `project` after a fetch: remember it for a while.
+    pub(crate) fn note_missing(&self, project: Uuid, rev: &str) {
+        let mut missing = locked(&self.missing_revs);
+        if missing.len() >= MISSING_REVS_REMEMBERED {
+            missing.retain(|_, found| found.elapsed() < MISSING_REV_MEMORY);
+            if missing.len() >= MISSING_REVS_REMEMBERED {
+                missing.clear();
+            }
+        }
+        missing.insert((project, rev.to_string()), Instant::now());
+    }
+
     /// Something may have added to (or removed) `project`'s mirror: the
     /// next sweep measures it again.
     pub(crate) fn size_changed(&self, project: Uuid) {
@@ -996,6 +1024,7 @@ impl MirrorCache {
         }
         let live = Instant::now() + TOKEN_REUSE_MARGIN;
         locked(&self.tokens).retain(|_, cached| cached.expires > live);
+        locked(&self.missing_revs).retain(|_, found| found.elapsed() < MISSING_REV_MEMORY);
 
         let stats = self.mirror_stats();
         let total_bytes = stats

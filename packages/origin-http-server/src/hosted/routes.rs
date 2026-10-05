@@ -437,9 +437,36 @@ pub(super) async fn resolve_rev(
     token: Option<&str>,
     rev: &str,
 ) -> Result<String, OriginError> {
+    find_rev(state, lease, token, rev, false).await
+}
+
+/// [`resolve_rev`] for diff and review, which a chat card asks once per
+/// file: a commit the space did not have after a fetch is remembered for
+/// [`super::cache::MISSING_REV_MEMORY`] and answered `rev_not_found`
+/// meanwhile without fetching again.
+async fn resolve_reviewed_rev(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    rev: &str,
+) -> Result<String, OriginError> {
+    find_rev(state, lease, token, rev, true).await
+}
+
+async fn find_rev(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    rev: &str,
+    remember_missing: bool,
+) -> Result<String, OriginError> {
     let rev = parse_rev(rev)?;
     if readable_here(state, lease, &rev).await? {
         return Ok(rev);
+    }
+    let project = lease.project();
+    if remember_missing && state.cache.recently_missing(project, &rev) {
+        return Err(ViewError::RevNotFound.into());
     }
     state
         .cache
@@ -447,6 +474,9 @@ pub(super) async fn resolve_rev(
         .await?;
     if readable_here(state, lease, &rev).await? {
         return Ok(rev);
+    }
+    if remember_missing {
+        state.cache.note_missing(project, &rev);
     }
     Err(ViewError::RevNotFound.into())
 }
@@ -832,7 +862,9 @@ async fn reviewed_commit(
             Ok(Some(fetched.commit))
         }
         None => match commit {
-            Some(commit) => Ok(Some(resolve_rev(state, lease, token, commit).await?)),
+            Some(commit) => Ok(Some(
+                resolve_reviewed_rev(state, lease, token, commit).await?,
+            )),
             None => Ok(None),
         },
     }
@@ -988,11 +1020,13 @@ async fn handle_git_diff(
     // against the commit's first parent instead, as the earlier gateway
     // did.
     let base = match query.base.as_deref().map(str::trim) {
-        Some(base) if !base.is_empty() => match resolve_rev(&state, &lease, token, base).await {
-            Ok(base) => Some(base),
-            Err(error) if is_rev_not_found(&error) => None,
-            Err(error) => return Err(error),
-        },
+        Some(base) if !base.is_empty() => {
+            match resolve_reviewed_rev(&state, &lease, token, base).await {
+                Ok(base) => Some(base),
+                Err(error) if is_rev_not_found(&error) => None,
+                Err(error) => return Err(error),
+            }
+        }
         _ => None,
     };
     let main = if commit.is_none() {
