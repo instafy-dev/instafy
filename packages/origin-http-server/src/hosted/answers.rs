@@ -1,5 +1,6 @@
 //! The gateway's answers to a change it refuses, as JSON `{error, code,
-//! ...}` with the paths concerned (at most [`MAX_REPORTED_PATHS`]).
+//! ...}` with the paths concerned (at most [`MAX_REPORTED_PATHS`]; a
+//! restore's conflicts all, up to as many as a restore can keep).
 
 use axum::http::StatusCode;
 
@@ -43,11 +44,16 @@ pub(super) fn report(
 
 /// `paths` as an error answer lists them: sorted, at most
 /// [`MAX_REPORTED_PATHS`], with how many more there were.
-pub(super) fn listed(mut paths: Vec<String>) -> serde_json::Value {
+pub(super) fn listed(paths: Vec<String>) -> serde_json::Value {
+    listed_up_to(paths, MAX_REPORTED_PATHS)
+}
+
+/// [`listed`], at most `most` paths.
+fn listed_up_to(mut paths: Vec<String>, most: usize) -> serde_json::Value {
     paths.sort();
     paths.dedup();
-    let more = paths.len().saturating_sub(MAX_REPORTED_PATHS);
-    paths.truncate(MAX_REPORTED_PATHS);
+    let more = paths.len().saturating_sub(most);
+    paths.truncate(most);
     if more > 0 {
         serde_json::json!({ "paths": paths, "morePaths": more })
     } else {
@@ -204,12 +210,18 @@ pub(super) fn revert_conflict(head: &str, paths: Vec<String>) -> OriginError {
     )
 }
 
+/// 409 for the paths of a restore both sides changed. Every one is listed,
+/// as on Desktop, up to as many as a restore can keep, so the person can
+/// choose for all of them and send them back at once.
 pub(super) fn restore_conflict(head: Option<&str>, paths: Vec<String>) -> OriginError {
     report(
         StatusCode::CONFLICT,
         "restore_conflict",
         "the saved version changed these files too; choose a version for each",
-        with_fields(listed(paths), serde_json::json!({ "head": head })),
+        with_fields(
+            listed_up_to(paths, crate::publish::MAX_RESTORE_KEEP_PATHS),
+            serde_json::json!({ "head": head }),
+        ),
     )
 }
 

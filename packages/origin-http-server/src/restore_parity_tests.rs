@@ -869,6 +869,68 @@ async fn work_main_already_holds_is_not_judged() {
     }
 }
 
+/// Every clash is named in one answer, so the person can choose for all of
+/// them at once: 250 files both sides changed are all listed, with nothing
+/// left for a later round, and sent back as `keep` they restore the rest and
+/// let the ref go. Both modes take as many kept paths as a restore allows,
+/// and refuse one more.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_conflict_is_listed_and_can_be_kept_at_once() {
+    let most = crate::publish::MAX_RESTORE_KEEP_PATHS;
+    let paths: Vec<String> = (0..250).map(|index| format!("f{index:03}.md")).collect();
+    for mode in MODES {
+        let seed: Vec<(&str, &[u8])> = paths
+            .iter()
+            .map(|path| (path.as_str(), &b"seed\n"[..]))
+            .collect();
+        let space = Space::new(mode, &seed).await;
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let mut work: Vec<(&str, Option<&[u8]>)> = paths
+            .iter()
+            .map(|path| (path.as_str(), Some(&b"work\n"[..])))
+            .collect();
+        work.push(("other.md", Some(b"other\n")));
+        let commit = space.park(&work, &reference);
+        let theirs: Vec<(&str, Option<&[u8]>)> = paths
+            .iter()
+            .map(|path| (path.as_str(), Some(&b"main\n"[..])))
+            .collect();
+        space.push(&theirs, "main changes them all");
+
+        let (status, answer) = space
+            .restore(json!({ "ref": reference, "rev": commit }))
+            .await;
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (409, Some("restore_conflict")),
+            "{mode:?}: {answer}"
+        );
+        assert_eq!(answer["paths"], json!(paths), "{mode:?}");
+        assert!(answer.get("morePaths").is_none(), "{mode:?}: {answer}");
+
+        let mut keep = paths.clone();
+        keep.extend((paths.len()..=most).map(|index| format!("unrelated/{index}.md")));
+        assert_eq!(keep.len(), most + 1);
+        let (status, answer) = space
+            .restore(json!({ "ref": reference, "rev": commit, "keep": keep }))
+            .await;
+        assert_eq!(status, 400, "{mode:?}: {answer}");
+        keep.pop();
+        let body = space
+            .restored(json!({ "ref": reference, "rev": commit, "keep": keep }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"].as_array().map(Vec::len),
+            Some(paths.len()),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(space.on_main("other.md").as_deref(), Some(&b"other\n"[..]));
+        assert_eq!(space.on_main("f000.md").as_deref(), Some(&b"main\n"[..]));
+    }
+}
+
 /// One canonical history served by both modes: a salvage ref restored in
 /// one mode, with nothing left to bring back, is recorded once, by that
 /// mode's empty restore commit. The other mode lists it as restored too,
