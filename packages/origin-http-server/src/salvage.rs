@@ -541,7 +541,8 @@ fn move_plain_git(root: &Path) -> Result<()> {
 
 /// Why git must not run in the repository at `git_dir`, if so: its parts
 /// must be real files and folders, and nothing may point git at another
-/// repository's objects or history.
+/// repository's objects or history, or make what the checks read differ
+/// from what a push sends (replacement refs).
 fn repository_problem(git_dir: &Path) -> Option<String> {
     for (name, folder) in [("HEAD", false), ("objects", true), ("refs", true)] {
         let kind = classify::kind_of(&git_dir.join(name));
@@ -573,6 +574,16 @@ fn repository_problem(git_dir: &Path) -> Option<String> {
                 "its repository has {name}, which git is never run with"
             ));
         }
+    }
+    let packed_replace = std::fs::read(git_dir.join("packed-refs"))
+        .map(|packed| {
+            packed
+                .windows(b" refs/replace/".len())
+                .any(|window| window == b" refs/replace/")
+        })
+        .unwrap_or(false);
+    if classify::kind_of(&git_dir.join("refs/replace")) != Kind::Missing || packed_replace {
+        return Some("its repository has replacement refs, which git is never run with".into());
     }
     None
 }
