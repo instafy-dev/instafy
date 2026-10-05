@@ -1975,7 +1975,8 @@ fn a_filtered_history_needs_an_ack_and_keeps_its_bundle() {
 /// A version only a local commit held may not reach canonical (over the
 /// size cap, or a gitlink), but the path's version at the tip may: the tip's
 /// version goes into the filtered commit, and only the earlier version is
-/// reported as left out, with the commit that held it.
+/// reported as left out, with the commit that held it. A path whose version
+/// at the tip is itself refused is filtered at once and reported once.
 #[test]
 fn a_version_only_history_held_never_drops_the_tips_version() {
     let gateway = Gateway::new();
@@ -1990,6 +1991,11 @@ fn a_version_only_history_held_never_drops_the_tips_version() {
     write(&entry.join("src/app.js"), b"app\n");
     ig(&entry, &["add", "-A"]);
     entry_commit(&entry, "Shrink the clip");
+    // An oversized file the tip still holds.
+    write(&entry.join("media/still.bin"), &vec![9u8; 21 * 1024 * 1024]);
+    ig(&entry, &["add", "-A"]);
+    entry_commit(&entry, "Add a still");
+    let still = ig(&entry, &["rev-parse", "HEAD:media/still.bin"]);
     // A gitlink, then a folder of files at the same path.
     ig(
         &entry,
@@ -2022,8 +2028,8 @@ fn a_version_only_history_held_never_drops_the_tips_version() {
     );
     assert_eq!(show(&format!("{salvaged}:vendor/lib/index.js")), "vendored");
     assert_eq!(show(&format!("{salvaged}:src/app.js")), "app");
-    // Neither the oversized version nor the commits holding it went.
-    for object in [&big, &big_commit, &link_commit] {
+    // Neither the oversized versions nor the commits holding them went.
+    for object in [&big, &still, &big_commit, &link_commit] {
         assert!(
             !git_output(&canonical, &["cat-file", "-e", object], None)
                 .status
@@ -2039,6 +2045,11 @@ fn a_version_only_history_held_never_drops_the_tips_version() {
                 "size": 21 * 1024 * 1024,
                 "reason": "too_large",
                 "commit": big_commit,
+            },
+            {
+                "path": "media/still.bin",
+                "size": 21 * 1024 * 1024,
+                "reason": "too_large",
             },
             {
                 "path": "vendor/lib",
