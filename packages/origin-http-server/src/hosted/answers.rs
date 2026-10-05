@@ -3,14 +3,31 @@
 
 use axum::http::StatusCode;
 
+use super::cache::{disk_full, says_disk_full};
 use crate::error::OriginError;
 use crate::publish_policy::RejectReason;
 
 /// Paths named in one answer.
 const MAX_REPORTED_PATHS: usize = 200;
 
+/// An unexpected failure: 500, or 503 `disk_full` when it says the
+/// gateway's disk is full.
 pub(super) fn internal(error: impl std::fmt::Display) -> OriginError {
-    OriginError::internal(error.to_string())
+    or_disk_full(OriginError::internal(error.to_string()))
+}
+
+/// `error`, or 503 `disk_full` when it is an unexpected failure that says
+/// the gateway's disk is full.
+pub(super) fn or_disk_full(error: OriginError) -> OriginError {
+    match &error {
+        OriginError::Internal(message) if says_disk_full(message) => disk_full(),
+        _ => error,
+    }
+}
+
+/// Whether `error` is 503 `disk_full`.
+pub(super) fn is_disk_full(error: &OriginError) -> bool {
+    matches!(error, OriginError::RetryLater { code, .. } if *code == "disk_full")
 }
 
 pub(super) fn report(
@@ -232,5 +249,37 @@ pub(super) fn hook_refusal(path: String, reason: RejectReason) -> OriginError {
         RejectReason::TooLarge => policy_rejected(vec![path], RejectReason::TooLarge),
         RejectReason::Unsupported => unsupported_entry(vec![path]),
         other => excluded_path(vec![(path, other)]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse as _;
+
+    #[test]
+    fn a_full_disk_is_asked_to_retry() {
+        for text in [
+            "failed to write ./objects/ab: No space left on device (os error 28)",
+            "git hash-object failed: fatal: write error: Disk quota exceeded",
+        ] {
+            let error = internal(text);
+            assert!(is_disk_full(&error), "{text}");
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                Some("2")
+            );
+        }
+        let other = internal("git write-tree failed: fatal: unable to read tree");
+        assert!(!is_disk_full(&other));
+        assert_eq!(
+            other.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

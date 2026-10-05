@@ -8,7 +8,9 @@ use std::time::{Duration, SystemTime};
 
 use uuid::Uuid;
 
-use super::cache::{plan_eviction, Freshness, MirrorCache, MirrorStat, EVICT_IDLE_AFTER};
+use super::cache::{
+    plan_eviction, plan_space_eviction, Freshness, MirrorCache, MirrorStat, EVICT_IDLE_AFTER,
+};
 use crate::config::ServerConfig;
 use crate::test_support::git_in;
 
@@ -603,6 +605,75 @@ fn eviction_removes_least_recently_used_idle_mirrors_until_under_the_cap() {
     // Exactly one hour is not idle yet.
     let edge = vec![stat(0, 10, now - EVICT_IDLE_AFTER, 0)];
     assert!(plan_eviction(&edge, 0, now).is_empty());
+}
+
+/// On a disk short of space, mirrors nobody holds go (least recently used
+/// first, however recently used) until enough is freed.
+#[test]
+fn a_disk_short_of_space_removes_unheld_mirrors_until_enough_is_free() {
+    let now = SystemTime::now();
+    let ids: Vec<Uuid> = (0..4).map(|n| Uuid::from_u128(n + 1)).collect();
+    let stat = |index: usize, bytes: u64, ago: u64, leases: usize| MirrorStat {
+        project: ids[index],
+        bytes,
+        last_use: now - Duration::from_secs(ago),
+        leases,
+    };
+    let stats = vec![
+        stat(0, 40, 60, 0),
+        stat(1, 40, 120, 0),
+        stat(2, 40, 600, 1),
+        stat(3, 40, 30, 0),
+    ];
+    assert_eq!(plan_space_eviction(&stats, 50), vec![ids[1], ids[0]]);
+    assert_eq!(plan_space_eviction(&stats, 1), vec![ids[1]]);
+    assert!(plan_space_eviction(&stats, 0).is_empty());
+    // Not enough to free: every mirror nobody holds, the held one stays.
+    assert_eq!(
+        plan_space_eviction(&stats, 1_000),
+        vec![ids[1], ids[0], ids[3]]
+    );
+}
+
+/// The sweeper keeps free space on the cache's disk, not only the cap: with
+/// the disk short of space, a mirror used a minute ago that nobody holds is
+/// removed though the cache is far under its cap; a held one stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sweeper_keeps_free_space_on_the_disk() {
+    let sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"one\n"))], "one");
+    let other = HostedScenario::new();
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
+    let reading = free.clone();
+    let cache = Arc::new(sc.open_cache().with_free_space(1024 * 1024, move |_| {
+        Some(reading.load(std::sync::atomic::Ordering::SeqCst))
+    }));
+    let held = cache.lease(sc.project);
+    cache
+        .resolve_main(&held, Freshness::Fresh, None)
+        .await
+        .unwrap();
+    let released = cache.lease(other.project);
+    cache.ensure_mirror(&released.mirror()).unwrap();
+    drop(released);
+    let other_mirror = sc
+        .root
+        .join(".git-cache")
+        .join(format!("{}.git", other.project));
+    assert!(other_mirror.is_dir());
+    let sweep = |cache: Arc<MirrorCache>| async move {
+        tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
+            .await
+            .unwrap()
+    };
+
+    // Plenty of space: nothing goes.
+    assert!(sweep(cache.clone()).await.evicted.is_empty());
+    // Short of space: the mirror nobody holds goes at once.
+    free.store(10, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(sweep(cache.clone()).await.evicted, vec![other.project]);
+    assert!(!other_mirror.exists());
+    assert!(sc.mirror().is_dir(), "a held mirror stays");
 }
 
 /// A sweep measures only mirrors that changed since the last one: a mirror
