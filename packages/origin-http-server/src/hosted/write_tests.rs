@@ -1466,6 +1466,106 @@ async fn imports_are_committed_once_and_found_by_their_key() {
     );
 }
 
+/// An import whose files `main` already holds still leaves its receipt (a
+/// commit with no changes carrying its key), so a retry after a lost
+/// answer replays it instead of writing over what was saved since.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
+    let mut sc = HostedScenario::new();
+    let head = sc.push(&[("src/app.ts", Some(b"v1\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = serve(&sc).await;
+    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let key = "imp:feedfacefeedface";
+    let request = manifest(
+        &["src/app.ts"],
+        &[],
+        json!({
+            "leaseId": controller.lease.to_string(),
+            "idempotencyKey": key,
+            "requestFingerprint": "sha256:cccc",
+            "commitMessage": "Import from GitHub",
+        }),
+    );
+    let archive = zip(&[("src/app.ts", b"v1\n")]);
+    let answer = apply_as(&served, request.clone(), &archive, Some(&import), None).await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
+    let receipt = rev(&answer);
+    assert_eq!(answer.json()["committed"], true);
+    assert_eq!(answer.json()["baseRev"], head.as_str());
+    assert_eq!(parent(&sc, &receipt), head);
+    assert_eq!(
+        canonical(&sc, &["rev-parse", &format!("{receipt}^{{tree}}")]),
+        canonical(&sc, &["rev-parse", &format!("{head}^{{tree}}")])
+    );
+    assert_eq!(
+        canonical(&sc, &["log", "-1", "--format=%B", &receipt]),
+        format!("Import from GitHub\n\nInstafy-Apply-Key: {key}\nInstafy-Apply-Fingerprint: sha256:cccc")
+    );
+
+    let status = post_as(
+        &served,
+        "/apply/status",
+        json!({ "idempotencyKey": key, "requestFingerprint": "sha256:cccc" }),
+        &import,
+    )
+    .await;
+    assert_eq!(status.status, 200, "{}", status.json());
+    assert_eq!(status.json()["rev"], receipt.as_str());
+    assert_eq!(
+        (
+            status.json()["fileCount"].clone(),
+            status.json()["bytesWritten"].clone()
+        ),
+        (json!(0), json!(0))
+    );
+
+    // A runtime saves; the retried import replays and leaves that alone.
+    let later = sc.push(&[("src/app.ts", Some(b"v2 by a runtime\n"))], "runtime");
+    let again = apply_as(&served, request, &archive, Some(&import), None).await;
+    assert_eq!(again.status, 200, "{}", again.json());
+    assert_eq!(again.json()["rev"], receipt.as_str());
+    assert_eq!(again.json()["replayed"], true);
+    assert_eq!(sc.canonical_main().as_deref(), Some(later.as_str()));
+    assert_eq!(
+        show(&sc, &later, "src/app.ts").unwrap(),
+        b"v2 by a runtime\n"
+    );
+
+    // An import into a space without main that saves nothing leaves a
+    // receipt too (a first commit with an empty tree).
+    let mut empty = HostedScenario::new();
+    let controller = StubController::start(empty.project).await;
+    controller.configure(&mut empty);
+    let served = serve(&empty).await;
+    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let answer = apply_as(
+        &served,
+        manifest(
+            &[".env"],
+            &[],
+            json!({
+                "leaseId": controller.lease.to_string(),
+                "idempotencyKey": key,
+                "requestFingerprint": "sha256:cccc",
+            }),
+        ),
+        &zip(&[(".env", b"KEY=1\n")]),
+        Some(&import),
+        None,
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
+    assert_eq!(answer.json()["skippedPaths"][0]["path"], ".env");
+    let receipt = rev(&answer);
+    assert_eq!(empty.canonical_main().as_deref(), Some(receipt.as_str()));
+    assert_eq!(
+        git_in(&empty.remote(), &["ls-tree", "-r", "--name-only", &receipt]),
+        ""
+    );
+}
+
 /// r3 test 14 (Q6 form): a person's save is authored by the name and
 /// pseudonymous address on their token, committed by the gateway, and
 /// never names the token's subject; History reads it as a person's.
