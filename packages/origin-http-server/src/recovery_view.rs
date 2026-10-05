@@ -1525,6 +1525,26 @@ pub(crate) fn describe(
     Ok(items)
 }
 
+/// The reason a restore gives for a path the person chose to keep as the
+/// saved version has it.
+pub(crate) const KEPT: &str = "kept";
+
+/// Why a restore leaves a change of the work out, if it does: refused first
+/// (`refused`: why it may never be restored here), so a path that can never
+/// come back is refused even below a kept folder, and only then [`KEPT`]
+/// when the person kept it (`kept`). Only the person's own choices let a
+/// recovery ref go once the rest is on `main`, so the order decides whether
+/// work is removed on their behalf. Desktop and the gateway decide by it.
+pub(crate) fn left_out_reason(
+    refused: Option<crate::publish_policy::RejectReason>,
+    kept: bool,
+) -> Option<&'static str> {
+    match refused {
+        Some(reason) => Some(reason.name()),
+        None => kept.then_some(KEPT),
+    }
+}
+
 /// The trailer a restore commit names the ref it restored with. Only the
 /// origin itself writes it (as the commit's committer), in exactly
 /// [`restore_commit_message`]; saves drop it, like every `Instafy-` trailer

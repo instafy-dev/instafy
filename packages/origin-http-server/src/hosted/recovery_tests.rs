@@ -282,6 +282,79 @@ async fn conflicts_are_answered_and_settled_by_the_person() {
     );
 }
 
+/// Keeping a folder keeps what the person chose there, but a file below it
+/// that can never be saved here (a secret, a file the space ignores) is
+/// still refused, not kept on request: the ref, the only copy of that work
+/// on canonical, stays, and the answer says why (5.5's Desktop test, on the
+/// gateway).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_folder_never_lets_refused_work_below_it_go() {
+    let sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"r\n"))], "seed");
+    let unsaved = sc.side_commit(
+        &[
+            ("cfg/app.txt", b"app\n"),
+            ("cfg/.env", b"TOKEN=1\n"),
+            ("cfg/debug.log", b"log\n"),
+            ("other.md", b"other\n"),
+        ],
+        "unsaved",
+    );
+    let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+    sc.push_ref(&unsaved, &reference);
+    // The space ignores logs since.
+    sc.push(&[(".gitignore", Some(b"*.log\n"))], "ignore logs");
+    let served = serve(&sc).await;
+
+    let body = ok(&restore(
+        &served,
+        json!({ "ref": reference, "rev": unsaved, "keep": ["cfg"] }),
+    )
+    .await);
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(
+        not_restored(&body),
+        [
+            ("cfg/.env", "secret"),
+            ("cfg/app.txt", "kept"),
+            ("cfg/debug.log", "ignored"),
+        ]
+        .map(|(path, reason)| (path.to_string(), reason.to_string()))
+        .to_vec()
+    );
+    assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(
+        canonical_ref(&sc, &reference).as_deref(),
+        Some(unsaved.as_str())
+    );
+    let restored = body["rev"].as_str().unwrap();
+    assert_eq!(
+        show(&sc, restored, "other.md").as_deref(),
+        Some(&b"other\n"[..])
+    );
+    for path in ["cfg/app.txt", "cfg/.env", "cfg/debug.log"] {
+        assert!(show(&sc, restored, path).is_none(), "{path}");
+    }
+
+    // Only kept paths left out: the ref goes.
+    let only_kept = sc.side_commit(
+        &[("cfg/app.txt", b"app\n"), ("more.md", b"more\n")],
+        "unsaved",
+    );
+    let only_kept_ref = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
+    sc.push_ref(&only_kept, &only_kept_ref);
+    let body = ok(&restore(
+        &served,
+        json!({ "ref": only_kept_ref, "rev": only_kept, "keep": ["cfg"] }),
+    )
+    .await);
+    assert_eq!(
+        not_restored(&body),
+        vec![("cfg/app.txt".to_string(), "kept".to_string())]
+    );
+    assert_eq!(body["refDeleted"], true, "{body}");
+}
+
 /// Secrets, build output, files the space now ignores and files over the
 /// size cap are never restored; they are reported, and the ref that still
 /// holds them stays (marked restored in the list).

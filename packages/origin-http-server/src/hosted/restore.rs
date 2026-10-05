@@ -6,19 +6,24 @@
 //! leaves some of what `Q` changes as `E` has it, reporting each such path
 //! in `notRestored` with why:
 //!
-//! - `kept`: the person chose to keep the saved version (`keep`; a path
-//!   also covers everything below it);
-//! - `excluded`, `secret`, `attachment`: a path that may never be saved
-//!   (build output and dependencies, Instafy metadata, credentials, legacy
-//!   chat uploads), as for an upload; a delete follows the same rule as an
-//!   upload's;
+//! - `excluded`, `secret`, `attachment`, `unsupported`: a path that may
+//!   never be saved (build output and dependencies, Instafy metadata,
+//!   credentials, legacy chat uploads, unsafe paths and submodules), as for
+//!   an upload; a delete follows the same rule as an upload's;
 //! - `too_large`: a file over the size a save may hold;
 //! - `ignored`: a new file the restored tree's `.gitignore` files ignore;
-//! - a reason from the shard, for a path it refused on an earlier attempt.
+//! - a reason from the shard, for a path it refused on an earlier attempt;
+//! - `kept`: the person chose to keep the saved version (`keep`; a path
+//!   also covers everything below it).
+//!
+//! Refusal comes first, as on Desktop
+//! ([`crate::publish_policy::restore_refusal`],
+//! [`crate::recovery_view::left_out_reason`]): a secret or ignored file
+//! below a kept folder is refused, not kept, so its ref stays.
 //!
 //! What both sides changed differently is a conflict: 409
-//! `restore_conflict` with the paths, unless the path is kept or could
-//! never be saved anyway. With a `baseRev` other than `main`, every path
+//! `restore_conflict` with the paths, unless the path could never be saved
+//! anyway or is kept. With a `baseRev` other than `main`, every path
 //! the restore changes must be as it was at `baseRev` (409 `head_moved`),
 //! as for an upload.
 
@@ -27,19 +32,15 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::answers::{head_moved, hook_refusal, internal, reason_name, restore_conflict};
+use super::answers::{head_moved, hook_refusal, internal, restore_conflict};
 use super::change::{check_ignored, entries_at, gitignores_for, is_regular, moved_since};
 use super::read::readable;
 use crate::error::OriginError;
 use crate::publish::parse_raw_changes;
-use crate::publish_policy::{
-    deletion_allowed, is_unsafe_path, unpublishable_reason, RejectReason, MAX_PUBLISH_BLOB_BYTES,
-};
+use crate::publish_policy::{restore_refusal, RejectReason};
+use crate::recovery_view::{left_out_reason, KEPT};
 use crate::tree_merge::{changed_paths, three_way, tree_with_entries_from};
 use crate::workspace_git::WorkspaceGit;
-
-/// The reason given for a path the person chose to keep as it is.
-pub(crate) const KEPT: &str = "kept";
 
 /// A path a restore left as `main` has it, and why.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -122,19 +123,20 @@ impl Restore {
         let mut withheld: BTreeMap<String, &'static str> = self
             .shard_refused
             .iter()
-            .map(|(path, reason)| (path.clone(), reason_name(*reason)))
+            .map(|(path, reason)| (path.clone(), reason.name()))
             .collect();
 
         // Conflicts keep `main`'s entry already; only real ones stop the
-        // restore.
+        // restore. A path that may never be saved is refused before a keep
+        // is looked at.
         let mut conflicts = Vec::new();
         for path in &merged.conflicts {
-            if self.kept(path) {
-                withheld.insert(path.clone(), KEPT);
-            } else if let Some(reason) = never_saved(path) {
-                withheld.insert(path.clone(), reason_name(reason));
-            } else {
-                conflicts.push(path.clone());
+            let refused = restore_refusal(path, false, "", None);
+            match left_out_reason(refused, self.kept(path)) {
+                Some(reason) => {
+                    withheld.insert(path.clone(), reason);
+                }
+                None => conflicts.push(path.clone()),
             }
         }
         if !conflicts.is_empty() {
@@ -171,27 +173,21 @@ impl Restore {
         let mut added = Vec::new();
         for change in &changes {
             let path = &change.path;
-            let reason = if withheld.contains_key(path) {
-                None
-            } else if self.kept(path) {
-                Some(KEPT)
-            } else if change.status == 'D' {
-                (!deletion_allowed(path)).then(|| reason_name(RejectReason::Excluded))
-            } else if let Some(reason) = never_saved(path) {
-                Some(reason_name(reason))
-            } else if sizes
-                .get(&change.new_oid)
-                .is_some_and(|size| *size > MAX_PUBLISH_BLOB_BYTES)
-            {
-                Some(reason_name(RejectReason::TooLarge))
-            } else {
-                if change.status == 'A' {
+            if !withheld.contains_key(path) {
+                let refused = restore_refusal(
+                    path,
+                    change.status == 'D',
+                    &change.new_mode,
+                    sizes.get(&change.new_oid).copied(),
+                );
+                if let Some(reason) = left_out_reason(refused, self.kept(path)) {
+                    withheld.insert(path.clone(), reason);
+                }
+                // New files go through the ignore check, kept ones too: a
+                // file the space ignores is refused, not kept.
+                if refused.is_none() && change.status == 'A' {
                     added.push(path.clone());
                 }
-                None
-            };
-            if let Some(reason) = reason {
-                withheld.insert(path.clone(), reason);
             }
             if withheld.contains_key(path) {
                 reset.push(path.clone());
@@ -214,9 +210,16 @@ impl Restore {
             let ignored = check_ignored(git, scratch, &rules, &added)?;
             if !ignored.is_empty() {
                 for path in &ignored {
-                    withheld.insert(path.clone(), reason_name(RejectReason::Ignored));
+                    withheld.insert(path.clone(), RejectReason::Ignored.name());
                 }
-                tree = tree_with_entries_from(git, &tree, main, &ignored).map_err(internal)?;
+                let restored: Vec<String> = ignored
+                    .iter()
+                    .filter(|path| !reset.contains(path))
+                    .cloned()
+                    .collect();
+                if !restored.is_empty() {
+                    tree = tree_with_entries_from(git, &tree, main, &restored).map_err(internal)?;
+                }
             }
         }
 
@@ -262,9 +265,4 @@ impl Restore {
         self.shard_refused.insert(path, reason);
         Ok(())
     }
-}
-
-/// Why `path` may never be added to or changed on `main`, if so.
-fn never_saved(path: &str) -> Option<RejectReason> {
-    unpublishable_reason(path).or_else(|| is_unsafe_path(path).then_some(RejectReason::Excluded))
 }

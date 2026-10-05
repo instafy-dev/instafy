@@ -37,6 +37,48 @@ pub enum RejectReason {
     Unsupported,
 }
 
+impl RejectReason {
+    /// The reason's name in answers (`excluded`, `secret`, `attachment`,
+    /// `ignored`, `too_large`, `policy`, `unsupported`), as it serializes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Excluded => "excluded",
+            Self::Secret => "secret",
+            Self::Attachment => "attachment",
+            Self::Ignored => "ignored",
+            Self::TooLarge => "too_large",
+            Self::Policy => "policy",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Why a restore of unsaved work may never bring a change at `path` back,
+/// if so, by the rules a save follows: a delete only where deletes are
+/// allowed; a write never to an excluded, secret or attachment path, an
+/// unsafe or reserved path or as a submodule (`new_mode` 160000), nor of a
+/// blob larger than [`MAX_PUBLISH_BLOB_BYTES`] (`size`, when known). Desktop
+/// and the hosted gateway restore by it; the space's ignore rules each mode
+/// applies itself.
+pub fn restore_refusal(
+    path: &str,
+    deleted: bool,
+    new_mode: &str,
+    size: Option<u64>,
+) -> Option<RejectReason> {
+    if deleted {
+        return (!deletion_allowed(path)).then_some(RejectReason::Excluded);
+    }
+    if let Some(reason) = unpublishable_reason(path) {
+        return Some(reason);
+    }
+    if is_unsafe_path(path) || new_mode == "160000" {
+        return Some(RejectReason::Unsupported);
+    }
+    size.is_some_and(|size| size > MAX_PUBLISH_BLOB_BYTES)
+        .then_some(RejectReason::TooLarge)
+}
+
 /// The reason `path` may never be published, if any.
 pub fn unpublishable_reason(path: &str) -> Option<RejectReason> {
     if git_service::policy::repo_policy_denies_path(path) || is_sync_reserved_path(path) {

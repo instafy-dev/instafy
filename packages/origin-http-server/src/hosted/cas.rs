@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::answers::{idempotency_conflict, internal, main_busy, push_rejected, reason_name};
+use super::answers::{idempotency_conflict, internal, main_busy, push_rejected};
 use super::cache::{is_fetch_pending, Freshness, MirrorCache, MirrorLease};
 use super::change::Change;
 use super::routes::Admission;
@@ -524,11 +524,7 @@ pub(crate) fn cas_commit(
                 info!(attempt, detail = %detail, "another save landed first; trying again");
             }
             PushClass::PathRejected { path, reason } => {
-                info!(
-                    attempt,
-                    reason = reason_name(reason),
-                    "the shard refused a path"
-                );
+                info!(attempt, reason = reason.name(), "the shard refused a path");
                 change.refused(path, reason)?;
             }
             PushClass::Rejected(detail) => {
