@@ -109,6 +109,10 @@ pub(crate) const MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// git never packs a mirror by itself).
 const LOOSE_OBJECT_LIMIT: u64 = 6_700;
 const PACK_LIMIT: u64 = 50;
+/// A mirror whose packing changed nothing (loose objects git keeps loose:
+/// recent ones nothing reaches) is not packed again for this long, as git
+/// waits a day after such a `gc --auto`.
+const PACK_RETRY_AFTER: Duration = Duration::from_secs(24 * 3600);
 
 /// How fresh a request needs `main` to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,6 +367,8 @@ pub(crate) struct MirrorCache {
     sweep_again: AtomicBool,
     /// Held while mirrors are packed (outside the sweep's lock).
     packing: Mutex<()>,
+    /// Mirrors whose last packing changed nothing, and when that was.
+    pack_skipped: Mutex<HashMap<Uuid, Instant>>,
     /// The size of `.legacy/` and when it was measured.
     legacy_bytes: Mutex<Option<(Instant, Option<u64>)>>,
     #[cfg(test)]
@@ -436,6 +442,7 @@ impl MirrorCache {
             sweeping: Mutex::new(()),
             sweep_again: AtomicBool::new(false),
             packing: Mutex::new(()),
+            pack_skipped: Mutex::new(HashMap::new()),
             legacy_bytes: Mutex::new(None),
             #[cfg(test)]
             test_packed_while_sweeping: Mutex::new(None),
@@ -1281,6 +1288,15 @@ impl MirrorCache {
         bytes
     }
 
+    /// Whether `project`'s mirror is left unpacked for now (its last
+    /// packing changed nothing).
+    #[cfg(test)]
+    pub(crate) fn pack_skipped(&self, project: Uuid) -> bool {
+        locked(&self.pack_skipped)
+            .get(&project)
+            .is_some_and(|at| at.elapsed() < PACK_RETRY_AFTER)
+    }
+
     /// Whether the last packing ran while a sweep held its lock.
     #[cfg(test)]
     pub(crate) fn packed_while_sweeping(&self) -> Option<bool> {
@@ -1291,12 +1307,21 @@ impl MirrorCache {
     /// loose objects or more than [`PACK_LIMIT`] packs, as `git gc --auto`
     /// would, but here: in the foreground, held against eviction, and one
     /// mirror at a time. Refs are left as they are (fetches move them
-    /// meanwhile), and no commit-graph is written. Blocking; whether it ran.
+    /// meanwhile), and no commit-graph is written. A packing that changed
+    /// nothing is not counted, and the mirror is left alone for
+    /// [`PACK_RETRY_AFTER`]. Blocking; whether it packed anything.
     fn pack_mirror(&self, project: Uuid) -> bool {
         let (loose_limit, pack_limit) = self.pack_limits;
+        if locked(&self.pack_skipped)
+            .get(&project)
+            .is_some_and(|at| at.elapsed() < PACK_RETRY_AFTER)
+        {
+            return false;
+        }
         let held = self.hold(project, false);
         let dir = held.dir().to_path_buf();
-        if !needs_packing(&dir, loose_limit, pack_limit) {
+        let before = packing_state(&dir);
+        if !before.needs_packing(loose_limit, pack_limit) {
             return false;
         }
         // git reads both as an `int`; 0 would turn `gc --auto` off.
@@ -1322,11 +1347,8 @@ impl MirrorCache {
             *locked(&self.test_packed_while_sweeping) = Some(self.sweeping.try_lock().is_err());
         }
         let ran = WorkspaceGit::bare(&dir, None).run(&args);
-        self.size_changed(project);
-        match ran {
-            Ok(output) if output.status.success() => {
-                info!(%project, "packed a mirror");
-            }
+        match &ran {
+            Ok(output) if output.status.success() => {}
             Ok(output) => {
                 warn!(%project, error = %failure(&args, &output), "packing a mirror failed");
             }
@@ -1334,6 +1356,19 @@ impl MirrorCache {
                 warn!(%project, error = %format!("{error:#}"), "packing a mirror failed");
             }
         }
+        let after = packing_state(&dir);
+        if after.needs_packing(loose_limit, pack_limit) {
+            info!(
+                %project,
+                "a mirror keeps loose objects git does not pack; packing it again in a day"
+            );
+            locked(&self.pack_skipped).insert(project, Instant::now());
+        }
+        if after == before {
+            return false;
+        }
+        self.size_changed(project);
+        info!(%project, "packed a mirror");
         true
     }
 
@@ -1594,10 +1629,24 @@ fn remove_stale_locks(dir: &Path) -> usize {
         + sweep(&dir.join("objects/pack"), false)
 }
 
-/// Whether the mirror at `dir` holds about `loose_limit` loose objects or
-/// more than `pack_limit` packs. Loose objects are estimated as `git gc
-/// --auto` does: from one of the 256 fan-out folders.
-fn needs_packing(dir: &Path, loose_limit: u64, pack_limit: u64) -> bool {
+/// What `git gc --auto` looks at in a mirror: loose objects in the one
+/// fan-out folder it samples (`objects/17`) and packs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PackingState {
+    sampled: u64,
+    packs: u64,
+}
+
+impl PackingState {
+    /// Whether `gc --auto` with these limits would pack: more than
+    /// `ceil(loose_limit / 256)` loose objects sampled, or more than
+    /// `pack_limit` packs.
+    fn needs_packing(self, loose_limit: u64, pack_limit: u64) -> bool {
+        self.sampled > loose_limit.div_ceil(256) || self.packs > pack_limit
+    }
+}
+
+fn packing_state(dir: &Path) -> PackingState {
     let count = |folder: &Path, keep: &dyn Fn(&str) -> bool| -> u64 {
         std::fs::read_dir(folder)
             .map(|entries| {
@@ -1609,11 +1658,20 @@ fn needs_packing(dir: &Path, loose_limit: u64, pack_limit: u64) -> bool {
             .unwrap_or(0)
     };
     let objects = dir.join("objects");
+    // The rest of an object name after its two-digit folder (SHA-1 or
+    // SHA-256), as git counts them.
     let sampled = count(&objects.join("17"), &|name| {
-        name.len() >= 38 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
+        matches!(name.len(), 38 | 62) && name.bytes().all(|byte| byte.is_ascii_hexdigit())
     });
     let packs = count(&objects.join("pack"), &|name| name.ends_with(".pack"));
-    sampled.saturating_mul(256) > loose_limit || packs > pack_limit
+    PackingState { sampled, packs }
+}
+
+/// Whether the mirror at `dir` holds about `loose_limit` loose objects or
+/// more than `pack_limit` packs, as `git gc --auto` estimates it.
+#[cfg(test)]
+fn needs_packing(dir: &Path, loose_limit: u64, pack_limit: u64) -> bool {
+    packing_state(dir).needs_packing(loose_limit, pack_limit)
 }
 
 /// The space a cache entry named `<space id>.git` belongs to.
@@ -1740,6 +1798,26 @@ pub(crate) fn plan_eviction(stats: &[MirrorStat], cap: u64, now: SystemTime) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Loose objects are estimated exactly as `git gc --auto` does: from
+    /// `objects/17`, packing only above `ceil(limit / 256)` there (27 for
+    /// git's 6700: 28 or more). Names that are not object names do not
+    /// count.
+    #[test]
+    fn packing_starts_where_gc_auto_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let sample = dir.path().join("objects/17");
+        std::fs::create_dir_all(&sample).unwrap();
+        std::fs::create_dir_all(dir.path().join("objects/pack")).unwrap();
+        for n in 0..27 {
+            std::fs::write(sample.join(format!("{n:038x}")), b"").unwrap();
+        }
+        std::fs::write(sample.join(format!("{:039x}", 1)), b"").unwrap();
+        std::fs::write(sample.join(format!("{:038x}.tmp", 1)), b"").unwrap();
+        assert!(!needs_packing(dir.path(), LOOSE_OBJECT_LIMIT, PACK_LIMIT));
+        std::fs::write(sample.join(format!("{:038x}", 27)), b"").unwrap();
+        assert!(needs_packing(dir.path(), LOOSE_OBJECT_LIMIT, PACK_LIMIT));
+    }
 
     #[cfg(unix)]
     #[test]
