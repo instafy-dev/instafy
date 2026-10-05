@@ -869,6 +869,52 @@ async fn work_main_already_holds_is_not_judged() {
     }
 }
 
+/// A file the plan restores but the shard refuses (a shard that takes
+/// smaller files than a save allows) stays out of `main` in both modes and
+/// is listed in `notRestored` with the shard's reason, so the person is
+/// never told it came back; the rest lands, and the ref, that file's only
+/// copy, stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_the_shard_refuses_is_listed_as_not_restored() {
+    let data = vec![b'x'; 10_000];
+    for mode in MODES {
+        let space = Space::new(mode, &[]).await;
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let commit = space.park(
+            &[
+                ("data.bin", Some(data.as_slice())),
+                ("other.md", Some(b"other\n")),
+            ],
+            &reference,
+        );
+        crate::test_support::install_shard_hook(&space.remote, &[("GIT_MAX_BLOB_BYTES", "4096")]);
+        let before = space.main();
+
+        let body = space
+            .restored(json!({ "ref": reference, "rev": commit }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("data.bin", "too_large")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&reference).as_deref(),
+            Some(commit.as_str()),
+            "{mode:?}"
+        );
+        assert_ne!(space.main(), before, "{mode:?}");
+        assert_eq!(
+            space.on_main("other.md").as_deref(),
+            Some(&b"other\n"[..]),
+            "{mode:?}"
+        );
+        assert_eq!(space.on_main("data.bin"), None, "{mode:?}");
+    }
+}
+
 /// Every clash is named in one answer, so the person can choose for all of
 /// them at once: 250 files both sides changed are all listed, with nothing
 /// left for a later round, and sent back as `keep` they restore the rest and
