@@ -34,71 +34,30 @@ fn too_large() -> Vec<u8> {
     vec![b'x'; crate::publish_policy::MAX_PUBLISH_BLOB_BYTES as usize + 1]
 }
 
-/// A space whose canonical repository is a bare repository on disk, served
-/// by one mode.
-struct Space {
-    _dir: tempfile::TempDir,
+/// One mode serving a space.
+struct Server {
     mode: Mode,
-    /// Canonical.
-    remote: PathBuf,
-    /// A clone that pushes to canonical, as a runtime or another client
-    /// would.
-    work: PathBuf,
     config: ServerConfig,
     base: String,
-    server: tokio::task::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
-impl Drop for Space {
+impl Drop for Server {
     fn drop(&mut self) {
-        self.server.abort();
+        self.handle.abort();
     }
 }
 
-impl Space {
-    /// A space whose `main` holds `seed`, served by `mode`.
-    async fn new(mode: Mode, seed: &[(&str, &[u8])]) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().canonicalize().unwrap();
-        let project = Uuid::new_v4();
-        let canonical = root.join("canonical");
-        std::fs::create_dir_all(&canonical).unwrap();
-        let remote = canonical.join(format!("{project}.git"));
-        git_in(
-            &root,
-            &[
-                "init",
-                "-q",
-                "--bare",
-                "-b",
-                "main",
-                remote.to_str().unwrap(),
-            ],
-        );
-        let work = root.join("work");
-        git_in(&root, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
-        git_in(&work, &["config", "user.name", "Runtime"]);
-        git_in(&work, &["config", "user.email", "agent@instafy.dev"]);
-        let mut files: Vec<(&str, Option<&[u8]>)> = seed
-            .iter()
-            .map(|(path, bytes)| (*path, Some(*bytes)))
-            .collect();
-        files.push(("README.md", Some(b"seed\n")));
-        commit_files(&work, &files, "seed");
-        git_in(
-            &work,
-            &[
-                "push",
-                "-q",
-                remote.to_str().unwrap(),
-                "HEAD:refs/heads/main",
-            ],
-        );
-
-        let workspace = root.join(match mode {
-            Mode::Desktop => "ws",
-            Mode::Gateway => "gateway",
-        });
+impl Server {
+    /// `mode` serving the canonical repository `remote` (in the folder
+    /// `canonical`), with its checkout or cache in `workspace`.
+    async fn start(
+        mode: Mode,
+        project: Uuid,
+        canonical: &Path,
+        remote: &Path,
+        workspace: PathBuf,
+    ) -> Self {
         std::fs::create_dir_all(&workspace).unwrap();
         let gateway = mode == Mode::Gateway;
         let config = ServerConfig {
@@ -163,18 +122,120 @@ impl Space {
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         Self {
-            _dir: dir,
             mode,
-            remote,
-            work,
             config,
             base: format!("http://{address}"),
-            server,
+            handle,
         }
+    }
+
+    /// Desktop's checkout catches up with canonical `main`, as its own
+    /// refresh does.
+    fn catch_up(&self) {
+        if self.mode != Mode::Desktop {
+            return;
+        }
+        let report = crate::publish::publish(
+            &crate::publish::PublishContext {
+                config: &self.config,
+                workspace_root: &self.config.workspace_root,
+                token: None,
+                can_write: true,
+            },
+            crate::publish::PublishRequest {
+                selection: crate::publish::Selection::None,
+                message: "instafy: agent sync".to_string(),
+                author: None,
+                budget: Duration::from_secs(30),
+            },
+        )
+        .expect("catch up");
+        assert!(report.rev.is_some(), "{report:?}");
+    }
+}
+
+/// A space whose canonical repository is a bare repository on disk, served
+/// by one mode, or by both over that one repository.
+struct Space {
+    /// The servers; the first answers [`Space::restore`].
+    servers: Vec<Server>,
+    /// Canonical.
+    remote: PathBuf,
+    /// A clone that pushes to canonical, as a runtime or another client
+    /// would.
+    work: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl Space {
+    /// A space whose `main` holds `seed`, served by `mode`.
+    async fn new(mode: Mode, seed: &[(&str, &[u8])]) -> Self {
+        Self::served_by(&[mode], seed).await
+    }
+
+    /// A space whose `main` holds `seed`, served by each of `modes`.
+    async fn served_by(modes: &[Mode], seed: &[(&str, &[u8])]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = Uuid::new_v4();
+        let canonical = root.join("canonical");
+        std::fs::create_dir_all(&canonical).unwrap();
+        let remote = canonical.join(format!("{project}.git"));
+        git_in(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        let work = root.join("work");
+        git_in(&root, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        git_in(&work, &["config", "user.name", "Runtime"]);
+        git_in(&work, &["config", "user.email", "agent@instafy.dev"]);
+        let mut files: Vec<(&str, Option<&[u8]>)> = seed
+            .iter()
+            .map(|(path, bytes)| (*path, Some(*bytes)))
+            .collect();
+        files.push(("README.md", Some(b"seed\n")));
+        commit_files(&work, &files, "seed");
+        git_in(
+            &work,
+            &[
+                "push",
+                "-q",
+                remote.to_str().unwrap(),
+                "HEAD:refs/heads/main",
+            ],
+        );
+        let mut servers = Vec::new();
+        for mode in modes {
+            let workspace = root.join(match mode {
+                Mode::Desktop => "ws",
+                Mode::Gateway => "gateway",
+            });
+            servers.push(Server::start(*mode, project, &canonical, &remote, workspace).await);
+        }
+        Self {
+            servers,
+            remote,
+            work,
+            _dir: dir,
+        }
+    }
+
+    fn server(&self, mode: Mode) -> &Server {
+        self.servers
+            .iter()
+            .find(|server| server.mode == mode)
+            .unwrap_or_else(|| panic!("{mode:?} serves this space"))
     }
 
     /// Commit `files` (`None` deletes) on top of canonical `main` and push
@@ -192,27 +253,8 @@ impl Space {
                 "HEAD:refs/heads/main",
             ],
         );
-        if self.mode == Mode::Desktop {
-            let report = crate::publish::publish(
-                &crate::publish::PublishContext {
-                    config: &self.config,
-                    workspace_root: &self.config.workspace_root,
-                    token: None,
-                    can_write: true,
-                },
-                crate::publish::PublishRequest {
-                    selection: crate::publish::Selection::None,
-                    message: "instafy: agent sync".to_string(),
-                    author: None,
-                    budget: Duration::from_secs(30),
-                },
-            )
-            .expect("catch up");
-            assert_eq!(
-                report.rev.as_deref(),
-                Some(self.main().as_str()),
-                "{report:?}"
-            );
+        for server in &self.servers {
+            server.catch_up();
         }
         self.main()
     }
@@ -267,8 +309,12 @@ impl Space {
     }
 
     async fn restore(&self, body: serde_json::Value) -> (u16, serde_json::Value) {
+        self.restore_in(self.servers[0].mode, body).await
+    }
+
+    async fn restore_in(&self, mode: Mode, body: serde_json::Value) -> (u16, serde_json::Value) {
         let response = reqwest::Client::new()
-            .post(format!("{}/git/recovery/restore", self.base))
+            .post(format!("{}/git/recovery/restore", self.server(mode).base))
             .json(&body)
             .send()
             .await
@@ -278,23 +324,39 @@ impl Space {
         (status, body)
     }
 
-    /// A restore the mode answers 200; its body.
+    /// A restore the first server answers 200; its body.
     async fn restored(&self, body: serde_json::Value) -> serde_json::Value {
-        let (status, answer) = self.restore(body).await;
-        assert_eq!(status, 200, "{:?}: {answer}", self.mode);
+        self.restored_in(self.servers[0].mode, body).await
+    }
+
+    /// A restore `mode` answers 200; its body.
+    async fn restored_in(&self, mode: Mode, body: serde_json::Value) -> serde_json::Value {
+        let (status, answer) = self.restore_in(mode, body).await;
+        assert_eq!(status, 200, "{mode:?}: {answer}");
         answer
     }
 
-    /// A restore the mode answers 409 `restore_conflict`; the paths.
+    /// A restore the first server answers 409 `restore_conflict`; the
+    /// paths.
     async fn conflict(&self, body: serde_json::Value) -> serde_json::Value {
         let (status, answer) = self.restore(body).await;
         assert_eq!(
             (status, answer["code"].as_str()),
             (409, Some("restore_conflict")),
             "{:?}: {answer}",
-            self.mode
+            self.servers[0].mode
         );
         answer["paths"].clone()
+    }
+
+    /// The unsaved-work list as `mode` serves it.
+    async fn listed_in(&self, mode: Mode) -> Vec<serde_json::Value> {
+        let response = reqwest::get(format!("{}/git/recovery", self.server(mode).base))
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200, "{mode:?}");
+        let body: serde_json::Value = response.json().await.unwrap();
+        body["entries"].as_array().unwrap().clone()
     }
 }
 
@@ -718,5 +780,66 @@ async fn work_main_already_holds_is_not_judged() {
         assert_eq!(body["notRestored"], json!([]), "{mode:?}: {body}");
         assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
         assert_eq!(space.on_main("extra.md").as_deref(), Some(&b"extra\n"[..]));
+    }
+}
+
+/// One canonical history served by both modes: a salvage ref restored in
+/// one mode, with nothing left to bring back, is recorded once, by that
+/// mode's empty restore commit. The other mode lists it as restored too,
+/// and restoring it there records nothing more, even before Desktop's
+/// branch has caught up with the record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_recorded_in_one_mode_counts_in_the_other() {
+    for (first, second) in [
+        (Mode::Desktop, Mode::Gateway),
+        (Mode::Gateway, Mode::Desktop),
+    ] {
+        let space = Space::served_by(&[first, second], &[]).await;
+        let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+        let commit = space.park(&[("draft.md", Some(b"draft\n"))], salvage);
+        let before = space.push(&[("draft.md", Some(b"draft\n"))], "the same draft");
+
+        let body = space
+            .restored_in(first, json!({ "ref": salvage, "rev": commit }))
+            .await;
+        assert_eq!(
+            (&body["committed"], &body["marked"]),
+            (&json!(false), &json!(true)),
+            "{first:?}: {body}"
+        );
+        let marker = space.main();
+        assert_ne!(marker, before, "{first:?}");
+        assert_eq!(
+            git_in(&space.remote, &["log", "-1", "--format=%ce", &marker]),
+            space.server(first).config.git_author_email,
+            "{first:?}"
+        );
+
+        // The other mode records nothing more.
+        let body = space
+            .restored_in(second, json!({ "ref": salvage, "rev": commit }))
+            .await;
+        assert_eq!(
+            (&body["committed"], &body["marked"]),
+            (&json!(false), &json!(false)),
+            "{second:?} after {first:?}: {body}"
+        );
+        assert_eq!(space.main(), marker, "{second:?} after {first:?}");
+
+        for server in &space.servers {
+            server.catch_up();
+        }
+        for mode in [first, second] {
+            let entries = space.listed_in(mode).await;
+            let entry = entries
+                .iter()
+                .find(|entry| entry["ref"] == salvage)
+                .unwrap_or_else(|| panic!("{mode:?} lists the salvage ref"));
+            assert_eq!(
+                entry["restoredRev"],
+                marker.as_str(),
+                "{mode:?} after {first:?}"
+            );
+        }
     }
 }
