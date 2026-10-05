@@ -70,7 +70,8 @@ impl OriginClaims {
     /// origin then commits as itself) for job tokens (`run_id`), for tokens
     /// without author claims (an older controller, or one without the
     /// pseudonym keyring), and for an address that is not a pseudonym.
-    /// The token subject (an account id) is never used.
+    /// The token subject (an account id) is never used. Desktop and the
+    /// hosted gateway both author a person's saves by this rule.
     pub fn user_author(&self) -> Option<crate::workspace_git::GitIdentity> {
         let is_job = self
             .run_id
@@ -85,12 +86,16 @@ impl OriginClaims {
         if local.is_empty() || email.len() > MAX_AUTHOR_FIELD_BYTES || !local.bytes().all(plain) {
             return None;
         }
+        // Git drops these from both ends of a name (`crud` in its ident.c)
+        // and refuses a commit whose name is then empty ("name consists only
+        // of disallowed characters").
+        let crud = |c: char| c <= ' ' || matches!(c, ',' | ':' | ';' | '"' | '\\' | '\'');
         let name = self
             .author_name
             .as_deref()
             .map(str::trim)
             .filter(|name| {
-                !name.is_empty()
+                !name.trim_matches(crud).is_empty()
                     && name.len() <= MAX_AUTHOR_FIELD_BYTES
                     && !name
                         .chars()
@@ -564,12 +569,16 @@ mod tests {
         assert_eq!(author.email, pseudonym);
 
         // No usable display name: the plain fallback, never the subject.
+        // Git drops blanks and some punctuation from both ends of a name and
+        // refuses a commit whose name is left empty, so a name of only those
+        // is none.
         for name in [
             json!(null),
             json!(""),
             json!("  "),
             json!("Ada <x@y>"),
             json!("a\nb"),
+            json!(" ,;: '\"\\ "),
         ] {
             let author = author_claims(json!({ "author_name": name, "author_email": pseudonym }))
                 .user_author()

@@ -60,9 +60,6 @@ const APPLY_KEY_WINDOW: &str = "--since=31.days.ago";
 /// behind it for long).
 const APPLY_KEY_MATCHES: &str = "64";
 
-/// The name given to a person whose token carries an address but no name.
-pub(crate) const DEFAULT_AUTHOR_NAME: &str = "Instafy user";
-
 /// The longest commit message a caller can set.
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 
@@ -70,68 +67,16 @@ const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 // Identities and messages.
 // ---------------------------------------------------------------------------
 
-/// The author of a person's change: the display name and per-space
-/// pseudonymous address the controller put on their token, or the
-/// gateway's own identity when the token carries none (an older controller,
-/// or one without the author keyring). The token's subject never is.
+/// The author of a person's change: [`OriginClaims::user_author`], the
+/// rule Desktop saves by (the per-space pseudonym and display name on a
+/// person's own token), or the gateway's own identity for a job's token
+/// (one that names a run), a token without author claims (an older
+/// controller, or one without the author keyring) and an address that is
+/// not a pseudonym. The token's subject never is.
 pub(crate) fn save_author(claims: &OriginClaims, gateway: &GitIdentity) -> GitIdentity {
-    let email = claims
-        .author_email
-        .as_deref()
-        .map(str::trim)
-        .filter(|email| plausible_email(email));
-    match email {
-        Some(email) => GitIdentity::new(author_name(claims.author_name.as_deref()), email),
-        None => GitIdentity::new(gateway.name.clone(), gateway.email.clone()),
-    }
-}
-
-/// An address git takes as is: one `@`, no space, quote, angle bracket or
-/// control character.
-fn plausible_email(email: &str) -> bool {
-    let Some((local, domain)) = email.split_once('@') else {
-        return false;
-    };
-    !local.is_empty()
-        && !domain.is_empty()
-        && !domain.contains('@')
-        && email.len() <= 254
-        && email
-            .chars()
-            .all(|c| !c.is_control() && !c.is_whitespace() && !matches!(c, '<' | '>' | '"' | '\\'))
-}
-
-/// A display name git takes as is: no control characters or angle
-/// brackets, no leading or trailing punctuation git would strip, at most 128
-/// bytes; [`DEFAULT_AUTHOR_NAME`] when nothing is left.
-fn author_name(name: Option<&str>) -> String {
-    let cleaned: String = name
-        .unwrap_or_default()
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '<' | '>') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-    let mut collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.len() > 128 {
-        let mut end = 128;
-        while !collapsed.is_char_boundary(end) {
-            end -= 1;
-        }
-        collapsed.truncate(end);
-    }
-    let trimmed = collapsed.trim_matches(|c: char| {
-        c.is_whitespace() || matches!(c, '.' | ',' | ':' | ';' | '"' | '\'')
-    });
-    if trimmed.is_empty() {
-        DEFAULT_AUTHOR_NAME.to_string()
-    } else {
-        trimmed.to_string()
-    }
+    claims
+        .user_author()
+        .unwrap_or_else(|| GitIdentity::new(gateway.name.clone(), gateway.email.clone()))
 }
 
 /// A caller's commit message with control characters other than newlines
