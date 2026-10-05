@@ -583,7 +583,7 @@ pub(crate) fn read_tree_at(
     let commit = parse_rev(commit)?;
     if path.is_empty() {
         let raw = git.bytes(&["ls-tree", "-l", "-z", "--end-of-options", &commit])?;
-        return Ok(TreeRead::Directory(listed_children("", &raw)));
+        return Ok(TreeRead::Directory(listed_children("", &raw)?));
     }
     let path = checked_path(path)?;
     if is_reserved_path(&path) {
@@ -596,7 +596,7 @@ pub(crate) fn read_tree_at(
         ObjectKind::File => Ok(TreeRead::File(entry)),
         ObjectKind::Directory => {
             let raw = git.bytes(&["ls-tree", "-l", "-z", "--end-of-options", &entry.oid])?;
-            Ok(TreeRead::Directory(listed_children(&path, &raw)))
+            Ok(TreeRead::Directory(listed_children(&path, &raw)?))
         }
     }
 }
@@ -694,7 +694,7 @@ pub(crate) fn absence_at(
             ..RunOpts::default()
         },
     )?;
-    let found = parse_ls_tree_long(&raw)
+    let found = parse_ls_tree_long(&raw)?
         .into_iter()
         .find(|(entry_path, _)| *entry_path == path);
     Ok(match found {
@@ -743,7 +743,7 @@ fn entry_at(
             ..RunOpts::default()
         },
     )?;
-    Ok(parse_ls_tree_long(&raw)
+    Ok(parse_ls_tree_long(&raw)?
         .into_iter()
         .find(|(entry_path, _)| entry_path == path)
         .and_then(|(_, entry)| entry))
@@ -751,8 +751,8 @@ fn entry_at(
 
 /// The shown entries of one `ls-tree -l -z` listing of a folder at
 /// `parent` ("" for the root).
-fn listed_children(parent: &str, raw: &[u8]) -> Vec<ObjectEntry> {
-    parse_ls_tree_long(raw)
+fn listed_children(parent: &str, raw: &[u8]) -> Result<Vec<ObjectEntry>, ViewError> {
+    Ok(parse_ls_tree_long(raw)?
         .into_iter()
         .filter_map(|(name, entry)| {
             let mut entry = entry?;
@@ -763,44 +763,72 @@ fn listed_children(parent: &str, raw: &[u8]) -> Vec<ObjectEntry> {
             };
             (!is_reserved_path(&entry.path)).then_some(entry)
         })
-        .collect()
+        .collect())
 }
 
 /// `(path, entry)` for each record of `ls-tree -l -z` output, where the
 /// entry is `None` for anything that is neither a regular file nor a folder
-/// (symlinks, submodules).
-fn parse_ls_tree_long(raw: &[u8]) -> Vec<(String, Option<ObjectEntry>)> {
-    raw.split(|byte| *byte == 0)
+/// (symlinks, submodules). A regular file whose size git could not read
+/// (`BAD`: its object is missing or corrupt) is an error, never a path that
+/// is not there: a client would take that for a deleted file.
+fn parse_ls_tree_long(raw: &[u8]) -> Result<Vec<(String, Option<ObjectEntry>)>, ViewError> {
+    let mut parsed = Vec::new();
+    for record in raw
+        .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
-        .filter_map(|record| {
-            let tab = record.iter().position(|byte| *byte == b'\t')?;
-            let meta = std::str::from_utf8(&record[..tab]).ok()?;
-            let path = std::str::from_utf8(&record[tab + 1..]).ok()?.to_string();
-            let mut fields = meta.split_whitespace();
-            let mode = fields.next()?.to_string();
-            let object_type = fields.next()?;
-            let oid = fields.next()?.to_string();
-            let size = fields.next()?;
-            let entry = match (mode.as_str(), object_type) {
-                ("100644" | "100755", "blob") => Some(ObjectEntry {
-                    path: path.clone(),
-                    kind: ObjectKind::File,
-                    mode,
-                    oid,
-                    size: Some(size.parse().ok()?),
-                }),
-                ("040000", "tree") => Some(ObjectEntry {
-                    path: path.clone(),
-                    kind: ObjectKind::Directory,
-                    mode,
-                    oid,
-                    size: None,
-                }),
-                _ => None,
+    {
+        if let Some(record) = parse_ls_tree_long_record(record)? {
+            parsed.push(record);
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_ls_tree_long_record(
+    record: &[u8],
+) -> Result<Option<(String, Option<ObjectEntry>)>, ViewError> {
+    let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+        return Ok(None);
+    };
+    let (Ok(meta), Ok(path)) = (
+        std::str::from_utf8(&record[..tab]),
+        std::str::from_utf8(&record[tab + 1..]),
+    ) else {
+        return Ok(None);
+    };
+    let path = path.to_string();
+    let mut fields = meta.split_whitespace();
+    let (Some(mode), Some(object_type), Some(oid), Some(size)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Ok(None);
+    };
+    let (mode, oid) = (mode.to_string(), oid.to_string());
+    let entry = match (mode.as_str(), object_type) {
+        ("100644" | "100755", "blob") => {
+            let Ok(size) = size.parse() else {
+                return Err(ViewError::Git(anyhow::anyhow!(
+                    "the object of {path} ({oid}) is missing or corrupt"
+                )));
             };
-            Some((path, entry))
-        })
-        .collect()
+            Some(ObjectEntry {
+                path: path.clone(),
+                kind: ObjectKind::File,
+                mode,
+                oid,
+                size: Some(size),
+            })
+        }
+        ("040000", "tree") => Some(ObjectEntry {
+            path: path.clone(),
+            kind: ObjectKind::Directory,
+            mode,
+            oid,
+            size: None,
+        }),
+        _ => None,
+    };
+    Ok(Some((path, entry)))
 }
 
 /// Up to `limit` (at most [`MAX_HISTORY_PAGE`]) commits of `head`'s
@@ -2431,6 +2459,41 @@ mod tests {
             .iter()
             .map(|entry| (entry.path.as_str(), entry.kind))
             .collect()
+    }
+
+    /// A file whose object is missing or corrupt is an error, never a
+    /// path that is not there (a client would take a 404 `not_found` for a
+    /// deleted file) and never left out of a listing.
+    #[test]
+    fn a_file_whose_object_is_damaged_is_an_error_not_an_absence() {
+        let (_dir, root) = tempdir();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let head = object_fixture(&workspace);
+        let mirror = bare(&root, "mirror.git");
+        let mirror_git = WorkspaceGit::bare(&mirror, None);
+        fetch(
+            &mirror_git,
+            &workspace.join(".instafy/.git"),
+            "+refs/heads/main:refs/heads/main",
+        );
+        let blob = ig(&workspace, &["rev-parse", &format!("{head}:src/lib.rs")]);
+        let loose = mirror.join("objects").join(&blob[..2]).join(&blob[2..]);
+        assert!(loose.is_file());
+        std::fs::remove_file(&loose).unwrap();
+
+        let unreadable = |error: ViewError| {
+            let text = format!("{error:#}");
+            assert!(text.contains("missing or corrupt"), "{text}");
+        };
+        unreadable(read_blob_at(&mirror_git, &head, "src/lib.rs", 1 << 20).unwrap_err());
+        unreadable(absence_at(&mirror_git, &head, "src/lib.rs").unwrap_err());
+        unreadable(read_tree_at(&mirror_git, &head, "src").unwrap_err());
+        // Other files read as before.
+        assert!(matches!(
+            read_blob_at(&mirror_git, &head, "README.md", 1 << 20).unwrap(),
+            BlobRead::Found { .. }
+        ));
     }
 
     #[test]

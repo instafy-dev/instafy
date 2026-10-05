@@ -29,7 +29,8 @@ use uuid::Uuid;
 
 use super::answers::recovery_ref_moved;
 use super::cache::{
-    canonical_unreachable, Freshness, MirrorCache, MirrorLease, RETRY_AFTER_SECONDS,
+    canonical_unreachable, fetch_failure, FetchFailure, Freshness, MirrorCache, MirrorLease,
+    RETRY_AFTER_SECONDS,
 };
 use super::read::{self, EntriesRead, FileRead};
 use super::{recovery, write};
@@ -318,6 +319,29 @@ pub(super) fn caller_token(token: &OriginAccessToken) -> Option<&str> {
     Some(token.token.trim()).filter(|token| !token.is_empty())
 }
 
+/// Blocking git work on `lease`'s mirror (created empty when missing) for
+/// a request whose bearer is `token`. A failure that says the mirror is
+/// damaged on this server's disk throws it away, starts making it again in
+/// the background and is answered 503 `mirror_reset`
+/// ([`MirrorCache::checked`]).
+pub(super) async fn on_mirror<T: Send + 'static>(
+    state: &HostedState,
+    lease: &MirrorLease,
+    token: Option<&str>,
+    work: impl FnOnce(&std::path::Path) -> Result<T, OriginError> + Send + 'static,
+) -> Result<T, OriginError> {
+    let cache = state.cache.clone();
+    let mirror = lease.mirror();
+    let token = token.map(str::to_string);
+    blocking(move || {
+        let resets = mirror.resets();
+        let dir = cache.ensure_mirror(&mirror)?;
+        let result = work(&dir);
+        cache.checked(&mirror, resets, token.as_deref(), result)
+    })
+    .await
+}
+
 /// Run blocking git work for a request.
 pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, OriginError> + Send + 'static,
@@ -368,10 +392,16 @@ fn missing(absence: Absence) -> OriginError {
 }
 
 /// A `?ref=` read that could not reach canonical is a 502, like a fetch.
+/// One that failed on the mirror itself (damaged on this server's disk)
+/// keeps git's words, so [`on_mirror`] makes the mirror again.
 pub(super) fn ref_error(error: ViewError) -> OriginError {
     match error {
         ViewError::Git(error) => {
-            warn!(error = %format!("{error:#}"), "fetching a recovery ref failed");
+            let text = format!("{error:#}");
+            if fetch_failure(&text) == Some(FetchFailure::Damaged) {
+                return OriginError::internal(text);
+            }
+            warn!(error = %text, "fetching a recovery ref failed");
             canonical_unreachable()
         }
         other => other.into(),
@@ -461,7 +491,7 @@ async fn find_rev(
     remember_missing: bool,
 ) -> Result<String, OriginError> {
     let rev = parse_rev(rev)?;
-    if readable_here(state, lease, &rev).await? {
+    if readable_here(state, lease, token, &rev).await? {
         return Ok(rev);
     }
     let project = lease.project();
@@ -472,7 +502,7 @@ async fn find_rev(
         .cache
         .resolve_main(lease, Freshness::Fresh, token)
         .await?;
-    if readable_here(state, lease, &rev).await? {
+    if readable_here(state, lease, token, &rev).await? {
         return Ok(rev);
     }
     if remember_missing {
@@ -484,14 +514,12 @@ async fn find_rev(
 async fn readable_here(
     state: &HostedState,
     lease: &MirrorLease,
+    token: Option<&str>,
     rev: &str,
 ) -> Result<bool, OriginError> {
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let rev = rev.to_string();
-    blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
-        Ok(read::readable(&WorkspaceGit::bare(&dir, None), &rev)?)
+    on_mirror(state, lease, token, move |dir| {
+        Ok(read::readable(&WorkspaceGit::bare(dir, None), &rev)?)
     })
     .await
 }
@@ -523,11 +551,9 @@ pub(super) async fn fetch_ref(
     let git_token = state.cache.read_token(project, token).await?;
     let url = state.cache.remote_url(project)?;
     let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let mirror_project = project;
-    blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
-        let git = WorkspaceGit::bare(&dir, git_token.as_deref())
+    on_mirror(state, lease, token, move |dir| {
+        let git = WorkspaceGit::bare(dir, git_token.as_deref())
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
         let reference = RecoveryRef::validate(&git, reference.as_str())?;
         let Some(tip) = remote_tip(&git, &url, &reference).map_err(ref_error)? else {
@@ -580,13 +606,10 @@ async fn handle_entries(
         query.reference.as_deref(),
     )
     .await?;
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let commit = target.commit.clone();
-    let read = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
+    let read = on_mirror(&state, &lease, caller_token(&token), move |dir| {
         Ok(read::entries(
-            &WorkspaceGit::bare(&dir, None),
+            &WorkspaceGit::bare(dir, None),
             commit.as_deref(),
             path.as_deref(),
         )?)
@@ -626,14 +649,11 @@ async fn read_file(
         query.reference.as_deref(),
     )
     .await?;
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let commit = target.commit.clone();
     let read_path = path.clone();
-    let read = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
+    let read = on_mirror(state, &lease, caller_token(token), move |dir| {
         Ok(read::file(
-            &WorkspaceGit::bare(&dir, None),
+            &WorkspaceGit::bare(dir, None),
             commit.as_deref(),
             &read_path,
         )?)
@@ -777,14 +797,11 @@ async fn handle_git_history(
         })
         .into_response());
     };
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let gateway_email = state.gateway_email();
     let read_head = head.clone();
-    let (entries, has_more) = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
+    let (entries, has_more) = on_mirror(&state, &lease, caller_token(&token), move |dir| {
         Ok(read::history(
-            &WorkspaceGit::bare(&dir, None),
+            &WorkspaceGit::bare(dir, None),
             &read_head,
             limit,
             skip,
@@ -915,11 +932,8 @@ async fn handle_git_history_review(
         }
         Err(error) => return Err(error),
     };
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
-    let (entries, parents) = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
-        Ok(read::review(&WorkspaceGit::bare(&dir, None), &commit)?)
+    let (entries, parents) = on_mirror(&state, &lease, caller_token(&token), move |dir| {
+        Ok(read::review(&WorkspaceGit::bare(dir, None), &commit)?)
     })
     .await?;
     Ok(Json(ReviewResponse {
@@ -1037,13 +1051,10 @@ async fn handle_git_diff(
     } else {
         None
     };
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let diff_path = path.clone();
-    let (diff, truncated) = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
+    let (diff, truncated) = on_mirror(&state, &lease, token, move |dir| {
         Ok(read::diff(
-            &WorkspaceGit::bare(&dir, None),
+            &WorkspaceGit::bare(dir, None),
             base.as_deref(),
             commit.as_deref(),
             main.as_deref(),
@@ -1077,12 +1088,10 @@ async fn handle_git_recovery(
     let git_token = state.cache.read_token(project, token).await?;
     let url = state.cache.remote_url(project)?;
     let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let gateway_email = state.gateway_email();
     let list_main = main.clone();
-    let entries = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
-        let git = WorkspaceGit::bare(&dir, git_token.as_deref())
+    let entries = on_mirror(&state, &lease, token, move |dir| {
+        let git = WorkspaceGit::bare(dir, git_token.as_deref())
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
         let listed = read::recovery_list(&git, &url, list_main.as_deref(), &gateway_email);
         cache.size_changed(project);
@@ -1152,12 +1161,9 @@ async fn handle_git_sync(
     };
     let on_main = match main.clone() {
         Some(head) => {
-            let cache = state.cache.clone();
-            let mirror = lease.mirror();
             let rev = expected.clone();
-            blocking(move || {
-                let dir = cache.ensure_mirror(&mirror)?;
-                Ok(read::on_main(&WorkspaceGit::bare(&dir, None), &rev, &head)?)
+            on_mirror(&state, &lease, caller_token(&token), move |dir| {
+                Ok(read::on_main(&WorkspaceGit::bare(dir, None), &rev, &head)?)
             })
             .await?
         }

@@ -542,6 +542,160 @@ async fn a_mirror_broken_on_disk_is_made_again() {
     );
 }
 
+/// The loose object file of `oid` in the mirror at `mirror`.
+fn loose_object(mirror: &Path, oid: &str) -> PathBuf {
+    mirror.join("objects").join(&oid[..2]).join(&oid[2..])
+}
+
+/// Overwrite the loose object `oid` of `mirror` with `bytes`.
+fn damage_object(mirror: &Path, oid: &str, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = loose_object(mirror, oid);
+    assert!(path.is_file(), "{oid} is not loose in the mirror");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::write(&path, bytes).unwrap();
+}
+
+/// Wait until `path` answers `status` (the mirror made again in the
+/// background), at most 20 s.
+async fn until_status(served: &Served, path: &str, status: u16) -> Answer {
+    let started = std::time::Instant::now();
+    loop {
+        let answer = get(served, path).await;
+        if answer.status == status || started.elapsed() > Duration::from_secs(20) {
+            return answer;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// An object damaged in a mirror on the gateway's disk (a missing tree, a
+/// corrupt or empty blob) is never read as "not there" or as a server
+/// failure: the mirror is thrown away and made again in the background,
+/// and the read meanwhile is told 503 `mirror_reset`. Canonical is never
+/// touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mirror_with_a_damaged_object_is_made_again_when_read() {
+    let sc = HostedScenario::new();
+    let head = sc.push(
+        &[("a.txt", Some(b"alpha\n")), ("d/x.txt", Some(b"x\n"))],
+        "first",
+    );
+    let blob = git_in(&sc.remote(), &["rev-parse", &format!("{head}:a.txt")]);
+    let tree = git_in(&sc.remote(), &["rev-parse", &format!("{head}:d")]);
+    let served = serve(&sc).await;
+    let canonical_before = git_in(&sc.remote(), &["count-objects", "-v"]);
+
+    for (damage, read) in [
+        ("corrupt blob", "/files/a.txt"),
+        ("empty blob", "/files/a.txt"),
+        ("corrupt blob in a listing", "/entries"),
+        ("missing tree", "/entries?path=d"),
+        ("missing tree under a file read", "/files/d/x.txt"),
+    ] {
+        assert_eq!(
+            until_status(&served, read, 200).await.status,
+            200,
+            "{damage}"
+        );
+        match damage {
+            "corrupt blob" | "corrupt blob in a listing" => {
+                damage_object(&sc.mirror(), &blob, b"garbage")
+            }
+            "empty blob" => damage_object(&sc.mirror(), &blob, b""),
+            _ => std::fs::remove_file(loose_object(&sc.mirror(), &tree)).unwrap(),
+        }
+        let answer = get(&served, read).await;
+        assert_eq!(
+            (answer.status, answer.code().as_str()),
+            (503, "mirror_reset"),
+            "{damage}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+        assert!(answer.header("retry-after").is_some(), "{damage}");
+        let answer = until_status(&served, read, 200).await;
+        assert_eq!(answer.status, 200, "{damage}: made again");
+    }
+    let file = get(&served, "/files/a.txt").await;
+    assert_eq!(decoded(&file), b"alpha\n");
+    let listing = get(&served, "/entries").await.json();
+    assert_eq!(listing.as_array().unwrap().len(), 2, "{listing}");
+    assert_eq!(
+        git_in(&sc.remote(), &["count-objects", "-v"]),
+        canonical_before
+    );
+
+    // A save that finds the damage while building is told the same, and
+    // saves once the mirror is made again.
+    std::fs::remove_file(loose_object(&sc.mirror(), &tree)).unwrap();
+    let request =
+        super::write_tests::manifest(&["d/y.txt"], &[], serde_json::json!({ "baseRev": head }));
+    let archive = super::write_tests::zip(&[("d/y.txt", b"y\n")]);
+    let save = || super::write_tests::apply(&served, request.clone(), &archive);
+    let answer = save().await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (503, "mirror_reset"),
+        "{}",
+        String::from_utf8_lossy(&answer.body)
+    );
+    assert_eq!(sc.canonical_main().as_deref(), Some(head.as_str()));
+    let started = std::time::Instant::now();
+    let saved = loop {
+        let answer = save().await;
+        if answer.status != 503 || started.elapsed() > Duration::from_secs(20) {
+            break answer;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        saved.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&saved.body)
+    );
+}
+
+/// A fetch whose new objects are deltas against an object damaged in the
+/// mirror (a thin pack, which `index-pack` resolves against local objects)
+/// fails in a way that also looks like a bad pack from canonical. Fetched
+/// again from scratch it shows whose it was: here the mirror's, so the read
+/// is served.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_that_fails_against_a_damaged_base_is_made_again_from_scratch() {
+    let big: String = (0..20_000).map(|n| format!("line {n}\n")).collect();
+    for damage in [&b"garbage"[..], &b""[..]] {
+        let sc = HostedScenario::new();
+        let head = sc.push(&[("big.txt", Some(big.as_bytes()))], "first");
+        let base = git_in(&sc.remote(), &["rev-parse", &format!("{head}:big.txt")]);
+        let served = serve(&sc).await;
+        assert_eq!(get(&served, "/files/big.txt").await.status, 200);
+        damage_object(&sc.mirror(), &base, damage);
+        // Enough new objects that the fetch goes through index-pack, and a
+        // change of the damaged file, sent as a delta against it.
+        let mut files: Vec<(String, Vec<u8>)> = (0..150)
+            .map(|n| (format!("many/{n}.txt"), format!("{n}\n").into_bytes()))
+            .collect();
+        files.push((
+            "big.txt".to_string(),
+            format!("{big}one more\n").into_bytes(),
+        ));
+        let files: Vec<(&str, Option<&[u8]>)> = files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), Some(bytes.as_slice())))
+            .collect();
+        let latest = sc.push(&files, "many");
+        let answer = get(&served, &format!("/files/big.txt?rev={latest}")).await;
+        assert_eq!(
+            answer.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&answer.body)
+        );
+        assert!(decoded(&answer).ends_with(b"one more\n"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mirror_that_is_not_a_folder_is_made_again() {
     let sc = HostedScenario::new();
