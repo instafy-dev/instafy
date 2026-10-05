@@ -109,6 +109,8 @@ Sweep stops publish `runtime.stopped` with a `reason`:
   the size preference) or your-own-machine, escalating when the project has
   ≥2 OOM stops in 7 days (`runtime_events` query).
 - `heartbeat_timeout` — genuine agent death; auto-recovery unchanged.
+- `launch_timeout` — the launch never registered within 15 minutes (see "A
+  launch that does not come up" below).
 - `runtime_limit_reclaim` — the machine was idle and another space in the
   organization was waiting for the hosted runtime slot (see "Waiting on the
   runtime limit" below). The event carries `queuedJobCount`, the work left
@@ -129,6 +131,33 @@ space's own hosted runtime) is left to its own 30-minute give-up, including
 work an idle-slot reclaim requeued. Work in that space pinned to a desktop or
 another machine is never retried or given up on by the wait, so it keeps this
 15-minute expiry.
+
+## A launch that does not come up
+
+Until a launched runtime registers, it stays `requested` with a `launching`
+lease and every ensure reuses that launch, so pressing Start again only waits
+on the same launch. Two things end a launch that never comes up:
+
+- An explicit retry. `POST /runtime/ensure` with `replaceStalledLaunch: true`
+  (the Studio sends it from the chat's Try again, and from Machines Start on a
+  stalled launch) replaces the launch when the runtime is still `requested`,
+  was never seen, its lease is still launching, and that lease was requested
+  at least 5 minutes ago (`STALLED_LAUNCH_REPLACE_AFTER_SECONDS`, measured by
+  the database clock). The old allocation is released through the provider
+  (stop reason `launch_retry`) before a new lease launches. If a job was
+  leased meanwhile, or another retry already replaced the lease, the stop is
+  skipped and the current launch is reused. A younger launch, or a request
+  without the flag, is reused as before. Ensures the controller starts on its
+  own (dispatch reconnect, limit-wait replays, requeue recovery, automations)
+  never replace a launch.
+- The launch-timeout sweep. After 15 minutes
+  (`REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS`) it stops the launch, files a
+  bug report, and publishes `runtime.stopped` with reason `launch_timeout` so
+  open tabs refresh at once.
+
+`GET /projects/:id/runtime/status` reports `launchRequestedAt`, the active
+lease's request time, so the Studio can tell how long the current launch has
+been coming up without keeping a clock of its own.
 
 ## Waiting on the runtime limit
 

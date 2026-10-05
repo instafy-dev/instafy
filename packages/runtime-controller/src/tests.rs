@@ -24546,8 +24546,31 @@ async fn runtime_idle_sweep_stops_stuck_requested_runtimes() -> anyhow::Result<(
         metadata: None,
     }];
     let state = build_test_state(pool.clone(), config);
+    let mut events = state.events.subscribe();
 
     runtime::sweep_idle_activity(&state).await?;
+
+    // Open tabs learn of the timeout at once instead of on their next poll.
+    let mut stopped = None;
+    loop {
+        let event = match events.try_recv() {
+            Ok(event) => event,
+            // Other rows on a shared database may stop in the same sweep.
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(_) => break,
+        };
+        if event.kind == "runtime.stopped"
+            && event.project_id == Some(project_id)
+            && event.data["runtimeId"] == json!(stale_requested_runtime)
+        {
+            stopped = Some(event);
+        }
+    }
+    let stopped =
+        stopped.ok_or_else(|| anyhow::anyhow!("launch timeout published no runtime.stopped"))?;
+    assert_eq!(stopped.data["reason"], json!("launch_timeout"));
+    assert_eq!(stopped.data["source"], json!("launch_timeout"));
+    assert_eq!(stopped.data["status"], json!("stopped"));
 
     {
         let connection = pool.get().await?;
