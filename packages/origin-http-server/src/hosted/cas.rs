@@ -15,7 +15,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -39,6 +39,9 @@ pub(crate) const IMPORT_BUDGET: Duration = Duration::from_secs(840);
 pub(crate) const MAX_ATTEMPTS: usize = 5;
 /// A push is given at least this long, whatever is left of the budget.
 const PUSH_GRACE: Duration = Duration::from_secs(120);
+/// A `git.write` credential is exchanged again before a push when less
+/// than this is left of it (the controller issues them for 60 s at most).
+pub(crate) const CREDENTIAL_MARGIN: Duration = Duration::from_secs(15);
 
 /// The trailer naming an import's apply key (the controller's `imp:` key).
 pub(crate) const APPLY_KEY_TRAILER: &str = "Instafy-Apply-Key";
@@ -200,14 +203,27 @@ fn full_message(message: &str, key: Option<&ApplyKey>) -> String {
 // Canonical `main`, as the mirror cache sees it.
 // ---------------------------------------------------------------------------
 
-/// Canonical `main` for one change: fetched fresh, and told when a push
-/// landed.
+/// Canonical `main` for one change: fetched fresh, pushed to with a
+/// current credential, and told when a push landed.
 pub(crate) trait Canonical {
     /// `main` from a fetch that starts after this call (`None`: no `main`).
     fn fetch_main(&mut self) -> Result<Option<String>, OriginError>;
+    /// The `git.write` credential to push with now (`None`: the server
+    /// needs none). Exchanged again whenever what is held runs out within
+    /// [`CREDENTIAL_MARGIN`]: a change can outlive one credential.
+    fn write_token(&mut self) -> Result<Option<String>, OriginError>;
+    /// Canonical refused the credential last handed out: the next
+    /// [`Self::write_token`] exchanges a new one.
+    fn write_token_refused(&mut self);
     /// `commit`, on top of `old`, is canonical `main` now; its objects are
     /// in the mirror when `promoted`.
     fn pushed(&mut self, commit: &str, old: Option<&str>, promoted: bool);
+}
+
+/// A `git.write` credential and when it runs out.
+struct HeldCredential {
+    token: String,
+    expires: Instant,
 }
 
 /// [`Canonical`] through the mirror cache, for blocking work that runs on
@@ -215,8 +231,16 @@ pub(crate) trait Canonical {
 pub(crate) struct CachedCanonical {
     cache: Arc<MirrorCache>,
     lease: MirrorLease,
+    /// The caller's own bearer (`fs.write` for writes): what fetches mint
+    /// read access with and pushes exchange for `git.write`.
     token: Option<String>,
     runtime: tokio::runtime::Handle,
+    /// When the caller's bearer expires: no credential is exchanged for a
+    /// later attempt once it is about to.
+    caller_expires: Option<SystemTime>,
+    held: Option<HeldCredential>,
+    /// Whether any `git.write` credential was exchanged for this change.
+    exchanged: bool,
 }
 
 impl CachedCanonical {
@@ -231,7 +255,16 @@ impl CachedCanonical {
             lease,
             token,
             runtime,
+            caller_expires: None,
+            held: None,
+            exchanged: false,
         }
+    }
+
+    /// The caller's bearer expires at `expires` (its `exp` claim).
+    pub(crate) fn caller_expires(mut self, expires: Option<SystemTime>) -> Self {
+        self.caller_expires = expires;
+        self
     }
 }
 
@@ -244,10 +277,59 @@ impl Canonical for CachedCanonical {
         ))
     }
 
+    fn write_token(&mut self) -> Result<Option<String>, OriginError> {
+        if let Some(held) = &self.held {
+            if held.expires > Instant::now() + CREDENTIAL_MARGIN {
+                return Ok(Some(held.token.clone()));
+            }
+        }
+        // A later attempt with the caller's own bearer about to expire
+        // cannot get a credential that outlives it: stop here, with the
+        // same answer as running out of attempts, rather than push with a
+        // credential canonical will refuse.
+        let caller_ending = self
+            .caller_expires
+            .is_some_and(|expires| expires <= SystemTime::now() + CREDENTIAL_MARGIN);
+        if self.exchanged && caller_ending {
+            info!("the caller's write access ends before another attempt could finish");
+            return Err(main_busy());
+        }
+        let project = self.lease.project();
+        let minted = self
+            .runtime
+            .block_on(self.cache.write_token(project, self.token.as_deref()))?;
+        self.exchanged = true;
+        self.held = minted.map(|(token, lifetime)| HeldCredential {
+            token,
+            expires: Instant::now() + lifetime,
+        });
+        Ok(self.held.as_ref().map(|held| held.token.clone()))
+    }
+
+    fn write_token_refused(&mut self) {
+        self.held = None;
+    }
+
     fn pushed(&mut self, commit: &str, old: Option<&str>, promoted: bool) {
         self.cache
             .record_push(&self.lease.mirror(), commit, old, promoted);
     }
+}
+
+/// Whether a failed push's output says canonical refused the credential
+/// (an expired or revoked `git.write`): git asks for a password it is not
+/// allowed to prompt for, or reports the HTTP refusal.
+fn credential_refused(detail: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "unable to get password",
+        "could not read username",
+        "could not read password",
+        "terminal prompts disabled",
+        "authentication failed",
+        "requested url returned error: 401",
+    ];
+    let lower = detail.to_ascii_lowercase();
+    MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +344,6 @@ pub(crate) struct CasTarget<'a> {
     pub quarantine_parent: &'a Path,
     /// The canonical repository.
     pub remote: &'a str,
-    /// The `git.write` credential, when the server needs one.
-    pub write_token: Option<&'a str>,
     /// The gateway's identity: every commit's committer.
     pub committer: &'a GitIdentity,
     /// No new attempt starts after this.
@@ -306,6 +386,8 @@ pub(crate) fn cas_commit(
         target.committer.email.clone(),
     );
 
+    // Credentials refused in a row: one is exchanged again, two end it.
+    let mut refused_credentials = 0;
     for attempt in 1..=MAX_ATTEMPTS {
         if attempt > 1 && Instant::now() >= target.deadline {
             break;
@@ -355,7 +437,8 @@ pub(crate) fn cas_commit(
             .commit_tree(&tree, &parents, author, &committer, message.as_bytes())
             .map_err(internal)?;
         let push_deadline = target.deadline.max(Instant::now() + PUSH_GRACE);
-        let pusher = WorkspaceGit::bare(target.mirror, target.write_token)
+        let write_token = canonical.write_token()?;
+        let pusher = WorkspaceGit::bare(target.mirror, write_token.as_deref())
             .with_quarantine(&quarantine)
             .with_network_deadline(push_deadline);
         let create_only: Vec<String> = if main.is_none() {
@@ -373,6 +456,21 @@ pub(crate) fn cas_commit(
             // The push may have been stopped after it landed.
             Err(error) => PushClass::Ambiguous(format!("{error:#}")),
         };
+        // Canonical refused the credential before taking anything: once,
+        // a new one is exchanged and the change tried again; twice in a row
+        // is a refusal, not an outcome to settle by fetching.
+        if let PushClass::Rejected(detail) | PushClass::Ambiguous(detail) = &class {
+            if credential_refused(detail) {
+                refused_credentials += 1;
+                warn!(attempt, detail = %detail, "canonical refused the write credential");
+                if refused_credentials > 1 {
+                    return Err(push_rejected());
+                }
+                canonical.write_token_refused();
+                continue;
+            }
+        }
+        refused_credentials = 0;
         match class {
             PushClass::Pushed => {
                 let promoted = promote(&quarantine, &plain);

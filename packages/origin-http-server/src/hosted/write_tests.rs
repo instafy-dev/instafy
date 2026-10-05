@@ -173,13 +173,16 @@ fn hosted_origin_id(project: Uuid) -> Uuid {
 }
 
 /// A controller that signs origin tokens, serves its JWKS, answers that
-/// one lease is active and hands out a git credential.
+/// one lease is active and hands out git credentials
+/// (`git-<n>-until-<unix seconds>`, living as long as it says).
 pub(super) struct StubController {
     base: String,
     key: jsonwebtoken::EncodingKey,
     project: Uuid,
     pub(super) user: Uuid,
     pub(super) lease: Uuid,
+    /// How many `git.write` credentials it handed out.
+    pub(super) write_tokens: Arc<std::sync::atomic::AtomicUsize>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -191,6 +194,11 @@ impl Drop for StubController {
 
 impl StubController {
     pub(super) async fn start(project: Uuid) -> Self {
+        Self::start_with_git_token_life(project, 600).await
+    }
+
+    /// A controller whose git credentials live `life` seconds.
+    pub(super) async fn start_with_git_token_life(project: Uuid, life: i64) -> Self {
         use axum::extract::State;
         use axum::routing::{get as get_route, post as post_route};
         use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -229,26 +237,48 @@ impl StubController {
         struct Stub {
             jwks: serde_json::Value,
             lease: serde_json::Value,
+            write_tokens: Arc<std::sync::atomic::AtomicUsize>,
+            life: i64,
         }
-        let app = axum::Router::new()
-            .route(
-                "/.well-known/jwks.json",
-                get_route(|State(stub): State<Stub>| async move { axum::Json(stub.jwks) }),
-            )
-            .route(
-                "/projects/:project/lease",
-                get_route(|State(stub): State<Stub>| async move { axum::Json(stub.lease) }),
-            )
-            .route(
-                "/projects/:project/git/access_token",
-                post_route(|| async {
-                    axum::Json(json!({ "token": "stub-git-token", "expiresIn": 600 }))
-                }),
-            )
-            .with_state(Stub {
-                jwks,
-                lease: active,
-            });
+        let write_tokens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app =
+            axum::Router::new()
+                .route(
+                    "/.well-known/jwks.json",
+                    get_route(|State(stub): State<Stub>| async move { axum::Json(stub.jwks) }),
+                )
+                .route(
+                    "/projects/:project/lease",
+                    get_route(|State(stub): State<Stub>| async move { axum::Json(stub.lease) }),
+                )
+                .route(
+                    "/projects/:project/git/access_token",
+                    post_route(
+                        |State(stub): State<Stub>,
+                         axum::Json(body): axum::Json<serde_json::Value>| async move {
+                            let writes = body["scopes"].as_array().is_some_and(|scopes| {
+                                scopes.iter().any(|scope| scope == "git.write")
+                            });
+                            let n = if writes {
+                                stub.write_tokens
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            } else {
+                                0
+                            };
+                            let until = chrono::Utc::now().timestamp() + stub.life;
+                            axum::Json(json!({
+                                "token": format!("git-{n}-until-{until}"),
+                                "expiresIn": stub.life,
+                            }))
+                        },
+                    ),
+                )
+                .with_state(Stub {
+                    jwks,
+                    lease: active,
+                    write_tokens: write_tokens.clone(),
+                    life,
+                });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -260,6 +290,7 @@ impl StubController {
             project,
             user,
             lease,
+            write_tokens,
             server,
         }
     }
@@ -369,6 +400,17 @@ impl Direct {
     }
 
     fn commit(&self, change: &mut Change, message: &str) -> Result<CasOutcome, OriginError> {
+        self.commit_as(change, message, None, None)
+    }
+
+    /// [`Self::commit`] for a caller with this bearer, expiring then.
+    fn commit_as(
+        &self,
+        change: &mut Change,
+        message: &str,
+        caller: Option<String>,
+        caller_expires: Option<std::time::SystemTime>,
+    ) -> Result<CasOutcome, OriginError> {
         let lease = self.cache.lease(self.project);
         let dir = self.cache.ensure_mirror(&lease.mirror()).unwrap();
         let quarantine = self.cache.quarantine_dir().unwrap();
@@ -376,14 +418,14 @@ impl Direct {
         let mut canonical = CachedCanonical::new(
             self.cache.clone(),
             lease,
-            None,
+            caller,
             self.runtime.handle().clone(),
-        );
+        )
+        .caller_expires(caller_expires);
         let target = CasTarget {
             mirror: &dir,
             quarantine_parent: &quarantine,
             remote: &self.remote,
-            write_token: None,
             committer: &committer,
             // Longer than a save's budget, so a test can count every
             // attempt on a loaded machine.
@@ -2147,6 +2189,131 @@ fn a_lost_race_is_retried_and_endless_races_are_main_busy() {
     assert_eq!(show(&sc, &main, "lost.txt"), None);
 }
 
+/// Refuses every push whose `git.write` credential (as the stub controller
+/// mints them, `...-until-<unix seconds>`) has run out, as git-edge does:
+/// git then asks for a password it may not prompt for.
+const EXPIRED_CREDENTIALS_REFUSED: &str = r#"for arg in "$@"; do
+  if [ "$arg" = push ]; then
+    until="${GIT_CONFIG_VALUE_0##*until-}"
+    case "$until" in ''|*[!0-9]*) echo "fatal: unable to get password from user" >&2; exit 128;; esac
+    if [ "$(date +%s)" -ge "$until" ]; then
+      echo "fatal: unable to get password from user" >&2
+      exit 128
+    fi
+  fi
+done"#;
+
+/// A change can outlive one `git.write` credential (a minute at most, and
+/// imports have 14): each push gets one with time left, exchanged again
+/// from the caller's bearer; a credential canonical refuses is exchanged
+/// once more and then reported; once the caller's own bearer is about to
+/// expire, no further attempt starts.
+#[test]
+fn every_push_carries_a_current_write_credential() {
+    let mut sc = HostedScenario::new();
+    sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let controller_runtime = tokio::runtime::Runtime::new().unwrap();
+    let controller =
+        controller_runtime.block_on(StubController::start_with_git_token_life(sc.project, 6));
+    controller.configure(&mut sc);
+    let direct = Direct::new(&sc);
+    let caller = controller.token(&["fs.write"], json!({}));
+    let later = Some(std::time::SystemTime::now() + Duration::from_secs(600));
+    let wrapper_dir = tempfile::tempdir().unwrap();
+    let _git = GitWrapper::install(wrapper_dir.path(), EXPIRED_CREDENTIALS_REFUSED);
+    let _hook = HookGuard;
+    let minted = || {
+        controller
+            .write_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+
+    // The first push loses a race after a slow attempt; the second comes
+    // after the first credential ran out.
+    let (work, remote) = sc.runtime();
+    let pushes = Arc::new(Mutex::new(0usize));
+    let seen = pushes.clone();
+    let (hook_work, hook_remote) = (work.clone(), remote.clone());
+    set_push_hook(move |_| {
+        let mut count = seen.lock().unwrap();
+        *count += 1;
+        if *count == 1 {
+            std::thread::sleep(Duration::from_secs(4));
+            runtime_push(
+                &hook_work,
+                &hook_remote,
+                &[("other.txt", Some(b"o\n"))],
+                "first",
+            );
+        } else {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        PushHookAction::Proceed
+    });
+    let mut change = direct.edits(&[("mine.txt", b"m\n")], &[], None);
+    let outcome = direct
+        .commit_as(&mut change, "Update mine.txt", Some(caller.clone()), later)
+        .unwrap();
+    assert!(outcome.committed);
+    assert_eq!(*pushes.lock().unwrap(), 2);
+    assert_eq!(minted(), 2, "one credential per push");
+    let saved = outcome.rev.unwrap();
+    assert_eq!(sc.canonical_main().as_deref(), Some(saved.as_str()));
+    assert_eq!(show(&sc, &saved, "mine.txt").unwrap(), b"m\n");
+
+    // Canonical refuses every credential: exchanged once more, then the
+    // refusal is the answer (not five attempts settled by fetching).
+    clear_push_hook();
+    let refusing = GitWrapper::install(
+        wrapper_dir.path(),
+        r#"for arg in "$@"; do
+  if [ "$arg" = push ]; then
+    echo "fatal: unable to get password from user" >&2
+    exit 128
+  fi
+done"#,
+    );
+    let before = minted();
+    let mut change = direct.edits(&[("refused.txt", b"r\n")], &[], None);
+    let error = direct
+        .commit_as(
+            &mut change,
+            "Update refused.txt",
+            Some(caller.clone()),
+            later,
+        )
+        .unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+    assert_eq!(minted() - before, 2);
+    drop(refusing);
+
+    // The caller's bearer ends within the margin: after a lost race no
+    // credential is exchanged for another attempt.
+    let _git = GitWrapper::install(wrapper_dir.path(), EXPIRED_CREDENTIALS_REFUSED);
+    let pushes = Arc::new(Mutex::new(0usize));
+    let seen = pushes.clone();
+    set_push_hook(move |_| {
+        let mut count = seen.lock().unwrap();
+        *count += 1;
+        runtime_push(
+            &work,
+            &remote,
+            &[(&format!("race-{count}.txt"), Some(b"r\n"))],
+            "race",
+        );
+        PushHookAction::Proceed
+    });
+    let ending = Some(std::time::SystemTime::now() + Duration::from_secs(5));
+    let mut change = direct.edits(&[("late.txt", b"l\n")], &[], None);
+    let error = direct
+        .commit_as(&mut change, "Update late.txt", Some(caller), ending)
+        .unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
+    assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+    assert_eq!(*pushes.lock().unwrap(), 1);
+}
+
 /// r3 test 5: a push whose answer was lost is settled by fetching: it
 /// landed (one commit, no duplicate), or it did not and is tried again.
 #[test]
@@ -2241,7 +2408,6 @@ fn import_trailers_are_added_by_the_gateway_only() {
         mirror: &dir,
         quarantine_parent: &quarantine,
         remote: &direct.remote,
-        write_token: None,
         committer: &committer,
         deadline: Instant::now() + Duration::from_secs(30),
     };

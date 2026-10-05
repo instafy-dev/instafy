@@ -648,6 +648,12 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
         Some(unsaved.as_str())
     );
 
+    let minted = || {
+        controller
+            .write_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+    let before = minted();
     let body = ok(&post_as(
         &served,
         "/git/recovery/restore",
@@ -658,6 +664,9 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
     assert_eq!(body["committed"], true);
     assert_eq!(body["refDeleted"], true);
     assert_eq!(canonical_ref(&sc, &clean_ref), None);
+    // The delete of the ref gets a credential of its own: the restore's
+    // push may have outlived the one it used.
+    assert_eq!(minted() - before, 2);
 
     let body = ok(&post_as(
         &served,
