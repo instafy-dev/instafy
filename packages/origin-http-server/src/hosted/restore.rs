@@ -36,12 +36,14 @@ use super::read::readable;
 use crate::error::OriginError;
 use crate::publish::parse_raw_changes;
 use crate::publish_policy::{restore_refusal, RejectReason};
-use crate::recovery_view::{left_out_reason, NotRestored, KEPT};
+use crate::recovery_view::{left_out_reason, restore_marker, NotRestored, RecoveryRef, KEPT};
 use crate::tree_merge::{changed_paths, three_way, tree_with_entries_from};
 use crate::workspace_git::WorkspaceGit;
 
 /// Unsaved work merged onto `main`.
 pub(crate) struct Restore {
+    /// The recovery or salvage ref restored.
+    reference: RecoveryRef,
     /// The commit the ref names, already in the mirror.
     commit: String,
     /// Paths (and everything below them) that keep `main`'s version.
@@ -54,18 +56,40 @@ pub(crate) struct Restore {
     withheld: BTreeMap<String, &'static str>,
     /// The last attempt's changes to `main`.
     touched: Option<Vec<String>>,
+    /// The gateway's own address, which restore commits are committed by.
+    committer_email: String,
+    /// The last attempt brings nothing new to `main` and records the
+    /// restore with an empty restore commit ([`restore_marker`]).
+    marker: bool,
 }
 
 impl Restore {
-    pub(crate) fn new(commit: String, keep: Vec<String>, base_rev: Option<String>) -> Self {
+    pub(crate) fn new(
+        reference: RecoveryRef,
+        commit: String,
+        keep: Vec<String>,
+        base_rev: Option<String>,
+        committer_email: String,
+    ) -> Self {
         Self {
+            reference,
             commit,
             keep,
             base_rev,
             shard_refused: BTreeMap::new(),
             withheld: BTreeMap::new(),
             touched: None,
+            committer_email,
+            marker: false,
         }
+    }
+
+    /// Whether the last attempt records the restore with an empty restore
+    /// commit (a salvage ref with nothing left to bring back, which `main`
+    /// has no restore commit of yet): such a commit is made even though its
+    /// tree is `main`'s.
+    pub(crate) fn marker(&self) -> bool {
+        self.marker
     }
 
     /// What the last attempt left as `main` has it, by path.
@@ -216,6 +240,23 @@ impl Restore {
 
         self.touched = Some(changed_paths(git, &ours_tree, &tree).map_err(internal)?);
         self.withheld = withheld;
+        // Nothing new for `main`: a salvage ref's restore is recorded once,
+        // by the rule Desktop records it by.
+        self.marker = match main {
+            Some(main) => {
+                restore_marker(
+                    git,
+                    &self.reference,
+                    tree != ours_tree,
+                    main,
+                    &self.commit,
+                    &self.committer_email,
+                )
+                .map_err(OriginError::from)?
+                .0
+            }
+            None => false,
+        };
         Ok(tree)
     }
 

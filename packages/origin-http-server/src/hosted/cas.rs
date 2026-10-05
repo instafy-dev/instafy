@@ -448,8 +448,9 @@ pub(crate) fn cas_commit(
         // An import is committed even when it changes nothing: that commit,
         // carrying its key, is its receipt. Without it a retry after a lost
         // answer would find no receipt and write the import again, over
-        // whatever was saved in between.
-        if tree == main_tree && key.is_none() {
+        // whatever was saved in between. So is a salvage restore's empty
+        // restore commit, which records it.
+        if tree == main_tree && key.is_none() && !change.commits_unchanged() {
             change.settled(&staged, main.as_deref())?;
             return Ok(CasOutcome {
                 rev: main.clone(),

@@ -34,8 +34,8 @@ use crate::publish_policy::{
 use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
-    left_out_reason, parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref,
-    restore_commit_message, restore_commits, restore_of, without_origin_trailers, NotRestored,
+    left_out_reason, parse_rev, recovery_ref_moved, remote_tip, resolve_ref,
+    restore_commit_message, restore_commits, restore_marker, without_origin_trailers, NotRestored,
     RecoveryRef, ViewError,
 };
 use crate::stale_align;
@@ -2760,25 +2760,14 @@ impl Publisher<'_> {
         // tells the list it was restored. A recovery ref needs none: it goes
         // once its work is on `main`, so an empty commit would only be noise
         // in history.
-        let earlier = if made || !reference.is_salvage() {
-            None
-        } else {
-            let made_at = self
-                .git
-                .read_objects(std::slice::from_ref(&saved))
-                .map_err(internal)?
-                .first()
-                .map(|object| parse_commit(&object.data).timestamp)
-                .unwrap_or_default();
-            restore_of(
-                &self.git,
-                &head,
-                reference.as_str(),
-                made_at,
-                &self.config.git_author_email,
-            )?
-        };
-        let marker = !made && reference.is_salvage() && earlier.is_none();
+        let (marker, earlier) = restore_marker(
+            &self.git,
+            &reference,
+            made,
+            &head,
+            &saved,
+            &self.config.git_author_email,
+        )?;
         // An earlier marker whose publish failed goes out with this call.
         let earlier_pending = match earlier.as_deref() {
             Some(earlier) => !self
