@@ -2706,7 +2706,7 @@ impl Publisher<'_> {
         let marked = !committed && (marker || earlier_pending);
         if made {
             let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
-            let dirty: Vec<String> = self
+            let mut dirty: Vec<String> = self
                 .status()
                 .map_err(internal)?
                 .into_iter()
@@ -2719,6 +2719,11 @@ impl Publisher<'_> {
                     })
                 })
                 .collect();
+            // Ignored and excluded files are in no status, and `read-tree`
+            // would replace them without asking.
+            dirty.extend(untracked_in_the_way(&self.git, &head_tree, &tree).map_err(internal)?);
+            dirty.sort();
+            dirty.dedup();
             if !dirty.is_empty() {
                 return Err(OriginError::conflict_paths(
                     "dirty_paths",
@@ -2861,6 +2866,83 @@ fn parse_ident(value: &str) -> Option<GitIdentity> {
         email,
         date: (!date.is_empty()).then(|| date.to_string()),
     })
+}
+
+/// The files of the checkout `git` that changing its files from `HEAD`'s
+/// tree `from` to `to` would replace although `HEAD` does not track them
+/// (ignored or excluded ones included, which no status lists and
+/// `read-tree -m -u` replaces without asking): a file or link at a path
+/// `to` adds, one where `to` makes a folder, and any file inside a folder
+/// `to` turns into a file. Each is named by the path in the way: the file
+/// above, or the path `to` writes. Links on disk are never followed.
+fn untracked_in_the_way(git: &WorkspaceGit<'_>, from: &str, to: &str) -> Result<Vec<String>> {
+    let raw = git.bytes(&["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to])?;
+    let changes = parse_raw_changes(&raw);
+    // What `HEAD` tracks and the change removes: its own files, which a
+    // status shows when they were edited.
+    let removed: BTreeSet<&str> = changes
+        .iter()
+        .filter(|change| change.status == 'D')
+        .map(|change| change.path.as_str())
+        .collect();
+    let root = git.root();
+    let mut found = BTreeSet::new();
+    'added: for change in changes.iter().filter(|change| change.status == 'A') {
+        let path = change.path.as_str();
+        for (index, _) in path.match_indices('/') {
+            let folder = &path[..index];
+            if removed.contains(folder) {
+                continue 'added;
+            }
+            match std::fs::symlink_metadata(root.join(folder)) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    found.insert(folder.to_string());
+                    continue 'added;
+                }
+                Err(_) => continue 'added,
+            }
+        }
+        match std::fs::symlink_metadata(root.join(path)) {
+            Ok(metadata) if metadata.is_dir() => {
+                if holds_files_besides(&root.join(path), path, &removed) {
+                    found.insert(path.to_string());
+                }
+            }
+            Ok(_) => {
+                found.insert(path.to_string());
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+
+/// Whether the folder `dir` (the checkout's `path`) holds a file or link
+/// that is not one of `tracked`, at any depth. Links are never followed.
+fn holds_files_besides(dir: &Path, path: &str, tracked: &BTreeSet<&str>) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            return true;
+        };
+        let inner = format!("{path}/{name}");
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                if holds_files_besides(&entry.path(), &inner, tracked) {
+                    return true;
+                }
+            }
+            Ok(_) if tracked.contains(inner.as_str()) => {}
+            _ => return true,
+        }
+    }
+    false
 }
 
 /// One `--raw` diff entry.
