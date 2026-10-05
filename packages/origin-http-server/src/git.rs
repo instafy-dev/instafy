@@ -673,53 +673,59 @@ pub(crate) fn is_network_git_command(args: &[&str]) -> bool {
     )
 }
 
-fn stage_applied_paths(
-    workspace_root: &Path,
-    applied_paths: &[String],
-    bearer_token: Option<&str>,
-) -> Result<(), OriginError> {
-    if applied_paths.is_empty() {
-        return Ok(());
-    }
-
-    for chunk in applied_paths.chunks(GIT_STAGE_CHUNK_SIZE) {
-        let mut args: Vec<&str> = Vec::with_capacity(3 + chunk.len());
-        args.push("add");
-        args.push("--force");
-        args.push("--");
-        for path in chunk {
-            args.push(path.as_str());
-        }
-        run_git_ok(workspace_root, &args, bearer_token)
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-
-    Ok(())
+fn stage_applied_paths(workspace_root: &Path, applied_paths: &[String]) -> Result<(), OriginError> {
+    git_with_literal_paths(
+        workspace_root,
+        &[
+            "add",
+            "--force",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        applied_paths,
+    )
 }
 
-fn stage_deleted_paths(
+fn stage_deleted_paths(workspace_root: &Path, deleted_paths: &[String]) -> Result<(), OriginError> {
+    git_with_literal_paths(
+        workspace_root,
+        &[
+            "rm",
+            "-r",
+            "--ignore-unmatch",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        deleted_paths,
+    )
+}
+
+/// Run `args` (a command that reads its paths with `--pathspec-from-file=-
+/// --pathspec-file-nul`) in the checkout under the workspace's git lock,
+/// with `paths` on stdin, each read as a name: an apply's paths come from
+/// the request, so they are never arguments of git, and a name such as
+/// `notes[1].md` never matches `notes1.md` as a pattern would.
+fn git_with_literal_paths<S: AsRef<str>>(
     workspace_root: &Path,
-    deleted_paths: &[String],
-    bearer_token: Option<&str>,
+    args: &[&str],
+    paths: &[S],
 ) -> Result<(), OriginError> {
-    if deleted_paths.is_empty() {
+    if paths.is_empty() {
         return Ok(());
     }
-
-    for chunk in deleted_paths.chunks(GIT_STAGE_CHUNK_SIZE) {
-        let mut args: Vec<&str> = Vec::with_capacity(4 + chunk.len());
-        args.push("rm");
-        args.push("-r");
-        args.push("--ignore-unmatch");
-        args.push("--");
-        for path in chunk {
-            args.push(path.as_str());
-        }
-        run_git_ok(workspace_root, &args, bearer_token)
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-
-    Ok(())
+    let lock = workspace_git_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = crate::workspace_git::nul_list(paths);
+    crate::workspace_git::WorkspaceGit::new(workspace_root, None)
+        .ok_opts(
+            args,
+            &crate::workspace_git::RunOpts {
+                stdin: Some(&list),
+                literal_pathspecs: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| OriginError::internal(error.to_string()))
 }
 
 fn unstage_sync_reserved_paths(
@@ -1298,8 +1304,8 @@ pub fn commit_apply_locally(
         let _embedded_guard = EmbeddedGitDirGuard::hide(workspace_root, &touched)
             .map_err(|error| OriginError::internal(error.to_string()))?;
 
-        stage_applied_paths(workspace_root, applied_paths, bearer_token)?;
-        stage_deleted_paths(workspace_root, deleted_paths, bearer_token)?;
+        stage_applied_paths(workspace_root, applied_paths)?;
+        stage_deleted_paths(workspace_root, deleted_paths)?;
 
         let staged = unstage_sync_reserved_paths(workspace_root, bearer_token)?;
         if staged.trim().is_empty() {
@@ -1317,7 +1323,7 @@ pub fn commit_apply_locally(
         let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
             .map_err(|error| OriginError::internal(error.to_string()))?;
         index_snapshot.restore_original()?;
-        reset_index_paths_to_head(workspace_root, &touched, bearer_token)?;
+        reset_index_paths_to_head(workspace_root, &touched)?;
         maybe_fail_commit_apply_after_path_reset()?;
         index_snapshot.flush_after_path_reset()?;
         Ok(Some(head))
@@ -1574,19 +1580,17 @@ fn sync_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to fsync directory {path:?}"))
 }
 
-fn reset_index_paths_to_head(
-    workspace_root: &Path,
-    touched: &[&str],
-    bearer_token: Option<&str>,
-) -> Result<(), OriginError> {
-    for chunk in touched.chunks(GIT_STAGE_CHUNK_SIZE) {
-        let mut args = Vec::with_capacity(3 + chunk.len());
-        args.extend(["reset", "HEAD", "--"]);
-        args.extend(chunk.iter().copied());
-        run_git_ok(workspace_root, &args, bearer_token)
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-    Ok(())
+fn reset_index_paths_to_head(workspace_root: &Path, touched: &[&str]) -> Result<(), OriginError> {
+    git_with_literal_paths(
+        workspace_root,
+        &[
+            "reset",
+            "-q",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        touched,
+    )
 }
 
 fn is_dependency_churn_path(path: &str) -> bool {
