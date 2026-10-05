@@ -209,8 +209,18 @@ fn classify_output(output: &Output) -> PushClass {
     classify_push(&text)
 }
 
+/// The shard hook's refusal of any salvage ref change from a push that does
+/// not hold the salvage credential.
+const SALVAGE_REF_KEPT: &str = "holds salvaged work and cannot be changed by a push";
+
 /// Classify the combined stdout and stderr of a failed push.
 pub(crate) fn classify_push(text: &str) -> PushClass {
+    // A refusal about a salvage ref is final, whatever else the output says:
+    // the name is not one a salvage push may create, or the ref already
+    // exists. It is never a race to retry or a path to leave out.
+    if text.contains(git_service::policy::SALVAGE_PUSH_REFUSED) || text.contains(SALVAGE_REF_KEPT) {
+        return PushClass::Rejected(summary(text));
+    }
     let lower = text.to_ascii_lowercase();
     // Checked first: the shard hook's fast-forward refusal also reads
     // "hook declined", and must be retried rather than parked.
@@ -455,6 +465,42 @@ mod tests {
         let result = delete_with_lease(&local, &url, reference, &seen).unwrap();
         assert_eq!(result.class, PushClass::Pushed);
         assert!(!tip().status.success());
+    }
+
+    #[test]
+    fn salvage_refusals_are_permanent_even_when_they_read_like_a_race_or_a_path() {
+        let marker = git_service::policy::SALVAGE_PUSH_REFUSED;
+        let gateway = "refs/instafy/salvage/gateway/node-1-0123abcd";
+        for text in [
+            // The ref exists: the hook refuses any update, and git reports a
+            // failed ref update.
+            format!(
+                "remote: {marker} '{gateway}' holds salvaged work and may only be created\n\
+                 remote: error: hook declined to update {gateway}\n\
+                 !\tabc:{gateway}\t[remote rejected] (failed to update ref)"
+            ),
+            format!(
+                "remote: {marker} only refs/instafy/salvage/gateway/<name> refs may be \
+                 created, not 'refs/heads/main'\n\
+                 !\tabc:refs/heads/main\t[remote rejected] (hook declined)"
+            ),
+            // A name with a quoted path in it is still not a path refusal.
+            format!(
+                "remote: {marker} 'refs/instafy/salvage/gateway/Upper' is not a valid salvage \
+                 ref name ([0-9a-z] then [0-9a-z._-], at most 100 characters)\n\
+                 remote: instafy: blocked path 'x' (stale info)"
+            ),
+            // Without the credential every salvage ref change is refused.
+            format!(
+                "remote: instafy: '{gateway}' holds salvaged work and cannot be changed by a \
+                 push\n!\tabc:{gateway}\t[remote rejected] (cannot lock ref)"
+            ),
+        ] {
+            assert!(
+                matches!(classify_push(&text), PushClass::Rejected(_)),
+                "{text}"
+            );
+        }
     }
 
     #[test]
