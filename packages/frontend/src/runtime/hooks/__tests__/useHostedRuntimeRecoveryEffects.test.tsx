@@ -4,16 +4,25 @@ import { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
-import { clearIdlePaused, isIdlePaused } from "../../idlePauseRegistry";
+import {
+  clearIdlePaused,
+  clearManualStop,
+  isIdlePaused,
+  isManualStopHeld,
+} from "../../idlePauseRegistry";
 import type { HostedRuntimeLifecycleEventKind } from "../../unexpectedHostedRuntimeRecovery";
 import { useHostedRuntimeRecoveryEffects } from "../useHostedRuntimeRecoveryEffects";
 
 const PROJECT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const RUNTIME_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const OTHER_RUNTIME_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
-function hostedEntry(status: "ready" | "stopped"): ControllerRuntimeStatusEntry {
+function hostedEntry(
+  status: "ready" | "stopped",
+  runtimeId = RUNTIME_ID,
+): ControllerRuntimeStatusEntry {
   return {
-    runtimeId: RUNTIME_ID,
+    runtimeId,
     status,
     provider: "instafy-cloud",
     idleTtlSeconds: 300,
@@ -32,15 +41,19 @@ interface HarnessProps {
   stopped: boolean;
   preferred: boolean;
   hasPendingProjectWork: boolean;
+  /** A second hosted machine in the space that stays ready. */
+  otherReady?: boolean;
 }
 
-describe("useHostedRuntimeRecoveryEffects after a runtime-limit reclaim", () => {
+describe("useHostedRuntimeRecoveryEffects after a stop", () => {
   let container: HTMLDivElement;
   let root: Root;
   const ensureHostedRuntime = vi.fn(async () => true);
 
-  function Harness({ stopped, preferred, hasPendingProjectWork }: HarnessProps) {
+  function Harness({ stopped, preferred, hasPendingProjectWork, otherReady = false }: HarnessProps) {
     const entry = hostedEntry(stopped ? "stopped" : "ready");
+    const statuses = otherReady ? [entry, hostedEntry("ready", OTHER_RUNTIME_ID)] : [entry];
+    const readyRuntimeCount = (stopped ? 0 : 1) + (otherReady ? 1 : 0);
     const autoEnsureHostedRef = useRef(false);
     const pendingHostedPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pendingHostedRuntimeRecoveryRef = useRef<{
@@ -60,9 +73,9 @@ describe("useHostedRuntimeRecoveryEffects after a runtime-limit reclaim", () => 
       projectAccessResolved: true,
       projectReadyForRuntime: true,
       runtimeControllerEnabled: true,
-      runtimeStatuses: [entry],
-      runtimeReady: !stopped,
-      readyRuntimeCount: stopped ? 0 : 1,
+      runtimeStatuses: statuses,
+      runtimeReady: readyRuntimeCount > 0,
+      readyRuntimeCount,
       runtimeStatusesResolved: true,
       waitingForPreferredRuntime: preferred && stopped,
       preferredRuntimeEntry: preferred ? entry : null,
@@ -108,6 +121,7 @@ describe("useHostedRuntimeRecoveryEffects after a runtime-limit reclaim", () => 
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     ensureHostedRuntime.mockClear();
     clearIdlePaused(PROJECT_ID);
+    clearManualStop(PROJECT_ID);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -119,6 +133,7 @@ describe("useHostedRuntimeRecoveryEffects after a runtime-limit reclaim", () => 
     });
     container.remove();
     clearIdlePaused(PROJECT_ID);
+    clearManualStop(PROJECT_ID);
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -174,5 +189,59 @@ describe("useHostedRuntimeRecoveryEffects after a runtime-limit reclaim", () => 
 
     expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
     expect(isIdlePaused(PROJECT_ID)).toBe(false);
+    expect(isManualStopHeld(PROJECT_ID)).toBe(false);
   });
+
+  it.each([
+    ["user_stop", false],
+    ["user_remove", false],
+    ["runtime_limit_takeover", false],
+    ["browser_session_runtime_limit_takeover", false],
+    ["user_stop", true],
+  ])(
+    "does not undo a %s made in another tab (preferred runtime: %s)",
+    async (reason, preferred) => {
+      // This tab did not press Stop, so nothing marked a hold before the
+      // event; without one it saw no ready machine and started it again.
+      const idle = { preferred, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      await publishStop({ reason });
+      await render({ ...idle, stopped: true });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+    },
+  );
+
+  it("does not hold the space when another hosted machine stays live", async () => {
+    // Stopping one of two machines elsewhere is not "no machine here", the
+    // same rule the tab that pressed Stop follows.
+    const busy = { preferred: false, hasPendingProjectWork: false, otherReady: true };
+    await render({ ...busy, stopped: false });
+    await publishStop({ reason: "user_stop" });
+    await render({ ...busy, stopped: true });
+
+    expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+    expect(isIdlePaused(PROJECT_ID)).toBe(false);
+  });
+
+  it.each(["oom_killed", "credits_exhausted"])(
+    "holds a %s stop like an idle pause",
+    async (reason) => {
+      const idle = { preferred: false, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      await publishStop({ reason });
+      await render({ ...idle, stopped: true });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isIdlePaused(PROJECT_ID)).toBe(true);
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+
+      // Writing in the chat there lifts the pause and the machine starts.
+      await act(async () => {
+        clearIdlePaused(PROJECT_ID);
+      });
+      expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    },
+  );
 });

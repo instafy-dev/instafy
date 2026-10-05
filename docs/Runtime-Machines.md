@@ -11,7 +11,7 @@ limit_waits.rs, stop.rs, provider.rs),
 Two user-facing concepts, deliberately no size matrix:
 
 - **Hosted machine** — a small cloud computer per project. Pauses when
-  unused, keeps project files and caches, wakes on interaction.
+  unused, keeps project files and caches, wakes when you write in the chat.
 - **Your machine** — the desktop runtime agent; free, unlimited, offered at
   every ceiling (RAM, credits, capacity, repo size).
 
@@ -92,22 +92,46 @@ migrated yet the sweep skips entirely — fail safe, never stop blind.
 
 Pause semantics: the frontend marks the project idle-paused
 (`runtime/idlePauseRegistry.ts`), which gates auto-ensure — otherwise the
-state-driven ensure would relaunch the machine seconds after every pause. Any
-pointerdown/keydown clears the pause and the machine wakes automatically.
+state-driven ensure would relaunch the machine seconds after every pause.
+Clicking into or typing in the chat composer (`#studio-chat-input`) clears
+the pause and the machine wakes automatically; Send and an explicit Start
+clear it too. Clicks and keys elsewhere (the space switcher, the Machines
+rail, shortcuts) do not, so leaving a space never starts its machine.
+
+## Starting a machine on intent
+
+Opening a space never starts its machine: not at startup, not from the space
+switcher, a link or a `?panel=machines` deep link, and not on a reload. Every
+time a space becomes the active one the frontend holds its auto-ensure
+(`markRestoredAwaitingIntent`, set in the project-change layout effect of
+`useHostedRuntimeProjectEffects.ts`). The hold lifts on the first intent in
+that space: clicking into or typing in the composer, Send, or an explicit
+Start or Reconnect. Focus reaching the composer on its own does not count.
+The Machines panel only reads status. One exception remains: the shared
+browser dock still asks for a machine itself when it connects without one.
+
+A stop made in another tab or device holds this tab too: `user_stop`,
+`user_remove`, `runtime_limit_takeover` and
+`browser_session_runtime_limit_takeover` hold like a manual Stop when they
+leave the space no live hosted machine, and `credits_exhausted` and
+`oom_killed` hold like an idle pause. Unexpected loss (`heartbeat_timeout`,
+`origin.expired` within 20 seconds of a machine this tab had ready) still
+recovers straight away.
 
 ## Stop reasons
 
 Sweep stops publish `runtime.stopped` with a `reason`:
 
-- `idle` — pause; explained toast; wakes on interaction.
-- `credits_exhausted` — no auto-restart; toast links to credits. The ensure
-  precheck (402 `insufficient_credits`) prevents launching a machine the first
-  billing bucket would kill.
+- `idle` — pause; explained toast; wakes when you write in the chat.
+- `credits_exhausted` — no auto-restart (held like an idle pause); toast
+  links to credits. The ensure precheck (402 `insufficient_credits`) prevents
+  launching a machine the first billing bucket would kill.
 - `oom_killed` — heartbeat timeout whose container the provider post-mortem
   (`/runtime/inspect`, docker `State.OOMKilled`) attributes to the memory
-  wall. No auto-restart into the same wall; the toast offers **Boost** (sets
-  the size preference) or your-own-machine, escalating when the project has
-  ≥2 OOM stops in 7 days (`runtime_events` query).
+  wall. No auto-restart into the same wall (held like an idle pause); the
+  toast offers **Boost** (sets the size preference) or your-own-machine,
+  escalating when the project has ≥2 OOM stops in 7 days (`runtime_events`
+  query).
 - `heartbeat_timeout` — genuine agent death; auto-recovery unchanged.
 - `launch_timeout` — the launch never registered within 15 minutes (see "A
   launch that does not come up" below). The Studio handles it like
@@ -121,7 +145,8 @@ Sweep stops publish `runtime.stopped` with a `reason`:
   stop is requeued); such a space then waits on the limit itself. A studio
   open on the reclaimed space does not relaunch it unless it has work of its
   own there (a queued or running turn, or `queuedJobCount > 0`); otherwise it
-  holds the machine like an idle pause until the next interaction.
+  holds the machine like an idle pause until someone writes in the chat
+  there.
   Controllers before this reason was introduced published
   `idle_runtime_limit_reclaim`; the frontend accepts both.
 

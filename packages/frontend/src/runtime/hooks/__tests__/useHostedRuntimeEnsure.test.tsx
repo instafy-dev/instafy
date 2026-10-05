@@ -4,6 +4,17 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
+import {
+  clearIdlePaused,
+  clearManualStop,
+  clearRestoredAwaitingIntent,
+  isIdlePaused,
+  isManualStopHeld,
+  isRestoredAwaitingIntent,
+  markIdlePaused,
+  markManualStop,
+  markRestoredAwaitingIntent,
+} from "../../idlePauseRegistry";
 
 // vi.mock is hoisted above module-level consts, so the spy has to be too.
 const { ensure } = vi.hoisted(() => ({ ensure: vi.fn() }));
@@ -108,5 +119,23 @@ describe("useHostedRuntimeEnsure force", () => {
     expect(ensure).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: PROJECT_ID, provider: "instafy-cloud" }),
     );
+  });
+
+  it("lifts every hold on the space, since only an explicit request gets here", async () => {
+    markManualStop(PROJECT_ID);
+    markRestoredAwaitingIntent(PROJECT_ID);
+    markIdlePaused(PROJECT_ID);
+    try {
+      await act(async () => {
+        await ensureHostedRuntime!();
+      });
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+      expect(isRestoredAwaitingIntent(PROJECT_ID)).toBe(false);
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+    } finally {
+      clearManualStop(PROJECT_ID);
+      clearRestoredAwaitingIntent(PROJECT_ID);
+      clearIdlePaused(PROJECT_ID);
+    }
   });
 });

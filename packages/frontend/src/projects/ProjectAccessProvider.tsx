@@ -18,7 +18,6 @@ import {
 import { hasSupabaseConfig } from "../lib/supabaseClient";
 import { getStudioVisitKey } from "../navigation/studioVisit";
 import { controllerClient } from "../sdk/instafy";
-import { markRestoredAwaitingIntent } from "../runtime/idlePauseRegistry";
 import { useWorkspaceStore } from "../store";
 import { isUUID } from "../utils/uuid";
 import { useProjectState } from "./ProjectStateProvider";
@@ -467,10 +466,6 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
 
     const resolveProject = async () => {
       let targetProjectIdForBackoff: string | null = urlProjectId;
-      // The first resolution of this page load, with no space in the URL: the
-      // space comes from memory or the account's list, not from a choice the
-      // person just made.
-      const firstResolution = lastResolvedProjectIdRef.current === null;
       setProjectProvisionFailed(false);
       setProjectAccessPending(true);
       setProjectAccessBlocked(false);
@@ -688,12 +683,6 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           setProjectCapabilities(null);
         }
 
-        // A space reopened from memory does not start its machine until the
-        // person shows intent there (see idlePauseRegistry). A space from the
-        // URL, or one just made for a new account, starts as before.
-        if (firstResolution && !urlProjectId && !mintedProject) {
-          markRestoredAwaitingIntent(targetProjectId);
-        }
         lastResolvedProjectIdRef.current = targetProjectId;
         lastUrlProjectIdRef.current = urlProjectId;
         storedProjectIdRef.current = targetProjectId;

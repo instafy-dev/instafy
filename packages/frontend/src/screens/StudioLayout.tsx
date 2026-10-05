@@ -23,7 +23,8 @@ import { useHomeReturn } from "../navigation/useHomeReturn";
 import { useRouteOwnedWorkspaceDrawer } from "./useRouteOwnedWorkspaceDrawer";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, Search, SidebarCollapse, SidebarExpand, User, Xmark } from "iconoir-react";
 import { fetchCreditPolicy } from "../credits/creditService";
-import { clearIdlePaused, clearRestoredAwaitingIntent, markIdlePaused } from "../runtime/idlePauseRegistry";
+import { markIdlePaused } from "../runtime/idlePauseRegistry";
+import { useComposerIntentWake } from "../runtime/hooks/useComposerIntentWake";
 import { isRuntimeLimitReclaimStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
 import { useGatedInterval } from "../runtime/pollingGate";
 import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
@@ -966,7 +967,7 @@ function StudioLayoutInner() {
         // Whether to hold this machine is the recovery listener's call (it
         // knows about this tab's queued work); this only explains the stop.
         showStatus(
-          "This space's cloud runtime was paused so another space in your team could use it. Your files are kept, and it starts again when you continue and a runtime is free.",
+          "This space's cloud runtime was paused so another space in your team could use it. Your files are kept, and it starts again when you write in the chat and a runtime is free.",
           "info",
           8000,
           { id: "runtime-paused-reclaimed", forceVisible: true },
@@ -974,7 +975,7 @@ function StudioLayoutInner() {
       } else if (reason === "idle") {
         markIdlePaused(projectId);
         showStatus(
-          "Hosted machine paused after inactivity. Your files and caches are kept, and it wakes when you continue.",
+          "Hosted machine paused after inactivity. Your files and caches are kept, and it wakes when you write in the chat.",
           "info",
           8000,
           { id: "runtime-paused-idle", forceVisible: true },
@@ -1028,37 +1029,11 @@ function StudioLayoutInner() {
     };
   }, [activeProjectId, openPanelTab, showStatus]);
 
-  // Intent in a space startup reopened from memory: focus reaching its
-  // composer. Clicks in the navigation (choosing another space, the team
-  // menu) do not count, or leaving would start the machine being left.
-  useEffect(() => {
-    if (typeof window === "undefined" || !activeProjectId) {
-      return;
-    }
-    const onFocus = (event: FocusEvent) => {
-      const target = event.target;
-      if (target instanceof Element && target.closest("#studio-chat-input")) {
-        clearRestoredAwaitingIntent(activeProjectId);
-      }
-    };
-    window.addEventListener("focusin", onFocus);
-    return () => window.removeEventListener("focusin", onFocus);
-  }, [activeProjectId]);
-
-  // A genuine interaction wakes an idle-paused machine: clearing the pause
-  // lets the normal auto-ensure path relaunch it.
-  useEffect(() => {
-    if (typeof window === "undefined" || !activeProjectId) {
-      return;
-    }
-    const wake = () => clearIdlePaused(activeProjectId);
-    window.addEventListener("pointerdown", wake, { passive: true });
-    window.addEventListener("keydown", wake, { passive: true });
-    return () => {
-      window.removeEventListener("pointerdown", wake);
-      window.removeEventListener("keydown", wake);
-    };
-  }, [activeProjectId]);
+  // Clicking into or typing in the composer is what starts a held or paused
+  // machine. Clicks in the navigation (choosing another space, the Machines
+  // rail, the team menu) do not count, or leaving would start the machine
+  // being left.
+  useComposerIntentWake(activeProjectId);
 
   // T-30 runway warning: while a hosted machine is online, warn once when the
   // remaining balance covers less than ~30 minutes of runtime, so the pause

@@ -4,7 +4,7 @@ import {
   type ControllerRuntimeStatusEntry,
 } from "../../sdk/instafy";
 import { isBrowserRuntimeClaimActive } from "../browserRuntimeClaimRegistry";
-import { clearManualStop, clearRestoredAwaitingIntent } from "../idlePauseRegistry";
+import { clearIdlePaused, clearManualStop, clearRestoredAwaitingIntent } from "../idlePauseRegistry";
 import {
   hostedRuntimeLimitDetailsFromError,
   type HostedRuntimeLimitErrorDetails,
@@ -280,9 +280,11 @@ export function useHostedRuntimeEnsure({
     }
     // Every explicit request for a machine (Reconnect, Start, sending a
     // prompt) funnels through here; the auto-ensure effects are gated before
-    // they call it. So reaching this point lifts a deliberate Stop.
+    // they call it. So reaching this point lifts a deliberate Stop, the wait
+    // for intent and an idle pause.
     clearManualStop(effectiveProjectId);
     clearRestoredAwaitingIntent(effectiveProjectId);
+    clearIdlePaused(effectiveProjectId);
     if (isBrowserRuntimeClaimActive(effectiveProjectId)) {
       debugLog("hosted-runtime:ensure-skip-browser-claim", {
         projectId: effectiveProjectId,

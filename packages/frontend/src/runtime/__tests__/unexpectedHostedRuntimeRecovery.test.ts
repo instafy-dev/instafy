@@ -3,6 +3,7 @@ import type { RunRecord } from "../../types";
 import {
   hasPendingRunInProject,
   isRuntimeLimitReclaimStopReason,
+  resolveRuntimeStopHold,
   shouldAttemptUnexpectedHostedRuntimeRecovery,
   shouldTrackHostedRuntimeLifecycleEvent,
   UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS,
@@ -198,5 +199,22 @@ describe("unexpectedHostedRuntimeRecovery", () => {
     }
     expect(hasPendingRunInProject(runs, null)).toBe(false);
     expect(hasPendingRunInProject(null, "project-1")).toBe(false);
+  });
+
+  it("holds a stop made elsewhere by who made it", () => {
+    for (const reason of [
+      "user_stop",
+      "user_remove",
+      "runtime_limit_takeover",
+      " Browser_Session_Runtime_Limit_Takeover ",
+    ]) {
+      expect(resolveRuntimeStopHold(reason)).toBe("manual_stop");
+    }
+    expect(resolveRuntimeStopHold("oom_killed")).toBe("idle_pause");
+    expect(resolveRuntimeStopHold("credits_exhausted")).toBe("idle_pause");
+    // Held where they are explained, or left to recovery.
+    for (const reason of ["idle", "runtime_limit_reclaim", "heartbeat_timeout", "", null, undefined]) {
+      expect(resolveRuntimeStopHold(reason)).toBeNull();
+    }
   });
 });

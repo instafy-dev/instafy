@@ -77,7 +77,6 @@ export function useHostedRuntimePolicy({
   const runtimeOfflineAlertRef = useRef<string | null>(null);
   const autoEnsureHostedRef = useRef(false);
   const previousRuntimeProjectIdRef = useRef<string | null>(null);
-  const skipAutoEnsureProjectRef = useRef<string | null>(null);
   const pendingHostedPollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastReadyHostedRuntimeRef = useRef<{
     projectId: string;
@@ -156,7 +155,6 @@ export function useHostedRuntimePolicy({
     runtimeOfflineAlertRef,
     autoEnsureHostedRef,
     previousRuntimeProjectIdRef,
-    skipAutoEnsureProjectRef,
     lastPreferredRuntimeIdRef,
     preferenceClearRequestedRef,
     latestReadyHostedRuntimeRef: lastReadyHostedRuntimeRef,

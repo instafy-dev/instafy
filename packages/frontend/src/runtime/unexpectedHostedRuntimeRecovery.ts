@@ -2,18 +2,27 @@ import type { RunRecord } from "../types";
 
 export const UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS = 20_000;
 
-const MANUAL_RUNTIME_STOP_REASONS = new Set([
+// Someone stopped the machine on purpose: Stop, Remove, or another space
+// taking over its slot.
+const USER_RUNTIME_STOP_REASONS = new Set([
   "user_stop",
   "user_remove",
   "runtime_limit_takeover",
   "browser_session_runtime_limit_takeover",
+]);
+
+// Platform stops that a restart would hit again straight away: no credits,
+// or the same memory wall.
+const PLATFORM_HOLD_STOP_REASONS = new Set(["credits_exhausted", "oom_killed"]);
+
+const MANUAL_RUNTIME_STOP_REASONS = new Set([
+  ...USER_RUNTIME_STOP_REASONS,
   // Deliberate platform stops: auto-restarting would either undo the pause
   // (idle), immediately die again (credits_exhausted), or run straight back
   // into the same memory wall (oom_killed). The machine wakes via the normal
   // ensure path on the user's next interaction instead.
   "idle",
-  "credits_exhausted",
-  "oom_killed",
+  ...PLATFORM_HOLD_STOP_REASONS,
 ]);
 
 // The controller stopped this space's idle machine because another space in
@@ -42,6 +51,26 @@ export interface HostedRuntimeLifecycleEventDetail {
 
 export function isRuntimeLimitReclaimStopReason(reason: string | null | undefined): boolean {
   return RUNTIME_LIMIT_RECLAIM_STOP_REASONS.has(reason?.trim().toLowerCase() ?? "");
+}
+
+/**
+ * The hold a stop puts on its space in a tab that did not make it, so that
+ * tab does not start the machine again: a person's stop holds like Stop does
+ * in the tab that pressed it, a platform stop like an idle pause. Idle and
+ * reclaim stops are held where they are explained, and any other reason
+ * leaves recovery to decide.
+ */
+export function resolveRuntimeStopHold(
+  reason: string | null | undefined,
+): "manual_stop" | "idle_pause" | null {
+  const normalizedReason = reason?.trim().toLowerCase() ?? "";
+  if (USER_RUNTIME_STOP_REASONS.has(normalizedReason)) {
+    return "manual_stop";
+  }
+  if (PLATFORM_HOLD_STOP_REASONS.has(normalizedReason)) {
+    return "idle_pause";
+  }
+  return null;
 }
 
 const PENDING_RUN_STATUSES = new Set<RunRecord["status"]>([

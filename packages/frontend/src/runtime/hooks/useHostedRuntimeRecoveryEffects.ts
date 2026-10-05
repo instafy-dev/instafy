@@ -7,6 +7,7 @@ import {
   isManualStopHeld,
   isRestoredAwaitingIntent,
   markIdlePaused,
+  markManualStop,
 } from "../idlePauseRegistry";
 import {
   BROWSER_RUNTIME_CLAIM_CHANGED_EVENT,
@@ -14,6 +15,7 @@ import {
 } from "../browserRuntimeClaimRegistry";
 import {
   isRuntimeLimitReclaimStopReason,
+  resolveRuntimeStopHold,
   shouldAttemptUnexpectedHostedRuntimeRecovery,
   shouldTrackHostedRuntimeLifecycleEvent,
   UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS,
@@ -26,6 +28,7 @@ import {
   shouldAutoEnsurePreferredHostedRuntime,
   shouldPollHostedBootingRuntime,
 } from "./hostedRuntimeRecoveryDecisions";
+import { stopLeavesNoLiveHostedRuntime } from "./manualStopDecisions";
 import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
 
 interface UseHostedRuntimeRecoveryEffectsArgs {
@@ -96,6 +99,10 @@ export function useHostedRuntimeRecoveryEffects({
   useEffect(() => {
     hasPendingProjectWorkRef.current = hasPendingProjectWork;
   }, [hasPendingProjectWork]);
+  const runtimeStatusesRef = useRef(runtimeStatuses);
+  useEffect(() => {
+    runtimeStatusesRef.current = runtimeStatuses;
+  }, [runtimeStatuses]);
   const [browserRuntimeClaimEpoch, setBrowserRuntimeClaimEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -162,6 +169,23 @@ export function useHostedRuntimeRecoveryEffects({
           // interaction (or send) wakes it as usual.
           markIdlePaused(projectId);
           debugLog("hosted-runtime:reclaimed-for-waiting-space", { projectId });
+          return;
+        }
+        // A stop made in another tab or device, or by the platform. Without
+        // a hold this tab would see no ready machine and start it again.
+        const hold = resolveRuntimeStopHold(reason);
+        if (hold === "manual_stop") {
+          // Only the last live hosted machine means "no machine", as in the
+          // tab that pressed Stop.
+          const runtimeId =
+            custom.detail?.data && typeof custom.detail.data.runtimeId === "string"
+              ? custom.detail.data.runtimeId
+              : "";
+          if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, runtimeId)) {
+            markManualStop(projectId);
+          }
+        } else if (hold === "idle_pause") {
+          markIdlePaused(projectId);
         }
         return;
       }
