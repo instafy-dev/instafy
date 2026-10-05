@@ -570,9 +570,11 @@ impl MirrorCache {
         .map_err(|error| OriginError::internal(format!("main read task failed: {error}")))?
     }
 
-    /// A fetch that starts no earlier than `since`: the queued one, the
-    /// running one if it started since, or a new one (queued behind the
-    /// running fetch, if any).
+    /// A fetch that starts no earlier than `since`: the running one if it
+    /// started since (so a caller that asks again after `fetch_pending`
+    /// keeps waiting for the fetch it waited for, not one a later request
+    /// queued behind it), else the queued one, else a new one (queued
+    /// behind the running fetch, if any).
     fn fresh_fetch(
         self: &Arc<Self>,
         entry: &Arc<MirrorEntry>,
@@ -580,15 +582,15 @@ impl MirrorCache {
         since: Instant,
         caller_token: Option<&str>,
     ) -> SharedFetch {
-        if let Some(queued) = &state.queued {
-            return queued.fetch.clone();
-        }
         if let Some(running) = state
             .running
             .as_ref()
             .filter(|running| running.started.is_some_and(|at| at >= since))
         {
             return running.fetch.clone();
+        }
+        if let Some(queued) = &state.queued {
+            return queued.fetch.clone();
         }
         let before = state.running.as_ref().map(|running| running.fetch.clone());
         self.start_fetch(entry, state, before, caller_token)

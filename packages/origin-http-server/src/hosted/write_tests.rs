@@ -2669,6 +2669,57 @@ fn a_change_with_time_left_waits_out_a_slow_fetch() {
     );
 }
 
+/// A change that waits out a slow fetch is answered by that fetch: a fetch
+/// a later write queued meanwhile is not the one it waits for again.
+#[test]
+fn a_patient_change_is_answered_by_the_fetch_it_waited_for() {
+    let sc = HostedScenario::new();
+    let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut cache = sc
+        .open_cache()
+        .with_waits(Duration::from_millis(400), Duration::from_millis(400));
+    cache.test_fetch_delay = Some(Duration::from_millis(2000));
+    let cache = Arc::new(cache);
+    use super::cas::Canonical as _;
+
+    let mut patient = CachedCanonical::new(
+        cache.clone(),
+        cache.lease(sc.project),
+        None,
+        runtime.handle().clone(),
+    )
+    .wait_until(Instant::now() + Duration::from_secs(30));
+    let started = Instant::now();
+    let waiting = std::thread::spawn(move || patient.fetch_main());
+    // Another write arrives while the first fetch runs: it queues a fetch
+    // of its own behind it.
+    std::thread::sleep(Duration::from_millis(150));
+    let later = {
+        let cache = cache.clone();
+        let project = sc.project;
+        runtime.spawn(async move {
+            let lease = cache.lease(project);
+            cache.resolve_main(&lease, Freshness::Fresh, None).await
+        })
+    };
+    let answered = waiting.join().unwrap().unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(answered.as_deref(), Some(head.as_str()));
+    // One fetch (2 s), not that one and the queued one after it (4 s).
+    assert!(elapsed < Duration::from_millis(3500), "{elapsed:?}");
+    // The later write waited its own short while for its own fetch.
+    let later = runtime.block_on(later).unwrap();
+    assert!(
+        later.is_ok() || later.as_ref().is_err_and(super::cache::is_fetch_pending),
+        "{later:?}"
+    );
+}
+
 /// r3 test 5: a push whose answer was lost is settled by fetching: it
 /// landed (one commit, no duplicate), or it did not and is tried again.
 #[test]
