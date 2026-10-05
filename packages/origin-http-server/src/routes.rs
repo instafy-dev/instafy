@@ -614,7 +614,7 @@ async fn handle_entries(
     if let Some(relative) = normalized.as_deref() {
         match workspace
             .entry_kind(relative)
-            .map_err(|_| OriginError::not_found("path not found"))?
+            .map_err(|error| worktree_miss(&error, "path not found"))?
         {
             WorkspaceEntryKind::File => {
                 let mut entry = build_file_entry(&workspace, relative)?;
@@ -660,7 +660,7 @@ async fn handle_file(
     let workspace = workspace_dir_for_project(&state, project_id)?;
     let file = workspace
         .open_file(&normalized)
-        .map_err(|_| OriginError::not_found("file not found"))?;
+        .map_err(|_| worktree_file_miss(&workspace, &normalized))?;
     let metadata = file
         .metadata()
         .map_err(|_| OriginError::not_found("file not found"))?;
@@ -689,6 +689,35 @@ async fn handle_file(
         set_blob_header(&mut response, &blob);
     }
     Ok(response)
+}
+
+/// The 404 for a work-tree path that could not be opened as a regular
+/// file: `not_found` only when nothing is there, otherwise
+/// `unsupported_entry` (a symlink, a folder or nested repository, a special
+/// file, or a file this origin cannot open).
+fn worktree_file_miss(workspace: &WorkspaceDir, relative: &str) -> OriginError {
+    match workspace.entry_kind(relative) {
+        Err(error) => worktree_miss(&error, "file not found"),
+        Ok(WorkspaceEntryKind::Directory) => {
+            OriginError::unsupported_entry("a folder is at this path, not a file")
+        }
+        Ok(WorkspaceEntryKind::File) => {
+            OriginError::unsupported_entry("the file at this path cannot be read")
+        }
+    }
+}
+
+/// The 404 for a work-tree lookup that failed with `error`: `not_found`
+/// (with `absent`) when the path or one of its folders does not exist,
+/// `unsupported_entry` when something that is never served is in the way
+/// (a symlink at the path or above it, or a special file).
+fn worktree_miss(error: &std::io::Error, absent: &str) -> OriginError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => {
+            OriginError::not_found(absent)
+        }
+        _ => OriginError::unsupported_entry("a symlink or special file is at this path"),
+    }
 }
 
 const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
@@ -738,7 +767,7 @@ async fn handle_raw(
     let workspace = workspace_dir_for_project(&state, project_id)?;
     let file = workspace
         .open_file(&normalized)
-        .map_err(|_| OriginError::not_found("file not found"))?;
+        .map_err(|_| worktree_file_miss(&workspace, &normalized))?;
     let size = file
         .metadata()
         .map_err(|_| OriginError::not_found("file not found"))?
@@ -2940,7 +2969,7 @@ fn build_file_entry(
 ) -> Result<Vec<FileEntryResponse>, OriginError> {
     let file = workspace
         .open_file(relative)
-        .map_err(|_| OriginError::not_found("file not found"))?;
+        .map_err(|_| worktree_file_miss(workspace, relative))?;
     let metadata = file
         .metadata()
         .map_err(|_| OriginError::not_found("file not found"))?;
@@ -3776,6 +3805,63 @@ mod tests {
             std::fs::read(outside.path().join("secret.txt")).unwrap(),
             b"outside-secret"
         );
+        server.abort();
+    }
+
+    /// A read answers 404 `not_found` only when nothing is at the path; a
+    /// symlink, a folder (a nested repository included) or a special file
+    /// is 404 `unsupported_entry`, which a client must never read as a
+    /// missing file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_read_misses_tell_an_absent_path_from_an_unsupported_entry() {
+        let workspace = TempDir::new().expect("workspace");
+        let root = workspace.path();
+        std::fs::write(root.join("real.txt"), b"hello\n").unwrap();
+        symlink(root.join("real.txt"), root.join("file-link")).unwrap();
+        std::fs::create_dir_all(root.join("docs/inner")).unwrap();
+        std::fs::write(root.join("docs/inner/a.txt"), b"a\n").unwrap();
+        std::fs::create_dir_all(root.join("vendor/lib/.git")).unwrap();
+        std::fs::write(root.join("vendor/lib/.git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        let state = test_app_state(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            &workspace,
+            "http://127.0.0.1:1".parse().expect("controller url"),
+            true,
+        );
+        let app = super::router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+        let address = listener.local_addr().expect("origin address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve origin");
+        });
+        let client = reqwest::Client::new();
+        let cases = [
+            ("/files/missing.txt", "not_found"),
+            ("/raw/missing.txt", "not_found"),
+            ("/files/docs/missing/a.txt", "not_found"),
+            // A file where a folder would be: the path cannot exist.
+            ("/files/real.txt/a.txt", "not_found"),
+            ("/entries?path=missing", "not_found"),
+            ("/files/file-link", "unsupported_entry"),
+            ("/raw/file-link", "unsupported_entry"),
+            ("/entries?path=file-link", "unsupported_entry"),
+            ("/files/docs", "unsupported_entry"),
+            ("/raw/docs/inner", "unsupported_entry"),
+            ("/files/vendor/lib", "unsupported_entry"),
+        ];
+        for (path, code) in cases {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .expect("origin request");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            let body: serde_json::Value = response.json().await.expect("json body");
+            assert_eq!(body["code"], code, "{path}: {body}");
+            assert!(body["error"].is_string(), "{path}: {body}");
+        }
         server.abort();
     }
 
