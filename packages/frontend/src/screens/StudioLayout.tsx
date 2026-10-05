@@ -120,6 +120,7 @@ import { ProviderBindingApprovalHost } from "./studio/components/ProviderBinding
 import { useRuntime } from "../runtime/useRuntime";
 import { type SubmitPromptResult } from "../prompts/usePromptActions";
 import { usePromptBootstrap } from "./studio/hooks/usePromptBootstrap";
+import { useProjectMemoryBootstrap } from "./useProjectMemoryBootstrap";
 import { useCreatePrivateConversation } from "./studio/hooks/useCreatePrivateConversation";
 import { useConversations } from "../conversations/ConversationsProvider";
 import { isUUID } from "../utils/uuid";
@@ -376,8 +377,6 @@ function StudioLayoutInner() {
   useWorkspaceActivity();
   const lastControllerAuthErrorRef = useRef(0);
   const projectMissingHandledRef = useRef<string | null>(null);
-  const projectMemoryBootstrapDoneRef = useRef<Set<string>>(new Set());
-  const projectMemoryBootstrapInFlightRef = useRef<Set<string>>(new Set());
   const activeConversation = useMemo(() => {
     if (!activeConversationId) {
       return null;
@@ -736,74 +735,11 @@ function StudioLayoutInner() {
       projectReadyForWorkspace,
     ]);
 
-  useEffect(() => {
-    const projectId = activeProjectId?.trim() ?? "";
-    if (!projectReadyForWorkspace || !projectId || controllerProjectMissing || !isUUID(projectId)) {
-      return;
-    }
-    if (typeof window === "undefined") {
-      return;
-    }
-    if (projectMemoryBootstrapDoneRef.current.has(projectId)) {
-      return;
-    }
-    const inFlightProjects = projectMemoryBootstrapInFlightRef.current;
-    if (inFlightProjects.has(projectId)) {
-      return;
-    }
-
-    let cancelled = false;
-    let retryTimeout: number | null = null;
-
-    const attemptBootstrap = async (attempt: number) => {
-      if (cancelled) {
-        return;
-      }
-      inFlightProjects.add(projectId);
-      const result = await controllerClient.projects.bootstrapMemory({ projectId });
-      inFlightProjects.delete(projectId);
-      if (cancelled) {
-        return;
-      }
-
-      if (result?.seeded === true || result?.reason === "already-present") {
-        projectMemoryBootstrapDoneRef.current.add(projectId);
-        if (result.seeded) {
-          window.dispatchEvent(
-            new CustomEvent("instafy:workspace-commit", { detail: { projectId } }),
-          );
-        }
-        return;
-      }
-
-      const retryable =
-        result == null || result.reason === "no-origin" || result.reason === "workspace-busy";
-      if (retryable) {
-        // Origins may only register after a hosted runtime is provisioned, which can take
-        // longer than the initial quick retries. Keep retrying in the background with a
-        // capped backoff so managed defaults eventually land before first real work.
-        const delayMs = attempt < 5 ? 1200 * (attempt + 1) : 15_000;
-        retryTimeout = window.setTimeout(() => {
-          void attemptBootstrap(attempt + 1);
-        }, delayMs);
-        return;
-      }
-
-      if (result?.reason && result.reason !== "no-origin" && result.reason !== "workspace-busy") {
-        projectMemoryBootstrapDoneRef.current.add(projectId);
-      }
-    };
-
-    void attemptBootstrap(0);
-
-    return () => {
-      cancelled = true;
-      if (retryTimeout !== null) {
-        window.clearTimeout(retryTimeout);
-      }
-      inFlightProjects.delete(projectId);
-    };
-  }, [activeProjectId, controllerProjectMissing, projectReadyForWorkspace]);
+  useProjectMemoryBootstrap({
+    activeProjectId,
+    controllerProjectMissing,
+    projectReadyForWorkspace,
+  });
   const {
     filesExplorerPortalTarget,
     handleFilesExplorerPortalRef,
