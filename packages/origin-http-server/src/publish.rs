@@ -23,14 +23,19 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use tracing::{info, warn};
 
+use crate::apply::normalize_relative_path;
 use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git::{looks_like_transient_http_error, EmbeddedGitDirGuard};
 use crate::publish_policy::{
     deletion_allowed, is_unsafe_path, unpublishable_reason, RejectReason, MAX_PUBLISH_BLOB_BYTES,
 };
-use crate::push::{push, PushClass};
+use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
+use crate::recovery_view::{
+    parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
+    restore_commits, restore_of, without_origin_trailers, RecoveryRef, ViewError,
+};
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
 use crate::workspace_fs::WorkspaceDir;
@@ -292,6 +297,85 @@ pub fn revert_commit(
     let mut publisher = Publisher::new(ctx, DEFAULT_PUBLISH_BUDGET);
     publisher.revert(commit, base, author)?;
     Ok(publisher.report)
+}
+
+/// Most paths a restore's `keep` list may name. Per-file choices over a
+/// conflict produce a handful; the bound keeps any list cheap to match
+/// while the project's apply lock is held.
+pub const MAX_RESTORE_KEEP_PATHS: usize = 10_000;
+
+/// What a restore of unsaved work asks for.
+#[derive(Clone, Debug, Default)]
+pub struct RestoreRequest {
+    /// A recovery ref (`refs/instafy/recovery/<origin id>/<name>`) or a
+    /// salvage ref (`refs/instafy/salvage/gateway/<name>`).
+    pub reference: String,
+    /// The tip the person saw; a ref that names something else now is
+    /// refused (409 `recovery_ref_moved`).
+    pub rev: Option<String>,
+    /// Paths (files or folders) that keep the saved version.
+    pub keep: Vec<String>,
+    /// Author of the restore commit; the origin's own identity when `None`.
+    pub author: Option<GitIdentity>,
+}
+
+/// The result of a restore: the publish of the restore commit, plus what it
+/// did with the unsaved work.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreReport {
+    #[serde(flatten)]
+    pub publish: PublishReport,
+    /// This call brings changes to `main`: it committed the restore, or
+    /// it publishes changes the branch held that `main` did not (an
+    /// earlier restore whose publish failed, or this checkout's own save
+    /// that could not reach `main`, as when its `unpublished` entry is
+    /// restored). False when the saved version already held the work, or
+    /// the rest of it was kept or refused.
+    pub committed: bool,
+    /// Nothing needed restoring, and this call put the empty restore commit
+    /// that records the restore on `main` (or published one an earlier call
+    /// made): `rev` is a new version with no changes, and the list now
+    /// shows the entry restored. Only with `committed: false`; false too
+    /// when the branch already had a restore commit of this ref on `main`.
+    pub marked: bool,
+    /// Paths the work changes that kept the saved version: kept on request,
+    /// or never restorable here (ignored, excluded, secret, legacy
+    /// attachments, too large).
+    pub not_restored: Vec<String>,
+    /// The recovery ref is gone from canonical after the restore reached
+    /// `main`: this call removed it, or found it already removed (the
+    /// publish retires a ref whose commits reached `main`). It is removed
+    /// only when everything it holds was restored or kept on request: work
+    /// refused here (ignored, secret, excluded, too large) keeps the ref,
+    /// the only copy of that work on canonical, for the person to review
+    /// or remove. Salvage refs are never removed.
+    pub ref_deleted: bool,
+}
+
+/// Restore unsaved work kept on a recovery or salvage ref onto the
+/// checkout's branch and publish it (see `Publisher::restore`).
+pub fn restore(
+    ctx: &PublishContext<'_>,
+    request: RestoreRequest,
+) -> Result<RestoreReport, OriginError> {
+    let mut publisher = Publisher::new(ctx, DEFAULT_PUBLISH_BUDGET);
+    let restored = publisher.restore(request)?;
+    Ok(RestoreReport {
+        publish: publisher.report,
+        committed: restored.committed,
+        marked: restored.marked,
+        not_restored: restored.not_restored,
+        ref_deleted: restored.ref_deleted,
+    })
+}
+
+/// What `Publisher::restore` did with the work (see [`RestoreReport`]).
+struct Restored {
+    committed: bool,
+    marked: bool,
+    not_restored: Vec<String>,
+    ref_deleted: bool,
 }
 
 /// Run the one-time repair of copies an older sync left behind (see
@@ -1079,6 +1163,10 @@ impl<'a> Publisher<'a> {
             return Ok(head.map(str::to_string));
         }
         let author = author.unwrap_or_else(|| self.identity.clone());
+        // The origin commits this as itself: a caller's text never carries
+        // a trailer the origin or the gateway trusts, such as a restore's
+        // (see `recovery_view::without_origin_trailers`).
+        let message = without_origin_trailers(message);
         let message = if message.trim().is_empty() {
             "Save workspace changes".to_string()
         } else {
@@ -1402,13 +1490,27 @@ impl<'a> Publisher<'a> {
                 Vec::new(),
             ));
         }
+        // A commit that changes nothing on `main` is left out, except the
+        // record of a salvage ref's restore (`restore`): its empty marker is
+        // what tells the list the salvage ref was restored.
+        let records: BTreeSet<String> = if commits.is_empty() {
+            BTreeSet::new()
+        } else {
+            restore_commits(&self.git, &commits, &self.config.git_author_email)?
+                .into_iter()
+                .filter(|(_, reference)| {
+                    RecoveryRef::parse(reference).is_ok_and(|reference| reference.is_salvage())
+                })
+                .map(|(id, _)| id)
+                .collect()
+        };
         let mut current = main.to_string();
         let mut conflicts = Vec::new();
         for commit in &commits {
             let parent = self.git.commit_id(&format!("{commit}^"))?;
             let merged = three_way(&self.git, parent.as_deref(), &current, commit)?;
             conflicts.extend(merged.conflicts);
-            if merged.tree == self.git.tree_id(&current)? {
+            if merged.tree == self.git.tree_id(&current)? && !records.contains(commit) {
                 continue;
             }
             let parsed = self.parse_commit(commit)?;
@@ -2455,6 +2557,364 @@ impl<'a> Publisher<'a> {
     }
 }
 
+impl Publisher<'_> {
+    /// Restore the work a recovery or salvage ref keeps (Q) onto `HEAD`,
+    /// the way a revert applies its inverse: everything checked first, then
+    /// the index and only the files the restore changes, one commit, one
+    /// publish.
+    ///
+    /// - The ref is read from the remote by exactly its name; `rev`, when
+    ///   given, must still be its tip.
+    /// - `T = three_way(merge-base(Q, HEAD), HEAD, Q)`. Paths Q changes that
+    ///   are kept on request, reserved, never publishable (excluded, secret,
+    ///   legacy attachments, unsupported, too large) or ignored here keep
+    ///   `HEAD`'s entry and are reported as not restored.
+    /// - A conflict is settled when the work brings nothing in at or below
+    ///   it any more (kept on request, below a path left out, or with every
+    ///   change inside it left out); any other conflict is 409
+    ///   `restore_conflict {head, paths}`. An unsaved edit of a path the
+    ///   restore changes is 409 `dirty_paths`.
+    /// - The commit (`Restore unsaved work`, with an
+    ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
+    ///   and committed by the origin, then published.
+    /// - With nothing left to bring back (the branch already holds the
+    ///   work, or the rest was kept or refused) from a salvage ref, the
+    ///   same commit is still made, empty, unless one of this ref is on the
+    ///   branch already: the marker records the restore on `main` for good,
+    ///   so the list shows the entry restored whatever `main` holds later
+    ///   (salvage refs are never removed). Such a restore is `marked`, not
+    ///   `committed`. A recovery ref gets no marker: it is removed once its
+    ///   work is on `main`, so the marker would only add an empty commit.
+    /// - Once the work is on `main`, a recovery ref is deleted under a
+    ///   lease on its tip, so the same work is not restored twice, but only
+    ///   when every path left out was kept on request: a path refused here
+    ///   keeps the ref, so work the person did not choose to leave out is
+    ///   never removed. Salvage refs are kept.
+    fn restore(&mut self, request: RestoreRequest) -> Result<Restored, OriginError> {
+        let reference = RecoveryRef::validate(&self.git, request.reference.trim())?;
+        let expected = match request.rev.as_deref().map(str::trim) {
+            Some(rev) if !rev.is_empty() => Some(parse_rev(rev)?),
+            _ => None,
+        };
+        if request.keep.len() > MAX_RESTORE_KEEP_PATHS {
+            return Err(OriginError::bad_request(format!(
+                "a restore keeps at most {MAX_RESTORE_KEEP_PATHS} paths"
+            )));
+        }
+        let mut keep = PathRoots::default();
+        for path in &request.keep {
+            let normalized = normalize_relative_path(path)
+                .ok_or_else(|| OriginError::bad_request("invalid keep path"))?;
+            keep.insert(normalized);
+        }
+
+        self.prepare().map_err(internal)?;
+        if !self.fetched {
+            return Err(OriginError::with_report(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "canonical_unreachable",
+                self.report
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "could not reach the saved history".to_string()),
+                serde_json::json!({ "retryable": true }),
+            ));
+        }
+        let remote = self.remote.clone();
+        let fetched = match resolve_ref(&self.git, &remote, &reference) {
+            Ok(fetched) => fetched,
+            Err(ViewError::RefNotFound) if expected.is_some() => {
+                return Err(recovery_ref_moved(None))
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if expected.as_deref().is_some_and(|rev| rev != fetched.tip) {
+            return Err(recovery_ref_moved(Some(&fetched.tip)));
+        }
+        let head = self
+            .git
+            .commit_id("HEAD")
+            .map_err(internal)?
+            .ok_or_else(|| OriginError::conflict("the workspace has no saved version yet"))?;
+        let head_tree = self.git.tree_id(&head).map_err(internal)?;
+        let saved = fetched.commit.clone();
+        let base = self.git.merge_base(&saved, &head).map_err(internal)?;
+        let base_tree = match base.as_deref() {
+            Some(base) => self.git.tree_id(base).map_err(internal)?,
+            None => self.git.empty_tree().map_err(internal)?,
+        };
+        let merged = three_way(&self.git, base.as_deref(), &head, &saved).map_err(internal)?;
+
+        // What the work changes, and which of it may not come back here.
+        let saved_tree = self.git.tree_id(&saved).map_err(internal)?;
+        let raw = self
+            .git
+            .bytes(&[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--no-renames",
+                "--raw",
+                &base_tree,
+                &saved_tree,
+            ])
+            .map_err(internal)?;
+        let changes = parse_raw_changes(&raw);
+        let sizes = self.blob_sizes(&changes).map_err(internal)?;
+        let written: Vec<String> = changes
+            .iter()
+            .filter(|change| change.status != 'D')
+            .map(|change| change.path.clone())
+            .collect();
+        let ignored: BTreeSet<String> = self
+            .ignored(&written)
+            .map_err(internal)?
+            .into_iter()
+            .collect();
+        // Refused because it can never come back here, or left out on
+        // request (`keep`). Only the person's own choices let the ref go,
+        // so refusal is decided first: a secret or ignored file below a
+        // kept folder (which no conflict showed them) is refused, not kept.
+        let mut not_restored = Vec::new();
+        let mut refused = Vec::new();
+        for change in &changes {
+            if crate::paths::is_reserved_path(&change.path)
+                || self.policy_reason(change, &sizes).is_some()
+                || ignored.contains(&change.path)
+            {
+                not_restored.push(change.path.clone());
+                refused.push(change.path.clone());
+            } else if keep.covers(&change.path) {
+                not_restored.push(change.path.clone());
+            }
+        }
+        // A conflict (which keeps `HEAD`'s entry) is settled when the work
+        // brings nothing in at or below it any more: it was kept on request
+        // (itself or a folder above it), it lies below a path left out, or
+        // every change the work makes inside it was left out, as when the
+        // work adds a folder where `HEAD` has a file.
+        let left_out: PathRoots = not_restored.iter().cloned().collect();
+        let changed: PathRoots = changes.iter().map(|change| change.path.clone()).collect();
+        let conflicts: Vec<String> = merged
+            .conflicts
+            .iter()
+            .filter(|path| {
+                if left_out.covers(path) || keep.covers(path) {
+                    return false;
+                }
+                let mut inside = changed.at_or_below(path).peekable();
+                let any_inside = inside.peek().is_some();
+                !(any_inside && inside.all(|path| left_out.contains(path)))
+            })
+            .cloned()
+            .collect();
+        if !conflicts.is_empty() {
+            return Err(OriginError::with_report(
+                axum::http::StatusCode::CONFLICT,
+                "restore_conflict",
+                "the saved version changed the same files since; choose a version per file",
+                serde_json::json!({ "head": head, "paths": conflicts }),
+            ));
+        }
+        let tree = tree_with_entries_from(&self.git, &merged.tree, Some(&head), &not_restored)
+            .map_err(internal)?;
+
+        let mut local = head.clone();
+        let made = tree != head_tree;
+        // The branch may hold changes canonical `main` (as just fetched)
+        // does not: an earlier restore whose publish failed, or a save of
+        // this checkout that could not reach `main` (as when the person
+        // restores that save's own `unpublished` entry). This call
+        // publishes them, so they are its new version too.
+        let tracked = self.tracked_main().map_err(internal)?;
+        let committed = made
+            || self
+                .unpublished_changes(&head, tracked.as_deref())
+                .map_err(internal)?;
+        // With nothing new to commit, a salvage ref's restore is still
+        // recorded once: an empty restore commit, unless the branch has one
+        // of this ref. A salvage ref is never removed, so only that record
+        // tells the list it was restored. A recovery ref needs none: it goes
+        // once its work is on `main`, so an empty commit would only be noise
+        // in history.
+        let earlier = if made || !reference.is_salvage() {
+            None
+        } else {
+            let made_at = self
+                .git
+                .read_objects(std::slice::from_ref(&saved))
+                .map_err(internal)?
+                .first()
+                .map(|object| parse_commit(&object.data).timestamp)
+                .unwrap_or_default();
+            restore_of(
+                &self.git,
+                &head,
+                reference.as_str(),
+                made_at,
+                &self.config.git_author_email,
+            )?
+        };
+        let marker = !made && reference.is_salvage() && earlier.is_none();
+        // An earlier marker whose publish failed goes out with this call.
+        let earlier_pending = match earlier.as_deref() {
+            Some(earlier) => !self
+                .is_published(earlier, tracked.as_deref())
+                .map_err(internal)?,
+            None => false,
+        };
+        let marked = !committed && (marker || earlier_pending);
+        if made {
+            let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
+            let dirty: Vec<String> = self
+                .status()
+                .map_err(internal)?
+                .into_iter()
+                .map(|(path, _)| path)
+                .filter(|path| {
+                    touched.iter().any(|touched| {
+                        touched == path
+                            || touched.starts_with(&format!("{path}/"))
+                            || path.starts_with(&format!("{touched}/"))
+                    })
+                })
+                .collect();
+            if !dirty.is_empty() {
+                return Err(OriginError::conflict_paths(
+                    "dirty_paths",
+                    "unsaved edits touch files this restore changes",
+                    dirty,
+                ));
+            }
+            self.git
+                .ok(&["read-tree", "-m", "-u", &head, &tree])
+                .map_err(internal)?;
+        }
+        if made || marker {
+            // The marker has `HEAD`'s tree: index and files stay as they are.
+            let message = restore_commit_message(reference.as_str());
+            let author = request.author.unwrap_or_else(|| self.identity.clone());
+            let restored = self
+                .git
+                .commit_tree(&tree, &[&head], &author, &self.identity, message.as_bytes())
+                .map_err(internal)?;
+            self.git
+                .update_ref(
+                    "HEAD",
+                    &restored,
+                    Some(&head),
+                    "instafy: restore unsaved work",
+                )
+                .map_err(internal)?;
+            local = restored;
+        }
+        self.report.local_rev = Some(local.clone());
+        self.publish_local(Some(local.clone())).map_err(internal)?;
+        self.finish().map_err(internal)?;
+
+        let landed = matches!(
+            self.report.git_sync_status,
+            SyncStatus::Published | SyncStatus::Unchanged
+        ) && self
+            .is_published(&local, self.report.rev.as_deref())
+            .map_err(internal)?;
+        let mut ref_deleted = false;
+        if landed && !refused.is_empty() && !reference.is_salvage() {
+            info!(
+                reference = reference.as_str(),
+                refused = refused.len(),
+                "kept the restored work's ref: part of it cannot be restored here"
+            );
+        }
+        if landed && refused.is_empty() && !reference.is_salvage() && self.can_write {
+            match delete_with_lease(&self.git, &remote, reference.as_str(), &fetched.tip) {
+                Ok(result) if result.class == PushClass::Pushed => ref_deleted = true,
+                // Gone already: the publish retired it (its commits reached
+                // `main`), or someone removed it first.
+                Ok(result)
+                    if matches!(result.class, PushClass::LostRace(_))
+                        && matches!(remote_tip(&self.git, &remote, &reference), Ok(None)) =>
+                {
+                    ref_deleted = true
+                }
+                Ok(result) => {
+                    warn!(reference = reference.as_str(), class = ?result.class, "restored work's ref was not removed")
+                }
+                Err(error) => {
+                    warn!(reference = reference.as_str(), error = %format!("{error:#}"), "restored work's ref was not removed")
+                }
+            }
+        }
+        not_restored.sort();
+        not_restored.dedup();
+        Ok(Restored {
+            committed,
+            marked,
+            not_restored,
+            ref_deleted,
+        })
+    }
+
+    /// Whether `head` holds changes canonical `main` does not: it is not
+    /// published, and its tree differs from its merge base with `main`
+    /// (the empty tree when they share none).
+    fn unpublished_changes(&self, head: &str, main: Option<&str>) -> Result<bool> {
+        if self.is_published(head, main)? {
+            return Ok(false);
+        }
+        let base = match main {
+            Some(main) => self.git.merge_base(head, main)?,
+            None => None,
+        };
+        let base_tree = match base {
+            Some(base) => self.git.tree_id(&base)?,
+            None => self.git.empty_tree()?,
+        };
+        Ok(self.git.tree_id(head)? != base_tree)
+    }
+}
+
+/// Paths and folders, each matched by itself and by every path below it,
+/// in time that grows with a path's depth, not with the number of entries.
+#[derive(Default)]
+struct PathRoots(BTreeSet<String>);
+
+impl PathRoots {
+    fn insert(&mut self, path: String) {
+        self.0.insert(path);
+    }
+
+    fn contains(&self, path: &str) -> bool {
+        self.0.contains(path)
+    }
+
+    /// `path` is an entry or lies below one.
+    fn covers(&self, path: &str) -> bool {
+        self.contains(path)
+            || path
+                .match_indices('/')
+                .any(|(index, _)| self.contains(&path[..index]))
+    }
+
+    /// The entries that are `folder` or lie below it.
+    fn at_or_below<'s>(&'s self, folder: &'s str) -> impl Iterator<Item = &'s str> + 's {
+        self.0
+            .range::<str, _>((
+                std::ops::Bound::Included(folder),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(String::as_str)
+            .take_while(move |path| path.starts_with(folder))
+            .filter(move |path| path.len() == folder.len() || path[folder.len()..].starts_with('/'))
+    }
+}
+
+impl FromIterator<String> for PathRoots {
+    fn from_iter<I: IntoIterator<Item = String>>(paths: I) -> Self {
+        Self(paths.into_iter().collect())
+    }
+}
+
 fn jitter(attempt: usize) {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2574,4 +3034,39 @@ pub(crate) fn parse_stdin_diff_tree(raw: &[u8]) -> BTreeMap<String, Vec<RawChang
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PathRoots;
+
+    #[test]
+    fn path_roots_match_a_path_and_what_lies_below_it() {
+        let roots: PathRoots = ["docs", "src/lib.rs", "a/b"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for path in ["docs", "docs/a.md", "docs/x/y.md", "src/lib.rs", "a/b/c"] {
+            assert!(roots.covers(path), "{path}");
+        }
+        for path in ["docs2", "docs.md", "src", "src/lib.rs.bak", "a", "a/bc"] {
+            assert!(!roots.covers(path), "{path}");
+        }
+        let changed: PathRoots = [
+            "docs",
+            "docs.md",
+            "docs/a.md",
+            "docs/z/b.md",
+            "docs2/c.md",
+            "doc",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(
+            changed.at_or_below("docs").collect::<Vec<_>>(),
+            vec!["docs", "docs/a.md", "docs/z/b.md"]
+        );
+        assert_eq!(changed.at_or_below("missing").count(), 0);
+    }
 }

@@ -1721,7 +1721,7 @@ pub struct DirtyPathStatusView {
     pub has_more_files: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHistoryEntry {
     pub commit: String,
@@ -1739,6 +1739,44 @@ pub struct GitHistoryEntry {
     /// a root commit and from listings that do not ask.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_parent: Option<String>,
+    /// How many parents the commit has, when the listing asked for parents:
+    /// more than one is a merge, which a revert needs a base for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_count: Option<usize>,
+    /// Who made the version, when the listing decides it (see
+    /// [`HistoryActor::of_author`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor: Option<HistoryActor>,
+}
+
+/// Who made a version in History.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HistoryActor {
+    /// A person saving in Studio, named by their per-space pseudonym.
+    User,
+    /// Instafy itself: an origin, a workspace runtime's publish, a service.
+    Service,
+    /// Anyone else, such as a person committing with their own git identity.
+    External,
+}
+
+impl HistoryActor {
+    /// Decide by the author address: an author pseudonym
+    /// (`…@users.noreply.instafy.dev`) is a person; `service_email` (the
+    /// origin's own identity) or any other `@instafy.dev` address is
+    /// Instafy; anything else is external. Letter case is ignored.
+    pub fn of_author(author_email: &str, service_email: &str) -> Self {
+        let email = author_email.trim().to_ascii_lowercase();
+        if email.ends_with(crate::auth::AUTHOR_PSEUDONYM_DOMAIN) {
+            return Self::User;
+        }
+        let service = service_email.trim().to_ascii_lowercase();
+        if (!service.is_empty() && email == service) || email.ends_with("@instafy.dev") {
+            return Self::Service;
+        }
+        Self::External
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2104,6 +2142,8 @@ impl HistoryFormat {
                 subject: fields[5].trim().to_string(),
                 resolved_by,
                 first_parent: None,
+                parent_count: None,
+                actor: None,
             });
         }
         entries

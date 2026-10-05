@@ -1467,6 +1467,8 @@ mod tests {
             jti: Some(Uuid::new_v4().to_string()),
             actor_label: label.map(str::to_string),
             browser_session_id: Some(session_id.to_string()),
+            author_name: None,
+            author_email: None,
         }
     }
 

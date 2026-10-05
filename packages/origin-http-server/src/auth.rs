@@ -39,6 +39,61 @@ pub struct OriginClaims {
     pub actor_label: Option<String>,
     #[serde(default)]
     pub browser_session_id: Option<String>,
+    /// Display name for commits a person saves: the controller sets it with
+    /// [`Self::author_email`] on a person's own workspace-write tokens.
+    #[serde(default)]
+    pub author_name: Option<String>,
+    /// The person's per-space pseudonymous address
+    /// (`p<version>-<hash>@users.noreply.instafy.dev`), never their account
+    /// id or email.
+    #[serde(default)]
+    pub author_email: Option<String>,
+}
+
+/// The domain every author pseudonym the controller issues is under.
+pub const AUTHOR_PSEUDONYM_DOMAIN: &str = "@users.noreply.instafy.dev";
+
+/// Author name used when the token names no usable display name.
+const DEFAULT_AUTHOR_NAME: &str = "Instafy user";
+
+/// Longest author name or address taken from a token.
+const MAX_AUTHOR_FIELD_BYTES: usize = 254;
+
+impl OriginClaims {
+    /// The author of a commit a person saves with this token: the
+    /// pseudonym and display name the controller put in it. `None` (the
+    /// origin then commits as itself) for job tokens (`run_id`), for tokens
+    /// without author claims (an older controller, or one without the
+    /// pseudonym keyring), and for an address that is not a pseudonym.
+    /// The token subject (an account id) is never used.
+    pub fn user_author(&self) -> Option<crate::workspace_git::GitIdentity> {
+        let is_job = self
+            .run_id
+            .as_deref()
+            .is_some_and(|run| !run.trim().is_empty());
+        if is_job {
+            return None;
+        }
+        let email = self.author_email.as_deref()?.trim();
+        let local = email.strip_suffix(AUTHOR_PSEUDONYM_DOMAIN)?;
+        let plain = |byte: u8| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.');
+        if local.is_empty() || email.len() > MAX_AUTHOR_FIELD_BYTES || !local.bytes().all(plain) {
+            return None;
+        }
+        let name = self
+            .author_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= MAX_AUTHOR_FIELD_BYTES
+                    && !name
+                        .chars()
+                        .any(|c| c.is_control() || matches!(c, '<' | '>'))
+            })
+            .unwrap_or(DEFAULT_AUTHOR_NAME);
+        Some(crate::workspace_git::GitIdentity::new(name, email))
+    }
 }
 
 /// Resolve the signed JWT expiry to an absolute wall-clock deadline. Initial
@@ -215,6 +270,8 @@ impl TokenValidator {
             jti: None,
             actor_label: Some("Origin test user".to_string()),
             browser_session_id: Some("origin-test-session".to_string()),
+            author_name: None,
+            author_email: None,
         }
     }
 }
@@ -449,6 +506,86 @@ mod tests {
             .expect("claims with the new fields deserialize");
             validate_claims(&config, &["fs.write"], &claims).expect("fs.write still authorizes");
             assert!(validate_claims(&config, &["fs.read"], &claims).is_err());
+        }
+    }
+
+    fn author_claims(extra: serde_json::Value) -> OriginClaims {
+        let mut value = json!({
+            "aud": "origin",
+            "sub": "0f0e0d0c-0b0a-4908-8706-050403020100",
+            "project_id": "project",
+            "origin_id": "origin",
+            "scopes": ["fs.write"],
+            "iat": 0i64,
+            "exp": 10i64,
+        });
+        for (key, field) in extra.as_object().expect("an object") {
+            value[key] = field.clone();
+        }
+        serde_json::from_value(value).expect("claims")
+    }
+
+    #[test]
+    fn a_persons_save_is_authored_by_the_pseudonym_never_the_subject() {
+        let pseudonym = "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev";
+        let author = author_claims(json!({
+            "author_name": "Ada Lovelace",
+            "author_email": pseudonym,
+        }))
+        .user_author()
+        .expect("a person's token names an author");
+        assert_eq!(author.name, "Ada Lovelace");
+        assert_eq!(author.email, pseudonym);
+
+        // No usable display name: the plain fallback, never the subject.
+        for name in [
+            json!(null),
+            json!(""),
+            json!("  "),
+            json!("Ada <x@y>"),
+            json!("a\nb"),
+        ] {
+            let author = author_claims(json!({ "author_name": name, "author_email": pseudonym }))
+                .user_author()
+                .expect("the address alone is enough");
+            assert_eq!(author.name, "Instafy user");
+            assert_eq!(author.email, pseudonym);
+        }
+    }
+
+    #[test]
+    fn jobs_old_controllers_and_other_addresses_commit_as_the_origin() {
+        let pseudonym = "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev";
+        // A job's token carries a run: its work keeps the origin identity.
+        assert!(author_claims(json!({
+            "author_name": "Ada",
+            "author_email": pseudonym,
+            "run_id": "run-1",
+        }))
+        .user_author()
+        .is_none());
+        // An older controller (or one without the keyring) sends no author.
+        assert!(author_claims(json!({ "actor_label": "Ada" }))
+            .user_author()
+            .is_none());
+        assert!(author_claims(json!({ "author_name": "Ada" }))
+            .user_author()
+            .is_none());
+        // Only pseudonyms: a real address or anything git would misread is
+        // never written into history.
+        for email in [
+            "ada@example.com",
+            "@users.noreply.instafy.dev",
+            "a b@users.noreply.instafy.dev",
+            "a>b@users.noreply.instafy.dev",
+            "x@users.noreply.instafy.dev.example.com",
+        ] {
+            assert!(
+                author_claims(json!({ "author_name": "Ada", "author_email": email }))
+                    .user_author()
+                    .is_none(),
+                "{email}"
+            );
         }
     }
 

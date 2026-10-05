@@ -21,7 +21,9 @@ pub(crate) fn git_in(dir: &Path, args: &[&str]) -> String {
         .to_string()
 }
 
-pub(crate) fn git_output(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
+/// Plain git in `dir`, without global or system configuration, its output
+/// captured.
+fn git_command(dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
     command
         .current_dir(dir)
@@ -33,6 +35,11 @@ pub(crate) fn git_output(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Out
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command
+}
+
+pub(crate) fn git_output(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Output {
+    let mut command = git_command(dir, args);
     if stdin.is_some() {
         command.stdin(Stdio::piped());
     } else {
@@ -49,6 +56,63 @@ pub(crate) fn git_output(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> Out
             .expect("write git stdin");
     }
     child.wait_with_output().expect("wait for git")
+}
+
+/// [`git_output`] with `stdin`, given at most `limit`: past it the git
+/// process is killed and the answer is `None`, so a test fails with a
+/// message instead of waiting forever on a git that never returns.
+pub(crate) fn git_output_within(
+    dir: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    limit: std::time::Duration,
+) -> Option<Output> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::CommandExt as _;
+    let mut command = git_command(dir, args);
+    // Its own process group, so whatever git started goes with it.
+    command.stdin(Stdio::piped()).process_group(0);
+    let mut child = command.spawn().expect("spawn git");
+    let mut input = child.stdin.take().unwrap();
+    let input_bytes = stdin.to_vec();
+    // Pipes are fed and drained on their own threads, so a full pipe never
+    // looks like a git that does not return.
+    let writer = std::thread::spawn(move || {
+        let _ = input.write_all(&input_bytes);
+    });
+    let mut stdout = child.stdout.take().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = std::time::Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for git") {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            let group = rustix::process::Pid::from_child(&child);
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let _ = writer.join();
+    let stdout = out.join().unwrap();
+    let stderr = err.join().unwrap();
+    status.map(|status| Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Git in a workspace checkout (`.instafy/.git` with the workspace as work

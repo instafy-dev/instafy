@@ -77,6 +77,10 @@ pub(crate) enum ViewError {
     RevNotFound,
     #[error("that ref does not exist")]
     RefNotFound,
+    /// The canonical repository could not be reached (or refused) while a
+    /// ref was listed or fetched: never answered from stale data.
+    #[error("the saved history could not be reached: {0:#}")]
+    Unreachable(anyhow::Error),
     #[error(transparent)]
     Git(#[from] anyhow::Error),
 }
@@ -88,8 +92,10 @@ impl ViewError {
             Self::InvalidRef | Self::RevAndRef => "invalid_ref",
             Self::InvalidRev => "invalid_rev",
             Self::InvalidPath => "invalid_path",
-            Self::RevNotFound => "rev_not_found",
-            Self::RefNotFound => "not_found",
+            // `not_found` is kept for a path absent from a commit's tree; a
+            // ref that does not resolve is a version that is not there.
+            Self::RevNotFound | Self::RefNotFound => "rev_not_found",
+            Self::Unreachable(_) => "canonical_unreachable",
             Self::Git(_) => "internal",
         }
     }
@@ -100,6 +106,7 @@ impl ViewError {
                 StatusCode::BAD_REQUEST
             }
             Self::RevNotFound | Self::RefNotFound => StatusCode::NOT_FOUND,
+            Self::Unreachable(_) => StatusCode::BAD_GATEWAY,
             Self::Git(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -170,10 +177,10 @@ impl RecoveryRef {
         } else {
             return Err(ViewError::InvalidRef);
         };
-        Ok(Self {
-            name: name.to_string(),
-            source,
-        })
+        // Every byte passed the rule above; git is given a copy built from
+        // the bytes the rule allows, never the caller's own string.
+        let name = copy_from_alphabet(name, REF_NAME_BYTES).ok_or(ViewError::InvalidRef)?;
+        Ok(Self { name, source })
     }
 
     /// [`Self::parse`], and `git check-ref-format` agrees.
@@ -228,13 +235,38 @@ fn is_valid_recovery_name(name: &str) -> bool {
 }
 
 /// A commit id a client sends (`?rev=`, `baseRev`, a listed `rev`): exactly
-/// 40 or 64 hex digits, returned in lower case.
+/// 40 or 64 hex digits, returned in lower case, copied from the hex digits
+/// (see [`copy_from_alphabet`]).
 pub(crate) fn parse_rev(value: &str) -> Result<String, ViewError> {
     if matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(value.to_ascii_lowercase())
+        copy_from_alphabet(&value.to_ascii_lowercase(), LOWER_HEX_BYTES)
+            .ok_or(ViewError::InvalidRev)
     } else {
         Err(ViewError::InvalidRev)
     }
+}
+
+/// Every byte a recovery or salvage ref name may hold (see
+/// [`RecoveryRef::parse`]).
+const REF_NAME_BYTES: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-/";
+
+/// The digits of a commit id in lower case.
+const LOWER_HEX_BYTES: &[u8] = b"0123456789abcdef";
+
+/// `value` rebuilt from `alphabet`: each byte is looked up there and the
+/// copy holds the table's own byte, so a name or id a caller sent reaches
+/// git's argument list only as bytes of `alphabet`. `None` when a byte is
+/// not in `alphabet`.
+fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
+    value
+        .bytes()
+        .map(|byte| {
+            alphabet
+                .iter()
+                .find(|allowed| **allowed == byte)
+                .map(|allowed| char::from(*allowed))
+        })
+        .collect()
 }
 
 /// What a read names.
@@ -291,19 +323,147 @@ pub(crate) fn resolve(
                 Err(ViewError::RevNotFound)
             }
         }
-        ReadAt::Ref(reference) => {
-            let Some(rev) = remote_tip(git, remote, reference)? else {
-                return Err(ViewError::RefNotFound);
-            };
-            match fetch_refs(git, remote, &[(reference.clone(), rev)])?
-                .fetched
-                .pop()
-            {
-                Some(fetched) => Ok(Some(fetched.commit)),
-                None => Err(ViewError::RefNotFound),
-            }
-        }
+        ReadAt::Ref(reference) => Ok(Some(resolve_ref(git, remote, reference)?.commit)),
     }
+}
+
+/// `reference` on `remote`, by exactly its name, fetched: what it names
+/// there (`tip`, which a lease on it uses and a read reports) and the
+/// commit. [`ViewError::RefNotFound`] when the remote has no such ref,
+/// [`ViewError::Unreachable`] when the remote cannot be listed or fetched.
+pub(crate) fn resolve_ref(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    reference: &RecoveryRef,
+) -> Result<FetchedRef, ViewError> {
+    let Some(rev) = remote_tip(git, remote, reference).map_err(unreachable)? else {
+        return Err(ViewError::RefNotFound);
+    };
+    match fetch_refs(git, remote, &[(reference.clone(), rev)])
+        .map_err(unreachable)?
+        .fetched
+        .pop()
+    {
+        Some(fetched) => Ok(fetched),
+        None => Err(ViewError::RefNotFound),
+    }
+}
+
+/// A git failure while talking to the remote is [`ViewError::Unreachable`].
+pub(crate) fn unreachable(error: ViewError) -> ViewError {
+    match error {
+        ViewError::Git(error) => ViewError::Unreachable(error),
+        other => other,
+    }
+}
+
+/// [`resolve`] of a `rev`, and when it is not readable here, once more after
+/// fetching `remote`'s `main` into a fetch namespace of this call (so a
+/// checkout whose own branch has not moved to a newer canonical commit can
+/// still read it). [`ViewError::RevNotFound`] when neither has it; with no
+/// `remote`, only what is here is read.
+pub(crate) fn resolve_rev_fetching_main(
+    git: &WorkspaceGit<'_>,
+    remote: Option<&str>,
+    rev: &str,
+) -> Result<String, ViewError> {
+    let rev = parse_rev(rev)?;
+    if readable_commit(git, &rev)? {
+        return Ok(rev);
+    }
+    let Some(remote) = remote else {
+        return Err(ViewError::RevNotFound);
+    };
+    let listed = git
+        .stdout(&["ls-remote", "--end-of-options", remote, MAIN_REF])
+        .map_err(ViewError::Unreachable)?;
+    if !parse_ls_remote(&listed)
+        .iter()
+        .any(|(name, _)| name == MAIN_REF)
+    {
+        return Err(ViewError::RevNotFound);
+    }
+    sweep_stale_fetches(git);
+    let scratch = FetchScratch::new(git);
+    let target = scratch.target(0);
+    let refspec = format!("+{MAIN_REF}:{target}");
+    git.ok(&[
+        "fetch",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--end-of-options",
+        remote,
+        &refspec,
+    ])
+    .map_err(ViewError::Unreachable)?;
+    // Read while the fetch ref holds the commits; dropping the scratch
+    // removes the ref, never the objects.
+    if readable_commit(git, &rev)? {
+        Ok(rev)
+    } else {
+        Err(ViewError::RevNotFound)
+    }
+}
+
+/// What a commit holds at exactly one path, whether or not a read serves
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PathKind {
+    /// Nothing, or a path below a file, symlink or submodule: not in the
+    /// tree.
+    Absent,
+    /// A regular file.
+    File,
+    /// A folder.
+    Directory,
+    /// A symlink, a submodule, a reserved path that is there, or another
+    /// entry reads never serve.
+    Unsupported,
+}
+
+/// What `commit` holds at `path` (in `normalize_relative_path` form; ""
+/// is the root folder). Reads use it to tell a path that is absent (404
+/// `not_found`) from one that holds something they never serve (404
+/// `unsupported_entry`), which a client must never take for a delete.
+pub(crate) fn path_kind_at(
+    git: &WorkspaceGit<'_>,
+    commit: &str,
+    path: &str,
+) -> Result<PathKind, ViewError> {
+    let commit = parse_rev(commit)?;
+    if path.is_empty() {
+        return Ok(PathKind::Directory);
+    }
+    let path = checked_path(path)?;
+    let raw = git.bytes_opts(
+        &[
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            "--end-of-options",
+            &commit,
+            "--",
+            &path,
+        ],
+        &RunOpts {
+            literal_pathspecs: true,
+            ..RunOpts::default()
+        },
+    )?;
+    // The tree first: a reserved path that is there is hidden from reads
+    // but never absent, as on the hosted gateway (`not_found` only when
+    // the tree has no entry).
+    let reserved = is_reserved_path(&path);
+    let kind = crate::workspace_git::parse_ls_tree(&raw)
+        .into_iter()
+        .find(|entry| entry.path == path)
+        .map(|entry| match (entry.mode.as_str(), entry.kind.as_str()) {
+            _ if reserved => PathKind::Unsupported,
+            ("100644" | "100755", "blob") => PathKind::File,
+            ("040000", "tree") => PathKind::Directory,
+            _ => PathKind::Unsupported,
+        });
+    Ok(kind.unwrap_or(PathKind::Absent))
 }
 
 /// Whether `rev` is a commit here that is complete: its tree is here, and
@@ -592,7 +752,7 @@ fn parse_ls_tree_long(raw: &[u8]) -> Vec<(String, Option<ObjectEntry>)> {
 
 /// Up to `limit` (at most [`MAX_HISTORY_PAGE`]) commits of `head`'s
 /// first-parent chain after skipping `skip`, newest first, each with its
-/// first parent.
+/// first parent and parent count.
 ///
 /// Ids and parents come from `rev-list`, which prints nothing but ids, so no
 /// commit text can change them; the other fields come from a `git log` of
@@ -603,33 +763,97 @@ pub(crate) fn first_parent_history(
     limit: usize,
     skip: usize,
 ) -> Result<Vec<GitHistoryEntry>, ViewError> {
-    let head = parse_rev(head)?;
+    walk_history(
+        git,
+        head,
+        limit.min(MAX_HISTORY_PAGE),
+        skip,
+        HistoryWalk::FirstParent,
+    )
+}
+
+/// Which commits a history page lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistoryWalk {
+    /// The first-parent chain: the versions of `main`.
+    FirstParent,
+    /// Every commit `head` reaches, in `git log`'s default order: a
+    /// checkout's own history, as single-tenant origins list it.
+    All,
+}
+
+/// One page of history and whether older commits follow it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct HistoryPage {
+    pub entries: Vec<GitHistoryEntry>,
+    pub has_more: bool,
+}
+
+/// Up to `limit` (at most [`MAX_HISTORY_PAGE`]) commits of `walk` from
+/// `head` after skipping `skip`, newest first, each with its first parent
+/// and parent count, and whether another commit follows the page (one more
+/// is walked to tell).
+pub(crate) fn history_page(
+    git: &WorkspaceGit<'_>,
+    head: &str,
+    limit: usize,
+    skip: usize,
+    walk: HistoryWalk,
+) -> Result<HistoryPage, ViewError> {
     let limit = limit.min(MAX_HISTORY_PAGE);
+    if limit == 0 {
+        return Ok(HistoryPage::default());
+    }
+    let mut entries = walk_history(git, head, limit + 1, skip, walk)?;
+    let has_more = entries.len() > limit;
+    entries.truncate(limit);
+    Ok(HistoryPage { entries, has_more })
+}
+
+/// Up to `count` commits of `walk` from `head` after `skip`, as
+/// [`first_parent_history`] reads them.
+fn walk_history(
+    git: &WorkspaceGit<'_>,
+    head: &str,
+    count: usize,
+    skip: usize,
+    walk: HistoryWalk,
+) -> Result<Vec<GitHistoryEntry>, ViewError> {
+    let head = parse_rev(head)?;
     // Git reads the count as an int: a larger skip is past any history.
-    if limit == 0 || skip > MAX_HISTORY_SKIP {
+    if count == 0 || skip > MAX_HISTORY_SKIP {
         return Ok(Vec::new());
     }
-    let max_count = limit.to_string();
+    let max_count = count.to_string();
     let skip = skip.to_string();
-    let walk = ["--first-parent", "--max-count", &max_count, "--skip", &skip];
+    let mut walk_args = Vec::new();
+    if walk == HistoryWalk::FirstParent {
+        walk_args.push("--first-parent");
+    }
+    walk_args.extend(["--max-count", &max_count, "--skip", &skip]);
     let mut args = vec!["rev-list", "--parents"];
-    args.extend(walk);
+    args.extend(&walk_args);
     args.extend(["--end-of-options", &head, "--"]);
     let listed = git.stdout(&args)?;
     let mut chain = Vec::new();
     for line in listed.lines() {
         let mut ids = line.split(' ');
         let commit = ids.next().unwrap_or_default();
-        if !is_full_object_id(commit) {
+        let parents: Vec<&str> = ids.collect();
+        if !is_full_object_id(commit) || !parents.iter().all(|id| is_full_object_id(id)) {
             return Err(anyhow::anyhow!("rev-list printed {line:?}").into());
         }
-        chain.push((commit.to_string(), ids.next().map(str::to_string)));
+        chain.push((
+            commit.to_string(),
+            parents.first().map(|id| id.to_string()),
+            parents.len(),
+        ));
     }
 
     let format = HistoryFormat::new();
     let pretty = format.pretty_arg();
     let mut args = vec!["log"];
-    args.extend(walk);
+    args.extend(&walk_args);
     args.extend([
         "--date=iso-strict",
         &pretty,
@@ -642,12 +866,13 @@ pub(crate) fn first_parent_history(
         || entries
             .iter()
             .zip(&chain)
-            .any(|(entry, (commit, _))| entry.commit != *commit)
+            .any(|(entry, (commit, _, _))| entry.commit != *commit)
     {
         return Err(anyhow::anyhow!("the history of {head} changed while it was read").into());
     }
-    for (entry, (_, first_parent)) in entries.iter_mut().zip(chain) {
+    for (entry, (_, first_parent, parents)) in entries.iter_mut().zip(chain) {
         entry.first_parent = first_parent;
+        entry.parent_count = Some(parents);
     }
     Ok(entries)
 }
@@ -1127,6 +1352,11 @@ pub(crate) struct RecoveryItem {
     /// Where the work left `main`: review and restore compare against it.
     pub base: Option<String>,
     pub dismissible: bool,
+    /// The newest commit on `main` that restored this ref (see
+    /// [`mark_restored`]); salvage refs stay after a restore, so this is
+    /// how a restored one is shown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_rev: Option<String>,
     #[serde(skip)]
     timestamp: i64,
 }
@@ -1195,6 +1425,7 @@ pub(crate) fn describe(
             paths,
             base: None,
             dismissible: reference.dismissible(),
+            restored_rev: None,
             timestamp: commit.timestamp,
         });
     }
@@ -1211,6 +1442,452 @@ pub(crate) fn describe(
         }
     }
     Ok(items)
+}
+
+/// The trailer a restore commit names the ref it restored with. Only the
+/// origin itself writes it (as the commit's committer), in exactly
+/// [`restore_commit_message`]; saves drop it, like every `Instafy-` trailer
+/// the origin trusts, from the text callers give
+/// ([`without_origin_trailers`]).
+pub(crate) const RESTORED_FROM_TRAILER: &str = "Instafy-Restored-From";
+
+/// The subject of a restore commit.
+const RESTORE_COMMIT_SUBJECT: &str = "Restore unsaved work";
+
+/// The whole message of the commit that restores `reference`.
+pub(crate) fn restore_commit_message(reference: &str) -> String {
+    format!("{RESTORE_COMMIT_SUBJECT}\n\n{RESTORED_FROM_TRAILER}: {reference}\n")
+}
+
+/// The ref a restore commit's message names, when the message is exactly
+/// [`restore_commit_message`] of a recovery or salvage ref; any other text
+/// (another subject, more lines, a second trailer) is not a restore.
+fn restored_from(message: &str) -> Option<&str> {
+    let reference = message
+        .strip_prefix(RESTORE_COMMIT_SUBJECT)?
+        .strip_prefix("\n\n")?
+        .strip_prefix(RESTORED_FROM_TRAILER)?
+        .strip_prefix(": ")?
+        .strip_suffix('\n')?;
+    RecoveryRef::parse(reference).ok().map(|_| reference)
+}
+
+/// The prefix of every trailer key the origin or the gateway writes itself
+/// and reads back from history (`Instafy-Restored-From`,
+/// `Instafy-Apply-Key`, `Instafy-Apply-Fingerprint`, the recovery
+/// trailers), in any letter case.
+const ORIGIN_TRAILER_PREFIX: &str = "instafy-";
+
+/// The one `Instafy-` trailer callers write: history only shows it.
+const CALLER_TRAILER: &str = "Instafy-Resolved-By";
+
+/// Trailer lines git writes itself. With one of them, a trailer block may
+/// hold up to three other lines per trailer.
+const GIT_GENERATED_TRAILERS: [&str; 2] = ["Signed-off-by: ", "(cherry picked from commit "];
+
+/// The line `git commit --verbose` cuts the message off at.
+const SCISSORS_LINE: &str = "# ------------------------ >8 ------------------------";
+
+/// Rounds [`without_origin_trailers`] looks for a trailer block in. A
+/// message whose paragraphs keep turning into trailer blocks is not prose:
+/// past the bound, every `Instafy-` trailer line below the subject goes at
+/// once, so a long one never costs a round per paragraph.
+const TRAILER_ROUNDS: usize = 8;
+
+/// `message`, trimmed as every save trims it, without the trailers the
+/// origin and the gateway write and trust. A line goes only when git reads
+/// it in the message's trailer block ([`trailer_block`]) and it is a
+/// `Key: value` line whose key starts with `Instafy-` in any letter case,
+/// once its control characters (other than tab) and leading blanks are set
+/// aside. Every other line stays: the subject, other paragraphs, a last
+/// paragraph git does not read as trailers, text that only starts with
+/// `Instafy-` ("Instafy-style buttons"), a key git would not parse (a
+/// Unicode look-alike), and `Instafy-Resolved-By`, which callers write and
+/// history only shows.
+///
+/// Text a caller gives a save goes through this before the origin commits
+/// it as itself (and canonical history is shared with the gateway), so a
+/// save can never pass for a restore or an import receipt. The block is
+/// looked for in the text as given and with its control characters set
+/// aside, each with and without the `---` line that ends a message for
+/// `git interpret-trailers` (but not for `%(trailers)`). Dropping a block's
+/// lines can leave the paragraph above it last, so this repeats until
+/// nothing more goes (see [`TRAILER_ROUNDS`]).
+pub(crate) fn without_origin_trailers(message: &str) -> String {
+    let mut message = message.trim().to_string();
+    for round in 0..=TRAILER_ROUNDS {
+        let lines: Vec<&str> = message.split('\n').collect();
+        let shown: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.chars()
+                    .filter(|ch| *ch == '\t' || !ch.is_control())
+                    .collect()
+            })
+            .collect();
+        let mut origin = vec![false; lines.len()];
+        if round < TRAILER_ROUNDS {
+            let shown_lines: Vec<&str> = shown.iter().map(String::as_str).collect();
+            for view in [&lines, &shown_lines] {
+                for divider in [false, true] {
+                    for index in trailer_block(view, divider) {
+                        origin[index] |= is_origin_trailer(&shown[index]);
+                    }
+                }
+            }
+        } else {
+            // The subject line is never in a trailer block, in any view.
+            for index in 1..lines.len() {
+                origin[index] = is_origin_trailer(&shown[index]);
+            }
+        }
+        if !origin.contains(&true) {
+            break;
+        }
+        let kept: Vec<&str> = lines
+            .iter()
+            .zip(&origin)
+            .filter(|(_, origin)| !**origin)
+            .map(|(line, _)| *line)
+            .collect();
+        let next = kept.join("\n").trim().to_string();
+        message = next;
+    }
+    message
+}
+
+/// Whether `shown` (a line with its control characters set aside) is a
+/// trailer the origin or the gateway trusts: leading blanks aside, a
+/// `Key: value` line whose key starts with `Instafy-` and is not
+/// `Instafy-Resolved-By`.
+fn is_origin_trailer(shown: &str) -> bool {
+    trailer_key(shown.trim_start_matches([' ', '\t'])).is_some_and(|key| {
+        key.get(..ORIGIN_TRAILER_PREFIX.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(ORIGIN_TRAILER_PREFIX))
+            && !key.eq_ignore_ascii_case(CALLER_TRAILER)
+    })
+}
+
+/// The key of `line` when git reads the line as a trailer: ASCII letters,
+/// digits and `-`, then optional blanks, then `:` (git's
+/// `find_separator`).
+fn trailer_key(line: &str) -> Option<&str> {
+    let end = line
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        .count();
+    let rest = line[end..].trim_start_matches([' ', '\t']);
+    (end > 0 && rest.starts_with(':')).then(|| &line[..end])
+}
+
+/// The lines of a message (`lines`, each read as ending in a newline, as a
+/// committed message does) git's trailer parser reads as its trailer
+/// block, with git's default settings (`#` comments, `:` separators, no
+/// configured trailers), as `trailer.c` and `commit.c` find it since git
+/// 2.34. The message ends at the first `---` line when `divider` is set,
+/// at the scissors line, and before a trailing run of comments, empty
+/// lines and an old `Conflicts:` list. The block is its last paragraph
+/// after the subject, when all of that paragraph's lines are trailers (or
+/// lines continuing one), or at least a quarter of them with one git
+/// writes itself (`Signed-off-by: `). Empty when there is none.
+fn trailer_block(lines: &[&str], divider: bool) -> std::ops::Range<usize> {
+    let is_space = |byte: u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    let is_blank = |line: &str| line.bytes().all(is_space);
+    let is_comment = |line: &str| line.starts_with('#');
+    let mut end = lines.len();
+    if divider {
+        if let Some(at) = lines.iter().position(|line| {
+            line.strip_prefix("---")
+                .is_some_and(|rest| rest.bytes().next().is_none_or(is_space))
+        }) {
+            end = at;
+        }
+    }
+    let cutoff = lines[..end]
+        .iter()
+        .position(|line| line.starts_with(SCISSORS_LINE))
+        .unwrap_or(end);
+    // The trailing run; like git, one that starts at the first line is
+    // not counted.
+    let mut run = None;
+    let mut conflicts = false;
+    for (index, line) in lines[..cutoff].iter().enumerate() {
+        if is_comment(line) || line.is_empty() || *line == "Conflicts:" {
+            conflicts |= *line == "Conflicts:";
+            if run.is_none() && index > 0 {
+                run = Some(index);
+            }
+        } else if conflicts && line.starts_with('\t') {
+            // A path in the old conflicts list.
+        } else if run.is_some() {
+            run = None;
+            conflicts = false;
+        }
+    }
+    let lines = &lines[..run.unwrap_or(cutoff)];
+    let title = lines
+        .iter()
+        .position(|line| !is_comment(line) && is_blank(line))
+        .unwrap_or(lines.len());
+    let (mut trailers, mut others, mut continuing) = (0usize, 0usize, 0usize);
+    let mut recognized = false;
+    let mut only_blank = true;
+    for index in (title..lines.len()).rev() {
+        let line = lines[index];
+        if is_comment(line) {
+            others += continuing;
+            continuing = 0;
+        } else if is_blank(line) {
+            if only_blank {
+                continue;
+            }
+            others += continuing;
+            let block = (recognized && trailers * 3 >= others) || (trailers > 0 && others == 0);
+            return if block { index + 1..lines.len() } else { 0..0 };
+        } else {
+            only_blank = false;
+            if GIT_GENERATED_TRAILERS
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+            {
+                trailers += 1;
+                continuing = 0;
+                recognized = true;
+            } else if trailer_key(line).is_some() {
+                trailers += 1;
+                continuing = 0;
+            } else if line.bytes().next().is_some_and(is_space) {
+                continuing += 1;
+            } else {
+                others += 1 + continuing;
+                continuing = 0;
+            }
+        }
+    }
+    0..0
+}
+
+/// Most restore commits one walk reads.
+const MAX_RESTORE_COMMITS: usize = 500;
+
+/// How long before a listed item was made a restore of it is looked for:
+/// clocks of the machines that made the commits may differ.
+const RESTORE_CLOCK_SLACK_SECONDS: i64 = 24 * 60 * 60;
+
+/// Give every item a commit `main` reaches restored its `restored_rev`: the
+/// newest commit whose whole message is [`restore_commit_message`] of the
+/// item's ref and whose committer is `committer_email` (this origin's own
+/// identity). Every restore of a salvage ref that lands leaves one, an
+/// empty one when the saved version already held the work (see
+/// `publish::restore`), so a salvage ref, which is never removed, shows as
+/// restored for good. The
+/// origin commits saves as itself too, but drops the trailer from their
+/// text ([`without_origin_trailers`]), so no save message is the restore
+/// message. The walk covers all of `main`'s history since the oldest item
+/// was made, not only its first parents (a Desktop publish merges the
+/// branch's restore commit in as a second parent), with one `rev-list`
+/// and one `cat-file --batch`.
+pub(crate) fn mark_restored(
+    git: &WorkspaceGit<'_>,
+    items: &mut [RecoveryItem],
+    main: Option<&str>,
+    committer_email: &str,
+) -> Result<(), ViewError> {
+    let (Some(main), Some(oldest)) = (main, items.iter().map(|item| item.timestamp).min()) else {
+        return Ok(());
+    };
+    let main = parse_rev(main)?;
+    let ids = restore_candidates(git, &main, "", oldest)?;
+    let mut restored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (id, reference) in restore_commits(git, &ids, committer_email)? {
+        // Newest first: the first commit seen for a ref wins.
+        restored.entry(reference).or_insert(id);
+    }
+    for item in items.iter_mut() {
+        item.restored_rev = restored.get(&item.reference).cloned();
+    }
+    Ok(())
+}
+
+/// The newest restore commit of `reference` (see [`mark_restored`]) that
+/// `tip` reaches, made since `made_at` (the time of the work's own commit,
+/// less the clock slack), when there is one.
+pub(crate) fn restore_of(
+    git: &WorkspaceGit<'_>,
+    tip: &str,
+    reference: &str,
+    made_at: i64,
+    committer_email: &str,
+) -> Result<Option<String>, ViewError> {
+    let tip = parse_rev(tip)?;
+    let ids = restore_candidates(git, &tip, reference, made_at)?;
+    Ok(restore_commits(git, &ids, committer_email)?
+        .into_iter()
+        .find(|(_, restored)| restored == reference)
+        .map(|(id, _)| id))
+}
+
+/// Ids of the commits `tip` reaches since `made_at` (less the clock slack)
+/// with a line holding `Instafy-Restored-From: <reference>`, newest first,
+/// at most [`MAX_RESTORE_COMMITS`]; [`restore_commits`] decides which are
+/// restores.
+fn restore_candidates(
+    git: &WorkspaceGit<'_>,
+    tip: &str,
+    reference: &str,
+    made_at: i64,
+) -> Result<Vec<String>, ViewError> {
+    let grep = format!("--grep={RESTORED_FROM_TRAILER}: {reference}");
+    let max_count = format!("--max-count={MAX_RESTORE_COMMITS}");
+    let since = format!(
+        "--max-age={}",
+        made_at.saturating_sub(RESTORE_CLOCK_SLACK_SECONDS).max(0)
+    );
+    let listed = git.stdout(&[
+        "rev-list",
+        "--fixed-strings",
+        &grep,
+        &max_count,
+        &since,
+        "--end-of-options",
+        tip,
+        "--",
+    ])?;
+    Ok(listed
+        .lines()
+        .map(str::trim)
+        .filter(|id| is_full_object_id(id))
+        .map(str::to_string)
+        .collect())
+}
+
+/// `(id, ref)` of each of `ids` that is a restore commit
+/// ([`restore_commit_message`] of `ref`) committed by `committer_email`,
+/// in the order given, with one `cat-file --batch`.
+pub(crate) fn restore_commits(
+    git: &WorkspaceGit<'_>,
+    ids: &[String],
+    committer_email: &str,
+) -> Result<Vec<(String, String)>, ViewError> {
+    let committer_email = committer_email.trim().to_ascii_lowercase();
+    let mut found = Vec::new();
+    for (id, object) in ids.iter().zip(git.read_objects(ids)?) {
+        if object.kind != "commit"
+            || committer_of(&object.data).as_deref() != Some(committer_email.as_str())
+        {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&object.data);
+        let Some((_, message)) = text.split_once("\n\n") else {
+            continue;
+        };
+        if let Some(reference) = restored_from(message) {
+            found.push((id.clone(), reference.to_string()));
+        }
+    }
+    Ok(found)
+}
+
+/// The committer's address of a raw commit, in lower case.
+fn committer_of(data: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(data);
+    let headers = text.split("\n\n").next()?;
+    let committer = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("committer "))?;
+    let open = committer.rfind('<')?;
+    let close = committer.rfind('>')?;
+    (open < close).then(|| committer[open + 1..close].trim().to_ascii_lowercase())
+}
+
+/// The answer to a dismissal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Dismissed {
+    /// This call removed the ref.
+    pub dismissed: bool,
+    /// The ref was already gone.
+    pub missing: bool,
+}
+
+/// Dismiss unsaved work for everyone: delete `reference` on `remote` while
+/// it still names `rev` (the tip the person saw), with a lease, so work
+/// that changed since is never removed. Salvage refs are kept for good
+/// (409 `salvage_ref_kept`); a ref that names something else now is 409
+/// `recovery_ref_moved`; a ref already gone is `{dismissed: false,
+/// missing: true}`. The handle needs write access to `remote`.
+pub(crate) fn dismiss(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    reference: &RecoveryRef,
+    rev: &str,
+) -> Result<Dismissed, OriginError> {
+    if reference.is_salvage() {
+        return Err(OriginError::with_report(
+            StatusCode::CONFLICT,
+            "salvage_ref_kept",
+            "work kept from the retired file server stays; it can be restored, not removed",
+            serde_json::json!({}),
+        ));
+    }
+    let rev = parse_rev(rev)?;
+    let mut pushed = false;
+    for _ in 0..2 {
+        match remote_tip(git, remote, reference).map_err(unreachable)? {
+            None => {
+                return Ok(Dismissed {
+                    dismissed: pushed,
+                    missing: !pushed,
+                })
+            }
+            Some(tip) if tip != rev => return Err(recovery_ref_moved(Some(&tip))),
+            Some(_) => {}
+        }
+        let result = crate::push::delete_with_lease(git, remote, reference.as_str(), &rev)
+            .map_err(ViewError::Unreachable)?;
+        match result.class {
+            crate::push::PushClass::Pushed => {
+                return Ok(Dismissed {
+                    dismissed: true,
+                    missing: false,
+                })
+            }
+            // Someone moved or removed it first: look again.
+            crate::push::PushClass::LostRace(_) => {}
+            // The answer was lost: the removal may have happened.
+            crate::push::PushClass::Ambiguous(_) => pushed = true,
+            crate::push::PushClass::Rejected(detail) => {
+                return Err(OriginError::with_report(
+                    StatusCode::BAD_GATEWAY,
+                    "push_rejected",
+                    format!("the saved history refused the removal: {detail}"),
+                    serde_json::json!({}),
+                ))
+            }
+            crate::push::PushClass::PathRejected { path, .. } => {
+                return Err(OriginError::with_report(
+                    StatusCode::BAD_GATEWAY,
+                    "push_rejected",
+                    format!("the saved history refused the removal ({path})"),
+                    serde_json::json!({}),
+                ))
+            }
+        }
+    }
+    Err(recovery_ref_moved(None))
+}
+
+/// 409 `recovery_ref_moved`: the ref no longer names what the person saw
+/// (`rev`: what it names now, if anything).
+pub(crate) fn recovery_ref_moved(rev: Option<&str>) -> OriginError {
+    OriginError::with_report(
+        StatusCode::CONFLICT,
+        "recovery_ref_moved",
+        "this unsaved work changed since it was listed; refresh the list",
+        match rev {
+            Some(rev) => serde_json::json!({ "rev": rev }),
+            None => serde_json::json!({ "missing": true }),
+        },
+    )
 }
 
 /// A recovery ref's own kind; `salvage` (or anything else) on a recovery ref
@@ -1502,6 +2179,36 @@ mod tests {
     }
 
     #[test]
+    fn names_and_ids_reach_git_as_copies_of_the_allowed_bytes() {
+        let name = format!("refs/instafy/recovery/{ORIGIN}/Unsaved_0.x-1");
+        assert_eq!(
+            copy_from_alphabet(&name, REF_NAME_BYTES).as_deref(),
+            Some(name.as_str())
+        );
+        assert_eq!(RecoveryRef::parse(&name).unwrap().as_str(), name);
+        let salvage = "refs/instafy/salvage/gateway/node-1.local-0123abcd";
+        assert_eq!(RecoveryRef::parse(salvage).unwrap().as_str(), salvage);
+        assert_eq!(
+            copy_from_alphabet("0123456789abcdef", LOWER_HEX_BYTES).as_deref(),
+            Some("0123456789abcdef")
+        );
+        for outside in ["a b", "a\0b", "a\nb", "a:b", "a~b", "é", "ABC"] {
+            assert_eq!(
+                copy_from_alphabet(outside, LOWER_HEX_BYTES),
+                None,
+                "{outside:?}"
+            );
+        }
+        for outside in ["refs/a b", "refs/a\0b", "refs/a:b", "refs/a^b", "refs/é"] {
+            assert_eq!(
+                copy_from_alphabet(outside, REF_NAME_BYTES),
+                None,
+                "{outside:?}"
+            );
+        }
+    }
+
+    #[test]
     fn revs_are_full_commit_ids_and_a_read_names_one_thing() {
         let sha1 = "0123456789abcdef0123456789abcdef01234567";
         let sha256 = "0123456789abcdef".repeat(4);
@@ -1581,7 +2288,12 @@ mod tests {
             (ViewError::InvalidRev, 400, "invalid_rev"),
             (ViewError::InvalidPath, 400, "invalid_path"),
             (ViewError::RevNotFound, 404, "rev_not_found"),
-            (ViewError::RefNotFound, 404, "not_found"),
+            (ViewError::RefNotFound, 404, "rev_not_found"),
+            (
+                ViewError::Unreachable(anyhow::anyhow!("offline")),
+                502,
+                "canonical_unreachable",
+            ),
             (ViewError::Git(anyhow::anyhow!("boom")), 500, "internal"),
         ] {
             assert_eq!(error.code(), code);
@@ -1613,6 +2325,52 @@ mod tests {
         let head = with_raw_entry(workspace, &linked, "vendor/sub", "160000", &first);
         ig(workspace, &["update-ref", "refs/heads/main", &head]);
         head
+    }
+
+    /// What a path holds tells an absent path (404 `not_found`) from one a
+    /// read never serves (404 `unsupported_entry`), in either layout.
+    #[test]
+    fn path_kinds_tell_absent_paths_from_unsupported_entries() {
+        let (_dir, root) = tempdir();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let head = object_fixture(&workspace);
+        let mirror = bare(&root, "mirror.git");
+        let mirror_git = WorkspaceGit::bare(&mirror, None);
+        fetch(
+            &mirror_git,
+            &workspace.join(".instafy/.git"),
+            "+refs/heads/main:refs/heads/main",
+        );
+        for git in [ws_git(&workspace), mirror_git] {
+            for (path, kind) in [
+                ("", PathKind::Directory),
+                ("README.md", PathKind::File),
+                ("bin/run.sh", PathKind::File),
+                ("src", PathKind::Directory),
+                ("src/nested", PathKind::Directory),
+                ("link", PathKind::Unsupported),
+                ("vendor/sub", PathKind::Unsupported),
+                ("missing.md", PathKind::Absent),
+                ("src/missing.rs", PathKind::Absent),
+                // Below a file, a symlink or a submodule nothing can be.
+                ("README.md/x", PathKind::Absent),
+                ("link/x", PathKind::Absent),
+                ("vendor/sub/x", PathKind::Absent),
+                // Reserved paths are never shown, but one that is there is
+                // never reported absent (a client could turn it into a
+                // delete).
+                (".instafy/state.json", PathKind::Unsupported),
+                (".instafy", PathKind::Unsupported),
+                (".instafy/missing.json", PathKind::Absent),
+            ] {
+                assert_eq!(path_kind_at(&git, &head, path).unwrap(), kind, "{path}");
+            }
+            assert!(matches!(
+                path_kind_at(&git, &head, "./README.md"),
+                Err(ViewError::InvalidPath)
+            ));
+        }
     }
 
     fn names(entries: &[ObjectEntry]) -> Vec<(&str, ObjectKind)> {
@@ -1815,6 +2573,91 @@ mod tests {
         assert!(first_parent_history(&git, &c, 2, i32::MAX as usize)
             .unwrap()
             .is_empty());
+    }
+
+    /// A page walks one commit more than it shows to say whether older ones
+    /// follow; every row names its parents' count, and the whole-history
+    /// walk (a checkout's) lists side commits too, in `git log` order.
+    #[test]
+    fn history_pages_count_parents_and_say_whether_more_follow() {
+        let (_dir, root) = tempdir();
+        let mirror = bare(&root, "mirror.git");
+        let git = WorkspaceGit::bare(&mirror, None);
+        let files = tree(&git, &[("README.md", "one\n")]);
+        let a = commit(&git, &files, &[], 1_700_000_000, "first\n");
+        let b = commit(&git, &files, &[&a], 1_700_000_100, "second\n");
+        let side = commit(&git, &files, &[&a], 1_700_000_150, "side\n");
+        let merge = commit(&git, &files, &[&b, &side], 1_700_000_200, "merge\n");
+        let c = commit(&git, &files, &[&merge], 1_700_000_300, "latest\n");
+
+        let rows = |page: &HistoryPage| -> Vec<(String, Option<usize>)> {
+            page.entries
+                .iter()
+                .map(|entry| (entry.subject.clone(), entry.parent_count))
+                .collect()
+        };
+        let first = history_page(&git, &c, 2, 0, HistoryWalk::FirstParent).unwrap();
+        assert_eq!(
+            rows(&first),
+            vec![
+                ("latest".to_string(), Some(1)),
+                ("merge".to_string(), Some(2))
+            ]
+        );
+        assert!(first.has_more);
+        let last = history_page(&git, &c, 2, 2, HistoryWalk::FirstParent).unwrap();
+        assert_eq!(
+            rows(&last),
+            vec![
+                ("second".to_string(), Some(1)),
+                ("first".to_string(), Some(0))
+            ]
+        );
+        assert!(!last.has_more, "nothing follows the root");
+        assert_eq!(last.entries[1].first_parent, None);
+
+        let all = history_page(&git, &c, 50, 0, HistoryWalk::All).unwrap();
+        let expected: Vec<String> = git
+            .stdout(&["log", "--format=%s", &c])
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            all.entries
+                .iter()
+                .map(|entry| entry.subject.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(all.entries.len(), 5);
+        assert!(!all.has_more);
+        let merge_row = all
+            .entries
+            .iter()
+            .find(|entry| entry.commit == merge)
+            .unwrap();
+        assert_eq!(merge_row.parent_count, Some(2));
+        assert_eq!(merge_row.first_parent.as_deref(), Some(b.as_str()));
+        let json = serde_json::to_value(&all.entries).unwrap();
+        assert_eq!(json[0]["parentCount"], 1);
+
+        // A page is at most 50 rows, and a full page of exactly the rest
+        // says nothing follows.
+        let full = history_page(&git, &c, 5, 0, HistoryWalk::All).unwrap();
+        assert_eq!(full.entries.len(), 5);
+        assert!(!full.has_more);
+        assert_eq!(
+            history_page(&git, &c, 0, 0, HistoryWalk::All).unwrap(),
+            HistoryPage::default()
+        );
+        let mut long = c.clone();
+        for index in 0..55i64 {
+            long = commit(&git, &files, &[&long], 1_700_001_000 + index, "more\n");
+        }
+        let capped = history_page(&git, &long, 500, 0, HistoryWalk::All).unwrap();
+        assert_eq!(capped.entries.len(), MAX_HISTORY_PAGE);
+        assert!(capped.has_more);
     }
 
     /// Subjects, author names and trailers that hold the bytes a listing
@@ -3096,6 +3939,362 @@ mod tests {
             Some(revs[0].as_str())
         );
         assert!(peel_to_commits(&git, &[]).unwrap().is_empty());
+    }
+
+    /// Dismiss looks at the ref, then deletes it under a lease on what it
+    /// saw. Work saved to the ref between the two stays: the lease refuses
+    /// the delete, and the dismissal answers 409 `recovery_ref_moved` with
+    /// the new tip.
+    #[test]
+    fn a_dismissal_never_removes_work_saved_after_it_looked() {
+        struct ClearHook;
+        impl Drop for ClearHook {
+            fn drop(&mut self) {
+                crate::push::clear_push_hook();
+            }
+        }
+
+        let (_dir, root) = tempdir();
+        let canonical = bare(&root, "canonical.git");
+        let remote = WorkspaceGit::bare(&canonical, None);
+        let files = tree(&remote, &[("notes.md", "notes\n")]);
+        let seen = commit(&remote, &files, &[], 1_700_000_000, "seen\n");
+        let newer = commit(&remote, &files, &[&seen], 1_700_000_100, "newer\n");
+        let name = format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab");
+        remote.update_ref(&name, &seen, None, "test").unwrap();
+        let reference = RecoveryRef::parse(&name).unwrap();
+        let local_dir = bare(&root, "local.git");
+        let local = WorkspaceGit::bare(&local_dir, None);
+        let url = format!("file://{}", canonical.display());
+
+        let moved = std::rc::Rc::new(std::cell::Cell::new(false));
+        let _clear = ClearHook;
+        {
+            let moved = moved.clone();
+            let canonical = canonical.clone();
+            let (name, newer) = (name.clone(), newer.clone());
+            crate::push::set_push_hook(move |_| {
+                if !moved.replace(true) {
+                    git_in(&canonical, &["update-ref", &name, &newer]);
+                }
+                crate::push::PushHookAction::Proceed
+            });
+        }
+        let error = dismiss(&local, &url, &reference, &seen).unwrap_err();
+        assert!(moved.get(), "the delete was never attempted");
+        match error {
+            OriginError::WithReport { code, report, .. } => {
+                assert_eq!(code, "recovery_ref_moved");
+                assert_eq!(report["rev"], newer.as_str());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(
+            remote.commit_id(&name).unwrap().as_deref(),
+            Some(newer.as_str())
+        );
+    }
+
+    #[test]
+    fn only_the_exact_restore_message_names_a_ref_and_saves_drop_it() {
+        let reference =
+            format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab");
+        let message = restore_commit_message(&reference);
+        assert_eq!(restored_from(&message), Some(reference.as_str()));
+        for other in [
+            format!("Tidy\n\n{RESTORED_FROM_TRAILER}: {reference}\n"),
+            format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: {reference}\nX-Other: y\n"),
+            format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: {reference}"),
+            format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: refs/heads/main\n"),
+            format!("Restore unsaved work\nmore\n\n{RESTORED_FROM_TRAILER}: {reference}\n"),
+        ] {
+            assert_eq!(restored_from(&other), None, "{other:?}");
+        }
+        assert_eq!(
+            without_origin_trailers(&format!(
+                "Fix\n\nInstafy-Resolved-By: assistant\n  instafy-restored-from : {reference}\n\
+                 {RESTORED_FROM_TRAILER}: {reference}"
+            )),
+            "Fix\n\nInstafy-Resolved-By: assistant"
+        );
+        assert_eq!(
+            without_origin_trailers("Notes on Instafy-Restored-From handling\n"),
+            "Notes on Instafy-Restored-From handling"
+        );
+    }
+
+    /// Caller text never carries a trailer the origin or the gateway writes
+    /// and reads back (`Instafy-Restored-From`, `Instafy-Apply-Key`, the
+    /// recovery trailers, any other `Instafy-` key): control characters
+    /// before it (other than tab) do not hide it. `Instafy-Resolved-By`,
+    /// which callers write and history only shows, stays.
+    #[test]
+    fn saves_drop_every_origin_trailer_however_it_is_hidden() {
+        let reference =
+            format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab");
+        let message = format!(
+            "Fix\n\nInstafy-Resolved-By: assistant\n\
+             \u{1}Instafy-Restored-From: {reference}\n\
+             \r\u{7f} instafy-restored-from: {reference}\n\
+             \t\u{1b}INSTAFY-APPLY-KEY: imp:forged\n\
+             Instafy-Apply-Fingerprint: abc\n\
+             \u{0}Instafy-Recovery-Kind: salvage\n\
+             Instafy-Origin: {ORIGIN}\n\
+             Signed-off-by: A <a@x>\n"
+        );
+        assert_eq!(
+            without_origin_trailers(&message),
+            "Fix\n\nInstafy-Resolved-By: assistant\nSigned-off-by: A <a@x>"
+        );
+        // Text that only mentions a trailer, or has no key before it, stays.
+        for kept in [
+            "Notes on Instafy-Apply-Key handling\n",
+            "See \u{1}Instafy-Restored-From\n",
+            "Instafy\n",
+        ] {
+            assert_eq!(without_origin_trailers(kept), kept.trim_end(), "{kept:?}");
+        }
+    }
+
+    /// The longest one git call of the trailer tests may take: they fail
+    /// with the call and its input past it, never wait forever.
+    const GIT_CALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The output of plain git `args` with `input` on stdin, outside any
+    /// repository and with no configuration, within [`GIT_CALL_LIMIT`].
+    fn git_stdout_within_limit(args: &[&str], input: &str) -> String {
+        let (_dir, root) = tempdir();
+        let output = crate::test_support::git_output_within(
+            &root,
+            args,
+            input.as_bytes(),
+            GIT_CALL_LIMIT,
+        )
+        .unwrap_or_else(|| {
+            panic!("git {args:?} did not return within {GIT_CALL_LIMIT:?} for {input:?}; stopped")
+        });
+        assert!(
+            output.status.success(),
+            "git {args:?} for {input:?}: {output:?}"
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Whether `message` has a scissors line below a `---` line. On such a
+    /// message git 2.34's `interpret-trailers` without `--no-divider` never
+    /// returns: its message end at the scissors line lies past the one it
+    /// took at the divider (later git bounds it).
+    fn loops_git_2_34_with_divider(message: &str) -> bool {
+        let mut below_divider = false;
+        for line in message.split('\n') {
+            if below_divider && line.starts_with(SCISSORS_LINE) {
+                return true;
+            }
+            below_divider |= line
+                .strip_prefix("---")
+                .is_some_and(|rest| rest.bytes().next().is_none_or(|b| b.is_ascii_whitespace()));
+        }
+        false
+    }
+
+    /// The trailer keys git's own parser reads in `message`, in lower case:
+    /// `git interpret-trailers --parse --no-divider` (as `%(trailers)`
+    /// reads a commit) and, unless git 2.34 would loop on `message`
+    /// ([`loops_git_2_34_with_divider`]), without `--no-divider` too, with
+    /// no configuration. Each call fails the test past [`GIT_CALL_LIMIT`].
+    fn git_trailer_keys(message: &str) -> Vec<String> {
+        let mut runs = vec![&["interpret-trailers", "--parse", "--no-divider"][..]];
+        if !loops_git_2_34_with_divider(message) {
+            runs.push(&["interpret-trailers", "--parse"][..]);
+        }
+        let mut keys = Vec::new();
+        for args in runs {
+            for line in git_stdout_within_limit(args, message).lines() {
+                let (key, _) = line.split_once(':').unwrap_or((line, ""));
+                keys.push(key.trim().to_ascii_lowercase());
+            }
+        }
+        keys
+    }
+
+    /// `message` as `git commit -m` keeps it (`git stripspace`).
+    fn git_stripspace(message: &str) -> String {
+        git_stdout_within_limit(&["stripspace"], message)
+    }
+
+    /// The trailer tests never hang on git 2.34: a message it loops on is
+    /// read only with `--no-divider`, and every git call is bounded.
+    #[test]
+    fn the_trailer_tests_never_wait_on_a_git_that_loops() {
+        let looping = format!("Tidy\n\n--- x\n{SCISSORS_LINE}\nInstafy-Apply-Key: imp:x\n");
+        assert!(loops_git_2_34_with_divider(&looping));
+        assert!(git_trailer_keys(&looping).is_empty());
+        for other in [
+            format!("Tidy\n\n{SCISSORS_LINE}\n---\n"),
+            "Tidy\n\n---x\nmore".to_string(),
+            "Tidy\n\n---\nmore".to_string(),
+        ] {
+            assert!(!loops_git_2_34_with_divider(&other), "{other:?}");
+        }
+        // A git that never returns is stopped, not waited on.
+        let (_dir, root) = tempdir();
+        let started = std::time::Instant::now();
+        let stopped = crate::test_support::git_output_within(
+            &root,
+            &["-c", "alias.wait=!sleep 30", "wait"],
+            b"",
+            std::time::Duration::from_millis(300),
+        );
+        assert!(stopped.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    /// A save drops only the `Instafy-` trailers git reads in the trailer
+    /// block, never prose: a subject or a body line that starts with
+    /// `Instafy-`, a `Key: value` line in another paragraph, or a last
+    /// paragraph git does not read as trailers stays word for word, and so
+    /// does a key git would not parse (Unicode look-alikes, a format
+    /// character before it). Every variant git reads, or would read once a
+    /// save trims the text or its control characters are set aside, goes,
+    /// so no save message is the restore message or carries a receipt.
+    #[test]
+    fn saves_keep_prose_and_drop_only_the_trailers_git_reads() {
+        let reference = "refs/instafy/salvage/gateway/node-1-0123abcd";
+        let reads_origin_trailer = |message: &str| {
+            git_trailer_keys(message)
+                .iter()
+                .any(|key| key.starts_with("instafy-") && key != "instafy-resolved-by")
+        };
+        // What the origin commits: trimmed with a newline (a Desktop save),
+        // or as `git commit -m` keeps it (the multi-tenant routes).
+        let assert_clean = |message: &str, saved: &str| {
+            for committed in [format!("{}\n", saved.trim()), git_stripspace(saved)] {
+                assert!(
+                    !reads_origin_trailer(&committed),
+                    "{message:?} saved as {committed:?}"
+                );
+                assert_eq!(restored_from(&committed), None, "{message:?}");
+            }
+        };
+
+        let prose = [
+            "Instafy-style buttons on the landing page".to_string(),
+            "instafy-cli: bump the version\n\nMore detail here".to_string(),
+            "Tidy\n\nInstafy-hosted docs are linked now".to_string(),
+            "Tidy\n\ninstafy-cli: now prints JSON.\nIt also fixes the flag parsing.".to_string(),
+            "Tidy\n\ninstafy-cli: now prints JSON.\n\nMore detail here".to_string(),
+            format!("Tidy\n\nInstafy-Restored-From: {reference}\n\nQuoted above, not a trailer."),
+            "Tidy\n\nInstafy-style note in a trailer block\nSigned-off-by: A <a@x>".to_string(),
+            "Notes on Instafy-Apply-Key handling".to_string(),
+            "See \u{1}Instafy-Restored-From".to_string(),
+            "Instafy".to_string(),
+        ];
+        let look_alikes = [
+            format!("Tidy\n\n\u{feff}Instafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{200b}Instafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{a0}Instafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{406}nstafy-Restored-From: {reference}"),
+            format!("Tidy\n\n\u{ff29}nstafy-Restored-From: {reference}"),
+            format!("Tidy\n\nInstafy\u{2010}Restored-From: {reference}"),
+            format!("Tidy\n\nInstafy-Restored-From\u{ff1a} {reference}"),
+            format!("Tidy\n\nInstafy-Restored-From\u{a0}: {reference}"),
+        ];
+        for message in prose.iter().chain(&look_alikes) {
+            assert!(!reads_origin_trailer(message), "git reads {message:?}");
+            assert_eq!(without_origin_trailers(message), *message, "{message:?}");
+            assert_clean(message, message);
+        }
+
+        // Trailers git reads: any letter case, blanks before the colon, a
+        // block a `Signed-off-by: ` line lets hold other text, before a
+        // `---` line, trailing comments or the scissors line, and a block
+        // that is last only once the one below it is gone.
+        let read = [
+            (
+                format!("Tidy\n\nINSTAFY-RESTORED-FROM: {reference}"),
+                "Tidy".to_string(),
+            ),
+            (
+                format!("Tidy\n\ninstafy-restored-from : {reference}\nSigned-off-by: A <a@x>"),
+                "Tidy\n\nSigned-off-by: A <a@x>".to_string(),
+            ),
+            (
+                "Tidy\n\nprose one\nprose two\nInstafy-Apply-Key: imp:x\nSigned-off-by: A <a@x>"
+                    .to_string(),
+                "Tidy\n\nprose one\nprose two\nSigned-off-by: A <a@x>".to_string(),
+            ),
+            (
+                format!("Tidy\n\nInstafy-Restored-From: {reference}\n\u{1}\nSigned-off-by: A"),
+                "Tidy\n\n\u{1}\nSigned-off-by: A".to_string(),
+            ),
+            (
+                format!("Tidy\n\nInstafy-Restored-From: {reference}\n---\nmore text"),
+                "Tidy\n\n---\nmore text".to_string(),
+            ),
+            (
+                format!("Tidy\n\nInstafy-Restored-From: {reference}\n\n# a comment"),
+                "Tidy\n\n\n# a comment".to_string(),
+            ),
+            (
+                format!(
+                    "Tidy\n\nInstafy-Restored-From: {reference}\n\n# a comment\n\
+                     Conflicts:\n\tpath.md"
+                ),
+                "Tidy\n\n\n# a comment\nConflicts:\n\tpath.md".to_string(),
+            ),
+            (
+                format!(
+                    "Tidy\n\nInstafy-Restored-From: {reference}\n\
+                     # ------------------------ >8 ------------------------\nmore text"
+                ),
+                "Tidy\n\n# ------------------------ >8 ------------------------\nmore text"
+                    .to_string(),
+            ),
+            (
+                format!(
+                    "Restore unsaved work\n\nInstafy-Restored-From: {reference}\n\n\
+                     Instafy-Apply-Key: imp:x"
+                ),
+                "Restore unsaved work".to_string(),
+            ),
+        ];
+        for (message, saved) in &read {
+            assert!(
+                reads_origin_trailer(message),
+                "git reads none in {message:?}"
+            );
+            assert_eq!(without_origin_trailers(message), *saved, "{message:?}");
+            assert_clean(message, saved);
+        }
+
+        // Trailers git does not read as given, but would once the save trims
+        // the text, or a reader sets control characters aside.
+        let hidden = [
+            (
+                format!("Restore unsaved work\n\nInstafy-Restored-From: {reference}\n\u{3000}"),
+                "Restore unsaved work".to_string(),
+            ),
+            (
+                format!(
+                    "Tidy\n\n\u{1}Instafy-Restored-From: {reference}\n\
+                     \r\u{7f}Instafy-Apply-Key: imp:x\nInsta\u{1b}fy-Apply-Fingerprint: abc"
+                ),
+                "Tidy".to_string(),
+            ),
+        ];
+        for (message, saved) in &hidden {
+            assert_eq!(without_origin_trailers(message), *saved, "{message:?}");
+            assert_clean(message, saved);
+        }
+
+        // Paragraph after paragraph of trailers: each round makes the one
+        // above it last, and past the bound every `Instafy-` trailer line
+        // below the subject goes at once.
+        let stacked = format!(
+            "Restore unsaved work\n\nInstafy-Restored-From: {reference}{}",
+            "\n\nInstafy-Apply-Key: imp:x".repeat(20_000)
+        );
+        assert_eq!(without_origin_trailers(&stacked), "Restore unsaved work");
     }
 
     #[test]
