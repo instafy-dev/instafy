@@ -10,7 +10,7 @@ import type { RevertWorkspaceGitCommitResult } from "../../../services/runtimeCo
 import { useRuntime } from "../../../runtime/useRuntime";
 import { useOptionalProjectAccess } from "../../../projects/ProjectAccessProvider";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
-import { useWorkspaceVersioning } from "../../../workspace/useWorkspaceVersioning";
+import { useWorkspaceVersioningForProject } from "../../../workspace/useActiveWorkspaceVersioning";
 import { getUnifiedDiffRowClass, parseUnifiedDiff, splitUnifiedDiffHeader } from "../../../utils/unifiedDiff";
 import type {
   ChatMessageCommitRange,
@@ -354,10 +354,11 @@ export function ChatFileChangeList({
 }) {
   const { openPanelTab, requestUrlPush, openGitDiffTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
-  const { effectiveRuntimeId, runtimeReady, desktopOrigin } = useRuntime();
+  const { effectiveRuntimeId, runtimeReady } = useRuntime();
   const projectAccess = useOptionalProjectAccess();
-  // How the space keeps versions. Instances share one probe and cache.
-  const versioning = useWorkspaceVersioning({ projectId, origin: desktopOrigin });
+  // How the space keeps versions. Instances share one probe and cache, and
+  // the store's origin counts only when it belongs to this card's project.
+  const versioning = useWorkspaceVersioningForProject({ projectId });
   // Only a History drawer with an Unsaved work section can be pointed at:
   // the stateless gateway has one, a Desktop origin once it lists recovery.
   // A space that keeps versions the old way still saves from Changes.

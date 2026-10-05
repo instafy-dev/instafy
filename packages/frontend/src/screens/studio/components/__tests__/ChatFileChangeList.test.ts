@@ -17,6 +17,7 @@ const {
   projectAccessState,
   runtimeState,
   versioningState,
+  versioningCalls,
 } = vi.hoisted(() => ({
   fetchWorkspaceGitDiff: vi.fn(),
   fetchWorkspaceGitHistoryReview: vi.fn(),
@@ -31,12 +32,18 @@ const {
     projectCapabilitiesResolved: true,
     canWriteProject: true,
   },
-  runtimeState: { effectiveRuntimeId: null as string | null, runtimeReady: false },
+  runtimeState: {
+    effectiveRuntimeId: null as string | null,
+    runtimeReady: false,
+    desktopOrigin: null as { originId: string; mode: string; endpoint: string } | null,
+    desktopOriginProjectId: null as string | null,
+  },
   versioningState: {
     mode: "legacy" as "legacy" | "stateless" | "desktop",
     recovery: "unknown" as "unknown" | "supported" | "unsupported",
     originId: null as string | null,
   },
+  versioningCalls: [] as Array<{ projectId: string | null; origin: { originId: string } | null }>,
 }));
 
 vi.mock("../../../../sdk/instafy", () => ({
@@ -59,11 +66,16 @@ vi.mock("../../../../runtime/useRuntime", () => ({
   useRuntime: () => ({
     effectiveRuntimeId: runtimeState.effectiveRuntimeId,
     runtimeReady: runtimeState.runtimeReady,
+    desktopOrigin: runtimeState.desktopOrigin,
+    desktopOriginProjectId: runtimeState.desktopOriginProjectId,
   }),
 }));
 
 vi.mock("../../../../workspace/useWorkspaceVersioning", () => ({
-  useWorkspaceVersioning: () => ({ ...versioningState, resolved: versioningState.mode !== "legacy" }),
+  useWorkspaceVersioning: (args: { projectId: string | null; origin: { originId: string } | null }) => {
+    versioningCalls.push({ projectId: args.projectId, origin: args.origin });
+    return { ...versioningState, resolved: versioningState.mode !== "legacy" };
+  },
 }));
 
 vi.mock("../../../../status/useStatus", () => ({
@@ -134,6 +146,9 @@ describe("ChatFileChangeList", () => {
     projectAccessState.canWriteProject = true;
     runtimeState.effectiveRuntimeId = null;
     runtimeState.runtimeReady = false;
+    runtimeState.desktopOrigin = null;
+    runtimeState.desktopOriginProjectId = null;
+    versioningCalls.length = 0;
     versioningState.mode = "legacy";
     versioningState.recovery = "unknown";
     versioningState.originId = null;
@@ -145,6 +160,23 @@ describe("ChatFileChangeList", () => {
     });
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("asks how its own project keeps versions, never with another project's origin", async () => {
+    const desk = { originId: "desk-origin", mode: "desktop", endpoint: "http://desk" };
+    // Right after a project switch the store still holds the previous
+    // project's Desktop origin.
+    runtimeState.desktopOrigin = desk;
+    runtimeState.desktopOriginProjectId = "desk-project";
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files: [fileChange("a.md")], projectId: "cloud-project" }));
+    });
+    expect(versioningCalls.at(-1)).toEqual({ projectId: "cloud-project", origin: null });
+
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files: [fileChange("a.md")], projectId: "desk-project" }));
+    });
+    expect(versioningCalls.at(-1)).toEqual({ projectId: "desk-project", origin: desk });
   });
 
   it("toggles a per-file detail card from its chip", async () => {

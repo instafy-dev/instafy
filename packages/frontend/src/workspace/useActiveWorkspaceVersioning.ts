@@ -65,8 +65,25 @@ export function useActiveWorkspaceVersioning({
   enabled = true,
 }: { enabled?: boolean } = {}): ActiveWorkspaceVersioning {
   const { activeProjectId } = useProject();
+  return useWorkspaceVersioningForProject({ projectId: activeProjectId, enabled });
+}
+
+/**
+ * The same, for a surface that is handed its project instead of reading the
+ * active one (the chat change card, which also renders outside the project
+ * providers). The store's origin is used only when it belongs to that
+ * project. Every caller goes through this guard or the hook above, never
+ * through `useWorkspaceVersioning` directly.
+ */
+export function useWorkspaceVersioningForProject({
+  projectId: requestedProjectId,
+  enabled = true,
+}: {
+  projectId: string | null | undefined;
+  enabled?: boolean;
+}): ActiveWorkspaceVersioning {
   const { desktopOrigin, desktopOriginProjectId } = useRuntime();
-  const projectId = activeProjectId?.trim() || null;
+  const projectId = requestedProjectId?.trim() || null;
   const state = useWorkspaceVersioning({
     projectId,
     origin: originForProject(projectId, desktopOrigin, desktopOriginProjectId),
