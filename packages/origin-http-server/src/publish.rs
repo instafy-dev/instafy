@@ -299,6 +299,11 @@ pub fn revert_commit(
     Ok(publisher.report)
 }
 
+/// Most paths a restore's `keep` list may name. Per-file choices over a
+/// conflict produce a handful; the bound keeps any list cheap to match
+/// while the project's apply lock is held.
+pub const MAX_RESTORE_KEEP_PATHS: usize = 10_000;
+
 /// What a restore of unsaved work asks for.
 #[derive(Clone, Debug, Default)]
 pub struct RestoreRequest {
@@ -2552,11 +2557,16 @@ impl Publisher<'_> {
             Some(rev) if !rev.is_empty() => Some(parse_rev(rev)?),
             _ => None,
         };
-        let mut keep = Vec::new();
+        if request.keep.len() > MAX_RESTORE_KEEP_PATHS {
+            return Err(OriginError::bad_request(format!(
+                "a restore keeps at most {MAX_RESTORE_KEEP_PATHS} paths"
+            )));
+        }
+        let mut keep = PathRoots::default();
         for path in &request.keep {
             let normalized = normalize_relative_path(path)
                 .ok_or_else(|| OriginError::bad_request("invalid keep path"))?;
-            keep.push(normalized);
+            keep.insert(normalized);
         }
 
         self.prepare().map_err(internal)?;
@@ -2622,17 +2632,12 @@ impl Publisher<'_> {
             .map_err(internal)?
             .into_iter()
             .collect();
-        let under = |path: &str, roots: &[String]| {
-            roots
-                .iter()
-                .any(|root| path == root || path.starts_with(&format!("{root}/")))
-        };
         // Left out on request (`keep`), or refused because it can never
         // come back here. Only the person's own choices let the ref go.
         let mut not_restored = Vec::new();
         let mut refused = Vec::new();
         for change in &changes {
-            if under(&change.path, &keep) {
+            if keep.covers(&change.path) {
                 not_restored.push(change.path.clone());
             } else if crate::paths::is_reserved_path(&change.path)
                 || self.policy_reason(change, &sizes).is_some()
@@ -2647,20 +2652,18 @@ impl Publisher<'_> {
         // (itself or a folder above it), it lies below a path left out, or
         // every change the work makes inside it was left out, as when the
         // work adds a folder where `HEAD` has a file.
+        let left_out: PathRoots = not_restored.iter().cloned().collect();
+        let changed: PathRoots = changes.iter().map(|change| change.path.clone()).collect();
         let conflicts: Vec<String> = merged
             .conflicts
             .iter()
             .filter(|path| {
-                if under(path, &not_restored) || under(path, &keep) {
+                if left_out.covers(path) || keep.covers(path) {
                     return false;
                 }
-                let folder = std::slice::from_ref(*path);
-                let mut inside = changes
-                    .iter()
-                    .filter(|change| under(&change.path, folder))
-                    .peekable();
+                let mut inside = changed.at_or_below(path).peekable();
                 let any_inside = inside.peek().is_some();
-                !(any_inside && inside.all(|change| not_restored.contains(&change.path)))
+                !(any_inside && inside.all(|path| left_out.contains(path)))
             })
             .cloned()
             .collect();
@@ -2799,6 +2802,47 @@ impl Publisher<'_> {
     }
 }
 
+/// Paths and folders, each matched by itself and by every path below it,
+/// in time that grows with a path's depth, not with the number of entries.
+#[derive(Default)]
+struct PathRoots(BTreeSet<String>);
+
+impl PathRoots {
+    fn insert(&mut self, path: String) {
+        self.0.insert(path);
+    }
+
+    fn contains(&self, path: &str) -> bool {
+        self.0.contains(path)
+    }
+
+    /// `path` is an entry or lies below one.
+    fn covers(&self, path: &str) -> bool {
+        self.contains(path)
+            || path
+                .match_indices('/')
+                .any(|(index, _)| self.contains(&path[..index]))
+    }
+
+    /// The entries that are `folder` or lie below it.
+    fn at_or_below<'s>(&'s self, folder: &'s str) -> impl Iterator<Item = &'s str> + 's {
+        self.0
+            .range::<str, _>((
+                std::ops::Bound::Included(folder),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(String::as_str)
+            .take_while(move |path| path.starts_with(folder))
+            .filter(move |path| path.len() == folder.len() || path[folder.len()..].starts_with('/'))
+    }
+}
+
+impl FromIterator<String> for PathRoots {
+    fn from_iter<I: IntoIterator<Item = String>>(paths: I) -> Self {
+        Self(paths.into_iter().collect())
+    }
+}
+
 fn jitter(attempt: usize) {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2918,4 +2962,39 @@ pub(crate) fn parse_stdin_diff_tree(raw: &[u8]) -> BTreeMap<String, Vec<RawChang
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PathRoots;
+
+    #[test]
+    fn path_roots_match_a_path_and_what_lies_below_it() {
+        let roots: PathRoots = ["docs", "src/lib.rs", "a/b"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for path in ["docs", "docs/a.md", "docs/x/y.md", "src/lib.rs", "a/b/c"] {
+            assert!(roots.covers(path), "{path}");
+        }
+        for path in ["docs2", "docs.md", "src", "src/lib.rs.bak", "a", "a/bc"] {
+            assert!(!roots.covers(path), "{path}");
+        }
+        let changed: PathRoots = [
+            "docs",
+            "docs.md",
+            "docs/a.md",
+            "docs/z/b.md",
+            "docs2/c.md",
+            "doc",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(
+            changed.at_or_below("docs").collect::<Vec<_>>(),
+            vec!["docs", "docs/a.md", "docs/z/b.md"]
+        );
+        assert_eq!(changed.at_or_below("missing").count(), 0);
+    }
 }

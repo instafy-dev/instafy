@@ -2933,6 +2933,13 @@ async fn handle_git_recovery_restore(
     Extension(access_token): Extension<OriginAccessToken>,
     Json(payload): Json<RecoveryRestoreRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
+    // Refused before any lock is taken (and again by the restore itself).
+    if payload.keep.len() > publish::MAX_RESTORE_KEEP_PATHS {
+        return Err(OriginError::bad_request(format!(
+            "a restore keeps at most {} paths",
+            publish::MAX_RESTORE_KEEP_PATHS
+        )));
+    }
     let project_id = project_id_for_request(&state, &claims)?;
     let origin_id = origin_id_for_receipt(&state, &claims);
     let apply_lock = project_apply_lock(&state, project_id).await;

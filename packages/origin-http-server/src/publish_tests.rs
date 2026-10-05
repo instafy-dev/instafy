@@ -3552,6 +3552,56 @@ async fn a_restore_counts_only_once_main_has_it() {
     server.abort();
 }
 
+/// A restore's `keep` list is bounded: past the bound the request is
+/// refused before anything is fetched or restored, so no list can hold the
+/// project's apply lock for long. Within it, entries are matched by path.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_keep_list_is_bounded() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    let commit = push_to_ref(
+        &sc,
+        &[("docs/a.md", Some(b"a\n")), ("docs2/b.md", Some(b"b\n"))],
+        &[],
+        "Unsaved edits",
+        &reference,
+    );
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let too_many: Vec<String> = (0..=crate::publish::MAX_RESTORE_KEEP_PATHS)
+        .map(|index| format!("kept/{index}.md"))
+        .collect();
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": reference, "rev": commit, "keep": too_many }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(sc.remote_refs(&reference).len(), 1);
+    assert!(sc.remote_file("docs/a.md").is_none());
+
+    // At the bound it goes ahead; `docs` keeps `docs/a.md`, not `docs2/`.
+    let mut keep: Vec<String> = (1..crate::publish::MAX_RESTORE_KEEP_PATHS)
+        .map(|index| format!("kept/{index}.md"))
+        .collect();
+    keep.push("docs".to_string());
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": reference, "rev": commit, "keep": keep }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["notRestored"], serde_json::json!(["docs/a.md"]));
+    assert_eq!(sc.remote_file("docs2/b.md").as_deref(), Some("b\n"));
+    assert!(sc.remote_file("docs/a.md").is_none());
+    server.abort();
+}
+
 /// Work that adds a folder where `main` now has a file conflicts on both
 /// paths. Keeping the saved version of either side, or of both, clears
 /// the clash and restores the rest; keeping only part of the folder does
