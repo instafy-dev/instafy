@@ -2297,6 +2297,35 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
     )
     .await;
     assert_eq!(answer.status, 200, "{}", answer.json());
+    let saved = rev(&answer);
+    assert_eq!(
+        canonical(&sc, &["log", "-1", "--format=%an <%ae>", &saved]),
+        "instafy-origin <gateway@instafy.dev>"
+    );
+
+    // A job's token (it names a run) saves as the gateway even with a
+    // pseudonym on it, as on Desktop: a job's work is never a person's.
+    let job = controller.token(
+        &["fs.write"],
+        json!({
+            "author_name": "Ada Lovelace",
+            "author_email": pseudonym,
+            "run_id": "run-1",
+        }),
+    );
+    let answer = apply_as(
+        &served,
+        manifest(
+            &["a.txt"],
+            &[],
+            json!({ "baseRev": saved, "leaseId": controller.lease.to_string() }),
+        ),
+        &zip(&[("a.txt", b"d\n")]),
+        Some(&job),
+        None,
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
     assert_eq!(
         canonical(&sc, &["log", "-1", "--format=%an <%ae>", &rev(&answer)]),
         "instafy-origin <gateway@instafy.dev>"
@@ -2327,10 +2356,13 @@ fn save_authors_come_from_clean_claims_only() {
     );
     let author = save_author(&claims(None, Some(pseudonym)), &gateway);
     assert_eq!(author.name, "Instafy user");
-    let author = save_author(&claims(Some(" <Ev\nil> "), Some(pseudonym)), &gateway);
-    assert_eq!(author.name, "Ev il");
-    let author = save_author(&claims(Some("..."), Some(pseudonym)), &gateway);
-    assert_eq!(author.name, "Instafy user");
+    // Desktop's rule: a name git would misread or strip to nothing is the
+    // plain fallback.
+    for name in [" <Ev\nil> ", " ,;: ", "Ada <x@y>"] {
+        let author = save_author(&claims(Some(name), Some(pseudonym)), &gateway);
+        assert_eq!(author.name, "Instafy user", "{name:?}");
+    }
+    // Only pseudonyms are ever written into history.
     for bad in [
         "",
         "  ",
@@ -2341,6 +2373,9 @@ fn save_authors_come_from_clean_claims_only() {
         "a@b\nc",
         "@b",
         "a@",
+        "ada@example.com",
+        "@users.noreply.instafy.dev",
+        "a b@users.noreply.instafy.dev",
     ] {
         let author = save_author(&claims(Some("Ada"), Some(bad)), &gateway);
         assert_eq!(author, gateway, "{bad:?}");
