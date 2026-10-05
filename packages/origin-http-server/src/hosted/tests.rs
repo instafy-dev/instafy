@@ -1124,6 +1124,74 @@ async fn only_the_sweeper_packs_mirrors() {
     assert!(swept.packed.is_empty());
 }
 
+/// A blob of `content` written loose into `mirror`; its id.
+fn write_loose_blob(mirror: &Path, content: &[u8]) -> String {
+    let output =
+        crate::test_support::git_output(mirror, &["hash-object", "-w", "--stdin"], Some(content));
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Contents whose blob ids start with `17`, the fan-out folder git (and
+/// the sweeper) count loose objects in.
+fn contents_sampled_by_gc(count: usize) -> Vec<Vec<u8>> {
+    let mut found = Vec::new();
+    let mut n = 0u64;
+    while found.len() < count {
+        let content = format!("unreachable {n}\n").into_bytes();
+        let mut header = format!("blob {}\0", content.len()).into_bytes();
+        header.extend_from_slice(&content);
+        let id = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &header);
+        if id.as_ref()[0] == 0x17 {
+            found.push(content);
+        }
+        n += 1;
+    }
+    found
+}
+
+/// Loose objects git keeps loose however often it packs (recent ones that
+/// nothing reaches) are not packed again on every sweep: a packing that
+/// changed nothing is not reported or measured, and the mirror is left
+/// alone for a day.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_packing_that_changes_nothing_is_not_run_again_every_sweep() {
+    let sc = HostedScenario::new();
+    sc.push(&[("a.txt", Some(b"a\n"))], "first");
+    // Packing above 2 loose objects in `objects/17` (a limit of 512).
+    let cache = Arc::new(sc.open_cache().with_pack_limits(512, 50));
+    let lease = cache.lease(sc.project);
+    cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap();
+    drop(lease);
+    // Everything the mirror reaches is packed already.
+    git_in(&sc.mirror(), &["repack", "-a", "-d", "-q"]);
+    for content in contents_sampled_by_gc(3) {
+        assert!(write_loose_blob(&sc.mirror(), &content).starts_with("17"));
+    }
+    let sweep = || {
+        let cache = cache.clone();
+        async move {
+            tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
+                .await
+                .unwrap()
+        }
+    };
+    let first = sweep().await;
+    assert!(first.packed.is_empty(), "{first:?}");
+    assert_eq!(
+        std::fs::read_dir(sc.mirror().join("objects/17"))
+            .unwrap()
+            .count(),
+        3
+    );
+    assert!(cache.pack_skipped(sc.project));
+    let second = sweep().await;
+    assert!(second.packed.is_empty(), "{second:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sweeper_keeps_mirrors_in_use_and_removes_idle_ones() {
     let sc = HostedScenario::new();
