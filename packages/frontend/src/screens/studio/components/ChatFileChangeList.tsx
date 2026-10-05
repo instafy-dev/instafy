@@ -32,6 +32,7 @@ import {
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
+  revertAnswerCode,
   revertCheckFailedCopy,
   revertRetryDelayMs,
 } from "./versioningCopy";
@@ -1031,8 +1032,12 @@ export function ChatFileChangeList({
   // What a revert answered: mark the files it undid and say so. Also runs
   // for an answer that arrives after the card stopped waiting for it.
   const applyRevertOutcome = useCallback(
-    (result: RevertWorkspaceGitCommitResult | null, revertedVersionPaths: ReadonlySet<string>) => {
-      const outcome = describeChangeRevertOutcome(result);
+    (
+      result: RevertWorkspaceGitCommitResult | null,
+      revertedVersionPaths: ReadonlySet<string>,
+      retriedAfter: string | null,
+    ) => {
+      const outcome = describeChangeRevertOutcome(result, { retriedAfter });
       if (outcome.reverted) {
         const left = new Set(outcome.unrevertedPaths.map((path) => normalizeWorkspacePath(path)));
         // A version revert only undoes what that version touched. Files the
@@ -1113,22 +1118,26 @@ export function ChatFileChangeList({
     const answer = (async () => {
       try {
         let result = await revert();
+        let retriedAfter: string | null = null;
         // A gateway still fetching the space's history, out of write slots
-        // or making its copy again asks for a moment. Nothing was committed,
-        // so one retry after that delay is safe (never for a full disk).
+        // or making its copy again asks for a moment, and the card asks once
+        // more after that delay (never for a full disk). The first revert
+        // may have landed even so (its push's answer was lost); a retry is
+        // still safe, because a revert main already holds writes nothing.
         const retryDelay = revertRetryDelayMs(result);
         if (retryDelay !== null) {
+          retriedAfter = revertAnswerCode(result);
           await new Promise((resolve) => setTimeout(resolve, retryDelay));
           result = await revert();
         }
-        return result;
+        return { result, retriedAfter };
       } catch {
-        return null;
+        return { result: null, retriedAfter: null };
       }
     })();
-    const running = answer.then((result) => {
+    const running = answer.then(({ result, retriedAfter }) => {
       runningRevertRef.current = null;
-      applyRevertOutcomeRef.current(result, revertedVersionPaths);
+      applyRevertOutcomeRef.current(result, revertedVersionPaths, retriedAfter);
     });
     runningRevertRef.current = running;
     setRevertWaitingAgain(false);

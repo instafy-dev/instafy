@@ -8,6 +8,7 @@ import {
   describeRevertConfirm,
   describeRevertOtherWork,
   describeUnsavedChanges,
+  revertAnswerCode,
   revertCheckFailedCopy,
   revertRetryDelayMs,
 } from "../versioningCopy";
@@ -191,7 +192,8 @@ describe("a revert while the space is still loading", () => {
   });
 });
 
-// The gateway's other 503 answers. Nothing was committed by any of them.
+// The gateway's other 503 answers. A retry is safe after each: a revert main
+// already holds is answered committed:false and writes nothing.
 describe("a revert the gateway asks to try again later", () => {
   function later(code: string, retryAfterMs?: number): RevertWorkspaceGitCommitResult {
     return {
@@ -240,6 +242,39 @@ describe("a revert the gateway asks to try again later", () => {
       unrevertedPaths: [],
       offerAgentUndo: false,
     });
+  });
+
+  // fetch_pending and mirror_reset can also follow a push that landed (its
+  // answer was lost and the fetch that confirms it failed). The retry then
+  // finds nothing left to revert: the change is undone, most likely by this
+  // revert, so the card marks it. writes_busy comes before any work.
+  it.each(["fetch_pending", "mirror_reset"])("counts nothing left to revert after %s as the change undone", (code) => {
+    const noop: RevertWorkspaceGitCommitResult = { ok: true, rev: "c".repeat(40), committed: false };
+    expect(describeChangeRevertOutcome(noop, { retriedAfter: code })).toEqual({
+      intent: "success",
+      message: "Those changes are undone.",
+      reverted: true,
+      unrevertedPaths: [],
+      offerAgentUndo: false,
+    });
+    // A retry that made the revert itself is a plain revert.
+    expect(
+      describeChangeRevertOutcome({ ok: true, rev: "c".repeat(40), committed: true }, { retriedAfter: code }),
+    ).toMatchObject({ intent: "success", message: "Reverted. Saved as a new version.", reverted: true });
+    expect(revertAnswerCode(later(code, 2000))).toBe(code);
+    expect(revertAnswerCode({ ...later(code, 2000), code: undefined })).toBe(code);
+  });
+
+  it.each(["writes_busy", "disk_full", null])("keeps Nothing to revert after %s", (code) => {
+    expect(
+      describeChangeRevertOutcome({ ok: true, rev: "c".repeat(40), committed: false }, { retriedAfter: code }),
+    ).toMatchObject({
+      intent: "info",
+      message: "Nothing to revert. Those changes are already undone.",
+      reverted: false,
+    });
+    expect(revertAnswerCode(null)).toBeNull();
+    expect(revertAnswerCode({ ok: true, rev: "c".repeat(40) })).toBeNull();
   });
 
   it("names the answer when the check before Revert fails", () => {

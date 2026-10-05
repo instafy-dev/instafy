@@ -826,7 +826,8 @@ export function describeRevertCombined(canAskAgent: boolean): string {
 export interface ChangeRevertOutcome {
   intent: "success" | "info" | "warning" | "error";
   message: string;
-  // A new version that undoes the change reached the saved history.
+  // A new version that undoes the change reached the saved history (after a
+  // retry that found nothing left to revert, most likely this revert's own).
   reverted: boolean;
   // Paths the revert left as they were (a Desktop origin's partial publish).
   unrevertedPaths: string[];
@@ -874,15 +875,30 @@ export function autoRetryDelayMs(
   return originAutoRetryDelayMs(error, CARD_AUTO_RETRY_BUDGET);
 }
 
-// The same for the revert itself: nothing was committed by these answers,
-// so one retry is safe.
+// The code a failed revert was answered with, or null.
+export function revertAnswerCode(result: RevertWorkspaceGitCommitResult | null): string | null {
+  if (!result || result.ok) {
+    return null;
+  }
+  return result.code ?? result.errorInfo?.code ?? null;
+}
+
+// The same for the revert itself. Two of these answers can also come after
+// the revert landed (see REVERT_MAY_HAVE_LANDED_CODES); one retry is still
+// safe, because a revert main already holds is answered committed:false and
+// writes nothing.
 export function revertRetryDelayMs(result: RevertWorkspaceGitCommitResult | null): number | null {
   if (!result || result.ok) {
     return null;
   }
-  const code = result.code ?? result.errorInfo?.code ?? null;
+  const code = revertAnswerCode(result);
   return autoRetryDelayMs({ code: code ?? undefined, retryAfterMs: result.errorInfo?.retryAfterMs });
 }
+
+// The answers a revert can get after its push landed: the push's own answer
+// was lost, and the fetch that confirms it was too slow (fetch_pending) or
+// met a damaged copy (mirror_reset). writes_busy comes before any work.
+const REVERT_MAY_HAVE_LANDED_CODES: ReadonlySet<string> = new Set(["fetch_pending", "mirror_reset"]);
 
 // The check before Revert failed. A gateway that said to try again later
 // (still fetching or making its copy again, even after one retry, or out
@@ -892,11 +908,16 @@ export function revertCheckFailedCopy(code: string | null | undefined): string {
 }
 
 const CHANGE_REVERT_FALLBACK_MESSAGE = "Couldn't revert this change. Try again, or ask the agent to undo it.";
+const REVERT_UNDONE_COPY = "Those changes are undone.";
 
 // What "Revert this change" did, as one toast: the request is
 // `/git/revert-commit {commit: head}`, which undoes that saved version's own
-// change (against its first parent).
-export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResult | null): ChangeRevertOutcome {
+// change (against its first parent). `retriedAfter` is the code of the
+// answer the card's one automatic retry followed, if it made one.
+export function describeChangeRevertOutcome(
+  result: RevertWorkspaceGitCommitResult | null,
+  options: { retriedAfter?: string | null } = {},
+): ChangeRevertOutcome {
   const outcome = (
     intent: ChangeRevertOutcome["intent"],
     message: string,
@@ -908,6 +929,12 @@ export function describeChangeRevertOutcome(result: RevertWorkspaceGitCommitResu
   }
   if (result.ok) {
     if (result.committed === false) {
+      // Nothing left to revert, after an answer that can follow a revert
+      // whose push landed: most likely this revert's own, whose answer was
+      // lost. The change is undone either way, and the card marks it.
+      if (options.retriedAfter && REVERT_MAY_HAVE_LANDED_CODES.has(options.retriedAfter)) {
+        return outcome("success", REVERT_UNDONE_COPY, { reverted: true });
+      }
       return outcome("info", revertSuccessCopy(false));
     }
     const left = [

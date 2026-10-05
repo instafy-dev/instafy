@@ -1720,6 +1720,62 @@ describe("ChatFileChangeList", () => {
       expect(revertChip()).not.toBeNull();
     });
 
+    // The first push landed but its answer was lost, and the fetch that
+    // confirms it was slow or met a damaged copy. The retry finds nothing
+    // left to revert: the change is undone, so the card says so.
+    it.each(["fetch_pending", "mirror_reset"])(
+      "marks the change undone when the retry after %s finds nothing left to revert",
+      async (code) => {
+        revertWorkspaceGitCommit
+          .mockResolvedValueOnce(answeredLater(code, 5))
+          .mockResolvedValueOnce({ ok: true, rev: "c".repeat(40), committed: false });
+        const commits: Event[] = [];
+        const onCommit = (event: Event) => commits.push(event);
+        window.addEventListener("instafy:workspace-commit", onCommit);
+        try {
+          await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+          await confirmRevert();
+          await waitFor(30);
+
+          expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(2);
+          expect(showStatus).toHaveBeenCalledTimes(1);
+          expect(showStatus).toHaveBeenCalledWith("Those changes are undone.", "success", 4000, undefined);
+          expect(commits).toHaveLength(1);
+          expect(revertChip()).toBeNull();
+          const chipTitles = Array.from(
+            container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
+          ).map((chip) => chip.title);
+          expect(chipTitles).toEqual(["src/app.ts (reverted)"]);
+        } finally {
+          window.removeEventListener("instafy:workspace-commit", onCommit);
+        }
+      },
+    );
+
+    // writes_busy is answered before any work: this click wrote nothing.
+    it("keeps Nothing to revert when the retry after writes_busy finds the change undone", async () => {
+      revertWorkspaceGitCommit
+        .mockResolvedValueOnce(answeredLater("writes_busy", 5))
+        .mockResolvedValueOnce({ ok: true, rev: "c".repeat(40), committed: false });
+      await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
+      await confirmRevert();
+      await waitFor(30);
+
+      expect(revertWorkspaceGitCommit).toHaveBeenCalledTimes(2);
+      expect(showStatus).toHaveBeenCalledTimes(1);
+      expect(showStatus).toHaveBeenCalledWith(
+        "Nothing to revert. Those changes are already undone.",
+        "info",
+        4000,
+        undefined,
+      );
+      expect(revertChip()).not.toBeNull();
+      const chipTitles = Array.from(
+        container.querySelectorAll<HTMLElement>('[data-testid="chat-file-change-file-chip"]'),
+      ).map((chip) => chip.title);
+      expect(chipTitles).toEqual(["src/app.ts"]);
+    });
+
     it("says the space is still loading when the retry finds it loading too", async () => {
       revertWorkspaceGitCommit.mockResolvedValue(stillLoading(5));
       await renderCard({ files: [fileChange("src/app.ts")], commitRange: gitRange });
