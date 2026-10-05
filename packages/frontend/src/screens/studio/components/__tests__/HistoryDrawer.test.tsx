@@ -688,7 +688,7 @@ describe("HistoryDrawer", () => {
       "The space is busy saving other changes. Try again in a moment.",
       false,
     ],
-    // The gateway's 503 answers with Retry-After: nothing was written.
+    // The gateway's 503 answers with Retry-After.
     [
       "taken write slots (writes_busy)",
       { ok: false, code: "writes_busy", errorInfo: { status: 503, code: "writes_busy", message: "busy", retryAfterMs: 2000, routeUnavailable: false } },

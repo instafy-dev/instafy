@@ -55,13 +55,19 @@ export type KnownOriginErrorCode =
 export type OriginErrorCode = KnownOriginErrorCode | (string & Record<never, never>);
 
 /**
- * The stateless gateway's 503 answers, each with `Retry-After`. None of them
- * wrote anything:
+ * The stateless gateway's 503 answers, each with `Retry-After`:
  * - `fetch_pending`: the space's saved versions are still being fetched;
  * - `writes_busy`: every write slot stayed taken while the request waited;
  * - `mirror_reset`: the gateway's copy of the space was damaged and is
  *   being made again;
  * - `disk_full`: the gateway's disk is full.
+ *
+ * `writes_busy` comes before any work. The other three usually mean nothing
+ * was written, but a write can also get them after its push landed, when the
+ * push's answer was lost and the fetch that confirms it failed. Asking again
+ * is safe either way: the gateway applies a change to `main` as it is then,
+ * and a change `main` already holds is answered `committed: false` with
+ * nothing written.
  */
 export type OriginRetryLaterCode = "fetch_pending" | "writes_busy" | "mirror_reset" | "disk_full";
 

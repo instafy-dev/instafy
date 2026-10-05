@@ -74,7 +74,8 @@ export const MAIN_BUSY_COPY = "The space is busy saving other changes. Try again
 export const LEASE_CONFLICT_COPY = "The agent is saving right now. Try again in a moment.";
 export const FETCH_PENDING_COPY = "The space is still loading. Try again in a moment.";
 // The gateway's other answers that say to try again later (503 with
-// Retry-After). None of them wrote anything.
+// Retry-After). See OriginRetryLaterCode for when a write may have landed
+// anyway, and why asking again is still safe.
 const WRITES_BUSY_LEAD = "The server is busy saving other changes.";
 const MIRROR_RESET_LEAD = "The server is rebuilding its copy of this space.";
 const DISK_FULL_LEAD = "The space is out of room right now.";
@@ -321,8 +322,9 @@ export function describeSaveFailure(params: {
       return { message: SAVE_COPY.deleteRequiresBaseRev };
     case "fetch_pending":
       return { message: SAVE_COPY.fetchPending };
-    // Nothing was written. A save keeps the edits in the editor; the busy
-    // answers clear in a moment, a full disk only later (no Try again).
+    // A save keeps the edits in the editor, and trying again is safe even
+    // when the change already landed. The busy answers clear in a moment, a
+    // full disk only later (no Try again).
     case "writes_busy":
       return { message: operation === "save" ? SAVE_COPY.writesBusy : WRITES_BUSY_COPY, action: RETRY_ACTION };
     case "mirror_reset":
@@ -957,8 +959,8 @@ export function describeChangeRevertOutcome(
   if (result.routeUnavailable || info?.routeUnavailable) {
     return outcome("warning", REVERT_ROUTE_UNAVAILABLE_MESSAGE, { offerAgentUndo: true });
   }
-  // The gateway said to try again later and committed nothing. A full disk
-  // is an error; the other answers clear in a moment.
+  // The gateway said to try again later. A full disk is an error; the other
+  // answers clear in a moment.
   const later = retryLaterCopy(code);
   if (later) {
     return outcome(code === "disk_full" ? "error" : "warning", later);

@@ -1011,7 +1011,7 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.fetchRecovery.mock.calls.length).toBe(before + 1);
   });
 
-  // The gateway's 503 answers with Retry-After: the restore wrote nothing.
+  // The gateway's 503 answers with Retry-After.
   it.each([
     ["writes_busy", "The server is busy saving other changes. Try again in a moment."],
     ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],

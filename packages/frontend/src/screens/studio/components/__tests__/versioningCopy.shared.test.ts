@@ -87,7 +87,7 @@ describe("versioning copy shared across surfaces", () => {
     expect(historyMessage({ code: "dismissal_not_applied", status: 422 })).toBe(DISMISSAL_NOT_APPLIED_COPY);
   });
 
-  // The gateway's 503 answers with Retry-After: none of them wrote anything.
+  // The gateway's 503 answers with Retry-After.
   it.each([
     ["writes_busy", WRITES_BUSY_COPY, "The server is busy saving other changes. Try again in a moment."],
     ["mirror_reset", MIRROR_RESET_COPY, "The server is rebuilding its copy of this space. Try again in a moment."],
