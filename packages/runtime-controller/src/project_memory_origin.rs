@@ -19,6 +19,10 @@
 //! be read (a symlink, a non-file entry): the retry leaves it alone. A second
 //! such 409 reports `workspace-busy`, or `conflict` when it names exactly the
 //! paths of the first. Any other 409 is an error, as before.
+//!
+//! An origin that is busy (503, such as the hosted gateway still fetching a
+//! space's first clone, `fetch_pending`) or a read that gets no answer in
+//! time reports `workspace-busy` too, which the client tries again later.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{Cursor, Write};
@@ -141,36 +145,55 @@ pub(crate) enum BootstrapWriteOutcome {
 
 /// Read `paths` in order, pinning every read after the first that reports a
 /// revision to that revision. If the origin no longer serves that revision,
-/// start over once from an unpinned read; `None` when that happens again.
+/// start over once from an unpinned read; `None` when that happens again,
+/// or when the origin is busy (try again later).
 pub(crate) async fn read_origin_snapshot(
     target: &OriginBootstrapTarget<'_>,
     token: &str,
     paths: &[String],
 ) -> ApiResult<Option<OriginReadSnapshot>> {
     for _ in 0..2 {
-        if let Some(snapshot) = read_pinned_snapshot(target, token, paths).await? {
-            return Ok(Some(snapshot));
+        match read_pinned_snapshot(target, token, paths).await? {
+            PinnedRead::Snapshot(snapshot) => return Ok(Some(snapshot)),
+            PinnedRead::RevisionGone => tracing::info!(
+                project_id = %target.project_id,
+                origin_id = %target.origin_id,
+                "origin no longer serves the revision a project memory read was pinned to"
+            ),
+            PinnedRead::Busy => {
+                tracing::info!(
+                    project_id = %target.project_id,
+                    origin_id = %target.origin_id,
+                    "origin is busy; project memory is read again later"
+                );
+                return Ok(None);
+            }
         }
-        tracing::info!(
-            project_id = %target.project_id,
-            origin_id = %target.origin_id,
-            "origin no longer serves the revision a project memory read was pinned to"
-        );
     }
     Ok(None)
+}
+
+/// One pass over the managed files.
+enum PinnedRead {
+    Snapshot(OriginReadSnapshot),
+    /// The revision the reads were pinned to is gone.
+    RevisionGone,
+    /// The origin is busy or did not answer in time.
+    Busy,
 }
 
 async fn read_pinned_snapshot(
     target: &OriginBootstrapTarget<'_>,
     token: &str,
     paths: &[String],
-) -> ApiResult<Option<OriginReadSnapshot>> {
+) -> ApiResult<PinnedRead> {
     let mut snapshot = OriginReadSnapshot::default();
     for path in paths {
-        let Some(read) =
-            origin_read_text_file(target, token, path, snapshot.rev.as_deref()).await?
-        else {
-            return Ok(None);
+        let read = match origin_read_text_file(target, token, path, snapshot.rev.as_deref()).await?
+        {
+            OriginRead::Read(read) => read,
+            OriginRead::RevisionGone => return Ok(PinnedRead::RevisionGone),
+            OriginRead::Busy => return Ok(PinnedRead::Busy),
         };
         if snapshot.rev.is_none() {
             snapshot.rev = read.rev;
@@ -183,7 +206,7 @@ async fn read_pinned_snapshot(
             },
         );
     }
-    Ok(Some(snapshot))
+    Ok(PinnedRead::Snapshot(snapshot))
 }
 
 /// Write what `plan` derives from `first`; on a 409, re-read `paths`
@@ -236,6 +259,14 @@ where
                     rev,
                 })
             }
+            ApplyAttempt::Busy => {
+                tracing::info!(
+                    project_id = %target.project_id,
+                    origin_id = %target.origin_id,
+                    "origin is busy; project memory is written again later"
+                );
+                return Ok(BootstrapWriteOutcome::WorkspaceBusy);
+            }
             ApplyAttempt::Conflict { paths: conflicted } => {
                 tracing::info!(
                     project_id = %target.project_id,
@@ -260,6 +291,9 @@ enum ApplyAttempt {
     },
     /// A 409 saying the space moved since the read, with the paths it named.
     Conflict { paths: BTreeSet<String> },
+    /// A 503: the origin is busy (still fetching the space, out of write
+    /// slots); nothing was written.
+    Busy,
 }
 
 async fn post_bootstrap_apply(
@@ -316,6 +350,9 @@ async fn post_bootstrap_apply(
     .map_err(|error| internal_error(format!("origin apply request failed: {error}")))?;
 
     let status = response.status();
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        return Ok(ApplyAttempt::Busy);
+    }
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         if status == reqwest::StatusCode::CONFLICT {
@@ -425,13 +462,22 @@ struct OriginTextRead {
     rev: Option<String>,
 }
 
-/// One read; `None` when a pinned read finds the revision gone.
+/// What one read came to.
+enum OriginRead {
+    Read(OriginTextRead),
+    /// A pinned read found the revision gone.
+    RevisionGone,
+    /// The origin is busy (503) or did not answer in time.
+    Busy,
+}
+
+/// One read.
 async fn origin_read_text_file(
     target: &OriginBootstrapTarget<'_>,
     token: &str,
     path: &str,
     rev: Option<&str>,
-) -> ApiResult<Option<OriginTextRead>> {
+) -> ApiResult<OriginRead> {
     let encoded = encode_workspace_path(path);
     let mut url = format!("{}/files/{encoded}?encoding=base64", target.endpoint);
     if let Some(rev) = rev {
@@ -439,14 +485,20 @@ async fn origin_read_text_file(
         url.push_str("&rev=");
         url.push_str(rev);
     }
-    let response = timeout(
+    let Ok(sent) = timeout(
         StdDuration::from_secs(ORIGIN_READ_TIMEOUT_SECS),
         target.http.get(url).bearer_auth(token).send(),
     )
     .await
-    .map_err(|_| internal_error("origin file lookup timed out"))?
-    .map_err(|error| internal_error(format!("origin file lookup failed: {error}")))?;
+    else {
+        return Ok(OriginRead::Busy);
+    };
+    let response =
+        sent.map_err(|error| internal_error(format!("origin file lookup failed: {error}")))?;
     let status = response.status();
+    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        return Ok(OriginRead::Busy);
+    }
     let served_rev = header_object_id(response.headers(), INSTAFY_REV_HEADER);
 
     if status == reqwest::StatusCode::NOT_FOUND {
@@ -454,9 +506,9 @@ async fn origin_read_text_file(
         // A pinned read of a revision the origin no longer serves is not an
         // absent file: never plan writes from it.
         if rev.is_some() && error_code(&body).as_deref() == Some("rev_not_found") {
-            return Ok(None);
+            return Ok(OriginRead::RevisionGone);
         }
-        return Ok(Some(OriginTextRead {
+        return Ok(OriginRead::Read(OriginTextRead {
             content: None,
             blob: None,
             rev: served_rev,
@@ -489,7 +541,7 @@ async fn origin_read_text_file(
     })?;
     let text = String::from_utf8(bytes)
         .map_err(|error| internal_error(format!("origin file response was not UTF-8: {error}")))?;
-    Ok(Some(OriginTextRead {
+    Ok(OriginRead::Read(OriginTextRead {
         content: Some(text),
         blob,
         rev: served_rev,
@@ -616,6 +668,10 @@ pub(crate) mod test_support {
         pub(crate) committed: Option<bool>,
         /// Answer this many pinned reads with 404 `rev_not_found`.
         pub(crate) forgotten_pinned_reads: usize,
+        /// Answer this many reads with 503 `fetch_pending`.
+        pub(crate) busy_reads: usize,
+        /// Answer this many applies with 503 `writes_busy`.
+        pub(crate) busy_applies: usize,
         /// `(path, rev query)` of every read.
         pub(crate) reads: Vec<(String, Option<String>)>,
         /// Every apply manifest, in order.
@@ -672,6 +728,15 @@ pub(crate) mod test_support {
         let mut stub = stub.lock().expect("stub lock");
         let pinned = query.get("rev").cloned();
         stub.reads.push((path.clone(), pinned.clone()));
+        if stub.busy_reads > 0 {
+            stub.busy_reads -= 1;
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "2")],
+                Json(json!({ "error": "still fetching", "code": "fetch_pending" })),
+            )
+                .into_response();
+        }
         if stub.forgotten_pinned_reads > 0 && pinned.is_some() {
             stub.forgotten_pinned_reads -= 1;
             return (
@@ -741,6 +806,15 @@ pub(crate) mod test_support {
         let mut stub = stub.lock().expect("stub lock");
         stub.applies.push(manifest.clone());
         stub.apply_tokens.push(token);
+        if stub.busy_applies > 0 {
+            stub.busy_applies -= 1;
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [("retry-after", "2")],
+                Json(json!({ "error": "busy", "code": "writes_busy" })),
+            )
+                .into_response();
+        }
         if let Some((path, content)) = stub.concurrent_write.take() {
             stub.files.insert(path, content);
             advance(&mut stub);
@@ -991,6 +1065,49 @@ mod tests {
         assert_eq!(stub.reads[0].1, None);
         assert_eq!(stub.reads[2].1, None);
         assert_eq!(stub.reads[3].1.as_deref(), Some(rev.as_str()));
+    }
+
+    /// An origin still fetching the space (the gateway's first clone, 503
+    /// `fetch_pending`) or out of write slots is busy, not broken: the
+    /// bootstrap reports `workspace-busy`, which the client tries again
+    /// later, and writes nothing.
+    #[tokio::test]
+    async fn a_busy_origin_reports_workspace_busy() {
+        let origin = start(StubState {
+            rev: Some(rev_for(0)),
+            report_blobs: true,
+            busy_reads: 1,
+            ..StubState::default()
+        })
+        .await;
+        let http = reqwest::Client::new();
+        let target = OriginBootstrapTarget {
+            http: &http,
+            endpoint: &origin.endpoint,
+            origin_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+        };
+        let first = read_origin_snapshot(&target, "read-token", &paths())
+            .await
+            .expect("a busy origin is not an error");
+        assert!(first.is_none());
+        assert_eq!(origin.state.lock().unwrap().reads.len(), 1);
+
+        let origin = start(StubState {
+            rev: Some(rev_for(0)),
+            report_blobs: true,
+            busy_applies: 1,
+            ..StubState::default()
+        })
+        .await;
+        let (outcome, _) = run(&origin.endpoint, Uuid::new_v4()).await;
+        assert!(matches!(
+            outcome.expect("a busy origin is not an error"),
+            BootstrapWriteOutcome::WorkspaceBusy
+        ));
+        let stub = origin.state.lock().unwrap();
+        assert_eq!(stub.applies.len(), 1);
+        assert!(stub.files.is_empty());
     }
 
     #[tokio::test]
