@@ -1013,6 +1013,7 @@ fn every_salvage_git_handle_ignores_replacement_refs() {
         ("salvage.rs", include_str!("../salvage.rs")),
         ("canonical.rs", include_str!("canonical.rs")),
         ("classify.rs", include_str!("classify.rs")),
+        ("journal.rs", include_str!("journal.rs")),
         ("options.rs", include_str!("options.rs")),
         ("outputs.rs", include_str!("outputs.rs")),
         ("repository.rs", include_str!("repository.rs")),
@@ -1299,6 +1300,27 @@ fn a_path_the_shard_refuses_is_left_out_and_the_push_retried() {
     assert!(listed.lines().any(|path| path == "README.md"));
     assert!(!listed.lines().any(|path| path == "export.zip"));
     assert_eq!(gateway.salvage_refs().len(), 1);
+
+    // A later dry run reports the ref that was made, with the path the
+    // shard refused, and a later run with --apply pushes nothing.
+    let (_, dry) = salvage(&gateway.settings(false, false, &[]), &stub);
+    assert_eq!(dry[0]["salvageRef"], report["salvageRef"], "{:#}", dry[0]);
+    assert_eq!(dry[0]["canonicalVerified"], true);
+    assert_eq!(dry[0]["historyFiltered"], true);
+    assert!(dry[0]["skippedPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["path"] == "export.zip" && item["reason"] == "policy"));
+    let (_, again) = salvage(&gateway.settings(true, false, &[]), &stub);
+    assert_eq!(
+        again[0]["salvageRef"], report["salvageRef"],
+        "{:#}",
+        again[0]
+    );
+    assert_eq!(again[0]["canonicalVerified"], true);
+    assert_eq!(stub.salvage_tokens.get(), 2);
+    assert_eq!(gateway.salvage_refs().len(), 1);
 }
 
 /// A chat image the controller cannot take stays in the private archive;
@@ -1398,6 +1420,76 @@ fn an_export_that_may_succeed_later_holds_up_removal() {
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
     assert!(!entry.exists());
+}
+
+/// A rerun of an entry that still holds the same work reports the salvage
+/// ref an earlier run made for it, whatever `main` and the node name did
+/// since: restoring that ref, or part of it, during the soak never mints a
+/// second one. A dry run reports the recorded ref too.
+#[test]
+fn a_rerun_reuses_the_ref_recorded_for_the_same_work() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            ("a.txt", Some("a0\n")),
+            ("c.txt", Some("c0\n")),
+            ("d.txt", Some("d0\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("local.md"), b"local\n");
+    ig(&entry, &["add", "local.md"]);
+    entry_commit(&entry, "Add local notes");
+    write(&entry.join("a.txt"), b"a1\n");
+    write(&entry.join("d.txt"), b"d1\n");
+    std::fs::remove_file(entry.join("c.txt")).unwrap();
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (_, lines) = salvage(&gateway.settings(true, false, &[]), &stub);
+    let first = &lines[0];
+    assert!(first["error"].is_null(), "{first:#}");
+    assert_eq!(first["canonicalVerified"], true);
+    let reference = first["salvageRef"].as_str().unwrap().to_string();
+    let salvaged = first["salvageRev"].as_str().unwrap().to_string();
+    assert_eq!(stub.salvage_tokens.get(), 1);
+
+    // The person restores the ref in Studio, leaving d.txt out: a new commit
+    // on main (not a merge) with local.md, a1, and no c.txt.
+    std::fs::remove_file(gateway.canonical().join("hooks/update")).unwrap();
+    gateway.publish(
+        &[
+            ("local.md", Some("local\n")),
+            ("a.txt", Some("a1\n")),
+            ("c.txt", None),
+        ],
+        "Restore",
+    );
+    gateway.salvage_mode_hook(&[]);
+
+    let (_, dry) = salvage(&gateway.settings(false, false, &[]), &stub);
+    assert_eq!(dry[0]["salvageRef"], reference.as_str(), "{:#}", dry[0]);
+    assert_eq!(dry[0]["salvageRev"], salvaged.as_str());
+    assert_eq!(dry[0]["canonicalVerified"], true);
+
+    // The checklist's removal run, on a gateway that changed its name.
+    let mut settings = gateway.settings(true, true, &[]);
+    settings.node = "other-node".to_string();
+    let (summary, lines) = salvage(&settings, &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["salvageRef"], reference.as_str(), "{report:#}");
+    assert_eq!(report["salvageRev"], salvaged.as_str());
+    assert_eq!(report["canonicalVerified"], true);
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+    assert_eq!(
+        gateway.salvage_refs(),
+        BTreeMap::from([(reference, salvaged)])
+    );
+    assert_eq!(stub.salvage_tokens.get(), 1);
 }
 
 /// A filtered entry's local commits reach canonical only as one commit, so

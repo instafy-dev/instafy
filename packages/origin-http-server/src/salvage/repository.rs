@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::canonical::{self, Canonical, Pushed};
 use super::classify::{self, Kind, PrivatePath, Skipped, Sorted};
+use super::journal::Recorded;
 use super::options::Settings;
 use super::outputs::{
     read_blob, read_worktree_file, write_bundle, write_private_archive, ArchiveItem, Bundled,
@@ -43,6 +44,7 @@ pub(super) fn salvage_folder(
     services: &dyn Services,
     root: &Path,
     project: Uuid,
+    recorded: Option<&Recorded>,
     report: &mut EntryReport,
 ) -> Result<()> {
     let instafy_git = root.join(".instafy/.git");
@@ -84,7 +86,7 @@ pub(super) fn salvage_folder(
     report.inspected = true;
     match unusable {
         Some(reason) => salvage_files_only(settings, root, &reason, report),
-        None => salvage_repository(settings, services, root, project, report),
+        None => salvage_repository(settings, services, root, project, recorded, report),
     }
 }
 
@@ -191,6 +193,7 @@ fn salvage_repository(
     services: &dyn Services,
     root: &Path,
     project: Uuid,
+    recorded: Option<&Recorded>,
     report: &mut EntryReport,
 ) -> Result<()> {
     let read_token = services.read_token(&project)?;
@@ -235,6 +238,9 @@ fn salvage_repository(
             }));
     }
     report.skipped_paths.append(&mut sorted.skipped);
+    // What the entry holds, before anything `main` has is left out.
+    let source_tree = index.write_tree(&git)?;
+    report.source_tree = Some(source_tree.clone());
     let current = index.entries(&git, &sorted.work)?;
     let stale = match main.as_deref() {
         Some(main) => classify::stale_paths(&git, root, main, &current)?,
@@ -437,6 +443,11 @@ fn salvage_repository(
             date: &date,
             private: &trailer_private,
             filtered: &mut filtered,
+            // Only a ref made for exactly what the entry holds now.
+            recorded: recorded.filter(|earlier| {
+                earlier.head == report.head
+                    && earlier.source_tree.as_deref() == Some(source_tree.as_str())
+            }),
         };
         push_salvage_ref(settings, services, &mut push, &mut tip, report).map(|landed| {
             if !landed {
@@ -478,6 +489,8 @@ struct PushState<'a, 'g> {
     date: &'a str,
     private: &'a [PrivatePath],
     filtered: &'a mut BTreeMap<String, RejectReason>,
+    /// The salvage ref an earlier run verified for the same HEAD and work.
+    recorded: Option<&'a Recorded>,
 }
 
 /// Create the salvage ref for `tip` on canonical (or find it there), and
@@ -491,6 +504,11 @@ fn push_salvage_ref(
     report: &mut EntryReport,
 ) -> Result<bool> {
     let git = push.git;
+    if let Some(earlier) = push.recorded {
+        if reuse_recorded(push, earlier, tip, report)? {
+            return Ok(true);
+        }
+    }
     let mut refusals = 0;
     loop {
         let current = tip.clone().context("a tip off main must exist")?;
@@ -580,6 +598,54 @@ fn push_salvage_ref(
             }
         }
     }
+}
+
+/// Report the salvage ref an earlier run verified for what the entry still
+/// holds, when canonical has it at the same commit (and the commit is here
+/// for the bundle): `main` may have moved since (a restore of that ref
+/// makes a different W), and so may the node name, but the work is already
+/// on canonical. Returns false when the ref cannot be used.
+fn reuse_recorded(
+    push: &PushState<'_, '_>,
+    earlier: &Recorded,
+    tip: &mut Option<String>,
+    report: &mut EntryReport,
+) -> Result<bool> {
+    let (Some(reference), Some(rev)) = (&earlier.salvage_ref, &earlier.salvage_rev) else {
+        return Ok(false);
+    };
+    if !is_salvage_ref_name(reference)
+        || push.git.commit_id(rev)?.as_deref() != Some(rev.as_str())
+        || canonical::salvage_tip(push.git, push.url, reference)?.as_deref() != Some(rev.as_str())
+    {
+        return Ok(false);
+    }
+    *tip = Some(rev.clone());
+    report.salvage_ref = Some(reference.clone());
+    report.salvage_rev = Some(rev.clone());
+    report.canonical_verified = true;
+    report.history_filtered |= earlier.history_filtered;
+    // Paths the shard refused then are only known from that run.
+    for skipped in &earlier.skipped_paths {
+        let policy = reason_name(RejectReason::Policy);
+        if skipped.reason == policy
+            && !report
+                .skipped_paths
+                .iter()
+                .any(|known| known.path == skipped.path)
+        {
+            report.skipped_paths.push(Skipped {
+                path: skipped.path.clone(),
+                size: skipped.size,
+                reason: policy,
+                commit: None,
+            });
+        }
+    }
+    report.notes.push(format!(
+        "{reference} holds this work from an earlier run; nothing was pushed"
+    ));
+    Ok(true)
 }
 
 /// `refs/instafy/salvage/gateway/<node>-<W[:8]>`, checked against the
