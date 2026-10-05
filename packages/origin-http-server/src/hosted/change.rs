@@ -51,7 +51,7 @@ fn is_tree(entry: &TreeEntry) -> bool {
     entry.kind == "tree"
 }
 
-fn is_regular(mode: &str) -> bool {
+pub(super) fn is_regular(mode: &str) -> bool {
     matches!(mode, "100644" | "100755")
 }
 
@@ -63,7 +63,7 @@ fn ancestors(path: &str) -> Vec<String> {
 }
 
 /// The `.gitignore` files that apply to `path`, outermost first.
-fn gitignores_for(path: &str) -> Vec<String> {
+pub(super) fn gitignores_for(path: &str) -> Vec<String> {
     std::iter::once(".gitignore".to_string())
         .chain(
             ancestors(path)
@@ -80,7 +80,7 @@ fn gitignores_for(path: &str) -> Vec<String> {
 /// it when another argument lies below it, so paths are looked up in layers
 /// of equal depth (no path in a layer contains another). Many paths are
 /// read from one full listing instead.
-fn entries_at(
+pub(super) fn entries_at(
     git: &WorkspaceGit<'_>,
     commit: &str,
     paths: &BTreeSet<String>,
@@ -575,25 +575,7 @@ impl Edits {
             }
         }
         if let Some(base) = self.base_rev.as_deref().filter(|base| Some(*base) != main) {
-            let mut compared: BTreeSet<String> = BTreeSet::new();
-            for path in &attempt.touched {
-                compared.insert(path.clone());
-                compared.extend(ancestors(path));
-            }
-            let at_base = entries_at(git, base, &compared)?;
-            let at_main = match main {
-                Some(main) => entries_at(git, main, &compared)?,
-                None => HashMap::new(),
-            };
-            for path in &attempt.touched {
-                let moved = differs(at_base.get(path), at_main.get(path))
-                    || ancestors(path)
-                        .iter()
-                        .any(|folder| differs(at_base.get(folder), at_main.get(folder)));
-                if moved {
-                    stale.insert(path.clone());
-                }
-            }
+            stale.extend(moved_since(git, base, main, &attempt.touched)?);
         }
         if stale.is_empty() {
             Ok(())
@@ -603,10 +585,40 @@ impl Edits {
     }
 }
 
+/// The paths of `touched` that `main` holds differently from `base` (the
+/// version the client read), or that lie in a folder that does: what a
+/// change made on `base` would overwrite unseen.
+pub(super) fn moved_since(
+    git: &WorkspaceGit<'_>,
+    base: &str,
+    main: Option<&str>,
+    touched: &[String],
+) -> Result<BTreeSet<String>, OriginError> {
+    let mut compared: BTreeSet<String> = BTreeSet::new();
+    for path in touched {
+        compared.insert(path.clone());
+        compared.extend(ancestors(path));
+    }
+    let at_base = entries_at(git, base, &compared)?;
+    let at_main = match main {
+        Some(main) => entries_at(git, main, &compared)?,
+        None => HashMap::new(),
+    };
+    Ok(touched
+        .iter()
+        .filter(|path| {
+            differs(at_base.get(*path), at_main.get(*path))
+                || ancestors(path)
+                    .iter()
+                    .any(|folder| differs(at_base.get(folder), at_main.get(folder)))
+        })
+        .cloned()
+        .collect())
+}
+
 /// The new paths (of `paths`, none of which `main` has) that the
-/// `.gitignore` files of the new tree ignore. Those files are written
-/// into a scratch work tree and `check-ignore --no-index` runs there, with
-/// no rules from the server's own configuration.
+/// `.gitignore` files of the new tree (`main` with `removals` gone and
+/// `additions` in place) ignore.
 fn ignored_paths(
     git: &WorkspaceGit<'_>,
     scratch: &Path,
@@ -639,7 +651,20 @@ fn ignored_paths(
             }
         }
     }
-    if rules.is_empty() {
+    check_ignored(git, scratch, &rules, paths)
+}
+
+/// The paths of `paths` that the `.gitignore` files `rules` (path → blob
+/// id) ignore. The files are written into a scratch work tree and
+/// `check-ignore --no-index` runs there, with no rules from the server's
+/// own configuration.
+pub(super) fn check_ignored(
+    git: &WorkspaceGit<'_>,
+    scratch: &Path,
+    rules: &BTreeMap<String, String>,
+    paths: &[String],
+) -> Result<Vec<String>, OriginError> {
+    if rules.is_empty() || paths.is_empty() {
         return Ok(Vec::new());
     }
     let tree = scratch.join(format!("ignore-{}", Uuid::new_v4().simple()));
