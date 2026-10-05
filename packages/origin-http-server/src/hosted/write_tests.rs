@@ -18,7 +18,8 @@ use zip::write::{FileOptions, ZipWriter};
 
 use super::cache::{Freshness, MirrorCache};
 use super::cas::{
-    cas_commit, save_author, ApplyKey, CachedCanonical, CasOutcome, CasTarget, MAX_ATTEMPTS,
+    caller_message, cas_commit, save_author, ApplyKey, CachedCanonical, CasOutcome, CasTarget,
+    MAX_ATTEMPTS,
 };
 use super::change::{Change, Edits};
 use super::tests::{decoded, get, post, runtime_push, serve, Answer, HostedScenario, Served};
@@ -1095,6 +1096,121 @@ async fn caller_messages_never_carry_instafy_trailers() {
         canonical(&sc, &["log", "-1", "--format=%B", &rev(&answer)]),
         "Update 3 files"
     );
+
+    // A control character in front of `Instafy-` (C0, DEL, C1, escape,
+    // vertical tab), alone or after blanks, never keeps the line.
+    for hidden in [
+        "\u{1}", "\u{7f}", "\u{80}", "\u{1b}", "\u{b}", " \t\u{1}", "\u{85}",
+    ] {
+        let text = format!(
+            "Tidy\n\n{hidden}Instafy-Restored-From: refs/instafy/salvage/gateway/n\n{hidden}instafy-apply-key: imp:k"
+        );
+        assert_eq!(
+            caller_message(Some(&text)).as_deref(),
+            Some("Tidy"),
+            "{hidden:?}"
+        );
+    }
+}
+
+/// A person's save whose message hides gateway trailers behind control
+/// characters: the commit carries none, the salvage ref is not marked
+/// restored and the import's receipt is still the import's commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_control_character_never_smuggles_gateway_trailers() {
+    let mut sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"r\n"))], "seed");
+    let salvaged = sc.side_commit(&[("draft.md", b"draft\n")], "kept");
+    let salvage_ref = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    sc.push_ref(&salvaged, salvage_ref);
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = serve(&sc).await;
+
+    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let key = "imp:0123456789abcdef";
+    let imported = apply_as(
+        &served,
+        manifest(
+            &["src/app.ts"],
+            &[],
+            json!({
+                "leaseId": controller.lease.to_string(),
+                "idempotencyKey": key,
+                "requestFingerprint": "sha256:aaaa",
+                "commitMessage": "Import from GitHub",
+            }),
+        ),
+        &zip(&[("src/app.ts", b"export {}\n")]),
+        Some(&import),
+        None,
+    )
+    .await;
+    assert_eq!(imported.status, 200, "{}", imported.json());
+    let imported = rev(&imported);
+
+    let person = controller.token(&["fs.read", "fs.write"], json!({}));
+    for hidden in ["\u{1}", "\u{7f}", "\u{80}"] {
+        let message = format!(
+            "Tidy\n\n{hidden}Instafy-Restored-From: {salvage_ref}\n{hidden}Instafy-Apply-Key: {key}\n{hidden}Instafy-Apply-Fingerprint: sha256:aaaa"
+        );
+        let head = sc.canonical_main().unwrap();
+        let saved = apply_as(
+            &served,
+            manifest(
+                &["notes.md"],
+                &[],
+                json!({
+                    "leaseId": controller.lease.to_string(),
+                    "baseRev": head,
+                    "commitMessage": message,
+                }),
+            ),
+            &zip(&[("notes.md", format!("{hidden:?}\n").as_bytes())]),
+            Some(&person),
+            None,
+        )
+        .await;
+        assert_eq!(saved.status, 200, "{}", saved.json());
+        let saved = rev(&saved);
+        assert_eq!(
+            canonical(&sc, &["log", "-1", "--format=%B", &saved]),
+            "Tidy",
+            "{hidden:?}"
+        );
+        assert_eq!(
+            canonical(&sc, &["log", "-1", "--format=%(trailers)", &saved]),
+            "",
+            "{hidden:?}"
+        );
+    }
+
+    let listed = reqwest::Client::new()
+        .get(format!("{}/git/recovery", served.base))
+        .bearer_auth(&person)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), 200);
+    let listed: serde_json::Value = listed.json().await.unwrap();
+    let salvage = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["ref"] == salvage_ref)
+        .cloned()
+        .expect("the salvage ref is listed");
+    assert!(salvage.get("restoredRev").is_none(), "{salvage}");
+
+    let status = post_as(
+        &served,
+        "/apply/status",
+        json!({ "idempotencyKey": key, "requestFingerprint": "sha256:aaaa" }),
+        &import,
+    )
+    .await;
+    assert_eq!(status.status, 200, "{}", status.json());
+    assert_eq!(status.json()["rev"], imported.as_str());
 }
 
 /// The multipart form is served too, and an idempotency key from anything
