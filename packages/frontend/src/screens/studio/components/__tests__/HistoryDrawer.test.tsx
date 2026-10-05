@@ -688,6 +688,25 @@ describe("HistoryDrawer", () => {
       "The space is busy saving other changes. Try again in a moment.",
       false,
     ],
+    // The gateway's 503 answers with Retry-After: nothing was written.
+    [
+      "taken write slots (writes_busy)",
+      { ok: false, code: "writes_busy", errorInfo: { status: 503, code: "writes_busy", message: "busy", retryAfterMs: 2000, routeUnavailable: false } },
+      "The server is busy saving other changes. Try again in a moment.",
+      false,
+    ],
+    [
+      "a copy being made again (mirror_reset)",
+      { ok: false, code: "mirror_reset", errorInfo: { status: 503, code: "mirror_reset", message: "reset", retryAfterMs: 2000, routeUnavailable: false } },
+      "The server is rebuilding its copy of this space. Try again in a moment.",
+      false,
+    ],
+    [
+      "a full disk (disk_full)",
+      { ok: false, code: "disk_full", errorInfo: { status: 503, code: "disk_full", message: "full", retryAfterMs: 2000, routeUnavailable: false } },
+      "The space is out of room right now. Try again later.",
+      false,
+    ],
   ])("maps %s to its copy", async (_label, result, copy, offersAgent) => {
     mocks.revertCommit.mockResolvedValue(result);
     await render();

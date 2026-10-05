@@ -587,6 +587,28 @@ describe("HistoryDrawer: Unsaved work", () => {
       expect(mocks.fetchRecovery.mock.calls.length).toBe(listsBefore + 1);
     });
 
+    // The gateway's 503 answers to the read at the ref: nothing is saved.
+    it.each([
+      ["fetch_pending", "The space is still loading. Try again in a moment."],
+      ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],
+      ["disk_full", "The space is out of room right now. Try again later."],
+    ])("is not a delete when the read answers %s, and says so", async (code, copy) => {
+      conflictOn(["src/a.ts"]);
+      mocks.readAt.mockResolvedValue({
+        ok: false,
+        notFound: false,
+        error: originError(503, code, { retryAfterMs: 2000 }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(row(container, RECOVERY), "unsaved-work-path-use");
+      expect(mocks.listAt).not.toHaveBeenCalled();
+      expect(mocks.saveChanges).not.toHaveBeenCalled();
+      expect(q(container, "history-status")?.textContent).toBe(copy);
+    });
+
     it("is not a delete when the read route is missing", async () => {
       conflictOn(["src/a.ts"]);
       mocks.readAt.mockResolvedValue({
@@ -987,6 +1009,45 @@ describe("HistoryDrawer: Unsaved work", () => {
     await press(row(container, RECOVERY), "unsaved-work-restore");
     expect(q(container, "history-status")?.textContent).toBe("This entry changed. Refreshing.");
     expect(mocks.fetchRecovery.mock.calls.length).toBe(before + 1);
+  });
+
+  // The gateway's 503 answers with Retry-After: the restore wrote nothing.
+  it.each([
+    ["writes_busy", "The server is busy saving other changes. Try again in a moment."],
+    ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],
+    ["disk_full", "The space is out of room right now. Try again later."],
+  ])("names a restore answered %s and keeps the entry", async (code, copy) => {
+    mocks.restoreRecovery.mockResolvedValueOnce({
+      ok: false,
+      stage: "request",
+      error: originError(503, code, { retryAfterMs: 2000 }),
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-restore");
+    expect(mocks.restoreRecovery).toHaveBeenCalledTimes(1);
+    expect(q(container, "history-status")?.textContent).toBe(copy);
+    expect(row(container, RECOVERY)).not.toBeNull();
+  });
+
+  it.each([
+    ["mirror_reset", "The server is rebuilding its copy of this space. Try again in a moment."],
+    ["disk_full", "The space is out of room right now. Try again later."],
+  ])("names a removal answered %s and keeps the entry", async (code, copy) => {
+    mocks.dismissRecovery.mockResolvedValueOnce({
+      ok: false,
+      stage: "request",
+      error: originError(503, code, { retryAfterMs: 2000 }),
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    await render();
+    await press(row(container, RECOVERY), "unsaved-work-remove");
+    await press(document.body, "unsaved-work-remove-dialog-confirm");
+    expect(mocks.dismissRecovery).toHaveBeenCalledTimes(1);
+    expect(q(container, "history-status")?.textContent).toBe(copy);
+    expect(row(container, RECOVERY)).not.toBeNull();
   });
 
   it("retries a moved head once, then reports a busy space", async () => {
