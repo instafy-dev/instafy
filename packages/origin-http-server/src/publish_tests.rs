@@ -2621,6 +2621,9 @@ fn push_to_ref(
     for (path, contents) in files {
         match contents {
             Some(bytes) => write(&sc.other, path, bytes),
+            None if sc.other.join(path).is_dir() => {
+                fs::remove_dir_all(sc.other.join(path)).unwrap()
+            }
             None => fs::remove_file(sc.other.join(path)).unwrap(),
         }
     }
@@ -4131,6 +4134,115 @@ async fn a_restore_keep_list_is_bounded() {
     );
     assert_eq!(sc.remote_file("docs2/b.md").as_deref(), Some("b\n"));
     assert!(sc.remote_file("docs/a.md").is_none());
+    server.abort();
+}
+
+/// A restore never replaces a file of the folder that `HEAD` does not
+/// track, ignored or excluded ones included: `git status` does not list
+/// them, and `read-tree -m -u` replaces them without asking. A local file at
+/// a path the restore writes (ignored by `.gitignore`, or excluded through
+/// the checkout's `info/exclude`), a local file where it makes a folder,
+/// and local files inside a folder it turns into a file are 409
+/// `dirty_paths`; they, `main` and the refs stay as they were. A new file
+/// next to local ones is restored, and leaves them alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_never_replaces_files_head_does_not_track() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        seed: vec![
+            (".gitignore", b"*.log\n".to_vec()),
+            ("logs/keep.md", b"keep\n".to_vec()),
+        ],
+        ..Options::default()
+    });
+    let mut refs = Vec::new();
+    for (index, files) in [
+        // Stops ignoring logs and brings its own `app.log`.
+        vec![
+            (".gitignore", Some(&b"# nothing ignored\n"[..])),
+            ("app.log", Some(&b"work log\n"[..])),
+        ],
+        // Agent settings, which the folder excludes through `info/exclude`.
+        vec![(".codex/config.toml", Some(&b"agent = true\n"[..]))],
+        // `logs` becomes a file.
+        vec![("logs", None), ("logs", Some(&b"a file now\n"[..]))],
+        // A folder where the folder holds an ignored file.
+        vec![
+            (".gitignore", Some(&b"# nothing ignored\n"[..])),
+            ("trace.log/inner.md", Some(&b"inner\n"[..])),
+        ],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reference =
+            recovery_ref_name(&sc, &format!("20261005T12000{index}Z-unsaved-0123456789ab"));
+        let commit = push_to_ref(&sc, &files, &[], "Unsaved edits", &reference);
+        git_in(&sc.other, &["clean", "-q", "-fdx"]);
+        refs.push((reference, commit));
+    }
+    sc.write("app.log", b"the person's own log\n");
+    sc.write(".codex/config.toml", b"mine = true\n");
+    sc.write(".codex/other.toml", b"other = true\n");
+    sc.write("logs/local.log", b"a local log\n");
+    sc.write("trace.log", b"a local trace\n");
+    assert_eq!(sc.status(), "", "every local file is ignored or excluded");
+    let main = sc.main();
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+
+    for ((reference, commit), in_the_way) in
+        refs.iter()
+            .zip(["app.log", ".codex/config.toml", "logs", "trace.log"])
+    {
+        let (status, body) = post_json(
+            &client,
+            format!("{base}/git/recovery/restore"),
+            serde_json::json!({ "ref": reference, "rev": commit }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            reqwest::StatusCode::CONFLICT,
+            "{in_the_way}: {body}"
+        );
+        assert_eq!(body["code"], "dirty_paths", "{in_the_way}: {body}");
+        assert_eq!(body["paths"], serde_json::json!([in_the_way]), "{body}");
+        assert_eq!(sc.main(), main, "{in_the_way}");
+        assert_eq!(sc.remote_refs(reference).len(), 1, "{in_the_way}");
+    }
+    assert_eq!(
+        sc.disk("app.log").as_deref(),
+        Some("the person's own log\n")
+    );
+    assert_eq!(
+        sc.disk(".codex/config.toml").as_deref(),
+        Some("mine = true\n")
+    );
+    assert_eq!(sc.disk("logs/local.log").as_deref(), Some("a local log\n"));
+    assert_eq!(sc.disk("logs/keep.md").as_deref(), Some("keep\n"));
+    assert_eq!(sc.disk("trace.log").as_deref(), Some("a local trace\n"));
+
+    // With the person's copy moved away, the settings come back; the other
+    // local file in that folder stays.
+    fs::remove_file(sc.ws.join(".codex/config.toml")).unwrap();
+    let (reference, commit) = &refs[1];
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": reference, "rev": commit }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(
+        sc.disk(".codex/config.toml").as_deref(),
+        Some("agent = true\n")
+    );
+    assert_eq!(
+        sc.disk(".codex/other.toml").as_deref(),
+        Some("other = true\n")
+    );
     server.abort();
 }
 
