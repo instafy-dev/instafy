@@ -1,0 +1,722 @@
+//! The same unsaved work restored by Desktop (a checkout behind
+//! [`crate::routes`]) and by the hosted gateway (a mirror cache behind
+//! [`crate::hosted`]), each over its own copy of one canonical history:
+//! both answer alike and leave `main` and the ref alike, because both decide
+//! by [`crate::restore_plan`]. Each test runs once per mode.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::config::ServerConfig;
+use crate::test_support::{git_in, git_output};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Desktop,
+    Gateway,
+}
+
+const MODES: [Mode; 2] = [Mode::Desktop, Mode::Gateway];
+
+/// The origin the recovery refs of these tests were kept by.
+const ORIGIN: &str = "0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60";
+
+fn recovery_ref(name: &str) -> String {
+    format!("refs/instafy/recovery/{ORIGIN}/{name}")
+}
+
+/// One more byte than a save may hold.
+fn too_large() -> Vec<u8> {
+    vec![b'x'; crate::publish_policy::MAX_PUBLISH_BLOB_BYTES as usize + 1]
+}
+
+/// A space whose canonical repository is a bare repository on disk, served
+/// by one mode.
+struct Space {
+    _dir: tempfile::TempDir,
+    mode: Mode,
+    /// Canonical.
+    remote: PathBuf,
+    /// A clone that pushes to canonical, as a runtime or another client
+    /// would.
+    work: PathBuf,
+    config: ServerConfig,
+    base: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Space {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+impl Space {
+    /// A space whose `main` holds `seed`, served by `mode`.
+    async fn new(mode: Mode, seed: &[(&str, &[u8])]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let project = Uuid::new_v4();
+        let canonical = root.join("canonical");
+        std::fs::create_dir_all(&canonical).unwrap();
+        let remote = canonical.join(format!("{project}.git"));
+        git_in(
+            &root,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        let work = root.join("work");
+        git_in(&root, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        git_in(&work, &["config", "user.name", "Runtime"]);
+        git_in(&work, &["config", "user.email", "agent@instafy.dev"]);
+        let mut files: Vec<(&str, Option<&[u8]>)> = seed
+            .iter()
+            .map(|(path, bytes)| (*path, Some(*bytes)))
+            .collect();
+        files.push(("README.md", Some(b"seed\n")));
+        commit_files(&work, &files, "seed");
+        git_in(
+            &work,
+            &[
+                "push",
+                "-q",
+                remote.to_str().unwrap(),
+                "HEAD:refs/heads/main",
+            ],
+        );
+
+        let workspace = root.join(match mode {
+            Mode::Desktop => "ws",
+            Mode::Gateway => "gateway",
+        });
+        std::fs::create_dir_all(&workspace).unwrap();
+        let gateway = mode == Mode::Gateway;
+        let config = ServerConfig {
+            project_id: project,
+            origin_id: if gateway {
+                Uuid::nil()
+            } else {
+                Uuid::parse_str(ORIGIN).unwrap()
+            },
+            workspace_root: workspace.clone(),
+            git_remote_url: (!gateway).then(|| format!("file://{}", remote.display())),
+            git_remote_base_url: gateway.then(|| format!("file://{}", canonical.display())),
+            git_branch: "main".into(),
+            git_remote_name: "origin".into(),
+            git_author_name: "instafy-origin".into(),
+            git_author_email: if gateway {
+                crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL.into()
+            } else {
+                crate::config::DEFAULT_ORIGIN_AUTHOR_EMAIL.into()
+            },
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            controller_base_url: "http://127.0.0.1:1/".parse().unwrap(),
+            controller_internal_token: None,
+            controller_token_source: None,
+            jwks_url: "http://127.0.0.1:1/jwks".parse().unwrap(),
+            skip_auth: true,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(30),
+            max_archive_bytes: 64 * 1024 * 1024,
+            staging_base: None,
+            multi_tenant: gateway,
+            hosted_checkout: false,
+        };
+        let shared = Arc::new(config.clone());
+        let http = reqwest::Client::new();
+        let validator = crate::auth::TokenValidator::new(http.clone(), shared.jwks_url.clone());
+        let app = match mode {
+            Mode::Desktop => {
+                crate::git::ensure_git_checkout(&config, None).expect("checkout");
+                let state = crate::routes::AppState::new(shared, validator, http, workspace, None)
+                    .expect("app state");
+                crate::routes::router(state)
+            }
+            Mode::Gateway => {
+                let cache = Arc::new(
+                    crate::hosted::MirrorCache::open(
+                        &workspace,
+                        shared.clone(),
+                        http.clone(),
+                        u64::MAX,
+                    )
+                    .unwrap(),
+                );
+                let auth = crate::route_auth::RouteAuth {
+                    token_validator: validator,
+                    config: shared,
+                    http_client: http,
+                };
+                crate::hosted::router(crate::hosted::HostedState::new(auth, cache))
+            }
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            _dir: dir,
+            mode,
+            remote,
+            work,
+            config,
+            base: format!("http://{address}"),
+            server,
+        }
+    }
+
+    /// Commit `files` (`None` deletes) on top of canonical `main` and push
+    /// it there. Desktop's checkout catches up, as it does before a person
+    /// restores anything.
+    fn push(&self, files: &[(&str, Option<&[u8]>)], message: &str) -> String {
+        self.sync_work();
+        commit_files(&self.work, files, message);
+        git_in(
+            &self.work,
+            &[
+                "push",
+                "-q",
+                self.remote.to_str().unwrap(),
+                "HEAD:refs/heads/main",
+            ],
+        );
+        if self.mode == Mode::Desktop {
+            let report = crate::publish::publish(
+                &crate::publish::PublishContext {
+                    config: &self.config,
+                    workspace_root: &self.config.workspace_root,
+                    token: None,
+                    can_write: true,
+                },
+                crate::publish::PublishRequest {
+                    selection: crate::publish::Selection::None,
+                    message: "instafy: agent sync".to_string(),
+                    author: None,
+                    budget: Duration::from_secs(30),
+                },
+            )
+            .expect("catch up");
+            assert_eq!(
+                report.rev.as_deref(),
+                Some(self.main().as_str()),
+                "{report:?}"
+            );
+        }
+        self.main()
+    }
+
+    /// Unsaved work: `files` (`None` deletes) committed on top of canonical
+    /// `main` and pushed to `reference` only.
+    fn park(&self, files: &[(&str, Option<&[u8]>)], reference: &str) -> String {
+        self.sync_work();
+        commit_files(&self.work, files, "Unsaved edits");
+        let spec = format!("HEAD:{reference}");
+        git_in(
+            &self.work,
+            &["push", "-q", self.remote.to_str().unwrap(), &spec],
+        );
+        let commit = git_in(&self.work, &["rev-parse", "HEAD"]);
+        git_in(&self.work, &["reset", "-q", "--hard", "HEAD~1"]);
+        commit
+    }
+
+    fn sync_work(&self) {
+        let remote = self.remote.to_str().unwrap();
+        git_in(&self.work, &["fetch", "-q", remote, "main"]);
+        git_in(&self.work, &["reset", "-q", "--hard", "FETCH_HEAD"]);
+        git_in(&self.work, &["clean", "-q", "-fdx"]);
+    }
+
+    fn main(&self) -> String {
+        git_in(&self.remote, &["rev-parse", "refs/heads/main"])
+    }
+
+    /// The file at `path` on canonical `main`.
+    fn on_main(&self, path: &str) -> Option<Vec<u8>> {
+        let output = git_output(
+            &self.remote,
+            &["cat-file", "blob", &format!("refs/heads/main:{path}")],
+            None,
+        );
+        output.status.success().then_some(output.stdout)
+    }
+
+    /// What canonical's `reference` names, if it exists.
+    fn canonical_ref(&self, reference: &str) -> Option<String> {
+        let output = git_output(
+            &self.remote,
+            &["rev-parse", "--verify", "--quiet", reference],
+            None,
+        );
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    async fn restore(&self, body: serde_json::Value) -> (u16, serde_json::Value) {
+        let response = reqwest::Client::new()
+            .post(format!("{}/git/recovery/restore", self.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body = response.json().await.unwrap_or(serde_json::Value::Null);
+        (status, body)
+    }
+
+    /// A restore the mode answers 200; its body.
+    async fn restored(&self, body: serde_json::Value) -> serde_json::Value {
+        let (status, answer) = self.restore(body).await;
+        assert_eq!(status, 200, "{:?}: {answer}", self.mode);
+        answer
+    }
+
+    /// A restore the mode answers 409 `restore_conflict`; the paths.
+    async fn conflict(&self, body: serde_json::Value) -> serde_json::Value {
+        let (status, answer) = self.restore(body).await;
+        assert_eq!(
+            (status, answer["code"].as_str()),
+            (409, Some("restore_conflict")),
+            "{:?}: {answer}",
+            self.mode
+        );
+        answer["paths"].clone()
+    }
+}
+
+/// Commit `files` (`None` deletes) in the clone `work`, ignored ones too.
+fn commit_files(work: &Path, files: &[(&str, Option<&[u8]>)], message: &str) {
+    for (path, content) in files {
+        let target = work.join(path);
+        match content {
+            Some(bytes) => {
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(&target, bytes).unwrap();
+                git_in(work, &["add", "-f", "--", path]);
+            }
+            None => {
+                git_in(work, &["rm", "-q", "-r", "--", path]);
+            }
+        }
+    }
+    git_in(work, &["commit", "-q", "--allow-empty", "-m", message]);
+}
+
+fn reasons(pairs: &[(&str, &str)]) -> serde_json::Value {
+    pairs
+        .iter()
+        .map(|(path, reason)| json!({ "path": path, "reason": reason }))
+        .collect()
+}
+
+/// Work that adds a folder where `main` now has a file conflicts on both
+/// paths. Keeping the saved version of either side, or of both, clears the
+/// clash and restores the rest; keeping only part of the folder does not,
+/// because the rest of it would still be dropped silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_clears_a_file_and_folder_conflict() {
+    for mode in MODES {
+        let space = Space::new(mode, &[]).await;
+        let mut refs = Vec::new();
+        for (index, files) in [
+            vec!["docs/readme.md", "other-0.md"],
+            vec!["docs/readme.md", "other-1.md"],
+            vec!["docs/readme.md", "other-2.md"],
+            vec!["docs/readme.md", "docs/extra.md", "other-3.md"],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let reference = recovery_ref(&format!("20261005T12000{index}Z-unsaved-0123456789ab"));
+            let contents: Vec<(&str, Option<&[u8]>)> = files
+                .iter()
+                .map(|path| (*path, Some(b"work\n".as_slice())))
+                .collect();
+            let commit = space.park(&contents, &reference);
+            refs.push((reference, commit));
+        }
+        space.push(&[("docs", Some(b"a file now\n"))], "docs is a file");
+
+        assert_eq!(
+            space.conflict(json!({ "ref": refs[0].0 })).await,
+            json!(["docs", "docs/readme.md"]),
+            "{mode:?}"
+        );
+        for (index, keep) in [
+            json!(["docs", "docs/readme.md"]),
+            json!(["docs"]),
+            json!(["docs/readme.md"]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (reference, commit) = &refs[index];
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": keep }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {keep}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[("docs/readme.md", "kept")]),
+                "{mode:?} {keep}: {body}"
+            );
+            assert_eq!(body["refDeleted"], true, "{mode:?} {keep}: {body}");
+            assert_eq!(space.canonical_ref(reference), None, "{mode:?} {keep}");
+            assert_eq!(
+                space.on_main(&format!("other-{index}.md")).as_deref(),
+                Some(&b"work\n"[..]),
+                "{mode:?} {keep}"
+            );
+            assert_eq!(space.on_main("docs").as_deref(), Some(&b"a file now\n"[..]));
+        }
+
+        // Keeping one file of the folder leaves the other in the clash.
+        let (reference, commit) = &refs[3];
+        assert_eq!(
+            space
+                .conflict(json!({ "ref": reference, "rev": commit, "keep": ["docs/readme.md"] }))
+                .await,
+            json!(["docs", "docs/extra.md"]),
+            "{mode:?}"
+        );
+        assert!(space.on_main("other-3.md").is_none(), "{mode:?}");
+    }
+}
+
+/// Keeping a folder settles its clash, but a file below it that can never
+/// come back here (a secret, which the conflict never showed; a file the
+/// restored tree ignores) is still refused, not kept on request: the ref
+/// stays, so that work is not removed on the person's behalf. With only
+/// kept paths left out, the ref goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_folder_never_lets_refused_work_below_it_go() {
+    for mode in MODES {
+        let space = Space::new(mode, &[]).await;
+        let clash = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let clash_commit = space.park(
+            &[
+                ("docs/readme.md", Some(b"work\n")),
+                ("docs/.env", Some(b"TOKEN=1\n")),
+                ("other.md", Some(b"other\n")),
+            ],
+            &clash,
+        );
+        let kept = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
+        let kept_commit = space.park(
+            &[
+                ("cfg/app.txt", Some(b"app\n")),
+                ("cfg/.env", Some(b"TOKEN=1\n")),
+                ("cfg/debug.log", Some(b"log\n")),
+                ("more.md", Some(b"more\n")),
+            ],
+            &kept,
+        );
+        let only_kept = recovery_ref("20261005T123000Z-unsaved-0123456789ad");
+        let only_kept_commit = space.park(
+            &[
+                ("cfg/app.txt", Some(b"app\n")),
+                ("most.md", Some(b"most\n")),
+            ],
+            &only_kept,
+        );
+        space.push(&[("docs", Some(b"a file now\n"))], "docs is a file");
+        space.push(&[(".gitignore", Some(b"*.log\n"))], "ignore logs");
+
+        assert_eq!(
+            space
+                .conflict(json!({ "ref": clash, "rev": clash_commit }))
+                .await,
+            json!(["docs", "docs/readme.md"]),
+            "{mode:?}"
+        );
+        let body = space
+            .restored(json!({
+                "ref": clash,
+                "rev": clash_commit,
+                "keep": ["docs", "docs/readme.md"],
+            }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("docs/.env", "secret"), ("docs/readme.md", "kept")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&clash).as_deref(),
+            Some(clash_commit.as_str())
+        );
+        assert_eq!(space.on_main("other.md").as_deref(), Some(&b"other\n"[..]));
+        assert_eq!(space.on_main("docs").as_deref(), Some(&b"a file now\n"[..]));
+
+        let body = space
+            .restored(json!({ "ref": kept, "rev": kept_commit, "keep": ["cfg"] }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[
+                ("cfg/.env", "secret"),
+                ("cfg/app.txt", "kept"),
+                ("cfg/debug.log", "ignored"),
+            ]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&kept).as_deref(),
+            Some(kept_commit.as_str())
+        );
+        assert_eq!(space.on_main("more.md").as_deref(), Some(&b"more\n"[..]));
+        for path in ["cfg/app.txt", "cfg/.env", "cfg/debug.log"] {
+            assert!(space.on_main(path).is_none(), "{mode:?}: {path}");
+        }
+
+        let body = space
+            .restored(json!({ "ref": only_kept, "rev": only_kept_commit, "keep": ["cfg"] }))
+            .await;
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("cfg/app.txt", "kept")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(space.canonical_ref(&only_kept), None, "{mode:?}");
+    }
+}
+
+/// Work below a folder `main` turned into a file, which the space ignores
+/// (or which is a secret): the clash is settled, since nothing of the work
+/// could come in there, so the rest is restored without asking, the file is
+/// reported, and the ref, its only copy, stays. Keeping the folder changes
+/// none of that.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_refused_below_a_clash_never_asks_and_keeps_its_ref() {
+    for mode in MODES {
+        let space = Space::new(mode, &[(".gitignore", b"*.log\n")]).await;
+        let ignored = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let ignored_commit = space.park(
+            &[("logs/app.log", Some(b"log\n")), ("x.md", Some(b"x\n"))],
+            &ignored,
+        );
+        let refused = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
+        let refused_commit = space.park(
+            &[("logs/.env", Some(b"TOKEN=1\n")), ("y.md", Some(b"y\n"))],
+            &refused,
+        );
+        space.push(&[("logs", Some(b"a file now\n"))], "logs is a file");
+
+        for (reference, commit, path, reason, restored) in [
+            (&ignored, &ignored_commit, "logs/app.log", "ignored", "x.md"),
+            (&refused, &refused_commit, "logs/.env", "secret", "y.md"),
+        ] {
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[(path, reason)]),
+                "{mode:?}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+            assert!(space.on_main(restored).is_some(), "{mode:?}: {restored}");
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": ["logs"] }))
+                .await;
+            assert_eq!(body["committed"], false, "{mode:?}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[(path, reason)]),
+                "{mode:?}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+            assert_eq!(
+                space.canonical_ref(reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?}"
+            );
+            assert_eq!(space.on_main("logs").as_deref(), Some(&b"a file now\n"[..]));
+        }
+    }
+}
+
+/// Work too large to save, or ignored, that sits in a conflict is refused
+/// like any other: it is never shown as a choice ("use this version" could
+/// never save it), and the ref that holds the only copy stays even when
+/// the person keeps the folder around it.
+#[tokio::test(flavor = "multi_thread")]
+async fn refused_work_in_a_conflict_keeps_its_ref() {
+    let big = too_large();
+    for mode in MODES {
+        let space = Space::new(mode, &[("big.bin", b"small\n")]).await;
+        let changed = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let changed_commit = space.park(
+            &[("big.bin", Some(&big)), ("extra.md", Some(b"extra\n"))],
+            &changed,
+        );
+        let folder = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
+        let folder_commit = space.park(
+            &[
+                ("cfg/app.txt", Some(b"app\n")),
+                ("cfg/debug.log", Some(b"log\n")),
+                ("cfg/big.bin", Some(&big)),
+            ],
+            &folder,
+        );
+        space.push(&[("big.bin", Some(b"other small\n"))], "a small change");
+        space.push(
+            &[
+                ("cfg", Some(b"a file now\n")),
+                (".gitignore", Some(b"*.log\n")),
+            ],
+            "cfg is a file",
+        );
+
+        let body = space
+            .restored(json!({ "ref": changed, "rev": changed_commit }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("big.bin", "too_large")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&changed).as_deref(),
+            Some(changed_commit.as_str())
+        );
+        assert_eq!(space.on_main("extra.md").as_deref(), Some(&b"extra\n"[..]));
+        assert_eq!(
+            space.on_main("big.bin").as_deref(),
+            Some(&b"other small\n"[..])
+        );
+
+        assert_eq!(
+            space
+                .conflict(json!({ "ref": folder, "rev": folder_commit }))
+                .await,
+            json!(["cfg", "cfg/app.txt"]),
+            "{mode:?}"
+        );
+        let main = space.main();
+        let body = space
+            .restored(json!({ "ref": folder, "rev": folder_commit, "keep": ["cfg"] }))
+            .await;
+        assert_eq!(body["committed"], false, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[
+                ("cfg/app.txt", "kept"),
+                ("cfg/big.bin", "too_large"),
+                ("cfg/debug.log", "ignored"),
+            ]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&folder).as_deref(),
+            Some(folder_commit.as_str())
+        );
+        assert_eq!(space.main(), main, "{mode:?}");
+    }
+}
+
+/// "Ignored" comes from the restored tree's own `.gitignore` files, in both
+/// modes: work that stops ignoring a pattern brings the files it matched
+/// back with it, and work that adds a rule never brings in a file its own
+/// rule ignores.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_restored_trees_own_rules_decide_what_is_ignored() {
+    for mode in MODES {
+        let space = Space::new(mode, &[(".gitignore", b"*.log\n")]).await;
+        let unignores = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let unignores_commit = space.park(
+            &[
+                (".gitignore", Some(b"# nothing ignored\n")),
+                ("app.log", Some(b"log\n")),
+                ("notes.md", Some(b"notes\n")),
+            ],
+            &unignores,
+        );
+        let ignores = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
+        let ignores_commit = space.park(
+            &[
+                ("gen/.gitignore", Some(b"*.out\n")),
+                ("gen/a.out", Some(b"out\n")),
+                ("gen/keep.md", Some(b"keep\n")),
+            ],
+            &ignores,
+        );
+
+        let body = space
+            .restored(json!({ "ref": unignores, "rev": unignores_commit }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(body["notRestored"], json!([]), "{mode:?}: {body}");
+        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(space.on_main("app.log").as_deref(), Some(&b"log\n"[..]));
+        assert_eq!(
+            space.on_main(".gitignore").as_deref(),
+            Some(&b"# nothing ignored\n"[..])
+        );
+
+        let body = space
+            .restored(json!({ "ref": ignores, "rev": ignores_commit }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("gen/a.out", "ignored")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert!(space.on_main("gen/a.out").is_none(), "{mode:?}");
+        assert!(space.on_main("gen/.gitignore").is_some(), "{mode:?}");
+        assert!(space.on_main("gen/keep.md").is_some(), "{mode:?}");
+    }
+}
+
+/// A change `main` already holds as the work has it brings nothing in, so
+/// it is neither restored nor refused: nothing of the work exists only on
+/// the ref, which goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn work_main_already_holds_is_not_judged() {
+    for mode in MODES {
+        let space = Space::new(mode, &[]).await;
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let commit = space.park(
+            &[
+                (".env.local", Some(b"TOKEN=1\n")),
+                ("extra.md", Some(b"extra\n")),
+            ],
+            &reference,
+        );
+        space.push(&[(".env.local", Some(b"TOKEN=1\n"))], "the same file");
+
+        let body = space
+            .restored(json!({ "ref": reference, "rev": commit }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(body["notRestored"], json!([]), "{mode:?}: {body}");
+        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(space.on_main("extra.md").as_deref(), Some(&b"extra\n"[..]));
+    }
+}
