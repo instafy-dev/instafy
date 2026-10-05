@@ -940,6 +940,30 @@ fn files_without_a_usable_repository_go_to_the_private_archive() {
         .unwrap()
         .contains("objects/info/alternates"));
     assert!(other.salvage_refs().is_empty());
+
+    // Nor one whose replacement refs would make the history checks read
+    // other objects than a push sends.
+    let replaced = Gateway::new();
+    let c1 = replaced.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = replaced.park_checkout_at(&c1);
+    write(&entry.join(".env.local"), b"KEY=1\n");
+    ig(&entry, &["add", "-f", ".env.local"]);
+    let secret = entry_commit(&entry, "settings");
+    let blob = ig(&entry, &["rev-parse", "HEAD:.env.local"]);
+    let harmless = ig(&entry, &["hash-object", "-w", "--stdin"]);
+    ig(&entry, &["replace", &blob, &harmless]);
+    ig(&entry, &["pack-refs", "--all"]);
+    // Only in packed-refs now, so the packed form is what is checked.
+    let _ = std::fs::remove_dir(entry.join(".instafy/.git/refs/replace"));
+    assert!(!entry.join(".instafy/.git/refs/replace").exists());
+    let (_, lines) = salvage(&replaced.settings(true, false, &[]), &stub);
+    assert_eq!(lines[0]["noRepository"], true, "{:#}", lines[0]);
+    assert!(lines[0]["notes"][0]
+        .as_str()
+        .unwrap()
+        .contains("replacement refs"));
+    assert!(replaced.salvage_refs().is_empty());
+    assert!(secret.len() == 40);
 }
 
 /// An existing salvage ref with another tip stops the entry before any
