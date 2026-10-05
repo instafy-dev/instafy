@@ -152,7 +152,7 @@ fn apply_changes_transactional_reader<R: Read + Seek>(
     archive_size: u64,
 ) -> Result<(ApplySummary, ApplyTransaction), OriginError> {
     if let Some(project_id) = manifest.project_id.as_deref() {
-        if !config.multi_tenant && project_id != config.project_id.to_string() {
+        if project_id != config.project_id.to_string() {
             return Err(OriginError::bad_request("manifest project mismatch"));
         }
     }
