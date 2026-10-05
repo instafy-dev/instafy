@@ -63,13 +63,13 @@ function route(key, github, enabled = '') {
 // Keep them in this existing CI test entrypoint so no workflow command changes.
 const cancellationWorkflows = [
   // Build includes the reviewed proxy_retry_budget and read-reference selectors, the
-  // code-mode host build, the per-model proxy_retry_budget runs and the runtime
-  // provider unit tests, independently bound by check-rust-ci, and the CLI git
+  // code-mode host build, per-model proxy_retry_budget runs, inert native compaction
+  // and provider unit tests, independently bound by check-rust-ci, and the CLI git
   // wrapper suite bound below, and the local author pseudonym key test in the
   // contracts lane; other commands and authority are exact.
   // Both hashes are taken after reversing the main-only cache change exactly.
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
-    previousHash: 'bd8e5261e1eea0d133a3606c15d1411843b9fca584a2c2c8c28b240d235bf23e' },
+    previousHash: '4f6678a485eb5f0550c9d1600aa81502a34e4dec556155640daa5923ba4d6da7' },
   { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
@@ -129,7 +129,7 @@ function aggregateResult(text, github, isCancelled, results) {
   }
 }
 
-test('only four job if lines differ from the complete reviewed workflows plus the runtime retry and read-reference test selectors and main-only caches', () => {
+test('only four job if lines differ from the complete reviewed workflows plus the runtime retry, read-reference and compaction test selectors and main-only caches', () => {
   for (const workflow of cancellationWorkflows) {
     assert.equal(workflow.text.split(aggregateIf).length - 1, workflow.keys.length, workflow.file);
     for (const key of workflow.keys) {

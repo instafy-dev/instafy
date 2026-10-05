@@ -54,6 +54,8 @@ use crate::active_turn_input::{
 };
 use crate::required_execution::RequiredExecutionGate;
 
+mod project_preferences;
+
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
     INTERNAL_CREDENTIAL_ENV_KEYS, MODEL_CHILD_ONLY_EXCLUDED_ENV_KEYS,
@@ -632,6 +634,9 @@ pub struct CodexExecutionError {
 
 #[derive(Debug, Clone, Default)]
 pub struct CodexRunOptions {
+    /// Authorized job scope for current shared defaults. Absent on routing preflight and non-project calls.
+    /// The workspace root comes from this CodexClient, never from prompt text.
+    pub project_id: Option<uuid::Uuid>,
     pub disable_shell_tool: bool,
     pub disable_final_output_json_schema: bool,
     pub final_output_schema: CodexFinalOutputSchema,
@@ -1365,7 +1370,11 @@ impl CodexClient {
                 CodexAppsToolsCache::default(),
                 SessionSource::Exec,
                 environment_manager,
-                codex_extension_registry(&turn_start_token_usage, &required_execution),
+                codex_extension_registry(
+                    &turn_start_token_usage,
+                    &required_execution,
+                    options.project_id.map(|id| (id, self.workspace_dir())),
+                ),
                 Arc::new(EmptyUserInstructionsProvider),
                 None,
                 codex_core::passthrough_image_store(),
@@ -3325,8 +3334,17 @@ impl TurnLifecycleContributor for TurnStartTokenUsageRecorder {
 fn codex_extension_registry(
     turn_start_token_usage: &TurnStartTokenUsage,
     required_execution: &RequiredExecutionGate,
+    project_context: Option<(uuid::Uuid, &Path)>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut extensions = ExtensionRegistryBuilder::new();
+    if let Some((project_id, workspace_dir)) = project_context {
+        extensions.prompt_contributor(Arc::new(
+            project_preferences::ProjectPreferencesContext::new(
+                project_id,
+                workspace_dir.to_owned(),
+            ),
+        ));
+    }
     extensions.turn_lifecycle_contributor(Arc::new(TurnStartTokenUsageRecorder(
         turn_start_token_usage.clone(),
     )));
@@ -3358,8 +3376,11 @@ pub(crate) async fn start_test_turn(
             developer_instructions: None,
         },
     };
-    let registry =
-        codex_extension_registry(turn_start_token_usage, &RequiredExecutionGate::default());
+    let registry = codex_extension_registry(
+        turn_start_token_usage,
+        &RequiredExecutionGate::default(),
+        None,
+    );
     for contributor in registry.turn_lifecycle_contributors() {
         contributor
             .on_turn_start(TurnStartInput {
@@ -4705,7 +4726,7 @@ mod tests {
     async fn run_registry_requires_execution_on_armed_threads_until_the_turn_stops() {
         use codex_extension_api::{ModelRequestInput, ModelRequestKind, TurnStopInput};
         let gate = RequiredExecutionGate::default();
-        let registry = codex_extension_registry(&TurnStartTokenUsage::default(), &gate);
+        let registry = codex_extension_registry(&TurnStartTokenUsage::default(), &gate, None);
         gate.arm("thread-a");
         let mut metadata = None;
         for contributor in registry.model_request_contributors() {
@@ -6817,6 +6838,7 @@ required = true
         let registry = codex_extension_registry(
             &TurnStartTokenUsage::default(),
             &RequiredExecutionGate::default(),
+            None,
         );
         let thread_store = ExtensionData::new("thread-main");
         let contributors = registry.turn_lifecycle_contributors();
