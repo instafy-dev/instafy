@@ -29,7 +29,7 @@ use super::change::{Change, Edits, Revert};
 use super::disk::{create_private_dir, remove_entry};
 use super::read;
 use super::routes::{
-    blocking, caller_token, coded, project_of, resolve_rev, Admission, HostedState,
+    blocking, caller_token, coded, on_mirror, project_of, resolve_rev, Admission, HostedState,
 };
 use crate::apply::{
     normalize_relative_path, stage_archive, validate_apply_paths, ApplyManifest, StagedArchive,
@@ -363,7 +363,10 @@ async fn commit(
     let deadline = Instant::now() + budget;
     let paused = admission.clone();
     let committed = blocking(move || {
+        let resets = mirror.resets();
         let dir = cache.ensure_mirror(&mirror)?;
+        let checker = cache.clone();
+        let token = read_token.clone();
         let mut canonical = CachedCanonical::new(cache, lease, read_token, runtime)
             .caller_expires(caller_expires)
             .wait_until(deadline)
@@ -385,6 +388,8 @@ async fn commit(
             &mut canonical,
         );
         drop(staging);
+        // A mirror found damaged while building is made again.
+        let outcome = checker.checked(&mirror, resets, token.as_deref(), outcome);
         Ok((outcome?, change))
     })
     .await;
@@ -418,12 +423,9 @@ pub(super) async fn handle_apply_status(
         .cache
         .resolve_main(&lease, Freshness::Fresh, caller_token(&token))
         .await?;
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let gateway_email = state.auth.config.git_author_email.clone();
-    let found = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
-        let git = WorkspaceGit::bare(&dir, None);
+    let found = on_mirror(&state, &lease, caller_token(&token), move |dir| {
+        let git = WorkspaceGit::bare(dir, None);
         let Some(applied) = find_applied(&git, main.as_deref(), &gateway_email, &key)? else {
             return Ok(None);
         };
@@ -489,12 +491,9 @@ pub(super) async fn handle_git_revert_commit(
             Ok((commit, base))
         })
         .await?;
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let reverted = commit.clone();
-    let (base, subject) = blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
-        let git = WorkspaceGit::bare(&dir, None);
+    let (base, subject) = on_mirror(&state, &lease, caller, move |dir| {
+        let git = WorkspaceGit::bare(dir, None);
         let base = match base {
             Some(base) => {
                 if !git

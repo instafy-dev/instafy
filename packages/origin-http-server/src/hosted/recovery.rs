@@ -30,7 +30,7 @@ use super::change::Change;
 use super::read::RESTORED_FROM_TRAILER;
 use super::restore::Restore;
 use super::routes::{
-    blocking, caller_token, fetch_ref, project_of, ref_error, Admission, HostedState,
+    caller_token, fetch_ref, on_mirror, project_of, ref_error, Admission, HostedState,
     REF_FETCH_DEADLINE,
 };
 use super::write::{caller_expiry, commit_change, gateway_identity, write_token};
@@ -257,13 +257,10 @@ async fn remove_ref(
     rev: &str,
 ) -> Result<Removal, OriginError> {
     let url = state.cache.remote_url(lease.project())?;
-    let cache = state.cache.clone();
-    let mirror = lease.mirror();
     let reference = reference.as_str().to_string();
     let rev = rev.to_string();
-    blocking(move || {
-        let dir = cache.ensure_mirror(&mirror)?;
-        let git = WorkspaceGit::bare(&dir, write_token.as_deref())
+    on_mirror(state, lease, None, move |dir| {
+        let git = WorkspaceGit::bare(dir, write_token.as_deref())
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
         let reference = RecoveryRef::validate(&git, &reference)?;
         // What it names now: gone, or moved, is answered without a push.
