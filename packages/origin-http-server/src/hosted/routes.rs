@@ -391,13 +391,14 @@ fn missing(absence: Absence) -> OriginError {
 }
 
 /// A `?ref=` read that could not reach canonical is a 502, like a fetch.
-/// One that failed on the mirror itself (damaged on this server's disk)
-/// keeps git's words, so [`on_mirror`] makes the mirror again.
-pub(super) fn ref_error(error: ViewError) -> OriginError {
+/// One that failed on the mirror at `dir` itself (damaged on this server's
+/// disk, as a look at the mirror confirms) keeps git's words, so
+/// [`on_mirror`] makes the mirror again.
+pub(super) fn ref_error(dir: &std::path::Path, error: ViewError) -> OriginError {
     match error {
         ViewError::Git(error) => {
             let text = format!("{error:#}");
-            match fetch_failure(&text) {
+            match fetch_failure(dir, &text) {
                 Some(FetchFailure::Damaged) => return OriginError::internal(text),
                 Some(FetchFailure::DiskFull) => return disk_full(),
                 None => {}
@@ -557,10 +558,13 @@ pub(super) async fn fetch_ref(
         let git = WorkspaceGit::bare(dir, git_token.as_deref())
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
         let reference = RecoveryRef::validate(&git, reference.as_str())?;
-        let Some(tip) = remote_tip(&git, &url, &reference).map_err(ref_error)? else {
+        let Some(tip) =
+            remote_tip(&git, &url, &reference).map_err(|error| ref_error(dir, error))?
+        else {
             return Ok(None);
         };
-        let fetched = fetch_refs(&git, &url, &[(reference, tip)]).map_err(ref_error);
+        let fetched =
+            fetch_refs(&git, &url, &[(reference, tip)]).map_err(|error| ref_error(dir, error));
         cache.size_changed(mirror_project);
         Ok(fetched?.fetched.pop())
     })
@@ -1096,7 +1100,7 @@ async fn handle_git_recovery(
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
         let listed = read::recovery_list(&git, &url, list_main.as_deref(), &gateway_email);
         cache.size_changed(project);
-        listed.map_err(ref_error)
+        listed.map_err(|error| ref_error(dir, error))
     })
     .await?;
     let response = Json(serde_json::json!({

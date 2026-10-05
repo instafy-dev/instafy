@@ -978,6 +978,178 @@ async fn damage_on_canonical_never_throws_the_mirror_away() {
     assert_eq!(get(&served, "/files/a.txt").await.status, 200);
 }
 
+/// Pack everything in the repository at `repo` and flip one byte in the
+/// middle of `oid`'s packed data, as a bad sector on canonical's disk
+/// would: upload-pack then sends the damaged bytes as they are.
+fn damage_packed_object(repo: &Path, oid: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    git_in(repo, &["repack", "-a", "-d", "-q"]);
+    let pack_dir = repo.join("objects/pack");
+    let idx = std::fs::read_dir(&pack_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "idx"))
+        .expect("a pack index");
+    let listing = git_in(repo, &["verify-pack", "-v", idx.to_str().unwrap()]);
+    let fields: Vec<&str> = listing
+        .lines()
+        .find(|line| line.starts_with(oid))
+        .unwrap_or_else(|| panic!("{oid} is not packed: {listing}"))
+        .split_whitespace()
+        .collect();
+    let (packed, offset): (usize, usize) = (fields[3].parse().unwrap(), fields[4].parse().unwrap());
+    let pack = idx.with_extension("pack");
+    std::fs::set_permissions(&pack, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut bytes = std::fs::read(&pack).unwrap();
+    bytes[offset + packed / 2] ^= 0xff;
+    std::fs::write(&pack, bytes).unwrap();
+}
+
+/// What a fetch of canonical failed with: 502 `canonical_unreachable`.
+fn assert_canonical_unreachable(error: &crate::error::OriginError, case: &str) {
+    match error {
+        crate::error::OriginError::WithReport { status, code, .. } => {
+            assert_eq!(
+                (status.as_u16(), *code),
+                (502, "canonical_unreachable"),
+                "{case}: {error:?}"
+            );
+        }
+        other => panic!("{case}: {other:?}"),
+    }
+}
+
+/// A packed object damaged on canonical's own disk reaches the gateway as a
+/// damaged stream, which the fetch's own readers reject without a
+/// `remote:` word (`unpack-objects` below `transfer.unpackLimit`,
+/// `index-pack` above it): still canonical's damage, never the mirror's. So
+/// is a stream cut off part way. The fetch is answered 502
+/// `canonical_unreachable`, and the space's healthy mirror and its `main`
+/// stay, whether the damage is on `main` or only on a recovery ref (`?ref=`
+/// reads and the recovery list).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_or_cut_stream_from_canonical_keeps_the_mirror() {
+    use std::os::unix::fs::MetadataExt as _;
+    for (case, files) in [("unpack-objects", 3usize), ("index-pack", 150)] {
+        let mut sc = HostedScenario::new();
+        let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+        let canonical = SmartHttpCanonical::start(&sc.canonical).await;
+        sc.config.git_remote_base_url = Some(canonical.base_url.clone());
+        let served = serve(&sc).await;
+        assert_eq!(get(&served, "/files/README.md").await.status, 200, "{case}");
+        let lease = served.cache.lease(sc.project);
+        let mirror = lease.mirror();
+        let resets = mirror.resets();
+        let inode = || std::fs::metadata(sc.mirror()).ok().map(|meta| meta.ino());
+        let before = inode();
+
+        let contents: Vec<(String, Vec<u8>)> = (0..files)
+            .map(|n| (format!("new/{n}.bin"), noise(n as u64 + 7, 2_000)))
+            .collect();
+        let pushed: Vec<(&str, Option<&[u8]>)> = contents
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), Some(bytes.as_slice())))
+            .collect();
+        let latest = sc.push(&pushed, "new files");
+        let blob = git_in(&sc.remote(), &["rev-parse", &format!("{latest}:new/0.bin")]);
+        damage_packed_object(&sc.remote(), &blob);
+
+        let error = served
+            .cache
+            .resolve_main(&lease, Freshness::Fresh, None)
+            .await
+            .unwrap_err();
+        assert_canonical_unreachable(&error, case);
+        assert_eq!(
+            mirror.resets(),
+            resets,
+            "{case}: the mirror was thrown away"
+        );
+        assert_eq!(inode(), before, "{case}: the mirror was thrown away");
+        assert_eq!(
+            git_in(&sc.mirror(), &["rev-parse", "refs/heads/main"]),
+            first,
+            "{case}: the mirror lost its main"
+        );
+        // A read after the coalescing window fetches again: the same.
+        tokio::time::sleep(Duration::from_millis(2_100)).await;
+        let answer = get(&served, "/files/README.md").await;
+        assert_eq!(
+            (answer.status, answer.code().as_str()),
+            (502, "canonical_unreachable"),
+            "{case}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+        assert_eq!(inode(), before, "{case}: the mirror was thrown away");
+    }
+
+    // Damage only on a recovery ref's packed objects.
+    let mut sc = HostedScenario::new();
+    sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let side = sc.side_commit(&[("b.txt", &noise(3, 4_000))], "unsaved");
+    let reference =
+        "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/20261004T120000Z-unsaved-0123456789ab";
+    sc.push_ref(&side, reference);
+    let blob = git_in(&sc.remote(), &["rev-parse", &format!("{side}:b.txt")]);
+    damage_packed_object(&sc.remote(), &blob);
+    let canonical = SmartHttpCanonical::start(&sc.canonical).await;
+    sc.config.git_remote_base_url = Some(canonical.base_url.clone());
+    let served = serve(&sc).await;
+    assert_eq!(get(&served, "/files/a.txt").await.status, 200);
+    let inode = || std::fs::metadata(sc.mirror()).ok().map(|meta| meta.ino());
+    let before = inode();
+    for path in [
+        format!("/files/b.txt?ref={reference}"),
+        "/git/recovery".to_string(),
+        format!("/files/b.txt?ref={reference}"),
+    ] {
+        let answer = get(&served, &path).await;
+        let body = String::from_utf8_lossy(&answer.body).to_string();
+        assert_eq!(
+            (answer.status, answer.code().as_str()),
+            (502, "canonical_unreachable"),
+            "{path}: {body}"
+        );
+        assert_eq!(inode(), before, "{path}: the mirror was thrown away");
+    }
+    assert_eq!(get(&served, "/files/a.txt").await.status, 200);
+
+    // A stream cut off part way below `transfer.unpackLimit`.
+    let mut sc = HostedScenario::new();
+    let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+    let canonical = SmartHttpCanonical::start(&sc.canonical).await;
+    sc.config.git_remote_base_url = Some(canonical.base_url.clone());
+    let cache = Arc::new(sc.open_cache());
+    let lease = cache.lease(sc.project);
+    cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap();
+    let mirror = lease.mirror();
+    let resets = mirror.resets();
+    let contents: Vec<(String, Vec<u8>)> = (0..3)
+        .map(|n| (format!("cut/{n}.bin"), noise(n + 11, 20_000)))
+        .collect();
+    let pushed: Vec<(&str, Option<&[u8]>)> = contents
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), Some(bytes.as_slice())))
+        .collect();
+    sc.push(&pushed, "three files");
+    canonical.cut_after(30_000);
+    let error = cache
+        .resolve_main(&lease, Freshness::Fresh, None)
+        .await
+        .unwrap_err();
+    assert!(canonical.cuts() >= 1);
+    assert_canonical_unreachable(&error, "cut");
+    assert_eq!(mirror.resets(), resets, "cut: the mirror was thrown away");
+    assert_eq!(
+        git_in(&sc.mirror(), &["rev-parse", "refs/heads/main"]),
+        first
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mirror_that_is_not_a_folder_is_made_again() {
     let sc = HostedScenario::new();
@@ -1196,28 +1368,34 @@ async fn a_write_on_a_full_disk_is_asked_to_retry_and_sweeps() {
     );
 }
 
-/// A `?ref=` or recovery-list fetch that fails on this server's disk is
-/// not canonical's: a full disk is 503 `disk_full`, a damaged mirror keeps
-/// git's words (so it is made again), the rest is 502.
+/// A `?ref=` fetch that failed on this server's disk is told apart from one
+/// that failed on canonical's: a full disk is 503 `disk_full`, a damaged
+/// mirror (a lock a stopped git left, as the mirror shows) keeps git's words
+/// (so it is made again), and the rest, a lock git complained about that
+/// the mirror does not have included, is 502.
 #[test]
 fn ref_fetches_tell_this_servers_disk_from_canonical() {
     use crate::recovery_view::ViewError;
+    let dir = tempfile::tempdir().unwrap();
+    let mirror = dir.path().canonicalize().unwrap().join("m.git");
+    crate::workspace_git::WorkspaceGit::init_bare(&mirror).unwrap();
     let code = |error: crate::error::OriginError| {
         let response = axum::response::IntoResponse::into_response(error);
         response.status().as_u16()
     };
-    let full = ViewError::Git(anyhow::anyhow!(
-        "git fetch failed: error: unable to write file ./objects/ab/cd: No space left on device"
-    ));
-    assert_eq!(code(super::routes::ref_error(full)), 503);
-    let damaged = ViewError::Git(anyhow::anyhow!(
-        "git fetch failed: error: cannot lock ref 'refs/instafy/fetched/x': File exists"
-    ));
-    assert_eq!(code(super::routes::ref_error(damaged)), 500);
-    let away = ViewError::Git(anyhow::anyhow!(
-        "git fetch failed: fatal: unable to access 'https://edge/x.git/': Could not resolve host"
-    ));
-    assert_eq!(code(super::routes::ref_error(away)), 502);
+    let error = |text: &str| ViewError::Git(anyhow::anyhow!(text.to_string()));
+    let full =
+        "git fetch failed: error: unable to write file ./objects/ab/cd: No space left on device";
+    assert_eq!(code(super::routes::ref_error(&mirror, error(full))), 503);
+    let locked = "git fetch failed: error: cannot lock ref 'refs/instafy/fetched/x': File exists";
+    assert_eq!(code(super::routes::ref_error(&mirror, error(locked))), 502);
+    let fetched = mirror.join("refs/instafy/fetched");
+    std::fs::create_dir_all(&fetched).unwrap();
+    std::fs::write(fetched.join("x.lock"), b"x\n").unwrap();
+    assert_eq!(code(super::routes::ref_error(&mirror, error(locked))), 500);
+    let away =
+        "git fetch failed: fatal: unable to access 'https://edge/x.git/': Could not resolve host";
+    assert_eq!(code(super::routes::ref_error(&mirror, error(away))), 502);
 }
 
 /// The sweeper never touches `.legacy/` (working copies of the old gateway,
