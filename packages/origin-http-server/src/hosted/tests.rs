@@ -429,7 +429,71 @@ async fn an_unreachable_canonical_is_an_error_and_never_old_data() {
     assert_eq!(body["code"], "canonical_unreachable");
     // The message names neither the repository nor its address.
     assert!(!body.to_string().contains(".git"), "{body}");
+    // Not the mirror's fault: it stays as it was.
+    assert!(sc.mirror().join("refs/heads/main").is_file());
     std::fs::rename(&moved, &sc.canonical).unwrap();
+}
+
+/// A git killed while it moved a mirror's `main` (out of memory, a stop
+/// that ran out of time) leaves `main.lock`, which refuses every later
+/// fetch. The mirror is thrown away and fetched again at once; a server
+/// that starts clears such locks before anything runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mirror_broken_on_disk_is_made_again() {
+    let sc = HostedScenario::new();
+    let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+    let cache = Arc::new(sc.open_cache());
+    let lease = cache.lease(sc.project);
+    assert_eq!(
+        cache
+            .resolve_main(&lease, Freshness::Fresh, None)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(first.as_str())
+    );
+    let lock = sc.mirror().join("refs/heads/main.lock");
+    std::fs::write(&lock, format!("{first}\n")).unwrap();
+    let second = sc.push(&[("README.md", Some(b"two\n"))], "second");
+    assert_eq!(
+        cache
+            .resolve_main(&lease, Freshness::Fresh, None)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(second.as_str())
+    );
+    assert!(!lock.exists());
+    drop(lease);
+    drop(cache);
+
+    // Locks left in a mirror are gone once the server starts again, and
+    // nothing else is touched.
+    let fetched = sc.mirror().join("refs/instafy/fetched/n1");
+    std::fs::create_dir_all(&fetched).unwrap();
+    let left = [
+        lock.clone(),
+        sc.mirror().join("packed-refs.lock"),
+        sc.mirror().join("config.lock"),
+        fetched.join("x.lock"),
+    ];
+    for path in &left {
+        std::fs::write(path, "x\n").unwrap();
+    }
+    let cache = Arc::new(sc.open_cache());
+    for path in &left {
+        assert!(!path.exists(), "{path:?}");
+    }
+    assert!(fetched.is_dir());
+    let lease = cache.lease(sc.project);
+    assert_eq!(
+        cache
+            .resolve_main(&lease, Freshness::Coalesced, None)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(second.as_str())
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

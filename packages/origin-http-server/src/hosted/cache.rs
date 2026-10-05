@@ -100,7 +100,12 @@ pub(crate) enum Freshness {
 enum FetchError {
     /// Canonical could not be read (or no credential to read it).
     Unreachable,
-    /// Something on the gateway's own disk failed.
+    /// The mirror is damaged on the gateway's own disk (a lock a killed git
+    /// left, a corrupt object). It is thrown away and cloned again.
+    Broken,
+    /// The gateway's disk is full.
+    DiskFull,
+    /// Something else on the gateway's own disk failed.
     Local(String),
 }
 
@@ -108,9 +113,31 @@ impl FetchError {
     fn into_origin(self) -> OriginError {
         match self {
             Self::Unreachable => canonical_unreachable(),
+            Self::Broken => mirror_reset(),
+            Self::DiskFull => disk_full(),
             Self::Local(message) => OriginError::internal(message),
         }
     }
+}
+
+/// 503: this space's mirror was damaged on the gateway's disk and is
+/// being made again.
+pub(crate) fn mirror_reset() -> OriginError {
+    OriginError::retry_later(
+        "mirror_reset",
+        "this space's copy on the server was damaged and is being made again; try again in a \
+         moment",
+        RETRY_AFTER_SECONDS,
+    )
+}
+
+/// 503: the gateway's disk is full.
+pub(crate) fn disk_full() -> OriginError {
+    OriginError::retry_later(
+        "disk_full",
+        "the server is out of disk space; try again in a moment",
+        RETRY_AFTER_SECONDS,
+    )
 }
 
 /// 502: canonical could not be read; nothing older is served instead.
@@ -280,9 +307,19 @@ impl MirrorCache {
         }
         for entry in std::fs::read_dir(&root).with_context(|| format!("failed to list {root:?}"))? {
             let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(TEMP_PREFIX) {
                 remove_entry(&entry.path())
                     .with_context(|| format!("failed to remove {:?}", entry.path()))?;
+            } else if mirror_project(&name).is_some() {
+                // Nothing runs git in a mirror before the server does: any
+                // lock in one was left by a git that was killed (out of
+                // memory, a stop that ran out of time), and would refuse
+                // every fetch of that space.
+                let removed = remove_stale_locks(&entry.path());
+                if removed > 0 {
+                    info!(mirror = %name, removed, "removed locks a stopped git left in a mirror");
+                }
             }
         }
         Ok(Self {
@@ -580,7 +617,24 @@ impl MirrorCache {
         tokio::task::spawn_blocking(move || {
             let dir = cache.open_mirror(&entry)?;
             let _refs = locked(&entry.refs);
-            fetch_main_into(&dir, &url, token.as_deref(), project)
+            match fetch_main_into(&dir, &url, token.as_deref(), project) {
+                Err(failure @ (FetchError::Broken | FetchError::DiskFull)) => {
+                    // The mirror is only a copy: throw it away. A damaged
+                    // one is made again at once; on a full disk that would
+                    // fail again, so the next request makes it.
+                    if let Err(error) = cache.discard(&dir) {
+                        warn!(%project, %error, "could not throw away a damaged mirror");
+                        return Err(failure);
+                    }
+                    warn!(%project, ?failure, "threw away a mirror the gateway's disk broke");
+                    if matches!(failure, FetchError::DiskFull) {
+                        return Err(failure);
+                    }
+                    let dir = cache.open_mirror(&entry)?;
+                    fetch_main_into(&dir, &url, token.as_deref(), project)
+                }
+                outcome => outcome,
+            }
         })
         .await
         .unwrap_or_else(|error| Err(FetchError::Local(format!("the fetch stopped: {error}"))))
@@ -1014,8 +1068,94 @@ fn fetch_main_into(
         }
         return Ok(());
     }
-    warn!(%project, error = %failure(&args, &output), "fetching main failed");
-    Err(FetchError::Unreachable)
+    let failed = local_failure(&stderr).unwrap_or(FetchError::Unreachable);
+    warn!(%project, ?failed, error = %failure(&args, &output), "fetching main failed");
+    Err(failed)
+}
+
+/// What a failed fetch's stderr says about the gateway's own disk: full,
+/// or a mirror damaged there. Lines from canonical (`remote:`) never count.
+fn local_failure(stderr: &str) -> Option<FetchError> {
+    const DISK_FULL: &[&str] = &["no space left on device", "disk quota exceeded"];
+    // About the mirror's own refs and stored objects only: a pack canonical
+    // sends that does not unpack ("pack has bad object", index-pack) is
+    // canonical's problem, and fetching again from scratch would not help.
+    const BROKEN: &[&str] = &[
+        "cannot lock ref",
+        ".lock': file exists",
+        "unable to update local ref",
+        "is corrupt",
+        "corrupt loose object",
+        "does not match index",
+        "cannot be accessed",
+        "unable to read sha1 file",
+        "is empty",
+        "does not point to a valid object",
+    ];
+    let lines: Vec<String> = stderr
+        .lines()
+        .map(|line| line.trim().to_ascii_lowercase())
+        .filter(|line| !line.starts_with("remote:"))
+        .collect();
+    let says = |markers: &[&str]| {
+        lines
+            .iter()
+            .any(|line| markers.iter().any(|marker| line.contains(marker)))
+    };
+    let from_pack = lines
+        .iter()
+        .any(|line| line.contains("index-pack") || line.contains("pack has bad object"));
+    if says(DISK_FULL) {
+        Some(FetchError::DiskFull)
+    } else if !from_pack
+        && (says(BROKEN)
+            || lines.iter().any(|line| {
+                line.starts_with("fatal: bad object") || line.starts_with("error: bad object")
+            }))
+    {
+        Some(FetchError::Broken)
+    } else {
+        None
+    }
+}
+
+/// Remove the lock files a stopped git left in the mirror at `dir`: the
+/// repository's own (`packed-refs.lock`, `config.lock`, ...), any under
+/// `refs/` and `logs/`, and those in `objects/info` and `objects/pack`.
+/// Links are never followed. Returns how many went.
+fn remove_stale_locks(dir: &Path) -> usize {
+    fn sweep(folder: &Path, deep: bool) -> usize {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return 0;
+        };
+        let mut removed = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_dir() {
+                if deep {
+                    removed += sweep(&path, true);
+                }
+            } else if metadata.file_type().is_file()
+                && entry.file_name().to_string_lossy().ends_with(".lock")
+                && std::fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        removed
+    }
+    let real_dir = std::fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.is_dir());
+    if !real_dir {
+        return 0;
+    }
+    sweep(dir, false)
+        + sweep(&dir.join("refs"), true)
+        + sweep(&dir.join("logs"), true)
+        + sweep(&dir.join("objects/info"), false)
+        + sweep(&dir.join("objects/pack"), false)
 }
 
 /// Whether the mirror at `dir` holds about `loose_limit` loose objects or
@@ -1117,4 +1257,49 @@ pub(crate) fn plan_eviction(stats: &[MirrorStat], cap: u64, now: SystemTime) -> 
         evict.push(stat.project);
     }
     evict
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_failures_are_told_apart_from_canonical_ones() {
+        let kind = |stderr: &str| match local_failure(stderr) {
+            Some(FetchError::Broken) => "broken",
+            Some(FetchError::DiskFull) => "disk_full",
+            Some(_) => "other",
+            None => "unreachable",
+        };
+        for (stderr, expected) in [
+            (
+                "error: cannot lock ref 'refs/heads/main': Unable to create '/c/x.git/refs/heads/main.lock': File exists.",
+                "broken",
+            ),
+            (
+                "error: update_ref failed for ref 'refs/heads/main': unable to update local ref",
+                "broken",
+            ),
+            ("error: object file ./objects/ab/cd is empty", "broken"),
+            ("fatal: loose object 0123 (stored in x) is corrupt", "broken"),
+            ("fatal: bad object refs/heads/main", "broken"),
+            (
+                "error: unable to write file ./objects/ab/cd: No space left on device",
+                "disk_full",
+            ),
+            ("fatal: write error: Disk quota exceeded", "disk_full"),
+            (
+                "fatal: unable to access 'https://edge/x.git/': Could not resolve host: edge",
+                "unreachable",
+            ),
+            ("error: RPC failed; curl 18 transfer closed", "unreachable"),
+            (
+                "fatal: pack has bad object at offset 12: inflate returned -3\nfatal: index-pack failed",
+                "unreachable",
+            ),
+            ("remote: error: object file x is empty\nfatal: early EOF", "unreachable"),
+        ] {
+            assert_eq!(kind(stderr), expected, "{stderr}");
+        }
+    }
 }
