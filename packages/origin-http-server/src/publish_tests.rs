@@ -5862,6 +5862,95 @@ async fn apply_route_refuses_a_stale_expected_blob_and_keeps_the_edit() {
     server.abort();
 }
 
+/// Creating a file over a link listings hide (the client read the path as
+/// absent) answers as on the hosted gateway: 400 `unsupported_entry` when
+/// the version the client read (`baseRev`) had this same link, since
+/// reading again cannot show it; 409 `head_moved` when the link is not what
+/// that version had, when no version is named, and for an
+/// `autoCommitAfterApply` apply (the managed-files bootstrap reads again
+/// and leaves the path alone).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn creating_over_a_hidden_link_is_unsupported_unless_it_changed_since() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let before = sc.push_other(&[("AGENTS.md", Some(b"agents\n"))], "agents");
+    std::os::unix::fs::symlink("AGENTS.md", sc.other.join("CLAUDE.md")).unwrap();
+    let linked = sc.push_other(&[], "a link");
+    sc.publish(Selection::None);
+    assert!(fs::symlink_metadata(sc.ws.join("CLAUDE.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let head = git_in(&sc.ws, &["--git-dir", ".instafy/.git", "rev-parse", "HEAD"]);
+    assert_eq!(head, linked);
+    let (base, server) = serve(&sc).await;
+    let create = |extra: serde_json::Value| {
+        let mut manifest = serde_json::json!({
+            "projectId": sc.config.project_id,
+            "files": [{ "path": "CLAUDE.md", "size": 5 }],
+            "deletes": [],
+            "expected": { "CLAUDE.md": null },
+        });
+        if let (Some(fields), serde_json::Value::Object(extra)) = (manifest.as_object_mut(), extra)
+        {
+            fields.extend(extra);
+        }
+        let base = base.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/apply-json"))
+                .json(&serde_json::json!({
+                    "manifest": manifest,
+                    "archiveBase64": apply_archive("CLAUDE.md", b"mine\n"),
+                }))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body)
+        }
+    };
+
+    // The version the person read had this same link.
+    let (status, body) = create(serde_json::json!({ "baseRev": linked })).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (400, Some("unsupported_entry")),
+        "{body}"
+    );
+    assert_eq!(body["paths"], serde_json::json!(["CLAUDE.md"]), "{body}");
+
+    // The link appeared after the version the person read; no version; a
+    // bootstrap.
+    for extra in [
+        serde_json::json!({ "baseRev": before }),
+        serde_json::json!({}),
+        serde_json::json!({ "baseRev": linked, "autoCommitAfterApply": true }),
+    ] {
+        let (status, body) = create(extra.clone()).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("head_moved")),
+            "{extra}: {body}"
+        );
+        assert_eq!(
+            body["paths"],
+            serde_json::json!(["CLAUDE.md"]),
+            "{extra}: {body}"
+        );
+    }
+    assert!(fs::symlink_metadata(sc.ws.join("CLAUDE.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(sc.main(), linked);
+    server.abort();
+}
+
 /// The single-tenant routes serve one checkout. A gateway configuration
 /// gets the hosted routes, which keep no working copy, so these refuse it
 /// before anything touches the workspace root.

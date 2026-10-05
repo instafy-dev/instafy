@@ -1713,6 +1713,12 @@ async fn apply_manifest_archive(
     let expected = manifest.expected.take();
     let manifest_deletes = manifest.deletes.clone();
     let auto_commit_after_apply = manifest.auto_commit_after_apply;
+    // The version the client read at: it tells a link the client could
+    // never have seen from one that changed since (see
+    // `check_expected_blobs`).
+    let read_at = (!auto_commit_after_apply)
+        .then(|| manifest.base_rev.clone())
+        .flatten();
     // Committed by the origin's identity: the caller's text never carries
     // a trailer the origin or the gateway trusts (a restore, a receipt).
     let commit_message = manifest
@@ -1752,7 +1758,12 @@ async fn apply_manifest_archive(
                 }
             }
             if let Some(expected) = expected.as_ref() {
-                check_expected_blobs(blocking_workspace.as_path(), expected, &manifest_deletes)?;
+                check_expected_blobs(
+                    blocking_workspace.as_path(),
+                    expected,
+                    &manifest_deletes,
+                    read_at.as_deref(),
+                )?;
             }
             let (mut apply_result, mut apply_transaction) = match archive {
                 ApplyArchive::InMemory(archive_bytes) => apply_changes_transactional(
@@ -1864,14 +1875,23 @@ async fn apply_manifest_archive(
 /// Refuse an apply when any path no longer holds the blob its client read.
 /// A deleted directory must list every file it holds, so a file someone else
 /// added under it is never removed unseen.
+///
+/// A symlink, which listings hide, never matches what a client read: 409
+/// `head_moved`, unless `read_at` (the `baseRev` the client read at; `None`
+/// for an `autoCommitAfterApply` apply, whose bootstrap reads again and
+/// leaves the path alone) had this same link there. Then reading again
+/// cannot help, and the write is 400 `unsupported_entry`, as on the hosted
+/// gateway.
 fn check_expected_blobs(
     workspace_root: &Path,
     expected: &std::collections::BTreeMap<String, Option<String>>,
     deletes: &[String],
+    read_at: Option<&str>,
 ) -> Result<(), OriginError> {
     let workspace = WorkspaceDir::open(workspace_root)
         .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
     let mut stale = Vec::new();
+    let mut unsupported = Vec::new();
     let mut normalized_expected = std::collections::BTreeMap::new();
     for (path, oid) in expected {
         let normalized = normalize_relative_path(path)
@@ -1894,7 +1914,13 @@ fn check_expected_blobs(
                 .unwrap_or_else(|_| Some("unreadable".to_string())),
         };
         if current != wanted {
-            stale.push(normalized.clone());
+            if read_at.is_some_and(|base| {
+                hidden_link_unchanged_since(workspace_root, &workspace, &normalized, base)
+            }) {
+                unsupported.push(normalized.clone());
+            } else {
+                stale.push(normalized.clone());
+            }
         }
         normalized_expected.insert(normalized, wanted);
     }
@@ -1914,8 +1940,17 @@ fn check_expected_blobs(
             }
         }
     }
+    // A 409 the client can act on (read again) comes before a refusal.
     if stale.is_empty() {
-        return Ok(());
+        if unsupported.is_empty() {
+            return Ok(());
+        }
+        return Err(OriginError::with_report(
+            axum::http::StatusCode::BAD_REQUEST,
+            "unsupported_entry",
+            "a link or a submodule cannot be changed here",
+            serde_json::json!({ "paths": unsupported }),
+        ));
     }
     stale.sort();
     stale.dedup();
@@ -1924,6 +1959,67 @@ fn check_expected_blobs(
         "files changed since they were read",
         stale,
     ))
+}
+
+/// Whether the work tree holds a symlink at `relative` (below real folders
+/// only) that is exactly the link the commit `base` of the checkout had
+/// there: the same mode and the same target.
+fn hidden_link_unchanged_since(
+    workspace_root: &Path,
+    workspace: &WorkspaceDir,
+    relative: &str,
+    base: &str,
+) -> bool {
+    let Ok(base) = recovery_view::parse_rev(base) else {
+        return false;
+    };
+    let parent_is_folder = match relative.rsplit_once('/') {
+        Some((parent, _)) => matches!(
+            workspace.entry_kind(parent),
+            Ok(WorkspaceEntryKind::Directory)
+        ),
+        None => true,
+    };
+    if !parent_is_folder {
+        return false;
+    }
+    let path = workspace_root.join(relative);
+    let is_link = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !is_link {
+        return false;
+    }
+    let Ok(target) = std::fs::read_link(&path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    let target_bytes = {
+        use std::os::unix::ffi::OsStrExt as _;
+        target.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let target_bytes = target.to_string_lossy().replace('\\', "/").into_bytes();
+    let link_oid = blob_oid(&target_bytes);
+    let git = WorkspaceGit::new(workspace_root, None);
+    let Ok(raw) = git.bytes_opts(
+        &[
+            "ls-tree",
+            "-z",
+            "--full-tree",
+            "--end-of-options",
+            &base,
+            "--",
+            relative,
+        ],
+        &crate::workspace_git::RunOpts {
+            literal_pathspecs: true,
+            ..crate::workspace_git::RunOpts::default()
+        },
+    ) else {
+        return false;
+    };
+    crate::workspace_git::parse_ls_tree(&raw)
+        .iter()
+        .any(|entry| entry.path == relative && entry.mode == "120000" && entry.oid == link_oid)
 }
 
 /// Regular files below a workspace directory (no links followed).
@@ -3905,7 +4001,7 @@ mod tests {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("README.md".to_string(), Some(HELLO_BLOB.to_string()));
         expected.insert("new.txt".to_string(), None);
-        let error = super::check_expected_blobs(workspace.path(), &expected, &[])
+        let error = super::check_expected_blobs(workspace.path(), &expected, &[], None)
             .expect_err("a stale read must be refused");
         match error {
             crate::error::OriginError::ConflictPaths { code, paths, .. } => {
@@ -3922,8 +4018,9 @@ mod tests {
         // A directory delete must have seen every file below it.
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("old/seen.txt".to_string(), Some(HELLO_BLOB.to_string()));
-        let error = super::check_expected_blobs(workspace.path(), &expected, &["old".to_string()])
-            .expect_err("an unseen file must block the delete");
+        let error =
+            super::check_expected_blobs(workspace.path(), &expected, &["old".to_string()], None)
+                .expect_err("an unseen file must block the delete");
         match error {
             crate::error::OriginError::ConflictPaths { paths, .. } => {
                 assert_eq!(paths, vec!["old/added.txt".to_string()]);
@@ -3934,7 +4031,8 @@ mod tests {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("old/seen.txt".to_string(), Some(HELLO_BLOB.to_string()));
         expected.insert("missing.txt".to_string(), None);
-        super::check_expected_blobs(workspace.path(), &expected, &[]).expect("fresh reads pass");
+        super::check_expected_blobs(workspace.path(), &expected, &[], None)
+            .expect("fresh reads pass");
     }
 
     #[cfg(unix)]
