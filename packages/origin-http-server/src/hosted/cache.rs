@@ -60,7 +60,7 @@ use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git_tokens;
 use crate::recovery_view::{copy_from_alphabet, sweep_stale_fetches, MAIN_REF};
-use crate::workspace_git::{failure, WorkspaceGit};
+use crate::workspace_git::{failure, RunOpts, WorkspaceGit};
 
 /// Every byte a hyphenated space id holds.
 const UUID_BYTES: &[u8] = b"0123456789abcdef-";
@@ -1609,16 +1609,86 @@ const TRANSPORT_MARKERS: &[&str] = &[
 
 /// What a failed fetch's stderr says about the gateway's own disk: full, or
 /// a mirror damaged there, as a look at the mirror at `dir` confirms
-/// ([`Suspects`]). Everything else (canonical's lines, a transfer that broke
-/// off, a pack or a stream canonical sent that could not be read, objects
-/// canonical did not send) is canonical's or the network's.
+/// ([`Suspects`], [`lost_a_base`]). Everything else (canonical's lines, a
+/// transfer that broke off, a pack or a stream canonical sent that could not
+/// be read, objects canonical did not send) is canonical's or the network's.
 fn local_failure(dir: &Path, stderr: &str) -> Option<FetchError> {
-    if says_disk_full(&local_lines(stderr)) {
+    let text = local_lines(stderr);
+    if says_disk_full(&text) {
         return Some(FetchError::DiskFull);
     }
-    Suspects::of(stderr, Doing::Fetch)
-        .confirmed(dir)
+    (Suspects::of(stderr, Doing::Fetch).confirmed(dir) || lost_a_base(dir, &text))
         .then_some(FetchError::Broken)
+}
+
+/// Whether a fetch that left deltas unresolved without naming an object
+/// (`unresolved deltas left after unpacking`, `pack has N unresolved
+/// deltas`) failed for want of a base the mirror at `dir` lost. Canonical
+/// sends a thin pack whose bases are objects of the mirror's `main` as it
+/// was, so a look at that `main` tells ([`main_tip_incomplete`]); with
+/// nothing missing there, the pack itself was bad: canonical's. `text` is
+/// [`local_lines`] of the failure.
+fn lost_a_base(dir: &Path, text: &str) -> bool {
+    text.contains("unresolved delta")
+        && !TRANSPORT_MARKERS.iter().any(|marker| text.contains(marker))
+        && main_tip_incomplete(dir)
+}
+
+/// Whether the mirror at `dir` cannot give the tip of its `main` whole: the
+/// commit, one of its trees or a file in them is missing. Bounded by the
+/// size of that one version, not by history. `false` without `main`.
+fn main_tip_incomplete(dir: &Path) -> bool {
+    let git = WorkspaceGit::bare(dir, None);
+    let tip = git
+        .run(&["for-each-ref", "--format=%(objectname)", MAIN_REF])
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
+    if !is_object_id(&tip) {
+        return false;
+    }
+    if unreadable(&git, &tip) {
+        return true;
+    }
+    // Every tree of the tip is read to list it; a lost one fails the list.
+    let Ok(listed) = git.run(&["ls-tree", "-r", "-z", "--full-tree", &tip]) else {
+        return false;
+    };
+    if !listed.status.success() {
+        return true;
+    }
+    let mut blobs: Vec<String> = listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter_map(|record| {
+            let record = String::from_utf8_lossy(record);
+            let (meta, _) = record.split_once('\t')?;
+            let mut fields = meta.split(' ');
+            let (_, kind, id) = (fields.next()?, fields.next()?, fields.next()?);
+            (kind == "blob" && is_object_id(id)).then(|| id.to_string())
+        })
+        .collect();
+    blobs.sort();
+    blobs.dedup();
+    if blobs.is_empty() {
+        return false;
+    }
+    let mut input = blobs.join("\n");
+    input.push('\n');
+    let Ok(checked) = git.run_opts(
+        &["cat-file", "--batch-check"],
+        &RunOpts {
+            stdin: Some(input.as_bytes()),
+            ..RunOpts::default()
+        },
+    ) else {
+        return false;
+    };
+    !checked.status.success()
+        || String::from_utf8_lossy(&checked.stdout)
+            .lines()
+            .any(|line| line.ends_with(" missing"))
 }
 
 /// What a failed git command was doing in a mirror.
@@ -2334,6 +2404,11 @@ mod tests {
         }
         // An object canonical never sent is not the mirror's damage.
         assert!(!Suspects::default().confirmed(&mirror));
+        // Deltas left unresolved against a whole `main` are canonical's.
+        let unresolved =
+            "fatal: unresolved deltas left after unpacking\nfatal: unpack-objects failed";
+        assert!(!lost_a_base(&mirror, &local_lines(unresolved)));
+        assert!(!lost_a_base(&mirror, "fatal: pack has 2 unresolved deltas"));
 
         let lock_file = mirror.join("refs/heads/main.lock");
         std::fs::write(&lock_file, b"x\n").unwrap();
@@ -2346,9 +2421,20 @@ mod tests {
             std::fs::write(&loose, damage).unwrap();
             assert!(object(&blob).confirmed(&mirror), "{damage:?}");
         }
+        // A file of `main`'s tip that is gone, not corrupt, is a lost base
+        // when deltas were left unresolved, unless the transfer broke off.
+        std::fs::remove_file(&loose).unwrap();
+        assert!(lost_a_base(&mirror, &local_lines(unresolved)));
+        assert!(lost_a_base(&mirror, "fatal: pack has 2 unresolved deltas"));
+        assert!(!lost_a_base(
+            &mirror,
+            "fatal: early eof\nfatal: pack has 2 unresolved deltas"
+        ));
+        assert!(!lost_a_base(&mirror, "fatal: index-pack failed"));
         let commit_file = mirror.join("objects").join(&commit[..2]).join(&commit[2..]);
         std::fs::remove_file(&commit_file).unwrap();
         assert!(object(&commit).confirmed(&mirror));
         assert!(main_ref.confirmed(&mirror));
+        assert!(main_tip_incomplete(&mirror));
     }
 }
