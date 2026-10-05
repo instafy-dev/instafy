@@ -60,6 +60,8 @@ services:
   origin-gateway:
     image: git-services:local
     entrypoint: ["/usr/local/bin/origin-http-server"]
+    # An init as PID 1 reaps any child the server leaves behind.
+    init: true
     ulimits:
       nofile:
         soft: 8192

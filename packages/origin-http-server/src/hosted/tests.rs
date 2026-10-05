@@ -541,6 +541,106 @@ fn eviction_removes_least_recently_used_idle_mirrors_until_under_the_cap() {
     assert!(plan_eviction(&edge, 0, now).is_empty());
 }
 
+/// The packs in a mirror.
+fn packs(mirror: &Path) -> usize {
+    std::fs::read_dir(mirror.join("objects/pack"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".pack"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// A mirror whose own configuration would have git pack it after every
+/// fetch (a pack per fetch, a limit of one pack, maintenance in the
+/// foreground): fetches leave it alone, and the sweeper packs it once it
+/// crosses the limits, without counting that as a use.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_the_sweeper_packs_mirrors() {
+    let sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"one\n"))], "one");
+    let cache = Arc::new(sc.open_cache().with_pack_limits(u64::MAX, 2));
+    let lease = cache.lease(sc.project);
+    let mirror = cache.ensure_mirror(&lease.mirror()).unwrap();
+    for setting in [
+        "fetch.unpackLimit=1",
+        "gc.auto=1",
+        "gc.autoPackLimit=1",
+        "gc.autoDetach=false",
+        "maintenance.autoDetach=false",
+        "maintenance.auto=true",
+    ] {
+        let (key, value) = setting.split_once('=').unwrap();
+        git_in(&mirror, &["config", key, value]);
+    }
+    let mut fetched = Vec::new();
+    for round in 0..3 {
+        if round > 0 {
+            sc.push(
+                &[(&format!("file-{round}.txt"), Some(b"x\n"))],
+                &format!("round {round}"),
+            );
+        }
+        fetched.push(
+            cache
+                .resolve_main(&lease, Freshness::Fresh, None)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    assert_eq!(packs(&mirror), 3, "one pack per fetch, none merged");
+    drop(lease);
+    let before = std::fs::metadata(mirror.join("instafy-last-use"))
+        .unwrap()
+        .modified()
+        .unwrap();
+
+    let swept = {
+        let cache = cache.clone();
+        tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
+            .await
+            .unwrap()
+    };
+    assert_eq!(swept.packed, vec![sc.project]);
+    assert_eq!(packs(&mirror), 1);
+    assert_eq!(
+        std::fs::metadata(mirror.join("instafy-last-use"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        before,
+        "packing is not a use"
+    );
+    // Everything is still there.
+    let lease = cache.lease(sc.project);
+    assert_eq!(
+        cache
+            .resolve_main(&lease, Freshness::Coalesced, None)
+            .await
+            .unwrap()
+            .as_deref(),
+        fetched.last().map(String::as_str)
+    );
+    assert_eq!(
+        git_in(
+            &mirror,
+            &["cat-file", "-p", &format!("{}:file-2.txt", fetched[2])]
+        ),
+        "x"
+    );
+    // Under the limits nothing runs.
+    let swept = {
+        let cache = cache.clone();
+        tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
+            .await
+            .unwrap()
+    };
+    assert!(swept.packed.is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sweeper_keeps_mirrors_in_use_and_removes_idle_ones() {
     let sc = HostedScenario::new();
