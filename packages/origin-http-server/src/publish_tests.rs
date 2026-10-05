@@ -3466,13 +3466,14 @@ async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
         "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: other.md",
         kept,
     );
-    let secret = "refs/instafy/salvage/gateway/node-1-0123abcf";
+    // Holds a `.env` file, which a restore always refuses.
+    let refused = "refs/instafy/salvage/gateway/node-1-0123abcf";
     push_to_ref(
         &sc,
         &[("held.md", Some(b"held\n")), (".env", Some(b"TOKEN=1\n"))],
         &[],
         "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage",
-        secret,
+        refused,
     );
     let ignored = "refs/instafy/salvage/gateway/node-1-0123abd0";
     push_to_ref(
@@ -3533,7 +3534,7 @@ async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
     };
 
     let entries = list().await;
-    for reference in [salvage, kept, secret, ignored] {
+    for reference in [salvage, kept, refused, ignored] {
         assert_eq!(restored_rev(&entries, reference), None, "{reference}");
     }
 
@@ -3594,7 +3595,7 @@ async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
     fs::remove_file(sc.ws.join("unrelated.md")).unwrap();
 
     // What is left is a secret, or a file `main` now ignores.
-    for (reference, left_out) in [(secret, ".env"), (ignored, "notes/plan.md")] {
+    for (reference, left_out) in [(refused, ".env"), (ignored, "notes/plan.md")] {
         let (status, body) = restore(serde_json::json!({ "ref": reference })).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{reference}: {body}");
         assert_eq!(body["committed"], false, "{reference}: {body}");
