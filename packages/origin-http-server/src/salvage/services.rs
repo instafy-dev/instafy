@@ -27,8 +27,8 @@ pub(crate) enum ExportOutcome {
     /// Stored for each listed conversation.
     Exported(Vec<ExportedTo>),
     /// Not stored, and a rerun would get the same answer (no message names
-    /// it, not an image, the space is gone); the salvage keeps it in the
-    /// private archive.
+    /// it, not an image, too large, the space is gone); the salvage keeps it
+    /// in the private archive.
     Kept(String),
     /// Not stored, but a rerun may store it (no Storage or no route yet, a
     /// credential the controller refused, a server error, a timeout, no
@@ -199,7 +199,9 @@ const GIT_SALVAGE_SCOPE: &str = "git.salvage";
 /// What an export answer means for the file. Only answers about the file
 /// or the space itself are final; anything else (no Storage, a route that is
 /// not deployed yet and answers 404 without a code, a refused credential, a
-/// server error) may change by a rerun.
+/// server error) may change by a rerun. A 413 is final with or without a
+/// code: the controller's body limit answers before its handler, in plain
+/// text.
 pub(crate) fn interpret_export(status: u16, body: &serde_json::Value) -> ExportOutcome {
     if status == 200 {
         let exported: Vec<ExportedTo> = body
@@ -214,12 +216,18 @@ pub(crate) fn interpret_export(status: u16, body: &serde_json::Value) -> ExportO
         };
     }
     let code = body.get("code").and_then(serde_json::Value::as_str);
+    if status == 413 {
+        return ExportOutcome::Kept(format!(
+            "too large for the controller (it answered 413, {})",
+            code.unwrap_or("no code")
+        ));
+    }
     let text = format!(
         "the controller answered {status} ({})",
         code.unwrap_or("unknown")
     );
     let file_or_space =
-        matches!(status, 400 | 413 | 415) || (status == 404 && code == Some("project_not_found"));
+        matches!(status, 400 | 415) || (status == 404 && code == Some("project_not_found"));
     if file_or_space && code.is_some() {
         ExportOutcome::Kept(text)
     } else {
@@ -262,6 +270,14 @@ mod tests {
                 matches!(interpret_export(status, &body), ExportOutcome::Kept(_)),
                 "{status} {body}"
             );
+        }
+        // Too large, whoever answered: the controller's own check gives a
+        // code, its body limit answers before the handler, without one.
+        for body in [json!(null), json!({ "code": "too_large" })] {
+            match interpret_export(413, &body) {
+                ExportOutcome::Kept(why) => assert!(why.contains("too large"), "{why}"),
+                other => panic!("413 {body}: {other:?}"),
+            }
         }
         // A rerun may export it.
         for (status, body) in [
