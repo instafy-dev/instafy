@@ -3,20 +3,16 @@
 //! and the recovery list. Everything reads git objects only (there is no
 //! work tree) and blocks; the routes run it off the async threads.
 
-use std::collections::HashMap;
 use std::path::Path;
-
-use serde::Serialize;
-use uuid::Uuid;
 
 use crate::git::{
     is_full_object_id, is_sync_reserved_path, DirtyPathEntry, GitHistoryEntry, HistoryActor,
 };
 use crate::publish_policy::MAX_PUBLISH_BLOB_BYTES;
 use crate::recovery_view::{
-    absence_at, describe, fetch_refs, first_parent_history, list_remote_refs, read_blob_at,
-    read_tree_at, resolve, Absence, BlobRead, ObjectEntry, ObjectKind, ReadAt, RecoveryItem,
-    RecoveryRef, TreeRead, ViewError,
+    absence_at, describe, fetch_refs, first_parent_history, list_remote_refs, mark_restored,
+    read_blob_at, read_tree_at, resolve, Absence, BlobRead, ObjectEntry, ObjectKind, ReadAt,
+    RecoveryItem, TreeRead, ViewError,
 };
 use crate::routes::{mime_type_for_extension, FileEntryResponse};
 use crate::workspace_git::{RunOpts, WorkspaceGit};
@@ -24,14 +20,8 @@ use crate::workspace_git::{RunOpts, WorkspaceGit};
 /// The largest file a read returns (the largest a save accepts).
 pub(crate) const MAX_READ_BYTES: u64 = MAX_PUBLISH_BLOB_BYTES;
 
-/// The trailer a restore commit names its recovery ref in.
-pub(crate) const RESTORED_FROM_TRAILER: &str = "Instafy-Restored-From";
-
 /// The longest diff a read returns.
 const MAX_DIFF_BYTES: usize = 200_000;
-
-/// How many restore commits the recovery list looks back over.
-const MAX_RESTORE_COMMITS: &str = "1000";
 
 /// A folder listing, or why there is none.
 pub(crate) enum EntriesRead {
@@ -365,90 +355,20 @@ fn cut_diff(mut text: String) -> (String, bool) {
     (text.trim_end().to_string(), true)
 }
 
-/// One recovery-list entry: the shared description, and the `main` commit
-/// that restored it, when one did.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ListedRecovery {
-    #[serde(flatten)]
-    pub item: RecoveryItem,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub restored_rev: Option<String>,
-}
-
 /// The recovery and salvage refs on `remote` that a person can review,
 /// newest first: listed, fetched and described against `main`, each marked
-/// with the commit that restored it when the gateway committed one.
+/// with the newest commit on `main` that restored it (`restoredRev`), by
+/// the rule Desktop lists them by ([`mark_restored`]: a restore commit the
+/// gateway committed, whose whole message names the ref).
 pub(crate) fn recovery_list(
     git: &WorkspaceGit<'_>,
     remote: &str,
     main: Option<&str>,
     gateway_email: &str,
-) -> Result<Vec<ListedRecovery>, ViewError> {
+) -> Result<Vec<RecoveryItem>, ViewError> {
     let listed = list_remote_refs(git, remote)?;
     let fetched = fetch_refs(git, remote, &listed)?;
-    let items = describe(git, &fetched.fetched, main)?;
-    let restored = match main {
-        Some(main) if !items.is_empty() => restored_refs(git, main, gateway_email)?,
-        _ => HashMap::new(),
-    };
-    Ok(items
-        .into_iter()
-        .map(|item| ListedRecovery {
-            restored_rev: restored.get(&item.reference).cloned(),
-            item,
-        })
-        .collect())
-}
-
-/// For each recovery or salvage ref a gateway commit on `main`'s
-/// first-parent chain names in [`RESTORED_FROM_TRAILER`], the newest such
-/// commit. Only commits whose committer is exactly the gateway count.
-fn restored_refs(
-    git: &WorkspaceGit<'_>,
-    main: &str,
-    gateway_email: &str,
-) -> Result<HashMap<String, String>, ViewError> {
-    // Commit text is data: fields and records are framed with a token made
-    // for this listing, which no commit written before it can contain.
-    let token = Uuid::new_v4().simple().to_string();
-    let field = format!("\u{1f}{token}\u{1f}");
-    let record = format!("\u{1e}{token}\u{1e}");
-    let pretty = format!(
-        "--pretty=format:%H%x1f{token}%x1f%cE%x1f{token}%x1f%(trailers:key={RESTORED_FROM_TRAILER},valueonly)%x1e{token}%x1e"
-    );
-    let committer = format!("--committer=<{gateway_email}>");
-    let grep = format!("--grep={RESTORED_FROM_TRAILER}:");
-    let raw = git.stdout(&[
-        "log",
-        "--first-parent",
-        "--max-count",
-        MAX_RESTORE_COMMITS,
-        "--fixed-strings",
-        &committer,
-        &grep,
-        &pretty,
-        "--end-of-options",
-        main,
-        "--",
-    ])?;
-    let mut restored = HashMap::new();
-    for raw_record in raw.split(record.as_str()) {
-        let fields: Vec<&str> = raw_record.trim().split(field.as_str()).collect();
-        let [commit, committer, values] = fields.as_slice() else {
-            continue;
-        };
-        if !is_full_object_id(commit) || !committer.eq_ignore_ascii_case(gateway_email) {
-            continue;
-        }
-        for value in values.lines().map(str::trim) {
-            if RecoveryRef::parse(value).is_ok() {
-                // Newest first: the first commit naming a ref wins.
-                restored
-                    .entry(value.to_string())
-                    .or_insert_with(|| commit.to_string());
-            }
-        }
-    }
-    Ok(restored)
+    let mut items = describe(git, &fetched.fetched, main)?;
+    mark_restored(git, &mut items, main, gateway_email)?;
+    Ok(items)
 }

@@ -27,7 +27,6 @@ use super::answers::{internal, push_rejected, recovery_ref_moved, salvage_ref_ke
 use super::cache::{canonical_unreachable, MirrorLease};
 use super::cas::save_author;
 use super::change::Change;
-use super::read::RESTORED_FROM_TRAILER;
 use super::restore::Restore;
 use super::routes::{
     caller_token, fetch_ref, on_mirror, project_of, ref_error, Admission, HostedState,
@@ -38,15 +37,12 @@ use crate::apply::normalize_relative_path;
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
 use crate::push::{self, PushClass};
-use crate::recovery_view::{parse_rev, remote_tip, RecoveryRef, ViewError};
+use crate::recovery_view::{parse_rev, remote_tip, restore_commit_message, RecoveryRef, ViewError};
 use crate::route_auth::OriginAccessToken;
 use crate::workspace_git::WorkspaceGit;
 
 /// The most paths a restore can be asked to keep.
 const MAX_KEEP_PATHS: usize = 1_000;
-
-/// The subject of a restore commit.
-const RESTORE_SUBJECT: &str = "Restore unsaved work";
 
 /// An optional full commit id from a request; empty counts as absent.
 fn optional_rev(value: Option<&str>) -> Result<Option<String>, OriginError> {
@@ -75,16 +71,6 @@ fn keep_paths(keep: Option<Vec<String>>) -> Result<Vec<String>, OriginError> {
     Ok(paths.into_iter().collect())
 }
 
-/// The message of a restore commit: the gateway writes the trailer that
-/// marks the ref restored (callers never can: their messages lose every
-/// `Instafy-` line).
-fn restore_message(reference: &RecoveryRef) -> String {
-    format!(
-        "{RESTORE_SUBJECT}\n\n{RESTORED_FROM_TRAILER}: {}",
-        reference.as_str()
-    )
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RestoreRequest {
@@ -100,8 +86,12 @@ pub(super) struct RestoreRequest {
 
 /// Restore unsaved work: the ref's commit merged onto `main` and saved as
 /// one commit, then (for a recovery ref whose work is now all on `main`)
-/// the ref removed. Answers `{rev, baseRev, committed, notRestored,
-/// refDeleted}`; `committed: false` when `main` already has the work.
+/// the ref removed. Answers `{rev, baseRev, committed, marked,
+/// notRestored, refDeleted}`; `committed: false` when `main` already has
+/// the work. A salvage ref with nothing left to bring back is recorded with
+/// an empty restore commit (`marked: true`, `rev` the new commit) unless
+/// `main` has one of it already, by Desktop's rule
+/// ([`crate::recovery_view::restore_marker`]).
 pub(super) async fn handle_restore(
     State(state): State<HostedState>,
     Extension(claims): Extension<OriginClaims>,
@@ -135,16 +125,26 @@ pub(super) async fn handle_restore(
         (Some(fetched), _) => fetched,
     };
 
-    let author = save_author(&claims, &gateway_identity(&state));
+    let gateway = gateway_identity(&state);
+    let author = save_author(&claims, &gateway);
+    let restore = Restore::new(
+        reference.clone(),
+        fetched.commit.clone(),
+        keep,
+        base_rev,
+        gateway.email.clone(),
+    );
+    // The gateway writes the trailer that marks the ref restored (callers
+    // never can: their messages lose every `Instafy-` trailer git reads).
     let (outcome, change) = commit_change(
         &state,
         project,
         &token,
         caller_expiry(&claims),
         admission.clone(),
-        Change::Restore(Restore::new(fetched.commit.clone(), keep, base_rev)),
+        Change::Restore(restore),
         author,
-        restore_message(&reference),
+        restore_commit_message(reference.as_str()),
     )
     .await?;
     // Removing the ref is network work too.
@@ -179,13 +179,20 @@ pub(super) async fn handle_restore(
     } else {
         false
     };
-    if outcome.committed {
+    // The commit that landed is the empty restore commit when the last
+    // attempt recorded one.
+    let marked = outcome.committed && restore.marker();
+    let committed = outcome.committed && !marked;
+    if committed {
         info!(%project, reference = reference.as_str(), "restored unsaved work on main");
+    } else if marked {
+        info!(%project, reference = reference.as_str(), "recorded a restore that brought nothing new");
     }
     Ok(Json(serde_json::json!({
         "rev": outcome.rev,
         "baseRev": outcome.base_rev,
-        "committed": outcome.committed,
+        "committed": committed,
+        "marked": marked,
         "notRestored": restore.not_restored(),
         "refDeleted": ref_deleted,
     })))

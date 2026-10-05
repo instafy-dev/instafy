@@ -460,6 +460,94 @@ async fn salvage_work_is_restored_and_kept_for_good() {
     assert_eq!(body["refDeleted"], false);
 }
 
+/// A salvage ref whose work `main` already has (saved the same way
+/// another time, or every changed path kept) is still recorded as restored:
+/// an empty restore commit on `main` (`committed: false`, `marked: true`),
+/// so the list shows it restored for good after a reload. Once there is
+/// one, a restore again records nothing more, and a recovery ref with
+/// nothing left gets no such commit (5.5's Desktop rule, on the gateway).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
+    let sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"r\n"))], "seed");
+    let salvaged = sc.side_commit(&[("draft.md", b"draft\n")], "kept from the file gateway");
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    sc.push_ref(&salvaged, salvage);
+    let kept = sc.side_commit(&[("other.md", b"other\n")], "kept from the file gateway");
+    let kept_ref = "refs/instafy/salvage/gateway/node-1-0123abce";
+    sc.push_ref(&kept, kept_ref);
+    let unsaved = sc.side_commit(&[("same.md", b"same\n")], "unsaved");
+    let unsaved_ref = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+    sc.push_ref(&unsaved, &unsaved_ref);
+    // `main` got the same work another way.
+    let head = sc.push(
+        &[("draft.md", Some(b"draft\n")), ("same.md", Some(b"same\n"))],
+        "saved the same",
+    );
+    let served = serve(&sc).await;
+    let tree = |commit: &str| canonical(&sc, &["rev-parse", &format!("{commit}^{{tree}}")]);
+
+    let body = ok(&restore(&served, json!({ "ref": salvage, "rev": salvaged })).await);
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["marked"], true, "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
+    let marker = body["rev"].as_str().unwrap().to_string();
+    assert_ne!(marker, head);
+    assert_eq!(sc.canonical_main().as_deref(), Some(marker.as_str()));
+    assert_eq!(parents(&sc, &marker), vec![head.clone()]);
+    assert_eq!(tree(&marker), tree(&head));
+    assert_eq!(
+        canonical(&sc, &["log", "-1", "--format=%B", &marker]),
+        format!("Restore unsaved work\n\nInstafy-Restored-From: {salvage}")
+    );
+    assert_eq!(
+        canonical(&sc, &["log", "-1", "--format=%ce", &marker]),
+        "gateway@instafy.dev"
+    );
+    let item = entry(&listed(&served).await, salvage).expect("listed");
+    assert_eq!(item["restoredRev"], marker.as_str());
+
+    // Again: the marker is there, so nothing more is recorded.
+    let body = ok(&restore(&served, json!({ "ref": salvage, "rev": salvaged })).await);
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["marked"], false, "{body}");
+    assert_eq!(body["rev"], marker.as_str());
+    assert_eq!(sc.canonical_main().as_deref(), Some(marker.as_str()));
+
+    // Every changed path kept: recorded too.
+    let body = ok(&restore(
+        &served,
+        json!({ "ref": kept_ref, "rev": kept, "keep": ["other.md"] }),
+    )
+    .await);
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["marked"], true, "{body}");
+    assert_eq!(
+        not_restored(&body),
+        vec![("other.md".to_string(), "kept".to_string())]
+    );
+    let kept_marker = body["rev"].as_str().unwrap().to_string();
+    assert_eq!(parents(&sc, &kept_marker), vec![marker.clone()]);
+    let entries = listed(&served).await;
+    assert_eq!(
+        entry(&entries, kept_ref).expect("listed")["restoredRev"],
+        kept_marker.as_str()
+    );
+    assert_eq!(
+        entry(&entries, salvage).expect("listed")["restoredRev"],
+        marker.as_str()
+    );
+
+    // A recovery ref with nothing left: no empty commit; `main` stays and
+    // the ref goes.
+    let body = ok(&restore(&served, json!({ "ref": unsaved_ref, "rev": unsaved })).await);
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["marked"], false, "{body}");
+    assert_eq!(body["rev"], kept_marker.as_str());
+    assert_eq!(body["refDeleted"], true, "{body}");
+    assert_eq!(sc.canonical_main().as_deref(), Some(kept_marker.as_str()));
+}
+
 /// A dismiss deletes the ref only while it names what the client listed:
 /// a ref that moved stays, one already gone answers `missing`, and a tag
 /// ref is removed by the tag's id (the listed one).

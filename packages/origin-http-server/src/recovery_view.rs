@@ -1820,6 +1820,37 @@ pub(crate) fn mark_restored(
     Ok(())
 }
 
+/// Whether a restore of `reference` onto `onto` that brings nothing new
+/// there (`made` is false: the saved version already holds the work, or
+/// the rest was kept or refused) records itself with an empty restore
+/// commit ([`restore_commit_message`], `onto`'s tree), and the earlier
+/// restore commit of it `onto` reaches, if any. Only a salvage ref is
+/// recorded: it is never removed, so only that commit tells the list it was
+/// restored ([`mark_restored`]); a recovery ref goes once its work is on
+/// `main`, so the commit would only be noise in history. And only once:
+/// not when `onto` already has a restore commit of it made since its work
+/// (`saved`) was ([`restore_of`]). Desktop and the hosted gateway decide by
+/// this; `committer_email` is the server's own identity.
+pub(crate) fn restore_marker(
+    git: &WorkspaceGit<'_>,
+    reference: &RecoveryRef,
+    made: bool,
+    onto: &str,
+    saved: &str,
+    committer_email: &str,
+) -> Result<(bool, Option<String>), ViewError> {
+    if made || !reference.is_salvage() {
+        return Ok((false, None));
+    }
+    let made_at = git
+        .read_objects(std::slice::from_ref(&saved.to_string()))?
+        .first()
+        .map(|object| parse_commit(&object.data).timestamp)
+        .unwrap_or_default();
+    let earlier = restore_of(git, onto, reference.as_str(), made_at, committer_email)?;
+    Ok((earlier.is_none(), earlier))
+}
+
 /// The newest restore commit of `reference` (see [`mark_restored`]) that
 /// `tip` reaches, made since `made_at` (the time of the work's own commit,
 /// less the clock slack), when there is one.
