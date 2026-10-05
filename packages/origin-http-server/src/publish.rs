@@ -2905,29 +2905,39 @@ fn parse_ident(value: &str) -> Option<GitIdentity> {
 /// `to` adds, one where `to` makes a folder, and any file inside a folder
 /// `to` turns into a file. Each is named by the path in the way: the file
 /// above, or the path `to` writes. Links on disk are never followed.
+///
+/// A file this change removes is `HEAD`'s own (a status shows it when it
+/// was edited), whatever name finds it: on a disk that ignores case (or
+/// Unicode form) in names, a rename by case only (`notes.md` to
+/// `Notes.md`) finds the old file at the new name ([`Removed::holds`]).
 fn untracked_in_the_way(git: &WorkspaceGit<'_>, from: &str, to: &str) -> Result<Vec<String>> {
     let raw = git.bytes(&["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to])?;
     let changes = parse_raw_changes(&raw);
+    let root = git.root();
     // What `HEAD` tracks and the change removes: its own files, which a
     // status shows when they were edited.
-    let removed: BTreeSet<&str> = changes
-        .iter()
-        .filter(|change| change.status == 'D')
-        .map(|change| change.path.as_str())
-        .collect();
-    let root = git.root();
+    let mut removed = Removed::new(
+        root,
+        changes
+            .iter()
+            .filter(|change| change.status == 'D')
+            .map(|change| change.path.as_str())
+            .collect(),
+    );
     let mut found = BTreeSet::new();
     'added: for change in changes.iter().filter(|change| change.status == 'A') {
         let path = change.path.as_str();
         for (index, _) in path.match_indices('/') {
             let folder = &path[..index];
-            if removed.contains(folder) {
+            if removed.paths.contains(folder) {
                 continue 'added;
             }
             match std::fs::symlink_metadata(root.join(folder)) {
                 Ok(metadata) if metadata.is_dir() => {}
-                Ok(_) => {
-                    found.insert(folder.to_string());
+                Ok(metadata) => {
+                    if !removed.holds(folder, &metadata) {
+                        found.insert(folder.to_string());
+                    }
                     continue 'added;
                 }
                 Err(_) => continue 'added,
@@ -2935,12 +2945,14 @@ fn untracked_in_the_way(git: &WorkspaceGit<'_>, from: &str, to: &str) -> Result<
         }
         match std::fs::symlink_metadata(root.join(path)) {
             Ok(metadata) if metadata.is_dir() => {
-                if holds_files_besides(&root.join(path), path, &removed) {
+                if holds_files_besides(&root.join(path), path, &mut removed) {
                     found.insert(path.to_string());
                 }
             }
-            Ok(_) => {
-                found.insert(path.to_string());
+            Ok(metadata) => {
+                if !removed.holds(path, &metadata) {
+                    found.insert(path.to_string());
+                }
             }
             Err(_) => {}
         }
@@ -2949,8 +2961,9 @@ fn untracked_in_the_way(git: &WorkspaceGit<'_>, from: &str, to: &str) -> Result<
 }
 
 /// Whether the folder `dir` (the checkout's `path`) holds a file or link
-/// that is not one of `tracked`, at any depth. Links are never followed.
-fn holds_files_besides(dir: &Path, path: &str, tracked: &BTreeSet<&str>) -> bool {
+/// that is not one of the `removed` files, at any depth. Links are never
+/// followed.
+fn holds_files_besides(dir: &Path, path: &str, removed: &mut Removed<'_>) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return true;
     };
@@ -2962,17 +2975,86 @@ fn holds_files_besides(dir: &Path, path: &str, tracked: &BTreeSet<&str>) -> bool
             return true;
         };
         let inner = format!("{path}/{name}");
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => {
-                if holds_files_besides(&entry.path(), &inner, tracked) {
+        match entry.metadata() {
+            Ok(metadata) if metadata.is_dir() => {
+                if holds_files_besides(&entry.path(), &inner, removed) {
                     return true;
                 }
             }
-            Ok(_) if tracked.contains(inner.as_str()) => {}
+            Ok(metadata) if removed.holds(&inner, &metadata) => {}
             _ => return true,
         }
     }
     false
+}
+
+/// The files of a checkout a change removes from `HEAD`'s tree.
+struct Removed<'a> {
+    root: &'a Path,
+    paths: BTreeSet<&'a str>,
+    /// Device and inode of each of them on disk, read on first use.
+    #[cfg(unix)]
+    on_disk: Option<std::collections::HashSet<(u64, u64)>>,
+}
+
+impl<'a> Removed<'a> {
+    fn new(root: &'a Path, paths: BTreeSet<&'a str>) -> Self {
+        Self {
+            root,
+            paths,
+            #[cfg(unix)]
+            on_disk: None,
+        }
+    }
+
+    /// Whether the entry found on disk at `path` (`metadata`, not following
+    /// a link) is one of these files: by its name, or, when the disk finds
+    /// it under another (one that differs in case or Unicode form), by
+    /// being the same file. A file the change removes is only ever reached
+    /// through real folders, never through a link.
+    fn holds(&mut self, path: &str, metadata: &std::fs::Metadata) -> bool {
+        if self.paths.contains(path) {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let (root, paths) = (self.root, &self.paths);
+            let on_disk = self.on_disk.get_or_insert_with(|| {
+                paths
+                    .iter()
+                    .filter_map(|path| metadata_below_folders(root, path))
+                    .map(|metadata| (metadata.dev(), metadata.ino()))
+                    .collect()
+            });
+            on_disk.contains(&(metadata.dev(), metadata.ino()))
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows folders ignore case: the same name ignoring case is
+            // the same file.
+            let _ = (self.root, metadata);
+            let wanted = path.to_lowercase();
+            self.paths
+                .iter()
+                .any(|removed| removed.to_lowercase() == wanted)
+        }
+    }
+}
+
+/// The entry at `path` below `root`, reached only through real folders
+/// (never a link), without following a link at `path` itself.
+#[cfg(unix)]
+fn metadata_below_folders(root: &Path, path: &str) -> Option<std::fs::Metadata> {
+    for (index, _) in path.match_indices('/') {
+        if !std::fs::symlink_metadata(root.join(&path[..index]))
+            .ok()?
+            .is_dir()
+        {
+            return None;
+        }
+    }
+    std::fs::symlink_metadata(root.join(path)).ok()
 }
 
 /// One `--raw` diff entry.

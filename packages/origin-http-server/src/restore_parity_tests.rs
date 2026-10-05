@@ -873,6 +873,125 @@ async fn both_sides_turning_a_file_into_a_folder_still_conflict_inside_it() {
     }
 }
 
+/// Whether the folder `dir` is on a disk that ignores case in names.
+fn ignores_case(dir: &Path) -> bool {
+    let probe = dir.join(format!("case-probe-{}", Uuid::new_v4().simple()));
+    std::fs::write(&probe, b"").unwrap();
+    let upper = dir.join(probe.file_name().unwrap().to_str().unwrap().to_uppercase());
+    let found = std::fs::symlink_metadata(upper).is_ok();
+    std::fs::remove_file(probe).unwrap();
+    found
+}
+
+/// The names of the entries of the folder `dir`, as the disk keeps them.
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Work that renames a file or a folder by case only (`notes.md` to
+/// `Notes.md`, `docs/` to `Docs/`, a folder `Src/` that becomes a file
+/// `src`) is restored in both modes. On a disk that ignores case, Desktop
+/// finds the file `HEAD` tracks (and this restore removes) at the new name:
+/// that is never an untracked file in the way. A file `HEAD` does not track
+/// at a name that differs only in case still is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_by_case_only_is_restored() {
+    type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
+    for mode in MODES {
+        let cases: Vec<(&str, Files, Files, &str, &str, &str)> = vec![
+            (
+                "file",
+                vec![("notes.md", Some(&b"notes\n"[..]))],
+                vec![("notes.md", None), ("Notes.md", Some(&b"notes\n"[..]))],
+                "notes.md",
+                "Notes.md",
+                "Notes.md",
+            ),
+            (
+                "folder",
+                vec![("docs/a.md", Some(&b"a\n"[..]))],
+                vec![("docs/a.md", None), ("Docs/a.md", Some(&b"a\n"[..]))],
+                "docs/a.md",
+                "Docs/a.md",
+                "Docs",
+            ),
+            (
+                "folder into a file",
+                vec![("Src/a.md", Some(&b"a\n"[..]))],
+                vec![("Src/a.md", None), ("src", Some(&b"a\n"[..]))],
+                "Src/a.md",
+                "src",
+                "src",
+            ),
+        ];
+        for (case, seed, work, gone, came, top) in cases {
+            let space = Space::new(mode, &[]).await;
+            space.push(&seed, "seed");
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let mut files = work.clone();
+            files.push(("other.md", Some(b"other\n")));
+            let commit = space.park(&files, &reference);
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {case}: {body}");
+            assert_eq!(body["notRestored"], json!([]), "{mode:?} {case}: {body}");
+            assert_eq!(body["refDeleted"], true, "{mode:?} {case}: {body}");
+            assert_eq!(space.canonical_ref(&reference), None, "{mode:?} {case}");
+            assert_eq!(space.on_main(gone), None, "{mode:?} {case}");
+            assert!(space.on_main(came).is_some(), "{mode:?} {case}");
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} {case}"
+            );
+            if mode == Mode::Desktop {
+                let root = &space.server(mode).config.workspace_root;
+                assert!(names_in(root).contains(&top.to_string()), "{case}");
+            }
+        }
+
+        // A file the person keeps that `HEAD` never tracked, at a name
+        // that differs only in case from one the work adds, stays theirs.
+        if mode != Mode::Desktop {
+            continue;
+        }
+        let space = Space::new(mode, &[]).await;
+        let root = space.server(mode).config.workspace_root.clone();
+        if !ignores_case(&root) {
+            continue;
+        }
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let commit = space.park(
+            &[("todo.md", Some(b"work\n")), ("other.md", Some(b"other\n"))],
+            &reference,
+        );
+        std::fs::write(root.join("TODO.md"), b"mine\n").unwrap();
+        let before = space.main();
+        let (status, body) = space
+            .restore(json!({ "ref": reference, "rev": commit }))
+            .await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("dirty_paths")),
+            "{body}"
+        );
+        assert_eq!(body["paths"], json!(["todo.md"]), "{body}");
+        assert_eq!(std::fs::read(root.join("TODO.md")).unwrap(), b"mine\n");
+        assert_eq!(space.main(), before);
+        assert_eq!(
+            space.canonical_ref(&reference).as_deref(),
+            Some(commit.as_str())
+        );
+    }
+}
+
 /// A change `main` already holds as the work has it brings nothing in, so
 /// it is neither restored nor refused: nothing of the work exists only on
 /// the ref, which goes.
