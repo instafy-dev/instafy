@@ -3006,6 +3006,7 @@ async fn handle_git_recovery_restore(
     .map_err(|error| OriginError::internal(format!("git restore task failed: {error}")))??;
     let extra = serde_json::json!({
         "committed": report.committed,
+        "marked": report.marked,
         "notRestored": report.not_restored,
         "refDeleted": report.ref_deleted,
     });

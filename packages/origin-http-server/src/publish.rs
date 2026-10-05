@@ -33,8 +33,8 @@ use crate::publish_policy::{
 use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
-    parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
-    without_origin_trailers, RecoveryRef, ViewError,
+    parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
+    restore_of, without_origin_trailers, RecoveryRef, ViewError,
 };
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
@@ -333,6 +333,12 @@ pub struct RestoreReport {
     /// restored). False when the saved version already held the work, or
     /// the rest of it was kept or refused.
     pub committed: bool,
+    /// Nothing needed restoring, and this call put the empty restore commit
+    /// that records the restore on `main` (or published one an earlier call
+    /// made): `rev` is a new version with no changes, and the list now
+    /// shows the entry restored. Only with `committed: false`; false too
+    /// when the branch already had a restore commit of this ref on `main`.
+    pub marked: bool,
     /// Paths the work changes that kept the saved version: kept on request,
     /// or never restorable here (ignored, excluded, secret, legacy
     /// attachments, too large).
@@ -354,13 +360,22 @@ pub fn restore(
     request: RestoreRequest,
 ) -> Result<RestoreReport, OriginError> {
     let mut publisher = Publisher::new(ctx, DEFAULT_PUBLISH_BUDGET);
-    let (committed, not_restored, ref_deleted) = publisher.restore(request)?;
+    let restored = publisher.restore(request)?;
     Ok(RestoreReport {
         publish: publisher.report,
-        committed,
-        not_restored,
-        ref_deleted,
+        committed: restored.committed,
+        marked: restored.marked,
+        not_restored: restored.not_restored,
+        ref_deleted: restored.ref_deleted,
     })
+}
+
+/// What `Publisher::restore` did with the work (see [`RestoreReport`]).
+struct Restored {
+    committed: bool,
+    marked: bool,
+    not_restored: Vec<String>,
+    ref_deleted: bool,
 }
 
 /// Run the one-time repair of copies an older sync left behind (see
@@ -2548,15 +2563,18 @@ impl Publisher<'_> {
     /// - The commit (`Restore unsaved work`, with an
     ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
     ///   and committed by the origin, then published.
+    /// - With nothing left to bring back (the branch already holds the
+    ///   work, or the rest was kept or refused), the same commit is still
+    ///   made, empty, unless one of this ref is on the branch already: the
+    ///   marker records the restore on `main` for good, so the list shows
+    ///   the entry restored whatever `main` holds later (salvage refs are
+    ///   never removed). Such a restore is `marked`, not `committed`.
     /// - Once the work is on `main`, a recovery ref is deleted under a
     ///   lease on its tip, so the same work is not restored twice, but only
     ///   when every path left out was kept on request: a path refused here
     ///   keeps the ref, so work the person did not choose to leave out is
     ///   never removed. Salvage refs are kept.
-    fn restore(
-        &mut self,
-        request: RestoreRequest,
-    ) -> Result<(bool, Vec<String>, bool), OriginError> {
+    fn restore(&mut self, request: RestoreRequest) -> Result<Restored, OriginError> {
         let reference = RecoveryRef::validate(&self.git, request.reference.trim())?;
         let expected = match request.rev.as_deref().map(str::trim) {
             Some(rev) if !rev.is_empty() => Some(parse_rev(rev)?),
@@ -2697,6 +2715,35 @@ impl Publisher<'_> {
             || self
                 .unpublished_changes(&head, tracked.as_deref())
                 .map_err(internal)?;
+        // With nothing new to commit, the restore is still recorded once:
+        // an empty restore commit, unless the branch has one of this ref.
+        let earlier = if made {
+            None
+        } else {
+            let made_at = self
+                .git
+                .read_objects(std::slice::from_ref(&saved))
+                .map_err(internal)?
+                .first()
+                .map(|object| parse_commit(&object.data).timestamp)
+                .unwrap_or_default();
+            restore_of(
+                &self.git,
+                &head,
+                reference.as_str(),
+                made_at,
+                &self.config.git_author_email,
+            )?
+        };
+        let marker = !made && earlier.is_none();
+        // An earlier marker whose publish failed goes out with this call.
+        let earlier_pending = match earlier.as_deref() {
+            Some(earlier) => !self
+                .is_published(earlier, tracked.as_deref())
+                .map_err(internal)?,
+            None => false,
+        };
+        let marked = !committed && (marker || earlier_pending);
         if made {
             let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
             let dirty: Vec<String> = self
@@ -2722,6 +2769,9 @@ impl Publisher<'_> {
             self.git
                 .ok(&["read-tree", "-m", "-u", &head, &tree])
                 .map_err(internal)?;
+        }
+        if made || marker {
+            // The marker has `HEAD`'s tree: index and files stay as they are.
             let message = restore_commit_message(reference.as_str());
             let author = request.author.unwrap_or_else(|| self.identity.clone());
             let restored = self
@@ -2777,7 +2827,12 @@ impl Publisher<'_> {
         }
         not_restored.sort();
         not_restored.dedup();
-        Ok((committed, not_restored, ref_deleted))
+        Ok(Restored {
+            committed,
+            marked,
+            not_restored,
+            ref_deleted,
+        })
     }
 
     /// Whether `head` holds changes canonical `main` does not: it is not
