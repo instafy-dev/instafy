@@ -260,6 +260,17 @@ pub(crate) struct Hit {
     pub reason: RejectReason,
     /// The versions the tip's local history adds.
     pub versions: Vec<Version>,
+    /// The first commit whose change hit.
+    pub commit: String,
+    /// The tip's own change of the path against `main` hit. False when only
+    /// versions the tip no longer holds did.
+    pub at_tip: bool,
+}
+
+/// Whether the publish rules let `path` reach canonical at all; for such a
+/// path only a version can be refused (over the size cap, or a gitlink).
+pub(crate) fn publishable_path(path: &str) -> bool {
+    unpublishable_reason(path).is_none() && !is_unsafe_path(path)
 }
 
 /// What a tip's local history holds.
@@ -288,7 +299,8 @@ pub(crate) fn scan(git: &WorkspaceGit<'_>, tip: &str, main: Option<&str>) -> Res
     let listing = git.stdout(&arg_refs)?;
     let commits: Vec<&str> = listing.lines().filter(|line| !line.is_empty()).collect();
 
-    let mut changes: Vec<(String, RawChange)> = Vec::new();
+    // (commit, change, whether it is the tip's whole change against main)
+    let mut changes: Vec<(String, RawChange, bool)> = Vec::new();
     if !commits.is_empty() {
         let mut input = String::new();
         for commit in &commits {
@@ -312,7 +324,10 @@ pub(crate) fn scan(git: &WorkspaceGit<'_>, tip: &str, main: Option<&str>) -> Res
             },
         )?;
         for (commit, list) in parse_stdin_diff_tree(&raw) {
-            changes.extend(list.into_iter().map(|change| (commit.clone(), change)));
+            changes.extend(
+                list.into_iter()
+                    .map(|change| (commit.clone(), change, false)),
+            );
         }
     }
     let base = match main {
@@ -323,13 +338,13 @@ pub(crate) fn scan(git: &WorkspaceGit<'_>, tip: &str, main: Option<&str>) -> Res
     changes.extend(
         parse_raw_changes(&net)
             .into_iter()
-            .map(|change| (tip.to_string(), change)),
+            .map(|change| (tip.to_string(), change, true)),
     );
 
     let ids: Vec<String> = changes
         .iter()
-        .filter(|(_, change)| change.status != 'D' && change.new_mode != "160000")
-        .map(|(_, change)| change.new_oid.clone())
+        .filter(|(_, change, _)| change.status != 'D' && change.new_mode != "160000")
+        .map(|(_, change, _)| change.new_oid.clone())
         .collect();
     let sizes: HashMap<String, u64> = ids
         .iter()
@@ -339,7 +354,7 @@ pub(crate) fn scan(git: &WorkspaceGit<'_>, tip: &str, main: Option<&str>) -> Res
         .collect();
 
     let mut scanned = Scan::default();
-    for (commit, change) in changes {
+    for (commit, change, net) in changes {
         if commits.contains(&commit.as_str()) {
             scanned.touched.insert(change.path.clone());
         }
@@ -349,7 +364,10 @@ pub(crate) fn scan(git: &WorkspaceGit<'_>, tip: &str, main: Option<&str>) -> Res
         let hit = scanned.hits.entry(change.path.clone()).or_insert(Hit {
             reason,
             versions: Vec::new(),
+            commit: commit.clone(),
+            at_tip: false,
         });
+        hit.at_tip |= net;
         let version = Version {
             commit,
             mode: change.new_mode.clone(),

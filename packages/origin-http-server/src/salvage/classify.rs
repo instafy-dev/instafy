@@ -55,6 +55,9 @@ pub(crate) struct Skipped {
     pub path: String,
     pub size: u64,
     pub reason: &'static str,
+    /// For a version only a local commit held: that commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
 }
 
 impl Skipped {
@@ -176,6 +179,7 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
                     path: format!("{path}/"),
                     size: crate::hosted::tree_size(&root.join(path)),
                     reason: "excluded",
+                    commit: None,
                 }),
                 // A repository inside the work tree, or a folder git will not
                 // descend into: never turned into a gitlink.
@@ -183,6 +187,7 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
                     path: format!("{path}/"),
                     size: crate::hosted::tree_size(&root.join(path)),
                     reason: "unsupported",
+                    commit: None,
                 }),
             }
             continue;
@@ -196,6 +201,7 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
                     path: path.to_string(),
                     size: 0,
                     reason: "excluded",
+                    commit: None,
                 });
             }
             continue;
@@ -217,6 +223,7 @@ fn sort_file(path: &str, listed: Listed, kind: Kind, sorted: &mut Sorted) {
             path: path.to_string(),
             size,
             reason,
+            commit: None,
         })
     };
     let private = |reason: &'static str, sorted: &mut Sorted| {
@@ -262,6 +269,7 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                 path: format!("{folder}/"),
                 size: 0,
                 reason: "unsupported",
+                commit: None,
             });
             continue;
         };
@@ -273,6 +281,7 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                     path: format!("{folder}/{}", name.to_string_lossy()),
                     size: 0,
                     reason: "unsupported",
+                    commit: None,
                 }),
             }
         }
@@ -291,6 +300,7 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                         path: format!("{child}/"),
                         size: crate::hosted::tree_size(&root.join(&child)),
                         reason: "unsupported",
+                        commit: None,
                     });
                 }
                 continue;
@@ -302,6 +312,7 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                         path: child,
                         size,
                         reason: "too_large",
+                        commit: None,
                     })
                 }
                 Kind::File { .. } | Kind::Link => {
@@ -320,6 +331,7 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                     path: child,
                     size: 0,
                     reason: "unsupported",
+                    commit: None,
                 }),
                 Kind::Missing => {}
             }
@@ -511,6 +523,7 @@ mod tests {
             path: path.to_string(),
             size: 0,
             reason: "excluded",
+            commit: None,
         };
         assert!(skipped("node_modules/").rebuildable());
         assert!(skipped("pkg/target/debug/x").rebuildable());

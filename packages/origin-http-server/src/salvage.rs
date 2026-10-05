@@ -33,7 +33,10 @@
 //!    canonical lacks, and W's whole change, is checked with the publish
 //!    rules; with any hit, W becomes one commit on the last shared commit
 //!    with those paths as `main` has them, and their local versions go to
-//!    the private archive (`historyFiltered`).
+//!    the private archive (`historyFiltered`). A path the rules allow keeps
+//!    its version at W when only an earlier version was refused (over the
+//!    size cap, or a gitlink); that version is reported skipped with its
+//!    commit.
 //! 5. When W is not on `main`, it is pushed create-only to
 //!    `refs/instafy/salvage/gateway/<node>-<W[:8]>` with a `git.salvage`
 //!    credential, then read back with `git.read` (`canonicalVerified`). An

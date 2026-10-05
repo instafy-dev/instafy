@@ -1398,6 +1398,85 @@ fn an_export_that_may_succeed_later_holds_up_removal() {
     assert!(!entry.exists());
 }
 
+/// A version only a local commit held may not reach canonical (over the
+/// size cap, or a gitlink), but the path's version at the tip may: the tip's
+/// version goes into the filtered commit, and only the earlier version is
+/// reported as left out, with the commit that held it.
+#[test]
+fn a_version_only_history_held_never_drops_the_tips_version() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    // An oversized clip, then a small one.
+    write(&entry.join("media/clip.bin"), &vec![7u8; 21 * 1024 * 1024]);
+    ig(&entry, &["add", "-A"]);
+    let big_commit = entry_commit(&entry, "Add the clip");
+    let big = ig(&entry, &["rev-parse", "HEAD:media/clip.bin"]);
+    write(&entry.join("media/clip.bin"), b"a much smaller clip now\n");
+    write(&entry.join("src/app.js"), b"app\n");
+    ig(&entry, &["add", "-A"]);
+    entry_commit(&entry, "Shrink the clip");
+    // A gitlink, then a folder of files at the same path.
+    ig(
+        &entry,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{c1},vendor/lib"),
+        ],
+    );
+    let link_commit = entry_commit(&entry, "Add a submodule");
+    ig(&entry, &["rm", "-q", "--cached", "vendor/lib"]);
+    write(&entry.join("vendor/lib/index.js"), b"vendored\n");
+    ig(&entry, &["add", "-A"]);
+    entry_commit(&entry, "Vendor the library");
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (_, lines) = salvage(&gateway.settings(true, false, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    assert_eq!(report["historyFiltered"], true, "{report:#}");
+    let canonical = gateway.canonical();
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let show = |spec: &str| git_in(&canonical, &["show", spec]);
+    assert_eq!(
+        show(&format!("{salvaged}:media/clip.bin")),
+        "a much smaller clip now"
+    );
+    assert_eq!(show(&format!("{salvaged}:vendor/lib/index.js")), "vendored");
+    assert_eq!(show(&format!("{salvaged}:src/app.js")), "app");
+    // Neither the oversized version nor the commits holding it went.
+    for object in [&big, &big_commit, &link_commit] {
+        assert!(
+            !git_output(&canonical, &["cat-file", "-e", object], None)
+                .status
+                .success(),
+            "{object}"
+        );
+    }
+    assert_eq!(
+        report["skippedPaths"],
+        serde_json::json!([
+            {
+                "path": "media/clip.bin",
+                "size": 21 * 1024 * 1024,
+                "reason": "too_large",
+                "commit": big_commit,
+            },
+            {
+                "path": "vendor/lib",
+                "size": 0,
+                "reason": "unsupported",
+                "commit": link_commit,
+            },
+        ]),
+        "{report:#}"
+    );
+}
+
 /// A credential file `main` itself holds and changed after the shared
 /// commit: the filtered commit carries `main`'s version, which is no leak,
 /// and the local version stays in the private archive.
