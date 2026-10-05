@@ -1676,7 +1676,10 @@ async fn imports_are_committed_once_and_found_by_their_key() {
     }
     assert_eq!(
         canonical(&sc, &["log", "-1", "--format=%B", &imported]),
-        format!("Import from GitHub\n\nInstafy-Apply-Key: {key}\nInstafy-Apply-Fingerprint: sha256:aaaa")
+        format!(
+            "Import from GitHub\n\nInstafy-Apply-Key: {key}\nInstafy-Apply-Fingerprint: sha256:aaaa\n\
+             Instafy-Apply-Files: 1\nInstafy-Apply-Bytes: 10"
+        )
     );
 
     // The same request again replays the commit.
@@ -1835,16 +1838,16 @@ async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
     let receipt = rev(&answer);
     assert_eq!(answer.json()["committed"], true);
     assert_eq!(answer.json()["baseRev"], head.as_str());
-    assert_eq!(parent(&sc, &receipt), head);
-    assert_eq!(
-        canonical(&sc, &["rev-parse", &format!("{receipt}^{{tree}}")]),
-        canonical(&sc, &["rev-parse", &format!("{head}^{{tree}}")])
-    );
-    assert_eq!(
-        canonical(&sc, &["log", "-1", "--format=%B", &receipt]),
-        format!("Import from GitHub\n\nInstafy-Apply-Key: {key}\nInstafy-Apply-Fingerprint: sha256:cccc")
-    );
+    let counts = |answer: &Answer| {
+        (
+            answer.json()["fileCount"].clone(),
+            answer.json()["bytesWritten"].clone(),
+        )
+    };
+    // What the import carried, as the controller records it.
+    assert_eq!(counts(&answer), (json!(1), json!(3)));
 
+    // A resumed import reads exactly the first answer's counts.
     let status = post_as(
         &served,
         "/apply/status",
@@ -1854,12 +1857,19 @@ async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
     .await;
     assert_eq!(status.status, 200, "{}", status.json());
     assert_eq!(status.json()["rev"], receipt.as_str());
+    assert_eq!(counts(&status), counts(&answer));
+
+    assert_eq!(parent(&sc, &receipt), head);
     assert_eq!(
-        (
-            status.json()["fileCount"].clone(),
-            status.json()["bytesWritten"].clone()
-        ),
-        (json!(0), json!(0))
+        canonical(&sc, &["rev-parse", &format!("{receipt}^{{tree}}")]),
+        canonical(&sc, &["rev-parse", &format!("{head}^{{tree}}")])
+    );
+    assert_eq!(
+        canonical(&sc, &["log", "-1", "--format=%B", &receipt]),
+        format!(
+            "Import from GitHub\n\nInstafy-Apply-Key: {key}\nInstafy-Apply-Fingerprint: sha256:cccc\n\
+             Instafy-Apply-Files: 1\nInstafy-Apply-Bytes: 3"
+        )
     );
 
     // A runtime saves; the retried import replays and leaves that alone.
@@ -1868,6 +1878,7 @@ async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
     assert_eq!(again.status, 200, "{}", again.json());
     assert_eq!(again.json()["rev"], receipt.as_str());
     assert_eq!(again.json()["replayed"], true);
+    assert_eq!(counts(&again), counts(&answer));
     assert_eq!(sc.canonical_main().as_deref(), Some(later.as_str()));
     assert_eq!(
         show(&sc, &later, "src/app.ts").unwrap(),
@@ -1905,6 +1916,93 @@ async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
         git_in(&empty.remote(), &["ls-tree", "-r", "--name-only", &receipt]),
         ""
     );
+}
+
+/// An import's counts are what it carried (the files it kept and their
+/// size), unchanged files included, and a replay or a status check answers
+/// exactly those counts, as the first answer did.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_is_counted_the_same_when_it_is_replayed() {
+    let mut sc = HostedScenario::new();
+    sc.push(&[("same.txt", Some(b"same\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = serve(&sc).await;
+    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let key = "imp:0badc0de0badc0de";
+    let request = manifest(
+        &["same.txt", "new.txt", ".env"],
+        &[],
+        json!({
+            "leaseId": controller.lease.to_string(),
+            "idempotencyKey": key,
+            "requestFingerprint": "sha256:dddd",
+        }),
+    );
+    let archive = zip(&[
+        ("same.txt", b"same\n"),
+        ("new.txt", b"brand new\n"),
+        (".env", b"KEY=1\n"),
+    ]);
+    let counts = |answer: &Answer| {
+        (
+            answer.json()["fileCount"].clone(),
+            answer.json()["bytesWritten"].clone(),
+        )
+    };
+    let first = apply_as(&served, request.clone(), &archive, Some(&import), None).await;
+    assert_eq!(first.status, 200, "{}", first.json());
+    // `.env` is left out; `same.txt` is kept although it changes nothing.
+    assert_eq!(counts(&first), (json!(2), json!(15)));
+    let again = apply_as(&served, request, &archive, Some(&import), None).await;
+    assert_eq!(again.json()["replayed"], true);
+    assert_eq!(counts(&again), counts(&first));
+    let status = post_as(
+        &served,
+        "/apply/status",
+        json!({ "idempotencyKey": key, "requestFingerprint": "sha256:dddd" }),
+        &import,
+    )
+    .await;
+    assert_eq!(status.status, 200, "{}", status.json());
+    assert_eq!(counts(&status), counts(&first));
+
+    // A receipt without the count trailers is counted from its own change.
+    sc.sync_work();
+    std::fs::write(sc.work.join("old.txt"), b"old\n").unwrap();
+    git_in(&sc.work, &["add", "old.txt"]);
+    git_in(
+        &sc.work,
+        &[
+            "-c",
+            "user.name=instafy-origin",
+            "-c",
+            "user.email=gateway@instafy.dev",
+            "commit",
+            "-q",
+            "-m",
+            "Import\n\nInstafy-Apply-Key: imp:00000000000000000099",
+        ],
+    );
+    let remote = sc.remote();
+    git_in(
+        &sc.work,
+        &[
+            "push",
+            "-q",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/main",
+        ],
+    );
+    let status = post_as(
+        &served,
+        "/apply/status",
+        json!({ "idempotencyKey": "imp:00000000000000000099" }),
+        &import,
+    )
+    .await;
+    assert_eq!(status.status, 200, "{}", status.json());
+    assert_eq!(counts(&status), (json!(1), json!(4)));
 }
 
 /// The write routes, each with a body it would act on.

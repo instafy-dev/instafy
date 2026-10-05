@@ -254,6 +254,15 @@ impl Change {
         }
     }
 
+    /// What an import's receipt records: the files it keeps and their size
+    /// (`None` for anything but an import).
+    pub(super) fn receipt_counts(&self) -> Option<(usize, u64)> {
+        match self {
+            Self::Edits(edits) if edits.import => Some(edits.kept()),
+            _ => None,
+        }
+    }
+
     /// The shard refused `path`: an import or a restore leaves it out and
     /// tries again; anything else is answered with the refusal.
     pub(super) fn refused(

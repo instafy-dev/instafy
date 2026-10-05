@@ -48,6 +48,12 @@ pub(crate) const CREDENTIAL_MARGIN: Duration = Duration::from_secs(15);
 pub(crate) const APPLY_KEY_TRAILER: &str = "Instafy-Apply-Key";
 /// The trailer holding the import request's fingerprint.
 pub(crate) const APPLY_FINGERPRINT_TRAILER: &str = "Instafy-Apply-Fingerprint";
+/// The trailers holding what an import carried: the files it kept and
+/// their total size, as its first answer counted them. A replay or a status
+/// check answers exactly these (a commit's own diff counts nothing for an
+/// import that changed nothing, and leaves out files it did not change).
+pub(crate) const APPLY_FILES_TRAILER: &str = "Instafy-Apply-Files";
+pub(crate) const APPLY_BYTES_TRAILER: &str = "Instafy-Apply-Bytes";
 /// How far back an import's key is looked for.
 const APPLY_KEY_WINDOW: &str = "--since=31.days.ago";
 /// How many key matches are inspected (a forged one cannot hide a real one
@@ -186,15 +192,19 @@ pub(crate) struct ApplyKey {
     pub fingerprint: Option<String>,
 }
 
-/// `message` as committed: the import's trailers appended in a paragraph
-/// of their own.
-fn full_message(message: &str, key: Option<&ApplyKey>) -> String {
+/// `message` as committed: the import's trailers (its key, fingerprint and
+/// `counts`) appended in a paragraph of their own.
+fn full_message(message: &str, key: Option<&ApplyKey>, counts: Option<(usize, u64)>) -> String {
     let mut text = message.trim_end().to_string();
     text.push('\n');
     if let Some(key) = key {
         text.push_str(&format!("\n{APPLY_KEY_TRAILER}: {}\n", key.key));
         if let Some(fingerprint) = &key.fingerprint {
             text.push_str(&format!("{APPLY_FINGERPRINT_TRAILER}: {fingerprint}\n"));
+        }
+        if let Some((files, bytes)) = counts {
+            text.push_str(&format!("{APPLY_FILES_TRAILER}: {files}\n"));
+            text.push_str(&format!("{APPLY_BYTES_TRAILER}: {bytes}\n"));
         }
     }
     text
@@ -452,7 +462,6 @@ pub(crate) fn cas_commit(
     let quarantine = Quarantine::create_in(target.quarantine_parent).map_err(internal)?;
     let plain = WorkspaceGit::bare(target.mirror, None);
     let staged = WorkspaceGit::bare(target.mirror, None).with_quarantine(&quarantine);
-    let message = full_message(message, key);
     let committer = GitIdentity::new(
         target.committer.name.clone(),
         target.committer.email.clone(),
@@ -472,7 +481,7 @@ pub(crate) fn cas_commit(
                 if applied.fingerprint != key.fingerprint {
                     return Err(idempotency_conflict());
                 }
-                let receipt = applied_size(&plain, &applied.commit, applied.parent.as_deref())?;
+                let receipt = receipt_counts(&plain, &applied)?;
                 return Ok(CasOutcome {
                     rev: Some(applied.commit),
                     base_rev: applied.parent,
@@ -505,8 +514,11 @@ pub(crate) fn cas_commit(
         change.check(&staged, main.as_deref())?;
 
         let parents: Vec<&str> = main.iter().map(String::as_str).collect();
+        // The counts as this attempt leaves them (the shard may have
+        // refused a path an earlier attempt kept).
+        let text = full_message(message, key, change.receipt_counts());
         let commit = staged
-            .commit_tree(&tree, &parents, author, &committer, message.as_bytes())
+            .commit_tree(&tree, &parents, author, &committer, text.as_bytes())
             .map_err(internal)?;
         // The push waits on canonical, not on this server: other writes
         // may build theirs meanwhile.
@@ -626,6 +638,9 @@ pub(crate) struct AppliedImport {
     /// Its first parent (the `main` it was made on).
     pub parent: Option<String>,
     pub fingerprint: Option<String>,
+    /// The files and bytes its trailers record (`None` for a commit made
+    /// before they were written).
+    pub counts: Option<(usize, u64)>,
 }
 
 /// The newest commit on `main`'s first-parent chain from the last 31 days
@@ -646,7 +661,7 @@ pub(crate) fn find_applied(
     let field = format!("\u{1f}{token}\u{1f}");
     let record = format!("\u{1e}{token}\u{1e}");
     let pretty = format!(
-        "--pretty=format:%H%x1f{token}%x1f%P%x1f{token}%x1f%cE%x1f{token}%x1f%(trailers:key={APPLY_KEY_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FINGERPRINT_TRAILER},valueonly)%x1e{token}%x1e"
+        "--pretty=format:%H%x1f{token}%x1f%P%x1f{token}%x1f%cE%x1f{token}%x1f%(trailers:key={APPLY_KEY_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FINGERPRINT_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FILES_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_BYTES_TRAILER},valueonly)%x1e{token}%x1e"
     );
     let committer = format!("--committer=<{gateway_email}>");
     let grep = format!("--grep={APPLY_KEY_TRAILER}: {key}");
@@ -668,7 +683,8 @@ pub(crate) fn find_applied(
         .map_err(internal)?;
     for raw_record in raw.split(record.as_str()) {
         let fields: Vec<&str> = raw_record.trim().split(field.as_str()).collect();
-        let [commit, parents, committer, keys, fingerprints] = fields.as_slice() else {
+        let [commit, parents, committer, keys, fingerprints, files, bytes] = fields.as_slice()
+        else {
             continue;
         };
         if !is_full_object_id(commit) || !committer.eq_ignore_ascii_case(gateway_email) {
@@ -684,14 +700,33 @@ pub(crate) fn find_applied(
                 .next()
                 .filter(|parent| is_full_object_id(parent))
                 .map(str::to_string),
-            fingerprint: fingerprints
-                .lines()
-                .map(str::trim)
-                .find(|value| !value.is_empty())
-                .map(str::to_string),
+            fingerprint: first_value(fingerprints).map(str::to_string),
+            counts: first_value(files)
+                .and_then(|files| files.parse().ok())
+                .zip(first_value(bytes).and_then(|bytes| bytes.parse().ok())),
         }));
     }
     Ok(None)
+}
+
+/// The first non-empty line of a trailer's values.
+fn first_value(values: &str) -> Option<&str> {
+    values
+        .lines()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+}
+
+/// An import's receipt counts: what its trailers record, or for a commit
+/// made before they were written, the files it added or changed.
+pub(crate) fn receipt_counts(
+    git: &WorkspaceGit<'_>,
+    applied: &AppliedImport,
+) -> Result<(usize, u64), OriginError> {
+    match applied.counts {
+        Some(counts) => Ok(counts),
+        None => applied_size(git, &applied.commit, applied.parent.as_deref()),
+    }
 }
 
 /// How many files `commit` added or changed against `parent` (everything,

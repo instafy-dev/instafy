@@ -157,7 +157,7 @@ impl HostedScenario {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    fn sync_work(&self) {
+    pub(super) fn sync_work(&self) {
         let remote = self.remote();
         let remote = remote.to_str().unwrap();
         let heads = git_in(&self.work, &["ls-remote", "--heads", remote, "main"]);

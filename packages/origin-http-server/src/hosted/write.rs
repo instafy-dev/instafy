@@ -22,8 +22,8 @@ use uuid::Uuid;
 use super::answers::{idempotency_conflict, is_disk_full, or_disk_full};
 use super::cache::Freshness;
 use super::cas::{
-    applied_size, caller_message, cas_commit, default_message, find_applied, save_author, ApplyKey,
-    CachedCanonical, CasOutcome, CasTarget, IMPORT_BUDGET, SAVE_BUDGET,
+    caller_message, cas_commit, default_message, find_applied, receipt_counts, save_author,
+    ApplyKey, CachedCanonical, CasOutcome, CasTarget, IMPORT_BUDGET, SAVE_BUDGET,
 };
 use super::change::{Change, Edits, Revert};
 use super::disk::{create_private_dir, remove_entry};
@@ -303,8 +303,8 @@ async fn apply(
     )
     .await?;
 
-    // Counts of what was saved: a replay's from its commit, an import's
-    // without the files it left out.
+    // Counts of what was saved: a replay's from its commit's trailers, an
+    // import's without the files it left out (what those trailers record).
     let (file_count, bytes_written) = match (&outcome.receipt, &change) {
         (Some(receipt), _) => *receipt,
         (None, Change::Edits(edits)) if import => edits.kept(),
@@ -427,8 +427,7 @@ pub(super) async fn handle_apply_status(
         let Some(applied) = find_applied(&git, main.as_deref(), &gateway_email, &key)? else {
             return Ok(None);
         };
-        let (file_count, bytes_written) =
-            applied_size(&git, &applied.commit, applied.parent.as_deref())?;
+        let (file_count, bytes_written) = receipt_counts(&git, &applied)?;
         Ok(Some((applied, file_count, bytes_written)))
     })
     .await?;
