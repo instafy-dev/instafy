@@ -327,8 +327,11 @@ pub struct RestoreReport {
     /// or never restorable here (ignored, excluded, secret, legacy
     /// attachments, too large).
     pub not_restored: Vec<String>,
-    /// The recovery ref was removed after the restore reached `main`.
-    /// Salvage refs are never removed.
+    /// The recovery ref was removed after the restore reached `main`. It is
+    /// removed only when everything it holds was restored or kept on
+    /// request: work refused here (ignored, secret, excluded, too large)
+    /// keeps the ref, the only copy of that work on canonical, for the
+    /// person to review or remove. Salvage refs are never removed.
     pub ref_deleted: bool,
 }
 
@@ -2527,8 +2530,10 @@ impl Publisher<'_> {
     ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
     ///   and committed by the origin, then published.
     /// - Once the work is on `main`, a recovery ref is deleted under a
-    ///   lease on its tip, so the same work is not restored twice. Salvage
-    ///   refs are kept.
+    ///   lease on its tip, so the same work is not restored twice, but only
+    ///   when every path left out was kept on request: a path refused here
+    ///   keeps the ref, so work the person did not choose to leave out is
+    ///   never removed. Salvage refs are kept.
     fn restore(
         &mut self,
         request: RestoreRequest,
@@ -2613,14 +2618,19 @@ impl Publisher<'_> {
                 .iter()
                 .any(|root| path == root || path.starts_with(&format!("{root}/")))
         };
+        // Left out on request (`keep`), or refused because it can never
+        // come back here. Only the person's own choices let the ref go.
         let mut not_restored = Vec::new();
+        let mut refused = Vec::new();
         for change in &changes {
-            let refused = under(&change.path, &keep)
-                || crate::paths::is_reserved_path(&change.path)
-                || self.policy_reason(change, &sizes).is_some()
-                || ignored.contains(&change.path);
-            if refused {
+            if under(&change.path, &keep) {
                 not_restored.push(change.path.clone());
+            } else if crate::paths::is_reserved_path(&change.path)
+                || self.policy_reason(change, &sizes).is_some()
+                || ignored.contains(&change.path)
+            {
+                not_restored.push(change.path.clone());
+                refused.push(change.path.clone());
             }
         }
         let conflicts: Vec<String> = merged
@@ -2697,7 +2707,14 @@ impl Publisher<'_> {
             .is_published(&local, self.report.rev.as_deref())
             .map_err(internal)?;
         let mut ref_deleted = false;
-        if landed && !reference.is_salvage() && self.can_write {
+        if landed && !refused.is_empty() && !reference.is_salvage() {
+            info!(
+                reference = reference.as_str(),
+                refused = refused.len(),
+                "kept the restored work's ref: part of it cannot be restored here"
+            );
+        }
+        if landed && refused.is_empty() && !reference.is_salvage() && self.can_write {
             match delete_with_lease(&self.git, &remote, reference.as_str(), &fetched.tip) {
                 Ok(result) if result.class == PushClass::Pushed => ref_deleted = true,
                 Ok(result) => {

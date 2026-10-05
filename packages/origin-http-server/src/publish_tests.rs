@@ -2943,8 +2943,10 @@ async fn recovery_list_describes_unsaved_work_and_restored_salvage() {
 
 /// Restore on a Desktop checkout: the work lands on `main` as one commit
 /// committed by the origin with an `Instafy-Restored-From` trailer, the
-/// recovery ref is removed (so it cannot be restored twice), and a moved
-/// ref, a conflict or an unsaved edit in the way refuses it.
+/// recovery ref is removed once all of it is restored or kept on request
+/// (so it cannot be restored twice), a ref whose work could not all come
+/// back stays, and a moved ref, a conflict or an unsaved edit in the way
+/// refuses it.
 #[tokio::test(flavor = "multi_thread")]
 async fn restore_route_restores_unsaved_work_once() {
     let sc = Scenario::new(Options {
@@ -2955,14 +2957,22 @@ async fn restore_route_restores_unsaved_work_once() {
     let unsaved = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
     let unsaved_commit = push_to_ref(
         &sc,
+        &[("notes.md", Some(b"notes\n"))],
+        &[],
+        "Unsaved edits",
+        &unsaved,
+    );
+    let refused = recovery_ref_name(&sc, "20261005T121500Z-unsaved-0123456789ac");
+    let refused_commit = push_to_ref(
+        &sc,
         &[
-            ("notes.md", Some(b"notes\n")),
+            ("kept.md", Some(b"kept\n")),
             (".env", Some(b"TOKEN=1\n")),
             ("debug.log", Some(b"log\n")),
         ],
         &[],
-        "Unsaved edits",
-        &unsaved,
+        "Unsaved edits with a secret",
+        &refused,
     );
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
@@ -2975,19 +2985,39 @@ async fn restore_route_restores_unsaved_work_once() {
     assert_eq!(body["code"], "recovery_ref_moved");
     assert_eq!(body["rev"], unsaved_commit.as_str());
 
+    // Work that cannot all come back (a secret, an ignored file) is
+    // restored as far as it can be, and its ref stays for the person to
+    // review or remove: nothing they did not choose to leave out is lost.
+    let (status, body) =
+        restore(serde_json::json!({ "ref": refused, "rev": refused_commit })).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(body["gitSyncStatus"], "published");
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([".env", "debug.log"])
+    );
+    assert_eq!(sc.remote_file("kept.md").as_deref(), Some("kept\n"));
+    assert!(sc.remote_file(".env").is_none());
+    assert!(sc.remote_file("debug.log").is_none());
+    assert_eq!(sc.remote_refs(&refused).len(), 1);
+    // Restoring it again finds nothing more to bring back, and keeps it.
+    let (status, body) =
+        restore(serde_json::json!({ "ref": refused, "rev": refused_commit })).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(sc.remote_refs(&refused).len(), 1);
+
     let (status, body) =
         restore(serde_json::json!({ "ref": unsaved, "rev": unsaved_commit })).await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true);
     assert_eq!(body["refDeleted"], true);
     assert_eq!(body["gitSyncStatus"], "published");
-    assert_eq!(
-        body["notRestored"],
-        serde_json::json!([".env", "debug.log"])
-    );
+    assert_eq!(body["notRestored"], serde_json::json!([]));
     assert_eq!(sc.remote_file("notes.md").as_deref(), Some("notes\n"));
-    assert!(sc.remote_file(".env").is_none());
-    assert!(sc.remote_file("debug.log").is_none());
     assert_eq!(sc.disk("notes.md").as_deref(), Some("notes\n"));
     assert!(sc.remote_refs(&unsaved).is_empty());
     let head = git_in(&sc.remote, &["log", "-1", "--format=%cn <%ce>%n%B", "main"]);
@@ -3047,6 +3077,9 @@ async fn restore_route_restores_unsaved_work_once() {
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true);
     assert_eq!(body["notRestored"], serde_json::json!(["README.md"]));
+    // Everything left out was left out on request: the ref goes.
+    assert_eq!(body["refDeleted"], true, "{body}");
+    assert!(sc.remote_refs(&conflicted).is_empty());
     assert_eq!(sc.remote_file("other.md").as_deref(), Some("other\n"));
     assert!(sc
         .remote_file("README.md")
@@ -3073,6 +3106,70 @@ async fn restore_route_restores_unsaved_work_once() {
     let (status, body) = restore(serde_json::json!({ "ref": "refs/heads/main" })).await;
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
     assert_eq!(body["code"], "invalid_ref");
+    server.abort();
+}
+
+/// Work that `main` started to ignore after it was kept cannot be restored
+/// here. The restore says so and keeps the ref, the only copy of that work
+/// on canonical, so the person can still review or remove it.
+#[tokio::test(flavor = "multi_thread")]
+async fn restoring_work_main_now_ignores_keeps_its_ref() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        hook: true,
+        ..Options::default()
+    });
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    let commit = push_to_ref(
+        &sc,
+        &[("notes/plan.md", Some(b"the plan\n"))],
+        &[],
+        "Unsaved edits\n\nInstafy-Recovery-Kind: unsaved\nInstafy-Path: notes/plan.md",
+        &reference,
+    );
+    sc.push_other(&[(".gitignore", Some(b"notes/\n"))], "ignore notes");
+    sc.publish(Selection::None);
+    assert_eq!(sc.disk(".gitignore").as_deref(), Some("notes/\n"));
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": reference, "rev": commit }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["committed"], false, "{body}");
+    assert_eq!(body["notRestored"], serde_json::json!(["notes/plan.md"]));
+    assert_eq!(body["refDeleted"], false, "{body}");
+    assert_eq!(sc.remote_refs(&reference).len(), 1);
+    assert!(sc.remote_file("notes/plan.md").is_none());
+
+    // Still listed, and still readable at the ref.
+    let listed: serde_json::Value = client
+        .get(format!("{base}/git/recovery"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let entry = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["ref"] == reference.as_str())
+        .cloned()
+        .unwrap_or_else(|| panic!("{reference} not listed in {listed}"));
+    assert!(entry.get("restoredRev").is_none(), "{entry}");
+    let response = client
+        .get(format!("{base}/files/notes/plan.md"))
+        .query(&[("ref", reference.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     server.abort();
 }
 
