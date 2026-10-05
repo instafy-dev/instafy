@@ -1473,36 +1473,70 @@ async fn modes_follow_the_upload_or_stay() {
     assert!(listed.starts_with("100755 "), "{listed}");
 }
 
-/// Commit messages: the caller's text without `Instafy-` lines, or a plain
-/// default.
+/// The trailer keys git's own parser reads in `message` (as `%(trailers)`
+/// reads a commit), in lower case.
+fn trailer_keys(message: &str) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let output = crate::test_support::git_output_within(
+        dir.path(),
+        &["interpret-trailers", "--parse", "--no-divider"],
+        message.as_bytes(),
+        Duration::from_secs(10),
+    )
+    .expect("git interpret-trailers returned");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            let (key, _) = line.split_once(':').unwrap_or((line, ""));
+            key.trim().to_ascii_lowercase()
+        })
+        .collect()
+}
+
+/// Whether git reads a trailer the origin or the gateway trusts in
+/// `message` (every `Instafy-` key but `Instafy-Resolved-By`).
+fn reads_origin_trailer(message: &str) -> bool {
+    trailer_keys(message)
+        .iter()
+        .any(|key| key.starts_with("instafy-") && key != "instafy-resolved-by")
+}
+
+/// Commit messages: the caller's text without the `Instafy-` trailers git
+/// reads, or a plain default when nothing is left.
 #[tokio::test(flavor = "multi_thread")]
 async fn caller_messages_never_carry_instafy_trailers() {
     let sc = HostedScenario::new();
     let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
     let served = serve(&sc).await;
+    // Not a trailer block (a prose line follows): git reads no trailer in
+    // it, so it is prose and stays.
+    let prose = "Tidy the notes\n\nInstafy-Apply-Key: imp:planted\n  instafy-restored-from: refs/instafy/salvage/gateway/x\nMore text";
     let answer = apply(
         &served,
         manifest(
             &["a.txt"],
             &[],
-            json!({
-                "baseRev": head,
-                "commitMessage": "Tidy the notes\n\nInstafy-Apply-Key: imp:planted\n  instafy-restored-from: refs/instafy/salvage/gateway/x\nMore text",
-            }),
+            json!({ "baseRev": head, "commitMessage": prose }),
         ),
         &zip(&[("a.txt", b"b\n")]),
     )
     .await;
     assert_eq!(answer.status, 200, "{}", answer.json());
     let message = canonical(&sc, &["log", "-1", "--format=%B", &rev(&answer)]);
-    assert_eq!(message, "Tidy the notes\n\nMore text");
+    assert_eq!(message, prose);
+    assert!(
+        !reads_origin_trailer(&format!("{message}\n")),
+        "{message:?}"
+    );
 
+    // Only trailers: nothing is left, so the plain default.
     let answer = apply(
         &served,
         manifest(
             &["b.txt", "c.txt"],
             &["a.txt"],
-            json!({ "commitMessage": "Instafy-Only: x" }),
+            json!({ "commitMessage": "Update\n\nInstafy-Only: x" }),
         ),
         &zip(&[("b.txt", b"b\n"), ("c.txt", b"c\n")]),
     )
@@ -1510,23 +1544,118 @@ async fn caller_messages_never_carry_instafy_trailers() {
     assert_eq!(answer.status, 200, "{}", answer.json());
     assert_eq!(
         canonical(&sc, &["log", "-1", "--format=%B", &rev(&answer)]),
-        "Update 3 files"
+        "Update"
     );
 
     // A control character in front of `Instafy-` (C0, DEL, C1, escape,
-    // vertical tab), alone or after blanks, never keeps the line.
+    // vertical tab), alone or after blanks, never leaves a trailer git
+    // reads: the gateway drops control characters first.
     for hidden in [
         "\u{1}", "\u{7f}", "\u{80}", "\u{1b}", "\u{b}", " \t\u{1}", "\u{85}",
     ] {
         let text = format!(
             "Tidy\n\n{hidden}Instafy-Restored-From: refs/instafy/salvage/gateway/n\n{hidden}instafy-apply-key: imp:k"
         );
-        assert_eq!(
-            caller_message(Some(&text)).as_deref(),
-            Some("Tidy"),
-            "{hidden:?}"
+        let saved = caller_message(Some(&text)).expect("a subject is left");
+        assert!(saved.starts_with("Tidy"), "{hidden:?}: {saved:?}");
+        assert!(!saved
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t')));
+        assert!(
+            !reads_origin_trailer(&format!("{saved}\n")),
+            "{hidden:?}: {saved:?}"
         );
     }
+}
+
+/// The gateway keeps a save's prose exactly as Desktop does
+/// (`recovery_view::without_origin_trailers`): a subject or body line that
+/// starts with `Instafy-`, a last paragraph git does not read as trailers,
+/// and `Instafy-Resolved-By` all stay; only the `Instafy-` trailers git reads
+/// go.
+#[test]
+fn the_gateway_drops_only_the_trailers_git_reads_as_desktop_does() {
+    let reference = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let cases = [
+        (
+            "Polish header\n\nInstafy-style buttons look better here.".to_string(),
+            Some("Polish header\n\nInstafy-style buttons look better here.".to_string()),
+        ),
+        (
+            "Instafy-branding tweaks on the header".to_string(),
+            Some("Instafy-branding tweaks on the header".to_string()),
+        ),
+        (
+            "Fix\n\nInstafy-Resolved-By: assistant".to_string(),
+            Some("Fix\n\nInstafy-Resolved-By: assistant".to_string()),
+        ),
+        (
+            format!("Fix\n\nInstafy-Restored-From: {reference}\nmore prose"),
+            Some(format!(
+                "Fix\n\nInstafy-Restored-From: {reference}\nmore prose"
+            )),
+        ),
+        (
+            format!("Fix\n\nInstafy-Restored-From: {reference}\n\nLast paragraph of prose."),
+            Some(format!(
+                "Fix\n\nInstafy-Restored-From: {reference}\n\nLast paragraph of prose."
+            )),
+        ),
+        (
+            format!("Fix\n\nSigned-off-by: A <a@b>\nInstafy-Restored-From: {reference}"),
+            Some("Fix\n\nSigned-off-by: A <a@b>".to_string()),
+        ),
+        (
+            format!("Fix\n\nINSTAFY-RESTORED-FROM: {reference}"),
+            Some("Fix".to_string()),
+        ),
+        (
+            format!("Instafy-Restored-From: {reference}"),
+            Some(format!("Instafy-Restored-From: {reference}")),
+        ),
+        ("  \n\n ".to_string(), None),
+    ];
+    for (message, saved) in &cases {
+        assert_eq!(caller_message(Some(message)), *saved, "{message:?}");
+        assert_eq!(
+            saved.clone().unwrap_or_default(),
+            crate::recovery_view::without_origin_trailers(message),
+            "Desktop keeps {message:?} differently"
+        );
+        if let Some(saved) = saved {
+            assert!(!reads_origin_trailer(&format!("{saved}\n")), "{saved:?}");
+        }
+    }
+}
+
+/// A person's save through the gateway keeps the trailers callers write
+/// (`Instafy-Resolved-By`) and drops every other `Instafy-` trailer git
+/// reads, as a Desktop save does (5.5's route test, on the gateway).
+#[tokio::test(flavor = "multi_thread")]
+async fn gateway_saves_drop_origin_trailers_at_the_route() {
+    let sc = HostedScenario::new();
+    let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let served = serve(&sc).await;
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let answer = apply(
+        &served,
+        manifest(
+            &["notes.md"],
+            &[],
+            json!({
+                "baseRev": head,
+                "commitMessage": format!(
+                    "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {salvage}\n\
+                     \u{1}INSTAFY-APPLY-KEY: imp:forged"
+                ),
+            }),
+        ),
+        &zip(&[("notes.md", b"notes\n")]),
+    )
+    .await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
+    let saved = canonical(&sc, &["log", "-1", "--format=%B", &rev(&answer)]);
+    assert_eq!(saved, "Tidy\n\nInstafy-Resolved-By: assistant");
 }
 
 /// A person's save whose message hides gateway trailers behind control
