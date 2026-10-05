@@ -2018,27 +2018,16 @@ fn hidden_link_unchanged_since(
     #[cfg(not(unix))]
     let target_bytes = target.to_string_lossy().replace('\\', "/").into_bytes();
     let link_oid = blob_oid(&target_bytes);
-    let git = WorkspaceGit::new(workspace_root, None);
-    let Ok(raw) = git.bytes_opts(
-        &[
-            "ls-tree",
-            "-z",
-            "--full-tree",
-            "--end-of-options",
-            &base,
-            "--",
-            relative,
-        ],
-        &crate::workspace_git::RunOpts {
-            literal_pathspecs: true,
-            ..crate::workspace_git::RunOpts::default()
-        },
-    ) else {
+    // The base's entry is found with the path on stdin: the path is the
+    // request's own text and never an argument of git.
+    let Ok(mut found) =
+        WorkspaceGit::new(workspace_root, None).entries_by_path(&base, &[relative.to_string()])
+    else {
         return false;
     };
-    crate::workspace_git::parse_ls_tree(&raw)
-        .iter()
-        .any(|entry| entry.path == relative && entry.mode == "120000" && entry.oid == link_oid)
+    found
+        .remove(relative)
+        .is_some_and(|entry| entry.mode == "120000" && entry.oid == link_oid)
 }
 
 /// Regular files below a workspace directory (no links followed).
@@ -4052,6 +4041,52 @@ mod tests {
         expected.insert("missing.txt".to_string(), None);
         super::check_expected_blobs(workspace.path(), &expected, &[], None)
             .expect("fresh reads pass");
+    }
+
+    /// A path in `expected` is the request's own text. Telling whether a
+    /// hidden link is the one the base had finds the base's entry with the
+    /// path on stdin, so git's command line never holds it, even when it
+    /// reads as an option; the write is still 400 `unsupported_entry`.
+    #[cfg(unix)]
+    #[test]
+    fn a_hidden_link_check_never_hands_git_the_path() {
+        use crate::test_support::{commit_files, init_workspace_repo, with_entry, GitWrapper};
+
+        let workspace = TempDir::new().expect("workspace");
+        let root = workspace.path();
+        init_workspace_repo(root);
+        let path = "--output=from-request";
+        let seeded = commit_files(root, None, &[("README.md", Some("hello\n"))]);
+        let base = with_entry(root, &seeded, path, "120000", Some("README.md"));
+        symlink("README.md", root.join(path)).expect("link");
+
+        let calls = TempDir::new().expect("calls");
+        let log = calls.path().join("argv.log");
+        let wrapper = GitWrapper::install(
+            calls.path(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert(path.to_string(), Some(HELLO_BLOB.to_string()));
+        let error = super::check_expected_blobs(root, &expected, &[], Some(&base))
+            .expect_err("a link the base had is unsupported");
+        drop(wrapper);
+        match error {
+            crate::error::OriginError::WithReport {
+                status,
+                code,
+                report,
+                ..
+            } => {
+                assert_eq!((status.as_u16(), code), (400, "unsupported_entry"));
+                assert_eq!(report["paths"], json!([path]));
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(!argv.is_empty(), "git was never asked");
+        assert!(!argv.contains("from-request"), "{argv}");
+        assert!(!root.join("from-request").exists());
     }
 
     #[cfg(unix)]
