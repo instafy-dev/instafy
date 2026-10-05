@@ -16,6 +16,8 @@ mod disk;
 mod legacy;
 mod read;
 mod recovery;
+#[cfg(test)]
+mod recovery_tests;
 mod restore;
 mod routes;
 #[cfg(test)]

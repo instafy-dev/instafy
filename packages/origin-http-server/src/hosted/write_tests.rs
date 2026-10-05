@@ -97,7 +97,12 @@ async fn apply(served: &Served, manifest: serde_json::Value, archive: &[u8]) -> 
     apply_as(served, manifest, archive, None, None).await
 }
 
-async fn post_as(served: &Served, path: &str, body: serde_json::Value, token: &str) -> Answer {
+pub(super) async fn post_as(
+    served: &Served,
+    path: &str,
+    body: serde_json::Value,
+    token: &str,
+) -> Answer {
     let response = reqwest::Client::new()
         .post(format!("{}{path}", served.base))
         .bearer_auth(token)
@@ -117,14 +122,14 @@ fn rev(answer: &Answer) -> String {
 }
 
 /// `path` at `commit` in canonical, if it is there.
-fn show(sc: &HostedScenario, commit: &str, path: &str) -> Option<Vec<u8>> {
+pub(super) fn show(sc: &HostedScenario, commit: &str, path: &str) -> Option<Vec<u8>> {
     let spec = format!("{commit}:{path}");
     let output = git_output(&sc.remote(), &["cat-file", "blob", &spec], None);
     output.status.success().then_some(output.stdout)
 }
 
 /// `git <args>` in canonical.
-fn canonical(sc: &HostedScenario, args: &[&str]) -> String {
+pub(super) fn canonical(sc: &HostedScenario, args: &[&str]) -> String {
     git_in(&sc.remote(), args)
 }
 
@@ -164,12 +169,12 @@ fn hosted_origin_id(project: Uuid) -> Uuid {
 
 /// A controller that signs origin tokens, serves its JWKS, answers that
 /// one lease is active and hands out a git credential.
-struct StubController {
+pub(super) struct StubController {
     base: String,
     key: jsonwebtoken::EncodingKey,
     project: Uuid,
-    user: Uuid,
-    lease: Uuid,
+    pub(super) user: Uuid,
+    pub(super) lease: Uuid,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -180,7 +185,7 @@ impl Drop for StubController {
 }
 
 impl StubController {
-    async fn start(project: Uuid) -> Self {
+    pub(super) async fn start(project: Uuid) -> Self {
         use axum::extract::State;
         use axum::routing::{get as get_route, post as post_route};
         use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -255,7 +260,7 @@ impl StubController {
     }
 
     /// Point the scenario's gateway at this controller.
-    fn configure(&self, sc: &mut HostedScenario) {
+    pub(super) fn configure(&self, sc: &mut HostedScenario) {
         sc.config.skip_auth = false;
         sc.config.controller_base_url = reqwest::Url::parse(&self.base).unwrap();
         sc.config.jwks_url =
@@ -263,7 +268,7 @@ impl StubController {
     }
 
     /// An origin token of the lease holder with `scopes` and extra claims.
-    fn token(&self, scopes: &[&str], extra: serde_json::Value) -> String {
+    pub(super) fn token(&self, scopes: &[&str], extra: serde_json::Value) -> String {
         let now = chrono::Utc::now().timestamp();
         let origin = hosted_origin_id(self.project).to_string();
         let mut claims = json!({
