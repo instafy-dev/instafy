@@ -18,10 +18,12 @@
 //! own, so a request that stops waiting never stops the fetch. A plain read
 //! reuses a fetch that finished in the last two seconds or joins the one in
 //! flight; a write joins only a fetch that started after it arrived. A
-//! request waits at most ten seconds (for a space's first clone: fifteen
-//! for a plain read, whose client gives up soon after, five minutes for a
-//! write) and is then told to retry; a failed fetch is an error, never
-//! stale data.
+//! request waits at most ten seconds, a space's first clone included, and
+//! is then told to retry (503 `fetch_pending`) while the fetch goes on: no
+//! caller (the controller's reads and import checks, a browser's save)
+//! waits on the server longer than it waits for the answer. A write with
+//! time left asks again ([`super::cas::CachedCanonical`]). A failed fetch
+//! is an error, never stale data.
 //!
 //! A write that pushed a commit moves the mirror's `main` to it at once
 //! (after its objects are in), unless a fetch is updating the mirror's refs
@@ -66,14 +68,12 @@ const MAIN_FETCH_SPEC: &str = "+refs/heads/main:refs/heads/main";
 const COALESCE_WINDOW: Duration = Duration::from_secs(2);
 /// How long a request waits for a fetch of a mirror that exists.
 pub(crate) const FETCH_WAIT: Duration = Duration::from_secs(10);
-/// How long a write (or a read of a named commit) waits for a space's first
-/// clone.
-pub(crate) const FIRST_CLONE_WAIT: Duration = Duration::from_secs(300);
-/// How long a plain read waits for a space's first clone: less than the
-/// clients give such a read (20 s for the controller's managed-files
-/// reads, 30 s for Files), so they are told `fetch_pending` and retry
-/// rather than time out. The clone goes on either way.
-pub(crate) const FIRST_READ_WAIT: Duration = Duration::from_secs(15);
+/// How long any request waits for a space's first clone: less than every
+/// client gives the answer (20 s for the controller's managed-files reads,
+/// 30 s for its import status checks and for Files), so they are told
+/// `fetch_pending` and retry rather than time out. The clone goes on
+/// either way.
+pub(crate) const FIRST_CLONE_WAIT: Duration = FETCH_WAIT;
 /// A fetch is stopped after this long, waited for or not.
 const FETCH_DEADLINE: Duration = Duration::from_secs(300);
 /// What `Retry-After` tells a request that stopped waiting.
@@ -301,7 +301,6 @@ pub(crate) struct MirrorCache {
     fetches_started: AtomicU64,
     fetch_wait: Duration,
     first_clone_wait: Duration,
-    first_read_wait: Duration,
     /// When the sweeper packs a mirror: (loose objects, packs).
     pack_limits: (u64, u64),
     /// The free space the sweeper keeps on the cache's disk.
@@ -367,7 +366,6 @@ impl MirrorCache {
             fetches_started: AtomicU64::new(0),
             fetch_wait: FETCH_WAIT,
             first_clone_wait: FIRST_CLONE_WAIT,
-            first_read_wait: FIRST_READ_WAIT,
             pack_limits: (LOOSE_OBJECT_LIMIT, PACK_LIMIT),
             min_free_bytes: MIN_FREE_BYTES,
             // Tests see no disk pressure unless they ask for it.
@@ -400,20 +398,11 @@ impl MirrorCache {
         self
     }
 
-    /// Shorter waits, for tests (a first clone: `first_clone_wait` for
-    /// reads and writes alike).
+    /// Shorter waits, for tests.
     #[cfg(test)]
     pub(crate) fn with_waits(mut self, fetch_wait: Duration, first_clone_wait: Duration) -> Self {
         self.fetch_wait = fetch_wait;
         self.first_clone_wait = first_clone_wait;
-        self.first_read_wait = first_clone_wait;
-        self
-    }
-
-    /// A shorter wait of plain reads for a first clone, for tests.
-    #[cfg(test)]
-    pub(crate) fn with_first_read_wait(mut self, wait: Duration) -> Self {
-        self.first_read_wait = wait;
         self
     }
 
@@ -520,10 +509,10 @@ impl MirrorCache {
         arrived: Instant,
     ) -> Result<Option<String>, OriginError> {
         let first_clone = std::fs::symlink_metadata(lease.dir()).is_err();
-        let wait = match (first_clone, freshness) {
-            (false, _) => self.fetch_wait,
-            (true, Freshness::Coalesced) => self.first_read_wait,
-            (true, Freshness::Fresh) => self.first_clone_wait,
+        let wait = if first_clone {
+            self.first_clone_wait
+        } else {
+            self.fetch_wait
         };
         let fetch = {
             let mut state = locked(&lease.entry.fetches);

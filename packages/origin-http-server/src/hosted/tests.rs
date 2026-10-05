@@ -403,52 +403,48 @@ async fn a_slow_fetch_answers_retry_later_and_finishes_on_its_own() {
     assert_eq!(cache.fetches_started(), 1);
 }
 
-/// A space's first clone: a plain read stops waiting before its client
-/// would give up and is told to retry while the clone goes on; a write
-/// waits for it.
+/// No caller waits for a space's first clone longer than its client
+/// waits for the answer (the controller's managed-files reads 20 s, its
+/// import status checks 30 s, a browser's save): every caller, plain read
+/// or write, is told `fetch_pending` within the fetch wait, and the clone
+/// goes on in the background.
+#[test]
+fn a_first_clone_never_outlasts_the_callers_that_wait() {
+    assert!(super::cache::FETCH_WAIT <= Duration::from_secs(10));
+    assert!(super::cache::FIRST_CLONE_WAIT <= Duration::from_secs(10));
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_first_clone_answers_plain_reads_early_and_writes_late() {
+async fn a_first_clone_answers_every_caller_early_and_goes_on() {
     let sc = HostedScenario::new();
     let pushed = sc.push(&[("README.md", Some(b"one\n"))], "first");
     let mut cache = sc
         .open_cache()
-        .with_waits(Duration::from_millis(100), Duration::from_secs(20))
-        .with_first_read_wait(Duration::from_millis(200));
-    cache.test_fetch_delay = Some(Duration::from_millis(800));
+        .with_waits(Duration::from_millis(100), Duration::from_millis(200));
+    cache.test_fetch_delay = Some(Duration::from_millis(1500));
     let cache = Arc::new(cache);
 
+    for freshness in [Freshness::Coalesced, Freshness::Fresh] {
+        let lease = cache.lease(sc.project);
+        let started = std::time::Instant::now();
+        let error = cache
+            .resolve_main(&lease, freshness, None)
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(1), "{freshness:?}");
+        assert!(super::cache::is_fetch_pending(&error), "{error:?}");
+    }
+    // The clone went on without anyone waiting for it.
+    tokio::time::sleep(Duration::from_millis(3500)).await;
     let lease = cache.lease(sc.project);
-    let started = std::time::Instant::now();
-    let error = cache
-        .resolve_main(&lease, Freshness::Coalesced, None)
-        .await
-        .unwrap_err();
-    assert!(started.elapsed() < Duration::from_secs(5));
-    let response = axum::response::IntoResponse::into_response(error);
-    assert_eq!(
-        response.status(),
-        axum::http::StatusCode::SERVICE_UNAVAILABLE
-    );
-    drop(lease);
-
-    let other = HostedScenario::new();
-    let written = other.push(&[("README.md", Some(b"two\n"))], "first");
-    let mut cache = other
-        .open_cache()
-        .with_waits(Duration::from_millis(100), Duration::from_secs(20))
-        .with_first_read_wait(Duration::from_millis(200));
-    cache.test_fetch_delay = Some(Duration::from_millis(800));
-    let lease = cache.lease(other.project);
-    let cache = Arc::new(cache);
     assert_eq!(
         cache
-            .resolve_main(&lease, Freshness::Fresh, None)
+            .resolve_main(&lease, Freshness::Coalesced, None)
             .await
             .unwrap()
             .as_deref(),
-        Some(written.as_str())
+        Some(pushed.as_str())
     );
-    assert_ne!(pushed, written);
 }
 
 #[tokio::test(flavor = "multi_thread")]
