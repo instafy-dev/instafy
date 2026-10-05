@@ -23,6 +23,7 @@ use uuid::Uuid;
 use super::answers::{idempotency_conflict, internal, main_busy, push_rejected, reason_name};
 use super::cache::{Freshness, MirrorCache, MirrorLease};
 use super::change::Change;
+use super::routes::Admission;
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
 use crate::git::is_full_object_id;
@@ -348,6 +349,8 @@ pub(crate) struct CasTarget<'a> {
     pub committer: &'a GitIdentity,
     /// No new attempt starts after this.
     pub deadline: Instant,
+    /// The request's write slot, let go before the first push.
+    pub admission: Option<&'a Admission>,
 }
 
 /// The result of a change.
@@ -436,6 +439,11 @@ pub(crate) fn cas_commit(
         let commit = staged
             .commit_tree(&tree, &parents, author, &committer, message.as_bytes())
             .map_err(internal)?;
+        // The push waits on canonical, not on this server: other writes
+        // may build theirs meanwhile.
+        if let Some(admission) = target.admission {
+            admission.release();
+        }
         let push_deadline = target.deadline.max(Instant::now() + PUSH_GRACE);
         let write_token = canonical.write_token()?;
         let pusher = WorkspaceGit::bare(target.mirror, write_token.as_deref())

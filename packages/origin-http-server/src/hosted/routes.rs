@@ -22,17 +22,19 @@ use axum::{Extension, Router};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::warn;
 use uuid::Uuid;
 
 use super::answers::recovery_ref_moved;
-use super::cache::{canonical_unreachable, Freshness, MirrorCache, MirrorLease};
+use super::cache::{
+    canonical_unreachable, Freshness, MirrorCache, MirrorLease, RETRY_AFTER_SECONDS,
+};
 use super::read::{self, EntriesRead, FileRead};
 use super::{recovery, write};
 use crate::apply::normalize_relative_path;
-use crate::auth::OriginClaims;
+use crate::auth::{OriginClaims, WORKSPACE_IMPORT_SCOPE};
 use crate::error::OriginError;
 use crate::git::{DirtyPathEntry, DirtyPathGroup, GitHistoryEntry};
 use crate::paths::is_reserved_path;
@@ -49,8 +51,15 @@ use crate::workspace_git::WorkspaceGit;
 /// The header naming the commit a read looked at.
 pub(crate) const INSTAFY_REV_HEADER: &str = "x-instafy-rev";
 
-/// How many uploads are staged and committed at once, across all spaces.
+/// How many writes (uploads, reverts, restores) are read, staged and built
+/// at once, across all spaces. A slot is let go before the push to
+/// canonical, which may wait on a slow shard for minutes.
 const APPLY_SLOTS: usize = 4;
+/// Imports have slots of their own, so a person's save never waits behind
+/// one (an import stages and hashes up to thousands of files).
+const IMPORT_SLOTS: usize = 2;
+/// How long a write waits for a slot before it is told to try again.
+const ADMISSION_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a `?ref=` read may spend listing and fetching the ref.
 pub(super) const REF_FETCH_DEADLINE: Duration = Duration::from_secs(60);
@@ -62,6 +71,10 @@ pub(crate) struct HostedState {
     pub(crate) cache: Arc<MirrorCache>,
     /// Admission for uploads and the writes that build trees.
     pub(crate) apply_slots: Arc<Semaphore>,
+    /// Admission for imports (tokens with `workspace.import`).
+    pub(crate) import_slots: Arc<Semaphore>,
+    /// How long a write waits for a slot.
+    pub(crate) admission_wait: Duration,
 }
 
 impl HostedState {
@@ -70,7 +83,16 @@ impl HostedState {
             auth,
             cache,
             apply_slots: Arc::new(Semaphore::new(APPLY_SLOTS)),
+            import_slots: Arc::new(Semaphore::new(IMPORT_SLOTS)),
+            admission_wait: ADMISSION_WAIT,
         }
+    }
+
+    /// A shorter wait for a slot, for tests.
+    #[cfg(test)]
+    pub(crate) fn with_admission_wait(mut self, wait: Duration) -> Self {
+        self.admission_wait = wait;
+        self
     }
 
     fn gateway_email(&self) -> String {
@@ -153,18 +175,65 @@ async fn require_write(
     route_auth::authorize_and_continue(&state.auth, request, next, &["fs.write"]).await
 }
 
+/// A write's admission slot. It covers reading and staging the upload and
+/// building the change (the CPU and disk work), and is let go before the
+/// push to canonical ([`Admission::release`]) or when the request ends,
+/// whichever comes first. Work the request started keeps it until then,
+/// also when the client is gone.
+#[derive(Clone)]
+pub(crate) struct Admission(Arc<std::sync::Mutex<Option<OwnedSemaphorePermit>>>);
+
+impl Admission {
+    fn new(permit: OwnedSemaphorePermit) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(Some(permit))))
+    }
+
+    /// Let the slot go (again: nothing).
+    pub(crate) fn release(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+}
+
+/// 503: every write slot stayed taken for the admission wait.
+pub(super) fn writes_busy() -> OriginError {
+    OriginError::retry_later(
+        "writes_busy",
+        "the server is busy saving other changes; try again in a moment",
+        RETRY_AFTER_SECONDS,
+    )
+}
+
+/// Admit a write: a slot from the import pool for an import token, from
+/// the save pool otherwise, waited for at most [`ADMISSION_WAIT`] (then
+/// 503 `writes_busy` with `Retry-After`).
 async fn limit_apply_concurrency(
     State(state): State<HostedState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, OriginError> {
-    let _permit = state
-        .apply_slots
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| OriginError::unavailable("apply admission is unavailable"))?;
-    Ok(next.run(request).await)
+    let import = request
+        .extensions()
+        .get::<OriginClaims>()
+        .is_some_and(|claims| claims.has_scope(WORKSPACE_IMPORT_SCOPE));
+    let slots = if import {
+        &state.import_slots
+    } else {
+        &state.apply_slots
+    };
+    let permit =
+        match tokio::time::timeout(state.admission_wait, slots.clone().acquire_owned()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => return Err(OriginError::unavailable("apply admission is unavailable")),
+            Err(_) => return Err(writes_busy()),
+        };
+    let admission = Admission::new(permit);
+    request.extensions_mut().insert(admission.clone());
+    let response = next.run(request).await;
+    admission.release();
+    Ok(response)
 }
 
 pub(super) fn project_of(state: &HostedState, claims: &OriginClaims) -> Result<Uuid, OriginError> {

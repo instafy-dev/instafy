@@ -629,6 +629,8 @@ async fn the_sweeper_keeps_mirrors_in_use_and_removes_idle_ones() {
 pub(super) struct Served {
     pub base: String,
     pub cache: Arc<MirrorCache>,
+    /// The state the router serves (its semaphores are shared).
+    pub state: super::routes::HostedState,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -639,6 +641,14 @@ impl Drop for Served {
 }
 
 pub(super) async fn serve(sc: &HostedScenario) -> Served {
+    serve_with(sc, |state| state).await
+}
+
+/// [`serve`] with the state `adjust` makes of the usual one.
+pub(super) async fn serve_with(
+    sc: &HostedScenario,
+    adjust: impl FnOnce(super::routes::HostedState) -> super::routes::HostedState,
+) -> Served {
     let config = Arc::new(sc.config.clone());
     let http = reqwest::Client::new();
     let cache =
@@ -648,7 +658,8 @@ pub(super) async fn serve(sc: &HostedScenario) -> Served {
         config,
         http_client: http,
     };
-    let app = super::routes::router(super::routes::HostedState::new(auth, cache.clone()));
+    let state = adjust(super::routes::HostedState::new(auth, cache.clone()));
+    let app = super::routes::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -657,6 +668,7 @@ pub(super) async fn serve(sc: &HostedScenario) -> Served {
     Served {
         base: format!("http://{address}"),
         cache,
+        state,
         server,
     }
 }
