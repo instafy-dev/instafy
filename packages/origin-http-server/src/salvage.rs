@@ -82,6 +82,8 @@ use crate::tree_merge::changed_paths;
 use crate::workspace_fs::WorkspaceDir;
 use crate::workspace_git::WorkspaceGit;
 
+pub(crate) use self::work::PRIVATE_PATH_TRAILER;
+
 /// Pushes of one entry that the shard's path policy may refuse.
 const MAX_POLICY_RETRIES: usize = 8;
 /// Rounds of history filtering before giving up on an entry.

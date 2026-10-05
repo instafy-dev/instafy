@@ -63,6 +63,16 @@
 //! out but on request: work refused here exists only on the ref, which then
 //! stays. A salvage ref with nothing left to bring back is recorded with an
 //! empty restore commit ([`restore_marker`]).
+//!
+//! A salvage commit the gateway made (its committer is
+//! [`RestoreInput::salvage_committer`]) also names each file its salvage
+//! kept in the owner-only private archive, never on canonical, as an
+//! `Instafy-Private-Path: <secret|ignored|attachment> <path>` trailer. Those
+//! files are listed in `notRestored` with that reason, unless the path is
+//! listed already, so the person knows the restore lacks them. They change
+//! neither the restored tree nor whether the ref may go (a salvage ref
+//! always stays). The same trailers under any other committer, or on a
+//! recovery ref, list nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -70,11 +80,14 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use uuid::Uuid;
 
-use crate::apply::portable_key;
+use crate::apply::{normalize_relative_path, portable_key};
 use crate::error::OriginError;
 use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
-use crate::recovery_view::{left_out_reason, restore_marker, NotRestored, RecoveryRef};
+use crate::recovery_view::{
+    left_out_reason, parse_commit, restore_marker, NotRestored, RecoveryRef,
+};
+use crate::salvage::PRIVATE_PATH_TRAILER;
 use crate::tree_merge::{three_way, tree_with_entries_from};
 use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, WorkspaceGit};
 
@@ -99,6 +112,10 @@ pub(crate) struct RestoreInput<'a> {
     /// (Desktop: canonical `main` as last fetched, which may be ahead of
     /// the branch restored onto).
     pub recorded_on: Option<&'a str>,
+    /// The gateway's address: a salvage ref's commit it made lists the
+    /// files its salvage kept privately (the gateway: its own; Desktop:
+    /// [`crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL`]).
+    pub salvage_committer: &'a str,
     /// A folder the ignore check may make its scratch tree in.
     pub scratch: &'a Path,
 }
@@ -364,6 +381,15 @@ pub(crate) fn plan(
         return Err(PlanError::Conflict(conflicts));
     }
 
+    // Files the salvage kept privately are in no commit: they are named so
+    // the person knows the restore lacks them. The tree never changes for
+    // them.
+    if input.reference.is_salvage() {
+        for (path, reason) in privately_kept(git, input.saved, input.salvage_committer)? {
+            left_out.entry(path).or_insert(reason);
+        }
+    }
+
     let made = tree != onto_tree;
     let (marker, earlier_marker) = match input.onto {
         Some(onto) => {
@@ -390,6 +416,48 @@ pub(crate) fn plan(
         marker,
         earlier_marker,
     })
+}
+
+/// The files a salvage commit's `Instafy-Private-Path` trailers name, with
+/// why, when `committer` made the commit; none otherwise.
+fn privately_kept(
+    git: &WorkspaceGit<'_>,
+    commit: &str,
+    committer: &str,
+) -> Result<Vec<(String, &'static str)>> {
+    let object = git
+        .read_objects(&[commit.to_string()])?
+        .pop()
+        .context("the commit to restore is missing")?;
+    let text = String::from_utf8_lossy(&object.data);
+    let made_by_gateway = text
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.strip_prefix("committer "))
+        .any(|line| {
+            line.split_once('<')
+                .and_then(|(_, rest)| rest.split_once('>'))
+                .is_some_and(|(email, _)| email.trim().eq_ignore_ascii_case(committer.trim()))
+        });
+    if !made_by_gateway {
+        return Ok(Vec::new());
+    }
+    Ok(parse_commit(&object.data)
+        .trailers
+        .into_iter()
+        .filter(|(key, _)| key == PRIVATE_PATH_TRAILER)
+        .filter_map(|(_, value)| {
+            let (reason, path) = value.split_once(' ')?;
+            let reason = match reason {
+                "secret" => "secret",
+                "ignored" => "ignored",
+                "attachment" => "attachment",
+                _ => return None,
+            };
+            let path = normalize_relative_path(path)?;
+            Some((path, reason))
+        })
+        .collect())
 }
 
 /// The paths of `pending` (changes neither left out nor already on `onto`)
