@@ -189,6 +189,20 @@ impl StalledLaunchFixture {
             .get(0))
     }
 
+    async fn stop_event_count(&self) -> anyhow::Result<i64> {
+        Ok(self
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select count(*)::bigint from runtime_events
+                 where runtime_id = $1 and kind = 'stopped'",
+                &[&self.runtime_id],
+            )
+            .await?
+            .get(0))
+    }
+
     /// The original launch is still the runtime's only, unreleased lease and
     /// the provider was never called.
     async fn assert_launch_reused(&self, reply: &RuntimeEnsureReply) -> anyhow::Result<()> {
@@ -526,6 +540,60 @@ async fn explicit_retry_keeps_a_launch_that_leased_a_job() -> anyhow::Result<()>
             .await?;
         let reply = fixture.ensure_over_http(true, Some(true)).await?;
         fixture.assert_launch_reused(&reply).await
+    })
+    .await
+}
+
+/// Two retries can probe the same stalled launch. The one that stops second
+/// still names the lease it saw, so it leaves the launch the first one
+/// started alone instead of replacing a launch seconds old.
+#[tokio::test]
+async fn a_late_retry_keeps_the_launch_that_replaced_the_one_it_saw() -> anyhow::Result<()> {
+    let fixture = setup(
+        "stalled-launch-late-retry",
+        STALLED_LAUNCH_AGE_SECONDS,
+        None,
+    )
+    .await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        let first = fixture.ensure_over_http(true, Some(true)).await?;
+        fixture.assert_launch_replaced(&first).await?;
+        let stops_before = fixture.stop_event_count().await?;
+
+        // The late retry's probe saw the original lease as stalled.
+        replace_stalled_launch_before_ensure(
+            &fixture.state,
+            &fixture.project_id,
+            fixture.runtime_id,
+            fixture.lease_id,
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+
+        assert_eq!(
+            fixture.provider_events().await,
+            vec!["release", "launch"],
+            "the newer launch must not be released"
+        );
+        assert_eq!(fixture.stop_event_count().await?, stops_before);
+        let row = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select r.status, r.active_lease_id, lease.status as lease_status,
+                        lease.released_at is null as live
+                 from runtimes r
+                 join runtime_leases lease on lease.id = r.active_lease_id
+                 where r.id = $1",
+                &[&fixture.runtime_id],
+            )
+            .await?;
+        assert_eq!(row.get::<_, String>("status"), "requested");
+        assert_eq!(row.get::<_, Uuid>("active_lease_id"), first.lease_id);
+        assert_eq!(row.get::<_, String>("lease_status"), "launching");
+        assert!(row.get::<_, bool>("live"));
+        Ok(())
     })
     .await
 }

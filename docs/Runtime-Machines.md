@@ -110,7 +110,10 @@ Sweep stops publish `runtime.stopped` with a `reason`:
   ≥2 OOM stops in 7 days (`runtime_events` query).
 - `heartbeat_timeout` — genuine agent death; auto-recovery unchanged.
 - `launch_timeout` — the launch never registered within 15 minutes (see "A
-  launch that does not come up" below).
+  launch that does not come up" below). The Studio handles it like
+  `heartbeat_timeout`: a tab that had the space running starts it again. If
+  the provider never brings the runtime up, such a tab therefore relaunches
+  it about every 15 minutes while it stays open.
 - `runtime_limit_reclaim` — the machine was idle and another space in the
   organization was waiting for the hosted runtime slot (see "Waiting on the
   runtime limit" below). The event carries `queuedJobCount`, the work left
