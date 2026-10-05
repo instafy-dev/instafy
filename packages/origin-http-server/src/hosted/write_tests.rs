@@ -1202,6 +1202,12 @@ async fn imports_are_committed_once_and_found_by_their_key() {
     );
     assert_eq!(show(&sc, &imported, "dist/out.js"), None);
     assert_eq!(show(&sc, &imported, "src/app.ts").unwrap(), b"export {}\n");
+    // What an import leaves out is never hashed, so never reaches the mirror.
+    for left_out in ["KEY=1\n", "built\n"] {
+        let blob = sc.blob(left_out);
+        let present = git_output(&sc.mirror(), &["cat-file", "-e", &blob], None);
+        assert!(!present.status.success(), "{left_out:?} reached the mirror");
+    }
     assert_eq!(
         canonical(&sc, &["log", "-1", "--format=%B", &imported]),
         format!("Import from GitHub\n\nInstafy-Apply-Key: {key}\nInstafy-Apply-Fingerprint: sha256:aaaa")
