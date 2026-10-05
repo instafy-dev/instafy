@@ -21,18 +21,22 @@
 //! request waits at most ten seconds (five minutes for a space's first
 //! clone) and is then told to retry; a failed fetch is an error, never
 //! stale data.
+//!
+//! A write that pushed a commit moves the mirror's `main` to it at once
+//! (after its objects are in), unless a fetch is updating the mirror's refs
+//! right then: the next read then fetches instead of reusing that fetch.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use super::disk::{ensure_private_dir, modified, remove_entry, rename_no_replace, tree_size};
@@ -142,6 +146,10 @@ struct FetchState {
     queued: Option<Pending>,
     /// When the last fetch finished, if it succeeded.
     last_success: Option<Instant>,
+    /// A write pushed to canonical at this time but could not move the
+    /// mirror's `main`: until a fetch that started later runs, every read
+    /// waits for one.
+    refetch_since: Option<Instant>,
 }
 
 /// One space's mirror, as the process tracks it.
@@ -151,6 +159,9 @@ pub(crate) struct MirrorEntry {
     /// a mirror in use.
     leases: AtomicUsize,
     fetches: Mutex<FetchState>,
+    /// Held while a fetch updates the mirror's refs, and by a write moving
+    /// `main` to the commit it pushed, so the two never race on `main`.
+    refs: Mutex<()>,
     /// Stale fetch namespaces were swept since this process opened it.
     swept: AtomicBool,
 }
@@ -303,6 +314,26 @@ impl MirrorCache {
         self.root.join(format!("{}.git", project.as_hyphenated()))
     }
 
+    /// Where writes make their object quarantines (absolute), created
+    /// again when someone removed it.
+    pub(crate) fn quarantine_dir(&self) -> Result<PathBuf, OriginError> {
+        self.scratch_dir(QUARANTINE_DIR)
+    }
+
+    /// Where writes stage the files of an upload (absolute), created again
+    /// when someone removed it.
+    pub(crate) fn staging_dir(&self) -> Result<PathBuf, OriginError> {
+        self.scratch_dir(STAGING_DIR)
+    }
+
+    fn scratch_dir(&self, name: &str) -> Result<PathBuf, OriginError> {
+        let path = self.root.join(name);
+        ensure_private_dir(&self.root)
+            .and_then(|()| ensure_private_dir(&path))
+            .map_err(|error| OriginError::internal(format!("{error:#}")))?;
+        Ok(path)
+    }
+
     /// The canonical repository of `project`.
     pub(crate) fn remote_url(&self, project: Uuid) -> Result<String, OriginError> {
         self.config
@@ -320,6 +351,7 @@ impl MirrorCache {
                     project,
                     leases: AtomicUsize::new(0),
                     fetches: Mutex::new(FetchState::default()),
+                    refs: Mutex::new(()),
                     swept: AtomicBool::new(false),
                 })
             })
@@ -350,8 +382,13 @@ impl MirrorCache {
         };
         let fetch = {
             let mut state = locked(&lease.entry.fetches);
-            match freshness {
-                Freshness::Coalesced => {
+            match (freshness, state.refetch_since) {
+                // A write pushed a commit the mirror may not show yet: only
+                // a fetch that started after that push will do.
+                (Freshness::Coalesced, Some(since)) => {
+                    Some(self.fresh_fetch(&lease.entry, &mut state, since, caller_token))
+                }
+                (Freshness::Coalesced, None) => {
                     // A recent fetch counts only while its mirror is there.
                     let recent = state
                         .last_success
@@ -367,19 +404,8 @@ impl MirrorCache {
                         Some(self.start_fetch(&lease.entry, &mut state, None, caller_token))
                     }
                 }
-                Freshness::Fresh => {
-                    if let Some(queued) = &state.queued {
-                        Some(queued.fetch.clone())
-                    } else if let Some(running) = state
-                        .running
-                        .as_ref()
-                        .filter(|running| running.started.is_some_and(|at| at >= arrived))
-                    {
-                        Some(running.fetch.clone())
-                    } else {
-                        let before = state.running.as_ref().map(|running| running.fetch.clone());
-                        Some(self.start_fetch(&lease.entry, &mut state, before, caller_token))
-                    }
+                (Freshness::Fresh, _) => {
+                    Some(self.fresh_fetch(&lease.entry, &mut state, arrived, caller_token))
                 }
             }
         };
@@ -397,6 +423,30 @@ impl MirrorCache {
         })
         .await
         .map_err(|error| OriginError::internal(format!("main read task failed: {error}")))?
+    }
+
+    /// A fetch that starts no earlier than `since`: the queued one, the
+    /// running one if it started since, or a new one (queued behind the
+    /// running fetch, if any).
+    fn fresh_fetch(
+        self: &Arc<Self>,
+        entry: &Arc<MirrorEntry>,
+        state: &mut FetchState,
+        since: Instant,
+        caller_token: Option<&str>,
+    ) -> SharedFetch {
+        if let Some(queued) = &state.queued {
+            return queued.fetch.clone();
+        }
+        if let Some(running) = state
+            .running
+            .as_ref()
+            .filter(|running| running.started.is_some_and(|at| at >= since))
+        {
+            return running.fetch.clone();
+        }
+        let before = state.running.as_ref().map(|running| running.fetch.clone());
+        self.start_fetch(entry, state, before, caller_token)
     }
 
     /// Start a fetch of `main` in a task of its own, after `before` when
@@ -455,6 +505,11 @@ impl MirrorCache {
     fn fetch_started(&self, entry: &MirrorEntry, id: u64) {
         self.fetches_started.fetch_add(1, Ordering::SeqCst);
         let mut state = locked(&entry.fetches);
+        // This fetch reads canonical after every push recorded so far.
+        let now = Instant::now();
+        if state.refetch_since.is_some_and(|since| since <= now) {
+            state.refetch_since = None;
+        }
         if state.queued.as_ref().is_some_and(|queued| queued.id == id) {
             let mut pending = state.queued.take().expect("checked above");
             pending.started = Some(Instant::now());
@@ -492,6 +547,7 @@ impl MirrorCache {
         let entry = guard.entry.clone();
         tokio::task::spawn_blocking(move || {
             let dir = cache.open_mirror(&entry)?;
+            let _refs = locked(&entry.refs);
             fetch_main_into(&dir, &url, token.as_deref(), project)
         })
         .await
@@ -542,6 +598,46 @@ impl MirrorCache {
         }
     }
 
+    /// After a write pushed `commit` (on top of `old`, `None` for a new
+    /// `main`) to canonical: move the mirror's `main` to it, so reads show
+    /// the save without a fetch. Only when the commit's objects were moved
+    /// into the mirror (`promoted`) and no fetch is updating the mirror's
+    /// refs right now; otherwise reads fetch first until a fetch that
+    /// started after this call has run. Blocking; never fails the write.
+    pub(crate) fn record_push(
+        &self,
+        mirror: &MirrorRef,
+        commit: &str,
+        old: Option<&str>,
+        promoted: bool,
+    ) {
+        let entry = &mirror.entry;
+        if promoted {
+            let refs = match entry.refs.try_lock() {
+                Ok(guard) => Some(guard),
+                Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+                Err(TryLockError::WouldBlock) => None,
+            };
+            if let Some(_refs) = refs {
+                let dir = self.mirror_dir(entry.project);
+                match WorkspaceGit::bare(&dir, None).update_ref(
+                    MAIN_REF,
+                    commit,
+                    old,
+                    "instafy: pushed",
+                ) {
+                    Ok(()) => return,
+                    Err(error) => debug!(
+                        project = %entry.project,
+                        error = %format!("{error:#}"),
+                        "the mirror's main moved meanwhile; the next read fetches"
+                    ),
+                }
+            }
+        }
+        locked(&entry.fetches).refetch_since = Some(Instant::now());
+    }
+
     /// The mirror's bare repository, created empty when missing. Blocking.
     pub(crate) fn ensure_mirror(&self, mirror: &MirrorRef) -> Result<PathBuf, OriginError> {
         self.open_mirror(&mirror.entry)
@@ -577,6 +673,8 @@ impl MirrorCache {
     /// and renamed into place, so a half-made mirror is never used. When
     /// another request made it first, theirs is kept.
     fn create_mirror(&self, dir: &Path) -> Result<()> {
+        // The whole cache may have been removed while the server runs.
+        ensure_private_dir(&self.root)?;
         let temp = self.root.join(format!(
             "{TEMP_PREFIX}{}.git",
             Uuid::new_v4().as_hyphenated()

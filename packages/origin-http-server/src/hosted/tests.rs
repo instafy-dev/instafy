@@ -1373,7 +1373,7 @@ async fn sync_confirms_a_commit_on_main_and_saves_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn working_copy_routes_are_refused_and_writes_are_not_served_yet() {
+async fn working_copy_routes_are_refused_and_recovery_writes_are_not_served_yet() {
     let sc = HostedScenario::new();
     sc.push(&[("README.md", Some(b"one\n"))], "first");
     let served = serve(&sc).await;
@@ -1387,13 +1387,7 @@ async fn working_copy_routes_are_refused_and_writes_are_not_served_yet() {
         (answer.status, answer.code().as_str()),
         (400, "not_supported")
     );
-    for route in [
-        "/apply-json",
-        "/apply/status",
-        "/git/revert-commit",
-        "/git/recovery/restore",
-        "/git/recovery/dismiss",
-    ] {
+    for route in ["/git/recovery/restore", "/git/recovery/dismiss"] {
         let answer = post(&served, route, serde_json::json!({})).await;
         assert_eq!(
             (answer.status, answer.code().as_str()),

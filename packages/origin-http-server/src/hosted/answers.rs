@@ -1,0 +1,207 @@
+//! The gateway's answers to a change it refuses, as JSON `{error, code,
+//! ...}` with the paths concerned (at most [`MAX_REPORTED_PATHS`]).
+
+use axum::http::StatusCode;
+
+use crate::error::OriginError;
+use crate::publish_policy::RejectReason;
+
+/// Paths named in one answer.
+const MAX_REPORTED_PATHS: usize = 200;
+
+pub(super) fn internal(error: impl std::fmt::Display) -> OriginError {
+    OriginError::internal(error.to_string())
+}
+
+pub(super) fn report(
+    status: StatusCode,
+    code: &'static str,
+    message: &str,
+    extra: serde_json::Value,
+) -> OriginError {
+    OriginError::with_report(status, code, message, extra)
+}
+
+/// `paths` as an error answer lists them: sorted, at most
+/// [`MAX_REPORTED_PATHS`], with how many more there were.
+pub(super) fn listed(mut paths: Vec<String>) -> serde_json::Value {
+    paths.sort();
+    paths.dedup();
+    let more = paths.len().saturating_sub(MAX_REPORTED_PATHS);
+    paths.truncate(MAX_REPORTED_PATHS);
+    if more > 0 {
+        serde_json::json!({ "paths": paths, "morePaths": more })
+    } else {
+        serde_json::json!({ "paths": paths })
+    }
+}
+
+pub(super) fn with_fields(
+    mut value: serde_json::Value,
+    fields: serde_json::Value,
+) -> serde_json::Value {
+    if let (Some(target), serde_json::Value::Object(fields)) = (value.as_object_mut(), fields) {
+        target.extend(fields);
+    }
+    value
+}
+
+pub(crate) fn head_moved(head: Option<&str>, paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "head_moved",
+        "these files changed since they were read; reload them and save again",
+        with_fields(listed(paths), serde_json::json!({ "head": head })),
+    )
+}
+
+pub(super) fn path_type_conflict(head: Option<&str>, paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "path_type_conflict",
+        "a file and a folder would have the same name",
+        with_fields(listed(paths), serde_json::json!({ "head": head })),
+    )
+}
+
+pub(crate) fn main_busy() -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "main_busy",
+        "other saves kept landing first; try again in a moment",
+        serde_json::json!({}),
+    )
+}
+
+pub(super) fn unsupported_entry(paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::BAD_REQUEST,
+        "unsupported_entry",
+        "a link or a submodule cannot be changed here",
+        listed(paths),
+    )
+}
+
+pub(super) fn delete_requires_base_rev(paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::BAD_REQUEST,
+        "delete_requires_base_rev",
+        "deleting a folder needs the version it was read at (baseRev)",
+        listed(paths),
+    )
+}
+
+pub(super) fn reason_name(reason: RejectReason) -> &'static str {
+    match reason {
+        RejectReason::Excluded => "excluded",
+        RejectReason::Secret => "secret",
+        RejectReason::Attachment => "attachment",
+        RejectReason::Ignored => "ignored",
+        RejectReason::TooLarge => "too_large",
+        RejectReason::Policy => "policy",
+        RejectReason::Unsupported => "unsupported",
+    }
+}
+
+/// 422 for paths that may never be saved. One answer names one reason:
+/// secrets first (the client points to project secrets), then legacy chat
+/// uploads, then everything else.
+pub(super) fn excluded_path(refused: Vec<(String, RejectReason)>) -> OriginError {
+    let rank = |reason: RejectReason| match reason {
+        RejectReason::Secret => 0,
+        RejectReason::Attachment => 1,
+        _ => 2,
+    };
+    let reason = refused
+        .iter()
+        .map(|(_, reason)| *reason)
+        .min_by_key(|reason| rank(*reason))
+        .unwrap_or(RejectReason::Excluded);
+    let paths = refused
+        .into_iter()
+        .filter(|(_, other)| rank(*other) == rank(reason))
+        .map(|(path, _)| path)
+        .collect();
+    let message = match reason {
+        RejectReason::Secret => {
+            "secret files are never saved to history; keep them in project secrets"
+        }
+        RejectReason::Attachment => "chat uploads are not saved to the workspace any more",
+        _ => "these paths are never saved to history (build output, dependencies or Instafy files)",
+    };
+    report(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "excluded_path",
+        message,
+        with_fields(
+            listed(paths),
+            serde_json::json!({ "reason": reason_name(reason) }),
+        ),
+    )
+}
+
+pub(super) fn policy_rejected(paths: Vec<String>, reason: RejectReason) -> OriginError {
+    report(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "policy_rejected",
+        "these files are larger than a save may hold",
+        with_fields(
+            listed(paths),
+            serde_json::json!({ "reason": reason_name(reason) }),
+        ),
+    )
+}
+
+pub(super) fn ignored_path(paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "ignored_path",
+        "the space's .gitignore ignores these new files, so they are not saved",
+        listed(paths),
+    )
+}
+
+pub(super) fn push_rejected() -> OriginError {
+    report(
+        StatusCode::BAD_GATEWAY,
+        "push_rejected",
+        "the saved versions refused this change",
+        serde_json::json!({}),
+    )
+}
+
+pub(crate) fn idempotency_conflict() -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "idempotency_conflict",
+        "this import key was already used for a different request",
+        serde_json::json!({}),
+    )
+}
+
+pub(crate) fn rev_not_on_main(head: Option<&str>) -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "rev_not_on_main",
+        "that version is not part of the saved history",
+        serde_json::json!({ "head": head }),
+    )
+}
+
+pub(super) fn revert_conflict(head: &str, paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "revert_conflict",
+        "later changes touch the same lines; this version cannot be reverted automatically",
+        with_fields(listed(paths), serde_json::json!({ "head": head })),
+    )
+}
+
+/// What the shard refused about one path, as an answer.
+pub(super) fn hook_refusal(path: String, reason: RejectReason) -> OriginError {
+    match reason {
+        RejectReason::TooLarge => policy_rejected(vec![path], RejectReason::TooLarge),
+        RejectReason::Unsupported => unsupported_entry(vec![path]),
+        other => excluded_path(vec![(path, other)]),
+    }
+}

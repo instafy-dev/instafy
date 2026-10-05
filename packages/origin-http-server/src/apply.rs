@@ -300,7 +300,6 @@ pub(crate) fn validate_apply_paths(
 
 /// One manifest file, extracted from the archive into a staging directory.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct StagedFile {
     /// The normalized destination path.
     pub path: String,

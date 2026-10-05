@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use super::cache::{canonical_unreachable, Freshness, MirrorCache, MirrorLease};
 use super::read::{self, EntriesRead, FileRead};
+use super::write;
 use crate::apply::normalize_relative_path;
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
@@ -104,10 +105,10 @@ pub(crate) fn router(state: HostedState) -> Router {
     let admitted_routes = Router::new()
         .route(
             "/apply",
-            post(handle_not_available).layer(DefaultBodyLimit::disable()),
+            post(write::handle_apply).layer(DefaultBodyLimit::disable()),
         )
-        .route("/apply-json", post(handle_not_available))
-        .route("/git/revert-commit", post(handle_not_available))
+        .route("/apply-json", post(write::handle_apply_json))
+        .route("/git/revert-commit", post(write::handle_git_revert_commit))
         .route("/git/recovery/restore", post(handle_not_available))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -116,7 +117,7 @@ pub(crate) fn router(state: HostedState) -> Router {
 
     let write_routes = Router::new()
         .merge(admitted_routes)
-        .route("/apply/status", post(handle_not_available))
+        .route("/apply/status", post(write::handle_apply_status))
         .route("/git/sync", post(handle_git_sync))
         .route("/git/revert", post(handle_git_revert))
         .route("/git/recovery/dismiss", post(handle_not_available))
@@ -165,24 +166,24 @@ async fn limit_apply_concurrency(
     Ok(next.run(request).await)
 }
 
-fn project_of(state: &HostedState, claims: &OriginClaims) -> Result<Uuid, OriginError> {
+pub(super) fn project_of(state: &HostedState, claims: &OriginClaims) -> Result<Uuid, OriginError> {
     route_auth::project_id_for_claims(&state.auth.config, claims)
 }
 
-fn caller_token(token: &OriginAccessToken) -> Option<&str> {
+pub(super) fn caller_token(token: &OriginAccessToken) -> Option<&str> {
     Some(token.token.trim()).filter(|token| !token.is_empty())
 }
 
 /// Run blocking git work for a request.
-async fn blocking<T: Send + 'static>(
+pub(super) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, OriginError> + Send + 'static,
 ) -> Result<T, OriginError> {
     tokio::task::spawn_blocking(work)
         .await
-        .map_err(|error| OriginError::internal(format!("git read task failed: {error}")))?
+        .map_err(|error| OriginError::internal(format!("git task failed: {error}")))?
 }
 
-fn coded(status: StatusCode, code: &'static str, message: &str) -> OriginError {
+pub(super) fn coded(status: StatusCode, code: &'static str, message: &str) -> OriginError {
     OriginError::with_report(status, code, message, serde_json::json!({}))
 }
 
@@ -286,7 +287,7 @@ async fn read_target(
 /// every other request waiting for one): a fetch that finished just before
 /// cannot hold a commit saved after it, and a client that names a commit
 /// usually just learned of it.
-async fn resolve_rev(
+pub(super) async fn resolve_rev(
     state: &HostedState,
     lease: &MirrorLease,
     token: Option<&str>,
