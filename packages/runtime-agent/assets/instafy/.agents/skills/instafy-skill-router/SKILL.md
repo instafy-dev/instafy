@@ -87,7 +87,7 @@ Use these mappings unless a project-specific skill overrides them.
 
 - **Review this space / useful next actions / “what should I do next here?”**
   - Use `instafy-space-review` for a bounded, on-demand review in the current chat.
-  - Read prior recommendations and accessible conversation evidence before proposing up to three actions. Respect accepted and dismissed decisions; do not schedule reviews or execute the suggestions.
+  - Read prior recommendations and accessible conversation evidence before proposing at most one useful next step. Respect delivered, accepted, dismissed and postponed topics; do not schedule reviews or execute the suggestion.
 
 - **Failed run / runtime error / diagnose / investigate / support report**
   - Use `instafy-diagnostics`.
@@ -95,10 +95,11 @@ Use these mappings unless a project-specific skill overrides them.
   - Keep diagnosis read-only unless the user explicitly asks to file a report, then preview and
     obtain confirmation before submitting once.
 
-- **Reminders / schedules / recurring tasks / “in 10 minutes” / “every morning at 8” / automation management**
+- **“Don't remind me again” / “remind me tonight” / “let's do this weekend” / “check in less often” / reminders / schedules / recurring tasks / automation management**
   - Use `instafy-automations`.
-  - Prefer the Instafy CLI automation commands over manual UI setup.
-  - Interpret times in the user's local timezone from client context unless they explicitly say otherwise.
+  - For feedback on this chat's proactive suggestion, use `instafy recommendations current`, then `dismiss` or `remind`. Save the preference before acknowledging it.
+  - Changes to overall check-in frequency belong on the existing space review automation. Ordinary reminders use the normal automation commands.
+  - Interpret times in the user's known local timezone unless they explicitly say otherwise; ask when it is missing. A postponement schedules a reminder, not automatic execution of the task.
 
 ## Ambiguous cases
 

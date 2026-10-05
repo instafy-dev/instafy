@@ -10,6 +10,9 @@ use axum::http::Request;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+#[path = "recommendation_feedback_tests.rs"]
+mod feedback_tests;
+
 fn proposal(conversation_id: Uuid) -> Value {
     json!({
         "key":"check-signup-mobile", "title":"Check signup on mobile",

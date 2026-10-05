@@ -38,17 +38,46 @@ Delivered topics remain recorded when their chats are archived or deleted. Later
 not raise the same work under a new key or paraphrase. Existing accepted and dismissed outcomes
 also remain suppressed. Delivery or acceptance does not imply that work was executed or completed.
 
+## Replying to a suggestion
+
+Octo uses the bundled automation skill to save conversational preferences:
+
+- “Don't remind me about this again” dismisses this recommendation and cancels its pending
+  reminder. It does not pause other check-ins.
+- “Remind me tonight” or “Let's do that this weekend” saves one future reminder on this topic.
+  A later postponement replaces that time. Octo confirms the concrete local date, time and
+  timezone after saving; it asks when the timezone or intended future date is unclear.
+- “Check in less often,” “Only on Fridays,” and “Stop these check-ins” update or pause the
+  existing space review schedule, preserving its private visibility and managed review prompt.
+  Pausing stops future runs; a review already in progress can still finish.
+
+The reminder worker posts a normal Octo message and source links into the existing private chat.
+It does not run a model, start the suggested work, or create another chat. Delivery and clearing
+the due date are atomic; concurrent workers cannot deliver the same pending reminder twice.
+The scheduler checks every 30 seconds while the controller is running, so delivery can be later
+than the requested time during downtime. If the chat is archived, hidden, deleted, no longer
+owner-private, or its owner loses access to the project or evidence, the worker cancels the pending
+reminder rather than reopening or relocating it. Dismissal remains possible when source evidence
+has disappeared. An explicit new postponement can replace an earlier dismissal.
+
+Natural-language intent and semantic topic matching are skill behavior. The controller enforces
+the saved preference for the recommendation's stable key, its timing, and its access boundary;
+it does not infer semantic equivalence between differently named topics.
+
 ## Grounding and authority
 
 - Recommendations belong to the requesting user and project; they are not a space-wide feed.
-- Human reads require current project access and access to every source conversation.
+- Human recommendation-list reads require current project access and access to every source
+  conversation. The exact-chat feedback endpoint exposes only the owner's saved preference and
+  remains usable for dismissal when old evidence is no longer accessible.
 - Scoped runtime jobs retain their existing boundary: shared chats and their own private
   conversation tree. Other private chats are outside the review, even when the human can open
   them. The skill must state coverage honestly and treat inaccessible history as unknown.
-- Runtime reads also check the recommendation's originating conversation. An unrelated private
+- Runtime recommendation-list reads also check the recommendation's originating conversation. An unrelated private
   review cannot become accessible through this API. Delivered conversation IDs are redacted from
   scoped jobs; delivery is not a grant to inspect the new private chat.
-- Sources are checked on submission and retrieval. Revoked access hides the finding.
+- Sources are checked on submission, recommendation-list retrieval and reminder scheduling/delivery.
+  Revoked access hides the finding from the list and prevents reminder delivery.
 - Delivered openers show one source chip per distinct evidence conversation, labeled with its
   accessible chat title at delivery time (or **Source chat** when untitled); labels do not update
   after a rename. Chips open the source chat; all original message-level evidence remains stored.
@@ -83,6 +112,20 @@ and at most one delivery per active run.
   `PATCH /projects/:projectId/recommendations/:id`,
   `POST /projects/:projectId/recommendations/review-conversation`, and
   `POST /projects/:projectId/recommendations/:id/prepare-conversation`.
+- `GET /conversations/:id/recommendation-feedback` reads the delivered topic's preference;
+  `PATCH` accepts `{ "action": "dismiss" }` or
+  `{ "action": "remind", "runAt": "<RFC3339 or local ISO datetime>", "timezone": "<IANA timezone>" }`.
+  The response contains `recommendationId`, `conversationId`, `projectId`, `title`, `status`,
+  `remindAt`, `timezone` and `lastRemindedAt`. Reads do not expose the private review anchor.
+  A live scoped job can use this endpoint only in the exact delivered private conversation, as
+  its owner, with current project access. Ordinary chats return `404`; service credentials alone
+  and jobs in other roots cannot act on the preference.
+- Recommendation lists include `remindAt`, `timezone` and `lastRemindedAt`. A reminder leaves the
+  original delivery tombstone intact, so another review does not redeliver the recommendation.
+- Live owner jobs may patch only an existing automation's schedule, timezone and status. The
+  controller denies schedule/status changes from background space review jobs and denies changes
+  to the name, task, mode, provider, metadata or visibility through this scoped capability.
+  Concurrent user schedule edits take precedence over finalizing an already-claimed launch.
 
 Apply the ordered additive migrations before the controller rollout, including
 `20261002120000_space_recommendations.sql` and
@@ -93,6 +136,9 @@ commit separately to preserve the migration lock-order boundary. Deploy the matc
 skill and CLI for conversation delivery. Existing runtime workspaces upgrade exact recognized
 previous bundled review skills, including the prior quiet-review template; customized copies
 are preserved and need a deliberate local update.
+Conversational preferences additionally require `20261005120000_recommendation_reminders.sql`
+before deploying the matching controller, CLI and bundled skills. Exact recognized bundled
+automation and review skill copies upgrade automatically; customized copies remain unchanged.
 See [CLI](CLI.md#space-reviews-and-recommendations).
 Semantic deduplication and the usefulness of a question still require review; stable-key
 idempotency alone does not establish quality.
@@ -156,3 +202,13 @@ prove source lookup.
 Manually inspect grounding, semantic duplicates and absence of unrequested actions; counts alone
 do not prove quality. Missing prerequisites fail an explicit live run; ordinary tests report it
 as ignored.
+
+For conversational preferences, use normal replies in a disposable delivered chat: “I don't want
+to get reminded any more of this,” “Remind me tonight,” then “Let's do that in the weekend.”
+Verify `recommendations current --json` after each completed turn: dismissal cancels a pending
+reminder, postponement replaces its time, and the confirmation matches the saved local date/time.
+Check “less often,” an explicit weekly cadence and “stop these check-ins” against the same review
+automation ID. Observe an actual due reminder and a subsequent scheduler tick: one message in the
+existing chat, no extra conversation or agent job, and no execution of the proposed task. Keep
+live controller fixtures separate from database regression fixtures so its scheduler cannot
+claim test rows.

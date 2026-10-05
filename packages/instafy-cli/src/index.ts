@@ -47,7 +47,7 @@ import {
   agentsList,
 } from "./agents.js";
 import { chatPrompt } from "./chat.js";
-import { recommendationsList, recommendationsSubmit } from "./recommendations.js";
+import { recommendationsCurrent, recommendationsDismiss, recommendationsList, recommendationsRemind, recommendationsSubmit } from "./recommendations.js";
 import { grepConversationMessages, showConversationContext } from "./conversation-grep.js";
 import {
   createConversation,
@@ -849,6 +849,34 @@ for (const operation of ["list", "submit"] as const) {
       const common = { project: resolveSpaceIdOption(opts), controllerUrl: opts.serverUrl, accessToken: opts.accessToken, json: opts.json };
       if (operation === "list") await recommendationsList({ ...common, limit: opts.limit });
       else await recommendationsSubmit({ ...common, file: opts.file });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+}
+
+for (const operation of ["current", "dismiss", "remind"] as const) {
+  const description = {
+    current: "Read the current chat's recommendation and saved reminder preference",
+    dismiss: "Stop future reminders about the current chat's recommendation",
+    remind: "Set or replace a reminder in the current chat without executing the task",
+  }[operation];
+  const command = recommendationsCommand.command(operation).description(description)
+    .option("--conversation <id>", "Conversation UUID (defaults to INSTAFY_CONVERSATION_ID)")
+    .option("--json", "Output the saved preference as JSON");
+  addServerUrlOptions(command);
+  addAccessTokenOptions(command, "Instafy access token");
+  if (operation === "remind") {
+    command.requiredOption("--at <datetime>", "Reminder time (RFC3339 or local YYYY-MM-DDTHH:MM[:SS])")
+      .requiredOption("--timezone <tz>", "IANA timezone (e.g. Europe/Vienna)");
+  }
+  command.action(async (opts) => {
+    try {
+      const common = { conversation: opts.conversation, controllerUrl: opts.serverUrl, accessToken: opts.accessToken, json: opts.json };
+      if (operation === "current") await recommendationsCurrent(common);
+      else if (operation === "dismiss") await recommendationsDismiss(common);
+      else await recommendationsRemind({ ...common, at: opts.at, timezone: opts.timezone });
     } catch (error) {
       console.error(kleur.red(String(error)));
       process.exit(1);

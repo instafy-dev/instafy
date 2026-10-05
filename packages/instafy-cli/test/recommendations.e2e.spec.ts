@@ -18,6 +18,7 @@ const proposal = {
   evidence: [{ conversationId, messageId: randomUUID() }],
 };
 const record = { ...proposal, id: randomUUID(), projectId: spaceId, status: "proposed", acceptedConversationId: null, createdAt: "2026-10-02T10:00:00Z", updatedAt: "2026-10-02T10:00:00Z" };
+const feedback = { recommendationId: record.id, conversationId, projectId: spaceId, title: record.title, status: "proposed", remindAt: null, timezone: null, lastRemindedAt: null };
 
 afterEach(() => {
   for (const server of servers.splice(0)) { server.closeAllConnections(); server.close(); }
@@ -64,6 +65,98 @@ async function cli(cwd: string, args: string[], extraEnv: NodeJS.ProcessEnv = {}
 }
 
 describe("space recommendations", () => {
+  it.each(["INSTAFY_CONVERSATION_ID", "CONVERSATION_ID"])("reads current feedback with %s and the active job credential", async (name) => {
+    const mock = await controller(feedback);
+    const result = await cli(workspace(), ["current", "--json"], {
+      RUNTIME_ID: randomUUID(), [name]: conversationId,
+      CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: mock.url,
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(feedback);
+    expect(mock.requests).toEqual([{ method: "GET", url: `/conversations/${conversationId}/recommendation-feedback`, auth: "Bearer scoped-job-token", body: null }]);
+  });
+
+  it("saves dismissal only for the explicitly selected conversation", async () => {
+    const dismissed = { ...feedback, status: "dismissed" };
+    const mock = await controller(dismissed);
+    const result = await cli(workspace(), ["dismiss", "--conversation", conversationId, "--json", "--server-url", mock.url, "--access-token", "user-token"], { INSTAFY_CONVERSATION_ID: randomUUID() });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(dismissed);
+    expect(mock.requests).toEqual([{ method: "PATCH", url: `/conversations/${conversationId}/recommendation-feedback`, auth: "Bearer user-token", body: { action: "dismiss" } }]);
+  });
+
+  it.each(["2026-10-10T10:00", "2026-10-10T10:00:00+02:00"])("saves a reminder from %s and reports the controller's normalized time", async (runAt) => {
+    const reminder = { ...feedback, remindAt: "2026-10-10T08:00:00Z", timezone: "Europe/Vienna" };
+    const mock = await controller(reminder);
+    const result = await cli(workspace(), ["remind", "--at", runAt, "--timezone", "Europe/Vienna", "--json"], {
+      RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: conversationId,
+      CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: mock.url,
+    });
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual(reminder);
+    expect(mock.requests).toEqual([{ method: "PATCH", url: `/conversations/${conversationId}/recommendation-feedback`, auth: "Bearer scoped-job-token", body: { action: "remind", runAt, timezone: "Europe/Vienna" } }]);
+  });
+
+  it.each([
+    ["remind", "--at", "tonight", "--timezone", "Europe/Vienna"],
+    ["remind", "--at", "2026-10-10T10:00:00", "--timezone", "Not/A_Zone"],
+    ["remind", "--at", "2026-10-10T10:00:00"],
+    ["dismiss", "--conversation", "../another-conversation"],
+    ["current", "--conversation", ""],
+  ])("rejects invalid reminder or conversation input before a request: %j", async (args) => {
+    const mock = await controller(feedback);
+    const result = await cli(workspace(), [...args, "--server-url", mock.url, "--access-token", "user-token"], { INSTAFY_CONVERSATION_ID: conversationId });
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  it("does not fall back from an invalid primary conversation to another environment value", async () => {
+    const mock = await controller(feedback);
+    const result = await cli(workspace(), ["current", "--server-url", mock.url, "--access-token", "user-token"], { INSTAFY_CONVERSATION_ID: "invalid", CONVERSATION_ID: conversationId });
+    expect(result.code).not.toBe(0);
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  it("requires an explicit or current conversation before contacting the controller", async () => {
+    const mock = await controller(feedback);
+    const result = await cli(workspace(), ["current", "--server-url", mock.url, "--access-token", "user-token"]);
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("No conversation configured");
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  it("keeps preference commands bound to the active job's controller origin", async () => {
+    const mock = await controller({ ...feedback, status: "dismissed" });
+    const result = await cli(workspace(), ["dismiss", "--json", "--server-url", mock.url], {
+      RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: conversationId,
+      CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: "http://127.0.0.1:1",
+    });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("controller origin other than CONTROLLER_BASE_URL");
+    expect(mock.requests).toHaveLength(0);
+  });
+
+  it.each([403, 404, 409])("surfaces feedback HTTP %i without a fallback mutation or acknowledgement", async (status) => {
+    const mock = await controller({ message: "Preference unavailable" }, status);
+    const result = await cli(workspace(), ["dismiss", "--conversation", conversationId, "--json", "--server-url", mock.url, "--access-token", "user-token"]);
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(mock.requests).toHaveLength(1);
+  });
+
+  it.each([
+    { ...feedback, conversationId: randomUUID() },
+    { ...feedback, status: "proposed" },
+    { ...feedback, status: "dismissed", remindAt: "2026-10-10T08:00:00Z" },
+  ])("refuses to confirm dismissal when readback does not confirm it", async (response) => {
+    const mock = await controller(response);
+    const result = await cli(workspace(), ["dismiss", "--conversation", conversationId, "--json", "--server-url", mock.url, "--access-token", "user-token"]);
+    expect(result.code).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(mock.requests).toHaveLength(1);
+  });
+
   it("lists all outcomes for the linked space with signed-in credentials", async () => {
     const recommendations = [record, { ...record, id: randomUUID(), status: "accepted" }, { ...record, id: randomUUID(), status: "dismissed" }];
     const mock = await controller({ recommendations });
