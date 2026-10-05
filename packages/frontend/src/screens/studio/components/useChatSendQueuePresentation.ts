@@ -43,6 +43,8 @@ export function useChatSendQueuePresentation({
   runtimeEnsureError,
   runtimeReady,
   sendingAttachment,
+  stalledLaunchRetryAvailable,
+  stalledLaunchRetryPending,
   waitingForPreferredRuntime,
 }: {
   activeConversationControllerId: string | null;
@@ -60,6 +62,9 @@ export function useChatSendQueuePresentation({
   runtimeEnsureError: string | null;
   runtimeReady: boolean;
   sendingAttachment: boolean;
+  /** A hosted launch is past the stalled bound and this viewer can retry it. */
+  stalledLaunchRetryAvailable: boolean;
+  stalledLaunchRetryPending: boolean;
   waitingForPreferredRuntime: boolean;
 }) {
   const resolveQueuedItemTargets = useCallback(
@@ -158,6 +163,15 @@ export function useChatSendQueuePresentation({
     if (totalQueuedCount === 0 || !runtimeControllerEnabled) {
       return null;
     }
+    // The chat notice's retry, so a launch that never came up does not leave
+    // a second spinner with no end.
+    if (stalledLaunchRetryAvailable) {
+      return {
+        label: "Try again",
+        disabled: false,
+        pending: stalledLaunchRetryPending,
+      };
+    }
     if (waitingForPreferredRuntime || hostedRuntimeEnsuring) {
       return {
         label: "Starting…",
@@ -186,6 +200,8 @@ export function useChatSendQueuePresentation({
     runtimeControllerEnabled,
     runtimeEnsureError,
     runtimeReady,
+    stalledLaunchRetryAvailable,
+    stalledLaunchRetryPending,
     totalQueuedCount,
     waitingForPreferredRuntime,
   ]);

@@ -39,22 +39,32 @@ function createAssistantActionMessage(id: string, timestamp = Date.now()) {
   };
 }
 
-function OutOfCreditsChatBubble({
-  creditLimit,
-  onOpenCredits,
+const CHAT_NOTICE_ACTION_CLASS =
+  "border-secondary-300/80 text-secondary-900 hover:bg-secondary-50 data-[hovered]:bg-secondary-50 dark:border-secondary-400/40 dark:text-secondary-100 dark:hover:bg-secondary-500/10 dark:data-[hovered]:bg-secondary-500/10";
+
+/** A warning row in the assistant's column with one optional action. */
+function ChatNoticeActionBubble({
+  testId,
+  text,
+  textRole,
+  action,
 }: {
-  creditLimit: number;
-  onOpenCredits: () => void;
+  testId: string;
+  text: string;
+  /** "status" when the row stands in for the typing status, a live region too. */
+  textRole?: "status";
+  action: {
+    label: string;
+    onPress: () => void;
+    isPending?: boolean;
+    testId?: string;
+  } | null;
 }) {
   return (
-    <ChatBubbleRow
-      key="chat-out-of-credits-message"
-      align="left"
-      avatar={ASSISTANT_AVATAR_GUTTER_PLACEHOLDER}
-    >
+    <ChatBubbleRow align="left" avatar={ASSISTANT_AVATAR_GUTTER_PLACEHOLDER}>
       <NotchedMessageShell
         align="left"
-        testId="chat-out-of-credits-cta"
+        testId={testId}
         messageType="warning"
         showNotch
         className="pr-2"
@@ -65,24 +75,95 @@ function OutOfCreditsChatBubble({
           notches={[{ maskLine: true }]}
         />
         <div className="min-w-0">
-          <Text as="div" variant="body" tone="secondary">
-            {creditLimit > 0 ? `0/${creditLimit} credits left.` : "No credits left."}
+          <Text as="div" variant="body" tone="secondary" role={textRole}>
+            {text}
           </Text>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              onPress={onOpenCredits}
-              variant="outline"
-              size="xs"
-              radius="full"
-              className="border-secondary-300/80 text-secondary-900 hover:bg-secondary-50 data-[hovered]:bg-secondary-50 dark:border-secondary-400/40 dark:text-secondary-100 dark:hover:bg-secondary-500/10 dark:data-[hovered]:bg-secondary-500/10"
-            >
-              Refill credits
-            </Button>
-          </div>
+          {action ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                onPress={action.onPress}
+                isPending={action.isPending}
+                variant="outline"
+                size="xs"
+                radius="full"
+                data-testid={action.testId}
+                className={CHAT_NOTICE_ACTION_CLASS}
+              >
+                {action.label}
+              </Button>
+            </div>
+          ) : null}
         </div>
       </NotchedMessageShell>
     </ChatBubbleRow>
+  );
+}
+
+function OutOfCreditsChatBubble({
+  creditLimit,
+  onOpenCredits,
+}: {
+  creditLimit: number;
+  onOpenCredits: () => void;
+}) {
+  return (
+    <ChatNoticeActionBubble
+      testId="chat-out-of-credits-cta"
+      text={creditLimit > 0 ? `0/${creditLimit} credits left.` : "No credits left."}
+      action={{ label: "Refill credits", onPress: onOpenCredits }}
+    />
+  );
+}
+
+export function workspaceStartStalledDescription({
+  agentDisplayName,
+  canRetry,
+}: {
+  agentDisplayName: string | null;
+  canRetry: boolean;
+}): string {
+  const workspace = agentDisplayName ? `${agentDisplayName}'s workspace` : "The workspace";
+  // A member who cannot retry cannot send either, so the waiting message is
+  // not theirs.
+  const waiting = canRetry
+    ? "Your message is kept and will send once it's running."
+    : "Queued messages will send once it's running.";
+  return `${workspace} is taking longer than usual to start. ${waiting}`;
+}
+
+/**
+ * Stands in for the "starting its workspace…" status once a hosted launch has
+ * gone five minutes without coming up. Try again asks the controller to
+ * replace the launch; a new one's fresh start time clears this row.
+ */
+export function WorkspaceStartStalledRow({
+  agentDisplayName,
+  onRetry,
+  retryPending,
+}: {
+  /** The waiting agent's name; null when several share the workspace. */
+  agentDisplayName: string | null;
+  /** Null for a member who cannot control the space's runtime. */
+  onRetry: (() => void) | null;
+  retryPending: boolean;
+}) {
+  return (
+    <ChatNoticeActionBubble
+      testId="chat-workspace-start-stalled"
+      text={workspaceStartStalledDescription({ agentDisplayName, canRetry: onRetry !== null })}
+      textRole="status"
+      action={
+        onRetry
+          ? {
+              label: "Try again",
+              onPress: onRetry,
+              isPending: retryPending,
+              testId: "chat-workspace-start-retry",
+            }
+          : null
+      }
+    />
   );
 }
 

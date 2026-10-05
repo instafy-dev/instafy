@@ -174,6 +174,43 @@ export function isHostedRuntime(entry: ControllerRuntimeStatusEntry): boolean {
   return !isSelfHostedRuntime(entry);
 }
 
+/**
+ * How long a hosted launch may go without coming up before Studio offers to
+ * replace it. The controller replaces one on an explicit retry only after the
+ * same five minutes (STALLED_LAUNCH_REPLACE_AFTER_SECONDS).
+ */
+export const STALLED_LAUNCH_AFTER_MS = 5 * 60_000;
+
+/**
+ * When this entry's launch becomes stalled: a hosted runtime still in a
+ * booting status that has never been seen, measured from when its lease was
+ * requested. Null when it never will, including for a controller that does
+ * not report launchRequestedAt.
+ */
+export function stalledLaunchDeadlineMs(
+  entry: ControllerRuntimeStatusEntry | null | undefined,
+): number | null {
+  if (!entry || entry.isLocal || !isHostedRuntime(entry)) {
+    return null;
+  }
+  if (!BOOTING_STATUS_SET.has((entry.status ?? "").toLowerCase())) {
+    return null;
+  }
+  if (entry.lastSeenAt) {
+    return null;
+  }
+  const requestedAtMs = parseIsoTimestamp(entry.launchRequestedAt ?? null);
+  return requestedAtMs === null ? null : requestedAtMs + STALLED_LAUNCH_AFTER_MS;
+}
+
+export function resolveStalledHostedLaunch(
+  entry: ControllerRuntimeStatusEntry | null | undefined,
+  nowMs: number,
+): boolean {
+  const deadlineMs = stalledLaunchDeadlineMs(entry);
+  return deadlineMs !== null && nowMs >= deadlineMs;
+}
+
 function resolveConnectionState(
   entries: ControllerRuntimeStatusEntry[],
 ): RuntimeConnectionState {

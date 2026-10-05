@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchRuntimeStatus } from "../runtimes";
+import { ensureRuntime, fetchRuntimeStatus, startRuntime } from "../runtimes";
 import { CONTROLLER_READ_BUDGET_MS } from "../readBudget";
 
 const { resolveContext, readError } = vi.hoisted(() => ({
@@ -10,6 +10,7 @@ vi.mock("../core", () => ({
   runtimeControllerEnabled: true,
   resolveControllerRequestContext: resolveContext,
   readControllerError: readError,
+  coerceControllerRuntimeIdleTtlSeconds: () => 600,
 }));
 
 function deferred<T>() {
@@ -137,5 +138,49 @@ describe("fetchRuntimeStatus", () => {
     await expect(fetchRuntimeStatus({ projectId: "project-1" })).resolves.toBeNull();
     expect(fetch).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("ensureRuntime", () => {
+  const ensured = { runtime_id: "runtime-2", leaseId: "lease-2", status: "requested", provider: "instafy-cloud" };
+
+  beforeEach(() => {
+    resolveContext.mockResolvedValue(context);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(ensured))));
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function sentBodies() {
+    return vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+  }
+
+  it("asks the controller to replace a stalled launch only when told to", async () => {
+    await ensureRuntime({ projectId: "project-1", provider: "instafy-cloud", replaceStalledLaunch: true });
+    await ensureRuntime({ projectId: "project-1", provider: "instafy-cloud", replaceStalledLaunch: false });
+    await ensureRuntime({ projectId: "project-1", provider: "instafy-cloud" });
+
+    expect(fetch).toHaveBeenCalledWith("https://controller.test/runtime/ensure", expect.objectContaining({ method: "POST" }));
+    const [replace, plainFalse, plain] = sentBodies();
+    expect(replace).toMatchObject({ project_id: "project-1", replaceStalledLaunch: true });
+    // Older controllers see exactly the body they always did.
+    expect(plainFalse).not.toHaveProperty("replaceStalledLaunch");
+    expect(plain).not.toHaveProperty("replaceStalledLaunch");
+    expect(plain).toEqual(plainFalse);
+  });
+
+  it("forwards the flag from a Machines start, which ensures with the runtime id", async () => {
+    await expect(
+      startRuntime({ projectId: "project-1", runtimeId: "runtime-1", replaceStalledLaunch: true }),
+    ).resolves.toBe(true);
+    await startRuntime({ projectId: "project-1", runtimeId: "runtime-1" });
+
+    const [replace, plain] = sentBodies();
+    expect(replace).toMatchObject({ runtime_id: "runtime-1", provider: "instafy-cloud", replaceStalledLaunch: true });
+    expect(plain).toMatchObject({ runtime_id: "runtime-1" });
+    expect(plain).not.toHaveProperty("replaceStalledLaunch");
   });
 });
