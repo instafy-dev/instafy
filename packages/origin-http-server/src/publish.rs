@@ -34,7 +34,8 @@ use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
     parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
-    restore_commits, without_origin_trailers, NotRestored, RecoveryRef, ViewError,
+    restore_commits, restore_committers, without_origin_trailers, NotRestored, RecoveryRef,
+    ViewError,
 };
 use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
 use crate::stale_align;
@@ -1498,13 +1499,17 @@ impl<'a> Publisher<'a> {
         let records: BTreeSet<String> = if commits.is_empty() {
             BTreeSet::new()
         } else {
-            restore_commits(&self.git, &commits, &self.config.git_author_email)?
-                .into_iter()
-                .filter(|(_, reference)| {
-                    RecoveryRef::parse(reference).is_ok_and(|reference| reference.is_salvage())
-                })
-                .map(|(id, _)| id)
-                .collect()
+            restore_commits(
+                &self.git,
+                &commits,
+                &restore_committers(&self.config.git_author_email),
+            )?
+            .into_iter()
+            .filter(|(_, reference)| {
+                RecoveryRef::parse(reference).is_ok_and(|reference| reference.is_salvage())
+            })
+            .map(|(id, _)| id)
+            .collect()
         };
         let mut current = main.to_string();
         let mut conflicts = Vec::new();
@@ -2636,6 +2641,10 @@ impl Publisher<'_> {
             .map_err(internal)?
             .ok_or_else(|| OriginError::conflict("the workspace has no saved version yet"))?;
         let saved = fetched.commit.clone();
+        // Canonical `main` as last fetched: a restore recorded there (by the
+        // gateway, say) counts even before the branch has it.
+        let tracked = self.tracked_main().map_err(internal)?;
+        let restorers = restore_committers(&self.config.git_author_email);
 
         // What comes back, what stays out and why, which clashes the person
         // must settle, and whether the ref may go: decided by the one rule
@@ -2649,7 +2658,8 @@ impl Publisher<'_> {
                 saved: &saved,
                 keep: &keep,
                 refused_before: &self.filtered,
-                restorer: &self.config.git_author_email,
+                restorers: &restorers,
+                recorded_on: tracked.as_deref(),
                 scratch: scratch.path(),
             },
         ) {
@@ -2675,7 +2685,6 @@ impl Publisher<'_> {
         // this checkout that could not reach `main` (as when the person
         // restores that save's own `unpublished` entry). This call
         // publishes them, so they are its new version too.
-        let tracked = self.tracked_main().map_err(internal)?;
         let committed = made
             || self
                 .unpublished_changes(&head, tracked.as_deref())

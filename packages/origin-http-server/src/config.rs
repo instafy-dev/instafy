@@ -16,7 +16,8 @@ pub const DEFAULT_ORIGIN_AUTHOR_EMAIL: &str = "origin@instafy.dev";
 /// The address the multi-tenant gateway commits under when
 /// `ORIGIN_GIT_AUTHOR_EMAIL` is unset. It must differ from every
 /// single-tenant origin's: the gateway trusts commits under its own address
-/// as its restores and import receipts.
+/// as its import receipts. Restore commits under it count as restores on
+/// Desktop too ([`crate::recovery_view::restore_committers`]).
 pub const DEFAULT_GATEWAY_AUTHOR_EMAIL: &str = "gateway@instafy.dev";
 
 /// The multi-tenant gateway's committer identity, from its environment.

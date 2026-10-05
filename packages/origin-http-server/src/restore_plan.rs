@@ -67,8 +67,13 @@ pub(crate) struct RestoreInput<'a> {
     pub keep: &'a PathRoots,
     /// Paths refused before this plan, with why.
     pub refused_before: &'a BTreeMap<String, RejectReason>,
-    /// The address restore commits are committed by.
-    pub restorer: &'a str,
+    /// The committers whose restore commits count
+    /// ([`crate::recovery_view::restore_committers`]).
+    pub restorers: &'a [String],
+    /// Another commit whose restore commits count for the marker decision
+    /// (Desktop: canonical `main` as last fetched, which may be ahead of
+    /// the branch restored onto).
+    pub recorded_on: Option<&'a str>,
     /// A folder the ignore check may make its scratch tree in.
     pub scratch: &'a Path,
 }
@@ -266,14 +271,17 @@ pub(crate) fn plan(
 
     let made = tree != onto_tree;
     let (marker, earlier_marker) = match input.onto {
-        Some(onto) => restore_marker(
-            git,
-            input.reference,
-            made,
-            onto,
-            input.saved,
-            input.restorer,
-        )?,
+        Some(onto) => {
+            let tips: Vec<&str> = std::iter::once(onto).chain(input.recorded_on).collect();
+            restore_marker(
+                git,
+                input.reference,
+                made,
+                &tips,
+                input.saved,
+                input.restorers,
+            )?
+        }
         None => (false, None),
     };
     Ok(RestorePlan {

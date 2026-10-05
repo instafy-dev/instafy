@@ -22,7 +22,7 @@ use super::change::moved_since;
 use super::read::readable;
 use crate::error::OriginError;
 use crate::publish_policy::RejectReason;
-use crate::recovery_view::{NotRestored, RecoveryRef};
+use crate::recovery_view::{restore_committers, NotRestored, RecoveryRef};
 use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
 use crate::tree_merge::changed_paths;
 use crate::workspace_git::WorkspaceGit;
@@ -45,8 +45,9 @@ pub(crate) struct Restore {
     lets_ref_go: bool,
     /// The last attempt's changes to `main`.
     touched: Option<Vec<String>>,
-    /// The gateway's own address, which restore commits are committed by.
-    committer_email: String,
+    /// The committers whose restore commits count: the gateway's own
+    /// address and Desktop's.
+    committers: Vec<String>,
     /// The last attempt brings nothing new to `main` and records the
     /// restore with an empty restore commit.
     marker: bool,
@@ -69,7 +70,7 @@ impl Restore {
             not_restored: Vec::new(),
             lets_ref_go: true,
             touched: None,
-            committer_email,
+            committers: restore_committers(&committer_email),
             marker: false,
         }
     }
@@ -107,7 +108,8 @@ impl Restore {
                 saved: &self.commit,
                 keep: &self.keep,
                 refused_before: &self.shard_refused,
-                restorer: &self.committer_email,
+                restorers: &self.committers,
+                recorded_on: None,
                 scratch,
             },
         )

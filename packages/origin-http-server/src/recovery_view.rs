@@ -1785,10 +1785,37 @@ const MAX_RESTORE_COMMITS: usize = 500;
 /// clocks of the machines that made the commits may differ.
 const RESTORE_CLOCK_SLACK_SECONDS: i64 = 24 * 60 * 60;
 
+/// The committer addresses whose restore commits count as restores, on
+/// Desktop and on the gateway alike: this server's own (`own`), Desktop's
+/// origin identity ([`DEFAULT_ORIGIN_AUTHOR_EMAIL`], which Desktop commits
+/// under) and the gateway's ([`DEFAULT_GATEWAY_AUTHOR_EMAIL`]), in lower
+/// case, without repeats. One space's canonical history is shared by both
+/// modes, so a restore made in one shows as restored in the other and is
+/// never recorded twice. A caller can never write a restore commit under
+/// either address: both servers drop every `Instafy-` trailer git reads
+/// from the messages they commit for callers ([`without_origin_trailers`]).
+///
+/// [`DEFAULT_ORIGIN_AUTHOR_EMAIL`]: crate::config::DEFAULT_ORIGIN_AUTHOR_EMAIL
+/// [`DEFAULT_GATEWAY_AUTHOR_EMAIL`]: crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL
+pub(crate) fn restore_committers(own: &str) -> Vec<String> {
+    let mut committers: Vec<String> = Vec::new();
+    for email in [
+        own,
+        crate::config::DEFAULT_ORIGIN_AUTHOR_EMAIL,
+        crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL,
+    ] {
+        let email = email.trim().to_ascii_lowercase();
+        if !email.is_empty() && !committers.contains(&email) {
+            committers.push(email);
+        }
+    }
+    committers
+}
+
 /// Give every item a commit `main` reaches restored its `restored_rev`: the
 /// newest commit whose whole message is [`restore_commit_message`] of the
-/// item's ref and whose committer is `committer_email` (this origin's own
-/// identity). Every restore of a salvage ref that lands leaves one, an
+/// item's ref and whose committer is one of `committers`
+/// ([`restore_committers`]). Every restore of a salvage ref that lands leaves one, an
 /// empty one when the saved version already held the work (see
 /// `publish::restore`), so a salvage ref, which is never removed, shows as
 /// restored for good. The
@@ -1802,7 +1829,7 @@ pub(crate) fn mark_restored(
     git: &WorkspaceGit<'_>,
     items: &mut [RecoveryItem],
     main: Option<&str>,
-    committer_email: &str,
+    committers: &[String],
 ) -> Result<(), ViewError> {
     let (Some(main), Some(oldest)) = (main, items.iter().map(|item| item.timestamp).min()) else {
         return Ok(());
@@ -1810,7 +1837,7 @@ pub(crate) fn mark_restored(
     let main = parse_rev(main)?;
     let ids = restore_candidates(git, &main, "", oldest)?;
     let mut restored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (id, reference) in restore_commits(git, &ids, committer_email)? {
+    for (id, reference) in restore_commits(git, &ids, committers)? {
         // Newest first: the first commit seen for a ref wins.
         restored.entry(reference).or_insert(id);
     }
@@ -1820,24 +1847,26 @@ pub(crate) fn mark_restored(
     Ok(())
 }
 
-/// Whether a restore of `reference` onto `onto` that brings nothing new
+/// Whether a restore of `reference` onto `tips[0]` that brings nothing new
 /// there (`made` is false: the saved version already holds the work, or
 /// the rest was kept or refused) records itself with an empty restore
-/// commit ([`restore_commit_message`], `onto`'s tree), and the earlier
-/// restore commit of it `onto` reaches, if any. Only a salvage ref is
-/// recorded: it is never removed, so only that commit tells the list it was
-/// restored ([`mark_restored`]); a recovery ref goes once its work is on
-/// `main`, so the commit would only be noise in history. And only once:
-/// not when `onto` already has a restore commit of it made since its work
-/// (`saved`) was ([`restore_of`]). Desktop and the hosted gateway decide by
-/// this; `committer_email` is the server's own identity.
+/// commit ([`restore_commit_message`], that tip's tree), and the earlier
+/// restore commit of it the first of `tips` reaches, if any. Only a salvage
+/// ref is recorded: it is never removed, so only that commit tells the list
+/// it was restored ([`mark_restored`]); a recovery ref goes once its work is
+/// on `main`, so the commit would only be noise in history. And only once:
+/// not when one of `tips` (the commit restored onto, and for Desktop also
+/// canonical `main` as it last fetched it) already has a restore commit of
+/// it made since its work (`saved`) was ([`restore_of`]) by one of
+/// `committers` ([`restore_committers`]). Desktop and the hosted gateway
+/// decide by this.
 pub(crate) fn restore_marker(
     git: &WorkspaceGit<'_>,
     reference: &RecoveryRef,
     made: bool,
-    onto: &str,
+    tips: &[&str],
     saved: &str,
-    committer_email: &str,
+    committers: &[String],
 ) -> Result<(bool, Option<String>), ViewError> {
     if made || !reference.is_salvage() {
         return Ok((false, None));
@@ -1847,23 +1876,27 @@ pub(crate) fn restore_marker(
         .first()
         .map(|object| parse_commit(&object.data).timestamp)
         .unwrap_or_default();
-    let earlier = restore_of(git, onto, reference.as_str(), made_at, committer_email)?;
-    Ok((earlier.is_none(), earlier))
+    for tip in tips {
+        if let Some(earlier) = restore_of(git, tip, reference.as_str(), made_at, committers)? {
+            return Ok((false, Some(earlier)));
+        }
+    }
+    Ok((true, None))
 }
 
 /// The newest restore commit of `reference` (see [`mark_restored`]) that
 /// `tip` reaches, made since `made_at` (the time of the work's own commit,
-/// less the clock slack), when there is one.
+/// less the clock slack) by one of `committers`, when there is one.
 pub(crate) fn restore_of(
     git: &WorkspaceGit<'_>,
     tip: &str,
     reference: &str,
     made_at: i64,
-    committer_email: &str,
+    committers: &[String],
 ) -> Result<Option<String>, ViewError> {
     let tip = parse_rev(tip)?;
     let ids = restore_candidates(git, &tip, reference, made_at)?;
-    Ok(restore_commits(git, &ids, committer_email)?
+    Ok(restore_commits(git, &ids, committers)?
         .into_iter()
         .find(|(_, restored)| restored == reference)
         .map(|(id, _)| id))
@@ -1904,19 +1937,19 @@ fn restore_candidates(
 }
 
 /// `(id, ref)` of each of `ids` that is a restore commit
-/// ([`restore_commit_message`] of `ref`) committed by `committer_email`,
-/// in the order given, with one `cat-file --batch`.
+/// ([`restore_commit_message`] of `ref`) committed by one of `committers`
+/// (lower case, as [`restore_committers`] gives them), in the order given,
+/// with one `cat-file --batch`.
 pub(crate) fn restore_commits(
     git: &WorkspaceGit<'_>,
     ids: &[String],
-    committer_email: &str,
+    committers: &[String],
 ) -> Result<Vec<(String, String)>, ViewError> {
-    let committer_email = committer_email.trim().to_ascii_lowercase();
     let mut found = Vec::new();
     for (id, object) in ids.iter().zip(git.read_objects(ids)?) {
-        if object.kind != "commit"
-            || committer_of(&object.data).as_deref() != Some(committer_email.as_str())
-        {
+        let trusted = committer_of(&object.data)
+            .is_some_and(|committer| committers.iter().any(|email| *email == committer));
+        if object.kind != "commit" || !trusted {
             continue;
         }
         let text = String::from_utf8_lossy(&object.data);
@@ -2318,6 +2351,30 @@ mod tests {
             RecoveryRef::validate(&git, "refs/instafy/salvage/gateway/a..b"),
             Err(ViewError::InvalidRef)
         ));
+    }
+
+    #[test]
+    fn restores_by_desktop_and_the_gateway_count_in_both() {
+        for (own, expected) in [
+            (
+                "origin@instafy.dev",
+                vec!["origin@instafy.dev", "gateway@instafy.dev"],
+            ),
+            (
+                " Gateway@Instafy.dev ",
+                vec!["gateway@instafy.dev", "origin@instafy.dev"],
+            ),
+            (
+                "Bot@Example.com",
+                vec![
+                    "bot@example.com",
+                    "origin@instafy.dev",
+                    "gateway@instafy.dev",
+                ],
+            ),
+        ] {
+            assert_eq!(restore_committers(own), expected, "{own}");
+        }
     }
 
     #[test]

@@ -11,8 +11,8 @@ use crate::git::{
 use crate::publish_policy::MAX_PUBLISH_BLOB_BYTES;
 use crate::recovery_view::{
     absence_at, describe, fetch_refs, first_parent_history, list_remote_refs, mark_restored,
-    read_blob_at, read_tree_at, resolve, Absence, BlobRead, ObjectEntry, ObjectKind, ReadAt,
-    RecoveryItem, TreeRead, ViewError,
+    read_blob_at, read_tree_at, resolve, restore_committers, Absence, BlobRead, ObjectEntry,
+    ObjectKind, ReadAt, RecoveryItem, TreeRead, ViewError,
 };
 use crate::routes::{mime_type_for_extension, FileEntryResponse};
 use crate::workspace_git::{RunOpts, WorkspaceGit};
@@ -359,7 +359,7 @@ fn cut_diff(mut text: String) -> (String, bool) {
 /// newest first: listed, fetched and described against `main`, each marked
 /// with the newest commit on `main` that restored it (`restoredRev`), by
 /// the rule Desktop lists them by ([`mark_restored`]: a restore commit the
-/// gateway committed, whose whole message names the ref).
+/// gateway or Desktop committed, whose whole message names the ref).
 pub(crate) fn recovery_list(
     git: &WorkspaceGit<'_>,
     remote: &str,
@@ -369,6 +369,6 @@ pub(crate) fn recovery_list(
     let listed = list_remote_refs(git, remote)?;
     let fetched = fetch_refs(git, remote, &listed)?;
     let mut items = describe(git, &fetched.fetched, main)?;
-    mark_restored(git, &mut items, main, gateway_email)?;
+    mark_restored(git, &mut items, main, &restore_committers(gateway_email))?;
     Ok(items)
 }

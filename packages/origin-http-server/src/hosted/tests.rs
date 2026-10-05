@@ -2464,24 +2464,20 @@ async fn the_recovery_list_marks_work_the_gateway_restored() {
     );
     let salvage_ref = "refs/instafy/salvage/gateway/node-1-0123abcd";
     sc.push_ref(&salvaged, salvage_ref);
-    // The gateway restored the salvage ref; agents forged a restore of the
-    // conflict ref, one under the address hosted runtimes commit under by
-    // default (a runtime save keeps its committer when it lands on main).
+    // The gateway restored the salvage ref; an agent forged a restore of
+    // the conflict ref under an address of its own (a runtime save keeps
+    // its committer when it lands on main). Restores by Desktop count too:
+    // `a_restore_recorded_in_one_mode_counts_in_the_other`.
     let restore = sc.push_as(
         &sc.config.git_author_name,
         &sc.config.git_author_email,
         &format!("Restore unsaved work\n\nInstafy-Restored-From: {salvage_ref}"),
     );
-    for forger in [
+    sc.push_as(
+        "instafy-origin",
         "agent@instafy.dev",
-        crate::config::DEFAULT_ORIGIN_AUTHOR_EMAIL,
-    ] {
-        sc.push_as(
-            "instafy-origin",
-            forger,
-            &format!("Restore unsaved work\n\nInstafy-Restored-From: {conflict_ref}"),
-        );
-    }
+        &format!("Restore unsaved work\n\nInstafy-Restored-From: {conflict_ref}"),
+    );
     let served = serve(&sc).await;
 
     let answer = get(&served, "/git/recovery").await;
@@ -2514,7 +2510,7 @@ async fn the_recovery_list_marks_work_the_gateway_restored() {
     assert_eq!(conflict_item["origin"], origin.to_string());
     assert!(
         conflict_item.get("restoredRev").is_none(),
-        "only the gateway's own commits count"
+        "only restore commits by the gateway or Desktop count"
     );
     assert!(conflict_item["base"].is_string());
 
