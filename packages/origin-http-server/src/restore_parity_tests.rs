@@ -242,7 +242,21 @@ impl Space {
     /// it there. Desktop's checkout catches up, as it does before a person
     /// restores anything.
     fn push(&self, files: &[(&str, Option<&[u8]>)], message: &str) -> String {
+        self.push_with_links(files, &[], message)
+    }
+
+    /// [`Space::push`], with `links` (path, target) added as symbolic links.
+    fn push_with_links(
+        &self,
+        files: &[(&str, Option<&[u8]>)],
+        links: &[(&str, &str)],
+        message: &str,
+    ) -> String {
         self.sync_work();
+        for (path, target) in links {
+            std::os::unix::fs::symlink(target, self.work.join(path)).unwrap();
+            git_in(&self.work, &["add", "--", path]);
+        }
         commit_files(&self.work, files, message);
         git_in(
             &self.work,
@@ -753,6 +767,78 @@ async fn the_restored_trees_own_rules_decide_what_is_ignored() {
         assert!(space.on_main("gen/a.out").is_none(), "{mode:?}");
         assert!(space.on_main("gen/.gitignore").is_some(), "{mode:?}");
         assert!(space.on_main("gen/keep.md").is_some(), "{mode:?}");
+    }
+}
+
+/// Work and `main` both turned the same file (or link) into a folder, each
+/// with its own version of a file inside it. The work's removal of the file
+/// is already on `main`, but that settles nothing below it: the file inside
+/// is a conflict the person chooses for, and the ref, the only copy of the
+/// work's version, stays until they do. Keeping `main`'s version restores
+/// the rest and lets the ref go.
+#[tokio::test(flavor = "multi_thread")]
+async fn both_sides_turning_a_file_into_a_folder_still_conflict_inside_it() {
+    for mode in MODES {
+        for (case, top, inside) in [
+            ("file", "notes", "notes/todo.md"),
+            ("link", "lib", "lib/a.rs"),
+        ] {
+            let space = Space::new(mode, &[]).await;
+            if case == "link" {
+                space.push_with_links(&[], &[(top, "src/lib")], "lib is a link");
+            } else {
+                space.push(&[(top, Some(b"a file\n"))], "notes is a file");
+            }
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park(
+                &[
+                    (top, None),
+                    (inside, Some(b"work version\n")),
+                    ("other.md", Some(b"other\n")),
+                ],
+                &reference,
+            );
+            let before = space.push(
+                &[(top, None), (inside, Some(b"main version\n"))],
+                "a folder now",
+            );
+
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                json!([inside]),
+                "{mode:?} {case}"
+            );
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {case}"
+            );
+            assert_eq!(space.main(), before, "{mode:?} {case}");
+            assert_eq!(
+                space.on_main(inside).as_deref(),
+                Some(&b"main version\n"[..]),
+                "{mode:?} {case}"
+            );
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": [inside] }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {case}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[(inside, "kept")]),
+                "{mode:?} {case}: {body}"
+            );
+            assert_eq!(body["refDeleted"], true, "{mode:?} {case}: {body}");
+            assert_eq!(space.on_main("other.md").as_deref(), Some(&b"other\n"[..]));
+            assert_eq!(
+                space.on_main(inside).as_deref(),
+                Some(&b"main version\n"[..]),
+                "{mode:?} {case}"
+            );
+        }
     }
 }
 
