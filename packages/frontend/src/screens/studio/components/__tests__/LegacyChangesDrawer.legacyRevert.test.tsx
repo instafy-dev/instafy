@@ -88,7 +88,7 @@ vi.mock("../WorkspaceGitRollingDiffPanel", () => ({
   WorkspaceGitRollingDiffPanel: () => null,
 }));
 
-import { SourceControlDrawer } from "../SourceControlDrawer";
+import { LegacyChangesDrawer } from "../LegacyChangesDrawer";
 
 async function flushAsyncWork() {
   await act(async () => {
@@ -97,7 +97,7 @@ async function flushAsyncWork() {
   });
 }
 
-describe("SourceControlDrawer (legacy mode) revert", () => {
+describe("LegacyChangesDrawer revert", () => {
   let container: HTMLDivElement;
   let root: Root;
 
@@ -150,7 +150,7 @@ describe("SourceControlDrawer (legacy mode) revert", () => {
 
   it("never issues a revert-commit request against the stateful gateway", async () => {
     await act(async () => {
-      root.render(<SourceControlDrawer />);
+      root.render(<LegacyChangesDrawer />);
     });
     await flushAsyncWork();
 
@@ -165,6 +165,9 @@ describe("SourceControlDrawer (legacy mode) revert", () => {
     await flushAsyncWork();
 
     expect(window.confirm).toHaveBeenCalledOnce();
+    expect(window.confirm).toHaveBeenCalledWith(
+      'Revert "Saved version"? A new version undoing this change is saved on top. Nothing is deleted from history.',
+    );
     expect(fetch).not.toHaveBeenCalled();
     expect(mocks.acquire).not.toHaveBeenCalled();
     expect(mocks.token).not.toHaveBeenCalled();

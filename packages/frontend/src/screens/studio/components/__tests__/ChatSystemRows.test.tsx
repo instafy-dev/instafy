@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { ChatBubbleRow } from "../ChatBubbleRow";
-import { buildTimedSyntheticChatRows } from "../ChatSystemRows";
+import { buildTimedSyntheticChatRows, unsavedWorkNoticeDescription, UnsavedWorkSystemRow } from "../ChatSystemRows";
 
 describe("buildTimedSyntheticChatRows", () => {
   function createRows({ outOfCredits }: { outOfCredits: boolean }) {
@@ -54,5 +54,26 @@ describe("buildTimedSyntheticChatRows", () => {
       (match) => match[1],
     );
     expect(markerKinds).toEqual(["assistant", "boundary"]);
+  });
+});
+
+describe("UnsavedWorkSystemRow", () => {
+  const notice = (count: number) => ({ count, onOpenHistory: vi.fn(), onDismiss: vi.fn() });
+
+  it("tells the viewer once where unsaved work is kept, in plain copy", () => {
+    const single = renderToStaticMarkup(
+      <UnsavedWorkSystemRow notice={notice(1)} renderAssistantAvatar={() => <span />} />,
+    );
+    expect(single).toContain('data-testid="unsaved-work-system-row"');
+    expect(single).toContain("Space");
+    expect(single).toContain("Some work wasn&#x27;t saved");
+    expect(single).toContain("It&#x27;s kept in History, under Unsaved work, until someone restores or removes it.");
+    expect(single).toContain("Open History");
+    expect(single).toContain("Dismiss");
+    expect(single).not.toContain("\u2014");
+
+    expect(unsavedWorkNoticeDescription(3)).toBe(
+      "3 entries are kept in History, under Unsaved work, until someone restores or removes them.",
+    );
   });
 });

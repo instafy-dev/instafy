@@ -1,5 +1,5 @@
 import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
-import { useWorkspaceVersioning } from "../../../workspace/useWorkspaceVersioning";
+import { useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
@@ -554,12 +554,13 @@ function resolveDiscoverySourceMeta(discovered: ControllerSkillDiscoveryItem): {
 
 export function SkillsPanel() {
   const { activeProjectId } = useProject();
-  const { effectiveRuntimeId, desktopOrigin } = useRuntime();
+  const { effectiveRuntimeId } = useRuntime();
   const { showStatus } = useStatus();
   // On the stateless gateway and Desktop origins, reads and writes use the
   // pinned default origin and every change is one version; legacy keeps
-  // today's runtime-first reads and separate writes.
-  const versioningState = useWorkspaceVersioning({ projectId: activeProjectId, origin: desktopOrigin });
+  // today's runtime-first reads and separate writes. The active hook never
+  // pairs this project with the previous project's origin after a switch.
+  const versioningState = useActiveWorkspaceVersioning();
   const filesVersioning = useMemo<FilesVersioning>(
     () => ({ mode: versioningState.mode, originId: versioningState.originId }),
     [versioningState.mode, versioningState.originId],

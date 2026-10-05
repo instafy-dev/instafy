@@ -1,11 +1,10 @@
 import { useEffect } from "react";
 import { useCode } from "../code/useCode";
 import { useProject } from "../projects/useProject";
-import { useRuntime } from "../runtime/useRuntime";
 import { isFileBufferDirty, isVersionedFilesMode } from "../screens/studio/components/filesVersioning";
 import type { CodeFile } from "../types";
 import { FILE_BUFFER_DRAFT_PREFIX, isFileBufferDraftKey, useStudioDraftStore } from "./StudioDrafts";
-import { useWorkspaceVersioning } from "./useWorkspaceVersioning";
+import { useActiveWorkspaceVersioning } from "./useActiveWorkspaceVersioning";
 
 /**
  * Register unsaved Files buffers as Studio drafts (one per file), so leaving
@@ -66,8 +65,8 @@ export function useFileBufferDrafts({
 export function StudioFileBufferDrafts() {
   const { workspace } = useCode();
   const { activeProjectId } = useProject();
-  const { desktopOrigin } = useRuntime();
-  const versioning = useWorkspaceVersioning({ projectId: activeProjectId, origin: desktopOrigin });
+  // The active hook never pairs a project with the previous project's origin.
+  const versioning = useActiveWorkspaceVersioning();
   useFileBufferDrafts({
     projectId: activeProjectId ?? null,
     files: workspace.files,

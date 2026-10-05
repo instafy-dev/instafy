@@ -32,12 +32,15 @@ const mocks = vi.hoisted(() => ({
     originId: "origin-1" as string | null,
     recovery: "unknown" as "unknown" | "supported" | "unsupported",
   },
+  /** What the panel asked the versioning hook for, render by render. */
+  versioningInputs: [] as Array<{ projectId?: string | null; origin?: unknown }>,
   runtime: {
     effectiveRuntimeId: "runtime-1",
     runtimeReady: false,
     waitingForPreferredRuntime: false,
     localWorkspace: null,
     desktopOrigin: { originId: "origin-1", endpoint: "https://origin.test", mode: "hosted" } as unknown,
+    desktopOriginProjectId: null as string | null,
   },
   project: { activeProjectId: "space-a", projectCapabilitiesResolved: true, canWriteProject: true },
   tabs: { openFileTab: vi.fn(), openPanelTab: vi.fn(), requestUrlPush: vi.fn() },
@@ -85,17 +88,20 @@ vi.mock("../../../../code/useCode", async () => {
   return { useCode: harness.useTestCode };
 });
 vi.mock("../../../../workspace/useWorkspaceVersioning", () => ({
-  useWorkspaceVersioning: () => ({
-    mode: mocks.versioning.mode,
-    resolved: true,
-    firstPaintMode: mocks.versioning.mode,
-    originId: mocks.versioning.originId,
-    originMode: "hosted",
-    stateless: mocks.versioning.mode === "stateless",
-    recovery: mocks.versioning.recovery,
-    checkedAt: 1,
-    refresh: async () => null,
-  }),
+  useWorkspaceVersioning: (input: { projectId?: string | null; origin?: unknown }) => {
+    mocks.versioningInputs.push(input);
+    return {
+      mode: mocks.versioning.mode,
+      resolved: true,
+      firstPaintMode: mocks.versioning.mode,
+      originId: mocks.versioning.originId,
+      originMode: "hosted",
+      stateless: mocks.versioning.mode === "stateless",
+      recovery: mocks.versioning.recovery,
+      checkedAt: 1,
+      refresh: async () => null,
+    };
+  },
 }));
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => mocks.runtime }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
@@ -192,6 +198,9 @@ describe("FilesPanel one Save", () => {
     mocks.versioning.recovery = "unknown";
     mocks.project.canWriteProject = true;
     mocks.project.activeProjectId = "space-a";
+    mocks.versioningInputs.length = 0;
+    mocks.runtime.desktopOrigin = { originId: "origin-1", endpoint: "https://origin.test", mode: "hosted" };
+    mocks.runtime.desktopOriginProjectId = null;
     mocks.listAt.mockImplementation(async ({ path }: { path?: string }) => ({
       ok: true,
       entries: path === "docs"
@@ -1251,6 +1260,24 @@ describe("FilesPanel one Save", () => {
       "error",
       6500,
     );
+  });
+
+  it("never pairs a cloud space with the previous Desktop space's origin", async () => {
+    const desk = { originId: "desk-origin", endpoint: "http://desk", mode: "desktop" };
+    mocks.project.activeProjectId = "desk-space";
+    mocks.runtime.desktopOrigin = desk;
+    mocks.runtime.desktopOriginProjectId = "desk-space";
+    await render([buffer({ modified: "saved" })]);
+    expect(mocks.versioningInputs.at(-1)).toMatchObject({ projectId: "desk-space", origin: desk });
+
+    // The user opens a cloud space; the store still holds the Desktop summary.
+    mocks.versioningInputs.length = 0;
+    mocks.project.activeProjectId = "space-a";
+    await render([buffer({ modified: "saved" })]);
+    expect(mocks.versioningInputs.length).toBeGreaterThan(0);
+    for (const input of mocks.versioningInputs) {
+      expect(input).toMatchObject({ projectId: "space-a", origin: null });
+    }
   });
 
   it("asks the probe to look again after a legacy save", async () => {

@@ -166,6 +166,11 @@ export interface WorkspaceGitDiffPanelProps {
   // With base set, the origin diffs base→commit (or base→worktree) tree-to-tree
   // — the pinned per-run view used by chat diff cards.
   base?: string | null;
+  /** Read objects from a recovery or salvage ref (History, unsaved work). */
+  gitRef?: string | null;
+  /** History pins its reads to the default origin; unset keeps legacy routing. */
+  routing?: "default";
+  originId?: string | null;
   runtimeId?: string | null;
   onOpenFile?: (path: string) => void;
   actions?: ReactNode;
@@ -197,6 +202,9 @@ export function WorkspaceGitDiffPanel({
   projectId,
   commit = null,
   base = null,
+  gitRef = null,
+  routing,
+  originId = null,
   runtimeId = null,
   onOpenFile,
   actions,
@@ -243,6 +251,7 @@ export function WorkspaceGitDiffPanel({
           path: normalizedPath,
           commit,
           base,
+          ...(routing === "default" ? { routing, originId, ref: gitRef } : {}),
         });
 
         if (!result) {
@@ -270,7 +279,7 @@ export function WorkspaceGitDiffPanel({
         setDiffLoading(false);
       }
     },
-    [base, commit, normalizedPath, projectId, runtimeId],
+    [base, commit, gitRef, normalizedPath, originId, projectId, routing, runtimeId],
   );
 
   useEffect(() => {

@@ -548,6 +548,13 @@ describe("unsaved work (recovery)", () => {
     ]);
   });
 
+  it("knows a salvage ref without a kind in any letter case", async () => {
+    // The git service treats salvage refs in any letter case.
+    fetchMock().mockResolvedValue(json(200, { entries: [{ ref: "refs/Instafy/SALVAGE/gateway/x", rev: "r" }] }));
+    const result = await fetchWorkspaceRecoveryFromController({ projectId: "p" });
+    expect(result?.entries[0]).toMatchObject({ kind: "salvage", dismissible: false });
+  });
+
   it("treats 404 as unsupported, never as an error", async () => {
     fetchMock().mockResolvedValue(json(404, { message: "origin path not found" }));
     expect(await fetchWorkspaceRecoveryFromController({ projectId: "p" })).toEqual({

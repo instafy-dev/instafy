@@ -49,6 +49,11 @@ describe("Studio lazy panel fallbacks", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("names the loading frame after the drawer it opens", async () => {
+    await act(async () => root.render(<SourceControlDrawer title="History" onRequestClose={vi.fn()} />));
+    expect(container.querySelector('[aria-label="Close history"]')).not.toBeNull();
+  });
+
   it("allows closing Changes while its panel downloads", async () => {
     const close = vi.fn();
     await act(async () => root.render(<SourceControlDrawer onRequestClose={close} />));

@@ -1490,7 +1490,8 @@ function parseRecoveryEntry(value: unknown): WorkspaceRecoveryEntry | null {
   if (!record || !ref || !rev) {
     return null;
   }
-  const isSalvage = ref.startsWith(SALVAGE_REF_PREFIX);
+  // The git service treats salvage refs in any letter case.
+  const isSalvage = ref.toLowerCase().startsWith(SALVAGE_REF_PREFIX);
   const entry: WorkspaceRecoveryEntry = {
     ref,
     rev,

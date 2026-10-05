@@ -14,6 +14,10 @@ export interface WorkspaceGitRollingDiffPanelProps {
   paths: string[];
   projectId: string | null;
   commit?: string | null;
+  base?: string | null;
+  gitRef?: string | null;
+  routing?: "default";
+  originId?: string | null;
   runtimeId?: string | null;
   initialPath?: string | null;
   diffViewMode?: "unified" | "split";
@@ -39,6 +43,10 @@ export function WorkspaceGitRollingDiffPanel({
   paths,
   projectId,
   commit = null,
+  base = null,
+  gitRef = null,
+  routing,
+  originId = null,
   runtimeId = null,
   initialPath = null,
   diffViewMode = "unified",
@@ -149,6 +157,10 @@ export function WorkspaceGitRollingDiffPanel({
                 <WorkspaceGitDiffPanel
                   path={path}
                   commit={commit}
+                  base={base}
+                  gitRef={gitRef}
+                  routing={routing}
+                  originId={originId}
                   projectId={projectId}
                   runtimeId={runtimeId}
                   onOpenFile={onOpenFile}

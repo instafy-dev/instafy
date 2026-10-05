@@ -48,7 +48,7 @@ export const GitReviewView = lazyStudioPanel(
 );
 export const SourceControlDrawer = lazyStudioPanel(
   "Changes", async () => ({ default: (await import("./components/SourceControlDrawer")).SourceControlDrawer }),
-  (content, props) => <PanelFallback title="Changes" onClose={props.onRequestClose}>{content}</PanelFallback>,
+  (content, props) => <PanelFallback title={props.title ?? "Changes"} onClose={props.onRequestClose}>{content}</PanelFallback>,
 );
 export const CreditsPanel = lazyStudioPanel(
   "Credits", async () => ({ default: (await import("./components/CreditsPanel")).CreditsPanel }),

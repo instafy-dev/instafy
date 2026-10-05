@@ -15,6 +15,7 @@ import {
   writeWorkspaceFile,
   writeWorkspaceFiles,
 } from "../utils/harness.js";
+import { requireGatewayMode } from "../utils/gatewayMode.js";
 
 const IGNORED_GENERATED_CHANGE_PATHS = [
   ".agents/skills/instafy-agent-collaboration/SKILL.md",
@@ -236,6 +237,11 @@ test.describe("Source Control UI (git-canonical)", () => {
   test.beforeEach(async ({ page }, testInfo) => {
     page.setDefaultTimeout(60_000);
     const projectId = await prepareStudio(page);
+    // The Changes drawer only exists on the stateful gateway; History covers
+    // the stateless one (history-ui.spec.ts).
+    if (projectId) {
+      await requireGatewayMode(page, projectId, "legacy");
+    }
     // Guest sessions have no AI access in the BYOC stack; onboard the
     // canonical local Codex login so the AI-targeted send is actually enabled.
     await ensureRealDefaultCodexCredentialWhenRequired(page);

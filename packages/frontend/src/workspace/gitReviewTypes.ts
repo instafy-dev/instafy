@@ -29,4 +29,25 @@ export type WorkspaceGitReviewSource =
       entries?: WorkspaceGitReviewEntry[];
       initialPath?: string | null;
       initialMode?: GitReviewMode;
+      /**
+       * Set by History (stateless and desktop modes): read the version from
+       * the default origin, pinned. Absent for the legacy Changes drawer,
+       * whose reviews keep today's routing.
+       */
+      routing?: "default";
+      originId?: string | null;
+    }
+  | {
+      /** Work kept on a recovery or salvage ref, reviewed read-only. */
+      kind: "unsavedWork";
+      ref: string;
+      rev: string;
+      /** Merge base with `main`; diffs run base..rev. */
+      base: string | null;
+      title: string;
+      date: string | null;
+      entries: WorkspaceGitReviewEntry[];
+      originId: string | null;
+      initialPath?: string | null;
+      initialMode?: GitReviewMode;
     };

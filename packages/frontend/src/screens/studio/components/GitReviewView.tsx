@@ -30,6 +30,38 @@ function normalizePath(path: string | null | undefined): string | null {
   return value.length > 0 ? value : null;
 }
 
+/**
+ * What the diff panels read. Legacy reviews keep today's routing; History
+ * pins saved versions and unsaved work to the default origin.
+ */
+function reviewDiffSource(review: WorkspaceGitReviewSource): {
+  commit: string | null;
+  base: string | null;
+  gitRef: string | null;
+  routing: "default" | undefined;
+  originId: string | null;
+} {
+  if (review.kind === "savedVersion") {
+    return {
+      commit: review.commit,
+      base: null,
+      gitRef: null,
+      routing: review.routing === "default" ? "default" : undefined,
+      originId: review.routing === "default" ? review.originId ?? null : null,
+    };
+  }
+  if (review.kind === "unsavedWork") {
+    return {
+      commit: review.rev,
+      base: review.base,
+      gitRef: review.ref,
+      routing: "default",
+      originId: review.originId,
+    };
+  }
+  return { commit: null, base: null, gitRef: null, routing: undefined, originId: null };
+}
+
 export function GitReviewView({
   review,
   presentation = "full",
@@ -68,6 +100,7 @@ export function GitReviewView({
         projectId: activeProjectId,
         runtimeId: effectiveRuntimeId ?? null,
         commit: review.commit,
+        ...(review.routing === "default" ? { routing: "default" as const, originId: review.originId ?? null } : {}),
       });
 
       if (!result) {
@@ -97,7 +130,7 @@ export function GitReviewView({
     setPreviewPath(normalizePath(review.initialPath));
     setError(null);
 
-    if (review.kind === "workingTree") {
+    if (review.kind === "workingTree" || review.kind === "unsavedWork") {
       setEntries(review.entries);
       setLoading(false);
       return;
@@ -132,6 +165,7 @@ export function GitReviewView({
   }, [entries, review.initialPath]);
 
   const paths = useMemo(() => entries.map((entry) => entry.path), [entries]);
+  const diffSource = useMemo(() => reviewDiffSource(review), [review]);
   const diffOverrides = useMemo(
     () =>
       Object.fromEntries(
@@ -189,6 +223,8 @@ export function GitReviewView({
     },
     [activeProjectId, openPanelTab, requestUrlPush, showStatus],
   );
+  // Unsaved work is review-only: no editor opens from it.
+  const openFileHandler = review.kind === "unsavedWork" ? undefined : handleOpenFile;
 
   const handleOpenChangesDrawer = useCallback(() => {
     if (review.kind !== "workingTree" || typeof window === "undefined") {
@@ -232,13 +268,15 @@ export function GitReviewView({
     </>
   ) : null;
 
-  const title = review.kind === "savedVersion" ? review.title : review.title ?? "Review changes";
+  const title = review.kind === "workingTree" ? review.title ?? "Review changes" : review.title;
   const reviewLabel =
     review.kind === "savedVersion"
       ? "Saved version review"
-      : hasSyntheticEntries
-        ? "Batch review"
-        : "Working tree review";
+      : review.kind === "unsavedWork"
+        ? "Unsaved work"
+        : hasSyntheticEntries
+          ? "Batch review"
+          : "Working tree review";
 
   if (presentation === "sheet") {
     return (
@@ -263,6 +301,8 @@ export function GitReviewView({
                   </span>
                   <span>{formatRelativeCommitTime(review.committedAt)}</span>
                 </>
+              ) : review.kind === "unsavedWork" && review.date ? (
+                <span>{formatRelativeCommitTime(review.date)}</span>
               ) : null}
             </div>
           </div>
@@ -304,11 +344,15 @@ export function GitReviewView({
             <WorkspaceGitRollingDiffPanel
               paths={paths}
               initialPath={previewPath}
-              commit={review.kind === "savedVersion" ? review.commit : null}
+              commit={diffSource.commit}
+              base={diffSource.base}
+              gitRef={diffSource.gitRef}
+              routing={diffSource.routing}
+              originId={diffSource.originId}
               projectId={activeProjectId}
               runtimeId={effectiveRuntimeId ?? null}
               diffViewMode="unified"
-              onOpenFile={handleOpenFile}
+              onOpenFile={openFileHandler}
               showHeader={false}
               layoutStyle="flat"
               diffOverrides={diffOverrides}
@@ -349,6 +393,8 @@ export function GitReviewView({
                   </span>
                   <span>{formatRelativeCommitTime(review.committedAt)}</span>
                 </>
+              ) : review.kind === "unsavedWork" && review.date ? (
+                <span>{formatRelativeCommitTime(review.date)}</span>
               ) : null}
             </div>
           </div>
@@ -451,11 +497,15 @@ export function GitReviewView({
             <WorkspaceGitRollingDiffPanel
               paths={paths}
               initialPath={previewPath}
-              commit={review.kind === "savedVersion" ? review.commit : null}
+              commit={diffSource.commit}
+              base={diffSource.base}
+              gitRef={diffSource.gitRef}
+              routing={diffSource.routing}
+              originId={diffSource.originId}
               projectId={activeProjectId}
               runtimeId={effectiveRuntimeId ?? null}
               diffViewMode={diffViewMode}
-              onOpenFile={handleOpenFile}
+              onOpenFile={openFileHandler}
               showHeader={false}
               layoutStyle="flat"
               diffOverrides={diffOverrides}
@@ -477,10 +527,14 @@ export function GitReviewView({
             <div className="min-h-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/80 dark:border-slate-800 dark:bg-slate-950/40">
               <WorkspaceGitDiffPanel
                 path={previewPath}
-                commit={review.kind === "savedVersion" ? review.commit : null}
+                commit={diffSource.commit}
+                base={diffSource.base}
+                gitRef={diffSource.gitRef}
+                routing={diffSource.routing}
+                originId={diffSource.originId}
                 projectId={activeProjectId}
                 runtimeId={effectiveRuntimeId ?? null}
-                onOpenFile={handleOpenFile}
+                onOpenFile={openFileHandler}
                 actions={diffActions}
                 diffViewMode={diffViewMode}
                 diffOverride={currentDiffOverride}
@@ -489,7 +543,9 @@ export function GitReviewView({
                     ? "Current file contents"
                     : currentDiffOverride?.synthetic
                       ? "Preview diff"
-                      : undefined
+                      : review.kind === "unsavedWork"
+                        ? "Unsaved work"
+                        : undefined
                 }
                 dataTestId="git-review-diff"
                 testIdPrefix="git-review-diff"

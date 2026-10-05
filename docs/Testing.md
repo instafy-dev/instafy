@@ -14,8 +14,12 @@
 - Headed: `pnpm test:e2e:headed`
 - Target a failing spec: `pnpm -C packages/frontend test:e2e -- tests/playwright/app.spec.ts -g "renders landing hero content"`
 - Gateway mode: `PLAYWRIGHT_GATEWAY_MODE=legacy|stateless` names the hosted gateway the local stack
-  runs. Specs for the other mode skip, and specs that name the mode fail (never skip) when the
-  project's default origin answers otherwise. Unset means the stateful gateway with no probe.
+  runs (helpers in `tests/playwright/utils/gatewayMode.ts`). Specs for the other mode skip, and specs
+  that name the mode fail (never skip) when the project's default origin answers otherwise. Unset
+  means the stateful gateway: the Files specs (`assertGatewayMode`) then make no probe. Specs that
+  use `requireGatewayMode` skip unless the declared mode is theirs and probe whenever they run, so
+  with the variable unset the History spec (written for `stateless`) skips, while the Changes spec
+  (written for `legacy`) still checks that the origin answers as the stateful gateway.
 
 The default `pnpm test:e2e` loop is intentionally product-focused:
 - it covers the regular Playwright regression surface
