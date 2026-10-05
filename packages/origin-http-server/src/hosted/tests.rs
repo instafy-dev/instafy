@@ -878,6 +878,78 @@ async fn a_fetch_that_fails_against_a_damaged_base_is_made_again_from_scratch() 
     }
 }
 
+/// A delta base the mirror lost outright (gone, not corrupt) makes the
+/// fetch fail with deltas left unresolved, naming no object, below
+/// `transfer.unpackLimit` (`unpack-objects`) and above it (`index-pack`).
+/// The mirror's own `main` shows the loss (its tip's trees read whole, each
+/// file there present), so the mirror is made again and reads of `main` and
+/// of the new version are served, never answered 502 for good. A lost root
+/// tree of `main` counts the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fetch_against_a_base_the_mirror_lost_is_made_again() {
+    let big: String = (0..20_000).map(|n| format!("line {n}\n")).collect();
+    for (case, files) in [
+        ("lost blob, unpack-objects", 3usize),
+        ("lost blob, index-pack", 150),
+        ("lost root tree", 3),
+    ] {
+        let sc = HostedScenario::new();
+        // Enough files at the top that the next root tree is sent as a
+        // delta against this one.
+        let names: Vec<String> = (0..40).map(|n| format!("top-{n:02}.txt")).collect();
+        let mut first: Vec<(&str, Option<&[u8]>)> = names
+            .iter()
+            .map(|name| (name.as_str(), Some(&b"top\n"[..])))
+            .collect();
+        first.push(("big.txt", Some(big.as_bytes())));
+        first.push(("two.txt", Some(b"two\n")));
+        let head = sc.push(&first, "first");
+        let served = serve(&sc).await;
+        assert_eq!(get(&served, "/files/big.txt").await.status, 200, "{case}");
+        let lost = if case == "lost root tree" {
+            git_in(&sc.remote(), &["rev-parse", &format!("{head}^{{tree}}")])
+        } else {
+            git_in(&sc.remote(), &["rev-parse", &format!("{head}:big.txt")])
+        };
+        let file = loose_object(&sc.mirror(), &lost);
+        assert!(file.is_file(), "{case}: {lost} is not loose in the mirror");
+        std::fs::remove_file(file).unwrap();
+        let lease = served.cache.lease(sc.project);
+        let resets = lease.mirror().resets();
+
+        let mut contents: Vec<(String, Vec<u8>)> = (0..files)
+            .map(|n| (format!("many/{n}.txt"), format!("{n}\n").into_bytes()))
+            .collect();
+        contents.push((
+            "big.txt".to_string(),
+            format!("{big}one more\n").into_bytes(),
+        ));
+        let pushed: Vec<(&str, Option<&[u8]>)> = contents
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), Some(bytes.as_slice())))
+            .collect();
+        let latest = sc.push(&pushed, "more");
+
+        let answer = get(&served, &format!("/files/big.txt?rev={latest}")).await;
+        assert_eq!(
+            answer.status,
+            200,
+            "{case}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+        assert!(decoded(&answer).ends_with(b"one more\n"), "{case}");
+        assert!(lease.mirror().resets() > resets, "{case}: made again");
+        assert_eq!(
+            git_in(&sc.mirror(), &["rev-parse", "refs/heads/main"]),
+            latest,
+            "{case}"
+        );
+        let answer = get(&served, "/files/two.txt").await;
+        assert_eq!(answer.status, 200, "{case}");
+        assert_eq!(decoded(&answer), b"two\n", "{case}");
+    }
+}
+
 /// A transfer from canonical that is cut off part way (curl 18 over smart
 /// HTTP: "early EOF", "invalid index-pack output") is the network's
 /// failure, never the mirror's: the mirror and its `main` stay as they were
