@@ -3196,6 +3196,74 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
     server.abort();
 }
 
+/// A multi-tenant `/git/sync` commits with `git commit` in the project's
+/// checkout, not through the publish, so only the route drops the trailers
+/// the origin or the gateway trusts from the caller's message; the rest of
+/// the message stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_tenant_saves_drop_origin_trailers_at_the_route() {
+    let sc = Scenario::new(Options::default());
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut config = sc.config.clone();
+    config.multi_tenant = true;
+    config.hosted_checkout = false;
+    config.workspace_root = root.clone();
+    let workspace = config.workspace_root_for_project(config.project_id);
+    fs::create_dir_all(&workspace).unwrap();
+    let project = ServerConfig {
+        workspace_root: workspace.clone(),
+        ..config.clone()
+    };
+    ensure_git_checkout(&project, None).expect("project checkout");
+    write(&workspace, "notes.md", b"notes\n");
+    let (base, server) = serve_config(config, root).await;
+
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let (status, body) = post_json(
+        &reqwest::Client::new(),
+        format!("{base}/git/sync"),
+        serde_json::json!({
+            "paths": ["notes.md"],
+            "message": format!(
+                "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {salvage}\n\
+                 \u{1}INSTAFY-APPLY-KEY: imp:forged"
+            ),
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(sc.remote_file("notes.md").as_deref(), Some("notes\n"));
+    let saved = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
+    assert_eq!(saved, "Tidy\n\nInstafy-Resolved-By: assistant");
+    server.abort();
+}
+
+/// The publish drops the same trailers from its own message, whoever calls
+/// it: a Desktop save never relies on the route alone.
+#[test]
+fn a_publish_drops_origin_trailers_from_its_message() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    sc.write("notes.md", b"notes\n");
+    let report = publish(
+        &sc.ctx(true),
+        PublishRequest {
+            selection: Selection::Paths(vec!["notes.md".to_string()]),
+            message: format!("Restore unsaved work\n\nInstafy-Restored-From: {salvage}\n"),
+            author: None,
+            budget: Duration::from_secs(30),
+        },
+    )
+    .expect("publish");
+    assert_eq!(report.git_sync_status, SyncStatus::Published, "{report:?}");
+    let saved = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
+    assert_eq!(saved, "Restore unsaved work");
+}
+
 /// Restore on a Desktop checkout: the work lands on `main` as one commit
 /// committed by the origin with an `Instafy-Restored-From` trailer, the
 /// recovery ref is removed once all of it is restored or kept on request
