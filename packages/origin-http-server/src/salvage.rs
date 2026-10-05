@@ -315,7 +315,19 @@ pub(crate) fn entry_project(name: &str) -> Option<Uuid> {
     suffix_ok.then_some(parsed)
 }
 
-fn lock(settings: &Settings) -> Result<std::fs::File> {
+/// The run lock, `.salvage/.lock`, held for one run with `--apply`.
+struct RunLock(std::fs::File);
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        // Released explicitly: a git process forked meanwhile can hold a
+        // copy of the descriptor until it starts, which would otherwise
+        // keep the lock past the run.
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn lock(settings: &Settings) -> Result<RunLock> {
     use fs2::FileExt as _;
     let dir = settings.salvage_dir();
     ensure_private_dir(&dir)?;
@@ -332,7 +344,7 @@ fn lock(settings: &Settings) -> Result<std::fs::File> {
         .with_context(|| format!("failed to open {path:?}"))?;
     file.try_lock_exclusive()
         .with_context(|| format!("another salvage holds {path:?}"))?;
-    Ok(file)
+    Ok(RunLock(file))
 }
 
 fn append_report(settings: &Settings, line: &str) -> Result<()> {
