@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  isOriginAutoRetryCode,
+  isOriginRetryLaterCode,
+  originAutoRetryDelayMs,
   originErrorFromException,
   parseOriginError,
   redactLeaseHolder,
@@ -135,6 +138,23 @@ describe("parseOriginError: other statuses", () => {
     expect(error).toMatchObject({ code: "fetch_pending", retryAfterMs: 3000 });
   });
 
+  // The stateless gateway's other 503 answers: `{error, code}` and
+  // `Retry-After: 2`, exactly as `OriginError::RetryLater` writes them.
+  it.each([
+    ["writes_busy", "the server is busy saving other changes; try again in a moment"],
+    ["mirror_reset", "this space's copy on the server was damaged and is being made again; try again in a moment"],
+    ["disk_full", "the server is out of disk space; try again in a moment"],
+  ])("503 %s reads its code and Retry-After", async (code, message) => {
+    const error = await parseOriginError(json(503, { error: message, code }, { "retry-after": "2" }));
+    expect(error).toEqual({ status: 503, code, message, retryAfterMs: 2000, routeUnavailable: false });
+  });
+
+  it("a 503 code without Retry-After has no wait", () => {
+    const error = parseOriginErrorText(503, JSON.stringify({ error: "busy", code: "writes_busy" }));
+    expect(error.code).toBe("writes_busy");
+    expect(error).not.toHaveProperty("retryAfterMs");
+  });
+
   it("workspace_stopping keeps retryable", () => {
     const error = parseOriginErrorText(503, JSON.stringify({ error: "stopping", code: "workspace_stopping", retryable: true }));
     expect(error).toMatchObject({ code: "workspace_stopping", retryable: true });
@@ -213,6 +233,39 @@ describe("helpers", () => {
       code: "network_error",
       message: "Failed to fetch",
     });
+  });
+});
+
+describe("answers that say to try again later", () => {
+  const budget = { defaultDelayMs: 1500, maxDelayMs: 5000 };
+
+  it("knows the four 503 codes and retries only the three that clear by themselves", () => {
+    for (const code of ["fetch_pending", "writes_busy", "mirror_reset", "disk_full"]) {
+      expect(isOriginRetryLaterCode(code)).toBe(true);
+    }
+    expect(["fetch_pending", "writes_busy", "mirror_reset"].every(isOriginAutoRetryCode)).toBe(true);
+    expect(isOriginAutoRetryCode("disk_full")).toBe(false);
+    for (const code of ["main_busy", "canonical_unreachable", "workspace_stopping", "", null, undefined]) {
+      expect(isOriginRetryLaterCode(code)).toBe(false);
+      expect(isOriginAutoRetryCode(code)).toBe(false);
+    }
+  });
+
+  it.each(["fetch_pending", "writes_busy", "mirror_reset"])("%s waits for Retry-After within the budget", (code) => {
+    expect(originAutoRetryDelayMs({ code, retryAfterMs: 2000 }, budget)).toBe(2000);
+    expect(originAutoRetryDelayMs({ code, retryAfterMs: 0 }, budget)).toBe(0);
+    expect(originAutoRetryDelayMs({ code, retryAfterMs: 60_000 }, budget)).toBe(5000);
+    expect(originAutoRetryDelayMs({ code }, budget)).toBe(1500);
+    expect(originAutoRetryDelayMs({ code, retryAfterMs: Number.NaN }, budget)).toBe(1500);
+    expect(originAutoRetryDelayMs({ code, retryAfterMs: -1 }, budget)).toBe(1500);
+  });
+
+  it("never retries disk_full or any other answer on its own", () => {
+    expect(originAutoRetryDelayMs({ code: "disk_full", retryAfterMs: 2000 }, budget)).toBeNull();
+    expect(originAutoRetryDelayMs({ code: "main_busy", retryAfterMs: 2000 }, budget)).toBeNull();
+    expect(originAutoRetryDelayMs({ retryAfterMs: 2000 }, budget)).toBeNull();
+    expect(originAutoRetryDelayMs(null, budget)).toBeNull();
+    expect(originAutoRetryDelayMs(undefined, budget)).toBeNull();
   });
 });
 

@@ -268,6 +268,12 @@ describe("default routing", () => {
     expect(ok).not.toHaveProperty("errorInfo");
   });
 
+  it.each(["mirror_reset", "disk_full"])("review reports %s with its Retry-After", async (code) => {
+    fetchMock().mockResolvedValue(json(503, { error: "try again in a moment", code }, { "retry-after": "2" }));
+    const review = await fetchWorkspaceGitHistoryReviewFromController({ projectId: "p", commit: "c", routing: "default" });
+    expect(review).toMatchObject({ supported: true, busy: false, errorInfo: { status: 503, code, retryAfterMs: 2000 } });
+  });
+
   it("sync never omits the message and parses a Desktop publish report", async () => {
     fetchMock().mockResolvedValue(
       json(200, {

@@ -223,6 +223,36 @@ describe("saveWorkspaceChanges", () => {
     expect(mocks.release).toHaveBeenCalledOnce();
   });
 
+  // The stateless gateway answers before it writes anything: nothing landed,
+  // the lease is let go and no sync follows; the code and its wait reach the
+  // caller, which decides whether to ask again.
+  it.each(["fetch_pending", "writes_busy", "mirror_reset", "disk_full"])(
+    "returns 503 %s with its Retry-After, not applied and without a sync",
+    async (code) => {
+      vi.mocked(fetch).mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "try again in a moment", code }), {
+          status: 503,
+          headers: { "content-type": "application/json", "retry-after": "2" },
+        }),
+      );
+      const result = await saveWorkspaceChanges({
+        projectId: "p",
+        originId: "gateway",
+        files: [{ path: "README.md", content: "x" }],
+        baseRev: "r1",
+      });
+      expect(calls()).toHaveLength(1);
+      expect(result).toMatchObject({
+        ok: false,
+        stage: "apply",
+        applied: false,
+        appliedRev: null,
+        error: { status: 503, code, retryAfterMs: 2000 },
+      });
+      expect(mocks.release).toHaveBeenCalledOnce();
+    },
+  );
+
   it.each([
     ["excluded_path", "secret"],
     ["excluded_path", undefined],
