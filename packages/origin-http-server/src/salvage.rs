@@ -42,8 +42,9 @@
 //!    credential, then read back with `git.read` (`canonicalVerified`). An
 //!    existing ref with the same tip is reported as verified; one with
 //!    another tip stops the entry. A path the shard's policy refuses is left
-//!    as `main` has it and the push is tried again (at most 8 times); any
-//!    salvage refusal is final.
+//!    as `main` has it and the push is tried again with W rebuilt as one
+//!    commit (at most 8 times, `historyFiltered`); any salvage refusal is
+//!    final.
 //! 6. `.salvage/<entry>.bundle` holds the entry's local history (all of it
 //!    when canonical is missing), `.salvage/<entry>.private.tar` (0600) the
 //!    private files, and `.salvage/report.jsonl` one line per entry and run.
@@ -55,10 +56,11 @@
 //! each entry is still fetched into its own repository and W's objects are
 //! written there, so the report can name W. `--remove` (with `--apply`)
 //! deletes an entry only when it was clean, or canonical now holds its
-//! salvage ref at W, nothing was skipped outside build output and every
-//! chat image was exported or given a final answer, or the entry is named
-//! with `--ack`. Salvage refs and private archives are never
-//! removed; a bundle only once its ref is verified on canonical.
+//! salvage ref at W, nothing was skipped outside build output, every chat
+//! image was exported or given a final answer, and no history was filtered,
+//! or the entry is named with `--ack`. Salvage refs and private archives are
+//! never removed; a bundle only once canonical holds the raw history it has
+//! (the ref verified at the unfiltered W).
 
 mod archive;
 mod canonical;
@@ -181,6 +183,9 @@ pub(crate) struct EntryReport {
     /// private archive meanwhile); they hold up `--remove`.
     pub export_failed: Vec<String>,
     pub skipped_paths: Vec<Skipped>,
+    /// W reached canonical only as one rebuilt commit (by the history check
+    /// or after the shard's policy refused a path), so canonical lacks the
+    /// local history the bundle holds.
     pub history_filtered: bool,
     pub bootstrap_only: bool,
     pub bundle: Option<String>,
@@ -463,6 +468,9 @@ fn removal_blocker(settings: &Settings, report: &EntryReport) -> Option<String> 
     } else if !report.export_failed.is_empty() {
         "chat images were not exported (they are in the private archive; a rerun may export \
          them)"
+    } else if report.history_filtered {
+        "its work reached canonical only as one rebuilt commit; the bundle keeps its local \
+         history"
     } else if report.clean || report.canonical_verified {
         return None;
     } else if report.canonical_missing {
@@ -495,7 +503,8 @@ fn remove(settings: &Settings, path: &Path, report: &mut EntryReport) {
             .with_context(|| format!("failed to move {path:?} out of .legacy"))?;
         report.removed = true;
         remove_entry(&target).with_context(|| format!("failed to delete {target:?}"))?;
-        if report.canonical_verified {
+        // Only when canonical holds the raw history the bundle has.
+        if report.canonical_verified && !report.history_filtered {
             if let Some(bundle) = report.bundle.as_deref() {
                 std::fs::remove_file(bundle)
                     .with_context(|| format!("failed to delete {bundle:?}"))?;
