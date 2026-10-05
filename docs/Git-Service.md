@@ -351,7 +351,7 @@ Studio picks its versioning UI per space from the project's default origin:
   "Restored" once restored. A restore of work the saved version already has answers
   `committed: false` and says there was nothing to restore; with `marked: true` (salvage refs) the
   origin recorded it as an empty version on `main`, so History also reloads at that `rev` and the
-  entry shows "Restored". `notRestored` items may carry a `reason`: a file left out as an old chat
+  entry shows "Restored". `notRestored` items carry a `reason` on both Desktop and the gateway: a file left out as an old chat
   upload (`attachment`, which a salvage keeps privately) is named in a sentence of its own, apart
   from secret and ignored files, and a `kept` file is never named as refused. The section is
   hidden on servers without these routes.

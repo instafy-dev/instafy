@@ -1529,6 +1529,16 @@ pub(crate) fn describe(
 /// saved version has it.
 pub(crate) const KEPT: &str = "kept";
 
+/// A path a restore left as `main` (or the checkout) has it, and why:
+/// [`KEPT`], or the name of the reason it may never be restored here
+/// ([`crate::publish_policy::RejectReason::name`]). Desktop and the hosted
+/// gateway both answer `notRestored` as a list of these, by path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NotRestored {
+    pub path: String,
+    pub reason: &'static str,
+}
+
 /// Why a restore leaves a change of the work out, if it does: refused first
 /// (`refused`: why it may never be restored here), so a path that can never
 /// come back is refused even below a kept folder, and only then [`KEPT`]

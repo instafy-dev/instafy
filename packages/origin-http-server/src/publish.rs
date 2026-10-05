@@ -35,8 +35,8 @@ use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
     left_out_reason, parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref,
-    restore_commit_message, restore_commits, restore_of, without_origin_trailers, RecoveryRef,
-    ViewError,
+    restore_commit_message, restore_commits, restore_of, without_origin_trailers, NotRestored,
+    RecoveryRef, ViewError,
 };
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
@@ -341,10 +341,11 @@ pub struct RestoreReport {
     /// shows the entry restored. Only with `committed: false`; false too
     /// when the branch already had a restore commit of this ref on `main`.
     pub marked: bool,
-    /// Paths the work changes that kept the saved version: kept on request,
-    /// or never restorable here (ignored, excluded, secret, legacy
-    /// attachments, too large).
-    pub not_restored: Vec<String>,
+    /// Paths the work changes that kept the saved version, each with why:
+    /// `kept` on request, or the reason it is never restorable here
+    /// (`ignored`, `excluded`, `secret`, `attachment`, `too_large`,
+    /// `unsupported`), as the hosted gateway answers them.
+    pub not_restored: Vec<NotRestored>,
     /// The recovery ref is gone from canonical after the restore reached
     /// `main`: this call removed it, or found it already removed (the
     /// publish retires a ref whose commits reached `main`). It is removed
@@ -376,7 +377,7 @@ pub fn restore(
 struct Restored {
     committed: bool,
     marked: bool,
-    not_restored: Vec<String>,
+    not_restored: Vec<NotRestored>,
     ref_deleted: bool,
 }
 
@@ -2698,8 +2699,11 @@ impl Publisher<'_> {
                         .contains(&change.path)
                         .then_some(RejectReason::Ignored)
                 });
-            if left_out_reason(refusal, keep.covers(&change.path)).is_some() {
-                not_restored.push(change.path.clone());
+            if let Some(reason) = left_out_reason(refusal, keep.covers(&change.path)) {
+                not_restored.push(NotRestored {
+                    path: change.path.clone(),
+                    reason,
+                });
                 if refusal.is_some() {
                     refused.push(change.path.clone());
                 }
@@ -2710,7 +2714,7 @@ impl Publisher<'_> {
         // (itself or a folder above it), it lies below a path left out, or
         // every change the work makes inside it was left out, as when the
         // work adds a folder where `HEAD` has a file.
-        let left_out: PathRoots = not_restored.iter().cloned().collect();
+        let left_out: PathRoots = not_restored.iter().map(|item| item.path.clone()).collect();
         let changed: PathRoots = changes.iter().map(|change| change.path.clone()).collect();
         let conflicts: Vec<String> = merged
             .conflicts
@@ -2733,7 +2737,9 @@ impl Publisher<'_> {
                 serde_json::json!({ "head": head, "paths": conflicts }),
             ));
         }
-        let tree = tree_with_entries_from(&self.git, &merged.tree, Some(&head), &not_restored)
+        let left_out_paths: Vec<String> =
+            not_restored.iter().map(|item| item.path.clone()).collect();
+        let tree = tree_with_entries_from(&self.git, &merged.tree, Some(&head), &left_out_paths)
             .map_err(internal)?;
 
         let mut local = head.clone();
@@ -2862,8 +2868,8 @@ impl Publisher<'_> {
                 }
             }
         }
-        not_restored.sort();
-        not_restored.dedup();
+        not_restored.sort_by(|a, b| a.path.cmp(&b.path));
+        not_restored.dedup_by(|a, b| a.path == b.path);
         Ok(Restored {
             committed,
             marked,
