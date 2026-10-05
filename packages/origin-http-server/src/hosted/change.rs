@@ -4,9 +4,13 @@
 //! the new tree from `main` in the change's quarantine and refuses what
 //! cannot be saved as asked (an upload's rules below):
 //!
-//! - a link or submodule written over (400 `unsupported_entry`; 409
-//!   `head_moved` when the request says what the client read there, since
-//!   a link or submodule never matches a blob id or "absent"), a folder
+//! - a link or submodule written over (400 `unsupported_entry`, also when
+//!   the request says what the client read there, such as "absent" for a
+//!   create, and the version it read had that same entry: reading again
+//!   cannot help; 409 `head_moved` when `main` changed that path since that
+//!   version, when the request names no version but says what it read, or
+//!   for the controller's managed-files bootstrap (`autoCommitAfterApply`),
+//!   which reads again and leaves such paths alone), a folder
 //!   deleted without the version it was read at (400
 //!   `delete_requires_base_rev`), a file where a folder is or the other way
 //!   round (409 `path_type_conflict`);
@@ -487,8 +491,8 @@ impl Edits {
 
         let mut unsupported = Vec::new();
         // Written over a link or submodule with a condition on what the
-        // client read there: that read cannot have been of this entry.
-        let mut unmatched = Vec::new();
+        // client read there (sorted below by what changed since).
+        let mut hidden_read = Vec::new();
         let mut clashes = Vec::new();
         let mut refused: Vec<(String, RejectReason)> = Vec::new();
         let mut too_large = Vec::new();
@@ -504,7 +508,7 @@ impl Edits {
                 }
                 if !is_regular(&entry.mode) {
                     if self.expected.contains_key(path) {
-                        unmatched.push(path.clone());
+                        hidden_read.push(path.clone());
                     } else {
                         unsupported.push(path.clone());
                     }
@@ -590,6 +594,27 @@ impl Edits {
             }
         }
 
+        // A link or submodule the client said it read something at: 409 when
+        // reading again shows something new (the path changed since the
+        // version it read, or it named no version: then its read cannot
+        // have been of this entry; the bootstrap reads again and leaves the
+        // path alone), 400 when that version had this same entry.
+        let unmatched = match base {
+            _ if hidden_read.is_empty() => Vec::new(),
+            _ if self.add_ignored => std::mem::take(&mut hidden_read),
+            None => std::mem::take(&mut hidden_read),
+            Some(base) if Some(base) == main => Vec::new(),
+            Some(base) => {
+                let paths: BTreeSet<String> = hidden_read.iter().cloned().collect();
+                let at_base = entries_at(git, base, &paths)?;
+                let (moved, same): (Vec<String>, Vec<String>) = hidden_read
+                    .drain(..)
+                    .partition(|path| differs(at_base.get(path), at_main.get(path)));
+                hidden_read = same;
+                moved
+            }
+        };
+        unsupported.append(&mut hidden_read);
         // A 409 the client can act on (read again, leave the path alone)
         // rather than a refusal of the whole request.
         if !unmatched.is_empty() {
