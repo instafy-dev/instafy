@@ -1192,6 +1192,63 @@ async fn a_packing_that_changes_nothing_is_not_run_again_every_sweep() {
     assert!(second.packed.is_empty(), "{second:?}");
 }
 
+/// What the sweeper keeps per space (a mirror's size) goes with the
+/// mirror: when it is evicted, and when it is gone from the disk.
+#[tokio::test(flavor = "multi_thread")]
+async fn sizes_are_forgotten_with_their_mirrors() {
+    let evicted = HostedScenario::new();
+    evicted.push(&[("a.txt", Some(b"a\n"))], "first");
+    let mut gone = HostedScenario::new();
+    // Both spaces in one cache.
+    gone.root = evicted.root.clone();
+    gone.config.workspace_root = evicted.root.clone();
+    gone.canonical = evicted.canonical.clone();
+    gone.config.git_remote_base_url = evicted.config.git_remote_base_url.clone();
+    git_in(
+        &evicted.canonical,
+        &[
+            "init",
+            "--bare",
+            "-q",
+            "-b",
+            "main",
+            &format!("{}.git", gone.project),
+        ],
+    );
+    let cache = Arc::new(
+        MirrorCache::open(
+            &evicted.root,
+            Arc::new(evicted.config.clone()),
+            reqwest::Client::new(),
+            0,
+        )
+        .unwrap(),
+    );
+    for project in [evicted.project, gone.project] {
+        let lease = cache.lease(project);
+        cache
+            .resolve_main(&lease, Freshness::Fresh, None)
+            .await
+            .unwrap();
+    }
+    let sweep = || {
+        let cache = cache.clone();
+        async move {
+            tokio::task::spawn_blocking(move || cache.sweep(SystemTime::now()))
+                .await
+                .unwrap()
+        }
+    };
+    sweep().await;
+    assert_eq!(cache.known_sizes(), 2);
+
+    set_last_use(&evicted.mirror(), SystemTime::now() - EVICT_IDLE_AFTER * 2);
+    std::fs::remove_dir_all(gone.mirror()).unwrap();
+    let report = sweep().await;
+    assert_eq!(report.evicted, vec![evicted.project]);
+    assert_eq!(cache.known_sizes(), 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sweeper_keeps_mirrors_in_use_and_removes_idle_ones() {
     let sc = HostedScenario::new();
