@@ -123,11 +123,13 @@ before trimming can resume.
 
 The optimizer should act like downward pressure, not like a second agent inventing new behavior.
 
-Its penalties use formatting heuristics, not semantic judgments. A useful procedure can be
-demoted because it includes fenced commands or an unrecognized verification heading. Inspect
-the saved files and generated index when evaluating acquisition. An archive entry currently
-does not exclude a block from automatic directory discovery; enforcing that exclusion needs
-separate validation of the demotion policy.
+Its penalties are bounded heuristics, not semantic judgments. Code fences and verification
+heading wording do not penalize a block or require a specific Markdown template. Explicit
+execution replay, stored example outputs and vague guidance still contribute penalties;
+size, bullet-count, usage and recency pressure still apply. Inspect the saved files and
+generated index when evaluating acquisition. An archive entry currently does not exclude a
+block from automatic directory discovery; enforcing that exclusion needs separate validation
+of the demotion policy.
 
 ## What good learned memory looks like
 

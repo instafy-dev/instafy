@@ -1157,9 +1157,8 @@ fn learned_block_quality_flags(text: &str) -> Vec<&'static str> {
     if bullet_count > 8 {
         flags.push("too_many_bullets");
     }
-    if text.contains("```") {
-        flags.push("code_fence");
-    }
+    // Fences and verification-heading wording are presentation, not evidence of
+    // replay or low-value learning. Keep content checks independent of those choices.
     let contains_command_snippet = [
         "bash -lc",
         "sh -lc",
@@ -1205,13 +1204,6 @@ fn learned_block_quality_flags(text: &str) -> Vec<&'static str> {
     {
         flags.push("vague_placeholder_guidance");
     }
-    if !text.lines().any(|line| {
-        line.trim_start().starts_with("## Verify")
-            || line.trim_start().starts_with("# Verify")
-            || line.to_ascii_lowercase().contains("stop/verify")
-    }) {
-        flags.push("missing_verify_section");
-    }
     if [
         "produced token `",
         "returned token `",
@@ -1240,8 +1232,6 @@ fn learned_block_quality_penalty(text: &str) -> u128 {
             "stores_example_output_value" => 4,
             "vague_apply_when" => 2,
             "vague_placeholder_guidance" => 2,
-            "code_fence" => 3,
-            "missing_verify_section" => 2,
             "large_block" => 2,
             "too_many_bullets" => 1,
             _ => 1,
@@ -1930,6 +1920,76 @@ Stop/verify conditions:\n\
     }
 
     #[test]
+    fn optimize_learned_index_preserves_procedure_rank_across_fences_and_headings() {
+        let workspace = tempdir().expect("workspace tempdir");
+        let root = workspace.path();
+        fs::write(root.join(INSTAFY_FILENAME), "# INSTAFY.md\n\nsmall\n")
+            .expect("write project memory");
+        let blocks_dir = root.join(LEARNED_BLOCKS_DIR_RELATIVE_PATH);
+        let modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let write_block = |name: &str, text: &str| {
+            let dir = blocks_dir.join(name);
+            fs::create_dir_all(&dir).expect("create block directory");
+            let path = dir.join("SKILL.md");
+            fs::write(&path, text).expect("write block");
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open block")
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .expect("keep recency equal across blocks and variants");
+        };
+
+        // Fill the index so even a below-threshold formatting penalty would displace
+        // the procedure. Equal usage and recency leave its name as the tie-breaker.
+        for i in 0..MAX_LEARNED_INDEX_BLOCKS {
+            let name = format!("neighbor-{i}");
+            write_block(
+                &name,
+                &format!(
+                    "---\nname: {name}\ndescription: Neighboring project check {i}.\n---\n\n## Verify\nThe project check succeeds.\n"
+                ),
+            );
+        }
+
+        let command = "node tools/replay-ledger.mjs --database scratch-only";
+        let verification = "The replay must produce two independent ledger entries.";
+        let mut expected_index = None;
+        for (heading, commands) in [
+            ("## Verify", format!("`{command}`")),
+            ("## Verify", format!("```sh\n{command}\n```")),
+            ("## Verified check", format!("`{command}`")),
+            ("## Verified check", format!("```sh\n{command}\n```")),
+            ("### verification", format!("~~~sh\n{command}\n~~~")),
+            ("", format!("    {command}")),
+        ] {
+            let text = format!(
+                "---\nname: a-local-replay\ndescription: Check a local ledger import.\n---\n\n## Apply when\nValidating a local ledger import.\n\n## Procedure\n{commands}\n\n{heading}\n{verification}\n\n## Safety and stop condition\nUse only a disposable scratch database. Stop if it is not isolated.\n"
+            );
+            write_block("a-local-replay", &text);
+            optimize_learned_memory(root, None);
+
+            let index = fs::read_to_string(root.join(LEARNED_INDEX_RELATIVE_PATH))
+                .expect("read active index");
+            assert!(
+                index.contains("blocks/a-local-replay/SKILL.md"),
+                "procedure should remain indexed with {heading:?} and {commands:?}"
+            );
+            if let Some(expected) = &expected_index {
+                assert_eq!(&index, expected, "formatting must not change index ranking");
+            } else {
+                expected_index = Some(index);
+            }
+            assert_eq!(
+                fs::read_to_string(blocks_dir.join("a-local-replay/SKILL.md"))
+                    .expect("read original procedure"),
+                text,
+                "optimizing the index must preserve the procedure"
+            );
+        }
+    }
+
+    #[test]
     fn optimize_learned_index_demotes_replay_style_block_from_active_index() {
         let workspace = tempdir().expect("workspace tempdir");
         let root = workspace.path();
@@ -1959,7 +2019,7 @@ Stop/verify conditions:\n\
         fs::create_dir_all(&bad_dir).expect("create bad block");
         fs::write(
             bad_dir.join("SKILL.md"),
-            "---\nname: bad-replay\ndescription: Replay style benchmark block.\n---\n\n# bad-replay\n\n## Apply when\n- this exact benchmark appears again\n\n## Look first\n- run exactly `bash -lc 'node - <<'\"'\"'NODE'\"'\"''`\n\n## Verify\n- use the copied script output as the answer\n",
+            "---\nname: bad-replay\ndescription: Replay style benchmark block.\n---\n\n# bad-replay\n\n## Apply when\n- this exact benchmark appears again\n\n## Look first\n```sh\nbash -lc 'node tools/replay-recording.mjs'\n```\n\n## Verify\n- use the copied script output as the answer\n",
         )
         .expect("write bad block");
 
