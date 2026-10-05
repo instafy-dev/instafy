@@ -3654,6 +3654,31 @@ async fn dismiss_route_removes_unsaved_work_under_a_lease() {
     server.abort();
 }
 
+/// Without a canonical repository there is no unsaved work to list: the
+/// list answers 404, which clients read as "not supported here", like an
+/// origin without the route.
+#[tokio::test(flavor = "multi_thread")]
+async fn unsaved_work_without_a_canonical_repository_is_unsupported() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let mut config = sc.config.clone();
+    config.git_remote_url = None;
+    config.git_remote_base_url = None;
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/git/recovery"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "not_supported", "{body}");
+    assert!(body.get("entries").is_none(), "{body}");
+    server.abort();
+}
+
 /// A multi-tenant origin serves no recovery routes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_multi_tenant_origin_mounts_no_recovery_routes() {

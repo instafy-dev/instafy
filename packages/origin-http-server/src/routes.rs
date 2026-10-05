@@ -2844,7 +2844,9 @@ async fn handle_git_sync(
 /// `GET /git/recovery`: unsaved work kept on recovery and salvage refs of
 /// canonical, newest first (see [`checkout_versions::list_unsaved_work`]),
 /// as `{entries: [...]}`. 502 `canonical_unreachable` when canonical cannot
-/// be listed: the list is never answered from stale data.
+/// be listed: the list is never answered from stale data. Without a
+/// canonical repository there is nothing to list: 404 `not_supported`,
+/// which clients read as an origin without the route.
 async fn handle_git_recovery(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
@@ -2852,8 +2854,11 @@ async fn handle_git_recovery(
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
     let Some(remote) = state.config.git_remote_url_for_project(project_id) else {
-        return Ok(Json(
-            serde_json::json!({ "supported": false, "entries": [] }),
+        return Err(OriginError::with_report(
+            axum::http::StatusCode::NOT_FOUND,
+            "not_supported",
+            "unsaved work needs a canonical repository, and this workspace has none",
+            serde_json::json!({}),
         ));
     };
     let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
