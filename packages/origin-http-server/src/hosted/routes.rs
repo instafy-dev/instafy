@@ -420,6 +420,7 @@ pub(super) async fn fetch_ref(
     let url = state.cache.remote_url(project)?;
     let cache = state.cache.clone();
     let mirror = lease.mirror();
+    let mirror_project = project;
     blocking(move || {
         let dir = cache.ensure_mirror(&mirror)?;
         let git = WorkspaceGit::bare(&dir, git_token.as_deref())
@@ -428,10 +429,9 @@ pub(super) async fn fetch_ref(
         let Some(tip) = remote_tip(&git, &url, &reference).map_err(ref_error)? else {
             return Ok(None);
         };
-        Ok(fetch_refs(&git, &url, &[(reference, tip)])
-            .map_err(ref_error)?
-            .fetched
-            .pop())
+        let fetched = fetch_refs(&git, &url, &[(reference, tip)]).map_err(ref_error);
+        cache.size_changed(mirror_project);
+        Ok(fetched?.fetched.pop())
     })
     .await
 }
@@ -976,7 +976,9 @@ async fn handle_git_recovery(
         let dir = cache.ensure_mirror(&mirror)?;
         let git = WorkspaceGit::bare(&dir, git_token.as_deref())
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
-        read::recovery_list(&git, &url, list_main.as_deref(), &gateway_email).map_err(ref_error)
+        let listed = read::recovery_list(&git, &url, list_main.as_deref(), &gateway_email);
+        cache.size_changed(project);
+        listed.map_err(ref_error)
     })
     .await?;
     let response = Json(serde_json::json!({

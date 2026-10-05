@@ -262,6 +262,16 @@ struct CachedToken {
     expires: Instant,
 }
 
+/// What the sweeper knows of a mirror's size: measured once and kept until
+/// something adds to the mirror (a fetch, a pushed save, a packing), so a
+/// sweep walks only the mirrors that changed since the last one.
+#[derive(Default)]
+struct KnownSize {
+    bytes: Option<u64>,
+    /// Bumped on every change, so a walk that ran across one is not kept.
+    generation: u64,
+}
+
 /// The mirror cache of one gateway process.
 pub(crate) struct MirrorCache {
     /// `<root>/.git-cache`, absolute.
@@ -271,6 +281,7 @@ pub(crate) struct MirrorCache {
     max_bytes: u64,
     mirrors: Mutex<HashMap<Uuid, Arc<MirrorEntry>>>,
     tokens: Mutex<HashMap<Uuid, CachedToken>>,
+    sizes: Mutex<HashMap<Uuid, KnownSize>>,
     next_fetch: AtomicU64,
     fetches_started: AtomicU64,
     fetch_wait: Duration,
@@ -329,6 +340,7 @@ impl MirrorCache {
             max_bytes,
             mirrors: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
+            sizes: Mutex::new(HashMap::new()),
             next_fetch: AtomicU64::new(1),
             fetches_started: AtomicU64::new(0),
             fetch_wait: FETCH_WAIT,
@@ -587,6 +599,7 @@ impl MirrorCache {
     }
 
     fn fetch_finished(&self, entry: &MirrorEntry, id: u64, outcome: &FetchOutcome) {
+        self.size_changed(entry.project);
         let mut state = locked(&entry.fetches);
         if state
             .running
@@ -727,6 +740,7 @@ impl MirrorCache {
         promoted: bool,
     ) {
         let entry = &mirror.entry;
+        self.size_changed(entry.project);
         if promoted {
             let refs = match entry.refs.try_lock() {
                 Ok(guard) => Some(guard),
@@ -751,6 +765,35 @@ impl MirrorCache {
             }
         }
         locked(&entry.fetches).refetch_since = Some(Instant::now());
+    }
+
+    /// Something may have added to (or removed) `project`'s mirror: the
+    /// next sweep measures it again.
+    pub(crate) fn size_changed(&self, project: Uuid) {
+        let mut sizes = locked(&self.sizes);
+        let known = sizes.entry(project).or_default();
+        known.bytes = None;
+        known.generation = known.generation.wrapping_add(1);
+    }
+
+    /// `project`'s mirror at `path`: the size kept since it last changed,
+    /// or measured now.
+    fn mirror_size(&self, project: Uuid, path: &Path) -> u64 {
+        let generation = {
+            let mut sizes = locked(&self.sizes);
+            let known = sizes.entry(project).or_default();
+            if let Some(bytes) = known.bytes {
+                return bytes;
+            }
+            known.generation
+        };
+        let bytes = tree_size(path);
+        let mut sizes = locked(&self.sizes);
+        let known = sizes.entry(project).or_default();
+        if known.generation == generation {
+            known.bytes = Some(bytes);
+        }
+        bytes
     }
 
     /// The mirror's bare repository, created empty when missing. Blocking.
@@ -931,7 +974,9 @@ impl MirrorCache {
             "--auto",
             "--quiet",
         ];
-        match WorkspaceGit::bare(&dir, None).run(&args) {
+        let ran = WorkspaceGit::bare(&dir, None).run(&args);
+        self.size_changed(project);
+        match ran {
             Ok(output) if output.status.success() => {
                 info!(%project, "packed a mirror");
             }
@@ -971,7 +1016,7 @@ impl MirrorCache {
                 .map_or(0, |entry| entry.leases.load(Ordering::SeqCst));
             stats.push(MirrorStat {
                 project,
-                bytes: tree_size(&path),
+                bytes: self.mirror_size(project, &path),
                 last_use,
                 leases,
             });
@@ -1010,6 +1055,7 @@ impl MirrorCache {
             }
             mirrors.remove(&project);
         }
+        self.size_changed(project);
         if let Err(error) = remove_entry(&trash) {
             warn!(%project, %error, "could not delete a removed mirror; the next sweep retries");
         }
