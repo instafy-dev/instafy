@@ -8,7 +8,9 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use origin_http_server::config::ServerConfig;
+use origin_http_server::config::{
+    ServerConfig, DEFAULT_GATEWAY_AUTHOR_EMAIL, DEFAULT_ORIGIN_AUTHOR_EMAIL,
+};
 use origin_http_server::hosted::HostedGatewayConfig;
 use origin_http_server::server::OriginHttpServer;
 
@@ -94,8 +96,16 @@ fn load_config() -> Result<ServerConfig> {
         read_env("ORIGIN_GIT_REMOTE_NAME").unwrap_or_else(|| "origin".to_string());
     let git_author_name =
         read_env("ORIGIN_GIT_AUTHOR_NAME").unwrap_or_else(|| "instafy-origin".to_string());
-    let git_author_email =
-        read_env("ORIGIN_GIT_AUTHOR_EMAIL").unwrap_or_else(|| "origin@instafy.dev".to_string());
+    // The gateway trusts commits under its own address (restores, import
+    // receipts), so by default it never shares the runtimes' address.
+    let git_author_email = read_env("ORIGIN_GIT_AUTHOR_EMAIL").unwrap_or_else(|| {
+        if multi_tenant {
+            DEFAULT_GATEWAY_AUTHOR_EMAIL
+        } else {
+            DEFAULT_ORIGIN_AUTHOR_EMAIL
+        }
+        .to_string()
+    });
     let bind_host = read_env("ORIGIN_BIND_HOST").unwrap_or_else(|| "0.0.0.0".to_string());
     let bind_port: u16 = read_env("ORIGIN_BIND_PORT")
         .as_deref()

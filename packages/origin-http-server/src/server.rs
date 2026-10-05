@@ -1016,7 +1016,7 @@ mod hosted_start_tests {
             git_branch: "main".into(),
             git_remote_name: "origin".into(),
             git_author_name: "instafy-origin".into(),
-            git_author_email: "origin@instafy.dev".into(),
+            git_author_email: "gateway@instafy.dev".into(),
             bind_host: "127.0.0.1".into(),
             bind_port: 0,
             controller_base_url: "http://127.0.0.1:1/".parse().expect("base url"),
