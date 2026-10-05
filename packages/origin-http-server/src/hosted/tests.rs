@@ -884,7 +884,9 @@ async fn a_fetch_that_fails_against_a_damaged_base_is_made_again_from_scratch() 
 /// The mirror's own `main` shows the loss (its tip's trees read whole, each
 /// file there present), so the mirror is made again and reads of `main` and
 /// of the new version are served, never answered 502 for good. A lost root
-/// tree of `main` counts the same.
+/// tree of `main` counts the same, and so does a file of an older version
+/// of `main` that a recovery ref built on that version is sent as deltas
+/// against: `?ref=` reads and the recovery list are served too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fetch_against_a_base_the_mirror_lost_is_made_again() {
     let big: String = (0..20_000).map(|n| format!("line {n}\n")).collect();
@@ -947,6 +949,62 @@ async fn a_fetch_against_a_base_the_mirror_lost_is_made_again() {
         let answer = get(&served, "/files/two.txt").await;
         assert_eq!(answer.status, 200, "{case}");
         assert_eq!(decoded(&answer), b"two\n", "{case}");
+    }
+
+    // A base from an older version of `main`, not its tip: a recovery ref
+    // built on that version is sent as deltas against it, while the tip
+    // reads whole. Both a `?ref=` read and the recovery list (one fetch of
+    // every ref) find the loss and make the mirror again.
+    let reference = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/\
+                     20261005T120000Z-unsaved-0123456789ab";
+    for read in ["?ref= read", "recovery list"] {
+        let sc = HostedScenario::new();
+        let first = sc.push(
+            &[
+                ("big.txt", Some(big.as_bytes())),
+                ("two.txt", Some(b"two\n")),
+            ],
+            "first",
+        );
+        let served = serve(&sc).await;
+        assert_eq!(get(&served, "/files/big.txt").await.status, 200, "{read}");
+        let changed = format!("{big}on main\n");
+        let second = sc.push(&[("big.txt", Some(changed.as_bytes()))], "second");
+        let answer = get(&served, &format!("/files/big.txt?rev={second}")).await;
+        assert_eq!(answer.status, 200, "{read}");
+        git_in(&sc.work, &["reset", "-q", "--hard", &first]);
+        std::fs::write(sc.work.join("big.txt"), format!("{big}on the ref\n")).unwrap();
+        git_in(&sc.work, &["commit", "-q", "-am", "unsaved"]);
+        let unsaved = git_in(&sc.work, &["rev-parse", "HEAD"]);
+        sc.push_ref(&unsaved, reference);
+        git_in(&sc.work, &["reset", "-q", "--hard", &second]);
+        let lost = git_in(&sc.remote(), &["rev-parse", &format!("{first}:big.txt")]);
+        let file = loose_object(&sc.mirror(), &lost);
+        assert!(file.is_file(), "{read}: {lost} is not loose in the mirror");
+        std::fs::remove_file(file).unwrap();
+        let lease = served.cache.lease(sc.project);
+        let resets = lease.mirror().resets();
+
+        let path = match read {
+            "?ref= read" => format!("/files/big.txt?ref={reference}"),
+            _ => "/git/recovery".to_string(),
+        };
+        let answer = until_status(&served, &path, 200).await;
+        assert_eq!(
+            answer.status,
+            200,
+            "{read}: {}",
+            String::from_utf8_lossy(&answer.body)
+        );
+        assert!(lease.mirror().resets() > resets, "{read}: made again");
+        if read == "?ref= read" {
+            assert!(decoded(&answer).ends_with(b"on the ref\n"), "{read}");
+        } else {
+            let listed = answer.json().to_string();
+            assert!(listed.contains(reference), "{read}: {listed}");
+        }
+        let answer = get(&served, "/files/two.txt").await;
+        assert_eq!(answer.status, 200, "{read}");
     }
 }
 

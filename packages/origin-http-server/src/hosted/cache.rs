@@ -92,6 +92,9 @@ pub(crate) const FETCH_WAIT: Duration = Duration::from_secs(10);
 pub(crate) const FIRST_CLONE_WAIT: Duration = FETCH_WAIT;
 /// A fetch is stopped after this long, waited for or not.
 const FETCH_DEADLINE: Duration = Duration::from_secs(300);
+/// How long a look through every object a mirror's refs reach may take
+/// ([`history_incomplete`]); a longer one tells nothing.
+const HISTORY_CHECK_BUDGET: Duration = Duration::from_secs(30);
 /// What `Retry-After` tells a request that stopped waiting.
 pub(crate) const RETRY_AFTER_SECONDS: u64 = 2;
 /// A cached read credential is replaced this long before it expires.
@@ -1002,7 +1005,9 @@ impl MirrorCache {
         // once a look at the mirror finds what they name damaged.
         let damaged = match &error {
             OriginError::Internal(message) => {
-                Suspects::of(message, Doing::Read).confirmed(&self.mirror_dir(mirror.entry.project))
+                let dir = self.mirror_dir(mirror.entry.project);
+                Suspects::of(message, Doing::Read).confirmed(&dir)
+                    || lost_a_base(&dir, &local_lines(message))
             }
             _ => false,
         };
@@ -1624,14 +1629,44 @@ fn local_failure(dir: &Path, stderr: &str) -> Option<FetchError> {
 /// Whether a fetch that left deltas unresolved without naming an object
 /// (`unresolved deltas left after unpacking`, `pack has N unresolved
 /// deltas`) failed for want of a base the mirror at `dir` lost. Canonical
-/// sends a thin pack whose bases are objects of the mirror's `main` as it
-/// was, so a look at that `main` tells ([`main_tip_incomplete`]); with
-/// nothing missing there, the pack itself was bad: canonical's. `text` is
-/// [`local_lines`] of the failure.
+/// sends a thin pack whose bases are objects the mirror says it has: any
+/// object its refs reach, not only `main`'s tip (a recovery ref built on an
+/// older `main` is sent as deltas against that version). A look at the tip
+/// comes first ([`main_tip_incomplete`]), then one at everything the refs
+/// reach ([`history_incomplete`]); with nothing missing, the pack itself was
+/// bad: canonical's. `text` is [`local_lines`] of the failure.
 fn lost_a_base(dir: &Path, text: &str) -> bool {
     text.contains("unresolved delta")
         && !TRANSPORT_MARKERS.iter().any(|marker| text.contains(marker))
-        && main_tip_incomplete(dir)
+        && (main_tip_incomplete(dir) || history_incomplete(dir, HISTORY_CHECK_BUDGET))
+}
+
+/// Whether an object some ref of the mirror at `dir` reaches (a commit, a
+/// tree or a file of any version) is missing or cannot be read. `false`
+/// when the look takes longer than `budget`: a mirror too large to look
+/// through in time is not thrown away on a guess.
+fn history_incomplete(dir: &Path, budget: Duration) -> bool {
+    let git = WorkspaceGit::bare(dir, None);
+    let Ok(output) = git.run_opts(
+        &[
+            "rev-list",
+            "--objects",
+            "--no-object-names",
+            "--missing=print",
+            "--all",
+        ],
+        &RunOpts {
+            deadline: Some(Instant::now() + budget),
+            ..RunOpts::default()
+        },
+    ) else {
+        return false;
+    };
+    !output.status.success()
+        || output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.starts_with(b"?"))
 }
 
 /// Whether the mirror at `dir` cannot give the tip of its `main` whole: the
@@ -2436,5 +2471,73 @@ mod tests {
         assert!(object(&commit).confirmed(&mirror));
         assert!(main_ref.confirmed(&mirror));
         assert!(main_tip_incomplete(&mirror));
+    }
+
+    /// A thin pack's base may be any object the mirror's refs reach: a file
+    /// of an older `main`, or of a ref fetched earlier. One that is gone is
+    /// a lost base though `main`'s tip reads whole; a look that runs out of
+    /// time tells nothing.
+    #[test]
+    fn a_lost_object_of_any_version_is_a_lost_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().canonicalize().unwrap().join("m.git");
+        WorkspaceGit::init_bare(&mirror).unwrap();
+        let git = WorkspaceGit::bare(&mirror, None);
+        let identity = crate::workspace_git::GitIdentity::new("t", "t@example.com");
+        let version = |content: &str, parent: Option<&str>| {
+            let blob = git
+                .stdout_opts(
+                    &["hash-object", "-w", "--stdin"],
+                    &RunOpts {
+                        stdin: Some(content.as_bytes()),
+                        ..RunOpts::default()
+                    },
+                )
+                .unwrap();
+            let tree = git
+                .stdout_opts(
+                    &["mktree"],
+                    &RunOpts {
+                        stdin: Some(format!("100644 blob {blob}\ta.txt\n").as_bytes()),
+                        ..RunOpts::default()
+                    },
+                )
+                .unwrap();
+            let parents: Vec<&str> = parent.into_iter().collect();
+            let commit = git
+                .commit_tree(&tree, &parents, &identity, &identity, content.as_bytes())
+                .unwrap();
+            (blob, commit)
+        };
+        let (older_blob, older) = version("older\n", None);
+        let (_, tip) = version("tip\n", Some(&older));
+        let (fetched_blob, fetched) = version("fetched\n", Some(&older));
+        git.update_ref(MAIN_REF, &tip, None, "test").unwrap();
+        git.update_ref("refs/instafy/fetched/1/0", &fetched, None, "test")
+            .unwrap();
+        let unresolved =
+            "fatal: unresolved deltas left after unpacking\nfatal: unpack-objects failed";
+        assert!(!history_incomplete(&mirror, HISTORY_CHECK_BUDGET));
+        assert!(!lost_a_base(&mirror, &local_lines(unresolved)));
+
+        for lost in [&older_blob, &fetched_blob] {
+            let loose = mirror.join("objects").join(&lost[..2]).join(&lost[2..]);
+            let kept = std::fs::read(&loose).unwrap();
+            std::fs::remove_file(&loose).unwrap();
+            assert!(!main_tip_incomplete(&mirror), "{lost}");
+            assert!(history_incomplete(&mirror, HISTORY_CHECK_BUDGET), "{lost}");
+            assert!(lost_a_base(&mirror, &local_lines(unresolved)), "{lost}");
+            assert!(
+                !lost_a_base(
+                    &mirror,
+                    "fatal: early eof\nfatal: pack has 2 unresolved deltas"
+                ),
+                "{lost}"
+            );
+            // No time to look: not thrown away on a guess.
+            assert!(!history_incomplete(&mirror, Duration::ZERO), "{lost}");
+            std::fs::write(&loose, kept).unwrap();
+        }
+        assert!(!history_incomplete(&mirror, HISTORY_CHECK_BUDGET));
     }
 }
