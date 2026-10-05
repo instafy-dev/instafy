@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodeFile } from "../../../../types";
+import type { VersioningMode } from "../../../../sdk/instafy";
 import { useWorkspaceStore } from "../../../../store";
 import { createOwnRevisions } from "../filesVersioning";
 import { SAVE_RETRY_LATER_CAP_MS, useFilesPanelSave, type UseFilesPanelSaveOptions } from "../useFilesPanelSave";
@@ -15,7 +16,8 @@ vi.mock("../../../../sdk/instafy", () => ({
 
 const REV_1 = "1".repeat(40);
 
-// A 503 the gateway answers before it writes anything.
+// A 503 that says to try again later. On /apply the save cannot tell whether
+// the change landed (usually it did not), so `applied` stays false.
 const answered = (code: string, retryAfterMs?: number, patch: Record<string, unknown> = {}) => ({
   ok: false,
   stage: "apply",
@@ -40,6 +42,7 @@ describe("useFilesPanelSave retry after an answer that says to try again later",
   const wait = vi.fn(async () => undefined);
   const presentFailure = vi.fn();
   const updateWorkspace = vi.fn();
+  let mode: VersioningMode = "stateless";
   const file: CodeFile = {
     id: "README.md", path: "README.md", label: "README.md", generated: "saved", modified: "edited",
     baseRev: REV_1, blobOid: "a".repeat(40), originId: "origin-1",
@@ -48,7 +51,7 @@ describe("useFilesPanelSave retry after an answer that says to try again later",
   function Harness() {
     const options: UseFilesPanelSaveOptions = {
       enabled: true,
-      versioning: { mode: "stateless", originId: "origin-1" },
+      versioning: { mode, originId: "origin-1" },
       activeProjectId: "space-a",
       readOnly: false,
       originAvailable: true,
@@ -70,6 +73,7 @@ describe("useFilesPanelSave retry after an answer that says to try again later",
   beforeEach(async () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    mode = "stateless";
     // Answers queued by a test that failed early never leak into the next.
     mocks.saveChanges.mockReset();
     mocks.readAt.mockReset();
@@ -159,13 +163,40 @@ describe("useFilesPanelSave retry after an answer that says to try again later",
     expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["fetch_pending", "writes_busy", "mirror_reset"])(
-    "never replays an apply that already landed (%s on the sync)",
+  // The apply landed (here a no-op: the space already held these bytes) and
+  // the sync's fetch of main met a slow or damaged copy. On the stateless
+  // gateway a replay is safe: the same change on a main that already holds
+  // it is answered committed:false and writes nothing.
+  it.each(["fetch_pending", "mirror_reset"])(
+    "asks once more when the sync after an apply that landed answers %s",
     async (code) => {
-      mocks.saveChanges.mockResolvedValue(answered(code, 0, { stage: "sync", applied: true, appliedRev: "l1" }));
+      mocks.saveChanges
+        .mockResolvedValueOnce(answered(code, 2_000, { stage: "sync", applied: true, appliedRev: REV_1 }))
+        .mockResolvedValueOnce({ ...savedResult, rev: REV_1, committed: false, via: "sync" });
       await act(async () => save());
-      expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
-      expect(wait).not.toHaveBeenCalled();
+      expect(wait).toHaveBeenCalledExactlyOnceWith(2_000);
+      expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+      expect(mocks.saveChanges.mock.calls[1][0]).toEqual(mocks.saveChanges.mock.calls[0][0]);
+      expect(presentFailure).not.toHaveBeenCalled();
+      // The buffer is recorded as saved once, from the retry's answer.
+      expect(updateWorkspace).toHaveBeenCalledTimes(1);
     },
   );
+
+  // A Desktop folder publishes with /git/sync, and a replay with the same
+  // `expected` would meet the bytes the first apply wrote.
+  it("never replays an apply that landed in a Desktop folder", async () => {
+    mode = "desktop";
+    await act(async () => root.render(<Harness />));
+    mocks.saveChanges.mockResolvedValue(
+      answered("fetch_pending", 0, { stage: "sync", applied: true, appliedRev: null, originMode: "desktop" }),
+    );
+    await act(async () => save());
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+    expect(presentFailure).toHaveBeenCalledExactlyOnceWith(
+      { message: "The space is still loading. Try again in a moment." },
+      expect.any(Function),
+    );
+  });
 });

@@ -294,14 +294,19 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     const releaseWrite = current.ownRevisions.addWrite(path, savedOid);
     try {
       let result: WorkspaceSaveResult = await controllerClient.workspace.save.changes(request);
-      // The gateway could not take the save yet and wrote nothing: it was
-      // still fetching the space (fetch_pending), every write slot stayed
-      // taken (writes_busy) or its copy of the space is being made again
-      // (mirror_reset). The save asks once more after Retry-After (at most
-      // 5 s). A full disk (disk_full) is left to the person, and an apply
-      // that already landed (a Desktop folder) is never sent twice.
+      // The gateway asked for a moment: it was still fetching the space
+      // (fetch_pending), every write slot stayed taken (writes_busy) or its
+      // copy of the space is being made again (mirror_reset). The save asks
+      // once more after Retry-After (at most 5 s); a full disk (disk_full) is
+      // left to the person. The change may already be in the space (an apply
+      // that landed before its sync failed, or a push whose answer was lost),
+      // and on the stateless gateway that is safe: the same change on a main
+      // that already holds it answers committed:false and writes nothing. A
+      // Desktop folder's apply that landed is never sent twice.
       const retryDelay =
-        !result.ok && !result.applied ? originAutoRetryDelayMs(result.error, SAVE_AUTO_RETRY_BUDGET) : null;
+        !result.ok && (!result.applied || mode === "stateless")
+          ? originAutoRetryDelayMs(result.error, SAVE_AUTO_RETRY_BUDGET)
+          : null;
       if (retryDelay !== null) {
         await (current.wait ?? defaultWait)(retryDelay);
         result = await controllerClient.workspace.save.changes(request);

@@ -1150,7 +1150,8 @@ describe("FilesPanel one Save", () => {
     );
   });
 
-  // The gateway's other 503 answers. Nothing was written by any of them.
+  // The gateway's other 503 answers on /apply. Whether or not the change
+  // landed, a replay is safe: one main already holds is a no-op apply.
   it.each(["writes_busy", "mirror_reset"])("tries a save once more after %s, then saves", async (code) => {
     mocks.saveChanges
       .mockResolvedValueOnce(failed({ status: 503, code, retryAfterMs: 0 }))
@@ -1195,6 +1196,26 @@ describe("FilesPanel one Save", () => {
     );
     expect(file()).toMatchObject({ generated: "saved", modified: "edited", baseRev: REV_1, blobOid: BLOB_A });
     expect(saveUnavailable()).toBe(false);
+  });
+
+  // The apply landed (a no-op here: the space already held these bytes) and
+  // the sync's fetch of main met a damaged copy. The replay is a no-op apply
+  // on the stateless gateway, so the save asks once more and is saved.
+  it("tries a save once more when the sync after an apply that landed answers mirror_reset", async () => {
+    mocks.saveChanges
+      .mockResolvedValueOnce({
+        ...failed({ status: 503, code: "mirror_reset", retryAfterMs: 0 }),
+        stage: "sync",
+        applied: true,
+        appliedRev: REV_1,
+      })
+      .mockResolvedValueOnce({ ...saved(REV_1), committed: false, via: "sync" });
+    await render([buffer()]);
+    await pressSave();
+    expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+    expect(mocks.saveChanges.mock.calls[1][0]).toEqual(mocks.saveChanges.mock.calls[0][0]);
+    expect(file()).toMatchObject({ generated: "edited", modified: "edited", baseRev: REV_1 });
+    expect(mocks.showStatus).not.toHaveBeenCalled();
   });
 
   it("keeps a new file in a new folder in the explorer after a reload", async () => {
