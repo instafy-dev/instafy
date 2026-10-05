@@ -4001,19 +4001,60 @@ mod tests {
         }
     }
 
-    /// The trailer keys git's own parser reads in `message`, in lower case:
-    /// `git interpret-trailers --parse`, with and without `--no-divider`
-    /// (as `%(trailers)` reads a commit), with no configuration.
-    fn git_trailer_keys(message: &str) -> Vec<String> {
+    /// The longest one git call of the trailer tests may take: they fail
+    /// with the call and its input past it, never wait forever.
+    const GIT_CALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// The output of plain git `args` with `input` on stdin, outside any
+    /// repository and with no configuration, within [`GIT_CALL_LIMIT`].
+    fn git_stdout_within_limit(args: &[&str], input: &str) -> String {
         let (_dir, root) = tempdir();
+        let output = crate::test_support::git_output_within(
+            &root,
+            args,
+            input.as_bytes(),
+            GIT_CALL_LIMIT,
+        )
+        .unwrap_or_else(|| {
+            panic!("git {args:?} did not return within {GIT_CALL_LIMIT:?} for {input:?}; stopped")
+        });
+        assert!(
+            output.status.success(),
+            "git {args:?} for {input:?}: {output:?}"
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Whether `message` has a scissors line below a `---` line. On such a
+    /// message git 2.34's `interpret-trailers` without `--no-divider` never
+    /// returns: its message end at the scissors line lies past the one it
+    /// took at the divider (later git bounds it).
+    fn loops_git_2_34_with_divider(message: &str) -> bool {
+        let mut below_divider = false;
+        for line in message.split('\n') {
+            if below_divider && line.starts_with(SCISSORS_LINE) {
+                return true;
+            }
+            below_divider |= line
+                .strip_prefix("---")
+                .is_some_and(|rest| rest.bytes().next().is_none_or(|b| b.is_ascii_whitespace()));
+        }
+        false
+    }
+
+    /// The trailer keys git's own parser reads in `message`, in lower case:
+    /// `git interpret-trailers --parse --no-divider` (as `%(trailers)`
+    /// reads a commit) and, unless git 2.34 would loop on `message`
+    /// ([`loops_git_2_34_with_divider`]), without `--no-divider` too, with
+    /// no configuration. Each call fails the test past [`GIT_CALL_LIMIT`].
+    fn git_trailer_keys(message: &str) -> Vec<String> {
+        let mut runs = vec![&["interpret-trailers", "--parse", "--no-divider"][..]];
+        if !loops_git_2_34_with_divider(message) {
+            runs.push(&["interpret-trailers", "--parse"][..]);
+        }
         let mut keys = Vec::new();
-        for args in [
-            &["interpret-trailers", "--parse"][..],
-            &["interpret-trailers", "--parse", "--no-divider"][..],
-        ] {
-            let output = crate::test_support::git_output(&root, args, Some(message.as_bytes()));
-            assert!(output.status.success(), "{args:?}: {output:?}");
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
+        for args in runs {
+            for line in git_stdout_within_limit(args, message).lines() {
                 let (key, _) = line.split_once(':').unwrap_or((line, ""));
                 keys.push(key.trim().to_ascii_lowercase());
             }
@@ -4023,11 +4064,34 @@ mod tests {
 
     /// `message` as `git commit -m` keeps it (`git stripspace`).
     fn git_stripspace(message: &str) -> String {
+        git_stdout_within_limit(&["stripspace"], message)
+    }
+
+    /// The trailer tests never hang on git 2.34: a message it loops on is
+    /// read only with `--no-divider`, and every git call is bounded.
+    #[test]
+    fn the_trailer_tests_never_wait_on_a_git_that_loops() {
+        let looping = format!("Tidy\n\n--- x\n{SCISSORS_LINE}\nInstafy-Apply-Key: imp:x\n");
+        assert!(loops_git_2_34_with_divider(&looping));
+        assert!(git_trailer_keys(&looping).is_empty());
+        for other in [
+            format!("Tidy\n\n{SCISSORS_LINE}\n---\n"),
+            "Tidy\n\n---x\nmore".to_string(),
+            "Tidy\n\n---\nmore".to_string(),
+        ] {
+            assert!(!loops_git_2_34_with_divider(&other), "{other:?}");
+        }
+        // A git that never returns is stopped, not waited on.
         let (_dir, root) = tempdir();
-        let output =
-            crate::test_support::git_output(&root, &["stripspace"], Some(message.as_bytes()));
-        assert!(output.status.success(), "{output:?}");
-        String::from_utf8(output.stdout).unwrap()
+        let started = std::time::Instant::now();
+        let stopped = crate::test_support::git_output_within(
+            &root,
+            &["-c", "alias.wait=!sleep 30", "wait"],
+            b"",
+            std::time::Duration::from_millis(300),
+        );
+        assert!(stopped.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
     }
 
     /// A save drops only the `Instafy-` trailers git reads in the trailer
