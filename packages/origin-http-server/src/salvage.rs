@@ -44,7 +44,10 @@
 //!    another tip stops the entry. A path the shard's policy refuses is left
 //!    as `main` has it and the push is tried again with W rebuilt as one
 //!    commit (at most 8 times, `historyFiltered`); any salvage refusal is
-//!    final.
+//!    final. When the entry holds what it held at a run that verified a
+//!    salvage ref (same HEAD, same `sourceTree`) and canonical still has
+//!    that ref at its commit, that ref is reported and nothing is pushed,
+//!    whatever `main` (a restore of the ref) or the node name did since.
 //! 6. `.salvage/<entry>.bundle` holds the entry's local history (all of it
 //!    when canonical is missing), `.salvage/<entry>.private.tar` (0600) the
 //!    private files, and `.salvage/report.jsonl` one line per entry and run.
@@ -65,6 +68,7 @@
 mod archive;
 mod canonical;
 mod classify;
+mod journal;
 mod options;
 mod outputs;
 mod repository;
@@ -167,6 +171,11 @@ pub(crate) struct EntryReport {
     /// not a parked working copy.
     pub inspected: bool,
     pub head: Option<String>,
+    /// HEAD's tree with the work tree's changes that W may take, before
+    /// stale copies are left out: what the entry holds, whatever `main`
+    /// does. A later run of an entry holding the same reuses the salvage
+    /// ref recorded for it.
+    pub source_tree: Option<String>,
     pub salvage_ref: Option<String>,
     pub salvage_rev: Option<String>,
     pub canonical_verified: bool,
@@ -284,11 +293,14 @@ pub(crate) fn run(
     let _lock = if settings.apply {
         let lock = lock(settings)?;
         // A journal that cannot take a line stops the run before any entry.
-        open_report(settings)?;
+        journal::open(settings)?;
         Some(lock)
     } else {
         None
     };
+    // The salvage refs earlier runs verified, so a rerun of an entry that
+    // holds the same work reports its ref instead of making another.
+    let recorded = journal::verified_refs(settings)?;
     let mut names = Vec::new();
     for entry in std::fs::read_dir(&legacy).with_context(|| format!("failed to list {legacy:?}"))? {
         let entry = entry.with_context(|| format!("failed to list {legacy:?}"))?;
@@ -303,7 +315,7 @@ pub(crate) fn run(
             continue;
         }
         let report = match project {
-            Some(project) => salvage_entry(settings, services, &name, project),
+            Some(project) => salvage_entry(settings, services, &name, project, recorded.get(&name)),
             None => EntryReport {
                 entry: name.clone(),
                 node: settings.node.clone(),
@@ -320,7 +332,7 @@ pub(crate) fn run(
         if settings.apply {
             // A line the journal could not take stops the run here, before
             // any later entry is pushed or removed.
-            append_report(settings, &line).with_context(|| {
+            journal::append(settings, &line).with_context(|| {
                 format!(
                     "{name} was handled (its line is on stdout) but report.jsonl did not take \
                      its line, so the run stopped: {line}"
@@ -382,34 +394,12 @@ fn lock(settings: &Settings) -> Result<RunLock> {
     Ok(RunLock(file))
 }
 
-/// `.salvage/report.jsonl`, opened for appending (created 0600).
-fn open_report(settings: &Settings) -> Result<(std::fs::File, std::path::PathBuf)> {
-    let path = settings.salvage_dir().join("report.jsonl");
-    let mut options = std::fs::OpenOptions::new();
-    options.append(true).create(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let file = options
-        .open(&path)
-        .with_context(|| format!("failed to open {path:?}"))?;
-    Ok((file, path))
-}
-
-fn append_report(settings: &Settings, line: &str) -> Result<()> {
-    let (mut file, path) = open_report(settings)?;
-    writeln!(file, "{line}")
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("failed to append to {path:?}"))
-}
-
 fn salvage_entry(
     settings: &Settings,
     services: &dyn Services,
     name: &str,
     project: Uuid,
+    recorded: Option<&journal::Recorded>,
 ) -> EntryReport {
     let mut report = EntryReport {
         entry: name.to_string(),
@@ -431,7 +421,9 @@ fn salvage_entry(
                 .push("a link is never followed: review where it points".to_string());
             Ok(())
         }
-        Kind::Folder => repository::salvage_folder(settings, services, &path, project, &mut report),
+        Kind::Folder => {
+            repository::salvage_folder(settings, services, &path, project, recorded, &mut report)
+        }
         _ => {
             report.notes.push("not a folder".to_string());
             Ok(())
