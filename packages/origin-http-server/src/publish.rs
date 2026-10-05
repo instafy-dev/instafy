@@ -2528,8 +2528,11 @@ impl Publisher<'_> {
     ///   are kept on request, reserved, never publishable (excluded, secret,
     ///   legacy attachments, unsupported, too large) or ignored here keep
     ///   `HEAD`'s entry and are reported as not restored.
-    /// - Any other conflict is 409 `restore_conflict {head, paths}`; an
-    ///   unsaved edit of a path the restore changes is 409 `dirty_paths`.
+    /// - A conflict is settled when the work brings nothing in at or below
+    ///   it any more (kept on request, below a path left out, or with every
+    ///   change inside it left out); any other conflict is 409
+    ///   `restore_conflict {head, paths}`. An unsaved edit of a path the
+    ///   restore changes is 409 `dirty_paths`.
     /// - The commit (`Restore unsaved work`, with an
     ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
     ///   and committed by the origin, then published.
@@ -2637,10 +2640,26 @@ impl Publisher<'_> {
                 refused.push(change.path.clone());
             }
         }
+        // A conflict (which keeps `HEAD`'s entry) is settled when the work
+        // brings nothing in at or below it any more: it was kept on request
+        // (itself or a folder above it), it lies below a path left out, or
+        // every change the work makes inside it was left out, as when the
+        // work adds a folder where `HEAD` has a file.
         let conflicts: Vec<String> = merged
             .conflicts
             .iter()
-            .filter(|path| !under(path, &not_restored))
+            .filter(|path| {
+                if under(path, &not_restored) || under(path, &keep) {
+                    return false;
+                }
+                let folder = std::slice::from_ref(*path);
+                let mut inside = changes
+                    .iter()
+                    .filter(|change| under(&change.path, folder))
+                    .peekable();
+                let any_inside = inside.peek().is_some();
+                !(any_inside && inside.all(|change| not_restored.contains(&change.path)))
+            })
             .cloned()
             .collect();
         if !conflicts.is_empty() {

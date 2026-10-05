@@ -3256,6 +3256,88 @@ async fn restore_route_restores_unsaved_work_once() {
     server.abort();
 }
 
+/// Work that adds a folder where `main` now has a file conflicts on both
+/// paths. Keeping the saved version of either side, or of both, clears
+/// the clash and restores the rest; keeping only part of the folder does
+/// not, because the rest of it would still be dropped silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn keep_clears_a_file_and_folder_conflict() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let mut refs = Vec::new();
+    for (index, files) in [
+        vec!["docs/readme.md", "other-0.md"],
+        vec!["docs/readme.md", "other-1.md"],
+        vec!["docs/readme.md", "other-2.md"],
+        vec!["docs/readme.md", "docs/extra.md", "other-3.md"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let reference =
+            recovery_ref_name(&sc, &format!("20261005T12000{index}Z-unsaved-0123456789ab"));
+        let contents: Vec<(&str, Option<&[u8]>)> = files
+            .iter()
+            .map(|path| (*path, Some(b"work\n".as_slice())))
+            .collect();
+        let commit = push_to_ref(&sc, &contents, &[], "Unsaved edits", &reference);
+        refs.push((reference, commit));
+    }
+    sc.push_other(&[("docs", Some(b"a file now\n"))], "docs is a file");
+    sc.publish(Selection::None);
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let restore =
+        |body: serde_json::Value| post_json(&client, format!("{base}/git/recovery/restore"), body);
+
+    let (status, body) = restore(serde_json::json!({ "ref": refs[0].0 })).await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "restore_conflict");
+    assert_eq!(body["paths"], serde_json::json!(["docs", "docs/readme.md"]));
+
+    for (index, keep) in [
+        serde_json::json!(["docs", "docs/readme.md"]),
+        serde_json::json!(["docs"]),
+        serde_json::json!(["docs/readme.md"]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (reference, commit) = &refs[index];
+        let (status, body) =
+            restore(serde_json::json!({ "ref": reference, "rev": commit, "keep": keep })).await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{keep}: {body}");
+        assert_eq!(body["committed"], true, "{keep}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            serde_json::json!(["docs/readme.md"]),
+            "{keep}: {body}"
+        );
+        assert_eq!(body["refDeleted"], true, "{keep}: {body}");
+        assert_eq!(
+            sc.remote_file(&format!("other-{index}.md")).as_deref(),
+            Some("work\n")
+        );
+        assert_eq!(sc.remote_file("docs").as_deref(), Some("a file now\n"));
+    }
+
+    // Keeping one file of the folder leaves the other in the clash.
+    let (reference, commit) = &refs[3];
+    let (status, body) = restore(serde_json::json!({
+        "ref": reference,
+        "rev": commit,
+        "keep": ["docs/readme.md"],
+    }))
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "restore_conflict");
+    assert_eq!(body["paths"], serde_json::json!(["docs", "docs/extra.md"]));
+    assert!(sc.remote_file("other-3.md").is_none());
+    server.abort();
+}
+
 /// Work that `main` started to ignore after it was kept cannot be restored
 /// here. The restore says so and keeps the ref, the only copy of that work
 /// on canonical, so the person can still review or remove it.
