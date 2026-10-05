@@ -4611,8 +4611,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeEnsureError,
     runtimeReady,
     sendingAttachment,
-    stalledLaunchRetryAvailable: workspaceStartStall.launchStalled && workspaceStartStall.retry !== null,
-    stalledLaunchRetryPending: workspaceStartStall.retryPending,
     waitingForPreferredRuntime,
   });
 

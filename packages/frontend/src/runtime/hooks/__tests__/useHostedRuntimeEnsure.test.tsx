@@ -197,6 +197,8 @@ describe("useHostedRuntimeEnsure force", () => {
     ensure.mockRejectedValue(new Error("provider launch failed"));
     await expect(retry()).resolves.toBe(false);
     expect(showStatus).toHaveBeenCalledWith(STALLED_LAUNCH_RETRY_FAILED_MESSAGE, "warning", 5000);
+    // One press, one replacement request: no immediate second attempt.
+    expect(ensure).toHaveBeenCalledTimes(1);
 
     // Credits and capacity carry their own message and action.
     for (const code of ["insufficient_credits", "platform_at_capacity"]) {
@@ -218,7 +220,9 @@ describe("useHostedRuntimeEnsure force", () => {
     await expect(retry()).resolves.toBe(false);
     expect(showStatus).not.toHaveBeenCalled();
 
-    // An ordinary forced ensure keeps its old, quiet failure.
+    // An ordinary forced ensure keeps its old, quiet failure and its
+    // immediate second attempt.
+    ensure.mockClear();
     ensure.mockRejectedValue(new Error("provider launch failed"));
     let result: boolean | undefined;
     await act(async () => {
@@ -226,5 +230,6 @@ describe("useHostedRuntimeEnsure force", () => {
     });
     expect(result).toBe(false);
     expect(showStatus).not.toHaveBeenCalled();
+    expect(ensure).toHaveBeenCalledTimes(2);
   });
 });

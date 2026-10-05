@@ -116,7 +116,7 @@ function OutOfCreditsChatBubble({
   );
 }
 
-export function workspaceStartStalledDescription({
+function workspaceStartStalledDescription({
   agentDisplayName,
   canRetry,
 }: {

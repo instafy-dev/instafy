@@ -204,6 +204,10 @@ export function useHostedRuntimeEnsure({
       try {
         result = await ensureWithTimeout(null);
       } catch (error) {
+        // One press sends one replacement request; the user can press again.
+        if (replaceStalledLaunch) {
+          throw error;
+        }
         debugLog("hosted-runtime:perform-retry", {
           projectId: effectiveProjectId,
           error: error instanceof Error ? error.message : String(error),
@@ -344,14 +348,17 @@ export function useHostedRuntimeEnsure({
     const statusesAfterRefresh = getLatestRuntimeStatuses();
 
     // A forced request skips the "already starting / already running" reuse
-    // below. It exists for one caller: the user just stopped the machine that
-    // held the org's slot ("Stop blocker and retry"). At that moment this
-    // project can still carry the runtime row the controller created for the
-    // queued prompt before the slot check refused it: status `requested`,
-    // never seen, never going to start. For three minutes that row reads as
-    // booting, so a plain ensure would report "starting…" and request
-    // nothing, and the queued message would wait until the row aged out.
-    // The launch below still reuses a runtime that is actually ready.
+    // below. It exists for two callers. One: the user just stopped the
+    // machine that held the org's slot ("Stop blocker and retry"). At that
+    // moment this project can still carry the runtime row the controller
+    // created for the queued prompt before the slot check refused it: status
+    // `requested`, never seen, never going to start. For three minutes that
+    // row reads as booting, so a plain ensure would report "starting…" and
+    // request nothing, and the queued message would wait until the row aged
+    // out. Two: the chat's Try again on a launch that has not come up in five
+    // minutes, which still reads as booting and must reach the controller to
+    // be replaced. The launch below still reuses a runtime that is actually
+    // ready.
     if (force) {
       debugLog("hosted-runtime:ensure-forced", {
         projectId: effectiveProjectId,

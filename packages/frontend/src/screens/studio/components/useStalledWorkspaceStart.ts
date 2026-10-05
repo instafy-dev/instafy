@@ -5,7 +5,10 @@ import {
   STALLED_LAUNCH_RETRY_FAILED_MESSAGE,
   type EnsureHostedRuntimeOptions,
 } from "../../../runtime/hooks/useHostedRuntimeEnsure";
-import { stalledLaunchDeadlineMs } from "../../../runtime/utils/runtimeEntry";
+import {
+  STALLED_LAUNCH_AFTER_MS,
+  stalledLaunchDeadlineMs,
+} from "../../../runtime/utils/runtimeEntry";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
 import type { StatusIntent } from "../../../status/useStatus";
 import type { RunRecord } from "../../../types";
@@ -27,9 +30,10 @@ export interface StalledWorkspaceStartInput {
 }
 
 export interface StalledWorkspaceStartState {
-  /** A hosted launch has gone five minutes without coming up. */
-  launchStalled: boolean;
-  /** ...and this conversation has a message waiting on it. */
+  /**
+   * A hosted launch has gone five minutes without coming up, and this
+   * conversation has a message waiting on it.
+   */
   showNotice: boolean;
   /** When a launch still under the bound reaches it; null when none will. */
   nextCheckAtMs: number | null;
@@ -42,23 +46,39 @@ function readRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Whether the space's hosted launch is stalled, from the controller's own
- * lease start time. A runtime limit wait or an empty credit balance has its
- * own message, and a controller that does not report the start time never
- * stalls anything.
+ * A run keeps the limit refusal it was given, so the refusal still counts
+ * only when the stalled launch did not start after it: a launch requested
+ * later means the space got past the limit. Without a time, it still counts.
+ */
+function isLiveRuntimeLimitWait(
+  alert: Record<string, unknown> | null,
+  launchRequestedAtMs: number,
+): boolean {
+  if (!isRuntimeLimitWaitAlert(alert)) {
+    return false;
+  }
+  const alertAtMs = typeof alert?.updatedAt === "string" ? Date.parse(alert.updatedAt) : Number.NaN;
+  return !Number.isFinite(alertAtMs) || alertAtMs >= launchRequestedAtMs;
+}
+
+/**
+ * Whether a stalled hosted launch holds up this conversation, from the
+ * controller's own lease start time. A runtime limit wait or an empty credit
+ * balance has its own message, and a controller that does not report the
+ * start time never stalls anything.
  */
 export function resolveStalledWorkspaceStart(
   input: StalledWorkspaceStartInput & { nowMs: number },
 ): StalledWorkspaceStartState {
   const idle: StalledWorkspaceStartState = {
-    launchStalled: false,
     showNotice: false,
     nextCheckAtMs: null,
   };
   if (input.runtimeReady || input.localRuntime || input.runtimeLimitReached || input.outOfCredits) {
     return idle;
   }
-  let launchStalled = false;
+  // The most recent stalled launch's request time; null while none is stalled.
+  let stalledLaunchRequestedAtMs: number | null = null;
   let nextCheckAtMs: number | null = null;
   for (const entry of input.runtimeStatuses) {
     const deadlineMs = stalledLaunchDeadlineMs(entry);
@@ -66,14 +86,19 @@ export function resolveStalledWorkspaceStart(
       continue;
     }
     if (input.nowMs >= deadlineMs) {
-      launchStalled = true;
+      const requestedAtMs = deadlineMs - STALLED_LAUNCH_AFTER_MS;
+      stalledLaunchRequestedAtMs =
+        stalledLaunchRequestedAtMs === null
+          ? requestedAtMs
+          : Math.max(stalledLaunchRequestedAtMs, requestedAtMs);
     } else {
       nextCheckAtMs = nextCheckAtMs === null ? deadlineMs : Math.min(nextCheckAtMs, deadlineMs);
     }
   }
-  if (!launchStalled) {
+  if (stalledLaunchRequestedAtMs === null) {
     return { ...idle, nextCheckAtMs };
   }
+  const launchRequestedAtMs = stalledLaunchRequestedAtMs;
   // No liveness filter: a queued run reads as stale after five minutes,
   // which is exactly when a launch that never came up is noticed.
   const pendingRuns = input.conversationId
@@ -90,10 +115,9 @@ export function resolveStalledWorkspaceStart(
       )
     : [];
   const waitingOnRuntimeLimit = pendingRuns.some((run) =>
-    isRuntimeLimitWaitAlert(readRecord(run.metadata?.runtimeAlert)),
+    isLiveRuntimeLimitWait(readRecord(run.metadata?.runtimeAlert), launchRequestedAtMs),
   );
   return {
-    launchStalled: !waitingOnRuntimeLimit,
     showNotice: pendingRuns.length > 0 && !waitingOnRuntimeLimit,
     nextCheckAtMs: null,
   };
@@ -114,13 +138,14 @@ export function useStalledWorkspaceStart({
   ensureHostedRuntime: ((options?: EnsureHostedRuntimeOptions) => Promise<boolean>) | null;
   showStatus: (message: string, intent: StatusIntent, durationMs?: number) => void;
 }) {
-  const [, setClockTick] = useState(0);
+  const [clockTick, setClockTick] = useState(0);
   const [retryPending, setRetryPending] = useState(false);
   const retryInFlightRef = useRef(false);
   const state = resolveStalledWorkspaceStart({ ...input, nowMs: Date.now() });
 
   // Nothing re-renders a quiet tab when a launch crosses the bound, so one
-  // timer reads the clock again at that moment.
+  // timer reads the clock again at that moment. Timers and the wall clock can
+  // disagree slightly, so a tick that lands short arms the timer again.
   const { nextCheckAtMs } = state;
   useEffect(() => {
     if (nextCheckAtMs === null) {
@@ -131,7 +156,7 @@ export function useStalledWorkspaceStart({
       Math.max(0, nextCheckAtMs - Date.now()),
     );
     return () => clearTimeout(timeoutId);
-  }, [nextCheckAtMs]);
+  }, [nextCheckAtMs, clockTick]);
 
   const retry = useCallback(async () => {
     if (!ensureHostedRuntime || retryInFlightRef.current) {
@@ -151,7 +176,6 @@ export function useStalledWorkspaceStart({
   }, [ensureHostedRuntime, showStatus]);
 
   return {
-    launchStalled: state.launchStalled,
     showNotice: state.showNotice,
     retry: ensureHostedRuntime ? () => void retry() : null,
     retryPending,

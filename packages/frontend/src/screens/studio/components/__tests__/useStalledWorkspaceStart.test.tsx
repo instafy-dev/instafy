@@ -87,12 +87,10 @@ describe("resolveStalledWorkspaceStart", () => {
 
   it("waits five minutes from the controller's launch time, then shows the notice", () => {
     expect(resolveStalledWorkspaceStart({ ...input(), nowMs: at(4) })).toEqual({
-      launchStalled: false,
       showNotice: false,
       nextCheckAtMs: at(5),
     });
     expect(resolveStalledWorkspaceStart({ ...input(), nowMs: at(5) })).toEqual({
-      launchStalled: true,
       showNotice: true,
       nextCheckAtMs: null,
     });
@@ -110,7 +108,7 @@ describe("resolveStalledWorkspaceStart", () => {
       ...input({ runtimeStatuses: [launchingRuntime({ launchRequestedAt: undefined })] }),
       nowMs: at(60),
     });
-    expect(state).toEqual({ launchStalled: false, showNotice: false, nextCheckAtMs: null });
+    expect(state).toEqual({ showNotice: false, nextCheckAtMs: null });
   });
 
   it("leaves a runtime limit wait and an empty credit balance to their own messages", () => {
@@ -121,13 +119,41 @@ describe("resolveStalledWorkspaceStart", () => {
       ...input({ runs: { "run-1": queuedRun({ metadata: { runtimeAlert: limitWaitAlert } }) } }),
       nowMs: late,
     });
-    expect(limitWait).toEqual({ launchStalled: false, showNotice: false, nextCheckAtMs: null });
+    expect(limitWait).toEqual({ showNotice: false, nextCheckAtMs: null });
+    // A refusal recorded at or after the launch still holds the message.
+    const refusedAfterLaunch = resolveStalledWorkspaceStart({
+      ...input({
+        runs: {
+          "run-1": queuedRun({
+            metadata: { runtimeAlert: { ...limitWaitAlert, updatedAt: new Date(at(1)).toISOString() } },
+          }),
+        },
+      }),
+      nowMs: late,
+    });
+    expect(refusedAfterLaunch.showNotice).toBe(false);
+  });
+
+  it("does not let a limit refusal from before the launch hide the notice", () => {
+    // The message once waited on the team's runtime limit; a slot freed, a
+    // new launch was requested, and that launch never came up.
+    const state = resolveStalledWorkspaceStart({
+      ...input({
+        runs: {
+          "run-1": queuedRun({
+            metadata: { runtimeAlert: { ...limitWaitAlert, updatedAt: new Date(at(-20)).toISOString() } },
+          }),
+        },
+      }),
+      nowMs: at(14),
+    });
+    expect(state).toEqual({ showNotice: true, nextCheckAtMs: null });
   });
 
   it("is quiet when the workspace is ready, local, or no message of this conversation waits", () => {
     const late = at(10);
-    expect(resolveStalledWorkspaceStart({ ...input({ runtimeReady: true }), nowMs: late }).launchStalled).toBe(false);
-    expect(resolveStalledWorkspaceStart({ ...input({ localRuntime: true }), nowMs: late }).launchStalled).toBe(false);
+    expect(resolveStalledWorkspaceStart({ ...input({ runtimeReady: true }), nowMs: late }).showNotice).toBe(false);
+    expect(resolveStalledWorkspaceStart({ ...input({ localRuntime: true }), nowMs: late }).showNotice).toBe(false);
 
     // A run that failed for good: the AI provider refused it.
     const failedRunError: ChatMessage = {
@@ -153,8 +179,7 @@ describe("resolveStalledWorkspaceStart", () => {
       }),
     ]) {
       const state = resolveStalledWorkspaceStart({ ...waiting, nowMs: late });
-      // The launch itself is still stalled, for the queue's retry.
-      expect(state).toEqual({ launchStalled: true, showNotice: false, nextCheckAtMs: null });
+      expect(state).toEqual({ showNotice: false, nextCheckAtMs: null });
     }
   });
 });
@@ -259,6 +284,22 @@ describe("stalled workspace start in the chat", () => {
     expect(retryButton()?.textContent).toBe("Try again");
     // Not stacked under the starting row.
     expect(typingStatus()).toBeNull();
+  });
+
+  it("checks again when its timer fires before the wall clock reaches the bound", async () => {
+    await render(<Harness ensureHostedRuntime={vi.fn(async () => true)} />);
+    // The wall clock falls behind the timer clock after the timer was armed,
+    // as it can during a clock adjustment.
+    const timerNow = Date.now.bind(Date);
+    const wallClock = vi.spyOn(Date, "now").mockImplementation(() => timerNow() - 200);
+    try {
+      await advance(5 * MINUTE - 1_000);
+      expect(notice()).toBeNull();
+      await advance(200);
+      expect(notice()?.textContent).toContain(STALLED_COPY);
+    } finally {
+      wallClock.mockRestore();
+    }
   });
 
   it("asks for a replacement launch on Try again, pending until the request settles", async () => {
