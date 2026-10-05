@@ -79,7 +79,7 @@ export function StudioMobileContextHeader({
     >
       <IconButton
         variant="ghost" radius="lg" onPress={onHome}
-        aria-label="Home — all teams" title="Home — all teams"
+        aria-label="Home, all teams" title="Home, all teams"
         aria-current={homeActive ? "page" : undefined}
         aria-describedby={unreadCount > 0 ? homeAttentionId : undefined}
         data-testid="topbar-home-button"

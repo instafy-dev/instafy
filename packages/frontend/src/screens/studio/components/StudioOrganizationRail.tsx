@@ -99,7 +99,7 @@ export function StudioOrganizationRail({
         style={{ top: `var(--studio-context-height, ${DESKTOP_TITLE_BAR_HEIGHT_PX}px)` }} /> : null}
       <div className="flex h-[var(--studio-context-height,60px)] shrink-0 items-center">
         <IconButton variant="ghost" size="sm" radius="lg" onPress={onHome}
-          aria-label="Home — all teams" title="Home — all teams" aria-current={homeActive ? "page" : undefined}
+          aria-label="Home, all teams" title="Home, all teams" aria-current={homeActive ? "page" : undefined}
           aria-describedby={homeAttentionCount > 0 ? homeAttentionId : undefined}
           data-testid="sidebar-home-button"
           className="relative h-11 w-11">
