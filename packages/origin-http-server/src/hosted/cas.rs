@@ -4,8 +4,9 @@
 //!
 //! An attempt fetches `main` (`E`), builds the new tree `T` from `E` and
 //! the change (see [`super::change`] for what is refused), answers
-//! `committed: false` when `T` is `E`'s tree, and otherwise checks what the
-//! client read before it commits and pushes.
+//! `committed: false` when `T` is `E`'s tree (except for an import, whose
+//! commit is its receipt), and otherwise checks what the client read before
+//! it commits and pushes.
 //!
 //! The push is classified: a lost race fetches and tries again (at most
 //! [`MAX_ATTEMPTS`] times within the budget, then 409 `main_busy`), an
@@ -333,7 +334,11 @@ pub(crate) fn cas_commit(
             None => staged.empty_tree(),
         }
         .map_err(internal)?;
-        if tree == main_tree {
+        // An import is committed even when it changes nothing: that commit,
+        // carrying its key, is its receipt. Without it a retry after a lost
+        // answer would find no receipt and write the import again, over
+        // whatever was saved in between.
+        if tree == main_tree && key.is_none() {
             return Ok(CasOutcome {
                 rev: main.clone(),
                 base_rev: main,
