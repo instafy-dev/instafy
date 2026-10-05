@@ -43,6 +43,8 @@
 //! 6. `.salvage/<entry>.bundle` holds the entry's local history (all of it
 //!    when canonical is missing), `.salvage/<entry>.private.tar` (0600) the
 //!    private files, and `.salvage/report.jsonl` one line per entry and run.
+//!    Each line goes to stdout first; when the journal cannot take it, the
+//!    run stops before the next entry.
 //!
 //! Without `--apply` nothing is pushed, minted for writing, exported, or
 //! written under `.salvage/`, and no file of an entry's work tree changes;
@@ -260,7 +262,10 @@ pub(crate) fn run(
         Err(error) => return Err(error).with_context(|| format!("failed to inspect {legacy:?}")),
     }
     let _lock = if settings.apply {
-        Some(lock(settings)?)
+        let lock = lock(settings)?;
+        // A journal that cannot take a line stops the run before any entry.
+        open_report(settings)?;
+        Some(lock)
     } else {
         None
     };
@@ -288,11 +293,20 @@ pub(crate) fn run(
             },
         };
         let line = serde_json::to_string(&report).context("failed to encode a report")?;
-        if settings.apply {
-            append_report(settings, &line)?;
-        }
+        // Stdout first: the entry may be pushed or removed already, so its
+        // line must reach the operator even when the journal fails.
         writeln!(out, "{line}").context("failed to write the report")?;
         summary.count(&report);
+        if settings.apply {
+            // A line the journal could not take stops the run here, before
+            // any later entry is pushed or removed.
+            append_report(settings, &line).with_context(|| {
+                format!(
+                    "{name} was handled (its line is on stdout) but report.jsonl did not take \
+                     its line, so the run stopped: {line}"
+                )
+            })?;
+        }
     }
     Ok(summary)
 }
@@ -348,7 +362,8 @@ fn lock(settings: &Settings) -> Result<RunLock> {
     Ok(RunLock(file))
 }
 
-fn append_report(settings: &Settings, line: &str) -> Result<()> {
+/// `.salvage/report.jsonl`, opened for appending (created 0600).
+fn open_report(settings: &Settings) -> Result<(std::fs::File, std::path::PathBuf)> {
     let path = settings.salvage_dir().join("report.jsonl");
     let mut options = std::fs::OpenOptions::new();
     options.append(true).create(true);
@@ -357,9 +372,14 @@ fn append_report(settings: &Settings, line: &str) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options
+    let file = options
         .open(&path)
         .with_context(|| format!("failed to open {path:?}"))?;
+    Ok((file, path))
+}
+
+fn append_report(settings: &Settings, line: &str) -> Result<()> {
+    let (mut file, path) = open_report(settings)?;
     writeln!(file, "{line}")
         .and_then(|()| file.sync_all())
         .with_context(|| format!("failed to append to {path:?}"))

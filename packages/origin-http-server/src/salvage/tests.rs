@@ -25,11 +25,16 @@ struct Stub {
     salvage_tokens: Cell<usize>,
     exports: RefCell<Vec<(String, Vec<u8>)>>,
     keep_exports: Cell<bool>,
+    /// Runs before each `git.read` mint.
+    on_read_token: RefCell<Option<Box<dyn FnMut()>>>,
 }
 
 impl Services for Stub {
     fn read_token(&self, _project: &Uuid) -> anyhow::Result<Option<String>> {
         self.read_tokens.set(self.read_tokens.get() + 1);
+        if let Some(hook) = self.on_read_token.borrow_mut().as_mut() {
+            hook();
+        }
         Ok(None)
     }
 
@@ -1122,6 +1127,73 @@ fn replacement_refs_in_reftable_storage_never_hide_history() {
         tar_listing(&archive),
         vec![format!("history/{leaking}/.env.production")]
     );
+}
+
+/// Each entry's line reaches stdout before `report.jsonl`; when the journal
+/// cannot take a line, the run stops before the next entry, and a journal
+/// that cannot be opened stops it before the first.
+#[test]
+fn a_report_line_is_never_lost_when_the_journal_fails() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("README.md"), b"edited\n");
+    let second = gateway
+        .root
+        .join(".legacy")
+        .join(format!("{}-20261005T000000Z", gateway.project));
+    write(&second.join("notes.md"), b"draft\n");
+    gateway.salvage_mode_hook(&[]);
+    let journal = gateway.root.join(".salvage/report.jsonl");
+    let stub = Stub::default();
+    let broken = journal.clone();
+    *stub.on_read_token.borrow_mut() = Some(Box::new(move || {
+        // The disk fills while the first entry is handled.
+        let _ = std::fs::remove_file(&broken);
+        let _ = std::fs::create_dir_all(&broken);
+    }));
+
+    let mut out = Vec::new();
+    let error = run(&gateway.settings(true, true, &[]), &stub, &mut out)
+        .unwrap_err()
+        .to_string();
+    let lines: Vec<JsonValue> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{error}");
+    assert_eq!(lines[0]["entry"], gateway.project.to_string());
+    assert_eq!(lines[0]["removed"], true, "{:#}", lines[0]);
+    assert!(error.contains("report.jsonl"), "{error}");
+    assert!(error.contains(&gateway.project.to_string()), "{error}");
+    assert!(!entry.exists());
+    assert_eq!(gateway.salvage_refs().len(), 1);
+    // The next entry was never touched.
+    assert!(second.join("notes.md").is_file());
+    assert!(!gateway
+        .root
+        .join(".salvage")
+        .join(format!("{}-20261005T000000Z.private.tar", gateway.project))
+        .exists());
+
+    // A journal that cannot be opened stops the run before any entry.
+    let other = Gateway::new();
+    let c1 = other.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = other.park_checkout_at(&c1);
+    write(&entry.join("README.md"), b"edited\n");
+    other.salvage_mode_hook(&[]);
+    std::fs::create_dir_all(other.root.join(".salvage/report.jsonl")).unwrap();
+    let stub = Stub::default();
+    let mut out = Vec::new();
+    let error = run(&other.settings(true, true, &[]), &stub, &mut out)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("report.jsonl"), "{error}");
+    assert!(out.is_empty());
+    assert_eq!(stub.read_tokens.get(), 0);
+    assert!(entry.join("README.md").is_file());
+    assert!(other.salvage_refs().is_empty());
 }
 
 /// An existing salvage ref with another tip stops the entry before any
