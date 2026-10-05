@@ -9,6 +9,10 @@ import {
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 import { formatAuthRejectedError, formatAuthRequiredError } from "./errors.js";
 import { findProjectManifest } from "./project-manifest.js";
+import {
+  resolveRuntimeBoundControllerUrl,
+  resolveRuntimeControllerCredential,
+} from "./runtime-controller-binding.js";
 
 type AutomationRecord = {
   id: string;
@@ -131,6 +135,24 @@ function resolveControllerAuth(
   retryCommand: string,
 ): ControllerAuth {
   const cwd = options.cwd ?? process.cwd();
+  // A runtime turn has a leased job credential, not an interactive login. Keep
+  // it bound to its controller rather than falling back to a user profile.
+  const runtimeCredential = options.accessToken?.trim()
+    ? null
+    : resolveRuntimeControllerCredential();
+  if (runtimeCredential) {
+    const controllerUrl = resolveControllerUrl({
+      controllerUrl: options.controllerUrl ?? runtimeCredential.controllerUrl,
+      cwd,
+    });
+    return {
+      controllerUrl: resolveRuntimeBoundControllerUrl(runtimeCredential, controllerUrl),
+      accessToken: runtimeCredential.token,
+      tokenSource: "env",
+      profile: null,
+      cwd,
+    };
+  }
   const controllerUrl = resolveControllerUrl({
     controllerUrl: options.controllerUrl ?? null,
     cwd,
@@ -184,6 +206,7 @@ async function controllerJsonRequest(
         method: params.method,
         headers,
         body: bodyText,
+        redirect: "error",
       },
       accessToken: auth.accessToken,
       tokenSource: auth.tokenSource,

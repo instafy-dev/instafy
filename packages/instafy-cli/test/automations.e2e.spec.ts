@@ -49,9 +49,11 @@ function startMockController(token: string, initialAutomations: MockAutomation[]
     automations: [...initialAutomations] as MockAutomation[],
     createBodies: [] as Record<string, unknown>[],
     updateBodies: [] as Array<{ automationId: string; body: Record<string, unknown> }>,
+    requests: [] as Array<{ method: string | undefined; url: string | undefined; authorization: string | undefined }>,
   };
 
   const server = http.createServer(async (req, res) => {
+    state.requests.push({ method: req.method, url: req.url, authorization: req.headers.authorization });
     if (req.headers.authorization !== `Bearer ${token}`) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ message: "invalid token" }));
@@ -135,17 +137,20 @@ async function readAll(stream: NodeJS.ReadableStream): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function execCli(args: string[]) {
+async function execCli(args: string[], extraEnv: NodeJS.ProcessEnv = {}) {
   const packageRoot = new URL("../", import.meta.url).pathname;
   const entry = path.join(packageRoot, "bin", "instafy.js");
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-home-"));
   try {
+    const env = { ...process.env };
+    for (const key of ["INSTAFY_ACCESS_TOKEN", "SUPABASE_ACCESS_TOKEN", "CONTROLLER_ACCESS_TOKEN", "CONTROLLER_BASE_URL", "RUNTIME_ACCESS_TOKEN", "RUNTIME_ID", "RUNTIME_LEASE_ID", "INSTAFY_CONVERSATION_ID", "CONVERSATION_ID", "SPACE_ID", "INSTAFY_SPACE_ID", "PROJECT_ID", "INSTAFY_PROJECT_ID", "INSTAFY_PROFILE", "INSTAFY_SERVER_URL", "INSTAFY_CLI_CONFIG"]) delete env[key];
     const child = spawn(process.execPath, [entry, ...args], {
       cwd: packageRoot,
       env: {
-        ...process.env,
+        ...env,
         HOME: tmpHome,
         USERPROFILE: tmpHome,
+        ...extraEnv,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -171,6 +176,85 @@ function automationArgs(controllerUrl: string, token: string): string[] {
 }
 
 describe("automations cli", () => {
+  it("lists, changes cadence and pauses with only the active runtime job credential", async () => {
+    const token = "scoped-job-token";
+    const automation = automationPayload({ mode: "space_review" });
+    const { server, projectId, state } = startMockController(token, [automation]);
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const env = {
+        RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: randomUUID(),
+        CONTROLLER_ACCESS_TOKEN: token, CONTROLLER_BASE_URL: `http://127.0.0.1:${address.port}`,
+        SPACE_ID: projectId,
+      };
+      const listed = await execCli(["automations", "list", "--json"], env);
+      expect(listed.code, listed.stderr).toBe(0);
+      expect(JSON.parse(listed.stdout)[0].id).toBe(automation.id);
+      const updated = await execCli(["automations", "update", automation.id, "--schedule-kind", "weekly", "--days", "fr", "--time", "10:00", "--timezone", "Europe/Vienna", "--json"], env);
+      expect(updated.code, updated.stderr).toBe(0);
+      expect(JSON.parse(updated.stdout)).toMatchObject({ id: automation.id, scheduleKind: "weekly", byDay: ["fr"], byHour: 10, timezone: "Europe/Vienna" });
+      const paused = await execCli(["automations", "pause", automation.id, "--json"], env);
+      expect(paused.code, paused.stderr).toBe(0);
+      expect(JSON.parse(paused.stdout).status).toBe("paused");
+      expect(state.updateBodies).toEqual([
+        { automationId: automation.id, body: { scheduleKind: "weekly", byDay: ["fr"], byHour: 10, byMinute: 0, timezone: "Europe/Vienna" } },
+        { automationId: automation.id, body: { status: "paused" } },
+      ]);
+      expect(state.requests.map((request) => request.authorization)).toEqual(Array(3).fill(`Bearer ${token}`));
+    } finally { await closeServer(server); }
+  });
+
+  it("refuses to send a scoped job credential to another controller origin", async () => {
+    const { server, projectId, state } = startMockController("scoped-job-token");
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const result = await execCli(["automations", "list", "--space", projectId, "--server-url", `http://127.0.0.1:${address.port}`, "--json"], {
+        RUNTIME_ID: randomUUID(), CONVERSATION_ID: randomUUID(),
+        CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: "http://127.0.0.1:1",
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("controller origin other than CONTROLLER_BASE_URL");
+      expect(state.requests).toEqual([]);
+    } finally { await closeServer(server); }
+  });
+
+  it("does not replace a missing job credential with a human session token", async () => {
+    const { server, projectId, state } = startMockController("human-token");
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const result = await execCli(["automations", "list", "--space", projectId, "--json"], {
+        RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: randomUUID(),
+        CONTROLLER_BASE_URL: `http://127.0.0.1:${address.port}`, INSTAFY_ACCESS_TOKEN: "human-token",
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("CONTROLLER_ACCESS_TOKEN");
+      expect(state.requests).toEqual([]);
+    } finally { await closeServer(server); }
+  });
+
+  it("does not follow redirects from the bound controller", async () => {
+    let requests = 0;
+    const server = http.createServer((_req, res) => {
+      requests += 1;
+      res.writeHead(307, { location: "/redirect-target" });
+      res.end();
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      const result = await execCli(["automations", "list", "--space", randomUUID(), "--json"], {
+        RUNTIME_ID: randomUUID(), INSTAFY_CONVERSATION_ID: randomUUID(),
+        CONTROLLER_ACCESS_TOKEN: "scoped-job-token", CONTROLLER_BASE_URL: `http://127.0.0.1:${address.port}`,
+      });
+      expect(result.code).not.toBe(0);
+      expect(requests).toBe(1);
+    } finally { await closeServer(server); }
+  });
+
   it("creates an explicit private quiet space review without a custom prompt", async () => {
     const token = "controller-token";
     const { server, projectId, state } = startMockController(token);
