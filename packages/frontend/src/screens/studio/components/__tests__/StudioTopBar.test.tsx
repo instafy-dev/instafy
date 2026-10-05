@@ -268,7 +268,8 @@ describe("StudioTopBar navigation", () => {
     expect(search).toHaveBeenCalledOnce();
     expect(searchTriggerRef.current?.getAttribute("aria-expanded")).toBe("false");
     await act(async () => searchTriggerRef.current!.click());
-    const home = [...document.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Home — all teams");
+    const home = [...document.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Home, all teams");
+    expect(home).toBeDefined();
     await act(async () => home!.click());
     expect(mocks.openHome).toHaveBeenCalledOnce();
 
