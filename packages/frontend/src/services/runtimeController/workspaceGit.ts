@@ -1660,12 +1660,39 @@ export type RestoreWorkspaceRecoveryResult =
       rev: string | null;
       baseRev: string | null;
       committed: boolean | null;
+      /**
+       * With `committed: false`: `main` already had the work, and an empty
+       * version on `main` (`rev`) now records the restore, so `main` moved
+       * and the entry shows restored. Salvage refs only; false when the
+       * answer does not say (older origins).
+       */
+      marked: boolean;
       notRestored: string[];
+      /** Why a path in `notRestored` was left out, when the answer says (the gateway does). */
+      notRestoredReasons: Record<string, string>;
       refDeleted: boolean;
       originId: string;
       originMode: string;
     }
   | WorkspaceRecoveryWriteFailure;
+
+/** The reason of each `{path, reason}` item, by path; a bare path string has none. */
+function readNotRestoredReasons(value: unknown): Record<string, string> {
+  const reasons: Record<string, string> = {};
+  if (!Array.isArray(value)) {
+    return reasons;
+  }
+  for (const item of value) {
+    const record =
+      item && typeof item === "object" && !Array.isArray(item) ? (item as Record<string, unknown>) : null;
+    const path = readPayloadString(record, "path");
+    const reason = readPayloadString(record, "reason");
+    if (path && reason) {
+      reasons[path] = reason;
+    }
+  }
+  return reasons;
+}
 
 export interface DismissWorkspaceRecoveryParams {
   projectId: string;
@@ -1781,12 +1808,15 @@ export async function restoreWorkspaceRecoveryFromController(
     return result;
   }
   const payload = result.payload;
+  const notRestored = payload?.notRestored ?? payload?.not_restored;
   return {
     ok: true,
     rev: readPayloadString(payload, "rev"),
     baseRev: readPayloadString(payload, "baseRev", "base_rev"),
     committed: typeof payload?.committed === "boolean" ? payload.committed : null,
-    notRestored: readOriginPathList(payload?.notRestored ?? payload?.not_restored),
+    marked: payload?.marked === true,
+    notRestored: readOriginPathList(notRestored),
+    notRestoredReasons: readNotRestoredReasons(notRestored),
     refDeleted: payload?.refDeleted === true || payload?.ref_deleted === true,
     originId: result.originId,
     originMode: result.originMode,
