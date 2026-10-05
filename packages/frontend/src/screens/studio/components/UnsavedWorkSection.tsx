@@ -44,7 +44,7 @@ import {
   savedPathVersionCopy,
   type HistoryNotice,
   type HistoryOriginKind,
-} from "./historyCopy";
+} from "./versioningCopy";
 import { PROGRAMMATIC_FOCUS_CLASS, restoreLostFocus } from "./historyFocus";
 import { checkDesktopFolderPath, confirmPathAbsentAtRef, servedFromOtherRev } from "./unsavedWorkPathChecks";
 import { formatRelativeCommitTime } from "./workspaceGitReviewShared";

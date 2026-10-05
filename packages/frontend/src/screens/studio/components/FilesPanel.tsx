@@ -76,7 +76,7 @@ import {
 } from "./filesVersioning";
 import type { FilesCreateVersionedOptions } from "./useFilesPanelCreateEntries";
 import { useFilesPanelSave } from "./useFilesPanelSave";
-import { SAVE_COPY, type SaveCopy } from "./workspaceSaveCopy";
+import { SAVE_COPY, type SaveCopy } from "./versioningCopy";
 
 const ignoreEmbeddedNavigation = () => {};
 

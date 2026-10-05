@@ -15,7 +15,7 @@ const repo = resolve(frontend, "../..");
 
 const GATED_FILES = [
   resolve(components, "ChatFileChangeList.tsx"),
-  resolve(components, "chatFileChangeCopy.ts"),
+  resolve(components, "versioningCopy.ts"),
   resolve(components, "FilesPanel.tsx"),
   resolve(components, "filesViewerFooter.ts"),
   resolve(components, "useFilesPanelWorkspaceTree.tsx"),
@@ -24,7 +24,7 @@ const GATED_FILES = [
   resolve(frontend, "src/conversations/conversationMessageUtils.ts"),
   resolve(components, "__tests__/ChatFileChangeList.test.ts"),
   resolve(components, "__tests__/ChatFileChangeUnsavedEntry.test.tsx"),
-  resolve(components, "__tests__/chatFileChangeCopy.test.ts"),
+  resolve(components, "__tests__/versioningCopy.chatChange.test.ts"),
   resolve(components, "__tests__/filesViewerFooter.test.ts"),
   resolve(repo, "docs/Settings-UI.md"),
 ];

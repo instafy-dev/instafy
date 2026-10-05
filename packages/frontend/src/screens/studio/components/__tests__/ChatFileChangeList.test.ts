@@ -764,9 +764,9 @@ describe("ChatFileChangeList", () => {
     const chips = container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-file-change-not-saved-chip"]');
     expect(chips[0]?.querySelector("span:not(.sr-only)")?.textContent).toBe("Not saved");
     expect(chips[0]?.textContent).toContain(".env");
-    expect(chips[0]?.title).toBe("Secret files stay out of the space. Use Secrets for these values.");
+    expect(chips[0]?.title).toBe("Secret files aren't saved to the space. Use Secrets for these values.");
     expect(chips[1]?.title).toBe(
-      "Larger than 20 MB, so it isn't saved to the space. The saved version is unchanged.",
+      "This file is larger than 20 MB, so it isn't saved to the space. The saved version is unchanged.",
     );
 
     // A tap opens that file's reason under the row, and only that one.
@@ -780,7 +780,7 @@ describe("ChatFileChangeList", () => {
     });
     expect(chips[0]?.getAttribute("aria-expanded")).toBe("true");
     expect(notes[0]?.classList.contains("sr-only")).toBe(false);
-    expect(notes[0]?.textContent).toBe(".env: Secret files stay out of the space. Use Secrets for these values.");
+    expect(notes[0]?.textContent).toBe(".env: Secret files aren't saved to the space. Use Secrets for these values.");
     expect(notes[1]?.classList.contains("sr-only")).toBe(true);
     expect(notes[0]?.parentElement?.getAttribute("data-testid")).toBe("chat-file-change-summary");
     expect(container.textContent).not.toMatch(/\u2014/);
@@ -823,7 +823,7 @@ describe("ChatFileChangeList", () => {
       ["excluded", "Build output, dependency and cache folders aren't saved to the space."],
       ["ignored", "This file matches .gitignore, so it isn't saved to the space."],
       ["attachment", "Old chat upload files aren't saved to the space."],
-      ["policy", "This space's file rules refused this file."],
+      ["policy", "This space's file rules refused the file."],
       ["unsupported", "Links and special files can't be saved."],
       ["unknown", "The space didn't save this file."],
     ] as const;

@@ -9,7 +9,7 @@ import {
   describeUnsavedChanges,
   fetchPendingRetryDelayMs,
   revertRetryDelayMs,
-} from "../chatFileChangeCopy";
+} from "../versioningCopy";
 
 function failure(
   status: number,
@@ -204,10 +204,10 @@ describe("describeChangeRevertOutcome for refused paths", () => {
 
   it("names the file rule, never says to try again, and offers the agent", () => {
     const cases = [
-      [refused("excluded_path", "secret"), "This change can't be reverted here. Secret files stay out of the space. Ask the agent to undo it."],
+      [refused("excluded_path", "secret"), "This change can't be reverted here. Secret files aren't saved to the space. Ask the agent to undo it."],
       [
         refused("excluded_path", "secret", [".env"]),
-        "This change can't be reverted here because it would bring back .env. Secret files stay out of the space. Ask the agent to undo it.",
+        "This change can't be reverted here because it would bring back .env. Secret files aren't saved to the space. Ask the agent to undo it.",
       ],
       [
         refused("excluded_path"),

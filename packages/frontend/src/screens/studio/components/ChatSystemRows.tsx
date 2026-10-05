@@ -11,7 +11,7 @@ import { NotchedMessageShell } from "./ChatMessageEntries";
 import { ThreadSpine } from "./ThreadSpine";
 import type { AssistantAgentIdentity } from "./chatAssistantIdentity";
 import type { WorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
-import { SAVE_COPY } from "./workspaceSaveCopy";
+import { SAVE_COPY } from "./versioningCopy";
 import type { UnsavedWorkNotice } from "./useUnsavedWorkNotice";
 
 const CHAT_LEFT_SPINE_OFFSET_CLASS = "left-[-26px]";

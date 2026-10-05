@@ -7,7 +7,7 @@ import {
   type OwnRevisions,
 } from "./filesVersioning";
 import type { OpenTextFileOptions } from "./useFilesPanelViewerState";
-import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./workspaceSaveCopy";
+import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./versioningCopy";
 
 export type CreateEntryDraftState = {
   parentPath: string;

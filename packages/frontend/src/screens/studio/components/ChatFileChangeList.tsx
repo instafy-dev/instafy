@@ -35,7 +35,7 @@ import {
   describeUnsavedChanges,
   fetchPendingRetryDelayMs,
   revertRetryDelayMs,
-} from "./chatFileChangeCopy";
+} from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 
 const {

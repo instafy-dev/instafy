@@ -632,7 +632,7 @@ describe("HistoryDrawer", () => {
     [
       "revert_conflict",
       { ok: false, code: "revert_conflict", paths: ["a.txt"], errorInfo: { status: 409, code: "revert_conflict", message: "conflict", routeUnavailable: false } },
-      "Later changes touch the same files, so this can't be reverted automatically.",
+      "Later changes touch the same lines, so this can't be reverted automatically.",
       true,
     ],
     [
@@ -650,7 +650,7 @@ describe("HistoryDrawer", () => {
     [
       "dirty Desktop files",
       { ok: false, code: "dirty_paths", paths: ["a.txt", "b.txt"], errorInfo: { status: 409, code: "dirty_paths", message: "dirty", routeUnavailable: false } },
-      "Files on this computer have edits this revert would change: a.txt, b.txt. Save them first.",
+      "Files on this computer have edits this revert would change: a.txt and b.txt. Save them first.",
       false,
     ],
     [
@@ -700,7 +700,7 @@ describe("HistoryDrawer", () => {
     await flush();
     const status = q(container, "history-status");
     const scroller = q(container, "history-scroll");
-    expect(status?.textContent).toContain("Later changes touch the same files");
+    expect(status?.textContent).toContain("Later changes touch the same lines");
     expect(scroller?.contains(status)).toBe(false);
     expect(scroller?.contains(q(container, "history-revert-ask-agent"))).toBe(false);
     // Between the header and the list, in the drawer's own column.
@@ -762,7 +762,7 @@ describe("HistoryDrawer", () => {
       const text = q(container, "history-status")?.textContent ?? "";
       expect(text).toContain("Saved 2 files as a version.");
       expect(text).toContain(
-        "2 files weren't saved because they changed in the space: a.txt, b.txt. Your versions are still in the folder on this computer.",
+        "2 files weren't saved because they changed in the space: a.txt and b.txt. Your versions are still in the folder on this computer.",
       );
       expect(text).toContain(".env stays on this computer: secret files aren't saved to the space.");
       // The count is checked again after the action.
