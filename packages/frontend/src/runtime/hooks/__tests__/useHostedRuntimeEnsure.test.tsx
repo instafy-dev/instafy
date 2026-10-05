@@ -121,6 +121,36 @@ describe("useHostedRuntimeEnsure force", () => {
     );
   });
 
+  it("answers a second request for the space with the one already on its way", async () => {
+    // Send in a held space lifts the holds, which wakes the auto-start; it
+    // calls back in before the first request has asked the controller.
+    await act(async () => {
+      root.render(<Harness statuses={[]} />);
+    });
+    let results: boolean[] = [];
+    await act(async () => {
+      results = await Promise.all([ensureHostedRuntime!(), ensureHostedRuntime!()]);
+    });
+    expect(results).toEqual([true, true]);
+    expect(ensure).toHaveBeenCalledTimes(1);
+
+    // Once it has settled, the next request asks again.
+    await act(async () => {
+      await ensureHostedRuntime!();
+    });
+    expect(ensure).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a forced request wait on a plain one", async () => {
+    let results: boolean[] = [];
+    await act(async () => {
+      results = await Promise.all([ensureHostedRuntime!(), ensureHostedRuntime!({ force: true })]);
+    });
+    expect(results).toEqual([true, true]);
+    // The plain one reuses the young requested row; only the forced one asks.
+    expect(ensure).toHaveBeenCalledTimes(1);
+  });
+
   it("lifts every hold on the space, since only an explicit request gets here", async () => {
     markManualStop(PROJECT_ID);
     markRestoredAwaitingIntent(PROJECT_ID);

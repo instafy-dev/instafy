@@ -108,6 +108,26 @@ describe("useComposerIntentWake", () => {
     expect(isRestoredAwaitingIntent(PROJECT_ID)).toBe(true);
   });
 
+  it("ignores keydown events that carry no key, in the composer and outside it", () => {
+    // Chrome autofill dispatches these; reading their key must not throw.
+    const errors: unknown[] = [];
+    const onError = (event: ErrorEvent) => {
+      errors.push(event.error);
+      event.preventDefault();
+    };
+    window.addEventListener("error", onError);
+    try {
+      fire(document.body, new Event("keydown", { bubbles: true }));
+      fire(composer(), new Event("keydown", { bubbles: true }));
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+
+    expect(errors).toEqual([]);
+    expect(isIdlePaused(PROJECT_ID)).toBe(true);
+    expect(isRestoredAwaitingIntent(PROJECT_ID)).toBe(true);
+  });
+
   it.each([
     ["clicking into it", () => fire(element('[data-testid="composer-text"]'), pointerDown())],
     ["typing a letter", () => fire(composer(), keyDown("a"))],

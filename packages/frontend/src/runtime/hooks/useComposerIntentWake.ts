@@ -12,9 +12,10 @@ function isInsideComposer(event: Event): boolean {
 // A key that writes into the composer. Shortcuts pressed while it has focus
 // (Cmd+K opens search, which can switch spaces), Escape, Tab and the arrows
 // do not; text that arrives without a plain key (IME, dictation, AltGr,
-// paste) is caught by beforeinput.
+// paste) is caught by beforeinput. Some keydown events carry no key at all
+// (Chrome autofill dispatches them).
 function isTypingKey(event: KeyboardEvent): boolean {
-  if (event.metaKey || event.ctrlKey || event.altKey) {
+  if (typeof event.key !== "string" || event.metaKey || event.ctrlKey || event.altKey) {
     return false;
   }
   return (
@@ -47,7 +48,7 @@ export function useComposerIntentWake(projectId: string | null) {
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (isTypingKey(event) && isInsideComposer(event)) {
+      if (isInsideComposer(event) && isTypingKey(event)) {
         wake();
       }
     };

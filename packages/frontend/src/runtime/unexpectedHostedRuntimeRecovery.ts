@@ -20,7 +20,7 @@ const MANUAL_RUNTIME_STOP_REASONS = new Set([
   // Deliberate platform stops: auto-restarting would either undo the pause
   // (idle), immediately die again (credits_exhausted), or run straight back
   // into the same memory wall (oom_killed). The machine wakes via the normal
-  // ensure path on the user's next interaction instead.
+  // ensure path when the user writes in the chat, sends or presses Start.
   "idle",
   ...PLATFORM_HOLD_STOP_REASONS,
 ]);
@@ -58,7 +58,9 @@ export function isRuntimeLimitReclaimStopReason(reason: string | null | undefine
  * tab does not start the machine again: a person's stop holds like Stop does
  * in the tab that pressed it, a platform stop like an idle pause. Idle and
  * reclaim stops are held where they are explained, and any other reason
- * leaves recovery to decide.
+ * leaves recovery to decide. Only platform stops are published to other tabs
+ * today; the controller records a person's stop without a runtime.stopped
+ * event, so "manual_stop" applies once it sends one.
  */
 export function resolveRuntimeStopHold(
   reason: string | null | undefined,

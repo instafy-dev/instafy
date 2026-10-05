@@ -490,10 +490,15 @@ export function ChatFileChangeList({
   const showSummaryToggle = totalCount > 1;
   const visibleChipEntries = railExpanded || !showSummaryToggle ? resolvedFiles : [];
   const chipLabels = resolveChipLabels(resolvedFiles);
-  const statsLoading = pendingPaths.some((path) => {
-    const stat = statsByPath[path];
-    return !stat || stat.kind === "loading";
-  });
+  // Stats load only from a ready runtime. A space whose machine is not running
+  // (it waits until someone writes in the chat) is not loading anything, so
+  // it shows no placeholder rather than one that never resolves.
+  const statsLoading =
+    runtimeReady &&
+    pendingPaths.some((path) => {
+      const stat = statsByPath[path];
+      return !stat || stat.kind === "loading";
+    });
 
   useEffect(() => {
     if (!projectId || !runtimeReady || uniquePaths.length === 0) {

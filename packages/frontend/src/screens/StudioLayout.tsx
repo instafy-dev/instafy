@@ -921,7 +921,8 @@ function StudioLayoutInner() {
 
   // Deliberate runtime pauses (idle, credits) get an explained notice instead
   // of looking like a crash. Auto-restart is suppressed for these reasons in
-  // unexpectedHostedRuntimeRecovery; the machine wakes on the next interaction.
+  // unexpectedHostedRuntimeRecovery; the machine wakes when the person writes
+  // in the chat, sends or presses Start.
   const runtimeStopNoticeRef = useRef<string | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") {

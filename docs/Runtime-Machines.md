@@ -110,13 +110,17 @@ Start or Reconnect. Focus reaching the composer on its own does not count.
 The Machines panel only reads status. One exception remains: the shared
 browser dock still asks for a machine itself when it connects without one.
 
-A stop made in another tab or device holds this tab too: `user_stop`,
-`user_remove`, `runtime_limit_takeover` and
-`browser_session_runtime_limit_takeover` hold like a manual Stop when they
-leave the space no live hosted machine, and `credits_exhausted` and
-`oom_killed` hold like an idle pause. Unexpected loss (`heartbeat_timeout`,
-`origin.expired` within 20 seconds of a machine this tab had ready) still
-recovers straight away.
+A platform stop holds every open tab: `credits_exhausted` and `oom_killed`
+arrive as `runtime.stopped` and hold like an idle pause. A Stop, Remove or
+takeover made in another tab or device does not reach this tab yet. The
+controller records `user_stop`, `user_remove`, `runtime_limit_takeover` and
+`browser_session_runtime_limit_takeover` in `runtime_events` but does not
+publish `runtime.stopped` for them, so another tab where someone already
+wrote in the chat can still start that machine again on its next status
+refresh. The frontend already holds those reasons like a manual Stop (when
+they leave the space no live hosted machine) once the controller publishes
+them. Unexpected loss (`heartbeat_timeout`, `origin.expired` within 20
+seconds of a machine this tab had ready) still recovers straight away.
 
 ## Stop reasons
 
@@ -197,8 +201,8 @@ holding the slot is in another space and has been idle for
 `RUNTIME_LIMIT_RECLAIM_IDLE_SECONDS` (default 120, 0 disables), the ensure
 stops it and launches the waiting space instead (reason
 `runtime_limit_reclaim`). That reclaim only runs inside an
-ensure, and clients ask again only on interaction, so the controller retries
-for them (`runtime/limit_waits.rs`):
+ensure, and clients ask again only when someone writes in the chat, sends or
+presses Start, so the controller retries for them (`runtime/limit_waits.rs`):
 
 - Every limit refusal of a real ensure (the studio's, the dispatch reconnect,
   requeue recovery, automations) is recorded in `hosted_runtime_limit_waits`,

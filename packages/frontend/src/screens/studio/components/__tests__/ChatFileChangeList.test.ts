@@ -386,6 +386,33 @@ describe("ChatFileChangeList", () => {
     expect(container.querySelectorAll('[data-testid="chat-file-change-row"]')).toHaveLength(1);
   });
 
+  it("shows no line-count placeholder while the space's machine is not running", async () => {
+    // A space waits for someone to write in the chat before its machine
+    // starts, so nothing loads the counts; a pulsing placeholder would never
+    // resolve.
+    // More than 4 files, so the rail starts tucked behind the summary chip.
+    const files = ["one", "two", "three", "four", "five"].map((name) => fileChange(`src/${name}.ts`));
+    const pulse = () =>
+      container.querySelector('[data-testid="chat-file-change-toggle-files"] .animate-pulse');
+
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: "p1" }));
+    });
+    expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')).not.toBeNull();
+    expect(pulse()).toBeNull();
+    expect(fetchWorkspaceGitDiff).not.toHaveBeenCalled();
+
+    // Once it is ready the counts load, with the placeholder until they do.
+    fetchWorkspaceGitDiff.mockReturnValue(new Promise(() => {}));
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: "p1" }));
+    });
+    expect(fetchWorkspaceGitDiff).toHaveBeenCalled();
+    expect(pulse()).not.toBeNull();
+  });
+
   it("disambiguates duplicate basenames in the chip rail", async () => {
     const files = [fileChange("src/app/index.ts"), fileChange("src/lib/index.ts")];
 

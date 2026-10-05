@@ -199,10 +199,12 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     ["browser_session_runtime_limit_takeover", false],
     ["user_stop", true],
   ])(
-    "does not undo a %s made in another tab (preferred runtime: %s)",
+    "does not undo a %s made in another tab once the controller reports it (preferred runtime: %s)",
     async (reason, preferred) => {
       // This tab did not press Stop, so nothing marked a hold before the
       // event; without one it saw no ready machine and started it again.
+      // The controller records these stops without publishing runtime.stopped
+      // today, so this pins the listener's side for when it does.
       const idle = { preferred, hasPendingProjectWork: false };
       await render({ ...idle, stopped: false });
       await publishStop({ reason });
