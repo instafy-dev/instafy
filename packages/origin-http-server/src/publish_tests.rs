@@ -5296,6 +5296,97 @@ async fn multi_tenant_apply_ignores_expected() {
     server.abort();
 }
 
+/// Restore and dismiss change canonical for everyone, so they take the
+/// workspace lease holder's `fs.write` token: an `fs.read` token, or an
+/// `fs.write` token of a lease that is no longer the live one, is refused
+/// before anything is minted or removed. Listing takes `fs.read`.
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_writes_need_the_live_lease_holders_write_token() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
+    let commit = push_to_ref(
+        &sc,
+        &[("notes.md", Some(b"notes\n"))],
+        &[],
+        "Unsaved edits",
+        &reference,
+    );
+    let lease_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let controller =
+        StubController::start(sc.config.project_id, lease_id, user_id, runtime_id).await;
+    let mut config = sc.config.clone();
+    config.skip_auth = false;
+    config.controller_base_url = Url::parse(&controller.base).unwrap();
+    config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
+    config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
+    let reader = controller.origin_token_with(
+        &config,
+        lease_id,
+        user_id,
+        runtime_id,
+        serde_json::json!({ "scopes": ["fs.read"] }),
+    );
+    let stale_writer = controller.origin_token(&config, Uuid::new_v4(), user_id, runtime_id);
+    let writer = controller.origin_token(&config, lease_id, user_id, runtime_id);
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "ref": reference, "rev": commit });
+
+    for token in [&reader, &stale_writer] {
+        for route in ["restore", "dismiss"] {
+            let response = client
+                .post(format!("{base}/git/recovery/{route}"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "{route}"
+            );
+        }
+    }
+    assert_eq!(sc.remote_refs(&reference).len(), 1);
+    assert!(sc.remote_file("notes.md").is_none());
+    {
+        let calls = controller.calls.lock().unwrap();
+        assert!(
+            calls
+                .git_tokens
+                .iter()
+                .all(|(bearer, _)| bearer != &reader && bearer != &stale_writer),
+            "a refused caller's token was exchanged"
+        );
+    }
+
+    // Listing takes fs.read; the live lease holder may remove the work.
+    let response = client
+        .get(format!("{base}/git/recovery"))
+        .bearer_auth(&reader)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let response = client
+        .post(format!("{base}/git/recovery/dismiss"))
+        .bearer_auth(&writer)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(sc.remote_refs(&reference).is_empty());
+    server.abort();
+    controller.server.abort();
+}
+
 /// The pseudonym the controller issues for one person in one space.
 const PSEUDONYM: &str = "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev";
 
