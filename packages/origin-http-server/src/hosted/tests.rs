@@ -761,6 +761,37 @@ async fn status_answers_stateless_with_no_git_and_no_fetch() {
     assert!(!sc.mirror().exists());
 }
 
+/// Spec test 13 on one thread: on a current-thread runtime the server's
+/// tasks, middleware included, run on the test thread, where every git
+/// process is replaced by a script that records it and fails. None runs.
+#[tokio::test(flavor = "current_thread")]
+async fn status_starts_no_git_process() {
+    let sc = HostedScenario::new();
+    let log = sc.root.parent().unwrap().join("git-calls.log");
+    let _wrapper = crate::test_support::GitWrapper::install(
+        sc.root.parent().unwrap(),
+        &format!("echo \"$@\" >> '{}'\nexit 1", log.display()),
+    );
+    let served = serve(&sc).await;
+    let answer = get(&served, "/git/status?offset=2&limit=3").await;
+    assert_eq!(answer.status, 200);
+    let body = answer.json();
+    assert_eq!(body["stateless"], true);
+    assert_eq!(body["pageOffset"], 2);
+    assert_eq!(body["pageLimit"], 3);
+    assert!(
+        !log.exists(),
+        "git ran: {:?}",
+        std::fs::read_to_string(&log)
+    );
+    assert_eq!(served.cache.fetches_started(), 0);
+    assert!(!sc.mirror().exists());
+
+    // The wrapper does reach git started on this thread.
+    let _ = crate::workspace_git::WorkspaceGit::bare(&sc.root, None).run(&["--version"]);
+    assert!(log.exists(), "the recording script never ran");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn listings_show_files_and_folders_from_main_with_blob_ids() {
     let sc = HostedScenario::new();

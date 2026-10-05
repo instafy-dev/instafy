@@ -21,6 +21,8 @@ mod recovery_tests;
 mod restore;
 mod routes;
 #[cfg(test)]
+mod stateless_tests;
+#[cfg(test)]
 mod tests;
 mod write;
 #[cfg(test)]
