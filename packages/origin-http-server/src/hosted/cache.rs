@@ -996,8 +996,10 @@ impl MirrorCache {
             self.request_sweep();
             return Err(error);
         }
+        // Only this server's words count: an error that quotes canonical's
+        // own damage (`remote: ...`) never throws the mirror away.
         let damaged = match &error {
-            OriginError::Internal(message) => says_mirror_damaged(message),
+            OriginError::Internal(message) => says_mirror_damaged(&local_lines(message)),
             _ => false,
         };
         if damaged {
@@ -1540,6 +1542,28 @@ pub(crate) fn fetch_failure(text: &str) -> Option<FetchFailure> {
     }
 }
 
+/// The lines of git output `text` that speak about this server, in lower
+/// case: canonical's own lines (`remote: ...`) are left out. The text may be
+/// git's stderr as printed or an error made of it, whose first stderr line
+/// follows the failed command on the same line (`git fetch ... failed
+/// (exit status: 128): remote: ...`, maybe after more context): that
+/// prefix is cut off before the line is judged, so canonical's words about
+/// its own damage are never taken for the mirror's.
+fn local_lines(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let line = line.trim();
+            let after_command = line.find(" failed (").and_then(|at| {
+                let rest = &line[at..];
+                rest.find("): ").map(|end| &rest[end + 3..])
+            });
+            after_command.unwrap_or(line).trim().to_ascii_lowercase()
+        })
+        .filter(|line| !line.starts_with("remote:"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// What git says when the transfer from canonical broke off: the
 /// connection closed or stalled part way (curl 18 and 28 over smart HTTP),
 /// or the other end hung up. A pack that did not arrive whole fails to
@@ -1559,12 +1583,7 @@ const TRANSPORT_MARKERS: &[&str] = &[
 /// from canonical (`remote:`) never count, and a transfer that broke off
 /// is canonical's (or the network's) whatever else git printed after it.
 fn local_failure(stderr: &str) -> Option<FetchError> {
-    let text = stderr
-        .lines()
-        .map(|line| line.trim().to_ascii_lowercase())
-        .filter(|line| !line.starts_with("remote:"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = local_lines(stderr);
     if says_disk_full(&text) {
         return Some(FetchError::DiskFull);
     }
@@ -1975,6 +1994,32 @@ mod tests {
                 "broken",
             ),
             ("remote: error: object file x is empty\nfatal: early EOF", "unreachable"),
+            // Canonical's damage, as a fetch of a ref it cannot send prints
+            // it over smart HTTP; its first line may follow the failed
+            // command in an error made of it.
+            (
+                "remote: error: inflate: data stream error (incorrect header check)\n\
+                 remote: error: unable to unpack 5c1b data\n\
+                 remote: fatal: loose object 5c1b (stored in ./objects/5c/1b) is corrupt\n\
+                 fatal: protocol error: bad pack header",
+                "unreachable",
+            ),
+            (
+                "could not fetch 1 recovery refs in 3 attempts: git fetch --no-tags \
+                 --no-write-fetch-head --end-of-options http://edge/x.git +refs/a:refs/b \
+                 failed (exit status: 128): remote: error: inflate: data stream error \
+                 (incorrect header check)\n\
+                 remote: error: unable to unpack 5c1b data\n\
+                 remote: fatal: loose object 5c1b (stored in ./objects/5c/1b) is corrupt\n\
+                 fatal: protocol error: bad pack header",
+                "unreachable",
+            ),
+            // The mirror's own damage keeps counting after such a prefix.
+            (
+                "git cat-file --batch failed (exit status: 128): fatal: loose object 7627 \
+                 (stored in ./objects/76/27) is corrupt",
+                "broken",
+            ),
         ] {
             assert_eq!(kind(stderr), expected, "{stderr}");
         }

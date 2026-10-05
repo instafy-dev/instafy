@@ -940,6 +940,44 @@ async fn a_fetch_cut_off_part_way_keeps_a_healthy_mirror() {
     assert_ne!(main.as_deref(), Some(first.as_str()));
 }
 
+/// A recovery ref canonical cannot send (an object of it is corrupt on
+/// canonical's own disk): git prints canonical's words about that damage
+/// (`remote: error: inflate: ...`), and they are never the mirror's, even
+/// on the first line of an error, where they follow the failed command.
+/// `?ref=` reads and the recovery list answer 502 `canonical_unreachable`,
+/// and the space's healthy mirror stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn damage_on_canonical_never_throws_the_mirror_away() {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut sc = HostedScenario::new();
+    sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+    let side = sc.side_commit(&[("b.txt", b"only on the ref\n")], "unsaved");
+    let reference =
+        "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/20261004T120000Z-unsaved-0123456789ab";
+    sc.push_ref(&side, reference);
+    let blob = git_in(&sc.remote(), &["rev-parse", &format!("{side}:b.txt")]);
+    damage_object(&sc.remote(), &blob, b"garbage");
+    let canonical = SmartHttpCanonical::start(&sc.canonical).await;
+    sc.config.git_remote_base_url = Some(canonical.base_url.clone());
+    let served = serve(&sc).await;
+    assert_eq!(get(&served, "/files/a.txt").await.status, 200);
+    let inode = || std::fs::metadata(sc.mirror()).ok().map(|meta| meta.ino());
+    let before = inode();
+    assert!(before.is_some());
+
+    for path in [
+        format!("/files/b.txt?ref={reference}"),
+        "/git/recovery".to_string(),
+    ] {
+        let answer = get(&served, &path).await;
+        let body = String::from_utf8_lossy(&answer.body).to_string();
+        assert_eq!(answer.status, 502, "{path}: {body}");
+        assert!(body.contains("canonical_unreachable"), "{path}: {body}");
+        assert_eq!(inode(), before, "{path}: the mirror was thrown away");
+    }
+    assert_eq!(get(&served, "/files/a.txt").await.status, 200);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mirror_that_is_not_a_folder_is_made_again() {
     let sc = HostedScenario::new();
