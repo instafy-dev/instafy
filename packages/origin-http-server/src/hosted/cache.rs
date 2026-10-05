@@ -33,7 +33,12 @@
 //! object missing or corrupt, what a full disk left behind) is thrown away
 //! and made again: by the fetch that finds it, or, when a read or a write
 //! finds it, in the background while that request is told 503
-//! `mirror_reset`. Canonical is never touched.
+//! `mirror_reset`. Canonical is never touched. Only damage git names on
+//! this server's disk (a lock, an object file or ref of the mirror, or for
+//! reads an object it could not read) counts, and only once a cheap look at
+//! the mirror finds it so ([`Suspects`]): canonical's own damage, a stream
+//! it sent that the fetch's readers reject, and a transfer cut off part way
+//! are canonical's, answered 502 with the mirror kept.
 
 use std::collections::HashMap;
 use std::io;
@@ -130,13 +135,9 @@ enum FetchError {
     /// Canonical could not be read (or no credential to read it).
     Unreachable,
     /// The mirror is damaged on the gateway's own disk (a lock a killed git
-    /// left, a corrupt object). It is thrown away and cloned again.
+    /// left, a corrupt object), as git said and a look at the mirror
+    /// confirmed ([`Suspects`]). It is thrown away and cloned again.
     Broken,
-    /// The pack canonical sent could not be indexed. That is canonical's
-    /// problem, unless the pack holds deltas against objects of the mirror
-    /// (a thin pack) that are damaged: fetched again from scratch, a mirror
-    /// that had `main` shows which it was.
-    BadPack,
     /// The gateway's disk is full.
     DiskFull,
     /// Something else on the gateway's own disk failed.
@@ -146,7 +147,7 @@ enum FetchError {
 impl FetchError {
     fn into_origin(self) -> OriginError {
         match self {
-            Self::Unreachable | Self::BadPack => canonical_unreachable(),
+            Self::Unreachable => canonical_unreachable(),
             Self::Broken => mirror_reset(),
             Self::DiskFull => disk_full(),
             Self::Local(message) => or_disk_full(OriginError::internal(message)),
@@ -164,9 +165,9 @@ impl FetchError {
     }
 
     /// Whether the mirror is thrown away and fetched again from scratch:
-    /// damaged, or (when it had `main`) a pack that did not index.
-    fn remakes(&self, had_main: bool) -> bool {
-        matches!(self, Self::Broken) || (had_main && matches!(self, Self::BadPack))
+    /// confirmed damaged on this server's disk.
+    fn remakes(&self) -> bool {
+        matches!(self, Self::Broken)
     }
 }
 
@@ -774,11 +775,8 @@ impl MirrorCache {
         tokio::task::spawn_blocking(move || {
             let dir = cache.open_mirror(&entry)?;
             let _refs = locked(&entry.refs);
-            let had_main = !matches!(WorkspaceGit::bare(&dir, None).commit_id(MAIN_REF), Ok(None));
             match fetch_main_into(&dir, &url, token.as_deref(), project) {
-                Err(failure)
-                    if failure.remakes(had_main) || matches!(failure, FetchError::DiskFull) =>
-                {
+                Err(failure) if failure.remakes() || matches!(failure, FetchError::DiskFull) => {
                     // The mirror is only a copy: throw it away. A damaged
                     // one is made again at once; on a full disk that would
                     // fail again, so the next request makes it.
@@ -792,12 +790,7 @@ impl MirrorCache {
                         return Err(failure);
                     }
                     let dir = cache.open_mirror(&entry)?;
-                    match fetch_main_into(&dir, &url, token.as_deref(), project) {
-                        // Fetched from scratch, a pack that does not index
-                        // is canonical's.
-                        Err(FetchError::BadPack) => Err(FetchError::Unreachable),
-                        outcome => outcome,
-                    }
+                    fetch_main_into(&dir, &url, token.as_deref(), project)
                 }
                 outcome => outcome,
             }
@@ -996,10 +989,13 @@ impl MirrorCache {
             self.request_sweep();
             return Err(error);
         }
-        // Only this server's words count: an error that quotes canonical's
-        // own damage (`remote: ...`) never throws the mirror away.
+        // Only this server's words count (an error that quotes canonical's
+        // own damage, `remote: ...`, never throws the mirror away), and only
+        // once a look at the mirror finds what they name damaged.
         let damaged = match &error {
-            OriginError::Internal(message) => says_mirror_damaged(&local_lines(message)),
+            OriginError::Internal(message) => {
+                Suspects::of(message, Doing::Read).confirmed(&self.mirror_dir(mirror.entry.project))
+            }
             _ => false,
         };
         if damaged {
@@ -1517,7 +1513,7 @@ fn fetch_main_into(
         }
         return Ok(());
     }
-    let failed = local_failure(&stderr).unwrap_or(FetchError::Unreachable);
+    let failed = local_failure(dir, &stderr).unwrap_or(FetchError::Unreachable);
     warn!(%project, ?failed, error = %failure(&args, &output), "fetching main failed");
     Err(failed)
 }
@@ -1532,10 +1528,10 @@ pub(crate) enum FetchFailure {
     DiskFull,
 }
 
-/// [`FetchFailure`] of a failed fetch's git output, `None` when it is
-/// canonical's (or the network's).
-pub(crate) fn fetch_failure(text: &str) -> Option<FetchFailure> {
-    match local_failure(text)? {
+/// [`FetchFailure`] of a failed fetch's git output (`text`) in the mirror at
+/// `dir`, `None` when it is canonical's (or the network's).
+pub(crate) fn fetch_failure(dir: &Path, text: &str) -> Option<FetchFailure> {
+    match local_failure(dir, text)? {
         FetchError::Broken => Some(FetchFailure::Damaged),
         FetchError::DiskFull => Some(FetchFailure::DiskFull),
         _ => None,
@@ -1564,6 +1560,31 @@ fn local_lines(text: &str) -> String {
         .join("\n")
 }
 
+/// [`local_lines`], with the failed command a line starts with kept: what
+/// this server asked git to do, and what git said about it, without
+/// canonical's lines.
+fn own_lines(text: &str) -> String {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim().to_ascii_lowercase();
+            if line.starts_with("remote:") {
+                return None;
+            }
+            let split = line.find(" failed (").and_then(|at| {
+                line[at..]
+                    .find("): ")
+                    .map(|end| (line[..at].to_string(), line[at + end + 3..].to_string()))
+            });
+            Some(match split {
+                Some((command, said)) if said.trim().starts_with("remote:") => command,
+                Some((command, said)) => format!("{command} {said}"),
+                None => line,
+            })
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// What git says when the transfer from canonical broke off: the
 /// connection closed or stalled part way (curl 18 and 28 over smart HTTP),
 /// or the other end hung up. A pack that did not arrive whole fails to
@@ -1578,38 +1599,194 @@ const TRANSPORT_MARKERS: &[&str] = &[
     "operation too slow",
 ];
 
-/// What a failed fetch's stderr says about the gateway's own disk: full,
-/// or a mirror damaged there; or that the pack sent did not index. Lines
-/// from canonical (`remote:`) never count, and a transfer that broke off
-/// is canonical's (or the network's) whatever else git printed after it.
-fn local_failure(stderr: &str) -> Option<FetchError> {
-    let text = local_lines(stderr);
-    if says_disk_full(&text) {
+/// What a failed fetch's stderr says about the gateway's own disk: full, or
+/// a mirror damaged there, as a look at the mirror at `dir` confirms
+/// ([`Suspects`]). Everything else (canonical's lines, a transfer that broke
+/// off, a pack or a stream canonical sent that could not be read, objects
+/// canonical did not send) is canonical's or the network's.
+fn local_failure(dir: &Path, stderr: &str) -> Option<FetchError> {
+    if says_disk_full(&local_lines(stderr)) {
         return Some(FetchError::DiskFull);
     }
-    let names_local_object = ["stored in ", "./objects/"]
+    Suspects::of(stderr, Doing::Fetch)
+        .confirmed(dir)
+        .then_some(FetchError::Broken)
+}
+
+/// What a failed git command was doing in a mirror.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Doing {
+    /// Fetching from canonical: only what git names on this server's disk
+    /// (a lock, an object file of the mirror, a ref of the mirror) can be
+    /// the mirror's; the stream's own readers (`unpack-objects`,
+    /// `index-pack`, `inflate`) fail on what canonical sent.
+    Fetch,
+    /// Reading or writing the mirror's own objects: any object git could
+    /// not read is suspect too.
+    Read,
+}
+
+/// What a failed git command (its output, or an error made of it) names on
+/// this server's disk that may be damaged. Nothing counts until
+/// [`Suspects::confirmed`] finds it so in the mirror.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Suspects {
+    /// A lock git could not take: one a killed git left.
+    lock: bool,
+    /// Objects of the mirror git could not read.
+    objects: Vec<String>,
+    /// Refs of the mirror naming an object git could not read.
+    refs: Vec<String>,
+}
+
+/// Most objects or refs one failure is checked for.
+const MAX_SUSPECTS: usize = 8;
+
+impl Suspects {
+    fn of(text: &str, doing: Doing) -> Self {
+        let original = text;
+        let text = local_lines(text);
+        let mut suspects = Self::default();
+        // Canonical left out objects it should have sent.
+        if text.contains("did not send all necessary objects") {
+            return suspects;
+        }
+        // An object file of the mirror git could not read: named by path
+        // (`./objects/ab/cd...`), or as a loose or packed object `stored in`
+        // the mirror.
+        let mut objects: Vec<String> = text
+            .match_indices("./objects/")
+            .filter_map(|(at, marker)| {
+                let rest = &text[at + marker.len()..];
+                let folder = rest.get(..2)?;
+                let file: String = rest
+                    .get(3..)?
+                    .chars()
+                    .take_while(char::is_ascii_hexdigit)
+                    .collect();
+                (rest.as_bytes().get(2) == Some(&b'/')).then(|| format!("{folder}{file}"))
+            })
+            .chain(
+                text.lines()
+                    .filter(|line| line.contains("(stored in "))
+                    .flat_map(|line| {
+                        ["loose object ", "packed object "]
+                            .into_iter()
+                            .flat_map(move |marker| hex_ids_after(line, marker))
+                    }),
+            )
+            .filter(|id| is_object_id(id))
+            .collect();
+        // A transfer that broke off is canonical's or the network's, unless
+        // git named an object file of the mirror before it.
+        if objects.is_empty() && TRANSPORT_MARKERS.iter().any(|marker| text.contains(marker)) {
+            return suspects;
+        }
+        suspects.lock = [
+            "cannot lock ref",
+            ".lock': file exists",
+            "unable to update local ref",
+        ]
         .iter()
-        .any(|marker| text.contains(marker));
-    // An object file of the mirror git could not read: the mirror's damage,
-    // whatever the transport printed after it.
-    if names_local_object && says_mirror_damaged(&text) {
-        return Some(FetchError::Broken);
+        .any(|marker| text.contains(marker))
+            || (text.contains("unable to create '") && text.contains(".lock'"));
+        for line in text.lines() {
+            if let Some(rest) = line.split("bad object ").nth(1) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && *c != '\'')
+                    .collect();
+                if name.starts_with("refs/") {
+                    suspects.refs.push(name);
+                }
+            }
+            if let Some(before) = line.split(" does not point to a valid object").next() {
+                if line.contains(" does not point to a valid object") {
+                    if let Some(name) = before.split_whitespace().last() {
+                        if name.starts_with("refs/") {
+                            suspects.refs.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        // Reading the mirror's own objects, any object git names in its
+        // words for one it could not give is suspect, and so is any object
+        // the failed command was asked to read (`ls-tree <id>` says only
+        // "not a tree object" when that tree is gone).
+        if doing == Doing::Read && says_mirror_damaged(&text) {
+            objects.extend(
+                own_lines(original)
+                    .split(|c: char| !c.is_ascii_hexdigit())
+                    .filter(|token| is_object_id(token))
+                    .map(str::to_string),
+            );
+        }
+        objects.sort();
+        objects.dedup();
+        objects.truncate(MAX_SUSPECTS);
+        suspects.refs.sort();
+        suspects.refs.dedup();
+        suspects.refs.truncate(MAX_SUSPECTS);
+        suspects.objects = objects;
+        suspects
     }
-    if TRANSPORT_MARKERS.iter().any(|marker| text.contains(marker)) {
-        return None;
+
+    /// Whether a cheap look at the mirror at `dir` finds what git named
+    /// damaged: a lock file a stopped git left, an object it names missing
+    /// or unreadable, a ref naming one. Nothing found, nothing confirmed.
+    fn confirmed(&self, dir: &Path) -> bool {
+        if self.lock && !lock_files(dir).is_empty() {
+            return true;
+        }
+        if self.objects.is_empty() && self.refs.is_empty() {
+            return false;
+        }
+        let git = WorkspaceGit::bare(dir, None);
+        self.objects.iter().any(|id| unreadable(&git, id))
+            || self.refs.iter().any(|reference| {
+                let named = git
+                    .run(&["for-each-ref", "--format=%(objectname)", reference])
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    .unwrap_or_default();
+                is_object_id(&named) && unreadable(&git, &named)
+            })
     }
-    // A pack that does not index: canonical's, unless git names an object
-    // file of the mirror it could not read to resolve the pack's deltas.
-    let from_pack = ["index-pack", "pack has bad object", "unresolved delta"]
-        .iter()
-        .any(|marker| text.contains(marker));
-    if from_pack && !names_local_object {
-        Some(FetchError::BadPack)
-    } else if says_mirror_damaged(&text) {
-        Some(FetchError::Broken)
-    } else {
-        None
+}
+
+/// Whether `value` is a full object id (lower-case hex).
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The full object ids that follow `marker` in `text`.
+fn hex_ids_after<'t>(text: &'t str, marker: &'t str) -> impl Iterator<Item = String> + 't {
+    text.match_indices(marker).filter_map(move |(at, marker)| {
+        let id: String = text[at + marker.len()..]
+            .chars()
+            .take_while(char::is_ascii_hexdigit)
+            .collect();
+        is_object_id(&id).then_some(id)
+    })
+}
+
+/// Whether the mirror cannot give the object `id` whole: it is missing,
+/// its header does not read, or its content does not.
+fn unreadable(git: &WorkspaceGit<'_>, id: &str) -> bool {
+    let Ok(kind) = git.run(&["cat-file", "-t", id]) else {
+        return false;
+    };
+    if !kind.status.success() {
+        return true;
     }
+    let kind = String::from_utf8_lossy(&kind.stdout).trim().to_string();
+    if !matches!(kind.as_str(), "blob" | "tree" | "commit" | "tag") {
+        return true;
+    }
+    git.run(&["cat-file", &kind, id])
+        .is_ok_and(|output| !output.status.success())
 }
 
 /// Whether `text` (git's own words about a mirror) says the mirror is
@@ -1651,16 +1828,24 @@ fn names_unreadable_object(text: &str) -> bool {
     })
 }
 
-/// Remove the lock files a stopped git left in the mirror at `dir`: the
-/// repository's own (`packed-refs.lock`, `config.lock`, ...), any under
-/// `refs/` and `logs/`, and those in `objects/info` and `objects/pack`.
-/// Links are never followed. Returns how many went.
+/// Remove the lock files a stopped git left in the mirror at `dir`
+/// ([`lock_files`]). Returns how many went.
 fn remove_stale_locks(dir: &Path) -> usize {
-    fn sweep(folder: &Path, deep: bool) -> usize {
+    lock_files(dir)
+        .iter()
+        .filter(|path| std::fs::remove_file(path).is_ok())
+        .count()
+}
+
+/// The lock files in the mirror at `dir`: the repository's own
+/// (`packed-refs.lock`, `config.lock`, ...), any under `refs/` and `logs/`,
+/// and those in `objects/info` and `objects/pack`. Links are never
+/// followed.
+fn lock_files(dir: &Path) -> Vec<PathBuf> {
+    fn sweep(folder: &Path, deep: bool, found: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(folder) else {
-            return 0;
+            return;
         };
-        let mut removed = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             let Ok(metadata) = std::fs::symlink_metadata(&path) else {
@@ -1668,26 +1853,26 @@ fn remove_stale_locks(dir: &Path) -> usize {
             };
             if metadata.file_type().is_dir() {
                 if deep {
-                    removed += sweep(&path, true);
+                    sweep(&path, true, found);
                 }
             } else if metadata.file_type().is_file()
                 && entry.file_name().to_string_lossy().ends_with(".lock")
-                && std::fs::remove_file(&path).is_ok()
             {
-                removed += 1;
+                found.push(path);
             }
         }
-        removed
     }
+    let mut found = Vec::new();
     let real_dir = std::fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.is_dir());
     if !real_dir {
-        return 0;
+        return found;
     }
-    sweep(dir, false)
-        + sweep(&dir.join("refs"), true)
-        + sweep(&dir.join("logs"), true)
-        + sweep(&dir.join("objects/info"), false)
-        + sweep(&dir.join("objects/pack"), false)
+    sweep(dir, false, &mut found);
+    sweep(&dir.join("refs"), true, &mut found);
+    sweep(&dir.join("logs"), true, &mut found);
+    sweep(&dir.join("objects/info"), false, &mut found);
+    sweep(&dir.join("objects/pack"), false, &mut found);
+    found
 }
 
 /// What `git gc --auto` looks at in a mirror: loose objects in the one
@@ -1913,35 +2098,58 @@ mod tests {
         );
     }
 
+    const ID: &str = "7627c2a1a2b3c4d5e6f708192a3b4c5d6e7f8091";
+
+    /// What git says names on this server's disk, by what it was doing:
+    /// only a lock, an object file of the mirror or a ref of the mirror for
+    /// a fetch (the stream readers fail on what canonical sent); any object
+    /// git could not read too for a read.
     #[test]
-    fn local_failures_are_told_apart_from_canonical_ones() {
-        let kind = |stderr: &str| match local_failure(stderr) {
-            Some(FetchError::Broken) => "broken",
-            Some(FetchError::DiskFull) => "disk_full",
-            Some(FetchError::BadPack) => "bad_pack",
-            Some(_) => "other",
-            None => "unreachable",
+    fn only_what_git_names_on_this_disk_is_suspect() {
+        let lock = Suspects {
+            lock: true,
+            ..Suspects::default()
         };
-        for (stderr, expected) in [
+        let object = Suspects {
+            objects: vec![ID.to_string()],
+            ..Suspects::default()
+        };
+        let main_ref = Suspects {
+            refs: vec!["refs/heads/main".to_string()],
+            ..Suspects::default()
+        };
+        let none = Suspects::default();
+        for (text, doing, expected) in [
             (
                 "error: cannot lock ref 'refs/heads/main': Unable to create '/c/x.git/refs/heads/main.lock': File exists.",
-                "broken",
+                Doing::Fetch,
+                &lock,
             ),
             (
                 "error: update_ref failed for ref 'refs/heads/main': unable to update local ref",
-                "broken",
+                Doing::Fetch,
+                &lock,
             ),
-            ("error: object file ./objects/ab/cd is empty", "broken"),
-            ("fatal: loose object 0123 (stored in x) is corrupt", "broken"),
-            ("fatal: bad object refs/heads/main", "broken"),
             (
-                "error: unable to write file ./objects/ab/cd: No space left on device",
-                "disk_full",
+                &format!("error: object file ./objects/76/{} is empty", &ID[2..]),
+                Doing::Fetch,
+                &object,
             ),
-            ("fatal: write error: Disk quota exceeded", "disk_full"),
+            (
+                &format!("fatal: loose object {ID} (stored in ./objects/76/{}) is corrupt", &ID[2..]),
+                Doing::Fetch,
+                &object,
+            ),
+            ("fatal: bad object refs/heads/main", Doing::Fetch, &main_ref),
+            (
+                "error: refs/heads/main does not point to a valid object!",
+                Doing::Fetch,
+                &main_ref,
+            ),
             (
                 "fatal: unable to access 'https://edge/x.git/': Could not resolve host: edge",
-                "unreachable",
+                Doing::Fetch,
+                &none,
             ),
             // A transfer cut off part way, as git tells it over smart HTTP
             // (curl 18: the connection closed; curl 28: too slow) and over
@@ -1953,75 +2161,186 @@ mod tests {
                  fetch-pack: unexpected disconnect while reading sideband packet\n\
                  fatal: early EOF\n\
                  fatal: fetch-pack: invalid index-pack output",
-                "unreachable",
+                Doing::Fetch,
+                &none,
             ),
             (
-                "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds\n\
-                 fetch-pack: unexpected disconnect while reading sideband packet\n\
-                 fatal: early EOF\n\
+                "fatal: the remote end hung up unexpectedly\nfatal: early EOF\nfatal: index-pack failed",
+                Doing::Fetch,
+                &none,
+            ),
+            // An object canonical sent damaged, read by the fetch's own
+            // stream readers below and above `transfer.unpackLimit`.
+            (
+                "error: inflate: data stream error (incorrect data check)\n\
+                 error: inflate returned -3\n\
+                 fatal: unpack-objects failed",
+                Doing::Fetch,
+                &none,
+            ),
+            (
+                "fatal: pack has bad object at offset 23889: inflate returned -3\n\
                  fatal: fetch-pack: invalid index-pack output",
-                "unreachable",
+                Doing::Fetch,
+                &none,
             ),
             (
-                "fatal: the remote end hung up unexpectedly\n\
-                 fatal: early EOF\n\
-                 fatal: index-pack failed",
-                "unreachable",
+                "fatal: pack has 1 unresolved delta\nfatal: fetch-pack: invalid index-pack output",
+                Doing::Fetch,
+                &none,
+            ),
+            (
+                &format!("fatal: bad object {ID}\nerror: https://edge/x.git did not send all necessary objects"),
+                Doing::Fetch,
+                &none,
+            ),
+            (
+                &format!("fatal: bad object {ID}\nerror: https://edge/x.git did not send all necessary objects"),
+                Doing::Read,
+                &none,
             ),
             // A damaged object file of the mirror stays the mirror's when the
             // other end hangs up after it.
             (
-                "fatal: loose object 7627 (stored in ./objects/76/27) is corrupt\n\
-                 fatal: the remote end hung up unexpectedly\n\
-                 fatal: fetch-pack: invalid index-pack output",
-                "broken",
+                &format!(
+                    "fatal: loose object {ID} (stored in ./objects/76/{}) is corrupt\n\
+                     fatal: the remote end hung up unexpectedly\n\
+                     fatal: fetch-pack: invalid index-pack output",
+                    &ID[2..]
+                ),
+                Doing::Fetch,
+                &object,
             ),
+            // A thin pack resolved against a damaged object of the mirror.
             (
-                "fatal: pack has bad object at offset 12: inflate returned -3\nfatal: index-pack failed",
-                "bad_pack",
+                &format!(
+                    "error: object file ./objects/76/{} is empty\n\
+                     fatal: pack has 1 unresolved delta\n\
+                     fatal: fetch-pack: invalid index-pack output",
+                    &ID[2..]
+                ),
+                Doing::Fetch,
+                &object,
             ),
-            (
-                "fatal: pack has 1 unresolved delta\nfatal: fetch-pack: invalid index-pack output",
-                "bad_pack",
-            ),
-            // A pack that does not resolve against a damaged local object.
-            (
-                "fatal: loose object 7627 (stored in ./objects/76/27) is corrupt\nfatal: fetch-pack: invalid index-pack output",
-                "broken",
-            ),
-            (
-                "error: object file ./objects/76/27 is empty\nfatal: index-pack failed",
-                "broken",
-            ),
-            ("remote: error: object file x is empty\nfatal: early EOF", "unreachable"),
+            ("remote: error: object file x is empty\nfatal: early EOF", Doing::Fetch, &none),
             // Canonical's damage, as a fetch of a ref it cannot send prints
             // it over smart HTTP; its first line may follow the failed
             // command in an error made of it.
             (
-                "remote: error: inflate: data stream error (incorrect header check)\n\
-                 remote: error: unable to unpack 5c1b data\n\
-                 remote: fatal: loose object 5c1b (stored in ./objects/5c/1b) is corrupt\n\
-                 fatal: protocol error: bad pack header",
-                "unreachable",
+                &format!(
+                    "remote: error: inflate: data stream error (incorrect header check)\n\
+                     remote: error: unable to unpack {ID} data\n\
+                     remote: fatal: loose object {ID} (stored in ./objects/76/{}) is corrupt\n\
+                     fatal: protocol error: bad pack header",
+                    &ID[2..]
+                ),
+                Doing::Fetch,
+                &none,
             ),
             (
-                "could not fetch 1 recovery refs in 3 attempts: git fetch --no-tags \
-                 --no-write-fetch-head --end-of-options http://edge/x.git +refs/a:refs/b \
-                 failed (exit status: 128): remote: error: inflate: data stream error \
-                 (incorrect header check)\n\
-                 remote: error: unable to unpack 5c1b data\n\
-                 remote: fatal: loose object 5c1b (stored in ./objects/5c/1b) is corrupt\n\
-                 fatal: protocol error: bad pack header",
-                "unreachable",
+                &format!(
+                    "could not fetch 1 recovery refs in 3 attempts: git fetch --no-tags \
+                     --no-write-fetch-head --end-of-options http://edge/x.git +refs/a:refs/b \
+                     failed (exit status: 128): remote: error: inflate: data stream error \
+                     (incorrect header check)\n\
+                     remote: error: unable to unpack {ID} data\n\
+                     remote: fatal: loose object {ID} (stored in ./objects/76/{}) is corrupt\n\
+                     fatal: protocol error: bad pack header",
+                    &ID[2..]
+                ),
+                Doing::Read,
+                &none,
             ),
-            // The mirror's own damage keeps counting after such a prefix.
+            // Reads name the objects they could not get.
             (
-                "git cat-file --batch failed (exit status: 128): fatal: loose object 7627 \
-                 (stored in ./objects/76/27) is corrupt",
-                "broken",
+                &format!("git cat-file --batch failed (exit status: 128): error: unable to unpack {ID} header"),
+                Doing::Read,
+                &object,
             ),
+            (&format!("error: Could not read {ID}"), Doing::Read, &object),
+            (
+                &format!("git ls-tree -l -z --end-of-options {ID} failed (exit status: 128): fatal: not a tree object"),
+                Doing::Read,
+                &object,
+            ),
+            (&format!("error: Could not read {ID}"), Doing::Fetch, &none),
         ] {
-            assert_eq!(kind(stderr), expected, "{stderr}");
+            assert_eq!(&Suspects::of(text, doing), expected, "{doing:?}: {text}");
         }
+    }
+
+    /// A suspect counts only once the mirror shows it: a lock file is
+    /// there, an object it names cannot be read whole, a ref names such an
+    /// object. A healthy mirror is never confirmed damaged, whatever git
+    /// printed.
+    #[test]
+    fn only_damage_the_mirror_shows_is_confirmed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().canonicalize().unwrap().join("m.git");
+        WorkspaceGit::init_bare(&mirror).unwrap();
+        let git = WorkspaceGit::bare(&mirror, None);
+        let blob = git
+            .stdout_opts(
+                &["hash-object", "-w", "--stdin"],
+                &crate::workspace_git::RunOpts {
+                    stdin: Some(b"content\n"),
+                    ..crate::workspace_git::RunOpts::default()
+                },
+            )
+            .unwrap();
+        let tree = git
+            .stdout_opts(
+                &["mktree"],
+                &crate::workspace_git::RunOpts {
+                    stdin: Some(format!("100644 blob {blob}\ta.txt\n").as_bytes()),
+                    ..crate::workspace_git::RunOpts::default()
+                },
+            )
+            .unwrap();
+        let identity = crate::workspace_git::GitIdentity::new("t", "t@example.com");
+        let commit = git
+            .commit_tree(&tree, &[], &identity, &identity, b"one\n")
+            .unwrap();
+        git.update_ref(MAIN_REF, &commit, None, "test").unwrap();
+
+        let object = |id: &str| Suspects {
+            objects: vec![id.to_string()],
+            ..Suspects::default()
+        };
+        let lock = Suspects {
+            lock: true,
+            ..Suspects::default()
+        };
+        let main_ref = Suspects {
+            refs: vec![MAIN_REF.to_string()],
+            ..Suspects::default()
+        };
+        for healthy in [
+            object(&blob),
+            object(&commit),
+            lock.clone(),
+            main_ref.clone(),
+        ] {
+            assert!(!healthy.confirmed(&mirror), "{healthy:?}");
+        }
+        // An object canonical never sent is not the mirror's damage.
+        assert!(!Suspects::default().confirmed(&mirror));
+
+        let lock_file = mirror.join("refs/heads/main.lock");
+        std::fs::write(&lock_file, b"x\n").unwrap();
+        assert!(lock.confirmed(&mirror));
+        std::fs::remove_file(&lock_file).unwrap();
+
+        let loose = mirror.join("objects").join(&blob[..2]).join(&blob[2..]);
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for damage in [&b"garbage"[..], &b""[..]] {
+            std::fs::write(&loose, damage).unwrap();
+            assert!(object(&blob).confirmed(&mirror), "{damage:?}");
+        }
+        let commit_file = mirror.join("objects").join(&commit[..2]).join(&commit[2..]);
+        std::fs::remove_file(&commit_file).unwrap();
+        assert!(object(&commit).confirmed(&mirror));
+        assert!(main_ref.confirmed(&mirror));
     }
 }

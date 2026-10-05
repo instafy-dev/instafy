@@ -271,7 +271,7 @@ async fn remove_ref(
             .with_network_deadline(Instant::now() + REF_FETCH_DEADLINE);
         let reference = RecoveryRef::validate(&git, &reference)?;
         // What it names now: gone, or moved, is answered without a push.
-        match remote_tip(&git, &url, &reference).map_err(ref_error)? {
+        match remote_tip(&git, &url, &reference).map_err(|error| ref_error(dir, error))? {
             None => return Ok(Removal::Missing),
             Some(tip) if tip != rev => return Ok(Removal::Moved(tip)),
             Some(_) => {}
@@ -298,7 +298,7 @@ async fn remove_ref(
         };
         // Changed while it was deleted, or no answer: look again.
         Ok(
-            match remote_tip(&git, &url, &reference).map_err(ref_error)? {
+            match remote_tip(&git, &url, &reference).map_err(|error| ref_error(dir, error))? {
                 None if lost_race => Removal::Missing,
                 None => Removal::Deleted,
                 Some(tip) if tip != rev => Removal::Moved(tip),
