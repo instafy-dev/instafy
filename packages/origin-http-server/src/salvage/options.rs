@@ -27,8 +27,10 @@ each entry is classified and reported as one JSON line on stdout.
   --ack <entry>     remove this entry even without a canonical record
                     (repeatable; the entry's folder name under .legacy/)
   --root <dir>      the gateway's workspace root (default: ORIGIN_WORKSPACE_ROOT)
-  --node <name>     this gateway's name in salvage refs (default: INSTAFY_NODE_NAME,
-                    else the host name); lower-cased
+  --node <name>     this gateway's name in salvage refs (default: INSTAFY_NODE_NAME;
+                    one of the two is required with --apply, and a dry run
+                    falls back to the host name); lower-cased; keep it the
+                    same across redeploys
   --project <id>    only the entries of this space (repeatable)
 
 Environment: ORIGIN_GIT_REMOTE_BASE_URL (required), ORIGIN_CONTROLLER_URL,
@@ -116,6 +118,14 @@ pub(crate) struct Settings {
 
 impl Settings {
     pub(crate) fn from_flags(flags: &Flags, env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::resolve(flags, env, &host_name)
+    }
+
+    fn resolve(
+        flags: &Flags,
+        env: &dyn Fn(&str) -> Option<String>,
+        host: &dyn Fn() -> Option<String>,
+    ) -> Result<Self> {
         let root = flags
             .root
             .clone()
@@ -126,7 +136,13 @@ impl Settings {
             .with_context(|| format!("workspace root {root:?} is not readable"))?;
         let node = match flags.node.clone().or_else(|| env("INSTAFY_NODE_NAME")) {
             Some(node) => node,
-            None => host_name()
+            // A container's host name changes when it is recreated, and a
+            // new name would push a second permanent ref for the same work.
+            None if flags.apply => bail!(
+                "--apply needs this gateway's lasting name in salvage refs: pass --node or set \
+                 INSTAFY_NODE_NAME (the host name changes when the container is recreated)"
+            ),
+            None => host()
                 .context("this host has no readable name: pass --node or set INSTAFY_NODE_NAME")?,
         };
         let node = node_name(&node)?;
@@ -330,5 +346,60 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("ORIGIN_GIT_REMOTE_BASE_URL"), "{error}");
+    }
+
+    /// A container's host name changes with every redeploy, and a salvage
+    /// ref's name must not: `--apply` needs the node named.
+    #[test]
+    fn apply_needs_a_named_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_text = dir.path().to_string_lossy().to_string();
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "ORIGIN_WORKSPACE_ROOT" => Some(root_text.clone()),
+                "ORIGIN_GIT_REMOTE_BASE_URL" => Some("https://edge.example/git".to_string()),
+                _ => None,
+            }
+        };
+        let container = || Some("3f2a9b8c1d4e".to_string());
+        let apply = Flags {
+            apply: true,
+            ..Flags::default()
+        };
+        let error = Settings::resolve(&apply, &env, &container)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("--node") && error.contains("INSTAFY_NODE_NAME"),
+            "{error}"
+        );
+        let named = Flags {
+            node: Some("gateway-1".to_string()),
+            apply: true,
+            ..Flags::default()
+        };
+        assert_eq!(
+            Settings::resolve(&named, &env, &container).unwrap().node,
+            "gateway-1"
+        );
+        let with_env = |name: &str| -> Option<String> {
+            match name {
+                "INSTAFY_NODE_NAME" => Some("Gateway-2".to_string()),
+                other => env(other),
+            }
+        };
+        assert_eq!(
+            Settings::resolve(&apply, &with_env, &container)
+                .unwrap()
+                .node,
+            "gateway-2"
+        );
+        // A dry run pushes nothing: the host name is enough to report with.
+        assert_eq!(
+            Settings::resolve(&Flags::default(), &env, &container)
+                .unwrap()
+                .node,
+            "3f2a9b8c1d4e"
+        );
     }
 }
