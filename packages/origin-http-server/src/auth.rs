@@ -59,6 +59,11 @@ const DEFAULT_AUTHOR_NAME: &str = "Instafy user";
 /// Longest author name or address taken from a token.
 const MAX_AUTHOR_FIELD_BYTES: usize = 254;
 
+/// The scope the controller adds to the origin tokens of a GitHub import:
+/// it alone lets an apply carry an `idempotencyKey`. Browsers cannot ask
+/// for it.
+pub const WORKSPACE_IMPORT_SCOPE: &str = "workspace.import";
+
 impl OriginClaims {
     /// The author of a commit a person saves with this token: the
     /// pseudonym and display name the controller put in it. `None` (the
@@ -93,6 +98,10 @@ impl OriginClaims {
             })
             .unwrap_or(DEFAULT_AUTHOR_NAME);
         Some(crate::workspace_git::GitIdentity::new(name, email))
+    }
+
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|value| value == scope)
     }
 }
 
@@ -475,12 +484,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_import_scope_and_author_claims_are_accepted_and_ignored() {
+    fn controller_import_scope_and_author_claims_are_accepted_and_read() {
         // The controller adds `workspace.import` to import tokens and
         // `author_name` / `author_email` to users' workspace-write tokens.
-        // An origin that does not use them must accept such a token exactly
-        // as before: the scope check is a subset check and unknown claims
-        // are ignored.
+        // Such a token authorizes exactly as before (the scope check is a
+        // subset check), and the extra claims are read; tokens without
+        // them still deserialize.
         let project_id = Uuid::new_v4();
         for multi_tenant in [false, true] {
             let config = claims_test_config(multi_tenant, project_id);
@@ -506,7 +515,24 @@ mod tests {
             .expect("claims with the new fields deserialize");
             validate_claims(&config, &["fs.write"], &claims).expect("fs.write still authorizes");
             assert!(validate_claims(&config, &["fs.read"], &claims).is_err());
+            assert!(claims.has_scope(WORKSPACE_IMPORT_SCOPE));
+            assert_eq!(claims.author_name.as_deref(), Some("Ada Lovelace"));
+            assert_eq!(
+                claims.author_email.as_deref(),
+                Some("p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev")
+            );
         }
+        let plain: OriginClaims = serde_json::from_value(json!({
+            "aud": "origin",
+            "sub": "user",
+            "project_id": project_id.to_string(),
+            "scopes": ["fs.write"],
+            "iat": 0i64,
+            "exp": i64::MAX,
+        }))
+        .expect("claims without the new fields deserialize");
+        assert!(!plain.has_scope(WORKSPACE_IMPORT_SCOPE));
+        assert_eq!((plain.author_name, plain.author_email), (None, None));
     }
 
     fn author_claims(extra: serde_json::Value) -> OriginClaims {
