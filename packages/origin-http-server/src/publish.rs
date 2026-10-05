@@ -2762,9 +2762,7 @@ impl Publisher<'_> {
         not_restored.dedup();
         Ok((committed, not_restored, ref_deleted))
     }
-}
 
-impl Publisher<'_> {
     /// A restore commit of `reference` that this origin committed on
     /// `head`'s history and canonical `main` (as last fetched) does not
     /// have yet, if any.
