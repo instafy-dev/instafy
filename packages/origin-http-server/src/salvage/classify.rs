@@ -564,9 +564,12 @@ fn private_files_in_build_output(root: &Path, path: &str, sorted: &mut Sorted) -
     apart
 }
 
-/// A chat image the web app wrote into the space's root.
+/// A chat image the web app wrote into the space's root. It never named one
+/// with surrounding whitespace: such a file is another one than the image
+/// messages name, so it is kept privately, never exported as that image.
 pub(crate) fn is_root_chat_upload(path: &str) -> bool {
     !path.contains('/')
+        && path.trim() == path
         && path.len() > 12
         && path
             .get(..12)
@@ -789,6 +792,8 @@ mod tests {
         assert!(!is_root_chat_upload("chat-upload-"));
         assert!(!is_root_chat_upload("img/chat-upload-1.png"));
         assert!(!is_root_chat_upload("chat-uploads.md"));
+        assert!(!is_root_chat_upload("chat-upload-1-a.png "));
+        assert!(!is_root_chat_upload("chat-upload-1-a.png\u{a0}"));
     }
 
     #[test]

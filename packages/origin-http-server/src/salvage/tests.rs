@@ -2748,3 +2748,47 @@ fn stale_copies_an_unpushed_save_committed_are_left_out_of_w() {
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
 }
+
+/// A file whose name is a chat image's with whitespace after it is another
+/// file than the image messages name (the web app never wrote such a name):
+/// it is never exported as that image, which would answer for the other
+/// file's bytes, and is kept in the private archive.
+#[test]
+fn a_chat_image_name_with_whitespace_around_it_is_kept_privately() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("chat-upload-1-a.png "), PNG);
+    write(&entry.join("chat-upload-1-a.png"), PNG);
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (_, lines) = salvage(&gateway.settings(true, false, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    let exported: Vec<String> = stub
+        .exports
+        .borrow()
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect();
+    assert_eq!(exported, ["chat-upload-1-a.png"]);
+    assert_eq!(
+        paths(&report["exportedAttachments"]),
+        ["chat-upload-1-a.png"]
+    );
+    assert_eq!(
+        report["privateArchivedPaths"],
+        serde_json::json!([{
+            "path": "chat-upload-1-a.png ",
+            "reason": "attachment",
+            "size": PNG.len(),
+        }]),
+        "{report:#}"
+    );
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(
+        tar_listing(&archive),
+        vec!["worktree/chat-upload-1-a.png ".to_string()]
+    );
+}
