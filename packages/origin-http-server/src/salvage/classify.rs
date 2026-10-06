@@ -374,9 +374,13 @@ pub(crate) fn within_build_output(path: &str, folder: bool) -> bool {
 ///
 /// - a file whose content (and mode) some commit of `main`'s history holds at
 ///   that path (the version main has now included);
-/// - a deleted file that a commit the old sync reset away from lacked, when
-///   `main` reaches that commit (the reflog's `reset: moving to origin/main`
-///   entries, or `ORIG_HEAD`).
+/// - a deleted file that a commit the old sync reset away from lacked, and
+///   that the commit's merge base with `main` lacked too: `main` added the
+///   file after the view the work tree came from. For a commit on `main` the
+///   merge base is the commit itself; for a local commit the reset abandoned
+///   it is the commit it was made on, so a file that commit deleted (its base
+///   had it) stays a deletion. Every distinct old head is read (the reflog's
+///   `reset: moving to origin/main` entries, then `ORIG_HEAD`), however old.
 ///
 /// A version only a local commit held is never stale: it is not on
 /// canonical, so it is kept.
@@ -425,18 +429,40 @@ pub(crate) fn stale_paths(
     if let Some(orig) = git.commit_id("ORIG_HEAD")? {
         old_heads.push(orig);
     }
+    let mut seen = BTreeSet::new();
     let mut checked = BTreeSet::new();
-    for old in old_heads.into_iter().take(40) {
+    for old in old_heads {
+        let open: Vec<String> = absent
+            .iter()
+            .filter(|path| !stale.contains(*path))
+            .cloned()
+            .collect();
+        if open.is_empty() {
+            break;
+        }
+        if !seen.insert(old.clone()) {
+            continue;
+        }
         let Some(old) = git.commit_id(&old).ok().flatten() else {
             continue;
         };
-        if !checked.insert(old.clone()) || !git.is_ancestor(&old, main).unwrap_or(false) {
+        if !checked.insert(old.clone()) {
             continue;
         }
-        let held = git.tree_entries(&old, &absent)?;
-        for path in &absent {
-            if !held.contains_key(path) {
-                stale.insert(path.clone());
+        let Some(base) = git.merge_base(&old, main).ok().flatten() else {
+            continue;
+        };
+        let held = git.tree_entries(&old, &open)?;
+        let base_held = match base == old {
+            true => None,
+            false => Some(git.tree_entries(&base, &open)?),
+        };
+        for path in open {
+            let in_base = base_held
+                .as_ref()
+                .is_some_and(|entries| entries.contains_key(&path));
+            if !held.contains_key(&path) && !in_base {
+                stale.insert(path);
             }
         }
     }
