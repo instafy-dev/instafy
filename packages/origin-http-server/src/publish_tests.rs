@@ -6925,3 +6925,66 @@ fn a_network_call_out_of_time_is_asked_to_stop_first() {
     assert!(marker.exists(), "the fetch was killed without SIGTERM");
     assert_eq!(report.unpushed_refs, 1, "{report:?}");
 }
+
+/// Discarding a file through Desktop's `/git/revert` puts back that file
+/// alone: its name is read as a name, never as a pattern. A tracked
+/// sibling such a pattern would match (`notes1.md` for `notes[1].md`,
+/// `app/i.tsx` for `app/[id].tsx`) keeps its unsaved edit, and a new file
+/// of such a name is removed instead of a tracked sibling being put back
+/// in its place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_discard_puts_back_only_the_file_it_names() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    sc.push_other(
+        &[
+            ("notes1.md", Some(b"saved one\n")),
+            ("notes[1].md", Some(b"saved bracket\n")),
+            ("app/i.tsx", Some(b"saved i\n")),
+            ("app/[id].tsx", Some(b"saved id\n")),
+            ("draft1.md", Some(b"saved draft\n")),
+        ],
+        "names that read as patterns",
+    );
+    sc.publish(Selection::None);
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("saved one\n"));
+    sc.write("notes1.md", b"unsaved one\n");
+    sc.write("notes[1].md", b"discard me\n");
+    sc.write("app/i.tsx", b"unsaved i\n");
+    sc.write("app/[id].tsx", b"discard me\n");
+    sc.write("draft1.md", b"unsaved draft\n");
+    sc.write("draft[1].md", b"new, discard me\n");
+
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/git/revert"))
+        .json(&serde_json::json!({
+            "paths": ["notes[1].md", "app/[id].tsx", "draft[1].md"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    server.abort();
+
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(
+        body["reverted"],
+        serde_json::json!(["app/[id].tsx", "notes[1].md"]),
+        "{body}"
+    );
+    assert_eq!(
+        body["removed"],
+        serde_json::json!(["draft[1].md"]),
+        "{body}"
+    );
+    assert_eq!(sc.disk("notes[1].md").as_deref(), Some("saved bracket\n"));
+    assert_eq!(sc.disk("app/[id].tsx").as_deref(), Some("saved id\n"));
+    assert_eq!(sc.disk("draft[1].md"), None);
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("unsaved one\n"));
+    assert_eq!(sc.disk("app/i.tsx").as_deref(), Some("unsaved i\n"));
+    assert_eq!(sc.disk("draft1.md").as_deref(), Some("unsaved draft\n"));
+}

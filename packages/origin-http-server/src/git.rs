@@ -728,6 +728,31 @@ fn git_with_literal_paths<S: AsRef<str>>(
         .map_err(|error| OriginError::internal(error.to_string()))
 }
 
+/// Run `args` (a command that reads its paths with `--pathspec-from-file=-
+/// --pathspec-file-nul`) in the checkout under the workspace's git lock,
+/// with `path` alone on stdin, read as a name, as
+/// [`git_with_literal_paths`] does; the output whatever the exit status,
+/// for callers that read git's own message.
+fn git_literal_path(
+    workspace_root: &Path,
+    args: &[&str],
+    path: &str,
+) -> Result<std::process::Output, OriginError> {
+    let lock = workspace_git_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = crate::workspace_git::nul_list(&[path]);
+    crate::workspace_git::WorkspaceGit::new(workspace_root, None)
+        .run_opts(
+            args,
+            &crate::workspace_git::RunOpts {
+                stdin: Some(&list),
+                literal_pathspecs: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| OriginError::internal(error.to_string()))
+}
+
 /// Commit what is staged in the checkout under the workspace's git lock,
 /// with `message` on stdin (`--file=-`): an apply's message comes from the
 /// request, so it is never an argument of git, and a long one is never cut
@@ -2421,10 +2446,13 @@ pub struct GitRevertSummary {
     pub removed: Vec<String>,
 }
 
+/// Put each of `paths` back as `HEAD` has it, or remove it when `HEAD`
+/// lacks it. Local git only, so no credential goes with it, and every path
+/// reaches git on stdin as a name ([`git_literal_path`]): a request's
+/// `notes[1].md` is never a pattern that also puts back `notes1.md`.
 pub fn revert_paths(
     workspace_root: &Path,
     paths: &[String],
-    bearer_token: Option<&str>,
 ) -> Result<GitRevertSummary, OriginError> {
     let mut touched = paths
         .iter()
@@ -2454,12 +2482,16 @@ pub fn revert_paths(
 
     for path in touched {
         if has_head {
-            let output = run_git(
+            let output = git_literal_path(
                 workspace_root,
-                &["checkout", "HEAD", "--", path.as_str()],
-                bearer_token,
-            )
-            .map_err(|error| OriginError::internal(error.to_string()))?;
+                &[
+                    "checkout",
+                    "HEAD",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ],
+                &path,
+            )?;
 
             if output.status.success() {
                 reverted.push(path);
@@ -2494,17 +2526,17 @@ pub fn revert_paths(
             }
         }
 
-        let _ = run_git(
+        let _ = git_literal_path(
             workspace_root,
             &[
                 "rm",
                 "--cached",
                 "-r",
                 "--ignore-unmatch",
-                "--",
-                path.as_str(),
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
             ],
-            bearer_token,
+            &path,
         );
 
         let workspace = WorkspaceDir::open(workspace_root)
@@ -2750,7 +2782,7 @@ mod tests {
             .expect("symlink diff remains contained");
         assert!(!diff.diff.contains("outside-secret"));
 
-        assert!(revert_paths(workspace.path(), &["escape/secret.txt".to_string()], None,).is_err());
+        assert!(revert_paths(workspace.path(), &["escape/secret.txt".to_string()]).is_err());
         assert_eq!(
             fs::read_to_string(&outside_file).unwrap(),
             "outside-secret\n"
@@ -3136,6 +3168,59 @@ mod tests {
         let argv = fs::read_to_string(&log)?;
         assert!(argv.lines().any(|line| line.contains("commit")), "{argv}");
         assert!(!argv.to_ascii_lowercase().contains("header"), "{argv}");
+        Ok(())
+    }
+
+    /// A discard (`/git/revert`) runs local git only, so no command carries
+    /// a credential, and it hands git its paths on stdin, never as
+    /// arguments.
+    #[test]
+    fn a_discard_hands_git_no_http_header_and_no_path_argument() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = sandbox.path().join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        init_repo(&workspace_dir, "main")?;
+        run_git(&workspace_dir, &["config", "user.name", "Instafy Test"])?;
+        run_git(
+            &workspace_dir,
+            &["config", "user.email", "playwright@instafy.dev"],
+        )?;
+        fs::write(workspace_dir.join("kept.txt"), "kept\n")?;
+        run_git(&workspace_dir, &["add", "-A"])?;
+        run_git(&workspace_dir, &["commit", "-m", "init"])?;
+        fs::create_dir_all(workspace_dir.join(".instafy"))?;
+        fs::rename(
+            workspace_dir.join(".git"),
+            workspace_dir.join(".instafy").join(".git"),
+        )?;
+        fs::write(workspace_dir.join("kept.txt"), "edited\n")?;
+        fs::write(workspace_dir.join("fresh.txt"), "new\n")?;
+
+        let log = sandbox.path().join("argv.log");
+        let wrapper = crate::test_support::GitWrapper::install(
+            sandbox.path(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        let summary = revert_paths(
+            &workspace_dir,
+            &["kept.txt".to_string(), "fresh.txt".to_string()],
+        );
+        drop(wrapper);
+        let summary = summary?;
+        assert_eq!(summary.reverted, vec!["kept.txt".to_string()]);
+        assert_eq!(summary.removed, vec!["fresh.txt".to_string()]);
+        assert_eq!(
+            fs::read_to_string(workspace_dir.join("kept.txt"))?,
+            "kept\n"
+        );
+        assert!(!workspace_dir.join("fresh.txt").exists());
+        let argv = fs::read_to_string(&log)?;
+        assert!(argv.lines().any(|line| line.contains("checkout")), "{argv}");
+        assert!(!argv.to_ascii_lowercase().contains("header"), "{argv}");
+        assert!(
+            !argv.contains("kept.txt") && !argv.contains("fresh.txt"),
+            "{argv}"
+        );
         Ok(())
     }
 
