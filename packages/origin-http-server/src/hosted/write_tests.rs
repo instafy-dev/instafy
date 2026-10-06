@@ -2669,6 +2669,124 @@ async fn a_push_recorded_while_a_fetch_runs_makes_reads_fetch() {
     assert_eq!(cache.fetches_started(), started + 1);
 }
 
+/// A save the mirror could not take at once (a fetch held its refs as the
+/// push landed) shows in every plain read made after its answer. The first
+/// such read starts a fetch; one that comes while that fetch runs waits for
+/// it too, never reusing the save's own earlier fetch, however recent.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_read_after_a_save_the_mirror_missed_shows_the_save() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let sc = HostedScenario::new();
+    let first = sc.push(&[("a.txt", Some(b"one\n"))], "first");
+    let served = super::tests::serve_with_cache(
+        &sc,
+        |mut cache| {
+            // The follow-up fetch is still running when the second read
+            // comes, and every earlier fetch counts as recent, however
+            // loaded the machine is.
+            cache.test_fetch_delay = Some(Duration::from_millis(1500));
+            cache.with_coalesce_window(Duration::from_secs(600))
+        },
+        |state| state,
+    )
+    .await;
+    let read = get(&served, "/files/a.txt").await;
+    assert_eq!(decoded(&read), b"one\n");
+
+    // Canonical holds the save's push in its hook until the mirror's refs
+    // are held, as a running fetch holds them.
+    let arrived = sc.root.join("push-arrived");
+    let release = sc.root.join("push-release");
+    let hook = sc.remote().join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\ntouch '{}'\nn=0\nwhile [ ! -e '{}' ] && [ $n -lt 600 ]; do\n  sleep 0.05\n  n=$((n + 1))\ndone\nexit 0\n",
+            arrived.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let save = {
+        let base = served.base.clone();
+        let request = json!({
+            "manifest": manifest(&["a.txt"], &[], json!({ "baseRev": first })),
+            "archiveBase64": base64::engine::general_purpose::STANDARD
+                .encode(zip(&[("a.txt", b"two\n")])),
+        });
+        tokio::spawn(async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/apply-json"))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body)
+        })
+    };
+    let waited = Instant::now();
+    while !arrived.exists() {
+        assert!(waited.elapsed() < Duration::from_secs(30), "no push came");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let lease = served.cache.lease(sc.project);
+    let (status, body) = {
+        let _refs = MirrorCache::hold_refs(&lease);
+        std::fs::write(&release, b"").unwrap();
+        save.await.unwrap()
+    };
+    drop(lease);
+    assert_eq!(status, 200, "{body}");
+    let saved = body["rev"].as_str().unwrap().to_string();
+    assert_eq!(sc.canonical_main().as_deref(), Some(saved.as_str()));
+    assert_eq!(
+        git_in(&sc.mirror(), &["rev-parse", "refs/heads/main"]),
+        first,
+        "the mirror took the save at once"
+    );
+
+    // One read starts the follow-up fetch; a second comes while it runs.
+    let fetches = served.cache.fetches_started();
+    let first_read = {
+        let base = served.base.clone();
+        tokio::spawn(async move {
+            let response = reqwest::get(format!("{base}/files/a.txt")).await.unwrap();
+            let status = response.status().as_u16();
+            let rev = response
+                .headers()
+                .get("x-instafy-rev")
+                .map(|value| value.to_str().unwrap().to_string());
+            (status, rev)
+        })
+    };
+    let waited = Instant::now();
+    while served.cache.fetches_started() == fetches {
+        assert!(
+            waited.elapsed() < Duration::from_secs(30),
+            "no fetch started"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let second_read = get(&served, "/files/a.txt").await;
+    assert_eq!(first_read.await.unwrap(), (200, Some(saved.clone())));
+    assert_eq!(second_read.status, 200);
+    assert_eq!(
+        second_read.rev().as_deref(),
+        Some(saved.as_str()),
+        "a read after the save was served the main before it"
+    );
+    assert_eq!(decoded(&second_read), b"two\n");
+    assert_eq!(
+        served.cache.fetches_started(),
+        fetches + 1,
+        "both reads shared the follow-up fetch"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The commit-and-push loop on the test thread.
 // ---------------------------------------------------------------------------

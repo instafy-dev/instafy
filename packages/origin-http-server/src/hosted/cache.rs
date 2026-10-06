@@ -238,11 +238,13 @@ struct FetchState {
     /// At most one fetch waits behind the running one; every write that
     /// arrives meanwhile joins it.
     queued: Option<Pending>,
-    /// When the last fetch finished, if it succeeded.
+    /// When the last fetch finished, if it succeeded. Cleared when a fetch
+    /// starts after a push the mirror did not record: that fetch read
+    /// canonical before the push, so no plain read reuses it.
     last_success: Option<Instant>,
     /// A write pushed to canonical at this time but could not move the
-    /// mirror's `main`: until a fetch that started later runs, every read
-    /// waits for one.
+    /// mirror's `main`: until a fetch that started later has run, every
+    /// read waits for one.
     refetch_since: Option<Instant>,
 }
 
@@ -362,6 +364,8 @@ pub(crate) struct MirrorCache {
     sweeps_run: AtomicU64,
     fetch_wait: Duration,
     first_clone_wait: Duration,
+    /// A plain read reuses a fetch that finished this recently.
+    coalesce_window: Duration,
     /// When the sweeper packs a mirror: (loose objects, packs).
     pack_limits: (u64, u64),
     /// The free space the sweeper keeps on the cache's disk.
@@ -439,6 +443,7 @@ impl MirrorCache {
             sweeps_run: AtomicU64::new(0),
             fetch_wait: FETCH_WAIT,
             first_clone_wait: FIRST_CLONE_WAIT,
+            coalesce_window: COALESCE_WINDOW,
             pack_limits: (LOOSE_OBJECT_LIMIT, PACK_LIMIT),
             min_free_bytes: MIN_FREE_BYTES,
             // Tests see no disk pressure unless they ask for it.
@@ -482,6 +487,14 @@ impl MirrorCache {
     pub(crate) fn with_waits(mut self, fetch_wait: Duration, first_clone_wait: Duration) -> Self {
         self.fetch_wait = fetch_wait;
         self.first_clone_wait = first_clone_wait;
+        self
+    }
+
+    /// Another window for plain reads to reuse a fetch in, for tests that
+    /// must not depend on how fast the machine is.
+    #[cfg(test)]
+    pub(crate) fn with_coalesce_window(mut self, window: Duration) -> Self {
+        self.coalesce_window = window;
         self
     }
 
@@ -623,7 +636,7 @@ impl MirrorCache {
                     // A recent fetch counts only while its mirror is there.
                     let recent = state
                         .last_success
-                        .is_some_and(|finished| finished.elapsed() < COALESCE_WINDOW)
+                        .is_some_and(|finished| finished.elapsed() < self.coalesce_window)
                         && std::fs::symlink_metadata(lease.dir()).is_ok();
                     if recent {
                         None
@@ -742,10 +755,13 @@ impl MirrorCache {
     fn fetch_started(&self, entry: &MirrorEntry, id: u64) {
         self.fetches_started.fetch_add(1, Ordering::SeqCst);
         let mut state = locked(&entry.fetches);
-        // This fetch reads canonical after every push recorded so far.
+        // This fetch reads canonical after every push recorded so far. The
+        // fetch before it may not have: plain reads wait for this one
+        // instead of reusing that one while this one runs.
         let now = Instant::now();
         if state.refetch_since.is_some_and(|since| since <= now) {
             state.refetch_since = None;
+            state.last_success = None;
         }
         if state.queued.as_ref().is_some_and(|queued| queued.id == id) {
             let mut pending = state.queued.take().expect("checked above");
