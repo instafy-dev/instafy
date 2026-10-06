@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::git::is_sync_reserved_path;
+use crate::git::{is_full_object_id, is_sync_reserved_path};
 use crate::paths::is_reserved_path;
 use crate::publish_policy::{
     deletion_allowed, is_legacy_attachment_path, is_secret_path, is_unsafe_path,
@@ -691,7 +691,8 @@ pub(crate) fn stale_paths(
         if open.is_empty() {
             break;
         }
-        if !seen.insert(old.clone()) {
+        // Only an object id read from the reflog reaches git's arguments.
+        if !is_full_object_id(&old) || !seen.insert(old.clone()) {
             continue;
         }
         let Some(old) = git.commit_id(&old).ok().flatten() else {
