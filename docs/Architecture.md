@@ -82,7 +82,7 @@ deploying the controller that reads these columns.
 There are two supported canonical filesystem modes:
 
 - **Local-canonical (BYO folder)**: a user-provided folder is the source of truth (desktop/self-host). The Origin runs next to it.
-- **Git-canonical** (hosted): an Instafy-hosted git repo is the source of truth; origins/runtimes materialize checkouts as needed and persist changes by commit + push.
+- **Git-canonical** (hosted): an Instafy-hosted git repo is the source of truth; runtimes and Desktop origins keep working copies and publish changes by commit + push, and the hosted workspace gateway serves from disposable bare mirrors and makes each save one commit on `main`.
 
 We do **not** treat “shared-folder canonical” as a first-class product mode. A shared filesystem (EFS/NFS) can still exist inside hosted infrastructure, but only as private implementation plumbing for origins/runtimes. It should not be the user-facing source-of-truth model.
 
