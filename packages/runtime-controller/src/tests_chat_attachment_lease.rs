@@ -560,6 +560,16 @@ async fn delete_project_purges_the_space_prefix_after_the_delete_commits() -> an
             folder(&second_conversation),
             space_prefix.clone(),
         ];
+        // The last two lists (the emptied folder, then the empty space)
+        // come after the last delete: wait for them too.
+        while bucket.listed_prefixes().len() < expected.len() {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "the purge did not finish listing: {:?}",
+                bucket.listed_prefixes()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         anyhow::ensure!(
             bucket.listed_prefixes() == expected,
             "listed prefixes: {:?}",
