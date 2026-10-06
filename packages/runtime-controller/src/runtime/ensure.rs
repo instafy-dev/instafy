@@ -43,7 +43,10 @@ use super::provider::{
     call_provider_endpoint, lock_and_load_authoritative_provider_config, merge_provider_metadata,
     ProviderEnsureRequest, ProviderReleaseRequest,
 };
-use super::stop::{stop_runtime_for_project, stop_runtime_safely, StopOptions};
+use super::stop::{
+    stop_runtime_for_project, stop_runtime_safely, RuntimeIdentityExpectation, StopOptions,
+};
+use super::sweeps::STALLED_LAUNCH_REPLACE_AFTER_SECONDS;
 use super::token::default_runtime_token_scopes;
 use super::utils::normalize_display_name_owned;
 
@@ -98,6 +101,15 @@ pub(crate) struct RuntimeEnsurePayload {
     pub(crate) origin_protocols: Option<Vec<String>>,
     #[serde(default, rename = "originMetadata", alias = "origin_metadata")]
     pub(crate) origin_metadata: Option<JsonValue>,
+    /// A person's explicit retry of a start that has not come up: replace a
+    /// launch that never registered once it is older than
+    /// `STALLED_LAUNCH_REPLACE_AFTER_SECONDS` instead of reusing it.
+    #[serde(
+        default,
+        rename = "replaceStalledLaunch",
+        alias = "replace_stalled_launch"
+    )]
+    pub(crate) replace_stalled_launch: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1281,6 +1293,11 @@ pub(crate) async fn runtime_ensure(
     } else {
         LimitWaitSource::Server
     };
+    let stalled_launch = if payload.replace_stalled_launch {
+        StalledLaunch::Replace
+    } else {
+        StalledLaunch::Reuse
+    };
     let response = match scope {
         RuntimeLeaseScope::Exclusive => {
             ensure_runtime_launch_recording_limit_wait(
@@ -1295,6 +1312,7 @@ pub(crate) async fn runtime_ensure(
                 RuntimeLeaseScope::Exclusive,
                 origin_options.clone(),
                 ReusedLeaseMetadata::Requested,
+                stalled_launch,
             )
             .await?
         }
@@ -1318,6 +1336,7 @@ pub(crate) async fn runtime_ensure(
                 RuntimeLeaseScope::Shared,
                 origin_options.clone(),
                 ReusedLeaseMetadata::Requested,
+                stalled_launch,
             )
             .await?
         }
@@ -1464,6 +1483,7 @@ async fn request_runtime_inner(
         RuntimeLeaseScope::Exclusive,
         origin_options,
         ReusedLeaseMetadata::Requested,
+        StalledLaunch::Reuse,
     )
     .await?;
 
@@ -1526,6 +1546,7 @@ pub(super) async fn ensure_runtime_for_requeued_jobs(
         RuntimeLeaseScope::Exclusive,
         OriginEnsureOptions::new(None, None, None),
         ReusedLeaseMetadata::Requested,
+        StalledLaunch::Reuse,
     )
     .await
 }
@@ -1563,6 +1584,7 @@ pub(super) async fn ensure_runtime_for_drain_flush(
         RuntimeLeaseScope::Exclusive,
         OriginEnsureOptions::new(None, None, None),
         ReusedLeaseMetadata::Requested,
+        StalledLaunch::Reuse,
     )
     .await
 }
@@ -1624,6 +1646,7 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
         RuntimeLeaseScope::Exclusive,
         OriginEnsureOptions::new(None, None, None),
         ReusedLeaseMetadata::CarriedFrom(carried_from),
+        StalledLaunch::Reuse,
     )
     .await
 }
@@ -1907,6 +1930,7 @@ pub(crate) async fn ensure_runtime_for_automation(
         RuntimeLeaseScope::Exclusive,
         OriginEnsureOptions::new(None, None, None),
         ReusedLeaseMetadata::Requested,
+        StalledLaunch::Reuse,
     )
     .await
 }
@@ -1981,6 +2005,37 @@ impl ReusedLeaseMetadata {
     }
 }
 
+/// What an ensure does with a launch that never came up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StalledLaunch {
+    /// Reuse it, as for any launch in flight; the launch-timeout sweep ends
+    /// it. Every ensure the controller starts on its own does this.
+    Reuse,
+    /// Stop it and launch a new lease once it is older than
+    /// `STALLED_LAUNCH_REPLACE_AFTER_SECONDS`. Only a person's explicit retry
+    /// (`replaceStalledLaunch` on `/runtime/ensure`) asks for this.
+    Replace,
+}
+
+/// Whether the active generation is a launch that never came up for
+/// `STALLED_LAUNCH_REPLACE_AFTER_SECONDS`: the runtime is still `requested`
+/// and was never seen, and its lease is still being launched (not
+/// quarantined for cleanup, not released). `lease_age_seconds` is measured by
+/// the database clock, as the launch-timeout sweep measures it.
+fn is_stalled_launch(
+    runtime_status: &str,
+    last_seen_at: Option<chrono::DateTime<Utc>>,
+    lease_status: Option<&str>,
+    lease_released: bool,
+    lease_age_seconds: Option<i64>,
+) -> bool {
+    runtime_status == "requested"
+        && last_seen_at.is_none()
+        && !lease_released
+        && matches!(lease_status, Some("pending" | "launching"))
+        && lease_age_seconds.is_some_and(|age| age >= STALLED_LAUNCH_REPLACE_AFTER_SECONDS)
+}
+
 /// [`ensure_runtime_launch`] for a request that must not be forgotten when the
 /// organization's hosted runtime limit refuses it: the refusal is recorded so
 /// the limit-wait sweep can replay this exact request once work is queued in
@@ -1998,6 +2053,7 @@ pub(super) async fn ensure_runtime_launch_recording_limit_wait(
     scope: RuntimeLeaseScope,
     origin_options: OriginEnsureOptions,
     reused_lease_metadata: ReusedLeaseMetadata,
+    stalled_launch: StalledLaunch,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     let wait_request = LimitWaitEnsureRequest {
         provider: provider.clone(),
@@ -2020,6 +2076,7 @@ pub(super) async fn ensure_runtime_launch_recording_limit_wait(
         scope,
         origin_options,
         reused_lease_metadata,
+        stalled_launch,
     )
     .await;
     if let Err(error) = &result {
@@ -2055,6 +2112,7 @@ pub(super) async fn ensure_runtime_for_limit_wait(
             None,
         ),
         ReusedLeaseMetadata::Requested,
+        StalledLaunch::Reuse,
     )
     .await
 }
@@ -2071,6 +2129,7 @@ async fn ensure_runtime_launch(
     scope: RuntimeLeaseScope,
     origin_options: OriginEnsureOptions,
     reused_lease_metadata: ReusedLeaseMetadata,
+    stalled_launch: StalledLaunch,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     #[cfg(test)]
     {
@@ -2085,6 +2144,7 @@ async fn ensure_runtime_launch(
             scope,
             origin_options,
             reused_lease_metadata,
+            stalled_launch,
             None,
         )
         .await;
@@ -2102,6 +2162,7 @@ async fn ensure_runtime_launch(
         scope,
         origin_options,
         reused_lease_metadata,
+        stalled_launch,
     )
     .await
 }
@@ -2116,6 +2177,7 @@ async fn cleanup_stale_runtime_generation_before_ensure(
     runtime_id: Option<Uuid>,
     provider: &str,
     display_name: Option<&str>,
+    stalled_launch: StalledLaunch,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let connection = state
         .pool
@@ -2128,7 +2190,10 @@ async fn cleanup_stale_runtime_generation_before_ensure(
             .query_opt(
                 "select r.id, r.provider, r.status, r.idle_ttl_seconds, r.last_seen_at,
                         r.endpoint_url, r.active_lease_id,
-                        lease.status as active_lease_status
+                        lease.status as active_lease_status,
+                        lease.released_at as active_lease_released_at,
+                        floor(extract(epoch from (now() - lease.requested_at)))::bigint
+                          as active_lease_age_seconds
                  from runtimes r
                  left join runtime_leases lease on lease.id = r.active_lease_id
                  where r.project_id = $1 and r.id = $2",
@@ -2140,7 +2205,10 @@ async fn cleanup_stale_runtime_generation_before_ensure(
             .query_opt(
                 "select r.id, r.provider, r.status, r.idle_ttl_seconds, r.last_seen_at,
                         r.endpoint_url, r.active_lease_id,
-                        lease.status as active_lease_status
+                        lease.status as active_lease_status,
+                        lease.released_at as active_lease_released_at,
+                        floor(extract(epoch from (now() - lease.requested_at)))::bigint
+                          as active_lease_age_seconds
                  from runtimes r
                  left join runtime_leases lease on lease.id = r.active_lease_id
                  where r.project_id = $1
@@ -2176,10 +2244,9 @@ async fn cleanup_stale_runtime_generation_before_ensure(
             )),
         ));
     }
-    let active_lease_id: Option<Uuid> = row.get("active_lease_id");
-    if active_lease_id.is_none() {
+    let Some(active_lease_id) = row.get::<_, Option<Uuid>>("active_lease_id") else {
         return Ok(());
-    }
+    };
 
     let candidate_runtime_id: Uuid = row.get("id");
     let status: String = row.get("status");
@@ -2187,6 +2254,9 @@ async fn cleanup_stale_runtime_generation_before_ensure(
     let last_seen_at: Option<chrono::DateTime<Utc>> = row.get("last_seen_at");
     let endpoint_url: Option<String> = row.get("endpoint_url");
     let active_lease_status: Option<String> = row.get("active_lease_status");
+    let active_lease_released_at: Option<chrono::DateTime<Utc>> =
+        row.get("active_lease_released_at");
+    let active_lease_age_seconds: Option<i64> = row.get("active_lease_age_seconds");
     let cleanup_pending = active_lease_status.as_deref() == Some("cleanup_pending");
     let terminal = matches!(status.as_str(), "offline" | "stopped" | "removed");
     let stale = !crate::workspace::runtime_is_recent(
@@ -2194,6 +2264,27 @@ async fn cleanup_stale_runtime_generation_before_ensure(
         idle_ttl_seconds,
         crate::workspace::endpoint_matches_local(endpoint_url.as_deref()),
     );
+
+    // A person retrying a start that has not come up for minutes wants a new
+    // launch, not the one they are already waiting on.
+    if stalled_launch == StalledLaunch::Replace
+        && is_stalled_launch(
+            &status,
+            last_seen_at,
+            active_lease_status.as_deref(),
+            active_lease_released_at.is_some(),
+            active_lease_age_seconds,
+        )
+    {
+        drop(connection);
+        return replace_stalled_launch_before_ensure(
+            state,
+            project_id,
+            candidate_runtime_id,
+            active_lease_id,
+        )
+        .await;
+    }
 
     // A normal requested/launching generation has not emitted its first
     // heartbeat yet. Reuse it; only retry requested state when a previous stop
@@ -2230,6 +2321,51 @@ async fn cleanup_stale_runtime_generation_before_ensure(
     Ok(())
 }
 
+/// Stop a launch that never came up so the ensure that follows launches a new
+/// lease. The stop applies only while `lease_id` is still the runtime's active
+/// generation, so a retry that finds it already replaced reuses the newer
+/// launch, and a launch that came up and leased a job meanwhile is kept.
+async fn replace_stalled_launch_before_ensure(
+    state: &AppState,
+    project_id: &Uuid,
+    runtime_id: Uuid,
+    lease_id: Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let stopped = stop_runtime_safely(
+        state,
+        &runtime_id,
+        StopOptions {
+            source: "ensure_replace_stalled_launch",
+            reason: Some("launch_retry".to_string()),
+            skip_if_active_jobs: true,
+            require_idle_timeout: false,
+            allow_cleanup_pending_release: false,
+            expected_identity: Some(RuntimeIdentityExpectation {
+                project_id: Some(*project_id),
+                provider: None,
+                display_name: None,
+                lease_id: Some(lease_id),
+            }),
+        },
+    )
+    .await?;
+
+    match stopped.outcome.skip_reason.as_deref() {
+        Some(skip_reason) => info!(
+            %runtime_id,
+            %lease_id,
+            %skip_reason,
+            "stalled launch replacement lost a revalidation race; reusing current state"
+        ),
+        None => info!(
+            %runtime_id,
+            %lease_id,
+            "stopped a launch that never came up so an explicit retry launches a new lease"
+        ),
+    }
+    Ok(())
+}
+
 async fn ensure_runtime_launch_inner(
     state: &AppState,
     project_id: Uuid,
@@ -2241,6 +2377,7 @@ async fn ensure_runtime_launch_inner(
     scope: RuntimeLeaseScope,
     origin_options: OriginEnsureOptions,
     reused_lease_metadata: ReusedLeaseMetadata,
+    stalled_launch: StalledLaunch,
     #[cfg(test)] admission_test_hook: Option<ProviderLaunchAdmissionTestHook>,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
     // A controller being retired starts nothing on its node, except the
@@ -2261,6 +2398,7 @@ async fn ensure_runtime_launch_inner(
         runtime_id,
         &provider,
         display_name.as_deref(),
+        stalled_launch,
     )
     .await?;
 
@@ -3447,6 +3585,10 @@ mod concurrency_tests;
 #[cfg(test)]
 #[path = "ensure_reclaim_tests.rs"]
 mod reclaim_tests;
+
+#[cfg(test)]
+#[path = "ensure_stalled_launch_tests.rs"]
+mod stalled_launch_tests;
 
 #[cfg(test)]
 #[path = "ensure_tenant_tests.rs"]

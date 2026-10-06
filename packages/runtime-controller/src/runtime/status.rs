@@ -75,6 +75,10 @@ pub(crate) struct RuntimeStatusEntry {
     #[serde(skip_serializing_if = "Option::is_none", rename = "createdAt")]
     created_at: Option<String>,
     last_seen_at: Option<String>,
+    /// When the active lease was requested. With `lastSeenAt` still empty,
+    /// it tells a client how long the current launch has been coming up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_requested_at: Option<String>,
     endpoint_url: Option<String>,
     task_ref: Option<String>,
     #[serde(default)]
@@ -765,7 +769,8 @@ async fn load_runtime_status_response_for_viewer(
                     oi.endpoint as origin_endpoint,
                     oi.protocols as origin_protocols,
                     oi.metadata as origin_metadata,
-                    rl.metadata as lease_metadata
+                    rl.metadata as lease_metadata,
+                    rl.requested_at as lease_requested_at
              from runtimes r
              left join runtime_leases rl
                on rl.id = r.active_lease_id
@@ -825,6 +830,7 @@ async fn load_runtime_status_response_for_viewer(
         let endpoint_url: Option<String> = row.get("endpoint_url");
         let last_seen_at: Option<DateTime<Utc>> = row.get("last_seen_at");
         let created_at: Option<DateTime<Utc>> = row.get("created_at");
+        let launch_requested_at: Option<DateTime<Utc>> = row.get("lease_requested_at");
         let idle_ttl_seconds: i32 = row.get("idle_ttl_seconds");
         let origin = origin_info_from_status_row(&row);
         let is_private_self_hosted =
@@ -853,6 +859,7 @@ async fn load_runtime_status_response_for_viewer(
             idle_ttl_seconds,
             created_at: created_at.map(|value| value.to_rfc3339()),
             last_seen_at: last_seen_at.map(|value| value.to_rfc3339()),
+            launch_requested_at: launch_requested_at.map(|value| value.to_rfc3339()),
             endpoint_url: endpoint_url.clone(),
             task_ref: row.get("task_ref"),
             is_local,

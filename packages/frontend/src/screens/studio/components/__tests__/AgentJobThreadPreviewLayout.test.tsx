@@ -2355,6 +2355,65 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(received.at(-1)?.unsavedReason).toBe("save_failed");
   });
 
+  it("gives the file-change rail the thread's last real change, not a later turn that only read a file", async () => {
+    const received: ChatFileChangeListProps[] = [];
+    function RecordingFileChangeList(props: ChatFileChangeListProps) {
+      received.push(props);
+      return <div data-testid="mock-file-change-list" />;
+    }
+    const now = Date.now();
+    const mapResult = (
+      id: string,
+      content: string,
+      outcome: string,
+      files: Array<Record<string, unknown>>,
+      at: number,
+    ) =>
+      mapControllerMessageToChat({
+        id,
+        conversationId: "44444444-4444-4444-4444-444444444444",
+        projectId: "55555555-5555-5555-5555-555555555555",
+        sessionId: null,
+        createdBy: null,
+        promptId: null,
+        runId: null,
+        role: "assistant",
+        content,
+        metadata: {
+          jobId: JOB_ID,
+          source: "agent",
+          outcome,
+          artifacts: [{ kind: "apply/files", files }],
+        },
+        createdAt: new Date(at).toISOString(),
+      });
+    const edit = mapResult(
+      "33333333-3333-4333-8333-333333333334",
+      "Added a task.",
+      "in_progress",
+      [{ path: "notes/todo.md", change: { type: "changed" } }],
+      now - 2_000,
+    );
+    const readBack = mapResult(
+      "33333333-3333-4333-8333-333333333335",
+      "The list now has three tasks.",
+      "completed",
+      [{ path: "notes/a.md", workspacePath: "notes/a.md", change: "read", changeType: "read", source: "workspace" }],
+      now - 1_000,
+    );
+    const baseMessage = createMessage();
+    const message = createMessage({
+      metadata: { ...baseMessage.metadata, threadMessages: [edit, readBack] },
+    });
+
+    await act(async () => {
+      root.render(<LiveAgentJobThreadPreview message={message} FileChangeList={RecordingFileChangeList} />);
+    });
+
+    expect(container.querySelector('[data-testid="mock-file-change-list"]')).not.toBeNull();
+    expect(received.at(-1)?.files.map((file) => file.path)).toEqual(["notes/todo.md"]);
+  });
+
   it("clips the thread bubble horizontally only, so edge focus rings stay visible", async () => {
     // jsdom cannot measure paint clipping, so this pins the structural fix:
     // overflow-hidden cut the 2px ring + 2px offset of the Review changes,

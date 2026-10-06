@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::runtime::ensure::{
     ensure_runtime_launch_recording_limit_wait, OriginEnsureOptions, ReusedLeaseMetadata,
+    StalledLaunch,
 };
 use crate::state::ControllerEvent;
 
@@ -67,6 +68,7 @@ impl LimitWaitFixture {
                 None,
             ),
             ReusedLeaseMetadata::Requested,
+            StalledLaunch::Reuse,
         )
         .await
     }
@@ -472,6 +474,7 @@ async fn a_limit_refusal_records_the_refused_request_and_a_user_request_outranks
             RuntimeLeaseScope::Exclusive,
             OriginEnsureOptions::new(None, None, None),
             ReusedLeaseMetadata::Requested,
+            StalledLaunch::Reuse,
         )
         .await;
         assert!(server_refusal.as_ref().is_err_and(is_runtime_limit_refusal));
@@ -1987,6 +1990,7 @@ async fn the_organization_limit_admits_one_launch_at_a_time_across_replicas() ->
                     RuntimeLeaseScope::Exclusive,
                     OriginEnsureOptions::new(None, None, None),
                     ReusedLeaseMetadata::Requested,
+                    StalledLaunch::Reuse,
                 )
                 .await
             }
@@ -2115,6 +2119,7 @@ async fn the_admission_lock_is_free_while_the_provider_releases_and_launches() -
                     RuntimeLeaseScope::Exclusive,
                     OriginEnsureOptions::new(None, None, None),
                     ReusedLeaseMetadata::Requested,
+                    StalledLaunch::Reuse,
                 )
                 .await
             }

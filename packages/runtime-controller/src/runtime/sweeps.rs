@@ -27,6 +27,11 @@ const TERMINAL_RUNTIME_CLEANUP_BATCH_SIZE: i64 = 50;
 /// How long a launch may go without its runtime registering before
 /// `auto_stop_stuck_requested_runtimes` stops it as timed out.
 pub(crate) const REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS: i64 = 15 * 60;
+/// How long a launch may go without its runtime registering before a
+/// person's explicit retry (`replaceStalledLaunch` on `/runtime/ensure`)
+/// replaces it instead of reusing it. The Studio offers that retry after the
+/// same 5 minutes; the sweep above still ends a launch nobody retries.
+pub(super) const STALLED_LAUNCH_REPLACE_AFTER_SECONDS: i64 = 5 * 60;
 const REQUESTED_RUNTIME_CLEANUP_BATCH_SIZE: i64 = 50;
 const STUCK_QUEUED_JOB_MAX_AGE_SECONDS: i64 = 90;
 const STUCK_QUEUED_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: i64 = 60;
@@ -1962,6 +1967,13 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
                             "failed to auto-revoke tunnels during launch timeout stop"
                         );
                     }
+                    notify_runtime_stopped(
+                        state,
+                        runtime.project_id,
+                        runtime.id,
+                        "launch_timeout",
+                        "launch_timeout",
+                    );
                     if let Err(error) = record_system_bug_report(
                         state,
                         SystemBugReportInput {

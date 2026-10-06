@@ -260,8 +260,8 @@ runner before those jobs need it.
 Debian service final stages explicitly refresh inherited security packages and
 check distribution-specific minimum versions after installation. Installing an
 unrelated package does not refresh every vulnerable base package. Bookworm
-services enforce the PCRE2 floor; Trixie services additionally enforce gzip,
-SQLite and Perl-base floors. `node --test scripts/check-production-image-inputs.test.mjs`
+services enforce the PCRE2 and Perl-base floors; Trixie services additionally
+enforce gzip and SQLite floors. `node --test scripts/check-production-image-inputs.test.mjs`
 checks every Debian publisher cell plus the standalone speech-host image.
 These source checks do not replace the unchanged scan-before-publication gate.
 
