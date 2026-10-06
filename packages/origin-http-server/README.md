@@ -3,7 +3,8 @@
 Rust implementation of the workspace origin service that now ships inside the runtime agent. The server validates controller-issued JWTs, exposes read endpoints for the workspace filesystem, and applies multi-file updates atomically.
 
 ## Key Features
-- Axum-based HTTP server with `/entries`, `/files/:path`, `/raw/:path`, `POST /apply`, `POST /git/sync`, `POST /git/flush` and `POST /git/flush/resume` routes, git history and review routes, and (single-tenant origins only) the unsaved-work routes `GET /git/recovery`, `POST /git/recovery/restore` and `POST /git/recovery/dismiss`.
+- Axum-based HTTP server with `/entries`, `/files/:path`, `/raw/:path`, `POST /apply`, `POST /git/sync`, `POST /git/flush` and `POST /git/flush/resume` routes, git history and review routes, and the unsaved-work routes `GET /git/recovery`, `POST /git/recovery/restore` and `POST /git/recovery/dismiss`.
+- The hosted workspace gateway (`ORIGIN_MULTI_TENANT=1`, `src/hosted/`): one process serving every cloud space's read, write, history and unsaved-work routes from its canonical repository, with no working copy and no flush or browser routes. See [Hosted workspace gateway](../../docs/Git-Service.md#hosted-workspace-gateway) and, for the working copies earlier gateway images kept, [Retiring gateway working copies](../../docs/Git-Service.md#retiring-gateway-working-copies) (`origin-http-server salvage`).
 - EdDSA token validation through the controller JWKS (Ed25519 public keys).
 - Safe path handling + staging writes via temporary files before atomic promotion.
 - Optional commit receipt + presence heartbeat back to the controller when `ORIGIN_INTERNAL_TOKEN` is provided.
@@ -16,8 +17,8 @@ cargo run
 
 Environment variables mirror the previous TypeScript stub (`ORIGIN_PROJECT_ID`, `ORIGIN_ID`, `ORIGIN_WORKSPACE_ROOT`, `ORIGIN_CONTROLLER_URL`, etc.). See `src/main.rs` for defaults. `cargo test --manifest-path packages/origin-http-server/Cargo.toml` exercises the crate.
 
-### Git-canonical mode (workspace gateway)
-Set `ORIGIN_GIT_REMOTE_URL` to enable git-backed persistence:
+### Git-canonical mode
+Set `ORIGIN_GIT_REMOTE_URL` to enable git-backed persistence on a single-tenant origin (one space's checkout: a workspace runtime or Desktop). The multi-tenant gateway refuses to start with it set and builds each space's URL from `ORIGIN_GIT_REMOTE_BASE_URL` instead:
 - `ORIGIN_GIT_REMOTE_URL`: git remote URL (SSH or HTTPS)
 - `ORIGIN_GIT_BRANCH`: branch to track/push (default: `main`)
 - `ORIGIN_GIT_REMOTE_NAME`: remote name (default: `origin`)
@@ -28,7 +29,7 @@ Set `ORIGIN_GIT_REMOTE_URL` to enable git-backed persistence:
 In this mode:
 - The origin bootstraps a checkout on start (`git clone`/`git fetch`).
 - `POST /apply` applies file changes to the workspace (no git operations). On a workspace runtime or Desktop origin, the manifest may carry `expected: {path: blobId | null}`; if any path no longer holds the blob the client read, the whole apply fails with `409 {code: "head_moved", paths}` and nothing is written. An apply without `autoCommitAfterApply` (a person's save, not the controller's import or managed files) that would write or delete a path the folder holds only under another spelling a disk ignoring case or Unicode form takes for it (`todo.md` where the folder has `TODO.md`, or `Docs/guide.md` where it has a file `docs`) fails first with `409 {code: "path_alias", paths}`: on such a disk the write would land in that other file, whose unsaved edits the client never checked. A path the checkout's `HEAD` tracks under exactly the name asked for is that tracked file however the disk spells it or a folder above it (a folder pair kept as one folder, a name left decomposed), unless `HEAD` also holds another entry such a disk takes for it. A new path in a folder the disk spells otherwise is judged by `HEAD`'s tree too, so `Vendor/x.c` beside a submodule entry `vendor` (a folder on the disk that may hold a repository of the person's own) is refused rather than written into that folder. The hosted gateway refuses a person's new path that `main` holds that way with the same code. `/files` and `/raw` send the served bytes' blob id in `X-Instafy-Blob`, and `/entries` lists `blobOid` for files up to 2 MiB.
-- `POST /git/sync` publishes. See "Publishing" below. The multi-tenant gateway keeps its older commit-and-push until its working copies are retired.
+- `POST /git/sync` publishes. See "Publishing" below. The multi-tenant gateway has no checkout: each of its writes is a commit on canonical `main`, and its `/git/sync` only checks that a commit is on `main`.
 - Reserved paths like `.git/` and `.instafy/origin-staging/` are hidden from the filesystem API and rejected for applies.
 
 ### Publishing (workspace runtimes and Desktop)

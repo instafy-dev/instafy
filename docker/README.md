@@ -80,6 +80,18 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   When the controller sets `GIT_REMOTE_BASE_URL`, a runtime whose workspace already has files
   but no `.instafy/.git` then fails to start. Roll the file out only to fresh nodes or empty
   workspaces; see [Workspace durability](../docs/Runtime-Machines.md#workspace-durability).
+- The origin gateway (`docker/origin-gateway/Dockerfile`, `origin-http-server` with
+  `ORIGIN_MULTI_TENANT=1`) is stateless: it serves every cloud space from its canonical repository
+  under `ORIGIN_GIT_REMOTE_BASE_URL` and keeps no working copy. Leave `ORIGIN_GIT_REMOTE_URL` and
+  `ORIGIN_STAGING_ROOT` unset for it, or it refuses to start. Its workspace volume holds a disposable
+  mirror cache in `.git-cache/` (soft cap `ORIGIN_CACHE_MAX_BYTES`, default 20 GiB; below 2 GiB
+  free on that disk it removes the mirrors no request holds). Run it with an init as PID 1
+  (`docker run --init`, or `init: true` as in `docker/docker-compose.runtime.yml`). Started on the
+  volume of an older, stateful gateway image, it first moves that image's per-space working copies
+  to `.legacy/` on the same volume. Keep that volume, and run `origin-http-server salvage` with a lasting
+  `INSTAFY_NODE_NAME`, as described in
+  [Retiring gateway working copies](../docs/Git-Service.md#retiring-gateway-working-copies), before
+  you replace the node or recreate the volume.
 - Local development remains source-built through
   `docker/docker-compose.runtime.yml` and its
   `instafy-runtime-agent:webdev-local` tag.

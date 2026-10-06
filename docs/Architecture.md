@@ -24,6 +24,10 @@ plugin seam, not a runtime marketplace or arbitrary remote-code loader.
 
 ## Filesystem Model
 - Hosted workers materialize per-space workspaces under `WORKSPACE_ROOT/<project_id>`.
+- The hosted workspace gateway (the controller's `HOSTED_ORIGIN_ENDPOINT`) keeps no working
+  copy: it reads git objects from a disposable per-space mirror and saves each write as a commit
+  on the space's canonical `main` (see
+  [Hosted workspace gateway](Git-Service.md#hosted-workspace-gateway)).
 - Desktop/local-canonical mode can point directly at the user's chosen folder instead of materializing a hosted checkout.
 - Studio and automation should treat the **Origin** as the filesystem API (`/entries`, `/files`, `/raw`, `POST /apply`).
 - Do not persist file contents (“snapshots”) into Postgres; the filesystem is the source of truth.
@@ -85,10 +89,11 @@ We do **not** treat “shared-folder canonical” as a first-class product mode.
 This does **not** require a dedicated public file server. Private storage stays inside the compute network; clients reach files through the Origin HTTP API (direct/reverse-proxy or a tunnel).
 
 ### Git-canonical Notes
-- Files are at rest in the git service as bare repos; checkouts on origin/runtime nodes are cache/working copies.
+- Files are at rest in the git service as bare repos; checkouts on runtime and Desktop nodes are working copies, and the hosted gateway keeps only disposable bare mirrors.
 - The git service is intended to be load-balancable: `git-edge` (stateless) routes to `git-shard-*` (stateful repo storage). See `docs/Git-Service.md`.
 - Studio and agents still use the Origin filesystem API; git is an implementation detail for persistence + reconciliation.
-- Concurrency follows git semantics: allow concurrent branches, protect `main` (fast-forward only; no force pushes), and let runtimes rebase/merge + retry when pushes are rejected.
+- Concurrency follows git semantics: allow concurrent branches, protect `main` (fast-forward only; no force pushes), and let runtimes merge + retry when pushes are rejected. The hosted gateway rebuilds a save on the new `main` and retries.
+- Single-tenant origins (Desktop, workspace runtimes) and the hosted gateway serve the same saved-version routes (`/git/history`, `/git/history/review`, `POST /git/revert-commit`) and unsaved-work routes (`GET /git/recovery`, `POST /git/recovery/restore`, `POST /git/recovery/dismiss`), and decide a restore with the same code (`packages/origin-http-server/src/restore_plan.rs`). Studio's History uses them on both (see [History in Studio](Git-Service.md#history-in-studio)).
 
 ### Choosing A Mode
 - Use **local-canonical** when one person's laptop or workstation should be the source of truth.

@@ -83,7 +83,8 @@ it goes only with its space or its team, whose purge covers it.
   is gone shows a plain "Image unavailable" placeholder. A download that could not reach
   Storage shows "Couldn't load image" with a "Try again" button. Text attachments are listed
   by name.
-- Older images with a `workspacePath` still load through the workspace's raw file route.
+- Older images with a `workspacePath` still load through the workspace's raw file route. An
+  image the gateway salvage exported (below) also has a `storagePath`, and loads from Storage.
 - When a file someone is editing changes underneath them and the two versions together are
   long (over 12,000 characters), the merge request sends them as two `kind: "file"` text
   attachments of that chat instead of writing snapshot files into the workspace. The prompt
@@ -106,6 +107,12 @@ self-hosted runtime, silently gets no attachments: images are missing from the a
 and a large merge request names snapshot files the agent cannot read. Release the runtime
 first, including a Desktop release whose bundled runtime advertises `attachmentDownloads`,
 and only then the web app.
+
+Chat uploads no longer reach a space's history either. The hosted gateway refuses a save of a
+root `chat-upload-*` file or of anything under `artifacts/instafy-merge/` (422 `excluded_path`
+with `reason: "attachment"`), and runtime and Desktop origins never publish one. A client that
+still writes chat images into the workspace therefore cannot send them to a cloud space once the
+stateless gateway runs.
 
 ## Delivery to the runtime
 
@@ -170,6 +177,30 @@ file it does not have.
 
 Older messages whose images were uploaded into the workspace (`workspacePath`) keep working
 wherever that file exists.
+
+### Images only a retired gateway held
+
+On a cloud space, such an image could exist only in a working copy of an earlier, stateful gateway
+image, which the stateless gateway never reads. The gateway's salvage (see
+[Retiring gateway working copies](Git-Service.md#retiring-gateway-working-copies)) exports each
+root `chat-upload-*` image it finds there through
+`POST /internal/projects/:projectId/chat-attachments/legacy?workspacePath=<name>` with the image's
+bytes. Only the controller's internal token or the service-role key itself is accepted, never a
+scoped token.
+
+- The body must be a PNG, JPEG, WebP or GIF image (415 otherwise) of at most 20 MiB (413), and
+  `workspacePath` a `chat-upload-*` name in the space's root (400). The space must exist and not
+  be deleted (404), and Storage must be available (409 `attachments_unavailable` otherwise).
+- For every conversation of the space with a message that names the file, the image is stored
+  once under `<projectId>/<conversationId>/<uuid>.<ext>` with the service role, and each such
+  attachment entry gains `storagePath`, `mimeType` and `sizeBytes` next to the `workspacePath` it
+  keeps. Entries that already name a Storage object are left as they are, so a second call
+  changes nothing.
+- A file no message names is answered `unreferenced: true` and stored nowhere; the salvage keeps
+  it in its private archive.
+- Once an entry has a `storagePath`, the controller handles it as any Storage attachment (see
+  [Delivery to the runtime](#delivery-to-the-runtime)), and a runtime prompt no longer names its
+  old `workspacePath`.
 
 ## Self-hosting
 

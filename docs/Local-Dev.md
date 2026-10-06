@@ -14,6 +14,7 @@ Defaults:
 - Repos stored under `tmp/git-repos/` (override with `GIT_REPO_VOLUME`)
 - `git-edge` auth is enabled by default (`GIT_EDGE_SKIP_AUTH=0`); run `instafy login` to set up git auth (credential helper) for clone/push, or set `GIT_EDGE_SKIP_AUTH=1` for insecure local-only debugging.
 - `git-shard` enforces repo hygiene by default (`GIT_MAX_BLOB_BYTES=20971520`, denies common churn paths like `node_modules/`; see `docs/Git-Service.md`).
+- `origin-gateway` is the stateless multi-tenant gateway: it keeps no working copy, and each save is a commit pushed to the space's `main` through `git-edge`. Its root is `tmp/origin-gateway-workspaces/` (override with `ORIGIN_GATEWAY_WORKSPACE_VOLUME`), where it keeps a disposable mirror cache in `.git-cache/` (deleting it only costs a fetch; `ORIGIN_CACHE_MAX_BYTES` caps it, 20 GiB by default). At every start it moves each folder in that root named like a space id, such as an older gateway's working copy, to `.legacy/`; `origin-http-server salvage` keeps their work (see [Retiring gateway working copies](Git-Service.md#retiring-gateway-working-copies)).
 
 ## Frontend
 - Install deps: `pnpm install`
