@@ -2,12 +2,15 @@ FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca440
 
 LABEL org.opencontainers.image.source="https://github.com/instafy-dev/instafy"
 
-# Explicitly refresh inherited PCRE2; this image has no other apt install step.
+# Explicitly refresh inherited PCRE2 and perl-base; this image has no other apt install step.
 ARG PCRE2_MIN_VERSION=10.42-1+deb12u1
+ARG PERL_BASE_MIN_VERSION=5.36.0-7+deb12u4
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libpcre2-8-0 \
-    && test -n "${PCRE2_MIN_VERSION}" \
+      perl-base \
+    && test -n "${PCRE2_MIN_VERSION}" && test -n "${PERL_BASE_MIN_VERSION}" \
     && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge "${PCRE2_MIN_VERSION}" \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' perl-base)" ge "${PERL_BASE_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
