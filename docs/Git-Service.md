@@ -114,8 +114,9 @@ The hook checks every pushed ref:
 Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)
 - `GIT_DENY_PATHS` (optional, comma-separated glob patterns): additional blocked paths (e.g. `*/vendor/*,*.zip`)
-- `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB): largest pack one push may send. Any value
-  other than a positive whole number of bytes stops the shard from starting.
+- `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB; blank means the default): largest pack one
+  push may send. A non-blank value other than a positive whole number of bytes stops the shard
+  from starting.
 - `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rules and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
@@ -357,7 +358,8 @@ The gateway refuses to start when:
 - `ORIGIN_GIT_BRANCH` is set to anything but `main`.
 - `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL` is `origin@instafy.dev`, the address workspace runtimes and
   Desktop commit under by default.
-- `ORIGIN_CACHE_MAX_BYTES` is set to anything but a positive whole number of bytes.
+- `ORIGIN_CACHE_MAX_BYTES` is set to a non-blank value other than a positive whole number of bytes
+  (blank means the 20 GiB default).
 
 The gateway commits as `ORIGIN_GATEWAY_GIT_AUTHOR_NAME` / `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL`. Without
 them it uses `ORIGIN_GIT_AUTHOR_NAME` / `ORIGIN_GIT_AUTHOR_EMAIL`, except that the runtimes' default
@@ -421,7 +423,8 @@ only costs a fetch.
   exceed `ORIGIN_CACHE_MAX_BYTES` (default 20 GiB), the least recently used mirror that nobody
   has used for an hour. The cap is soft: mirrors in use are never removed for it. When the cache's
   disk has less than 2 GiB free, the sweep removes mirrors nobody holds, however recently used,
-  until it has that much again. `.legacy/` is never touched; its size is logged instead. The sweep
+  until it has that much again. `.legacy/` is never touched; when the disk is short of space, the
+  warning reports its size (measured at most once an hour). The sweep
   also packs a mirror past git's own `gc --auto` limits (about 6,700 loose objects or 50 packs);
   git never runs maintenance in a mirror on its own.
 
@@ -497,7 +500,9 @@ refused write leaves nothing behind.
   first answer's counts with `replayed: true`, and a different fingerprint is 409 `idempotency_conflict`. `POST
   /apply/status {idempotencyKey, requestFingerprint?}` finds the receipt on `main` (a commit under
   the gateway's address, at most 31 days old by its committer date) and answers `{status:
-  "succeeded", rev, baseRev, fileCount, bytesWritten}`, or 404 `not_found`. Imports, and the
+  "succeeded", rev, baseRev, fileCount, bytesWritten}`, or 404 `not_found`; it takes an import
+  token only (400 `idempotency_requires_import` otherwise), and a different `requestFingerprint`
+  is 409 `idempotency_conflict`. Imports, and the
   controller's managed-files applies (`autoCommitAfterApply`), add ignored files as tracked content
   and are not refused for `path_alias`.
 - `POST /git/revert-commit {commit, base?}` saves the inverse of a saved commit, merged onto
@@ -545,18 +550,21 @@ stacks set it up, may have parked runtime checkouts there.
    fails unless its commit is on `main`. Run this right before the image changes, and start no
    import between the two:
    ```sql
-   select id, project_id, status, claim_expires_at
+   select id, project_id, status, claim_expires_at, error_message
      from public.github_import_operations
-    where status in ('pending', 'applied');
+    where status in ('pending', 'applied')
+       or (status = 'failed' and prepared_json is not null);
    ```
-   Wait for each row whose claim is live (`claim_expires_at` in the future) to finish. A row whose
-   claim has expired is an import that stopped part way (at a controller restart, for example),
-   and a retry with the same key resumes it: have it retried while the stateful gateway still
-   serves, so that it finishes there, or, when it cannot be, check on that gateway whether its
-   files were applied and tell the space's owner before you switch. A `failed` row that kept its
-   preparation (`prepared_json`) is resumed the same way when its import is retried; one that
-   failed while its apply was under way (a timeout, for example) may already have been applied on
-   the stateful gateway.
+   Wait for each `pending` or `applied` row whose claim is live (`claim_expires_at` in the future)
+   to finish. A row whose claim has expired is an import that stopped part way (at a controller
+   restart, for example), and a retry with the same key resumes it: have it retried while the
+   stateful gateway still serves, so that it finishes there, or, when it cannot be, check on that
+   gateway whether its files were applied and tell the space's owner before you switch. A `failed`
+   row the query lists kept its preparation (`prepared_json`) and is resumed the same way when its
+   import is retried; one that failed while its apply was under way (a timeout, for example) may
+   already have been applied on the stateful gateway. Treat these rows like the expired ones: have
+   them retried on the stateful gateway, or check there whether their files were applied, before
+   you switch.
 3. Deploy the stateless gateway image. Its start moves the working copies to `.legacy/`.
 4. Run the salvage without `--apply` and read the report, then run it with `--apply`.
 5. Check that every reported `salvageRef` is on canonical (`canonicalVerified: true`) and review
