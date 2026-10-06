@@ -188,9 +188,13 @@ root `chat-upload-*` image it finds there through
 bytes. Only the controller's internal token or the service-role key itself is accepted, never a
 scoped token.
 
-- The body must be a PNG, JPEG, WebP or GIF image (415 otherwise) of at most 20 MiB (413), and
-  `workspacePath` a `chat-upload-*` name in the space's root (400). The space must exist and not
-  be deleted (404), and Storage must be available (409 `attachments_unavailable` otherwise).
+- `workspacePath` must name a `chat-upload-*` file (any letter case) in the space's root: one
+  path segment of at most 255 characters with no control character, `"` or `\`, taken exactly
+  as given (400 `invalid_workspace_path` otherwise). A name with surrounding whitespace is refused,
+  never trimmed, since it names another file than the one messages name. The body must be a PNG,
+  JPEG, WebP or GIF image (400 when empty, 415 otherwise) of at most 20 MiB (413). The space must
+  exist and not be deleted (404), and Storage must be available (409 `attachments_unavailable`
+  otherwise).
 - For every conversation of the space with a message that names the file, the image is stored
   once under `<projectId>/<conversationId>/<uuid>.<ext>` with the service role, and each such
   attachment entry gains `storagePath`, `mimeType` and `sizeBytes` next to the `workspacePath` it

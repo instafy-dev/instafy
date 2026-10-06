@@ -21,9 +21,10 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
 - **Kept after retirement**: `<workspace root>/.salvage/` on the same volume, readable only by the
   gateway server's user, holds what retiring those copies keeps outside canonical: private
   archives (ignored files, credentials, chat images that were not exported, history versions the
-  publish rules refused, and every file of an entry without a usable repository) and bundles of
-  local history canonical lacks. Removing `.legacy/` entries leaves it in place. Keep that volume
-  until [Retiring gateway working copies](#retiring-gateway-working-copies) is done.
+  publish rules refused, files git cannot store, the work tree's own versions of files the salvage
+  merged, and every file of an entry without a usable repository) and bundles of local history
+  canonical lacks. Removing `.legacy/` entries leaves it in place. Keep that volume until
+  [Retiring gateway working copies](#retiring-gateway-working-copies) is done.
 - **Backups**: shard volume snapshots plus periodic encrypted copies to independent durable
   storage. Replication is a later upgrade.
 
@@ -522,7 +523,12 @@ so a copy could hold drafts that never reached canonical. The stateless gateway 
 to `<root>/.legacy/` before it serves and never reads them. `origin-http-server salvage` keeps their
 work, so that they can be removed. It runs inside the gateway's container next to the server
 (`docker exec <gateway container> origin-http-server salvage ...`), touches only `.legacy/` and
-`<root>/.salvage/` (mode 0700), and runs one `--apply` at a time (`.salvage/.lock`).
+`<root>/.salvage/` (mode 0700), and runs one `--apply` at a time (`.salvage/.lock`). It never runs
+on a runtime provider's checkout folder: before it reads anything, a run (a dry run too) exits with
+status 2 when the root looks like one by the rule the gateway's start uses (see
+[Configuration and start](#configuration-and-start)), here also applied to the entries under
+`.legacy/`: a gateway started on a folder it shared with a runtime provider, as earlier local
+stacks set it up, may have parked runtime checkouts there.
 
 ### Switching a deployment
 
@@ -551,56 +557,95 @@ work, so that they can be removed. It runs inside the gateway's container next t
 3. Deploy the stateless gateway image. Its start moves the working copies to `.legacy/`.
 4. Run the salvage without `--apply` and read the report, then run it with `--apply`.
 5. Check that every reported `salvageRef` is on canonical (`canonicalVerified: true`) and review
-   the private archives and bundles with the spaces' owners.
+   the private archives and bundles with the spaces' owners, with every `staleKept` path (a
+   version W keeps that also undoes a change `main` made after the view it came from, so a
+   restore of the ref can undo that change) and every `unsavedRefs` commit (local history only
+   the bundle holds).
 6. Only then remove entries: `--apply --remove`, naming with `--ack` the entries that need it.
 
 Keep the gateway's workspace volume until every entry under `.legacy/` has been removed (step 6)
 and the private archives and bundles under `.salvage/` have been reviewed with the spaces' owners
-or copied to durable storage that only operators can read. Do not change the gateway's server
-type, replace its node or recreate its volume before then: `.legacy/` may hold the only copy of a
-draft, and `.salvage/` stays on the volume after its entries are removed. Verified salvage refs are
-not enough. `.salvage/` holds the only copies of what no salvage ref carries: every private archive
-(ignored files, credentials, chat images that were not exported, history versions the publish
-rules refused), all files of an entry without a usable repository (`noRepository`, which gets no
-salvage ref), and in the bundles the history of an entry whose history was filtered
-(`historyFiltered`) or whose space has no canonical repository (`canonicalMissing`, which gets no
-salvage ref either). Rolling the gateway image back is safe for the drafts, since no gateway image
-reads `.legacy/`.
+or copied to durable storage that only operators can read. Do not change the gateway's server type,
+replace its node or recreate its volume before then: `.legacy/` may hold the only copy of a draft,
+and `.salvage/` stays on the volume after its entries are removed. Verified salvage refs are not
+enough. `.salvage/` holds the only copies of what no salvage ref carries: every private archive
+(ignored files, credentials, chat images that were not exported, history versions the publish rules
+refused, files git cannot store, the work tree's own version of each file W takes merged), all
+files of an entry without a usable repository (`noRepository`, which gets no salvage ref), and in
+the bundles local commits outside HEAD's history (`unsavedRefs`) and the history of an entry whose
+history was filtered (`historyFiltered`) or whose space has no canonical repository
+(`canonicalMissing`, which gets no salvage ref either). Rolling the gateway image back is safe for
+the drafts, since no gateway image reads `.legacy/`.
 
 ### What a run does
 
 For each entry under `.legacy/` (`<space id>` or `<space id>-<suffix>`):
 
 1. The entry's repository is `.instafy/.git`; a plain `.git` is first moved there inside the entry
-   (`legacyLayout`). A dry run moves nothing, so it leaves such an entry uninspected. An entry without a usable repository goes to the private
-   archive whole (`noRepository`), and a link named like a space is never followed (`linkEntry`).
+   (`legacyLayout`). A dry run moves nothing, so it leaves such an entry uninspected. An entry
+   without a usable repository (none, a link or a file where `.instafy`, its `.git` or a part git
+   needs should be, or one that points git at other objects or history) goes to the private archive
+   whole (`noRepository`), and a link named like a space is never followed (`linkEntry`).
 2. Canonical `main` is fetched from `<ORIGIN_GIT_REMOTE_BASE_URL>/<id>.git`, never from the entry's
    own remote, with every received object checked and a `git.read` credential the controller mints
    for the gateway's `ORIGIN_INTERNAL_TOKEN`. A space without a canonical repository is
-   `canonicalMissing`. Every git command runs with hooks off, the entry's config reduced to
-   data-only settings, and replacement refs ignored.
-3. Changed, untracked and ignored paths are sorted. Stale copies of versions `main` already has
-   are left out (`stalePaths`). Ignored files, credentials and merge snapshots go to the private
-   archive. `chat-upload-*` images in the root are exported to the conversations that name them
-   (see [Chat images](#chat-images)). Build output, deny-listed paths, files over 20 MiB,
-   repositories inside the work tree and anything git cannot store are `skippedPaths`. The rest is
-   the entry's work, W.
-4. W is HEAD plus that work, committed under the gateway's identity at HEAD's commit date, so a
+   `canonicalMissing`. The commits an old sync moved the copy away from without its files (the
+   reflog's `reset: moving to origin/main` entries, then `ORIG_HEAD`) are read before the fetch,
+   and the fetch never starts git's automatic maintenance, which could expire those reflog
+   entries. Every git command runs with hooks off, the entry's config reduced to data-only
+   settings, and replacement refs ignored.
+3. Changed, untracked and ignored paths are sorted. Ignored files, credentials and merge snapshots
+   go to the private archive. `chat-upload-*` images in the root are exported to the conversations
+   that name them (see [Chat images](#chat-images)). Build output, deny-listed paths, files over
+   20 MiB, repositories inside the work tree and anything git cannot store are `skippedPaths`. The
+   rest is the entry's work, taken as `git add -A` takes it: a file takes the place of a folder,
+   and a folder's files the place of a file. A swap that would drop an entry nothing changed is
+   left out whole. What git cannot store (such a swap, or a name git never records) is reported
+   with its size, and a file of it up to 20 MiB, or a link, also goes to the private archive
+   (reason `unsupported`), so an `--ack` never drops the only copy.
+4. Stale copies are judged against the commits read in step 2:
+   - A path whose work-tree state is a copy of a version `main` already has (a version in `main`'s
+     history, or the absence of a file `main` added after the view the copy came from) is left
+     out, as HEAD has it (`stalePaths`); where HEAD has a folder, the whole folder comes back. A
+     copy that HEAD's version cannot replace without dropping another change of the work tree's
+     (a file it put where `main` added a folder, or the reverse) stays in W (`staleKept`).
+   - An edit made to a copy of an older view of a file HEAD changed since is merged onto HEAD's
+     version (`staleMerged`; the file as the work tree has it goes to the private archive, reason
+     `merged`). An edit that does not merge (a conflict, binary content, a file `main` added or
+     removed since) stays as the work tree has it, which also undoes HEAD's change (`staleKept`).
+   - HEAD's local commits are judged the same way, since an old save committed what an old sync
+     had left behind: W puts their stale copies back as the commit they were made on has them
+     (`stalePaths`; a copy it cannot put back without dropping another change stays,
+     `staleKept`), and merges their edits to an older view onto that commit's version
+     (`staleMerged`) or keeps them as they are (`staleKept`). The local commits stay below W.
+5. W is HEAD plus that work, committed under the gateway's identity at HEAD's commit date, so a
    rerun makes the same commit. Its subject is `Keep unsaved edits from the retired file gateway`,
-   with an `Instafy-Recovery-Kind: salvage` trailer and `Instafy-Path` and `Instafy-Private-Path:
-   <reason> <path>` trailers (at most 200 of each). Every local commit canonical lacks, and W's own
-   change, is checked against the publish rules; on any hit W becomes one commit on the last commit
-   canonical shares, and the refused local versions go to the private archive (`historyFiltered`).
-5. When `main` does not already hold W, it is pushed create-only to
+   with an `Instafy-Recovery-Kind: salvage` trailer, an `Instafy-Path` trailer for each path the
+   work tree's edits change, and an `Instafy-Private-Path: <reason> <path>` trailer for each
+   work-tree file kept privately as `secret`, `ignored` or `attachment` (at most 200 of each). A
+   chat image that was not exported is archived without one, so a rerun makes the same commit.
+   Every local commit canonical lacks, and W's own change, is checked against the publish rules; on
+   any hit W becomes one commit on the last commit canonical shares, and the refused local
+   versions go to the private archive (`historyFiltered`).
+6. When `main` does not already hold W, it is pushed create-only to
    `refs/instafy/salvage/gateway/<node>-<first 8 hex digits of W>` with a `git.salvage` credential,
    then read back with `git.read` (`canonicalVerified`). An existing ref with the same tip counts
    as verified; one with another tip stops the entry. A path the shard refuses is left as `main` has
    it and W is rebuilt as one commit and pushed again (at most 8 times). A rerun of an entry that
-   still holds what a verified run recorded reports that run's ref and pushes nothing.
-6. With `--apply`, `.salvage/<entry>.bundle` holds the entry's history canonical lacks (all of it
-   when there is no canonical repository), `.salvage/<entry>.private.tar` (mode 0600) the private
-   files, and `.salvage/report.jsonl` one line per entry and run. An entry whose outputs would leave
-   the volume with less than 2 GiB free (the mirror cache's floor) stops before writing them.
+   still holds what a verified run recorded reports that run's ref, with that run's
+   `archivedPaths`, `stalePaths`, `staleKept` and `staleMerged`, and pushes nothing.
+7. Local commits outside HEAD's history are listed in `unsavedRefs`: each `refs/heads/*` tip, and
+   the head a rebase the old gateway never finished started from (`rebase-merge/orig-head` or
+   `rebase-apply/orig-head`), with a commit neither W nor `main` holds. The old gateway saved to
+   its branch and rebased it onto canonical when canonical had moved, so one stopped part way
+   through a rebase left HEAD detached and its saves only on the branch. W is built on HEAD as it
+   is, and a note names the unfinished rebase. Such an entry is never `clean`.
+8. With `--apply`, `.salvage/<entry>.bundle` holds the entry's history canonical lacks (all of it
+   when there is no canonical repository), each `unsavedRefs` commit under
+   `refs/instafy/salvage-local/unsaved-<n>`, `.salvage/<entry>.private.tar` (mode 0600) the
+   private files, and `.salvage/report.jsonl` one line per entry and run. An entry whose outputs
+   would leave the volume with less than 2 GiB free (the mirror cache's floor) stops before
+   writing them.
 
 Without `--apply` nothing is pushed, exported, minted for writing or written under `.salvage/`,
 and no file of an entry's work tree changes. Each entry is still fetched into its own repository
@@ -608,7 +653,9 @@ and W's objects are written there, so the report can name W.
 
 A restore of a salvage ref lists each `Instafy-Private-Path` file in `notRestored` with its reason:
 those files are only in the private archive. The gateway reads these trailers only on commits
-under its own address, and Desktop only on commits by `gateway@instafy.dev`.
+under its own address, and Desktop only on commits by `gateway@instafy.dev`. Files kept privately
+for another reason (`merged`, `unsupported`) and versions taken from local commits get no trailer;
+only the report names them.
 
 ### Flags and environment
 
@@ -619,14 +666,16 @@ origin-http-server salvage [--apply] [--remove] [--root <dir>] [--node <name>]
 
 - `--apply` pushes salvage refs, exports chat images, and writes `.salvage/`.
 - `--remove` also removes each entry that was clean or whose salvage ref is verified, when nothing
-  was skipped outside build output, every chat image was exported or got a final answer, and no
-  history was filtered. Without `--apply` it only reports `wouldRemove`. Any other entry needs
-  `--ack <entry>` (its folder name under `.legacy/`) after review. An entry whose run stopped early
-  (an error, the free-space floor) is never removed, even with `--ack`. A removed entry is first
-  moved to `.salvage/trash/`. Salvage refs and private archives are never removed, and a bundle only
-  once canonical holds the history it has (the ref verified and the history not filtered).
+  was skipped outside build output, `unsavedRefs` and `staleKept` are empty, every chat image was
+  exported or got a final answer, and no history was filtered. Without `--apply` it only reports
+  `wouldRemove`. Any other entry needs `--ack <entry>` (its folder name under `.legacy/`) after
+  review. An entry whose run stopped early (an error, the free-space floor) is never removed, even
+  with `--ack`. A removed entry is first moved to `.salvage/trash/`. Salvage refs and private
+  archives are never removed, and a bundle only once canonical holds the history it has (the ref
+  verified, the history not filtered, and no `unsavedRefs`).
 - `--project <id>` (repeatable) limits the run to those spaces' entries.
-- `--root <dir>` is the workspace root; the default is `ORIGIN_WORKSPACE_ROOT`.
+- `--root <dir>` is the workspace root; the default is `ORIGIN_WORKSPACE_ROOT`. A runtime
+  provider's checkout folder is refused (see above).
 - `--node <name>`, or `INSTAFY_NODE_NAME`, is this gateway's lasting name in salvage refs:
   lower-cased, then `[0-9a-z]` followed by `[0-9a-z._-]`. `--apply` and `--remove` refuse to run
   without one, because a container's host name changes when it is recreated and a new name would
@@ -638,22 +687,25 @@ origin-http-server salvage [--apply] [--remove] [--root <dir>] [--node <name>]
   `ORIGIN_GATEWAY_GIT_AUTHOR_*` and `ORIGIN_GIT_AUTHOR_*`.
 
 The exit status is 0 when every entry was handled, 1 when an entry failed, was not removed, or is
-still there with a chat image a rerun may export, and 2 for a usage or configuration error. Report
-lines go to stdout and, with `--apply`, to `report.jsonl` (a run stops before the next entry when
-either cannot take a line); a summary goes to stderr.
+still there with a chat image a rerun may export, and 2 for a usage or configuration error (a root
+that looks like a runtime provider's checkout folder included). Report lines go to stdout and, with
+`--apply`, to `report.jsonl` (a run stops before the next entry when either cannot take a line); a
+summary goes to stderr.
 
 ### Report
 
 Each line is one entry: `entry`, `project`, `node`, `dryRun`, `inspected`, `head`, `sourceTree`,
-`salvageRef`, `salvageRev`, `canonicalVerified`, `localOnlyCommits`, `subjects`, `archivedPaths`
-(the paths W changes from HEAD), `stalePaths`, `privateArchivedPaths` (`{path, reason, size,
-commit?}`), `privateArchiveBytes`, `exportedAttachments` (`{path, conversations:
-[{conversationId, storagePath, messages}]}`), `attachmentsToExport` (what `--apply` would export),
-`exportFailed` (images a rerun may still export; they hold up `--remove`), `skippedPaths` (`{path,
-size, reason, commit?}`), `historyFiltered`, `bootstrapOnly` (only the project-memory bootstrap
-wrote there), `bundle`, `privateArchive`, `clean`, `legacyLayout`, `noRepository`,
-`canonicalMissing`, `linkEntry`, `notes`, `error`, `removed`, `wouldRemove`, `removeRefused` and
-`bundleRemoved`.
+`salvageRef`, `salvageRev`, `canonicalVerified`, `localOnlyCommits`, `subjects`, `unsavedRefs`
+(`{name, commit, commits, bundleRef}`: where the repository holds the commit, how many commits it
+has that neither W nor `main` has, and its ref in the bundle; they hold up `--remove`),
+`archivedPaths` (the paths the work tree's edits change in W), `stalePaths`, `staleKept` (they hold
+up `--remove`), `staleMerged`, `privateArchivedPaths` (`{path, reason, size, commit?}`),
+`privateArchiveBytes`, `exportedAttachments` (`{path, conversations: [{conversationId, storagePath,
+messages}]}`), `attachmentsToExport` (what `--apply` would export), `exportFailed` (images a rerun
+may still export; they hold up `--remove`), `skippedPaths` (`{path, size, reason, commit?}`),
+`historyFiltered`, `bootstrapOnly` (only the project-memory bootstrap wrote there), `bundle`,
+`privateArchive`, `clean`, `legacyLayout`, `noRepository`, `canonicalMissing`, `linkEntry`,
+`notes`, `error`, `removed`, `wouldRemove`, `removeRefused` and `bundleRemoved`.
 
 `.salvage/` stays on the gateway's volume and is readable only by the server's user: the private
 archives hold credentials and ignored files from the old working copies, and the bundles hold local
@@ -665,13 +717,16 @@ Before chat attachments moved to Storage, the web app wrote each chat image into
 as `chat-upload-*` and recorded that `workspacePath` in the message, so on a hosted space the only
 copy may be in a gateway working copy. The salvage sends each such image once to the controller,
 `POST /internal/projects/<id>/chat-attachments/legacy?workspacePath=<name>` with the image's bytes,
-authenticated with the controller's internal token or the service-role key itself. For each
-conversation with a message that names the file, the controller stores the image once in Storage
-and adds `storagePath`, `mimeType` and `sizeBytes` to those attachment entries; a second call
-changes nothing. A file no message names is answered `unreferenced: true` and stays in the private
-archive. Answers about the file or the space (not an image, over 20 MiB, the space deleted) are
-final; any other failure, such as a server without Storage, keeps the image in the private archive
-as `exportFailed` for a rerun. See [Chat attachments](Chat-Attachments.md).
+authenticated with the controller's internal token or the service-role key itself. Both take the
+name exactly as the file has it: a file whose name has surrounding whitespace is another file than
+the one messages name, so the salvage never exports it, and the controller refuses such a name
+(400) rather than trim it. For each conversation with a message that names the file, the controller
+stores the image once in Storage and adds `storagePath`, `mimeType` and `sizeBytes` to those
+attachment entries; a second call changes nothing. A file no message names is answered
+`unreferenced: true` and stays in the private archive. Answers about the file or the space (not an
+image, over 20 MiB, the space deleted) are final; any other failure, such as a server without
+Storage, keeps the image in the private archive as `exportFailed` for a rerun. See
+[Chat attachments](Chat-Attachments.md).
 
 ## Concurrency (human-style)
 - Agents/runtimes work on branches or local commits.
