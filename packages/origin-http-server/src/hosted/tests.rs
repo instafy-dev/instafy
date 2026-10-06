@@ -724,6 +724,200 @@ async fn a_mirror_broken_on_disk_is_made_again() {
     );
 }
 
+/// Whether the mirror at `mirror` is there and holds no `main` (and no
+/// lock): one just made, not yet cloned into.
+fn made_empty(mirror: &Path) -> bool {
+    mirror.join("HEAD").is_file()
+        && !mirror.join("refs/heads/main.lock").exists()
+        && !mirror.join("refs/heads/main").exists()
+        && !mirror.join("packed-refs").exists()
+}
+
+/// Wait (at most 30 s) until `done` holds.
+async fn until(what: &str, done: impl Fn() -> bool) {
+    let started = std::time::Instant::now();
+    while !done() {
+        assert!(started.elapsed() < Duration::from_secs(30), "{what}");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
+/// A fetch that finds the mirror damaged throws it away and clones it
+/// again. While the new mirror is empty, plain reads, even within the
+/// window in which they reuse the fetch before it, wait for the clone:
+/// a file of the space is never answered absent, its listing never empty,
+/// its history never blank.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mirror_being_made_again_is_never_read_as_an_empty_space() {
+    let sc = HostedScenario::new();
+    let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+    let served = serve_with_cache(
+        &sc,
+        |mut cache| {
+            // The new mirror stays empty a while before it is cloned into,
+            // and the fetch before counts as recent however slow the
+            // machine is.
+            cache.test_remake_delay = Some(Duration::from_secs(2));
+            cache.with_coalesce_window(Duration::from_secs(600))
+        },
+        |state| state,
+    )
+    .await;
+    let read = get(&served, "/files/README.md").await;
+    assert_eq!(read.status, 200);
+    assert_eq!(read.rev().as_deref(), Some(first.as_str()));
+
+    // A lock a killed git left, and a new version on canonical: the next
+    // fetch fails on the lock and makes the mirror again.
+    let lock = sc.mirror().join("refs/heads/main.lock");
+    std::fs::write(&lock, format!("{first}\n")).unwrap();
+    let second = sc.push(&[("README.md", Some(b"two\n"))], "second");
+    let sync = {
+        let base = served.base.clone();
+        tokio::spawn(async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/git/sync"))
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body)
+        })
+    };
+    let mirror = sc.mirror();
+    until("the mirror was not made again", || made_empty(&mirror)).await;
+
+    let answer = get(&served, "/files/README.md").await;
+    assert_eq!(
+        answer.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&answer.body)
+    );
+    assert_eq!(answer.rev().as_deref(), Some(second.as_str()));
+    assert_eq!(decoded(&answer), b"two\n");
+    let answer = get(&served, "/entries").await;
+    assert_eq!(answer.status, 200);
+    assert_eq!(answer.rev().as_deref(), Some(second.as_str()));
+    assert!(
+        answer.json().to_string().contains("README.md"),
+        "{}",
+        answer.json()
+    );
+    let answer = get(&served, "/git/history").await;
+    assert_eq!(answer.status, 200);
+    assert_eq!(answer.json()["entries"][0]["commit"], second.as_str());
+    let (status, body) = sync.await.unwrap();
+    assert_eq!((status, body["rev"].as_str()), (200, Some(second.as_str())));
+}
+
+/// The cache removed while the server runs, and made again (empty) by a
+/// read that names a version: a plain read within the window in which it
+/// would reuse the fetch before waits for the one that fills the new
+/// mirror instead of reading it empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mirror_made_while_serving_is_never_read_as_an_empty_space() {
+    let sc = HostedScenario::new();
+    let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+    let served = serve_with_cache(
+        &sc,
+        |mut cache| {
+            cache.test_fetch_delay = Some(Duration::from_millis(1500));
+            cache.with_coalesce_window(Duration::from_secs(600))
+        },
+        |state| state,
+    )
+    .await;
+    let read = get(&served, "/files/README.md").await;
+    assert_eq!(read.rev().as_deref(), Some(first.as_str()));
+
+    let second = sc.push(&[("README.md", Some(b"two\n"))], "second");
+    std::fs::remove_dir_all(sc.mirror()).unwrap();
+    let pinned = {
+        let url = format!("{}/files/README.md?rev={second}", served.base);
+        tokio::spawn(async move { reqwest::get(url).await.unwrap().status().as_u16() })
+    };
+    let mirror = sc.mirror();
+    until("no read made the mirror", || mirror.join("HEAD").is_file()).await;
+
+    let answer = get(&served, "/files/README.md").await;
+    assert_eq!(
+        answer.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&answer.body)
+    );
+    assert_eq!(answer.rev().as_deref(), Some(second.as_str()));
+    assert_eq!(decoded(&answer), b"two\n");
+    assert_eq!(pinned.await.unwrap(), 200);
+}
+
+/// A plain read that reused a recent fetch and reads `main` only after the
+/// mirror was thrown away and made again (a write's fetch found it damaged
+/// meanwhile) is not answered from the empty mirror: it waits for the clone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_that_reused_a_fetch_never_answers_from_a_mirror_made_since() {
+    let sc = HostedScenario::new();
+    let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+    let mut cache = sc
+        .open_cache()
+        .with_coalesce_window(Duration::from_secs(600))
+        .with_waits(Duration::from_secs(60), Duration::from_secs(60));
+    cache.test_reused_read_delay = Some(Duration::from_secs(4));
+    cache.test_remake_delay = Some(Duration::from_secs(8));
+    let cache = Arc::new(cache);
+    let lease = cache.lease(sc.project);
+    assert_eq!(
+        cache
+            .resolve_main(&lease, Freshness::Coalesced, None)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(first.as_str())
+    );
+    let lock = sc.mirror().join("refs/heads/main.lock");
+    std::fs::write(&lock, format!("{first}\n")).unwrap();
+    let second = sc.push(&[("README.md", Some(b"two\n"))], "second");
+
+    // A plain read reuses that fetch and is held before it reads `main`.
+    let started = std::time::Instant::now();
+    let reader = {
+        let cache = cache.clone();
+        let project = sc.project;
+        tokio::spawn(async move {
+            let lease = cache.lease(project);
+            cache.resolve_main(&lease, Freshness::Coalesced, None).await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Meanwhile a write's fetch finds the lock and makes the mirror again.
+    let writer = {
+        let cache = cache.clone();
+        let project = sc.project;
+        tokio::spawn(async move {
+            let lease = cache.lease(project);
+            cache.resolve_main(&lease, Freshness::Fresh, None).await
+        })
+    };
+    let mirror = sc.mirror();
+    until("the mirror was not made again", || made_empty(&mirror)).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the mirror was made again only after the read looked"
+    );
+
+    assert_eq!(
+        reader.await.unwrap().unwrap().as_deref(),
+        Some(second.as_str())
+    );
+    assert_eq!(
+        writer.await.unwrap().unwrap().as_deref(),
+        Some(second.as_str())
+    );
+}
+
 /// The loose object file of `oid` in the mirror at `mirror`.
 fn loose_object(mirror: &Path, oid: &str) -> PathBuf {
     mirror.join("objects").join(&oid[..2]).join(&oid[2..])

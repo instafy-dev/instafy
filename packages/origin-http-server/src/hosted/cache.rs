@@ -38,7 +38,10 @@
 //! reads an object it could not read) counts, and only once a cheap look at
 //! the mirror finds it so ([`Suspects`]): canonical's own damage, a stream
 //! it sent that the fetch's readers reject, and a transfer cut off part way
-//! are canonical's, answered 502 with the mirror kept.
+//! are canonical's, answered 502 with the mirror kept. A mirror being
+//! thrown away or made is never read as a space without `main`: the fetch
+//! before it no longer counts, so plain reads wait for the one that fills
+//! it (or are told to retry).
 
 use std::collections::HashMap;
 use std::io;
@@ -386,6 +389,20 @@ pub(crate) struct MirrorCache {
     test_packed_while_sweeping: Mutex<Option<bool>>,
     #[cfg(test)]
     pub(crate) test_fetch_delay: Option<Duration>,
+    /// A pause once a damaged mirror is made again, before it is cloned.
+    #[cfg(test)]
+    pub(crate) test_remake_delay: Option<Duration>,
+    /// A pause before a plain read that reused a fetch reads `main`.
+    #[cfg(test)]
+    pub(crate) test_reused_read_delay: Option<Duration>,
+}
+
+/// `entry`'s mirror is about to be thrown away or made: no plain read
+/// reuses a fetch that finished before (it would read an empty or missing
+/// mirror as a space without `main`); reads join the fetch that fills it,
+/// or are told to retry.
+fn forget_fetches(entry: &MirrorEntry) {
+    locked(&entry.fetches).last_success = None;
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -460,6 +477,10 @@ impl MirrorCache {
             test_packed_while_sweeping: Mutex::new(None),
             #[cfg(test)]
             test_fetch_delay: None,
+            #[cfg(test)]
+            test_remake_delay: None,
+            #[cfg(test)]
+            test_reused_read_delay: None,
         })
     }
 
@@ -624,49 +645,76 @@ impl MirrorCache {
         } else {
             self.fetch_wait
         };
-        let fetch = {
-            let mut state = locked(&lease.entry.fetches);
-            match (freshness, state.refetch_since) {
-                // A write pushed a commit the mirror may not show yet: only
-                // a fetch that started after that push will do.
-                (Freshness::Coalesced, Some(since)) => {
-                    Some(self.fresh_fetch(&lease.entry, &mut state, since, caller_token))
-                }
-                (Freshness::Coalesced, None) => {
-                    // A recent fetch counts only while its mirror is there.
-                    let recent = state
-                        .last_success
-                        .is_some_and(|finished| finished.elapsed() < self.coalesce_window)
-                        && std::fs::symlink_metadata(lease.dir()).is_ok();
-                    if recent {
-                        None
-                    } else if let Some(pending) = state.running.as_ref().or(state.queued.as_ref()) {
-                        // A queued fetch is about to start: two fetches
-                        // into one mirror would fight over its refs.
-                        Some(pending.fetch.clone())
-                    } else {
-                        Some(self.start_fetch(&lease.entry, &mut state, None, caller_token))
+        // A plain read that reused an earlier fetch checks that fetch still
+        // counts once it has read: a mirror thrown away or made again while
+        // it looked (which clears the success first) is never answered as a
+        // space without `main`. It then asks again, at most this often
+        // reusing a fetch, then waiting for one.
+        let mut reuses_left = 3usize;
+        loop {
+            let mut reused = None;
+            let fetch = {
+                let mut state = locked(&lease.entry.fetches);
+                match (freshness, state.refetch_since) {
+                    // A write pushed a commit the mirror may not show yet:
+                    // only a fetch that started after that push will do.
+                    (Freshness::Coalesced, Some(since)) => {
+                        Some(self.fresh_fetch(&lease.entry, &mut state, since, caller_token))
+                    }
+                    (Freshness::Coalesced, None) => {
+                        // A recent fetch counts only while its mirror is
+                        // there.
+                        let recent = state
+                            .last_success
+                            .filter(|finished| finished.elapsed() < self.coalesce_window)
+                            .filter(|_| reuses_left > 0)
+                            .filter(|_| std::fs::symlink_metadata(lease.dir()).is_ok());
+                        if let Some(finished) = recent {
+                            reuses_left -= 1;
+                            reused = Some(finished);
+                            None
+                        } else if let Some(pending) =
+                            state.running.as_ref().or(state.queued.as_ref())
+                        {
+                            // A queued fetch is about to start: two fetches
+                            // into one mirror would fight over its refs.
+                            Some(pending.fetch.clone())
+                        } else {
+                            Some(self.start_fetch(&lease.entry, &mut state, None, caller_token))
+                        }
+                    }
+                    (Freshness::Fresh, _) => {
+                        Some(self.fresh_fetch(&lease.entry, &mut state, arrived, caller_token))
                     }
                 }
-                (Freshness::Fresh, _) => {
-                    Some(self.fresh_fetch(&lease.entry, &mut state, arrived, caller_token))
+            };
+            if let Some(fetch) = fetch {
+                match tokio::time::timeout(wait, fetch).await {
+                    Ok(outcome) => outcome.map_err(FetchError::into_origin)?,
+                    Err(_) => return Err(fetch_pending()),
                 }
             }
-        };
-        if let Some(fetch) = fetch {
-            match tokio::time::timeout(wait, fetch).await {
-                Ok(outcome) => outcome.map_err(FetchError::into_origin)?,
-                Err(_) => return Err(fetch_pending()),
+            let dir = lease.dir().to_path_buf();
+            #[cfg(test)]
+            let pause = reused.and(self.test_reused_read_delay);
+            let main = tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some(pause) = pause {
+                    std::thread::sleep(pause);
+                }
+                WorkspaceGit::bare(&dir, None)
+                    .commit_id(MAIN_REF)
+                    .map_err(|error| OriginError::internal(format!("failed to read main: {error}")))
+            })
+            .await
+            .map_err(|error| OriginError::internal(format!("main read task failed: {error}")))?;
+            if let Some(finished) = reused {
+                if locked(&lease.entry.fetches).last_success != Some(finished) {
+                    continue;
+                }
             }
+            return main;
         }
-        let dir = lease.dir().to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            WorkspaceGit::bare(&dir, None)
-                .commit_id(MAIN_REF)
-                .map_err(|error| OriginError::internal(format!("failed to read main: {error}")))
-        })
-        .await
-        .map_err(|error| OriginError::internal(format!("main read task failed: {error}")))?
     }
 
     /// A fetch that starts no earlier than `since`: the running one if it
@@ -807,6 +855,7 @@ impl MirrorCache {
                     // The mirror is only a copy: throw it away. A damaged
                     // one is made again at once; on a full disk that would
                     // fail again, so the next request makes it.
+                    forget_fetches(&entry);
                     if let Err(error) = cache.discard(&dir) {
                         warn!(%project, %error, "could not throw away a damaged mirror");
                         return Err(failure);
@@ -817,6 +866,10 @@ impl MirrorCache {
                         return Err(failure);
                     }
                     let dir = cache.open_mirror(&entry)?;
+                    #[cfg(test)]
+                    if let Some(delay) = cache.test_remake_delay {
+                        std::thread::sleep(delay);
+                    }
                     fetch_main_into(&dir, &url, token.as_deref(), project)
                 }
                 outcome => outcome,
@@ -1050,6 +1103,7 @@ impl MirrorCache {
                 Err(TryLockError::WouldBlock) => return,
             };
             let dir = self.mirror_dir(entry.project);
+            forget_fetches(entry);
             if let Err(error) = self.discard(&dir) {
                 warn!(project = %entry.project, %error, "could not throw away a damaged mirror");
                 return;
@@ -1080,10 +1134,12 @@ impl MirrorCache {
             Ok(metadata) if metadata.file_type().is_dir() => {}
             Ok(_) => {
                 // Never written by the server: throw it away.
+                forget_fetches(entry);
                 self.discard(&dir).map_err(|error| local(error.into()))?;
                 self.create_mirror(&dir).map_err(local)?;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                forget_fetches(entry);
                 self.create_mirror(&dir).map_err(local)?;
             }
             Err(error) => return Err(local(error.into())),
