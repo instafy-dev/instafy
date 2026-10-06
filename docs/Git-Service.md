@@ -17,8 +17,13 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
 - **Not at rest**: the workspace gateway's mirror cache (`<workspace root>/.git-cache/`; deleting any of it only costs a fetch) and runtime checkouts (working copies on ephemeral disk).
 - **Until retired**: `<workspace root>/.legacy/` on the gateway's volume holds the working copies that
   earlier, stateful gateway images kept per space, which may hold drafts that never reached
-  canonical. Keep that volume until [Retiring gateway working copies](#retiring-gateway-working-copies)
-  is done.
+  canonical.
+- **Kept after retirement**: `<workspace root>/.salvage/` on the same volume, readable only by the
+  gateway server's user, holds what retiring those copies keeps outside canonical: private
+  archives (ignored files, credentials, chat images that were not exported, history versions the
+  publish rules refused, and every file of an entry without a usable repository) and bundles of
+  local history canonical lacks. Removing `.legacy/` entries leaves it in place. Keep that volume
+  until [Retiring gateway working copies](#retiring-gateway-working-copies) is done.
 - **Backups**: shard volume snapshots plus periodic encrypted copies to independent durable
   storage. Replication is a later upgrade.
 
@@ -517,10 +522,18 @@ work, so that they can be removed. It runs inside the gateway's container next t
    the private archives and bundles with the spaces' owners.
 6. Only then remove entries: `--apply --remove`, naming with `--ack` the entries that need it.
 
-Until every salvage ref is verified on canonical, keep the gateway's workspace volume. Do not change
-the gateway's server type, replace its node or recreate its volume before then: `.legacy/` may hold
-the only copy of a draft. Rolling the gateway image back is safe for the drafts, since no gateway
-image reads `.legacy/`.
+Keep the gateway's workspace volume until every entry under `.legacy/` has been removed (step 6)
+and the private archives and bundles under `.salvage/` have been reviewed with the spaces' owners
+or copied to durable storage that only operators can read. Do not change the gateway's server
+type, replace its node or recreate its volume before then: `.legacy/` may hold the only copy of a
+draft, and `.salvage/` stays on the volume after its entries are removed. Verified salvage refs are
+not enough. `.salvage/` holds the only copies of what no salvage ref carries: every private archive
+(ignored files, credentials, chat images that were not exported, history versions the publish
+rules refused), all files of an entry without a usable repository (`noRepository`, which gets no
+salvage ref), and in the bundles the history of an entry whose history was filtered
+(`historyFiltered`) or whose space has no canonical repository (`canonicalMissing`, which gets no
+salvage ref either). Rolling the gateway image back is safe for the drafts, since no gateway image
+reads `.legacy/`.
 
 ### What a run does
 

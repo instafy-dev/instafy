@@ -88,10 +88,12 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   free on that disk it removes the mirrors no request holds). Run it with an init as PID 1
   (`docker run --init`, or `init: true` as in `docker/docker-compose.runtime.yml`). Started on the
   volume of an older, stateful gateway image, it first moves that image's per-space working copies
-  to `.legacy/` on the same volume. Keep that volume, and run `origin-http-server salvage` with a lasting
-  `INSTAFY_NODE_NAME`, as described in
-  [Retiring gateway working copies](../docs/Git-Service.md#retiring-gateway-working-copies), before
-  you replace the node or recreate the volume.
+  to `.legacy/` on the same volume. Keep that volume until
+  [Retiring gateway working copies](../docs/Git-Service.md#retiring-gateway-working-copies) is
+  done: run `origin-http-server salvage` with a lasting `INSTAFY_NODE_NAME`, remove every `.legacy/`
+  entry, and review the private archives and bundles it leaves in `.salvage/` with the spaces'
+  owners (or copy `.salvage/` to durable storage that only operators can read) before you replace
+  the node or recreate the volume.
 - Local development remains source-built through
   `docker/docker-compose.runtime.yml` and its
   `instafy-runtime-agent:webdev-local` tag.
