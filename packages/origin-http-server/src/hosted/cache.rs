@@ -266,6 +266,10 @@ pub(crate) struct MirrorEntry {
     /// How often a request found it damaged and threw it away: a request
     /// whose git failed after that is told `mirror_reset` too.
     resets: AtomicU64,
+    /// How often its mirror was about to be thrown away or made
+    /// ([`forget_fetches`]), changed under the `fetches` lock: a read that
+    /// sees it move while it looks asks again.
+    remakes: AtomicU64,
 }
 
 /// A request's hold on one space's mirror. While any exists the mirror is
@@ -395,14 +399,21 @@ pub(crate) struct MirrorCache {
     /// A pause before a plain read that reused a fetch reads `main`.
     #[cfg(test)]
     pub(crate) test_reused_read_delay: Option<Duration>,
+    /// A pause before a read that waited for a fetch (joined or started
+    /// one, plain or fresh) reads `main`.
+    #[cfg(test)]
+    pub(crate) test_waited_read_delay: Option<Duration>,
 }
 
 /// `entry`'s mirror is about to be thrown away or made: no plain read
 /// reuses a fetch that finished before (it would read an empty or missing
-/// mirror as a space without `main`); reads join the fetch that fills it,
-/// or are told to retry.
+/// mirror as a space without `main`), and a read that decided before and
+/// looks after asks again; reads join the fetch that fills it, or are told
+/// to retry.
 fn forget_fetches(entry: &MirrorEntry) {
-    locked(&entry.fetches).last_success = None;
+    let mut state = locked(&entry.fetches);
+    state.last_success = None;
+    entry.remakes.fetch_add(1, Ordering::SeqCst);
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -481,6 +492,8 @@ impl MirrorCache {
             test_remake_delay: None,
             #[cfg(test)]
             test_reused_read_delay: None,
+            #[cfg(test)]
+            test_waited_read_delay: None,
         })
     }
 
@@ -603,6 +616,7 @@ impl MirrorCache {
                     refs: Mutex::new(()),
                     swept: AtomicBool::new(false),
                     resets: AtomicU64::new(0),
+                    remakes: AtomicU64::new(0),
                 })
             })
             .clone();
@@ -651,11 +665,18 @@ impl MirrorCache {
         // space without `main`. It then asks again, at most this often
         // reusing a fetch, then waiting for one.
         let mut reuses_left = 3usize;
+        // Every read, also one that waited for a fetch, checks that its
+        // mirror was not thrown away or made again since it decided (a
+        // later fetch found it damaged): then it asks again, at most this
+        // often, and is otherwise told to retry rather than answered from
+        // an empty mirror.
+        let mut rereads_left = 3usize;
         loop {
             let mut reused = None;
-            let fetch = {
+            let (fetch, remakes) = {
                 let mut state = locked(&lease.entry.fetches);
-                match (freshness, state.refetch_since) {
+                let remakes = lease.entry.remakes.load(Ordering::SeqCst);
+                let fetch = match (freshness, state.refetch_since) {
                     // A write pushed a commit the mirror may not show yet:
                     // only a fetch that started after that push will do.
                     (Freshness::Coalesced, Some(since)) => {
@@ -686,7 +707,8 @@ impl MirrorCache {
                     (Freshness::Fresh, _) => {
                         Some(self.fresh_fetch(&lease.entry, &mut state, arrived, caller_token))
                     }
-                }
+                };
+                (fetch, remakes)
             };
             if let Some(fetch) = fetch {
                 match tokio::time::timeout(wait, fetch).await {
@@ -696,7 +718,11 @@ impl MirrorCache {
             }
             let dir = lease.dir().to_path_buf();
             #[cfg(test)]
-            let pause = reused.and(self.test_reused_read_delay);
+            let pause = if reused.is_some() {
+                self.test_reused_read_delay
+            } else {
+                self.test_waited_read_delay
+            };
             let main = tokio::task::spawn_blocking(move || {
                 #[cfg(test)]
                 if let Some(pause) = pause {
@@ -708,6 +734,15 @@ impl MirrorCache {
             })
             .await
             .map_err(|error| OriginError::internal(format!("main read task failed: {error}")))?;
+            if lease.entry.remakes.load(Ordering::SeqCst) != remakes {
+                if rereads_left > 0 {
+                    rereads_left -= 1;
+                    continue;
+                }
+                if matches!(main, Ok(None)) {
+                    return Err(fetch_pending());
+                }
+            }
             if let Some(finished) = reused {
                 if locked(&lease.entry.fetches).last_success != Some(finished) {
                     continue;
