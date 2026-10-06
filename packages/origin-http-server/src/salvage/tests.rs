@@ -2681,3 +2681,70 @@ fn a_save_a_stopped_rebase_had_not_picked_yet_is_kept() {
     assert_eq!(lines[0]["bundleRemoved"], false, "{:#}", lines[0]);
     assert!(Path::new(&bundle).is_file());
 }
+
+/// An old sync reset the copy onto a newer `main` without its files, so
+/// notes.md held an older version and data.txt looked deleted; the next
+/// save staged every path that differed and committed them with the
+/// person's edit, and its push never happened. The salvage ref keeps that
+/// commit below W, and W puts the stale copies back as the commit it was
+/// made on has them, so a restore brings back the edit alone. The entry is
+/// removed without an acknowledgement: canonical holds its whole history.
+#[test]
+fn stale_copies_an_unpushed_save_committed_are_left_out_of_w() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[("README.md", Some("one\n")), ("notes.md", Some("v1\n"))],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    let c2 = gateway.publish(
+        &[("notes.md", Some("v2\n")), ("data.txt", Some("data\n"))],
+        "c2",
+    );
+    ig(
+        &entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(&entry, &["reset", "-q", "--mixed", "origin/main"]);
+    write(&entry.join("README.md"), b"the person's edit\n");
+    for path in ["README.md", "data.txt", "notes.md"] {
+        ig(&entry, &["add", "-A", "--", path]);
+    }
+    let save = entry_commit(&entry, "Save");
+    assert_eq!(
+        ig(&entry, &["diff", "--name-status", &c2, &save]),
+        "M\tREADME.md\nD\tdata.txt\nM\tnotes.md"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(
+        paths(&report["stalePaths"]),
+        ["data.txt", "notes.md"],
+        "{report:#}"
+    );
+    assert_eq!(report["archivedPaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["localOnlyCommits"], 1);
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    assert_eq!(report["historyFiltered"], false, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["diff", "--name-status", &c2, salvaged]),
+        "M\tREADME.md"
+    );
+    assert_eq!(
+        git_in(&canonical, &["rev-parse", &format!("{salvaged}^")]),
+        save
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+}
