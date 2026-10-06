@@ -142,8 +142,16 @@ impl UpdateAutomationBody {
             || self.result_visibility.is_some()
     }
 
-    fn is_status_only(&self) -> bool {
-        self.status.is_some() && !self.has_settings_updates()
+    fn is_schedule_or_status_only(&self) -> bool {
+        !self.is_empty()
+            && self.mode.is_none()
+            && self.name.is_none()
+            && self.prompt_text.is_none()
+            && self.metadata.is_none()
+            && self.runtime_mode.is_none()
+            && self.runtime_provider.is_none()
+            && self.silent_when_nothing_to_report.is_none()
+            && self.result_visibility.is_none()
     }
 
     fn is_empty(&self) -> bool {
@@ -374,12 +382,16 @@ fn normalize_weekly_days(
     Ok(out)
 }
 
-fn parse_run_at(raw: &str, timezone: &str) -> Result<DateTime<Utc>, (StatusCode, Json<ApiError>)> {
+pub(crate) fn parse_run_at(
+    raw: &str,
+    timezone: &str,
+) -> Result<DateTime<Utc>, (StatusCode, Json<ApiError>)> {
     let value = raw.trim();
     if value.is_empty() {
         return Err(bad_request("runAt is required for once schedules"));
     }
 
+    let tz = parse_tz(timezone).ok_or_else(|| bad_request("timezone must be an IANA timezone"))?;
     if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
         return Ok(parsed.with_timezone(&Utc));
     }
@@ -392,27 +404,12 @@ fn parse_run_at(raw: &str, timezone: &str) -> Result<DateTime<Utc>, (StatusCode,
             bad_request("runAt must be RFC3339 or local datetime (YYYY-MM-DDTHH:MM[:SS])")
         })?;
 
-    let tz = parse_tz(timezone).unwrap_or(chrono_tz::UTC);
-    // Handle DST gaps/overlaps. Prefer earliest mapping when ambiguous.
-    let mut candidate_local = tz.from_local_datetime(&naive).earliest();
-    if candidate_local.is_none() {
-        // If the local time does not exist (DST jump), try bumping forward in 30m steps.
-        for bump in 1..=6i64 {
-            let bumped = naive + ChronoDuration::minutes(30 * bump);
-            candidate_local = tz.from_local_datetime(&bumped).earliest();
-            if candidate_local.is_some() {
-                break;
-            }
-        }
-    }
-
-    let Some(candidate_local) = candidate_local else {
-        return Err(bad_request(
-            "runAt maps to a non-existent local time in the chosen timezone",
-        ));
-    };
-
-    Ok(candidate_local.with_timezone(&Utc))
+    tz.from_local_datetime(&naive)
+        .single()
+        .map(|time| time.with_timezone(&Utc))
+        .ok_or_else(|| {
+            bad_request("runAt is ambiguous or nonexistent in this timezone; choose an explicit offset or another time")
+        })
 }
 
 fn compute_next_run_at(
@@ -571,6 +568,20 @@ pub(crate) fn router() -> Router<AppState> {
 }
 
 pub(crate) fn spawn_automation_scheduler(state: AppState) {
+    // Reminder delivery must not wait for runtime provisioning during another
+    // automation's launch. Neither loop starts model work for a reminder.
+    let reminder_state = state.clone();
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(Duration::from_secs(AUTOMATION_SCHEDULER_TICK_SECONDS));
+        loop {
+            ticker.tick().await;
+            if let Err(error) = crate::recommendations::deliver_due_reminders(&reminder_state).await
+            {
+                warn!(?error, "recommendation reminder tick failed");
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut ticker =
             tokio::time::interval(Duration::from_secs(AUTOMATION_SCHEDULER_TICK_SECONDS));
@@ -1123,25 +1134,51 @@ async fn finalize_automation_attempt(
         .filter(|value| !value.is_empty());
 
     let transaction = connection.transaction().await?;
-    transaction
+    // A user can pause or reschedule while dispatch is in flight. Record this
+    // launch, but never overwrite a newer schedule with the claimed snapshot.
+    // Compare scheduling fields rather than updated_at: an unrelated name or
+    // prompt edit must still let the completed launch advance its next run.
+    let finalized = transaction
         .execute(
             "update automations
              set locked_until = null,
                  last_run_at = $2,
-                 next_run_at = $3,
+                 next_run_at = case when
+                   (schedule_kind, run_at, interval_hours, by_day, by_hour, by_minute, timezone, status, next_run_at)
+                   is not distinct from ($6, $7, $8, $9, $10, $11, $12, $13, $14)
+                   then $3 else next_run_at end,
                  last_error = $4,
-                 status = coalesce($5, status),
+                 status = case when
+                   (schedule_kind, run_at, interval_hours, by_day, by_hour, by_minute, timezone, status, next_run_at)
+                   is not distinct from ($6, $7, $8, $9, $10, $11, $12, $13, $14)
+                   then coalesce($5, status) else status end,
                  updated_at = now()
-             where id = $1",
+             where id = $1 and locked_until is not distinct from $15",
             &[
                 &automation_id,
                 &attempted_at,
                 &next_run_at,
                 &stored_error,
                 &status_override,
+                &record.schedule_kind,
+                &record.run_at,
+                &record.interval_hours,
+                &record.by_day,
+                &record.by_hour,
+                &record.by_minute,
+                &record.timezone,
+                &record.status,
+                &record.next_run_at,
+                &record.locked_until,
             ],
         )
         .await?;
+    if finalized == 0 {
+        // A later claim now owns the schedule. A stale launch must not release
+        // its lock, replace its outcome, or publish a failure notice for it.
+        transaction.commit().await?;
+        return Ok(());
+    }
 
     // A launch failure is told where the work would have happened: a notice in
     // the scheduled conversation (like a runtime alert), and a failed-run row
@@ -1977,10 +2014,29 @@ async fn update_automation(
         ActiveJobProjectAccess::Write,
     )
     .await?;
-    if active_job.is_some() && !body.is_status_only() {
-        return Err(crate::forbidden(
-            "job token may only pause or resume an automation",
-        ));
+    if let Some(active_job) = active_job.as_ref() {
+        if !body.is_schedule_or_status_only() {
+            return Err(crate::forbidden(
+                "job token may only update an automation schedule or status",
+            ));
+        }
+        // Review runs propose useful work; only an interactive reply may change
+        // how often the user hears from Octo. Read controller-owned provenance,
+        // never a caller-supplied flag or conversation title.
+        let review_run: bool = transaction
+            .query_one(
+                "select coalesce(payload #>> '{metadata,spaceReview,enforcedBy}' = 'runtime-controller', false)
+                 from agent_jobs where id = $1",
+                &[&active_job.job_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to check automation job provenance: {error}")))?
+            .get(0);
+        if review_run {
+            return Err(crate::forbidden(
+                "space review runs cannot change automation schedules or status; wait for the user's reply",
+            ));
+        }
     }
     let access_context = active_job
         .as_ref()
@@ -2144,7 +2200,11 @@ async fn update_automation(
         }
         _ => {
             let run_at = if let Some(raw) = body.run_at.as_deref() {
-                Some(parse_run_at(raw, timezone.as_str())?)
+                let requested = parse_run_at(raw, timezone.as_str())?;
+                if requested <= Utc::now() {
+                    return Err(bad_request("runAt must be in the future"));
+                }
+                Some(requested)
             } else {
                 existing_record.run_at
             };
@@ -2507,18 +2567,22 @@ async fn run_automation_now(
     }
     let now = Utc::now();
     let locked_until = now + ChronoDuration::seconds(AUTOMATION_SCHEDULER_LOCK_SECONDS);
-    transaction
-        .execute(
+    let scheduled = transaction
+        .query_one(
             "update automations
              set next_run_at = $2,
                  locked_until = $3,
                  status = 'active',
                  updated_at = now()
-             where id = $1",
+             where id = $1
+             returning *",
             &[&automation_id, &now, &locked_until],
         )
         .await
         .map_err(|error| internal_error(format!("failed to schedule automation: {error}")))?;
+    // Finalization compares against the claim snapshot. A manual run changes
+    // next_run_at and may resume a paused schedule, so dispatch that new snapshot.
+    let record = row_to_record(&scheduled);
 
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit automation run schedule: {error}"))
@@ -2588,39 +2652,30 @@ mod tests {
     }
 
     #[test]
-    fn job_automation_update_accepts_status_only() {
-        assert!(UpdateAutomationBody {
-            status: Some("paused".to_string()),
-            ..UpdateAutomationBody::default()
+    fn job_automation_update_accepts_only_schedule_and_status_fields() {
+        for body in [
+            json!({"status":"paused"}),
+            json!({"status":"active","scheduleKind":"weekly","byDay":["sa"],"byHour":10,"byMinute":0,"timezone":"Europe/Vienna"}),
+            json!({"scheduleKind":"once","runAt":"2030-01-05T18:00:00+01:00"}),
+            json!({"intervalHours":48}),
+        ] {
+            let body: UpdateAutomationBody = serde_json::from_value(body).unwrap();
+            assert!(body.is_schedule_or_status_only());
         }
-        .is_status_only());
-    }
-
-    #[test]
-    fn job_automation_update_rejects_schedule_or_prompt_changes() {
-        assert!(!UpdateAutomationBody {
-            status: Some("active".to_string()),
-            prompt_text: Some("do something else".to_string()),
-            ..UpdateAutomationBody::default()
+        for body in [
+            json!({}),
+            json!({"status":"active","name":"Different job"}),
+            json!({"promptText":"do something else"}),
+            json!({"metadata":{"controllerDispatch":true}}),
+            json!({"runtimeMode":"hosted"}),
+            json!({"runtimeProvider":"other"}),
+            json!({"silentWhenNothingToReport":true}),
+            json!({"resultVisibility":"team"}),
+            json!({"mode":"space_review"}),
+        ] {
+            let body: UpdateAutomationBody = serde_json::from_value(body).unwrap();
+            assert!(!body.is_schedule_or_status_only());
         }
-        .is_status_only());
-        assert!(!UpdateAutomationBody {
-            timezone: Some("Europe/Stockholm".to_string()),
-            ..UpdateAutomationBody::default()
-        }
-        .is_status_only());
-        assert!(!UpdateAutomationBody {
-            status: Some("active".to_string()),
-            silent_when_nothing_to_report: Some(true),
-            ..UpdateAutomationBody::default()
-        }
-        .is_status_only());
-        assert!(!UpdateAutomationBody {
-            status: Some("active".to_string()),
-            result_visibility: Some("team".to_string()),
-            ..UpdateAutomationBody::default()
-        }
-        .is_status_only());
     }
 
     #[test]
@@ -2935,3 +2990,7 @@ mod tests {
 #[cfg(test)]
 #[path = "quiet_space_review_tests.rs"]
 mod quiet_space_review_tests;
+
+#[cfg(test)]
+#[path = "automation_cadence_tests.rs"]
+mod automation_cadence_tests;

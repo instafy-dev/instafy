@@ -153,6 +153,7 @@ const SPACE_REVIEW_TEMPLATE: &str = include_str!(concat!(
 const LEGACY_SPACE_REVIEW_TEMPLATES: &[&str] = &[
     include_str!("legacy/space-review-v1.md"),
     include_str!("legacy/space-review-v2.md"),
+    include_str!("legacy/space-review-v3.md"),
 ];
 const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -166,6 +167,10 @@ const AUTOMATIONS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-automations/SKILL.md"
 ));
+const LEGACY_AUTOMATIONS_TEMPLATES: &[&str] = &[
+    include_str!("legacy/automations-v1.md"),
+    include_str!("legacy/automations-v2.md"),
+];
 const PERSISTENT_CONTEXTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-persistent-contexts/SKILL.md"
@@ -477,7 +482,20 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
-    if !automations_path.exists() {
+    let automations_are_local = automations_path
+        .ancestors()
+        .take_while(|path| *path != workspace_dir)
+        .all(|path| {
+            fs::symlink_metadata(path)
+                .map(|metadata| !metadata.file_type().is_symlink())
+                .unwrap_or_else(|error| error.kind() == std::io::ErrorKind::NotFound)
+        });
+    if automations_are_local
+        && (!automations_path.exists()
+            || fs::read_to_string(&automations_path)
+                .ok()
+                .is_some_and(|content| LEGACY_AUTOMATIONS_TEMPLATES.contains(&content.as_str())))
+    {
         if let Some(parent) = automations_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -1596,6 +1614,66 @@ mod tests {
             fs::read_to_string(&skill).expect("preserved skill"),
             "project-specific review guidance"
         );
+    }
+
+    #[test]
+    fn scaffold_upgrades_bundled_automations_and_preserves_customized_reminders() {
+        let workspace = tempdir().expect("workspace tempdir");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(AUTOMATIONS_RELATIVE_PATH);
+        assert_eq!(fs::read_to_string(&skill).unwrap(), AUTOMATIONS_TEMPLATE);
+        for previous in LEGACY_AUTOMATIONS_TEMPLATES {
+            fs::write(&skill, previous).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&skill).unwrap(), AUTOMATIONS_TEMPLATE);
+            let customized = format!("{previous}\nUse my preferred reminder time.\n");
+            fs::write(&skill, &customized).unwrap();
+            ensure_project_memory_scaffold(workspace.path());
+            assert_eq!(fs::read_to_string(&skill).unwrap(), customized);
+        }
+    }
+
+    #[test]
+    fn conversational_reminder_preferences_load_the_automation_workflow() {
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        for request in [
+            "I don't want to get reminded any more of this",
+            "Remind me tonight",
+            "Let's do that in the weekend",
+            "Check in less often, only on Fridays",
+            "Remind me tonight at 22:30 UTC",
+            "This weekend, after the workshop we discussed",
+        ] {
+            let snapshot = super::super::format_project_memory_snapshot(workspace.path(), request)
+                .expect("reminder memory snapshot");
+            assert!(
+                snapshot.text.contains(AUTOMATIONS_TEMPLATE.trim()),
+                "{request}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scaffold_does_not_upgrade_an_automation_skill_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        let skill = workspace.path().join(AUTOMATIONS_RELATIVE_PATH);
+        let external_skill = outside.path().join("SKILL.md");
+        let previous = LEGACY_AUTOMATIONS_TEMPLATES.last().unwrap();
+        fs::write(&external_skill, previous).unwrap();
+        fs::remove_file(&skill).unwrap();
+        symlink(&external_skill, &skill).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
+        fs::remove_file(&skill).unwrap();
+        fs::remove_dir(skill.parent().unwrap()).unwrap();
+        symlink(outside.path(), skill.parent().unwrap()).unwrap();
+        ensure_project_memory_scaffold(workspace.path());
+        assert_eq!(fs::read_to_string(&external_skill).unwrap(), *previous);
     }
 
     #[cfg(unix)]

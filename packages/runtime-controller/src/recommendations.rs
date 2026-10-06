@@ -1,5 +1,5 @@
 //! Owner-private findings delivered as ordinary chats without executing proposed work.
-//! Skills may submit one opener per run; only a user records acceptance or dismissal.
+//! Skills may submit one opener per run; replies may save narrowly scoped reminder preferences.
 use std::collections::HashSet;
 
 use axum::extract::{Path, Query, State};
@@ -22,6 +22,10 @@ use crate::projects::{ensure_project_access, ensure_project_write_access, load_p
 use crate::{bad_request, internal_error, not_found, ApiError, AppState};
 
 type ApiResult<T> = Result<T, (StatusCode, Json<ApiError>)>;
+
+#[path = "recommendation_feedback.rs"]
+mod feedback;
+pub(crate) use feedback::deliver_due_reminders;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,6 +86,9 @@ struct Recommendation {
     accepted_conversation_id: Option<Uuid>,
     delivered: bool,
     delivered_conversation_id: Option<Uuid>,
+    remind_at: Option<String>,
+    timezone: Option<String>,
+    last_reminded_at: Option<String>,
     created_at: String,
     updated_at: String,
     #[serde(skip)]
@@ -108,6 +115,7 @@ struct Reader {
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        .merge(feedback::router())
         .route(
             "/projects/:project_id/recommendations/review-conversation",
             post(prepare_review_conversation),
@@ -305,6 +313,13 @@ fn map_record(row: Row) -> ApiResult<Recommendation> {
             .get::<_, Option<Uuid>>("delivered_conversation_id")
             .is_some(),
         delivered_conversation_id: row.get("delivered_conversation_id"),
+        remind_at: row
+            .get::<_, Option<DateTime<Utc>>>("remind_at")
+            .map(|time| time.to_rfc3339()),
+        timezone: row.get("reminder_timezone"),
+        last_reminded_at: row
+            .get::<_, Option<DateTime<Utc>>>("last_reminded_at")
+            .map(|time| time.to_rfc3339()),
         created_at: row.get::<_, DateTime<Utc>>("created_at").to_rfc3339(),
         updated_at: row.get::<_, DateTime<Utc>>("updated_at").to_rfc3339(),
         source_conversation_id: row.get("source_conversation_id"),
@@ -898,7 +913,7 @@ async fn decide_recommendation(
     }
     if record.status == RecommendationStatus::Proposed {
         record = map_record(transaction.query_one(
-            "update space_recommendations set status=$2,accepted_conversation_id=$3,updated_at=now() where id=$1 returning *",
+            "update space_recommendations set status=$2,accepted_conversation_id=$3,remind_at=null,reminder_timezone=null,updated_at=now() where id=$1 returning *",
             &[&recommendation_id,&body.status.as_str(),&body.accepted_conversation_id],
         ).await.map_err(|e| internal_error(format!("failed to save recommendation decision: {e}")))?)?;
     }

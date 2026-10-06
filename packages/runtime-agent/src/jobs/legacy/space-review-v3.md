@@ -7,8 +7,6 @@ description: Review accessible recent chats and start at most one useful private
 
 Find one useful reason to start a private conversation with the person who requested this review. Read bounded context and submit a grounded opener through the recommendations CLI. The controller delivers it as a normal Octo chat; the person can reply there. The review itself never carries out the work. Preserve any earlier request and its limits when describing how to continue in that ordinary chat.
 
-If the person is replying to an existing suggestion with “don't remind me,” “remind me tonight,” “let's do this weekend,” or a change to check-in frequency, use `instafy-automations` to save that preference instead of starting another review. Explicit conversational feedback is different from inferring a choice during a background review.
-
 ## Read a bounded slice
 
 Use the existing scoped CLI session; do not request credentials or try another account to expand access.
@@ -28,7 +26,7 @@ If listing prior recommendations fails, explain the limitation and stop before s
 ## Choose zero or one useful conversation
 
 - Prefer unfinished work with a specific useful outcome, an unresolved decision, or a blocker that the person can move forward now. Skip generic maintenance, imagined bugs and work already completed in the evidence.
-- Choose the strongest finding, not a batch of reminders. Read `delivered` and the `accepted` and `dismissed` statuses first. Do not submit that work again under a new key or paraphrase. A dismissed topic stays dismissed; a postponed topic is handled by its saved reminder, not a new review finding. Delivery remains recorded if its chat is archived or deleted; neither absence nor an unreadable private follow-up means the work should be raised again. A chosen action may still be an unsent draft: do not infer execution or completion.
+- Choose the strongest finding, not a batch of reminders. Read `delivered` and the legacy `accepted` and `dismissed` statuses first. Do not submit that work again under a new key or paraphrase. Delivery remains recorded if its chat is archived or deleted; neither absence nor an unreadable private follow-up means the work should be raised again. A chosen action may still be an unsent draft: do not infer execution or completion.
 - Apply previous choices to every human-facing message too. Do not invite reconsideration of declined work or offer already-raised work again unless the person explicitly asks to revisit that specific item. Another review does not reopen earlier choices.
 - A recommendation needs at least one accessible conversation reference that actually supports it. Prefer an exact message ID when returned by the CLI. Never invent identifiers or use the review request itself as evidence for a supposed project problem.
 - Keep the identity and stage of each deliverable separate. A guide draft being ready does not mean a follow-up message draft exists. If the source says the guide is ready and asks to prepare a follow-up for review, acknowledge that request and point to drafting the follow-up next; do not claim an existing follow-up is ready to review or send. Likewise, requested, drafted, reviewed, approved and sent are different states. Resolve pronouns against their actual source and preserve uncertainty when the evidence does not establish a state.
@@ -61,6 +59,6 @@ Replace the example with observed evidence. `messageId` is optional; `conversati
 
 Inspect the response. `delivered: true` records delivery and does not prove the person has replied or the work has started. A legacy terminal status preserves an earlier choice. A scoped review may receive `deliveredConversationId: null` for privacy; do not try to bypass that boundary. On an uncertain submission result, list again and match the stable key before retrying once. A delivery-limit response means stop, not invent another key or omit `message` to work around it.
 
-During a review, do not infer or record choices for the person, call chat creation or send commands, dispatch a follow-up job, create an automation, change settings, install tools, edit project files, contact others or execute the proposed action. The only permitted review delivery is the controller's private opener produced by this submission.
+Do not record choices for the person, call chat creation or send commands, dispatch a follow-up job, create an automation, change settings, install tools, edit project files, contact others or execute the proposed action. The only permitted delivery is the controller's private opener produced by this submission.
 
 For an opted-in quiet space review automation, finish with exactly `NO_RESPONSE` after successful review, whether or not you delivered an opener. Its execution anchor is private internal audit history; the useful message belongs in the delivered chat. Report actual failures instead of hiding them with this sentinel. For a direct request in an ordinary chat, briefly describe the outcome or ask the empty-space starter question. Omit unrelated workspace or Git diagnostics. Do not emit suggested replies; the person can answer Octo in the ordinary conversation.

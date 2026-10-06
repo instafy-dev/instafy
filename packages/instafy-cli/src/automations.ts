@@ -9,6 +9,10 @@ import {
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 import { formatAuthRejectedError, formatAuthRequiredError } from "./errors.js";
 import { findProjectManifest } from "./project-manifest.js";
+import {
+  resolveRuntimeBoundControllerUrl,
+  resolveRuntimeControllerCredential,
+} from "./runtime-controller-binding.js";
 
 type AutomationRecord = {
   id: string;
@@ -131,6 +135,24 @@ function resolveControllerAuth(
   retryCommand: string,
 ): ControllerAuth {
   const cwd = options.cwd ?? process.cwd();
+  // A runtime turn has a leased job credential, not an interactive login. Keep
+  // it bound to its controller rather than falling back to a user profile.
+  const runtimeCredential = options.accessToken?.trim()
+    ? null
+    : resolveRuntimeControllerCredential();
+  if (runtimeCredential) {
+    const controllerUrl = resolveControllerUrl({
+      controllerUrl: options.controllerUrl ?? runtimeCredential.controllerUrl,
+      cwd,
+    });
+    return {
+      controllerUrl: resolveRuntimeBoundControllerUrl(runtimeCredential, controllerUrl),
+      accessToken: runtimeCredential.token,
+      tokenSource: "env",
+      profile: null,
+      cwd,
+    };
+  }
   const controllerUrl = resolveControllerUrl({
     controllerUrl: options.controllerUrl ?? null,
     cwd,
@@ -184,6 +206,7 @@ async function controllerJsonRequest(
         method: params.method,
         headers,
         body: bodyText,
+        redirect: "error",
       },
       accessToken: auth.accessToken,
       tokenSource: auth.tokenSource,
@@ -254,13 +277,13 @@ function listToRecords(payload: unknown): AutomationRecord[] {
 }
 
 function defaultTimezone(): string {
-  for (const raw of [
-    process.env["INSTAFY_CLIENT_TIMEZONE"],
-    process.env["TZ"],
-  ]) {
-    const value = raw?.trim();
-    if (value) return value;
+  const clientTimezone = process.env["INSTAFY_CLIENT_TIMEZONE"]?.trim();
+  if (clientTimezone) return clientTimezone;
+  if (resolveRuntimeControllerCredential()?.kind === "job") {
+    throw new Error("The client's timezone is unknown. Resolve the user's timezone and pass --timezone explicitly before creating an automation.");
   }
+  const hostTimezone = process.env["TZ"]?.trim();
+  if (hostTimezone) return hostTimezone;
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (typeof tz === "string" && tz.trim()) return tz.trim();
@@ -392,6 +415,10 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
   }
 
   const scheduleKind = options.scheduleKind ?? "weekly";
+  if (options.timezone !== undefined && !options.timezone.trim()
+    && resolveRuntimeControllerCredential()?.kind === "job") {
+    throw new Error("--timezone must not be empty for a runtime job. Resolve the user's timezone before creating an automation.");
+  }
   const timezone = (options.timezone ?? defaultTimezone()).trim() || "UTC";
 
   const body: Record<string, unknown> = {

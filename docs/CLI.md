@@ -171,16 +171,27 @@ A same-handle agent in a new chat should not assume it has global memory from ol
 
 Ask to review a space in a normal chat, invoke `$instafy-space-review`, or explicitly schedule
 `automations create --mode space_review`. The bundled skill reads bounded accessible context and
-prior recommendations, then starts at most one useful private Octo chat with a grounded question.
+prior recommendations, then starts at most one useful private Octo chat with a grounded next step.
 It does not execute the suggested work or create a schedule itself. Runtime jobs can read shared
 space chats and their own private conversation tree, not unrelated private chats.
 
 ```bash
 instafy recommendations list --limit 200 --json
 instafy recommendations submit --file - --json
+instafy recommendations current --json
+instafy recommendations dismiss --json
+instafy recommendations remind --at "<future local datetime>" --timezone "Europe/Vienna" --json
 ```
 
-Both commands use the linked space or runtime space ID; `--space <uuid>` selects an explicit
+`current`, `dismiss` and `remind` default to the active runtime conversation; signed-in callers
+can provide `--conversation <UUID>`. They apply to the recommendation delivered into that chat.
+Dismissal cancels its pending reminder. A future postponement replaces the pending time and can
+explicitly reopen a dismissed topic. The response confirms `status`, `remindAt`, `timezone` and
+`lastRemindedAt`. Due reminders are normal messages in that same private chat, without executing
+the suggested work. For overall check-in frequency, use `automations update` or `pause` on the
+existing `mode: "space_review"` schedule instead. See [Space reviews](Space-Review.md).
+
+`list` and `submit` use the linked space or runtime space ID; `--space <uuid>` selects an explicit
 space. User and active scoped-job credentials retain the existing CLI origin binding and
 controller permissions. `list` returns `{ "recommendations": [...] }`, including visible proposed,
 accepted and dismissed items and their `delivered` state. `deliveredConversationId` is redacted
@@ -615,6 +626,10 @@ Add `--json` to any of these commands for machine-readable output.
 
 Create and manage scheduled project prompts with `instafy automations`. When no local space
 manifest is available, pass `--space` to the project-scoped `list` and `create` commands.
+Runtime jobs creating an automation must supply `--timezone` or have a known
+`INSTAFY_CLIENT_TIMEZONE`; an unknown client timezone never falls back to the runtime host's
+zone. An ordinary interactive CLI invocation retains its local timezone default. Omitting
+`--timezone` when updating an automation preserves the saved timezone.
 
 For a bounded review that starts at most one normal private Octo conversation per run:
 

@@ -28,7 +28,7 @@ These commands default to the active runtime conversation. `--conversation <UUID
 
 Inspect the returned `status`, `remindAt` and `timezone` before confirming. If a result is uncertain, read `current` again before retrying. Never claim a reminder or dismissal is saved when the command failed. A `404` on `current` can mean an ordinary chat without a delivered recommendation: use the normal automation flow for the requested reminder or existing schedule. Do not invent a recommendation, dismiss another topic, or fall back to a new automation after a denied/failed preference change.
 
-Keep the reply natural: “I won't bring up this task again,” or a brief confirmation of when you'll remind them here. State the exact saved local date/time for a postponement and mention any assumed time briefly. Don't do the task now or schedule it to run automatically unless the person explicitly requested automatic execution.
+Keep the reply natural: “I won't bring up this task again,” or “I'll remind you here on Saturday, 10 October at 10:00 (Europe/Vienna).” State the exact saved local date/time for a postponement and mention any assumed time briefly. Don't do the task now or schedule it to run automatically unless the person explicitly requested automatic execution.
 
 ## Change the space review cadence
 
@@ -44,7 +44,7 @@ Updating cadence preserves paused status. Resume only when the request asks to s
 
 Use the existing CLI and prefer `--json`. For `automations list` and `create`, pass `--space "<Project ID>"` from the runtime context. `update`, `pause`, `resume`, `run` and `delete` take the observed automation ID and no `--space`.
 
-Use the user's explicitly chosen timezone first, then reliable client context or an established preference applicable to this request. An unknown client timezone is unknown: neither a local timestamp's UTC offset, the server timezone nor the user's language identifies their IANA timezone. Ask only if the needed timezone remains unresolved; an explicit choice already supplied by the user should not trigger another question. Before creating a schedule, list existing automations when the same task may already have one. Update the matching record instead of creating duplicates.
+Interpret dates in the timezone supplied by client context or explicitly chosen by the user. Ask if no reliable timezone is available; never substitute the server timezone or infer it from a language. Before creating a schedule, list existing automations when the same task may already have one. Update the matching record instead of creating duplicates.
 
 Keep an automation's `--prompt` about its task, with timing in schedule flags. For a reminder, the prompt should tell the person to revisit the task, not perform it. Only schedule automatic execution when explicitly requested. For a check that should stay quiet without new findings, pass `--silent-when-nothing-to-report` and describe the meaningful reporting condition in the prompt.
 
@@ -62,9 +62,7 @@ Keep an automation's `--prompt` about its task, with timing in schedule flags. F
 - **Every weekend at 9**:
   - use `--schedule-kind weekly --days sa,su --time 09:00`
 
-“Morning,” “tonight” and “this weekend” have no universal scheduled hour or day. Resolve a future date/time from the person's explicit wording, the current local context and relevant known preferences. When that context supports a reasonable choice, make it and state the assumed time briefly in the confirmation. Ask a short clarification only when the remaining ambiguity would materially change when they are reminded. Don't override an explicit time, schedule in the past, or silently move an elapsed date to a different day or weekend. The mappings above use times explicitly named in their example requests, not fallback defaults.
-
-For an ambiguous or nonexistent local time around a daylight-saving change, clarify a valid time or explicit UTC offset; don't silently choose an occurrence. Confirm the controller's saved time, including any normalization, rather than echoing the input as proof.
+Reasonable defaults, stated in the confirmation: “morning” is `08:00`, “tonight” is `20:00` today, and “this weekend” is Saturday at `10:00`, in the chosen timezone. Compute against the current local date rather than copying example dates. If that candidate is already past, or the phrase could mean different weekends, ask a short clarification instead of silently rolling it forward. For an ambiguous or nonexistent local time around a daylight-saving change, clarify a valid time or explicit UTC offset; don't silently choose an occurrence. Confirm the controller's saved time, including any normalization, rather than echoing the input as proof.
 
 ## Create and verify
 

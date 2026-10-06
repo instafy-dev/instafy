@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { requestControllerApiJson } from "./api.js";
+import { conversationIdFromEnvironment } from "./conversations.js";
 import { findProjectManifest } from "./project-manifest.js";
 
 type CommonOptions = {
@@ -21,6 +22,18 @@ type Recommendation = Proposal & {
   deliveredConversationId?: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type FeedbackOptions = Omit<CommonOptions, "project"> & { conversation?: string };
+type RecommendationFeedback = {
+  recommendationId: string;
+  conversationId: string;
+  projectId: string;
+  title: string;
+  status: "proposed" | "accepted" | "dismissed";
+  remindAt: string | null;
+  timezone: string | null;
+  lastRemindedAt: string | null;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -147,4 +160,52 @@ export async function recommendationsSubmit(options: CommonOptions & { file: str
   if (options.json) console.log(JSON.stringify(response, null, 2));
   else if (response.delivered) console.log(`Recommendation ${response.id} [delivered]: ${response.title}`);
   else console.log(`${response.status === "proposed" ? "Saved" : "Kept"} recommendation ${response.id} [${response.status}]: ${response.title}`);
+}
+
+async function recommendationFeedback(
+  options: FeedbackOptions,
+  change?: { action: "dismiss" } | { action: "remind"; runAt: string; timezone: string },
+): Promise<void> {
+  const current = options.conversation === undefined ? conversationIdFromEnvironment() : options.conversation;
+  if (current === null) throw new Error("No conversation configured. Pass --conversation or set INSTAFY_CONVERSATION_ID.");
+  const id = uuid(current, "Conversation ID");
+  const response = await requestControllerApiJson<RecommendationFeedback>({
+    method: change ? "PATCH" : "GET", path: `/conversations/${id}/recommendation-feedback`,
+    ...(change ? { jsonBody: change } : {}),
+    controllerUrl: options.controllerUrl, accessToken: options.accessToken,
+  });
+  if (!response || !UUID.test(response.recommendationId) || typeof response.conversationId !== "string" || response.conversationId.toLowerCase() !== id.toLowerCase()
+    || !UUID.test(response.projectId) || typeof response.title !== "string"
+    || !["proposed", "accepted", "dismissed"].includes(response.status)
+    || ![response.remindAt, response.timezone, response.lastRemindedAt].every((value) => value === null || typeof value === "string")) {
+    throw new Error("Invalid recommendation feedback response from controller.");
+  }
+  if (change?.action === "dismiss" && (response.status !== "dismissed" || response.remindAt !== null)) {
+    throw new Error("Controller did not confirm dismissal. Read the current recommendation before retrying.");
+  }
+  if (change?.action === "remind" && (!response.remindAt || !response.timezone || response.status === "dismissed")) {
+    throw new Error("Controller did not confirm a reminder. Read the current recommendation before retrying.");
+  }
+  if (options.json) console.log(JSON.stringify(response, null, 2));
+  else if (response.remindAt) console.log(`${response.title}: reminder set for ${response.remindAt} (${response.timezone}).`);
+  else console.log(`${response.title} [${response.status}]. No reminder scheduled.`);
+}
+
+export async function recommendationsCurrent(options: FeedbackOptions): Promise<void> {
+  await recommendationFeedback(options);
+}
+
+export async function recommendationsDismiss(options: FeedbackOptions): Promise<void> {
+  await recommendationFeedback(options, { action: "dismiss" });
+}
+
+export async function recommendationsRemind(options: FeedbackOptions & { at: string; timezone: string }): Promise<void> {
+  const runAt = text(options.at, "Reminder time", 64);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?$/.test(runAt)) {
+    throw new Error("--at must be RFC3339 or a local YYYY-MM-DDTHH:MM[:SS] datetime.");
+  }
+  const timezone = text(options.timezone, "Timezone", 120);
+  try { new Intl.DateTimeFormat("en", { timeZone: timezone }); }
+  catch { throw new Error("--timezone must be an IANA timezone, such as Europe/Vienna."); }
+  await recommendationFeedback(options, { action: "remind", runAt, timezone });
 }

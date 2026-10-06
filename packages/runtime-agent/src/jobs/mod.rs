@@ -2887,10 +2887,15 @@ impl ClientTimezoneGuard {
     }
 
     fn from_metadata(metadata: Option<&JsonValue>) -> Self {
-        extract_client_timezone(metadata)
-            .as_deref()
-            .map(Self::new)
-            .unwrap_or_else(Self::empty)
+        match extract_client_timezone(metadata) {
+            Some(timezone) => Self::new(&timezone),
+            None if client_metadata(metadata).is_some() => Self {
+                // Current client context explicitly has no timezone. An inherited
+                // hint from the runtime host is not this person's preference.
+                _overrides: vec![EnvOverride::remove("INSTAFY_CLIENT_TIMEZONE")],
+            },
+            None => Self::empty(),
+        }
     }
 }
 
@@ -15168,13 +15173,12 @@ fn format_client_context_section(metadata: Option<&JsonValue>) -> Option<String>
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    if timezone.is_none() && locale.is_none() && local_date_time.is_none() {
-        return None;
-    }
-
     let mut formatted = String::from("\nClient context:\n");
     if let Some(value) = timezone {
         let _ = writeln!(formatted, "- Local timezone: {}", value);
+    } else {
+        formatted
+            .push_str("- Local timezone: unknown (the client did not provide an IANA timezone).\n");
     }
     if let Some(value) = locale {
         let _ = writeln!(formatted, "- Local locale: {}", value);
@@ -15186,7 +15190,10 @@ fn format_client_context_section(metadata: Option<&JsonValue>) -> Option<String>
         "- Interpret reminder, automation, and schedule requests from the user's local timezone unless they explicitly say otherwise.\n",
     );
     formatted.push_str(
-        "- If you use `instafy automations create` or `instafy automations update`, always pass `--timezone` explicitly using that local timezone. Do not rely on runtime defaults or assume UTC when a local timezone is available.\n\n",
+        "- A timestamp's UTC offset or locale does not identify the user's IANA timezone. If the client timezone is unknown, use an explicit user choice or a reliable established preference; otherwise ask when a timezone is needed. Do not infer it from the runtime clock or assume UTC.\n",
+    );
+    formatted.push_str(
+        "- For `instafy recommendations remind`, `instafy automations create`, or a schedule update that needs a timezone, always pass `--timezone` explicitly using the resolved timezone. Preserve an explicit user choice over client context.\n\n",
     );
     Some(formatted)
 }
@@ -25159,6 +25166,73 @@ mod tests {
             section.contains("always pass `--timezone` explicitly"),
             "expected explicit automation CLI timezone guidance: {section}"
         );
+    }
+
+    #[test]
+    fn client_context_keeps_unknown_timezone_unknown_despite_offset_or_locale() {
+        for timezone in [JsonValue::Null, json!("   ")] {
+            let metadata = json!({
+                "client": {
+                    "timezone": timezone,
+                    "locale": "en-US",
+                    "localDateTime": "2026-10-05T21:15:00+02:00"
+                },
+                "prompt_metadata": {"client": {"timezone": "Europe/Vienna"}}
+            });
+            let section = format_client_context_section(Some(&metadata)).unwrap();
+            assert!(section.contains("Local timezone: unknown"));
+            assert!(section.contains("Local date/time: 2026-10-05T21:15:00+02:00"));
+            assert!(!section.contains("Local timezone: Europe/Vienna"));
+            assert!(!section.contains("Local timezone: UTC"));
+            assert_eq!(extract_client_timezone(Some(&metadata)), None);
+        }
+    }
+
+    #[test]
+    fn client_context_distinguishes_missing_metadata_unknown_timezone_and_real_utc() {
+        assert!(format_client_context_section(None).is_none());
+        assert!(format_client_context_section(Some(&json!({"other": true}))).is_none());
+        let unknown = format_client_context_section(Some(&json!({
+            "client": {"timezone": null}
+        })))
+        .unwrap();
+        assert!(unknown.contains("Local timezone: unknown"));
+        let utc = json!({"prompt_metadata": {"client": {"timezone": "UTC"}}});
+        let known = format_client_context_section(Some(&utc)).unwrap();
+        assert!(known.contains("Local timezone: UTC\n"));
+        assert_eq!(extract_client_timezone(Some(&utc)).as_deref(), Some("UTC"));
+    }
+
+    #[tokio::test]
+    async fn client_timezone_guard_clears_unknown_hint_but_preserves_background_context() {
+        let _lock = JOB_PROCESS_ENV_LOCK.lock().await;
+        let _timezone = EnvOverride::apply("INSTAFY_CLIENT_TIMEZONE", "Europe/Vienna");
+        let _host_timezone = EnvOverride::apply("TZ", "America/New_York");
+        {
+            let _guard = ClientTimezoneGuard::from_metadata(None);
+            assert_eq!(
+                env::var("INSTAFY_CLIENT_TIMEZONE").unwrap(),
+                "Europe/Vienna"
+            );
+        }
+        {
+            let metadata =
+                json!({"client": {"timezone": null, "localDateTime": "2026-10-05T21:15:00+02:00"}});
+            let _guard = ClientTimezoneGuard::from_metadata(Some(&metadata));
+            assert!(env::var_os("INSTAFY_CLIENT_TIMEZONE").is_none());
+            assert_eq!(env::var("TZ").unwrap(), "America/New_York");
+        }
+        assert_eq!(
+            env::var("INSTAFY_CLIENT_TIMEZONE").unwrap(),
+            "Europe/Vienna"
+        );
+        {
+            let metadata = json!({"client": {"timezone": "UTC"}});
+            let _guard = ClientTimezoneGuard::from_metadata(Some(&metadata));
+            assert_eq!(env::var("INSTAFY_CLIENT_TIMEZONE").unwrap(), "UTC");
+            assert_eq!(env::var("TZ").unwrap(), "UTC");
+        }
+        assert_eq!(env::var("TZ").unwrap(), "America/New_York");
     }
 
     #[test]

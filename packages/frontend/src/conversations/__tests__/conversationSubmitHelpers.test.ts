@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const storage = vi.hoisted(() => ({ upload: vi.fn(), remove: vi.fn() }));
 vi.mock("../../lib/supabaseClient", () => ({
@@ -11,6 +11,8 @@ import { ChatAttachmentUploadError } from "../../lib/chatAttachments";
 import { clearChatAttachmentPreviews, loadChatAttachmentPreview } from "../../lib/chatAttachmentPreviews";
 import {
   CHAT_ATTACHMENT_UPLOAD_CONCURRENCY,
+  buildConversationClientMetadata,
+  detectClientTimezone,
   patchConversationMessageMetadata,
   sanitizeChatUploadFileName,
   uploadConversationAttachments,
@@ -33,6 +35,48 @@ function createMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
 }
 
 describe("conversationSubmitHelpers", () => {
+  describe("client timezone context", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
+    it.each(["Europe/Vienna", "UTC"])("preserves the detected timezone %s", (timezone) => {
+      const resolved = Intl.DateTimeFormat().resolvedOptions();
+      vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+        .mockReturnValue({ ...resolved, timeZone: timezone });
+
+      expect(detectClientTimezone()).toBe(timezone);
+      expect(buildConversationClientMetadata("session", "user").timezone).toBe(timezone);
+    });
+
+    it("sends an explicit unknown timezone when browser detection fails", () => {
+      vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockImplementation(() => {
+        throw new Error("Timezone information unavailable");
+      });
+
+      const metadata = buildConversationClientMetadata("session", "user", new Date("2026-10-05T12:30:00Z"));
+      expect(JSON.parse(JSON.stringify(metadata))).toMatchObject({
+        sessionId: "session", userId: "user", timezone: null,
+      });
+      // The local clock can still be useful context, but its offset does not
+      // identify an IANA timezone or establish future daylight-saving rules.
+      expect(metadata.localDateTime).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+    });
+
+    it("keeps an empty timezone unknown", () => {
+      const resolved = Intl.DateTimeFormat().resolvedOptions();
+      vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+        .mockReturnValue({ ...resolved, timeZone: "  " });
+      expect(detectClientTimezone()).toBeNull();
+    });
+
+    it("keeps the timezone unknown when Intl is unavailable", () => {
+      vi.stubGlobal("Intl", undefined);
+      expect(buildConversationClientMetadata("session", null).timezone).toBeNull();
+    });
+  });
+
   it("sanitizes upload names and falls back to a default name", () => {
     expect(sanitizeChatUploadFileName(" cover shot?.png ")).toBe("cover-shot-.png");
     expect(sanitizeChatUploadFileName("   ")).toBe("image");

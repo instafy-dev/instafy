@@ -8,7 +8,7 @@ import {
 import { seedChatAttachmentPreview } from "../lib/chatAttachmentPreviews";
 import type { ChatMessage } from "../screens/studio/types";
 
-export function detectClientTimezone(): string {
+export function detectClientTimezone(): string | null {
   try {
     if (typeof Intl !== "undefined") {
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -19,7 +19,9 @@ export function detectClientTimezone(): string {
   } catch {
     // ignore
   }
-  return "UTC";
+  // An unavailable browser timezone is unknown, not evidence that the user is
+  // in UTC. Keep that distinction in the context sent to the runtime.
+  return null;
 }
 
 export function detectClientLocale(): string {
