@@ -228,6 +228,10 @@ Cross-workspace aggregation:
 node packages/frontend/tests/playwright/bench/aggregateLearnBenchResults.mjs
 ```
 
+It reads every workspace folder under `tmp/runtime-checkouts/` (`DOCKER_REPO_HOST` when set),
+where the local provider keeps git-canonical runtimes' checkouts, and never the origin gateway's
+folder.
+
 Generated outputs:
 
 - `tmp/bench-rollup/learn-bench-rollup.md`
