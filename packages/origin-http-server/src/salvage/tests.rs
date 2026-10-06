@@ -3068,3 +3068,90 @@ fn a_stale_absence_never_drops_the_work_in_its_place() {
     assert_eq!(paths(&lines[0]["staleKept"]), ["docs/guide.md", "notes"]);
     assert_eq!(summary.exit_code(), 0);
 }
+
+/// `main` replaced a folder with a file of the same name after the copy's
+/// view, and an old sync reset the copy onto it: the folder's untouched
+/// files are stale copies, and so is the absence of `main`'s file. W is
+/// HEAD, and the entry is clean. Where the person edited a file in such a
+/// folder, W keeps the edit, and with it the absence of `main`'s file,
+/// which needs an acknowledgement.
+#[test]
+fn a_stale_folder_where_main_has_a_file_never_deletes_the_file() {
+    let fixture = |edit: bool| {
+        let gateway = Gateway::new();
+        let c1 = gateway.publish(
+            &[
+                ("README.md", Some("one\n")),
+                ("cfg/settings.json", Some("{}\n")),
+            ],
+            "c1",
+        );
+        let entry = gateway.park_checkout_at(&c1);
+        std::fs::remove_dir_all(gateway.seed.join("cfg")).unwrap();
+        let c2 = gateway.publish(&[("cfg", Some("main's file\n"))], "c2");
+        ig(
+            &entry,
+            &[
+                "fetch",
+                "-q",
+                &gateway.url(),
+                "+refs/heads/main:refs/remotes/origin/main",
+            ],
+        );
+        ig(&entry, &["reset", "-q", "--mixed", "origin/main"]);
+        if edit {
+            write(&entry.join("cfg/settings.json"), b"{\"edited\":true}\n");
+        }
+        assert_eq!(
+            ig(&entry, &["status", "--porcelain", "--untracked-files=all"]),
+            " D cfg\n?? cfg/settings.json"
+        );
+        gateway.salvage_mode_hook(&[]);
+        (gateway, c2)
+    };
+    let stub = Stub::default();
+
+    let (gateway, _) = fixture(false);
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(
+        paths(&report["stalePaths"]),
+        ["cfg", "cfg/settings.json"],
+        "{report:#}"
+    );
+    assert_eq!(report["archivedPaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["clean"], true, "{report:#}");
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+    assert!(gateway.salvage_refs().is_empty());
+
+    let (gateway, c2) = fixture(true);
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["stalePaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(paths(&report["staleKept"]), ["cfg"], "{report:#}");
+    assert_eq!(
+        paths(&report["archivedPaths"]),
+        ["cfg", "cfg/settings.json"],
+        "{report:#}"
+    );
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    assert_eq!(
+        git_in(
+            &gateway.canonical(),
+            &["show", &format!("{salvaged}:cfg/settings.json")]
+        ),
+        "{\"edited\":true}"
+    );
+    assert_eq!(
+        git_in(
+            &gateway.canonical(),
+            &["diff", "--no-renames", "--name-status", &c2, salvaged]
+        ),
+        "D\tcfg\nA\tcfg/settings.json"
+    );
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert_eq!(summary.exit_code(), 1);
+}
