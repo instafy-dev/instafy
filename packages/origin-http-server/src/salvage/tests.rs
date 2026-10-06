@@ -3183,8 +3183,9 @@ fn a_stale_absence_never_drops_the_work_in_its_place() {
 /// view, and an old sync reset the copy onto it: the folder's untouched
 /// files are stale copies, and so is the absence of `main`'s file. W is
 /// HEAD, and the entry is clean. Where the person edited a file in such a
-/// folder, W keeps the edit, and with it the absence of `main`'s file,
-/// which needs an acknowledgement.
+/// folder, W keeps the edit (a change to a file `main` has since removed),
+/// and with it the absence of `main`'s file, which needs an
+/// acknowledgement.
 #[test]
 fn a_stale_folder_where_main_has_a_file_never_deletes_the_file() {
     let fixture = |edit: bool| {
@@ -3241,7 +3242,11 @@ fn a_stale_folder_where_main_has_a_file_never_deletes_the_file() {
     let report = &lines[0];
     assert!(report["error"].is_null(), "{report:#}");
     assert_eq!(report["stalePaths"], serde_json::json!([]), "{report:#}");
-    assert_eq!(paths(&report["staleKept"]), ["cfg"], "{report:#}");
+    assert_eq!(
+        paths(&report["staleKept"]),
+        ["cfg", "cfg/settings.json"],
+        "{report:#}"
+    );
     assert_eq!(
         paths(&report["archivedPaths"]),
         ["cfg", "cfg/settings.json"],
@@ -3264,6 +3269,293 @@ fn a_stale_folder_where_main_has_a_file_never_deletes_the_file() {
     );
     assert_eq!(report["removed"], false, "{report:#}");
     assert_eq!(summary.exit_code(), 1);
+}
+
+/// An old sync moves the copy onto canonical `main` without its files.
+fn old_sync_reset(gateway: &Gateway, entry: &Path) {
+    ig(
+        entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(entry, &["reset", "-q", "--mixed", "origin/main"]);
+}
+
+/// The person had notes.md open at C1 while `main` changed its second line
+/// (C2) and later its sixth (C3), and an old sync moved the copy on after
+/// each without its files; the person then edited the last line. The edit
+/// was made on C1's version (the view that holds the most of the file's
+/// lines, not C2's, which a later reset left behind too): W takes it merged
+/// onto HEAD's version, so it keeps both of `main`'s lines and a restore
+/// brings back the edit alone. The file as the work tree has it is kept in
+/// the private archive, and the entry is removed without an
+/// acknowledgement.
+#[test]
+fn an_edit_made_on_a_stale_copy_keeps_mains_newer_lines() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            ("notes.md", Some("a\nb\nc\nd\ne\nf\ng\nh\ni\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    gateway.publish(
+        &[("notes.md", Some("a\nB from main\nc\nd\ne\nf\ng\nh\ni\n"))],
+        "c2",
+    );
+    old_sync_reset(&gateway, &entry);
+    let c3 = gateway.publish(
+        &[
+            (
+                "notes.md",
+                Some("a\nB from main\nc\nd\ne\nF from main\ng\nh\ni\n"),
+            ),
+            ("other.txt", Some("other\n")),
+        ],
+        "c3",
+    );
+    old_sync_reset(&gateway, &entry);
+    let edited = "a\nb\nc\nd\ne\nf\ng\nh\ni edited by the person\n";
+    write(&entry.join("notes.md"), edited.as_bytes());
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain", "--untracked-files=all"]),
+        " M notes.md\n D other.txt"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+    let merged = "a\nB from main\nc\nd\ne\nF from main\ng\nh\ni edited by the person\n";
+    let kept =
+        serde_json::json!([{ "path": "notes.md", "reason": "merged", "size": edited.len() }]);
+
+    // The dry run promises what --apply does.
+    let (_, dry) = salvage(&gateway.settings(false, true, &[]), &stub);
+    let report = &dry[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    let planned = report["salvageRev"].as_str().unwrap();
+    assert_eq!(
+        ig(&entry, &["show", &format!("{planned}:notes.md")]),
+        merged.trim_end()
+    );
+    assert_eq!(paths(&report["staleMerged"]), ["notes.md"], "{report:#}");
+    assert_eq!(report["staleKept"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["privateArchivedPaths"], kept, "{report:#}");
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(paths(&report["stalePaths"]), ["other.txt"], "{report:#}");
+    assert_eq!(report["staleKept"], serde_json::json!([]), "{report:#}");
+    assert_eq!(paths(&report["staleMerged"]), ["notes.md"], "{report:#}");
+    assert_eq!(paths(&report["archivedPaths"]), ["notes.md"], "{report:#}");
+    assert_eq!(report["privateArchivedPaths"], kept, "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["rev-parse", &format!("{salvaged}^")]),
+        c3
+    );
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:notes.md")]),
+        merged.trim_end()
+    );
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(tar_listing(&archive), vec!["worktree/notes.md".to_string()]);
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+}
+
+/// An old sync left C1's notes.md behind, the old gateway's discard gave
+/// the work tree HEAD's version back, and the person then edited the line
+/// after `main`'s change: the edit was made on HEAD's version, which holds
+/// more of the file's lines than C1's, so W takes the work tree's file as
+/// it is, and the entry is removed without an acknowledgement.
+#[test]
+fn an_edit_made_on_heads_version_is_the_work_trees_own() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            ("notes.md", Some("a\nb\nc\nd\ne\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    let c2 = gateway.publish(&[("notes.md", Some("a\nB from main\nc\nd\ne\n"))], "c2");
+    old_sync_reset(&gateway, &entry);
+    ig(&entry, &["checkout", "-q", "HEAD", "--", "notes.md"]);
+    let edited = "a\nB from main\nc edited by the person\nd\ne\n";
+    write(&entry.join("notes.md"), edited.as_bytes());
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain", "--untracked-files=all"]),
+        " M notes.md"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["staleKept"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["staleMerged"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["stalePaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(paths(&report["archivedPaths"]), ["notes.md"], "{report:#}");
+    assert_eq!(
+        report["privateArchivedPaths"],
+        serde_json::json!([]),
+        "{report:#}"
+    );
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    assert_eq!(
+        git_in(
+            &gateway.canonical(),
+            &["show", &format!("{salvaged}:notes.md")]
+        ),
+        edited.trim_end()
+    );
+    assert_eq!(
+        git_in(
+            &gateway.canonical(),
+            &["rev-parse", &format!("{salvaged}^")]
+        ),
+        c2
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+}
+
+/// The same edit, committed by an old save whose push never happened: the
+/// save made it on C1's version of notes.md, so W takes it merged onto the
+/// version of the commit the save was made on. The save stays below W, on
+/// canonical, and a restore brings back the edit alone; the entry is
+/// removed without an acknowledgement.
+#[test]
+fn an_edit_an_unpushed_save_made_on_a_stale_copy_keeps_mains_newer_lines() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            ("notes.md", Some("a\nb\nc\nd\ne\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    let c2 = gateway.publish(&[("notes.md", Some("a\nB from main\nc\nd\ne\n"))], "c2");
+    old_sync_reset(&gateway, &entry);
+    write(
+        &entry.join("notes.md"),
+        b"a\nb\nc\nd\ne edited by the person\n",
+    );
+    ig(&entry, &["add", "-A", "--", "notes.md"]);
+    let save = entry_commit(&entry, "Save");
+    assert_eq!(ig(&entry, &["status", "--porcelain"]), "");
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:notes.md")]),
+        "a\nB from main\nc\nd\ne edited by the person"
+    );
+    assert_eq!(
+        git_in(&canonical, &["rev-parse", &format!("{salvaged}^")]),
+        save
+    );
+    assert_eq!(
+        git_in(&canonical, &["diff", "--name-status", &c2, salvaged]),
+        "M\tnotes.md"
+    );
+    assert_eq!(paths(&report["staleMerged"]), ["notes.md"], "{report:#}");
+    assert_eq!(report["staleKept"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["stalePaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["archivedPaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(
+        report["privateArchivedPaths"],
+        serde_json::json!([]),
+        "{report:#}"
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+}
+
+/// The same edit next to `main`'s newer line does not merge: W keeps the
+/// work tree's version (`staleKept`), and the entry is removed only with an
+/// acknowledgement. A deletion of a file `main` changed after the view the
+/// work tree came from drops the file whatever version it held, and is
+/// salvaged as it is.
+#[test]
+fn a_change_made_on_a_stale_copy_that_does_not_merge_needs_an_ack() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            ("guide.md", Some("g1\n")),
+            ("notes.md", Some("a\nb\nc\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    let c2 = gateway.publish(
+        &[
+            ("guide.md", Some("g2\n")),
+            ("notes.md", Some("a\nB from main\nc\n")),
+        ],
+        "c2",
+    );
+    old_sync_reset(&gateway, &entry);
+    write(&entry.join("notes.md"), b"a\nb\nc edited by the person\n");
+    std::fs::remove_file(entry.join("guide.md")).unwrap();
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain", "--untracked-files=all"]),
+        " D guide.md\n M notes.md"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["stalePaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(paths(&report["staleKept"]), ["notes.md"], "{report:#}");
+    assert_eq!(report["staleMerged"], serde_json::json!([]), "{report:#}");
+    assert_eq!(
+        paths(&report["archivedPaths"]),
+        ["guide.md", "notes.md"],
+        "{report:#}"
+    );
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["diff", "--name-status", &c2, salvaged]),
+        "D\tguide.md\nM\tnotes.md"
+    );
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:notes.md")]),
+        "a\nb\nc edited by the person"
+    );
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert!(report["removeRefused"]
+        .as_str()
+        .unwrap()
+        .contains("staleKept"));
+    assert_eq!(summary.exit_code(), 1);
+
+    let name = gateway.project.to_string();
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[name.as_str()]), &stub);
+    assert_eq!(lines[0]["removed"], true, "{:#}", lines[0]);
+    assert_eq!(summary.exit_code(), 0);
 }
 
 /// Revision text read from the entry's files (a reflog line) or from the

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::git::{is_full_object_id, is_sync_reserved_path};
@@ -735,6 +735,276 @@ pub(crate) fn stale_paths(
         }
     }
     Ok(stale)
+}
+
+/// What W does with a change the work tree made to an older view of a file
+/// HEAD changed since.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OnOldView {
+    /// The change merges onto HEAD's version: W takes this `(mode, blob)`
+    /// (`None`: no file).
+    Merged(Option<(String, String)>),
+    /// It does not: W keeps the work tree's version, which also undoes
+    /// HEAD's newer change.
+    Kept,
+}
+
+/// The paths among `changed` (W's entries for paths that are not stale
+/// copies) whose change from HEAD was made to an older view of the file:
+/// an old sync moved the branch onto a `main` that had changed the file
+/// without touching the work tree, and the person edited the copy the work
+/// tree still held. W's change would also undo `main`'s, unnoticed.
+///
+/// The views are the merge bases of [`old_heads`] with HEAD (for a local
+/// commit the reset abandoned, the commit it was made on, so its own edits
+/// count as the work tree's). Only a regular file the work tree holds is
+/// judged: a deletion drops the file whatever version it held, and a path
+/// HEAD holds as a folder is left to the folder rules. The work tree's file
+/// came from the version that lacks the fewest of its lines (then the one
+/// with the fewest lines the file lacks); when that is HEAD's, the change
+/// is the work tree's own. Otherwise it is merged with HEAD's version, as
+/// the old single-tenant repair merged such files: when it merges cleanly
+/// (from every view that near), W takes the result unless the work tree
+/// already holds it; when it does not (a conflict, binary content, a file
+/// `main` added or removed since), W keeps the work tree's version.
+pub(crate) fn changes_on_old_views(
+    git: &WorkspaceGit<'_>,
+    old_heads: &[String],
+    head: &str,
+    changed: &BTreeMap<String, Option<TreeEntry>>,
+) -> Result<BTreeMap<String, OnOldView>> {
+    let mut found = BTreeMap::new();
+    if changed.is_empty() || old_heads.is_empty() {
+        return Ok(found);
+    }
+    let paths: Vec<String> = changed.keys().cloned().collect();
+    let at_head = git.tree_entries(head, &paths)?;
+    let open: Vec<String> = paths
+        .into_iter()
+        .filter(|path| {
+            let ours = at_head.get(path);
+            let theirs = changed[path].as_ref();
+            theirs.is_some_and(is_regular)
+                && ours.is_none_or(is_regular)
+                && !same_entry(ours, theirs)
+        })
+        .collect();
+    if open.is_empty() {
+        return Ok(found);
+    }
+    let mut views = Vec::new();
+    let mut bases = BTreeSet::new();
+    for old in old_heads {
+        // Only an object id read from the reflog reaches git's arguments.
+        if !is_full_object_id(old) {
+            continue;
+        }
+        let Some(old) = git.commit_id(old).ok().flatten() else {
+            continue;
+        };
+        let Some(base) = git.merge_base(&old, head).ok().flatten() else {
+            continue;
+        };
+        if bases.insert(base.clone()) {
+            views.push(git.tree_entries(&base, &open)?);
+        }
+    }
+    let mut scratch = None;
+    let mut empty = None;
+    for path in open {
+        let ours = at_head.get(&path);
+        let theirs = changed[&path].as_ref();
+        // Each distinct version a view held that HEAD no longer has; a
+        // folder or a link there is no version of this file.
+        let mut older: Vec<Option<&TreeEntry>> = Vec::new();
+        for entries in &views {
+            let view = entries.get(&path);
+            if view.is_some_and(|entry| !is_regular(entry))
+                || same_entry(view, ours)
+                || older.iter().any(|known| same_entry(*known, view))
+            {
+                continue;
+            }
+            older.push(view);
+        }
+        if older.is_empty() {
+            continue;
+        }
+        let Some(from_head) = lines_apart(git, &mut empty, ours, theirs)? else {
+            found.insert(path, OnOldView::Kept);
+            continue;
+        };
+        let mut nearest: Vec<Option<&TreeEntry>> = Vec::new();
+        let mut best = None;
+        let mut unknown = false;
+        for view in older {
+            let Some(apart) = lines_apart(git, &mut empty, view, theirs)? else {
+                unknown = true;
+                break;
+            };
+            match best {
+                Some(known) if apart > known => {}
+                Some(known) if apart == known => nearest.push(view),
+                _ => {
+                    best = Some(apart);
+                    nearest = vec![view];
+                }
+            }
+        }
+        if unknown {
+            found.insert(path, OnOldView::Kept);
+            continue;
+        }
+        if best.is_none_or(|(lacking, _)| from_head.0 < lacking) {
+            // The work tree's file came from HEAD's version.
+            continue;
+        }
+        let mut result: Option<Option<(String, String)>> = None;
+        let mut kept = false;
+        for view in nearest {
+            match merge_view_onto_head(git, &mut scratch, view, ours, theirs)? {
+                Some(merged) if result.as_ref().is_none_or(|known| *known == merged) => {
+                    result = Some(merged);
+                }
+                _ => {
+                    kept = true;
+                    break;
+                }
+            }
+        }
+        if kept {
+            found.insert(path, OnOldView::Kept);
+            continue;
+        }
+        let Some(merged) = result else {
+            continue;
+        };
+        let held = theirs.map(|entry| (entry.mode.clone(), entry.oid.clone()));
+        if merged != held {
+            found.insert(path, OnOldView::Merged(merged));
+        }
+    }
+    Ok(found)
+}
+
+fn is_regular(entry: &TreeEntry) -> bool {
+    matches!(entry.mode.as_str(), "100644" | "100755")
+}
+
+/// How many lines of `to` the version `from` lacks, and how many of its
+/// own lines `to` lacks (no file counts as an empty one); `None` for binary
+/// content.
+fn lines_apart(
+    git: &WorkspaceGit<'_>,
+    empty: &mut Option<String>,
+    from: Option<&TreeEntry>,
+    to: Option<&TreeEntry>,
+) -> Result<Option<(u64, u64)>> {
+    if same_entry(from, to) {
+        return Ok(Some((0, 0)));
+    }
+    let mut blob = |entry: Option<&TreeEntry>| -> Result<String> {
+        if let Some(entry) = entry {
+            return Ok(entry.oid.clone());
+        }
+        if empty.is_none() {
+            *empty = Some(git.stdout_opts(
+                &["hash-object", "-w", "--stdin"],
+                &RunOpts {
+                    stdin: Some(&[][..]),
+                    ..RunOpts::default()
+                },
+            )?);
+        }
+        empty.clone().context("no empty blob")
+    };
+    let (from, to) = (blob(from)?, blob(to)?);
+    // Only object ids reach git's arguments.
+    if !is_full_object_id(&from) || !is_full_object_id(&to) {
+        return Ok(None);
+    }
+    let numstat = git.stdout(&[
+        "diff",
+        "--numstat",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        &from,
+        &to,
+    ])?;
+    let mut fields = numstat.split('\t');
+    let added = fields.next().unwrap_or("0");
+    let removed = fields.next().unwrap_or("0");
+    Ok(match (added.parse(), removed.parse()) {
+        (Ok(added), Ok(removed)) => Some((added, removed)),
+        _ if numstat.is_empty() => Some((0, 0)),
+        _ => None,
+    })
+}
+
+/// The work tree's change from `view` (`theirs`) made on HEAD's version
+/// (`ours`): `Some` with the entry W takes, or `None` when they do not
+/// merge. Merged content is written as a blob.
+fn merge_view_onto_head(
+    git: &WorkspaceGit<'_>,
+    scratch: &mut Option<tempfile::TempDir>,
+    view: Option<&TreeEntry>,
+    ours: Option<&TreeEntry>,
+    theirs: Option<&TreeEntry>,
+) -> Result<Option<Option<(String, String)>>> {
+    let entry = |entry: &TreeEntry| (entry.mode.clone(), entry.oid.clone());
+    if same_entry(view, theirs) {
+        // The work tree holds the view's version: HEAD's replaces it.
+        return Ok(Some(ours.map(entry)));
+    }
+    let (Some(view), Some(ours), Some(theirs)) = (view, ours, theirs) else {
+        return Ok(None);
+    };
+    if !(is_regular(view) && is_regular(ours) && is_regular(theirs)) {
+        return Ok(None);
+    }
+    let blobs = git.read_objects(&[view.oid.clone(), ours.oid.clone(), theirs.oid.clone()])?;
+    let [base, head, work] = blobs.as_slice() else {
+        bail!("git returned {} of three blobs", blobs.len());
+    };
+    if scratch.is_none() {
+        *scratch = Some(
+            tempfile::Builder::new()
+                .prefix("instafy-merge-")
+                .tempdir_in(git.git_dir())?,
+        );
+    }
+    let folder = scratch
+        .as_ref()
+        .map(|dir| dir.path())
+        .context("no folder to merge in")?;
+    let Some(content) =
+        crate::tree_merge::merge_file(git, folder, &base.data, &head.data, &work.data)?
+    else {
+        return Ok(None);
+    };
+    // Only one side changing the executable bit decides it.
+    let mode = if ours.mode == theirs.mode || theirs.mode == view.mode {
+        ours.mode.clone()
+    } else {
+        theirs.mode.clone()
+    };
+    let oid = git.stdout_opts(
+        &["hash-object", "-w", "--stdin"],
+        &RunOpts {
+            stdin: Some(&content),
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(Some(Some((mode, oid))))
+}
+
+fn same_entry(a: Option<&TreeEntry>, b: Option<&TreeEntry>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.mode == b.mode && a.oid == b.oid,
+        _ => false,
+    }
 }
 
 /// Every `(mode, blob)` each path held anywhere in `main`'s history.

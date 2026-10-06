@@ -69,6 +69,7 @@ pub(crate) struct Recorded {
     pub archived_paths: Vec<String>,
     pub stale_paths: Vec<String>,
     pub stale_kept: Vec<String>,
+    pub stale_merged: Vec<String>,
 }
 
 /// A path an earlier run left out.
@@ -141,7 +142,7 @@ mod tests {
         };
         assert!(verified_refs(&settings).unwrap().is_empty());
         let lines = [
-            r#"{"entry":"a","dryRun":false,"canonicalVerified":true,"head":"h1","sourceTree":"t1","salvageRef":"refs/instafy/salvage/gateway/n-1","salvageRev":"r1","skippedPaths":[{"path":"x.zip","size":0,"reason":"policy"}],"archivedPaths":["a.txt"],"stalePaths":["b.txt"],"staleKept":["c.txt"]}"#,
+            r#"{"entry":"a","dryRun":false,"canonicalVerified":true,"head":"h1","sourceTree":"t1","salvageRef":"refs/instafy/salvage/gateway/n-1","salvageRev":"r1","skippedPaths":[{"path":"x.zip","size":0,"reason":"policy"}],"archivedPaths":["a.txt"],"stalePaths":["b.txt"],"staleKept":["c.txt"],"staleMerged":["d.txt"]}"#,
             // A later line without a verified ref keeps the earlier one.
             r#"{"entry":"a","dryRun":false,"canonicalVerified":false,"salvageRef":"refs/instafy/salvage/gateway/n-2","salvageRev":"r2"}"#,
             r#"{"entry":"b","dryRun":false,"canonicalVerified":true,"salvageRef":"refs/instafy/salvage/gateway/n-3","salvageRev":"r3","historyFiltered":true}"#,
@@ -191,6 +192,7 @@ mod tests {
                 archived_paths: vec!["a.txt".to_string()],
                 stale_paths: vec!["b.txt".to_string()],
                 stale_kept: vec!["c.txt".to_string()],
+                stale_merged: vec!["d.txt".to_string()],
             }
         );
         assert_eq!(verified["b"].salvage_rev.as_deref(), Some("r4"));

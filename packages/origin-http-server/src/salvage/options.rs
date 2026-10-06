@@ -22,8 +22,10 @@ each entry is classified and reported as one JSON line on stdout.
                     private archives and report.jsonl under <root>/.salvage/
   --remove          also remove each entry whose work is on canonical (or that
                     was clean); only with --apply does anything get removed.
-                    An entry with paths left out, a chat image a rerun may
-                    still export, or a filtered history needs --ack
+                    An entry with paths left out, local commits only its
+                    bundle holds, work that would undo a newer change of
+                    main's (staleKept), a chat image a rerun may still
+                    export, or a filtered history needs --ack
   --ack <entry>     remove this entry even without a canonical record
                     (repeatable; the entry's folder name under .legacy/);
                     never one whose run stopped with an error

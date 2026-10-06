@@ -265,6 +265,39 @@ impl WorkIndex {
             .collect())
     }
 
+    /// Give each path the entry `(mode, blob)` (`None`: no entry). Each is
+    /// a path the index holds as a file or not at all, as is its new entry,
+    /// so none takes another's place.
+    pub(crate) fn put(
+        &self,
+        git: &WorkspaceGit<'_>,
+        entries: &[(String, Option<(String, String)>)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let zero = zero_oid(&git.empty_tree()?);
+        let mut info = Vec::new();
+        for (path, _) in entries {
+            info.extend_from_slice(format!("0 {zero}\t{path}").as_bytes());
+            info.push(0);
+        }
+        for (path, entry) in entries {
+            if let Some((mode, oid)) = entry {
+                info.extend_from_slice(format!("{mode} {oid}\t{path}").as_bytes());
+                info.push(0);
+            }
+        }
+        git.ok_opts(
+            &["update-index", "-z", "--index-info"],
+            &RunOpts {
+                index_file: Some(&self.index),
+                stdin: Some(&info),
+                ..RunOpts::default()
+            },
+        )
+    }
+
     pub(crate) fn write_tree(&self, git: &WorkspaceGit<'_>) -> Result<String> {
         git.stdout_opts(&["write-tree"], &self.opts())
     }

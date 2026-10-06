@@ -222,7 +222,7 @@ fn is_regular(mode: &str) -> bool {
 }
 
 /// Merge three versions of a file. `None` when they conflict or are binary.
-fn merge_file(
+pub(crate) fn merge_file(
     git: &WorkspaceGit<'_>,
     scratch: &std::path::Path,
     base: &[u8],
