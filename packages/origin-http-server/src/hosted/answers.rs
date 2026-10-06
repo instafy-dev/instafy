@@ -89,6 +89,17 @@ pub(super) fn path_type_conflict(head: Option<&str>, paths: Vec<String>) -> Orig
     )
 }
 
+/// New paths of a person's save that `main` holds under another spelling
+/// ([`crate::restore_plan::alias_clashes`]).
+pub(super) fn path_alias(head: Option<&str>, paths: Vec<String>) -> OriginError {
+    report(
+        StatusCode::CONFLICT,
+        "path_alias",
+        crate::apply::PATH_ALIAS_MESSAGE,
+        with_fields(listed(paths), serde_json::json!({ "head": head })),
+    )
+}
+
 pub(crate) fn main_busy() -> OriginError {
     report(
         StatusCode::CONFLICT,

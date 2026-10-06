@@ -489,6 +489,63 @@ impl Space {
         let body: serde_json::Value = response.json().await.unwrap();
         body["entries"].as_array().unwrap().clone()
     }
+
+    /// A person's save of `bytes` at `path` through `mode`, as a client's
+    /// "Use this version" sends it: read at `main`, and on Desktop on
+    /// condition that the folder still holds what it reads there now
+    /// (`expected`: the blob it serves for the path, or nothing). With
+    /// `managed`, the controller's managed-files write instead
+    /// (`autoCommitAfterApply`). The status and the body.
+    async fn save_in(
+        &self,
+        mode: Mode,
+        path: &str,
+        bytes: &[u8],
+        managed: bool,
+    ) -> (u16, serde_json::Value) {
+        let server = self.server(mode);
+        let client = reqwest::Client::new();
+        let mut manifest = json!({
+            "files": [{ "path": path, "size": bytes.len() }],
+            "deletes": [],
+            "baseRev": self.main(),
+            "autoCommitAfterApply": managed,
+        });
+        if mode == Mode::Desktop && !managed {
+            let read = client
+                .get(format!("{}/files/{path}", server.base))
+                .send()
+                .await
+                .unwrap();
+            let blob = match read.status().as_u16() {
+                200 => read
+                    .headers()
+                    .get(crate::routes::INSTAFY_BLOB_HEADER)
+                    .map(|value| value.to_str().unwrap().to_string()),
+                404 => None,
+                other => panic!("the folder's {path} answered {other}"),
+            };
+            manifest["expected"] = json!({ path: blob });
+        }
+        let archive = {
+            use base64::Engine as _;
+            use std::io::Write as _;
+            let mut writer = zip::write::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file(path, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+            base64::engine::general_purpose::STANDARD.encode(writer.finish().unwrap().into_inner())
+        };
+        let response = client
+            .post(format!("{}/apply-json", server.base))
+            .json(&json!({ "manifest": manifest, "archiveBase64": archive }))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        (status, response.json().await.unwrap_or_default())
+    }
 }
 
 /// Commit `files` (`None` deletes) in the clone `work`, ignored ones too.
@@ -1238,6 +1295,149 @@ async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
                 "{mode:?} {added}"
             );
         }
+    }
+}
+
+/// "Use this version" for a clash at a name that differs only in case from
+/// one `main` holds is refused in both modes (409 `path_alias`), never a
+/// write over the other file: on Desktop on a disk that ignores case, that
+/// file may hold an unsaved edit the client's check of the path as named
+/// never sees, and on the gateway `main` would hold both names. Three ways
+/// to such a clash: a new `todo.md` beside a `TODO.md` that `main` gained
+/// since; the work's edit of `todo.md` after `main` renamed it `TODO.md`;
+/// the work's rename of `notes.md` to `Notes.md` after `main` edited
+/// `notes.md`. Keeping the current version restores the rest, and the
+/// unsaved edit stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn using_the_saved_version_of_a_name_main_holds_in_another_case_is_refused() {
+    type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
+    // (seed, work, then on `main`, the path used, the saved version, the
+    // file of `main` that holds the unsaved edit on Desktop, the conflict).
+    let cases: Vec<(Files, Files, Files, &str, &[u8], &str, serde_json::Value)> = vec![
+        (
+            vec![],
+            vec![("todo.md", Some(&b"work\n"[..]))],
+            vec![("TODO.md", Some(&b"main\n"[..]))],
+            "todo.md",
+            b"work\n",
+            "TODO.md",
+            json!(["todo.md"]),
+        ),
+        (
+            vec![("todo.md", Some(&b"1\n2\n3\n"[..]))],
+            vec![("todo.md", Some(&b"1\n2\nwork\n"[..]))],
+            vec![("todo.md", None), ("TODO.md", Some(&b"main\n2\n3\n"[..]))],
+            "todo.md",
+            b"1\n2\nwork\n",
+            "TODO.md",
+            json!(["todo.md"]),
+        ),
+        (
+            vec![("notes.md", Some(&b"1\n2\n3\n"[..]))],
+            vec![("notes.md", None), ("Notes.md", Some(&b"1\n2\nwork\n"[..]))],
+            vec![("notes.md", Some(&b"main\n2\n3\n"[..]))],
+            "Notes.md",
+            b"1\n2\nwork\n",
+            "notes.md",
+            json!(["Notes.md", "notes.md"]),
+        ),
+    ];
+    for mode in MODES {
+        for (seed, work, on_main, used, saved, holder, clashes) in &cases {
+            let space = Space::new(mode, &[]).await;
+            if !seed.is_empty() {
+                space.push(seed, "seed");
+            }
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let mut files = work.clone();
+            files.push(("other.md", Some(b"other\n")));
+            let commit = space.park(&files, &reference);
+            space.push(on_main, "main moved");
+            let unsaved = [space.on_main(holder).unwrap(), b"UNSAVED EDIT\n".to_vec()].concat();
+            let root = space.server(mode).config.workspace_root.clone();
+            if mode == Mode::Desktop {
+                std::fs::write(root.join(holder), &unsaved).unwrap();
+            }
+            let before = space.main();
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                *clashes,
+                "{mode:?} {used}"
+            );
+
+            let (status, body) = space.save_in(mode, used, saved, false).await;
+            assert_eq!(
+                (status, body["code"].as_str()),
+                (409, Some("path_alias")),
+                "{mode:?} {used}: {body}"
+            );
+            assert_eq!(body["paths"], json!([used]), "{mode:?} {used}");
+            assert_eq!(space.main(), before, "{mode:?} {used}");
+            assert_eq!(space.on_main(used), None, "{mode:?} {used}");
+            if mode == Mode::Desktop {
+                assert_eq!(std::fs::read(root.join(holder)).unwrap(), unsaved, "{used}");
+            }
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": clashes }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {used}: {body}");
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} {used}"
+            );
+            assert_eq!(space.on_main(used), None, "{mode:?} {used}");
+            if mode == Mode::Desktop {
+                assert_eq!(std::fs::read(root.join(holder)).unwrap(), unsaved, "{used}");
+            }
+        }
+    }
+}
+
+/// A person's save of a new name the space holds in another case is
+/// refused in both modes, before anything is written: `guide.md` beside
+/// `Guide.md`, and a new folder `Docs` beside a file `docs`. A new file in
+/// a folder whose name differs only in case from another folder is saved
+/// (the two are one folder on such a disk), and so is what the controller's
+/// managed-files write (`autoCommitAfterApply`) adds, as it always was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_name_the_space_holds_in_another_case_is_never_saved() {
+    for mode in MODES {
+        let space = Space::new(
+            mode,
+            &[
+                ("Guide.md", b"guide\n"),
+                ("docs", b"docs\n"),
+                ("Shared/old.md", b"old\n"),
+            ],
+        )
+        .await;
+        let before = space.main();
+        for path in ["guide.md", "Docs/guide.md"] {
+            let (status, body) = space.save_in(mode, path, b"mine\n", false).await;
+            assert_eq!(
+                (status, body["code"].as_str()),
+                (409, Some("path_alias")),
+                "{mode:?} {path}: {body}"
+            );
+            assert_eq!(body["paths"], json!([path]), "{mode:?} {path}");
+        }
+        assert_eq!(space.main(), before, "{mode:?}");
+        if mode == Mode::Desktop {
+            let root = &space.server(mode).config.workspace_root;
+            assert_eq!(std::fs::read(root.join("Guide.md")).unwrap(), b"guide\n");
+            assert_eq!(std::fs::read(root.join("docs")).unwrap(), b"docs\n");
+        }
+
+        let (status, body) = space.save_in(mode, "shared/new.md", b"new\n", false).await;
+        assert_eq!(status, 200, "{mode:?}: {body}");
+        let (status, body) = space.save_in(mode, "agents.md", b"notes\n", false).await;
+        assert_eq!(status, 200, "{mode:?}: {body}");
+        let (status, body) = space.save_in(mode, "AGENTS.md", b"managed\n", true).await;
+        assert_eq!(status, 200, "{mode:?}: {body}");
     }
 }
 
