@@ -56,11 +56,20 @@ Hosted GitHub import must be durable, not just locally applied.
 Expected hosted flow:
 
 1. Download GitHub zipball.
-2. Repack and apply into the workspace through Origin `/apply`.
-3. Baseline commit locally.
-4. If git-canonical is configured, follow with Origin `/git/sync` so the imported state is pushed to canonical history.
+2. Repack and apply it through the space's Origin as one `/apply` with the import's idempotency key.
+3. Follow with Origin `/git/sync {expectedRev}`.
 
-If step 4 is skipped, onboarding can appear successful while the imported files are not yet durable in canonical git.
+What those steps do depends on the origin:
+
+- On the hosted workspace gateway, the `/apply` is itself the commit on canonical `main`, and that
+  commit is the import's receipt: a resumed import asks `POST /apply/status` for it before it
+  applies anything. `/git/sync {expectedRev}` commits nothing; it checks that the import's commit
+  is on `main`, which is how an interrupted import resumes. See
+  [Hosted workspace gateway](Git-Service.md#writes).
+- On a workspace runtime or Desktop origin, the `/apply` writes the files and commits them locally
+  as a baseline, and `/git/sync` pushes that commit to canonical history when the origin has a git
+  remote. If that sync is skipped, onboarding can appear successful while the imported files are
+  not yet durable in canonical git.
 
 ## Benchmark goals
 
