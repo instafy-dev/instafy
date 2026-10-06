@@ -272,8 +272,15 @@ fn salvage_repository(
         Some(main) => classify::stale_paths(&git, root, main, &current)?,
         None => BTreeSet::new(),
     };
-    let stale: Vec<String> = stale.into_iter().collect();
-    index.reset(&git, head.as_deref(), &stale)?;
+    let copies: Vec<String> = stale.into_iter().collect();
+    let stale = index.reset(&git, head.as_deref(), &copies)?;
+    // Copies W holds all the same: HEAD's version in their place would drop
+    // a change of the work tree's own (a file it put where `main` added a
+    // folder, or the reverse).
+    report.stale_kept = copies
+        .into_iter()
+        .filter(|path| !stale.contains(path))
+        .collect();
     // A stale copy where HEAD has a folder brings the folder back whole: the
     // deletions below it only the copy made are as HEAD has them now.
     let folded: Vec<String> = current
@@ -291,9 +298,14 @@ fn salvage_repository(
     // The same copies in HEAD's local commits: W puts them back as the
     // commit those were made on has them.
     let history_stale = match (head.as_deref(), main.as_deref()) {
-        (Some(head), Some(main)) => stale_in_history(&git, root, &index, head, main)?,
+        (Some(head), Some(main)) => {
+            let (put_back, kept) = stale_in_history(&git, root, &index, head, main)?;
+            report.stale_kept.extend(kept);
+            put_back
+        }
         _ => Vec::new(),
     };
+    report.stale_kept.sort();
     report.stale_paths.extend(history_stale.iter().cloned());
     report.stale_paths.sort();
     report.stale_paths.dedup();
@@ -579,35 +591,44 @@ fn keep_refused(root: &Path, refused: Vec<String>, sorted: &mut Sorted) {
 /// that differed, so it committed what an old sync had left behind. Each is
 /// put back in the index as that merge base has it, so the salvage ref
 /// changes nothing of theirs and a restore never takes `main` back to them;
-/// the local commits stay below W, on canonical and in the bundle.
+/// the local commits stay below W, on canonical and in the bundle. Returns
+/// the paths put back, and the stale copies W keeps as HEAD has them.
 fn stale_in_history(
     git: &WorkspaceGit<'_>,
     root: &Path,
     index: &WorkIndex,
     head: &str,
     main: &str,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Vec<String>)> {
     let Some(base) = git.merge_base(head, main)? else {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     };
     if base == head {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     }
     let paths = changed_paths(git, &git.tree_id(&base)?, &git.tree_id(head)?)?;
     if paths.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Default::default());
     }
     let held = index.entries(git, &paths)?;
-    let mut stale: Vec<String> = classify::stale_paths(git, root, main, &held)?
+    let copies: Vec<String> = classify::stale_paths(git, root, main, &held)?
         .into_iter()
         .collect();
     // A path the merge base holds as a folder stays as W holds it: putting
     // the folder back would also undo deletions below it that a local
     // commit saved and no stale rule judged.
-    let in_base = git.tree_entries(&base, &stale)?;
-    stale.retain(|path| in_base.get(path).is_none_or(|entry| entry.kind != "tree"));
-    index.reset(git, Some(base.as_str()), &stale)?;
-    Ok(stale)
+    let in_base = git.tree_entries(&base, &copies)?;
+    let files: Vec<String> = copies
+        .iter()
+        .filter(|path| in_base.get(*path).is_none_or(|entry| entry.kind != "tree"))
+        .cloned()
+        .collect();
+    let put_back = index.reset(git, Some(base.as_str()), &files)?;
+    let kept = copies
+        .into_iter()
+        .filter(|path| !put_back.contains(path))
+        .collect();
+    Ok((put_back, kept))
 }
 
 fn private_bytes(private: &[PrivatePath]) -> u64 {
@@ -785,6 +806,7 @@ fn reuse_recorded(
     // W differs once `main` holds part of the work (a partial restore).
     report.archived_paths = earlier.archived_paths.clone();
     report.stale_paths = earlier.stale_paths.clone();
+    report.stale_kept = earlier.stale_kept.clone();
     // Paths the shard refused then are only known from that run.
     for skipped in &earlier.skipped_paths {
         let policy = reason_name(RejectReason::Policy);
@@ -803,8 +825,8 @@ fn reuse_recorded(
         }
     }
     report.notes.push(format!(
-        "{reference} holds this work from an earlier run, whose archivedPaths and stalePaths \
-         this line repeats; nothing was pushed"
+        "{reference} holds this work from an earlier run, whose archivedPaths, stalePaths and \
+         staleKept this line repeats; nothing was pushed"
     ));
     Ok(true)
 }

@@ -164,19 +164,25 @@ impl WorkIndex {
         Ok(entries)
     }
 
-    /// Put `source`'s entries (or none) back for `paths`. A path the source
-    /// holds as a folder comes back as every entry below it: an index takes
-    /// a folder's own entry for a sparse one and writes its files one level
-    /// up (`shared/a.ts` as `shareda.ts`). Every path is taken out first, so
-    /// no entry put back meets one of them in its place.
+    /// Put `source`'s entries (or none) back for `paths`, and return the
+    /// paths put back. A path the source holds as a folder comes back as
+    /// every entry below it: an index takes a folder's own entry for a
+    /// sparse one and writes its files one level up (`shared/a.ts` as
+    /// `shareda.ts`). Every path is taken out first, so no entry put back
+    /// meets one of them in its place. A path whose entries would take the
+    /// place of one the index holds that is not put back too (a folder's
+    /// file where the work tree put a file, or the reverse) is left as the
+    /// index holds it: an index drops what is in the way without a word,
+    /// and W never loses a change of the work tree's own for a copy of the
+    /// source's.
     pub(crate) fn reset(
         &self,
         git: &WorkspaceGit<'_>,
         source: Option<&str>,
         paths: &[String],
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         if paths.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let kept = match source {
             Some(source) => git.tree_entries(source, paths)?,
@@ -191,30 +197,72 @@ impl WorkIndex {
             Some(source) if !folders.is_empty() => entries_below(git, source, &folders)?,
             _ => Vec::new(),
         };
+        // What each path puts back.
+        let mut back: BTreeMap<&str, Vec<&TreeEntry>> = paths
+            .iter()
+            .map(|path| (path.as_str(), Vec::new()))
+            .collect();
+        for entry in kept.values().filter(|entry| entry.kind != "tree") {
+            if let Some(entries) = back.get_mut(entry.path.as_str()) {
+                entries.push(entry);
+            }
+        }
+        for entry in &below {
+            let folder = folders
+                .iter()
+                .find(|folder| entry.path.starts_with(&format!("{folder}/")));
+            if let Some(entries) = folder.and_then(|folder| back.get_mut(folder.as_str())) {
+                entries.push(entry);
+            }
+        }
+        let held = self.paths(git)?;
+        let mut taken: BTreeSet<&str> = back.keys().copied().collect();
+        loop {
+            let blocked: Vec<&str> = taken
+                .iter()
+                .copied()
+                .filter(|path| {
+                    back[path].iter().any(|entry| {
+                        let at = entry.path.as_str();
+                        (at != *path && held.contains(at) && !taken.contains(at))
+                            || displaced(&held, at).any(|other| !taken.contains(other))
+                    })
+                })
+                .collect();
+            if blocked.is_empty() {
+                break;
+            }
+            for path in blocked {
+                taken.remove(path);
+            }
+        }
         let zero = zero_oid(&git.empty_tree()?);
         let mut info = Vec::new();
-        for path in paths {
+        for path in &taken {
             info.extend_from_slice(format!("0 {zero}\t{path}").as_bytes());
             info.push(0);
         }
-        for entry in kept
-            .values()
-            .filter(|entry| entry.kind != "tree")
-            .chain(&below)
-        {
+        for entry in taken.iter().flat_map(|path| &back[path]) {
             info.extend_from_slice(
                 format!("{} {}\t{}", entry.mode, entry.oid, entry.path).as_bytes(),
             );
             info.push(0);
         }
-        git.ok_opts(
-            &["update-index", "-z", "--index-info"],
-            &RunOpts {
-                index_file: Some(&self.index),
-                stdin: Some(&info),
-                ..RunOpts::default()
-            },
-        )
+        if !info.is_empty() {
+            git.ok_opts(
+                &["update-index", "-z", "--index-info"],
+                &RunOpts {
+                    index_file: Some(&self.index),
+                    stdin: Some(&info),
+                    ..RunOpts::default()
+                },
+            )?;
+        }
+        Ok(paths
+            .iter()
+            .filter(|path| taken.contains(path.as_str()))
+            .cloned()
+            .collect())
     }
 
     pub(crate) fn write_tree(&self, git: &WorkspaceGit<'_>) -> Result<String> {

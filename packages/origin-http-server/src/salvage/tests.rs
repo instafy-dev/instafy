@@ -2985,3 +2985,86 @@ fn a_stale_copy_where_main_has_a_folder_gets_the_whole_folder_back() {
     assert_eq!(report["removed"], false, "{report:#}");
     assert_eq!(summary.exit_code(), 1);
 }
+
+/// The person made a file `docs` and a folder `notes/`, and `main` later
+/// added a folder `docs/` and a file `notes` before an old sync reset the
+/// copy onto it. The absences of `docs/guide.md` and `notes` are stale, but
+/// `main`'s versions in their place would drop the person's file and
+/// folder: W keeps the work (and with it those absences, `staleKept`), and
+/// the entry is removed only with an acknowledgement.
+#[test]
+fn a_stale_absence_never_drops_the_work_in_its_place() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("docs"), b"my docs\n");
+    write(&entry.join("notes/today.md"), b"today\n");
+    let c2 = gateway.publish(
+        &[
+            ("docs/guide.md", Some("guide\n")),
+            ("notes", Some("main's notes\n")),
+        ],
+        "c2",
+    );
+    ig(
+        &entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(&entry, &["reset", "-q", "--mixed", "origin/main"]);
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain", "--untracked-files=all"]),
+        " D docs/guide.md\n D notes\n?? docs\n?? notes/today.md"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(
+        paths(&report["archivedPaths"]),
+        ["docs", "docs/guide.md", "notes", "notes/today.md"],
+        "{report:#}"
+    );
+    assert_eq!(report["stalePaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(
+        paths(&report["staleKept"]),
+        ["docs/guide.md", "notes"],
+        "{report:#}"
+    );
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:docs")]),
+        "my docs"
+    );
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:notes/today.md")]),
+        "today"
+    );
+    assert_eq!(
+        git_in(
+            &canonical,
+            &["diff", "--no-renames", "--name-status", &c2, salvaged]
+        ),
+        "A\tdocs\nD\tdocs/guide.md\nD\tnotes\nA\tnotes/today.md"
+    );
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert!(report["removeRefused"]
+        .as_str()
+        .unwrap()
+        .contains("staleKept"));
+    assert_eq!(summary.exit_code(), 1);
+
+    let name = gateway.project.to_string();
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[name.as_str()]), &stub);
+    assert_eq!(lines[0]["removed"], true, "{:#}", lines[0]);
+    assert_eq!(paths(&lines[0]["staleKept"]), ["docs/guide.md", "notes"]);
+    assert_eq!(summary.exit_code(), 0);
+}

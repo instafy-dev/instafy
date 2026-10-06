@@ -76,7 +76,9 @@
 //! written there, so the report can name W. `--remove` (with `--apply`)
 //! deletes an entry only when it was clean, or canonical now holds its
 //! salvage ref at W, nothing was skipped outside build output, no local
-//! commit lies outside HEAD's history, every chat image was exported or
+//! commit lies outside HEAD's history, W keeps no stale copy (`staleKept`:
+//! one `main`'s version could not replace without dropping a change of the
+//! work tree's own), every chat image was exported or
 //! given a final answer, and no history was filtered, or the entry is named
 //! with `--ack`. Salvage refs and private archives are never removed; a
 //! bundle only once canonical holds the raw history it has (the ref
@@ -230,6 +232,11 @@ pub(crate) struct EntryReport {
     /// `stale_paths`.
     pub archived_paths: Vec<String>,
     pub stale_paths: Vec<String>,
+    /// Stale copies W holds all the same, in its own change or in the local
+    /// commits below it: `main`'s version in their place would drop other
+    /// changes W holds (a file the work tree put where `main` added a
+    /// folder, or the reverse). They hold up `--remove`.
+    pub stale_kept: Vec<String>,
     pub private_archived_paths: Vec<PrivatePath>,
     /// What the private files take, in bytes: the private archive's size,
     /// near enough (a dry run says how much room `.salvage/` needs).
@@ -553,6 +560,8 @@ fn removal_blocker(settings: &Settings, report: &EntryReport) -> Option<String> 
         "it has no usable repository; its files are in the private archive"
     } else if !report.unsaved_refs.is_empty() {
         "local commits HEAD does not hold (unsavedRefs) are only in the bundle"
+    } else if !report.stale_kept.is_empty() {
+        "W holds copies of versions main had beside changes of its own (staleKept)"
     } else if report
         .skipped_paths
         .iter()
