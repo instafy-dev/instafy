@@ -242,7 +242,8 @@ function ensureGitCanonicalBindRoots() {
  * kept runtime checkouts in the gateway's folder, which the gateway now
  * moves out of the way (or refuses to start on). Move them to the
  * provider's own folder once, except for a space whose runtime container
- * still exists.
+ * still exists; while such a checkout stays, the gateway refuses to start
+ * (see relocateRuntimeCheckouts).
  */
 function separateRuntimeCheckoutsFromGateway(checkoutRoot) {
   if ((process.env.GIT_CANONICAL || "").trim() !== "1") {
@@ -271,8 +272,8 @@ function separateRuntimeCheckoutsFromGateway(checkoutRoot) {
   relocateRuntimeCheckouts({
     from: gatewayRoot,
     to: checkouts,
-    // Without a container list, every space counts as in use.
-    inUse: (id) => projects === null || projects.includes(id.replace(/-/g, "")),
+    // Without a container list, every space stays, and so does every stamp.
+    inUse: projects === null ? null : (id) => projects.includes(id.replace(/-/g, "")),
   });
 }
 
