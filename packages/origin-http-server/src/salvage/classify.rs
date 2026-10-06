@@ -3,7 +3,8 @@
 //! versions canonical `main` already has.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -166,13 +167,16 @@ pub(crate) fn candidates(git: &WorkspaceGit<'_>) -> Result<(Vec<Candidate>, Vec<
     Ok((listed, unreadable))
 }
 
-/// Sort the candidates of the work tree at `root`.
+/// Sort the candidates of the work tree at `root`, and report the
+/// repositories inside it that `git status` never shows.
 pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
     let mut sorted = Sorted::default();
+    let mut folders = BTreeSet::new();
     for candidate in listed {
         let path = candidate.path.as_str();
         let kind = kind_of(&root.join(path));
         if candidate.folder || kind == Kind::Folder {
+            folders.insert(path.to_string());
             match candidate.listed {
                 Listed::Ignored if !within_build_output(path, true) => {
                     walk_private(root, path, "ignored", &mut sorted);
@@ -210,9 +214,74 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
         }
         sort_file(path, candidate.listed, kind, &mut sorted);
     }
+    nested_repositories(root, &folders, &mut sorted);
     sorted.work.sort();
     sorted.work.dedup();
     sorted
+}
+
+/// Repositories inside the folders git reads, which `git status` never
+/// lists: a `.git` (a folder, or a file pointing elsewhere) in a folder that
+/// also holds tracked files, or one the old gateway renamed while it staged
+/// files and never put back. Their history is not copied, so each is
+/// skipped as `unsupported`, which holds up removal. The folders sorted
+/// above (ignored or untracked as a whole), build output and links are not
+/// entered; the entry's own `.instafy` and `.git` are the layout's.
+fn nested_repositories(root: &Path, sorted_folders: &BTreeSet<String>, sorted: &mut Sorted) {
+    let mut pending: Vec<(PathBuf, String)> = vec![(PathBuf::new(), String::new())];
+    while let Some((folder, shown)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
+            continue;
+        };
+        let mut children: Vec<(OsString, bool)> = entries
+            .flatten()
+            .map(|entry| {
+                let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                (entry.file_name(), is_folder)
+            })
+            .collect();
+        children.sort();
+        for (name, is_folder) in children {
+            let text = name.to_string_lossy();
+            let child = if shown.is_empty() {
+                text.to_string()
+            } else {
+                format!("{shown}/{text}")
+            };
+            if shown.is_empty() && (name == ".git" || name == ".instafy") {
+                continue;
+            }
+            if is_repository_name(&text) {
+                sorted.skipped.push(Skipped {
+                    path: if is_folder {
+                        format!("{child}/")
+                    } else {
+                        child
+                    },
+                    size: crate::hosted::tree_size(&root.join(&folder).join(&name)),
+                    reason: "unsupported",
+                    commit: None,
+                });
+            } else if is_folder
+                && !sorted_folders.contains(&child)
+                && !within_build_output(&child, true)
+            {
+                pending.push((folder.join(&name), child));
+            }
+        }
+    }
+}
+
+/// A name git takes for a repository (`.git` in any case, with trailing dots
+/// or spaces), or one the old gateway gave a repository it hid while it
+/// staged files.
+fn is_repository_name(name: &str) -> bool {
+    const HIDDEN: &str = ".git.instafy-hidden-";
+    let name = name.trim_end_matches([' ', '.']);
+    name.eq_ignore_ascii_case(".git")
+        || name
+            .get(..HIDDEN.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(HIDDEN))
 }
 
 fn sort_file(path: &str, listed: Listed, kind: Kind, sorted: &mut Sorted) {
@@ -296,7 +365,7 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
                 format!("{folder}/{name}")
             };
             if is_reserved_path(&child) || child == ".instafy" {
-                if name.eq_ignore_ascii_case(".git") {
+                if is_repository_name(&name) {
                     // A repository inside the folder: its history is not
                     // copied file by file.
                     sorted.skipped.push(Skipped {
