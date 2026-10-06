@@ -77,7 +77,7 @@ async fn apply_as(
     served: &Served,
     manifest: serde_json::Value,
     archive: &[u8],
-    token: Option<&str>,
+    bearer: Option<&str>,
     client: Option<&str>,
 ) -> Answer {
     let mut request = reqwest::Client::new()
@@ -86,8 +86,8 @@ async fn apply_as(
             "manifest": manifest,
             "archiveBase64": base64::engine::general_purpose::STANDARD.encode(archive),
         }));
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
+    if let Some(bearer) = bearer {
+        request = request.bearer_auth(bearer);
     }
     if let Some(client) = client {
         request = request.header("x-instafy-client", client);
@@ -108,11 +108,11 @@ pub(super) async fn post_as(
     served: &Served,
     path: &str,
     body: serde_json::Value,
-    token: &str,
+    bearer: &str,
 ) -> Answer {
     let response = reqwest::Client::new()
         .post(format!("{}{path}", served.base))
-        .bearer_auth(token)
+        .bearer_auth(bearer)
         .json(&body)
         .send()
         .await
@@ -184,7 +184,7 @@ pub(super) struct StubController {
     pub(super) user: Uuid,
     pub(super) lease: Uuid,
     /// How many `git.write` credentials it handed out.
-    pub(super) write_tokens: Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) write_grants: Arc<std::sync::atomic::AtomicUsize>,
     /// What it answers about the space's active lease.
     lease_answer: Arc<Mutex<serde_json::Value>>,
     server: tokio::task::JoinHandle<()>,
@@ -198,11 +198,11 @@ impl Drop for StubController {
 
 impl StubController {
     pub(super) async fn start(project: Uuid) -> Self {
-        Self::start_with_git_token_life(project, 600).await
+        Self::start_with_git_access_life(project, 600).await
     }
 
     /// A controller whose git credentials live `life` seconds.
-    pub(super) async fn start_with_git_token_life(project: Uuid, life: i64) -> Self {
+    pub(super) async fn start_with_git_access_life(project: Uuid, life: i64) -> Self {
         use axum::extract::State;
         use axum::routing::{get as get_route, post as post_route};
         use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -241,10 +241,10 @@ impl StubController {
         struct Stub {
             jwks: serde_json::Value,
             lease: Arc<Mutex<serde_json::Value>>,
-            write_tokens: Arc<std::sync::atomic::AtomicUsize>,
+            write_grants: Arc<std::sync::atomic::AtomicUsize>,
             life: i64,
         }
-        let write_tokens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let write_grants = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let lease_answer = Arc::new(Mutex::new(active));
         let app = axum::Router::new()
             .route(
@@ -274,7 +274,7 @@ impl StubController {
                             .as_array()
                             .is_some_and(|scopes| scopes.iter().any(|scope| scope == "git.write"));
                         let n = if writes {
-                            stub.write_tokens
+                            stub.write_grants
                                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                         } else {
                             0
@@ -291,7 +291,7 @@ impl StubController {
             .with_state(Stub {
                 jwks,
                 lease: lease_answer.clone(),
-                write_tokens: write_tokens.clone(),
+                write_grants: write_grants.clone(),
                 life,
             });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -305,7 +305,7 @@ impl StubController {
             project,
             user,
             lease,
-            write_tokens,
+            write_grants,
             lease_answer,
             server,
         }
@@ -325,7 +325,7 @@ impl StubController {
     }
 
     /// An origin token of the lease holder with `scopes` and extra claims.
-    pub(super) fn token(&self, scopes: &[&str], extra: serde_json::Value) -> String {
+    pub(super) fn bearer(&self, scopes: &[&str], extra: serde_json::Value) -> String {
         let now = chrono::Utc::now().timestamp();
         let origin = hosted_origin_id(self.project).to_string();
         let mut claims = json!({
@@ -354,14 +354,14 @@ impl StubController {
 /// Whether the bearer of `headers` is a token whose `exp` has passed.
 fn bearer_expired(headers: &axum::http::HeaderMap) -> bool {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let Some(token) = headers
+    let Some(bearer) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
     else {
         return false;
     };
-    let Some(payload) = token
+    let Some(payload) = bearer
         .split('.')
         .nth(1)
         .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
@@ -1672,7 +1672,7 @@ async fn a_control_character_never_smuggles_gateway_trailers() {
     controller.configure(&mut sc);
     let served = serve(&sc).await;
 
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let key = "imp:0123456789abcdef";
     let imported = apply_as(
         &served,
@@ -1694,7 +1694,7 @@ async fn a_control_character_never_smuggles_gateway_trailers() {
     assert_eq!(imported.status, 200, "{}", imported.json());
     let imported = rev(&imported);
 
-    let person = controller.token(&["fs.read", "fs.write"], json!({}));
+    let person = controller.bearer(&["fs.read", "fs.write"], json!({}));
     for hidden in ["\u{1}", "\u{7f}", "\u{80}"] {
         let message = format!(
             "Tidy\n\n{hidden}Instafy-Restored-From: {salvage_ref}\n{hidden}Instafy-Apply-Key: {key}\n{hidden}Instafy-Apply-Fingerprint: sha256:aaaa"
@@ -1831,7 +1831,7 @@ async fn imports_are_committed_once_and_found_by_their_key() {
     let controller = StubController::start(sc.project).await;
     controller.configure(&mut sc);
     let served = serve(&sc).await;
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let key = "imp:0123456789abcdef";
     let request = manifest(
         &["src/app.ts", "dist/out.js", ".env", "huge.bin"],
@@ -2000,7 +2000,7 @@ async fn imports_are_committed_once_and_found_by_their_key() {
     assert!(answer.json().get("replayed").is_none());
 
     // A person's token cannot ask for a receipt.
-    let person = controller.token(&["fs.write"], json!({}));
+    let person = controller.bearer(&["fs.write"], json!({}));
     let status = post_as(
         &served,
         "/apply/status",
@@ -2075,7 +2075,7 @@ async fn an_import_receipt_is_found_past_a_commit_dated_in_the_past() {
     let controller = StubController::start(sc.project).await;
     controller.configure(&mut sc);
     let served = serve(&sc).await;
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let key = "imp:0123456789abcdef";
     let request = manifest(
         &["src/app.ts"],
@@ -2156,7 +2156,7 @@ async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
     let controller = StubController::start(sc.project).await;
     controller.configure(&mut sc);
     let served = serve(&sc).await;
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let key = "imp:feedfacefeedface";
     let request = manifest(
         &["src/app.ts"],
@@ -2227,7 +2227,7 @@ async fn an_import_that_changes_nothing_still_leaves_its_receipt() {
     let controller = StubController::start(empty.project).await;
     controller.configure(&mut empty);
     let served = serve(&empty).await;
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let answer = apply_as(
         &served,
         manifest(
@@ -2264,7 +2264,7 @@ async fn an_import_is_counted_the_same_when_it_is_replayed() {
     let controller = StubController::start(sc.project).await;
     controller.configure(&mut sc);
     let served = serve(&sc).await;
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let key = "imp:0badc0de0badc0de";
     let request = manifest(
         &["same.txt", "new.txt", ".env"],
@@ -2371,7 +2371,7 @@ fn write_routes(head: &str, lease: &str) -> Vec<(&'static str, serde_json::Value
 /// anything is fetched or pushed. A manifest naming another lease or
 /// another space is refused too.
 #[tokio::test(flavor = "multi_thread")]
-async fn writes_need_fs_write_the_live_lease_and_the_tokens_space() {
+async fn writes_need_fs_write_the_live_lease_and_the_callers_space() {
     let mut sc = HostedScenario::new();
     let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
     let controller = StubController::start(sc.project).await;
@@ -2380,7 +2380,7 @@ async fn writes_need_fs_write_the_live_lease_and_the_tokens_space() {
     let lease = controller.lease.to_string();
     let refused = |answer: &Answer| matches!(answer.status, 401 | 403);
 
-    let reader = controller.token(&["fs.read"], json!({}));
+    let reader = controller.bearer(&["fs.read"], json!({}));
     for (route, body) in write_routes(&head, &lease) {
         let answer = post_as(&served, route, body, &reader).await;
         assert!(refused(&answer), "{route}: {}", answer.status);
@@ -2400,24 +2400,24 @@ async fn writes_need_fs_write_the_live_lease_and_the_tokens_space() {
     let writers = [
         (
             "no lease",
-            controller.token(&["fs.write"], json!({ "lease_id": null })),
+            controller.bearer(&["fs.write"], json!({ "lease_id": null })),
         ),
         (
             "another lease",
-            controller.token(&["fs.write"], json!({ "lease_id": other_lease })),
+            controller.bearer(&["fs.write"], json!({ "lease_id": other_lease })),
         ),
         (
             "another person",
-            controller.token(&["fs.write"], json!({ "sub": Uuid::new_v4().to_string() })),
+            controller.bearer(&["fs.write"], json!({ "sub": Uuid::new_v4().to_string() })),
         ),
     ];
-    for (case, token) in &writers {
+    for (case, bearer) in &writers {
         for (route, body) in write_routes(&head, &lease) {
-            let answer = post_as(&served, route, body, token).await;
+            let answer = post_as(&served, route, body, bearer).await;
             assert!(refused(&answer), "{case} {route}: {}", answer.status);
         }
     }
-    let writer = controller.token(&["fs.write"], json!({}));
+    let writer = controller.bearer(&["fs.write"], json!({}));
     let expired = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
     for (case, answer) in [
         ("no active lease", json!({ "lease": null })),
@@ -2441,7 +2441,7 @@ async fn writes_need_fs_write_the_live_lease_and_the_tokens_space() {
     assert_eq!(served.cache.fetches_started(), 0, "nothing was fetched");
     assert_eq!(
         controller
-            .write_tokens
+            .write_grants
             .load(std::sync::atomic::Ordering::SeqCst),
         0
     );
@@ -2503,7 +2503,7 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
     controller.configure(&mut sc);
     let served = serve(&sc).await;
     let pseudonym = "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev";
-    let token = controller.token(
+    let bearer = controller.bearer(
         &["fs.read", "fs.write"],
         json!({ "author_name": "Ada Lovelace", "author_email": pseudonym }),
     );
@@ -2515,7 +2515,7 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
             json!({ "baseRev": head, "leaseId": controller.lease.to_string() }),
         ),
         &zip(&[("a.txt", b"b\n")]),
-        Some(&token),
+        Some(&bearer),
         None,
     )
     .await;
@@ -2534,7 +2534,7 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
 
     let history = reqwest::Client::new()
         .get(format!("{}/git/history?limit=1", served.base))
-        .bearer_auth(&token)
+        .bearer_auth(&bearer)
         .send()
         .await
         .unwrap()
@@ -2544,7 +2544,7 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
     assert_eq!(history["entries"][0]["actor"], "user");
 
     // A token without author claims saves as the gateway.
-    let plain = controller.token(&["fs.write"], json!({}));
+    let plain = controller.bearer(&["fs.write"], json!({}));
     let answer = apply_as(
         &served,
         manifest(
@@ -2566,7 +2566,7 @@ async fn a_persons_save_carries_their_pseudonym_and_never_their_id() {
 
     // A job's token (it names a run) saves as the gateway even with a
     // pseudonym on it, as on Desktop: a job's work is never a person's.
-    let job = controller.token(
+    let job = controller.bearer(
         &["fs.write"],
         json!({
             "author_name": "Ada Lovelace",
@@ -2979,7 +2979,7 @@ fn a_lost_race_is_retried_and_endless_races_are_main_busy() {
 /// Refuses every push whose `git.write` credential (as the stub controller
 /// mints them, `...-until-<unix seconds>`) has run out, as git-edge does:
 /// git then asks for a password it may not prompt for.
-const EXPIRED_CREDENTIALS_REFUSED: &str = r#"for arg in "$@"; do
+const EXPIRED_WRITE_ACCESS_REFUSED: &str = r#"for arg in "$@"; do
   if [ "$arg" = push ]; then
     until="${GIT_CONFIG_VALUE_0##*until-}"
     case "$until" in ''|*[!0-9]*) echo "fatal: unable to get password from user" >&2; exit 128;; esac
@@ -2996,22 +2996,22 @@ done"#;
 /// once more and then reported; once the caller's own bearer is about to
 /// expire, no further attempt starts.
 #[test]
-fn every_push_carries_a_current_write_credential() {
+fn every_push_carries_current_write_access() {
     let mut sc = HostedScenario::new();
     sc.push(&[("a.txt", Some(b"a\n"))], "seed");
     let controller_runtime = tokio::runtime::Runtime::new().unwrap();
     let controller =
-        controller_runtime.block_on(StubController::start_with_git_token_life(sc.project, 6));
+        controller_runtime.block_on(StubController::start_with_git_access_life(sc.project, 6));
     controller.configure(&mut sc);
     let direct = Direct::new(&sc);
-    let caller = controller.token(&["fs.write"], json!({}));
+    let caller = controller.bearer(&["fs.write"], json!({}));
     let later = Some(std::time::SystemTime::now() + Duration::from_secs(600));
     let wrapper_dir = tempfile::tempdir().unwrap();
-    let _git = GitWrapper::install(wrapper_dir.path(), EXPIRED_CREDENTIALS_REFUSED);
+    let _git = GitWrapper::install(wrapper_dir.path(), EXPIRED_WRITE_ACCESS_REFUSED);
     let _hook = HookGuard;
     let minted = || {
         controller
-            .write_tokens
+            .write_grants
             .load(std::sync::atomic::Ordering::SeqCst)
     };
 
@@ -3077,7 +3077,7 @@ done"#,
 
     // The caller's bearer ends within the margin: after a lost race no
     // credential is exchanged for another attempt.
-    let _git = GitWrapper::install(wrapper_dir.path(), EXPIRED_CREDENTIALS_REFUSED);
+    let _git = GitWrapper::install(wrapper_dir.path(), EXPIRED_WRITE_ACCESS_REFUSED);
     let pushes = Arc::new(Mutex::new(0usize));
     let seen = pushes.clone();
     set_push_hook(move |_| {
@@ -3116,8 +3116,8 @@ async fn write_slots_are_bounded_and_end_before_the_push() {
         state.with_admission_wait(Duration::from_millis(500))
     })
     .await;
-    let person = controller.token(&["fs.read", "fs.write"], json!({}));
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let person = controller.bearer(&["fs.read", "fs.write"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let lease = controller.lease.to_string();
 
     // A slow shard: the push of a save waits in canonical's hook.
@@ -3242,11 +3242,11 @@ async fn write_slots_are_bounded_and_end_before_the_push() {
     assert_eq!(served.state.import_slots.available_permits(), 2);
 }
 
-/// An import keyed `key` writing `path`, sent with `token` to `base`:
+/// An import keyed `key` writing `path`, sent with `bearer` to `base`:
 /// status and body.
 async fn send_import(
     base: String,
-    token: String,
+    bearer: String,
     lease: String,
     key: &'static str,
     path: &'static str,
@@ -3261,7 +3261,7 @@ async fn send_import(
     });
     let response = reqwest::Client::new()
         .post(format!("{base}/apply-json"))
-        .bearer_auth(token)
+        .bearer_auth(bearer)
         .json(&request)
         .send()
         .await
@@ -3289,7 +3289,7 @@ async fn imports_let_their_slot_go_while_a_fetch_runs() {
         |state| state.with_admission_wait(Duration::from_millis(300)),
     )
     .await;
-    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({}));
     let lease = controller.lease.to_string();
 
     let first = tokio::spawn(send_import(
@@ -3356,7 +3356,7 @@ async fn a_wait_for_a_fetch_ends_before_the_callers_access_does() {
     )
     .await;
     let exp = chrono::Utc::now().timestamp() + 17;
-    let import = controller.token(&["fs.write", "workspace.import"], json!({ "exp": exp }));
+    let import = controller.bearer(&["fs.write", "workspace.import"], json!({ "exp": exp }));
     let started = Instant::now();
     let (status, body) = send_import(
         served.base.clone(),
@@ -3397,7 +3397,7 @@ async fn a_first_push_after_the_callers_access_ended_is_main_busy() {
     )
     .await;
     // A read first, so the read credential is cached.
-    let reader = controller.token(&["fs.read"], json!({}));
+    let reader = controller.bearer(&["fs.read"], json!({}));
     let read = reqwest::Client::new()
         .get(format!("{}/files/a.txt", served.base))
         .bearer_auth(&reader)
@@ -3407,7 +3407,7 @@ async fn a_first_push_after_the_callers_access_ended_is_main_busy() {
     assert_eq!(read.status().as_u16(), 200);
 
     let exp = chrono::Utc::now().timestamp() + 2;
-    let person = controller.token(&["fs.read", "fs.write"], json!({ "exp": exp }));
+    let person = controller.bearer(&["fs.read", "fs.write"], json!({ "exp": exp }));
     let answer = apply_as(
         &served,
         manifest(

@@ -3150,7 +3150,7 @@ async fn deleting_the_cache_between_reads_changes_nothing() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn every_route_but_health_needs_a_token() {
+async fn every_route_but_health_needs_a_bearer() {
     let mut sc = HostedScenario::new();
     sc.config.skip_auth = false;
     sc.push(&[("README.md", Some(b"one\n"))], "first");
