@@ -319,6 +319,92 @@ impl Space {
         commit
     }
 
+    /// [`Space::park`] for work no checkout on a disk that ignores case
+    /// could hold (a folder `Docs` beside a file `docs`): the commit is
+    /// built in canonical itself, on `main`, with an index of its own.
+    fn park_built(&self, files: &[(&str, Option<&[u8]>)], reference: &str) -> String {
+        let index = self
+            .remote
+            .join(format!("index-{}", Uuid::new_v4().simple()));
+        let git = |args: &[&str], input: Option<&[u8]>| -> String {
+            use std::io::Write as _;
+            let mut command = std::process::Command::new("git");
+            command
+                .current_dir(&self.remote)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_INDEX_FILE", &index)
+                .env("GIT_AUTHOR_NAME", "Runtime")
+                .env("GIT_AUTHOR_EMAIL", "agent@instafy.dev")
+                .env("GIT_COMMITTER_NAME", "Runtime")
+                .env("GIT_COMMITTER_EMAIL", "agent@instafy.dev")
+                .args(["-c", "core.ignorecase=false"])
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped());
+            let mut child = command.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.unwrap_or_default())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["read-tree", "refs/heads/main"], None);
+        for (path, content) in files {
+            match content {
+                Some(bytes) => {
+                    let blob = git(&["hash-object", "-w", "--stdin"], Some(bytes));
+                    let info = format!("100644,{blob},{path}");
+                    git(&["update-index", "--add", "--cacheinfo", &info], None);
+                }
+                None => {
+                    git(&["update-index", "--force-remove", "--", path], None);
+                }
+            }
+        }
+        let tree = git(&["write-tree"], None);
+        let commit = git(
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                "refs/heads/main",
+                "-m",
+                "Unsaved edits",
+            ],
+            None,
+        );
+        git(&["update-ref", reference, &commit], None);
+        std::fs::remove_file(&index).unwrap();
+        commit
+    }
+
+    /// The paths on canonical `main`.
+    fn paths_on_main(&self) -> Vec<String> {
+        git_in(
+            &self.remote,
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "--full-tree",
+                "refs/heads/main",
+            ],
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
+    }
+
     fn sync_work(&self) {
         let remote = self.remote.to_str().unwrap();
         git_in(&self.work, &["fetch", "-q", remote, "main"]);
@@ -1100,6 +1186,58 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
             Some(&b"other\n"[..]),
             "{mode:?}"
         );
+    }
+}
+
+/// A new folder of the work whose name differs only in case from a file
+/// `main` holds (`Docs/guide.md` beside a file `docs`, at any depth) is a
+/// clash in both modes, never an unsaved edit that is not there (Desktop on
+/// a disk that ignores case finds the file where the folder goes) or a
+/// `main` holding both names (the gateway). Keeping the new path restores
+/// the rest and lets the ref go.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
+    for mode in MODES {
+        for (file, added) in [("docs", "Docs/guide.md"), ("a/b", "A/b/c.md")] {
+            let space = Space::new(mode, &[(file, b"file\n")]).await;
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park_built(
+                &[(added, Some(b"guide\n")), ("other.md", Some(b"other\n"))],
+                &reference,
+            );
+            let before = space.main();
+
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                json!([added]),
+                "{mode:?} {added}"
+            );
+            assert_eq!(space.main(), before, "{mode:?} {added}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {added}"
+            );
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": [added] }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {added}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[(added, "kept")]),
+                "{mode:?} {added}: {body}"
+            );
+            assert_eq!(body["refDeleted"], true, "{mode:?} {added}: {body}");
+            assert_eq!(space.canonical_ref(&reference), None, "{mode:?} {added}");
+            assert_eq!(
+                space.paths_on_main(),
+                vec!["README.md", file, "other.md"],
+                "{mode:?} {added}"
+            );
+        }
     }
 }
 
