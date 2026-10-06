@@ -29,9 +29,10 @@ each entry is classified and reported as one JSON line on stdout.
                     never one whose run stopped with an error
   --root <dir>      the gateway's workspace root (default: ORIGIN_WORKSPACE_ROOT)
   --node <name>     this gateway's name in salvage refs (default: INSTAFY_NODE_NAME;
-                    one of the two is required with --apply, and a dry run
-                    falls back to the host name); lower-cased; keep it the
-                    same across redeploys
+                    one of the two is required with --apply or --remove, and
+                    a dry run falls back to the host name with a warning);
+                    lower-cased, then [0-9a-z] followed by [0-9a-z._-]; keep
+                    it the same across redeploys
   --project <id>    only the entries of this space (repeatable)
 
 Environment: ORIGIN_GIT_REMOTE_BASE_URL (required), ORIGIN_CONTROLLER_URL,
@@ -151,17 +152,27 @@ impl Settings {
             .canonicalize()
             .with_context(|| format!("workspace root {root:?} is not readable"))?;
         let node = match flags.node.clone().or_else(|| env("INSTAFY_NODE_NAME")) {
-            Some(node) => node,
+            Some(node) => node_name(&node)?,
             // A container's host name changes when it is recreated, and a
             // new name would push a second permanent ref for the same work.
-            None if flags.apply => bail!(
-                "--apply needs this gateway's lasting name in salvage refs: pass --node or set \
-                 INSTAFY_NODE_NAME (the host name changes when the container is recreated)"
+            None if flags.apply || flags.remove => bail!(
+                "--apply and --remove need this gateway's lasting name in salvage refs: pass \
+                 --node or set INSTAFY_NODE_NAME (the host name changes when the container is \
+                 recreated)"
             ),
-            None => host()
-                .context("this host has no readable name: pass --node or set INSTAFY_NODE_NAME")?,
+            None => {
+                let host = host().context(
+                    "this host has no readable name: pass --node or set INSTAFY_NODE_NAME",
+                )?;
+                let node = node_name(&host)?;
+                warnings.push(format!(
+                    "neither --node nor INSTAFY_NODE_NAME is set: this dry run names salvage \
+                     refs after the host name {node:?}, which changes when the container is \
+                     recreated; --apply and --remove refuse to run without one"
+                ));
+                node
+            }
         };
-        let node = node_name(&node)?;
         let remote_base = env("ORIGIN_GIT_REMOTE_BASE_URL")
             .map(|base| base.trim().trim_end_matches('/').to_string())
             .filter(|base| !base.is_empty())
@@ -373,9 +384,10 @@ mod tests {
     }
 
     /// A container's host name changes with every redeploy, and a salvage
-    /// ref's name must not: `--apply` needs the node named.
+    /// ref's name must not: `--apply` and `--remove` need the node named,
+    /// and a dry run that falls back to the host name says so.
     #[test]
-    fn apply_needs_a_named_node() {
+    fn apply_and_remove_need_a_named_node() {
         let dir = tempfile::tempdir().unwrap();
         let root_text = dir.path().to_string_lossy().to_string();
         let env = |name: &str| -> Option<String> {
@@ -390,42 +402,60 @@ mod tests {
             apply: true,
             ..Flags::default()
         };
-        let error = Settings::resolve(&apply, &env, &container)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("--node") && error.contains("INSTAFY_NODE_NAME"),
-            "{error}"
-        );
+        let remove = Flags {
+            remove: true,
+            ..Flags::default()
+        };
+        let both = Flags {
+            apply: true,
+            remove: true,
+            ..Flags::default()
+        };
+        for flags in [&apply, &remove, &both] {
+            let error = Settings::resolve(flags, &env, &container)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("--node") && error.contains("INSTAFY_NODE_NAME"),
+                "{flags:?}: {error}"
+            );
+        }
         let named = Flags {
             node: Some("gateway-1".to_string()),
             apply: true,
+            remove: true,
             ..Flags::default()
         };
-        assert_eq!(
-            Settings::resolve(&named, &env, &container).unwrap().0.node,
-            "gateway-1"
-        );
+        let (settings, warnings) = Settings::resolve(&named, &env, &container).unwrap();
+        assert_eq!(settings.node, "gateway-1");
+        assert_eq!(warnings, Vec::<String>::new());
         let with_env = |name: &str| -> Option<String> {
             match name {
                 "INSTAFY_NODE_NAME" => Some("Gateway-2".to_string()),
                 other => env(other),
             }
         };
-        assert_eq!(
-            Settings::resolve(&apply, &with_env, &container)
-                .unwrap()
-                .0
-                .node,
-            "gateway-2"
-        );
-        // A dry run pushes nothing: the host name is enough to report with.
-        assert_eq!(
-            Settings::resolve(&Flags::default(), &env, &container)
-                .unwrap()
-                .0
-                .node,
-            "3f2a9b8c1d4e"
+        for flags in [&apply, &remove, &both] {
+            let (settings, warnings) = Settings::resolve(flags, &with_env, &container).unwrap();
+            assert_eq!(settings.node, "gateway-2", "{flags:?}");
+            assert_eq!(warnings, Vec::<String>::new(), "{flags:?}");
+        }
+        // A name outside the rule stops the run.
+        let bad_env = |name: &str| -> Option<String> {
+            match name {
+                "INSTAFY_NODE_NAME" => Some("gateway/2".to_string()),
+                other => env(other),
+            }
+        };
+        assert!(Settings::resolve(&apply, &bad_env, &container).is_err());
+        // A dry run pushes nothing: the host name is enough to report with,
+        // and the run says it is not a lasting name.
+        let (settings, warnings) = Settings::resolve(&Flags::default(), &env, &container).unwrap();
+        assert_eq!(settings.node, "3f2a9b8c1d4e");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("INSTAFY_NODE_NAME") && warnings[0].contains("3f2a9b8c1d4e"),
+            "{warnings:?}"
         );
     }
 

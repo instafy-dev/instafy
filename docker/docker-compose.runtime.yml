@@ -89,9 +89,10 @@ services:
       ORIGIN_GIT_AUTHOR_EMAIL: ${ORIGIN_GIT_AUTHOR_EMAIL:-}
       ORIGIN_MAX_ARCHIVE_BYTES: ${ORIGIN_MAX_ARCHIVE_BYTES:-134217728}
       # This gateway's name in the refs `origin-http-server salvage --apply`
-      # pushes (refs/instafy/salvage/gateway/<name>-...). Keep it the same
-      # across redeploys: the container's host name changes when it is
-      # recreated, so --apply refuses to run without this (or --node).
+      # pushes (refs/instafy/salvage/gateway/<name>-...), lower case
+      # [0-9a-z._-]. Keep it the same across redeploys: the container's host
+      # name changes when it is recreated, so --apply and --remove refuse to
+      # run without this (or --node).
       INSTAFY_NODE_NAME: ${INSTAFY_NODE_NAME:-}
     volumes:
       - ${ORIGIN_GATEWAY_WORKSPACE_VOLUME:-../tmp/origin-gateway-workspaces}:/workspaces
