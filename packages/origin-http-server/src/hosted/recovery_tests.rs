@@ -684,7 +684,7 @@ async fn restore_requests_are_checked_before_anything_changes() {
 /// person (never their id), a path the shard refuses stays out (and so the
 /// ref stays), and recovery refs can be removed.
 #[tokio::test(flavor = "multi_thread")]
-async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
+async fn restores_and_dismisses_under_the_shard_rules_as_a_person() {
     let mut sc = HostedScenario::new();
     sc.push(&[("README.md", Some(b"r\n"))], "seed");
     let unsaved = sc.side_commit(&[("ok.md", b"ok\n"), ("assets/a.zip", b"zip")], "unsaved");
@@ -701,7 +701,7 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
     controller.configure(&mut sc);
     let served = serve(&sc).await;
     let pseudonym = "p1-3ujoyn5txgxsverj7psd@users.noreply.instafy.dev";
-    let token = controller.token(
+    let bearer = controller.bearer(
         &["fs.read", "fs.write"],
         json!({ "author_name": "Ada Lovelace", "author_email": pseudonym }),
     );
@@ -710,7 +710,7 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
         &served,
         "/git/recovery/restore",
         json!({ "ref": reference, "rev": unsaved }),
-        &token,
+        &bearer,
     )
     .await;
     let body = ok(&answer);
@@ -740,7 +740,7 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
 
     let minted = || {
         controller
-            .write_tokens
+            .write_grants
             .load(std::sync::atomic::Ordering::SeqCst)
     };
     let before = minted();
@@ -748,7 +748,7 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
         &served,
         "/git/recovery/restore",
         json!({ "ref": clean_ref, "rev": clean }),
-        &token,
+        &bearer,
     )
     .await);
     assert_eq!(body["committed"], true);
@@ -762,7 +762,7 @@ async fn restores_and_dismisses_under_the_shard_rules_and_a_persons_token() {
         &served,
         "/git/recovery/dismiss",
         json!({ "ref": dropped_ref, "rev": dropped }),
-        &token,
+        &bearer,
     )
     .await);
     assert_eq!(body["dismissed"], true);
