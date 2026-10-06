@@ -728,6 +728,24 @@ fn git_with_literal_paths<S: AsRef<str>>(
         .map_err(|error| OriginError::internal(error.to_string()))
 }
 
+/// Commit what is staged in the checkout under the workspace's git lock,
+/// with `message` on stdin (`--file=-`): an apply's message comes from the
+/// request, so it is never an argument of git, and a long one is never cut
+/// off by the system's limit on an argument's length.
+fn commit_staged(workspace_root: &Path, message: &str) -> Result<(), OriginError> {
+    let lock = workspace_git_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::workspace_git::WorkspaceGit::new(workspace_root, None)
+        .ok_opts(
+            &["commit", "--no-gpg-sign", "--file=-"],
+            &crate::workspace_git::RunOpts {
+                stdin: Some(message.as_bytes()),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| OriginError::internal(error.to_string()))
+}
+
 fn unstage_sync_reserved_paths(
     workspace_root: &Path,
     bearer_token: Option<&str>,
@@ -1313,12 +1331,7 @@ pub fn commit_apply_locally(
             return Ok(base_head.clone());
         }
 
-        run_git_ok(
-            workspace_root,
-            &["commit", "--no-gpg-sign", "-m", message],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
+        commit_staged(workspace_root, message)?;
 
         let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
             .map_err(|error| OriginError::internal(error.to_string()))?;
