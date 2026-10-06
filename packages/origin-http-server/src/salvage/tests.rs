@@ -2108,3 +2108,138 @@ fn an_npmrc_main_itself_changed_is_filtered_once() {
         vec![format!("history/{local}/.npmrc")]
     );
 }
+
+/// An old save whose push failed left its local commit at HEAD, and the next
+/// save's reset onto `main` abandoned it. A file `main` added meanwhile looks
+/// deleted in the work tree, though neither that commit nor the commit it was
+/// made on had it: the absence is a stale copy, never salvaged as a deletion.
+/// A file the abandoned commit itself deleted (its base had it) is a real
+/// deletion and is kept.
+#[test]
+fn a_file_main_added_after_an_abandoned_local_commit_is_not_salvaged_as_a_deletion() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[("README.md", Some("one\n")), ("notes.md", Some("v1\n"))],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    std::fs::remove_file(entry.join("README.md")).unwrap();
+    write(&entry.join("notes.md"), b"local\n");
+    ig(&entry, &["add", "-A"]);
+    let abandoned = entry_commit(&entry, "Save notes");
+    let c2 = gateway.publish(&[("p.txt", Some("runtime\n"))], "c2");
+    ig(
+        &entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(&entry, &["reset", "-q", "--mixed", "origin/main"]);
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain", "--untracked-files=no"]),
+        " D README.md\n M notes.md\n D p.txt"
+    );
+    // The abandoned commit is not on main.
+    let on_main = git_output(
+        &entry,
+        &[
+            "--git-dir",
+            ".instafy/.git",
+            "merge-base",
+            "--is-ancestor",
+            &abandoned,
+            &c2,
+        ],
+        None,
+    );
+    assert_eq!(on_main.status.code(), Some(1));
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(paths(&report["stalePaths"]), ["p.txt"], "{report:#}");
+    assert_eq!(
+        paths(&report["archivedPaths"]),
+        ["README.md", "notes.md"],
+        "{report:#}"
+    );
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["diff", "--name-status", &c2, salvaged]),
+        "D\tREADME.md\nM\tnotes.md"
+    );
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:p.txt")]),
+        "runtime"
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+}
+
+/// An old sync reset the copy onto every new `main` it saw. The reset that
+/// first hid a file `main` added is older than the newest forty, and its old
+/// head is read all the same: the absence is a stale copy, and the entry is
+/// clean.
+#[test]
+fn a_reset_older_than_the_newest_forty_still_marks_a_stale_deletion() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    let mut tips = vec![gateway.publish(&[("p.txt", Some("runtime\n"))], "Add p")];
+    for n in 0..40 {
+        write(
+            &gateway.seed.join("counter.txt"),
+            format!("{n}\n").as_bytes(),
+        );
+        tips.push(commit_all(&gateway.seed, &format!("Count {n}")));
+    }
+    git_in(
+        &gateway.seed,
+        &[
+            "push",
+            "-q",
+            gateway.canonical().to_str().unwrap(),
+            "HEAD:main",
+        ],
+    );
+    ig(
+        &entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    for tip in &tips {
+        ig(&entry, &["update-ref", "refs/remotes/origin/main", tip]);
+        ig(&entry, &["reset", "-q", "--mixed", "origin/main"]);
+    }
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain", "--untracked-files=no"]),
+        " D counter.txt\n D p.txt"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(
+        paths(&report["stalePaths"]),
+        ["counter.txt", "p.txt"],
+        "{report:#}"
+    );
+    assert_eq!(report["archivedPaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(report["clean"], true, "{report:#}");
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+    assert!(gateway.salvage_refs().is_empty());
+}
