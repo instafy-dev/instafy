@@ -2343,6 +2343,116 @@ fn a_reset_older_than_the_newest_forty_still_marks_a_stale_deletion() {
     assert!(gateway.salvage_refs().is_empty());
 }
 
+/// Loose objects past git's `gc.auto` estimate, which counts the loose
+/// objects in `objects/17` and starts `gc --auto` past 6700 / 256 of them.
+fn loose_objects_past_the_gc_estimate(entry: &Path) {
+    use sha1::{Digest as _, Sha1};
+    let scratch = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    let mut n = 0u32;
+    while files.len() < 40 {
+        let content = format!("loose object {n}\n");
+        n += 1;
+        let mut stored = format!("blob {}\0", content.len()).into_bytes();
+        stored.extend_from_slice(content.as_bytes());
+        if Sha1::digest(&stored)[0] != 0x17 {
+            continue;
+        }
+        let file = scratch.path().join(format!("{n}.txt"));
+        std::fs::write(&file, content).unwrap();
+        files.push(file.to_string_lossy().to_string());
+    }
+    let mut args = vec!["hash-object", "-w", "--"];
+    args.extend(files.iter().map(String::as_str));
+    ig(entry, &args);
+    let loose = std::fs::read_dir(entry.join(".instafy/.git/objects/17"))
+        .unwrap()
+        .count();
+    assert!(loose >= 40, "{loose} loose objects in objects/17");
+}
+
+/// The salvage's fetch never starts git's automatic maintenance in the
+/// parked repository: its `reflog expire` would drop the old sync's reset
+/// entries the stale rule reads (past 90 days, or past 30 when the reset
+/// abandoned a save), and a file `main` added after the copy's view would
+/// be salvaged as a deletion, by a dry run too. The parked repository is
+/// past both triggers: over a hundred reflog entries older than 90 days
+/// (git 2.51 and later), and loose objects past `gc.auto`'s estimate (older
+/// git). The dry run leaves the reflog as it was.
+#[test]
+fn the_salvage_never_lets_git_expire_the_reflog_it_reads() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    let c2 = gateway.publish(&[("p.txt", Some("runtime\n"))], "c2");
+    ig(
+        &entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(&entry, &["reset", "-q", "--mixed", "origin/main"]);
+    write(&entry.join("README.md"), b"edited\n");
+    std::fs::remove_file(entry.join(".instafy/.git/ORIG_HEAD")).unwrap();
+    let day = 24 * 60 * 60;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let who = "Old gateway <origin@instafy.dev>";
+    let mut log = String::new();
+    for n in 0..120 {
+        log.push_str(&format!(
+            "{c1} {c1} {who} {} +0000\tcommit: Save {n}\n",
+            now - 200 * day
+        ));
+    }
+    log.push_str(&format!(
+        "{c1} {c2} {who} {} +0000\treset: moving to origin/main\n",
+        now - 100 * day
+    ));
+    let reflog = entry.join(".instafy/.git/logs/HEAD");
+    std::fs::write(&reflog, &log).unwrap();
+    loose_objects_past_the_gc_estimate(&entry);
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain", "--untracked-files=no"]),
+        " M README.md\n D p.txt"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (_, dry) = salvage(&gateway.settings(false, false, &[]), &stub);
+    let report = &dry[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(paths(&report["stalePaths"]), ["p.txt"], "{report:#}");
+    assert_eq!(paths(&report["archivedPaths"]), ["README.md"], "{report:#}");
+    let kept = std::fs::read_to_string(&reflog).unwrap_or_default();
+    assert!(
+        kept == log,
+        "the dry run left {} of the reflog's 121 lines",
+        kept.lines().count()
+    );
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(paths(&report["stalePaths"]), ["p.txt"], "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    assert_eq!(
+        git_in(
+            &gateway.canonical(),
+            &["diff", "--name-status", &c2, salvaged]
+        ),
+        "M\tREADME.md"
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+}
+
 /// A repository inside a folder git reads (one cloned into a tracked folder,
 /// or one whose `.git` the old gateway hid while it staged files and never
 /// put back): `git status` never shows it, so it is reported as skipped and

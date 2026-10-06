@@ -619,6 +619,29 @@ pub(crate) fn within_build_output(path: &str, folder: bool) -> bool {
         .any(|segment| BUILD_OUTPUT_DIRS.contains(segment))
 }
 
+/// The commits an old sync moved the copy away from without its files, newest
+/// first: the reflog's `reset: moving to origin/main` entries, then
+/// `ORIG_HEAD`, each once and only as a full object id. Read before the
+/// salvage talks to canonical, so what it judges is the entry as it was
+/// parked.
+pub(crate) fn old_heads(git: &WorkspaceGit<'_>, root: &Path) -> Result<Vec<String>> {
+    let mut heads = Vec::new();
+    if let Ok(workspace) = crate::workspace_fs::WorkspaceDir::open(root) {
+        if let Some(lines) = crate::stale_align::read_reflog(&workspace) {
+            heads.extend(crate::stale_align::old_heads_before_resets(
+                &lines,
+                "origin/main",
+            ));
+        }
+    }
+    if let Some(orig) = git.commit_id("ORIG_HEAD")? {
+        heads.push(orig);
+    }
+    let mut seen = BTreeSet::new();
+    heads.retain(|id| is_full_object_id(id) && seen.insert(id.clone()));
+    Ok(heads)
+}
+
 /// The paths among `current` whose work-tree state is a copy of a version
 /// canonical `main` already has, left behind when an old sync moved the
 /// branch without the files:
@@ -630,14 +653,14 @@ pub(crate) fn within_build_output(path: &str, folder: bool) -> bool {
 ///   too: `main` added the file after the view the work tree came from. For a commit on `main` the
 ///   merge base is the commit itself; for a local commit the reset abandoned
 ///   it is the commit it was made on, so a file that commit deleted (its base
-///   had it) stays a deletion. Every distinct old head is read (the reflog's
-///   `reset: moving to origin/main` entries, then `ORIG_HEAD`), however old.
+///   had it) stays a deletion. Every one of `old_heads` ([`old_heads`]) is
+///   read, however old.
 ///
 /// A version only a local commit held is never stale: it is not on
 /// canonical, so it is kept.
 pub(crate) fn stale_paths(
     git: &WorkspaceGit<'_>,
-    root: &Path,
+    old_heads: &[String],
     main: &str,
     current: &BTreeMap<String, Option<TreeEntry>>,
 ) -> Result<BTreeSet<String>> {
@@ -668,19 +691,6 @@ pub(crate) fn stale_paths(
     if absent.is_empty() {
         return Ok(stale);
     }
-    let mut old_heads = Vec::new();
-    if let Ok(workspace) = crate::workspace_fs::WorkspaceDir::open(root) {
-        if let Some(lines) = crate::stale_align::read_reflog(&workspace) {
-            old_heads.extend(crate::stale_align::old_heads_before_resets(
-                &lines,
-                "origin/main",
-            ));
-        }
-    }
-    if let Some(orig) = git.commit_id("ORIG_HEAD")? {
-        old_heads.push(orig);
-    }
-    let mut seen = BTreeSet::new();
     let mut checked = BTreeSet::new();
     for old in old_heads {
         let open: Vec<String> = absent
@@ -692,10 +702,10 @@ pub(crate) fn stale_paths(
             break;
         }
         // Only an object id read from the reflog reaches git's arguments.
-        if !is_full_object_id(&old) || !seen.insert(old.clone()) {
+        if !is_full_object_id(old) {
             continue;
         }
-        let Some(old) = git.commit_id(&old).ok().flatten() else {
+        let Some(old) = git.commit_id(old).ok().flatten() else {
             continue;
         };
         if !checked.insert(old.clone()) {
