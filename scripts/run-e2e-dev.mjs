@@ -20,6 +20,8 @@ import {
   deleteEnvFileValue,
   DEFAULT_SUPABASE_PROJECT_URL,
   ensureServiceRuntimeUserId,
+  relocateRuntimeCheckouts,
+  resolveRuntimeCheckoutRoot,
   setEnvFileValue,
 } from "./lib/runtimeEnvHelpers.mjs";
 import {
@@ -233,6 +235,45 @@ function ensureGitCanonicalBindRoots() {
   for (const root of roots) {
     fs.mkdirSync(root, { recursive: true });
   }
+}
+
+/**
+ * Before the provider starts with git-canonical on: an earlier local stack
+ * kept runtime checkouts in the gateway's folder, which the gateway now
+ * moves out of the way (or refuses to start on). Move them to the
+ * provider's own folder once, except for a space whose runtime container
+ * still exists.
+ */
+function separateRuntimeCheckoutsFromGateway(checkoutRoot) {
+  if ((process.env.GIT_CANONICAL || "").trim() !== "1") {
+    return;
+  }
+  const gatewayRoot = resolveComposeHostBindPath(
+    process.env.ORIGIN_GATEWAY_WORKSPACE_VOLUME,
+    "../tmp/origin-gateway-workspaces"
+  );
+  const checkouts = path.resolve(repoRoot, checkoutRoot);
+  if (path.resolve(gatewayRoot) === checkouts) {
+    console.warn(
+      `[runtime-dev] DOCKER_REPO_HOST is the origin gateway's folder (${gatewayRoot}); ` +
+        "the gateway refuses to start on a folder that holds runtime checkouts. Unset DOCKER_REPO_HOST " +
+        "or point it elsewhere."
+    );
+    return;
+  }
+  const containers = tryCapture("docker", [
+    "ps",
+    "-a",
+    "--format",
+    '{{.Label "com.docker.compose.project"}}',
+  ]);
+  const projects = containers.code === 0 ? containers.stdout : null;
+  relocateRuntimeCheckouts({
+    from: gatewayRoot,
+    to: checkouts,
+    // Without a container list, every space counts as in use.
+    inUse: (id) => projects === null || projects.includes(id.replace(/-/g, "")),
+  });
 }
 
 function pruneRuntimeAgentsBeforeUp() {
@@ -2632,15 +2673,9 @@ function providerEnv(baseEnv = {}) {
   // Compose operations are prone to flaking on Docker Desktop when many stacks churn quickly.
   // Keep concurrency low by default for local dev + Playwright.
   env.DOCKER_MAX_CONCURRENT_OPS = env.DOCKER_MAX_CONCURRENT_OPS || "1";
-  const gitCanonicalEnabled = (env.GIT_CANONICAL || "").trim() === "1";
-  const defaultRepoHost = gitCanonicalEnabled
-    ? path.join(repoRoot, "tmp", "origin-gateway-workspaces")
-    : sandboxDir;
-  const runtimeRepoHostOverride =
-    !gitCanonicalEnabled && (env.RUNTIME_REPO_HOST || "").trim()
-      ? env.RUNTIME_REPO_HOST
-      : "";
-  env.DOCKER_REPO_HOST = env.DOCKER_REPO_HOST || runtimeRepoHostOverride || defaultRepoHost;
+  // Runtime checkouts never share the gateway's folder: see
+  // resolveRuntimeCheckoutRoot.
+  env.DOCKER_REPO_HOST = resolveRuntimeCheckoutRoot({ env, repoRoot, sandboxDir });
   env.DOCKER_CODEX_ROOT = env.DOCKER_CODEX_ROOT || sandboxDir;
   if (proxyByocModeEnabled()) {
     const proxyPort = getProxyConfig().port;
@@ -2714,6 +2749,7 @@ async function startProviderService() {
   const stdio = ["ignore", providerLogFd(), providerLogFd()];
   console.log(`[runtime-dev] Starting provider service on ${providerBaseUrl}...`);
   const env = providerEnv();
+  separateRuntimeCheckoutsFromGateway(env.DOCKER_REPO_HOST);
   const launch =
     prebuiltLaunch ??
     resolveRustBinaryLaunch({

@@ -242,3 +242,107 @@ export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
 
   return { id: userRecord.id, email: serviceEmail };
 }
+
+// The provider's folders next to its checkouts (checkout stamps, evicted
+// checkouts), and a space folder's name (a lower-case, hyphenated UUID).
+const PROVIDER_FOLDERS = [".instafy-checkout-stamps", ".instafy-evicted"];
+const SPACE_FOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The folder the local runtime provider keeps its runtimes' checkouts in
+ * (`DOCKER_REPO_HOST`, one `<space id>` folder each). With git-canonical on,
+ * that is a folder of its own, never the gateway's (`tmp/origin-gateway-
+ * workspaces`): the gateway moves every space folder of its root out of the
+ * way when it starts, and refuses to start on a provider's folder.
+ */
+export function resolveRuntimeCheckoutRoot({ env = process.env, repoRoot, sandboxDir }) {
+  const explicit = String(env.DOCKER_REPO_HOST ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (String(env.GIT_CANONICAL ?? "").trim() === "1") {
+    return path.join(repoRoot, "tmp", "runtime-checkouts");
+  }
+  return String(env.RUNTIME_REPO_HOST ?? "").trim() || sandboxDir;
+}
+
+/**
+ * Move the runtime checkouts an earlier local stack kept in the gateway's
+ * folder `from` (when the provider and the gateway shared it) to the
+ * provider's own folder `to`, with the provider's stamp and eviction
+ * folders, before either starts. A space whose runtime may still use its
+ * checkout (`inUse(id)`), or whose folder `to` already has, stays where it
+ * is, with a warning. Nothing is replaced and links are never followed.
+ */
+export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = console }) {
+  const report = { moved: [], kept: [] };
+  if (path.resolve(from) === path.resolve(to)) {
+    return report;
+  }
+  let names;
+  try {
+    names = fs.readdirSync(from).sort();
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      log.warn(`[runtime-dev] Unable to list ${from}: ${error.message}`);
+    }
+    return report;
+  }
+  const keep = (name, reason) => {
+    report.kept.push({ name, reason });
+    log.warn(`[runtime-dev] Left ${path.join(from, name)} in place: ${reason}.`);
+  };
+  const move = (source, target) => {
+    if (fs.existsSync(target)) {
+      return "the provider's folder already has it";
+    }
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.renameSync(source, target);
+      return null;
+    } catch (error) {
+      return `it could not be moved (${error.message})`;
+    }
+  };
+  for (const name of names) {
+    const source = path.join(from, name);
+    let stat;
+    try {
+      stat = fs.lstatSync(source);
+    } catch {
+      continue;
+    }
+    if (SPACE_FOLDER.test(name) && stat.isDirectory()) {
+      if (inUse(name)) {
+        keep(name, "a runtime container of this space may still use it; stop it and start again");
+        continue;
+      }
+      const refused = move(source, path.join(to, name));
+      if (refused) {
+        keep(name, refused);
+      } else {
+        report.moved.push(name);
+        log.log(`[runtime-dev] Moved the runtime checkout ${name} to ${to}.`);
+      }
+    } else if (PROVIDER_FOLDERS.includes(name) && stat.isDirectory()) {
+      for (const entry of fs.readdirSync(source).sort()) {
+        const refused = move(path.join(source, entry), path.join(to, name, entry));
+        if (refused) {
+          keep(path.join(name, entry), refused);
+        }
+      }
+      try {
+        fs.rmdirSync(source);
+      } catch {
+        // Something stayed behind; the gateway names it if it refuses.
+      }
+    }
+  }
+  if (fs.existsSync(path.join(from, ".legacy"))) {
+    log.warn(
+      `[runtime-dev] ${path.join(from, ".legacy")} holds folders an earlier gateway start moved there; ` +
+        `runtime checkouts among them can be moved back to ${to} by hand (they may belong to root).`
+    );
+  }
+  return report;
+}
