@@ -812,8 +812,10 @@ unsaved work appears (opening History counts as seeing it); it is not written in
 conversation. What a viewer has seen lives in the browser's storage, and in memory for the session
 when the browser refuses storage.
 
-## Local dev (what we should wire into `pnpm stack:up`)
-- Start `git-shard-0` + `git-edge` in Docker (compose file), storing repos in a local docker volume.
+## Local dev
+- `pnpm stack:up` starts `git-shard-0`, `git-edge` and `origin-gateway` in Docker
+  (`docker/docker-compose.runtime.yml`) by default (`GIT_CANONICAL=0` opts out), storing repos
+  under `tmp/git-repos/` (`GIT_REPO_VOLUME`).
 - Dev convenience: `git-shard` can auto-init and seed `<project_id>.git` on first access (`GIT_AUTO_INIT=1`).
 - Run a single-tenant Origin (one space's checkout) in git mode by setting:
   - `ORIGIN_GIT_REMOTE_URL=http://git-edge:8080/<project_id>.git`
@@ -839,6 +841,12 @@ Why `<project_id>.git`?
 - Run each stateful `git-shard` with a persistent volume mounted at
   `/var/lib/instafy-git`; expose shards only to the private service network.
 - Keep routing deterministic per repository as described above.
+- Run the Workspace Gateway with a persistent volume of its own as its workspace root, never the
+  runtime provider's checkout folder (`DOCKER_REPO_HOST`), an init as PID 1, and a lasting
+  `INSTAFY_NODE_NAME`. Its mirror cache is disposable, but after an upgrade from a stateful
+  gateway image the same volume holds `.legacy/` and `.salvage/` until
+  [Retiring gateway working copies](#retiring-gateway-working-copies) is done. See
+  [docker/README.md](../docker/README.md#deployment-and-self-hosting).
 
 ## Backups
 
