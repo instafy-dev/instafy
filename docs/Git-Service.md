@@ -797,7 +797,7 @@ when the browser refuses storage.
   (`ORIGIN_MULTI_TENANT=1`, `ORIGIN_GIT_REMOTE_BASE_URL=http://git-edge:8080`, no
   `ORIGIN_GIT_REMOTE_URL`). In its workspace root, `tmp/origin-gateway-workspaces/` by default
   (`ORIGIN_GATEWAY_WORKSPACE_VOLUME`), the gateway keeps `.git-cache/` and, after an upgrade from
-  an older gateway, `.legacy/` and `.salvage/`. Runtime checkouts never go there: the local
+  an older gateway, `.legacy/` and `.salvage/`. Runtime checkouts do not belong there: the local
   provider keeps them in `tmp/runtime-checkouts/<project_id>` (`DOCKER_REPO_HOST` overrides it;
   see [Local Development](Local-Dev.md#git-canonical-local-git-service)).
 
