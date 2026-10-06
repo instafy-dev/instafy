@@ -52,9 +52,18 @@ pub(super) fn salvage_folder(
     let plain_git = root.join(".git");
     let mut unusable = None;
     match (
-        classify::kind_of(&instafy_git),
+        classify::kind_in(root, ".instafy/.git"),
         classify::kind_of(&plain_git),
     ) {
+        // A linked `.instafy` is never followed: what it leads to is not the
+        // entry's, and git is never run in it.
+        _ if !matches!(
+            classify::kind_of(&root.join(".instafy")),
+            Kind::Folder | Kind::Missing
+        ) =>
+        {
+            unusable = Some("its .instafy is a link or a file".to_string())
+        }
         (Kind::Folder, other) => {
             if other != Kind::Missing {
                 report.skipped_paths.push(Skipped {
@@ -168,7 +177,7 @@ fn salvage_files_only(
     report.notes.push(reason.to_string());
     let mut sorted = Sorted::default();
     classify::walk_private(root, "", "no_repository", &mut sorted);
-    if classify::kind_of(&root.join(".instafy/.git")) != Kind::Missing {
+    if classify::kind_in(root, ".instafy/.git") != Kind::Missing {
         sorted.skipped.push(Skipped {
             path: ".instafy/.git/".to_string(),
             size: tree_size(&root.join(".instafy/.git")),
@@ -236,7 +245,7 @@ fn salvage_repository(
     // A name git never stores (`git~1`, a link named `.gitmodules`) is
     // passed over without an error: the index lacks what the work tree has.
     for (path, entry) in &current {
-        let missed = match (classify::kind_of(&root.join(path)), entry) {
+        let missed = match (classify::kind_in(root, path), entry) {
             (Kind::File { .. }, Some(entry)) => matches!(entry.mode.as_str(), "120000" | "160000"),
             (Kind::Link, Some(entry)) => entry.mode != "120000",
             (Kind::File { .. } | Kind::Link, None) => true,
@@ -248,7 +257,9 @@ fn salvage_repository(
     }
     if !refused.is_empty() {
         refused.sort();
-        // Git recorded none of them: the index holds them as HEAD does.
+        // Git recorded none of them: the index holds each as HEAD does, or
+        // lacks it where a path that was taken in its place (a link where
+        // its folder was) dropped it, as the work tree does.
         sorted.work.retain(|path| !refused.contains(path));
         current.retain(|path, _| !refused.contains(path));
         keep_refused(root, refused, &mut sorted);
@@ -520,10 +531,12 @@ fn salvage_repository(
 /// Paths of the work tree W cannot hold as they are: each is reported
 /// skipped with its size (which holds up removal), and a file or link up to
 /// the size cap is kept in the private archive too, so acknowledging the
-/// entry never drops the only copy.
+/// entry never drops the only copy. A path below a link is not the entry's
+/// (what the link leads to is salvaged at its own path, or lies outside the
+/// entry): it is reported with no size, and never read.
 fn keep_refused(root: &Path, refused: Vec<String>, sorted: &mut Sorted) {
     for path in refused {
-        let (size, archived) = match classify::kind_of(&root.join(&path)) {
+        let (size, archived) = match classify::kind_in(root, &path) {
             Kind::File { size } => (size, size <= MAX_PUBLISH_BLOB_BYTES),
             Kind::Link => (0, true),
             Kind::Folder => (tree_size(&root.join(&path)), false),
