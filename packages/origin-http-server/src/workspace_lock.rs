@@ -86,6 +86,7 @@ pub fn try_acquire_workspace_apply_lock(
 mod tests {
     use super::try_acquire_workspace_apply_lock;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     #[test]
@@ -106,14 +107,17 @@ mod tests {
             .is_none());
         release_tx.send(()).unwrap();
 
-        for _ in 0..100 {
+        // The worker lets the lock go when it next runs, which a loaded host
+        // can put off for a while: wait for that, within a generous bound.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
             if try_acquire_workspace_apply_lock(workspace.path())
                 .unwrap()
                 .is_some()
             {
                 return;
             }
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(5));
         }
         panic!("detached worker did not release lock after finishing");
     }

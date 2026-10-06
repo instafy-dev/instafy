@@ -24,6 +24,10 @@ plugin seam, not a runtime marketplace or arbitrary remote-code loader.
 
 ## Filesystem Model
 - Hosted workers materialize per-space workspaces under `WORKSPACE_ROOT/<project_id>`.
+- The hosted workspace gateway (the controller's `HOSTED_ORIGIN_ENDPOINT`) keeps no working
+  copy: it reads git objects from a disposable per-space mirror and saves each write as a commit
+  on the space's canonical `main` (see
+  [Hosted workspace gateway](Git-Service.md#hosted-workspace-gateway)).
 - Desktop/local-canonical mode can point directly at the user's chosen folder instead of materializing a hosted checkout.
 - Studio and automation should treat the **Origin** as the filesystem API (`/entries`, `/files`, `/raw`, `POST /apply`).
 - Do not persist file contents (“snapshots”) into Postgres; the filesystem is the source of truth.
@@ -78,17 +82,18 @@ deploying the controller that reads these columns.
 There are two supported canonical filesystem modes:
 
 - **Local-canonical (BYO folder)**: a user-provided folder is the source of truth (desktop/self-host). The Origin runs next to it.
-- **Git-canonical** (hosted): an Instafy-hosted git repo is the source of truth; origins/runtimes materialize checkouts as needed and persist changes by commit + push.
+- **Git-canonical** (hosted): an Instafy-hosted git repo is the source of truth; runtimes and Desktop origins keep working copies and publish changes by commit + push, and the hosted workspace gateway serves from disposable bare mirrors and makes each save one commit on `main`.
 
 We do **not** treat “shared-folder canonical” as a first-class product mode. A shared filesystem (EFS/NFS) can still exist inside hosted infrastructure, but only as private implementation plumbing for origins/runtimes. It should not be the user-facing source-of-truth model.
 
 This does **not** require a dedicated public file server. Private storage stays inside the compute network; clients reach files through the Origin HTTP API (direct/reverse-proxy or a tunnel).
 
 ### Git-canonical Notes
-- Files are at rest in the git service as bare repos; checkouts on origin/runtime nodes are cache/working copies.
+- Files are at rest in the git service as bare repos; checkouts on runtime and Desktop nodes are working copies, and the hosted gateway keeps only disposable bare mirrors.
 - The git service is intended to be load-balancable: `git-edge` (stateless) routes to `git-shard-*` (stateful repo storage). See `docs/Git-Service.md`.
 - Studio and agents still use the Origin filesystem API; git is an implementation detail for persistence + reconciliation.
-- Concurrency follows git semantics: allow concurrent branches, protect `main` (fast-forward only; no force pushes), and let runtimes rebase/merge + retry when pushes are rejected.
+- Concurrency follows git semantics: allow concurrent branches, protect `main` (fast-forward only; no force pushes), and let runtimes merge + retry when pushes are rejected. The hosted gateway rebuilds a save on the new `main` and retries.
+- Single-tenant origins (Desktop, workspace runtimes) and the hosted gateway serve the same saved-version routes (`/git/history`, `/git/history/review`, `POST /git/revert-commit`) and unsaved-work routes (`GET /git/recovery`, `POST /git/recovery/restore`, `POST /git/recovery/dismiss`), and decide a restore with the same code (`packages/origin-http-server/src/restore_plan.rs`). Studio's History uses them on both (see [History in Studio](Git-Service.md#history-in-studio)).
 
 ### Choosing A Mode
 - Use **local-canonical** when one person's laptop or workstation should be the source of truth.

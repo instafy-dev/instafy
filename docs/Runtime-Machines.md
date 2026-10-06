@@ -488,8 +488,11 @@ chat uploads, build output): such files stay on the runtime's disk only.
 **Checkout lifetime.** The hosted checkout is a bind mount of the node's disk,
 `DOCKER_REPO_HOST/<project>`. It survives container stops and re-provisioning
 on that node and is lost when the node is replaced; correctness does not
-depend on it, because the next start clones `main` again. The provider service
-evicts stopped checkouts:
+depend on it, because the next start clones `main` again. `DOCKER_REPO_HOST`
+is never the origin gateway's `ORIGIN_WORKSPACE_ROOT`: the gateway moves every
+`<project>` folder of its root aside when it starts, and refuses to start on a
+folder that holds runtime checkouts. The provider service evicts stopped
+checkouts:
 
 - after `RUNTIME_CHECKOUT_TTL_DAYS` without a start or stop (default 7, 0
   turns idle eviction off), and, oldest first, while the node's checkouts

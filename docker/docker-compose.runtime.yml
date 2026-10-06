@@ -60,6 +60,8 @@ services:
   origin-gateway:
     image: git-services:local
     entrypoint: ["/usr/local/bin/origin-http-server"]
+    # An init as PID 1 reaps any child the server leaves behind.
+    init: true
     ulimits:
       nofile:
         soft: 8192
@@ -78,9 +80,23 @@ services:
       ORIGIN_GIT_REMOTE_BASE_URL: ${ORIGIN_GIT_REMOTE_BASE_URL:-http://git-edge:8080}
       ORIGIN_GIT_BRANCH: ${ORIGIN_GIT_BRANCH:-main}
       ORIGIN_GIT_REMOTE_NAME: ${ORIGIN_GIT_REMOTE_NAME:-origin}
-      ORIGIN_GIT_AUTHOR_NAME: ${ORIGIN_GIT_AUTHOR_NAME:-instafy-origin}
-      ORIGIN_GIT_AUTHOR_EMAIL: ${ORIGIN_GIT_AUTHOR_EMAIL:-origin@instafy.dev}
+      # The gateway's own committer identity: ORIGIN_GATEWAY_GIT_AUTHOR_* when
+      # set, else a custom ORIGIN_GIT_AUTHOR_*; the runtimes' default address
+      # (origin@instafy.dev) is replaced by gateway@instafy.dev.
+      ORIGIN_GATEWAY_GIT_AUTHOR_NAME: ${ORIGIN_GATEWAY_GIT_AUTHOR_NAME:-}
+      ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL: ${ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL:-}
+      ORIGIN_GIT_AUTHOR_NAME: ${ORIGIN_GIT_AUTHOR_NAME:-}
+      ORIGIN_GIT_AUTHOR_EMAIL: ${ORIGIN_GIT_AUTHOR_EMAIL:-}
       ORIGIN_MAX_ARCHIVE_BYTES: ${ORIGIN_MAX_ARCHIVE_BYTES:-134217728}
+      # Soft cap of the mirror cache under /workspaces/.git-cache, in bytes;
+      # blank means the default (20 GiB).
+      ORIGIN_CACHE_MAX_BYTES: ${ORIGIN_CACHE_MAX_BYTES:-}
+      # This gateway's name in the refs `origin-http-server salvage --apply`
+      # pushes (refs/instafy/salvage/gateway/<name>-...), lower case
+      # [0-9a-z._-]. Keep it the same across redeploys: the container's host
+      # name changes when it is recreated, so --apply and --remove refuse to
+      # run without this (or --node).
+      INSTAFY_NODE_NAME: ${INSTAFY_NODE_NAME:-}
     volumes:
       - ${ORIGIN_GATEWAY_WORKSPACE_VOLUME:-../tmp/origin-gateway-workspaces}:/workspaces
     depends_on:

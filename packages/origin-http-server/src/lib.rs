@@ -1,5 +1,6 @@
 pub mod apply;
 mod apply_idempotency;
+mod apply_request;
 pub mod auth;
 pub mod browser;
 mod browser_approval;
@@ -11,6 +12,7 @@ pub mod config;
 pub mod error;
 pub mod git;
 pub mod git_tokens;
+pub mod hosted;
 pub mod jwks;
 pub mod paths;
 pub mod publish;
@@ -20,8 +22,13 @@ mod publish_tests;
 mod push;
 pub mod recovery;
 mod recovery_view;
+#[cfg(test)]
+mod restore_parity_tests;
+mod restore_plan;
+mod route_auth;
 pub mod routes;
 mod safe_fs;
+pub mod salvage;
 pub mod server;
 mod stale_align;
 #[cfg(test)]

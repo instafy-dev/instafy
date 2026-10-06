@@ -257,7 +257,7 @@ const LOWER_HEX_BYTES: &[u8] = b"0123456789abcdef";
 /// copy holds the table's own byte, so a name or id a caller sent reaches
 /// git's argument list only as bytes of `alphabet`. `None` when a byte is
 /// not in `alphabet`.
-fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
+pub(crate) fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
     value
         .bytes()
         .map(|byte| {
@@ -267,6 +267,13 @@ fn copy_from_alphabet(value: &str, alphabet: &'static [u8]) -> Option<String> {
                 .map(|allowed| char::from(*allowed))
         })
         .collect()
+}
+
+/// `value` in decimal, as a copy of the digits (see [`copy_from_alphabet`]):
+/// a count a caller sent (a page size, how many to skip) reaches git's
+/// arguments only as table bytes.
+pub(crate) fn decimal(value: usize) -> String {
+    copy_from_alphabet(&value.to_string(), b"0123456789").unwrap_or_default()
 }
 
 /// What a read names.
@@ -435,28 +442,13 @@ pub(crate) fn path_kind_at(
         return Ok(PathKind::Directory);
     }
     let path = checked_path(path)?;
-    let raw = git.bytes_opts(
-        &[
-            "ls-tree",
-            "-z",
-            "--full-tree",
-            "--end-of-options",
-            &commit,
-            "--",
-            &path,
-        ],
-        &RunOpts {
-            literal_pathspecs: true,
-            ..RunOpts::default()
-        },
-    )?;
     // The tree first: a reserved path that is there is hidden from reads
     // but never absent, as on the hosted gateway (`not_found` only when
     // the tree has no entry).
     let reserved = is_reserved_path(&path);
-    let kind = crate::workspace_git::parse_ls_tree(&raw)
-        .into_iter()
-        .find(|entry| entry.path == path)
+    let kind = git
+        .entries_by_path(&commit, std::slice::from_ref(&path))?
+        .remove(&path)
         .map(|entry| match (entry.mode.as_str(), entry.kind.as_str()) {
             _ if reserved => PathKind::Unsupported,
             ("100644" | "100755", "blob") => PathKind::File,
@@ -583,7 +575,7 @@ pub(crate) fn read_tree_at(
     let commit = parse_rev(commit)?;
     if path.is_empty() {
         let raw = git.bytes(&["ls-tree", "-l", "-z", "--end-of-options", &commit])?;
-        return Ok(TreeRead::Directory(listed_children("", &raw)));
+        return Ok(TreeRead::Directory(listed_children("", &raw)?));
     }
     let path = checked_path(path)?;
     if is_reserved_path(&path) {
@@ -596,7 +588,7 @@ pub(crate) fn read_tree_at(
         ObjectKind::File => Ok(TreeRead::File(entry)),
         ObjectKind::Directory => {
             let raw = git.bytes(&["ls-tree", "-l", "-z", "--end-of-options", &entry.oid])?;
-            Ok(TreeRead::Directory(listed_children(&path, &raw)))
+            Ok(TreeRead::Directory(listed_children(&path, &raw)?))
         }
     }
 }
@@ -655,6 +647,43 @@ pub(crate) fn read_blob_at(
     })
 }
 
+/// Why a read shows nothing at a path of a commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Absence {
+    /// The tree has no entry at the path.
+    Absent,
+    /// A folder is there (a file read finds no file).
+    Directory,
+    /// Something reads never show is there: a symlink, a submodule, or a
+    /// reserved path.
+    Hidden,
+}
+
+/// What `commit` holds at exactly `path` when a read showed nothing there.
+/// Only [`Absence::Absent`] means the path is not in the tree, so only it
+/// may be reported as a missing path: a client could otherwise turn a link
+/// or a submodule into a delete.
+pub(crate) fn absence_at(
+    git: &WorkspaceGit<'_>,
+    commit: &str,
+    path: &str,
+) -> Result<Absence, ViewError> {
+    let commit = parse_rev(commit)?;
+    let path = checked_path(path)?;
+    let Some(found) = git
+        .entries_by_path(&commit, std::slice::from_ref(&path))?
+        .remove(&path)
+    else {
+        return Ok(Absence::Absent);
+    };
+    Ok(match shown_entry(git, found)? {
+        Some(entry) if entry.kind == ObjectKind::Directory && !is_reserved_path(&path) => {
+            Absence::Directory
+        }
+        _ => Absence::Hidden,
+    })
+}
+
 /// `path` as `normalize_relative_path` writes it, or an error: reads take
 /// paths in that form only, so one path never names two entries.
 fn checked_path(path: &str) -> Result<String, ViewError> {
@@ -668,38 +697,68 @@ fn checked_path(path: &str) -> Result<String, ViewError> {
     }
 }
 
-/// The shown entry at exactly `path` in `commit`, if any.
+/// The shown entry at exactly `path` in `commit`, if any. The path reaches
+/// git only on stdin ([`WorkspaceGit::entries_by_path`]).
 fn entry_at(
     git: &WorkspaceGit<'_>,
     commit: &str,
     path: &str,
 ) -> Result<Option<ObjectEntry>, ViewError> {
-    let raw = git.bytes_opts(
-        &[
-            "ls-tree",
-            "-l",
-            "-z",
-            "--full-tree",
-            "--end-of-options",
-            commit,
-            "--",
-            path,
-        ],
-        &RunOpts {
-            literal_pathspecs: true,
-            ..RunOpts::default()
-        },
-    )?;
-    Ok(parse_ls_tree_long(&raw)
-        .into_iter()
-        .find(|(entry_path, _)| entry_path == path)
-        .and_then(|(_, entry)| entry))
+    match git
+        .entries_by_path(commit, &[path.to_string()])?
+        .remove(path)
+    {
+        Some(entry) => shown_entry(git, entry),
+        None => Ok(None),
+    }
+}
+
+/// `entry` as a listing shows it: a regular file with its size, or a
+/// folder; `None` for anything else (symlinks, submodules). A regular file
+/// whose size git could not read (its object is missing or corrupt) is an
+/// error, never a path that is not there: a client would take that for a
+/// deleted file.
+fn shown_entry(
+    git: &WorkspaceGit<'_>,
+    entry: crate::workspace_git::TreeEntry,
+) -> Result<Option<ObjectEntry>, ViewError> {
+    match (entry.mode.as_str(), entry.kind.as_str()) {
+        ("100644" | "100755", "blob") => {
+            let size = git
+                .object_sizes(std::slice::from_ref(&entry.oid))?
+                .pop()
+                .flatten()
+                .map(|(_, size)| size);
+            let Some(size) = size else {
+                return Err(ViewError::Git(anyhow::anyhow!(
+                    "the object of {} ({}) is missing or corrupt",
+                    entry.path,
+                    entry.oid
+                )));
+            };
+            Ok(Some(ObjectEntry {
+                path: entry.path,
+                kind: ObjectKind::File,
+                mode: entry.mode,
+                oid: entry.oid,
+                size: Some(size),
+            }))
+        }
+        ("040000", "tree") => Ok(Some(ObjectEntry {
+            path: entry.path,
+            kind: ObjectKind::Directory,
+            mode: entry.mode,
+            oid: entry.oid,
+            size: None,
+        })),
+        _ => Ok(None),
+    }
 }
 
 /// The shown entries of one `ls-tree -l -z` listing of a folder at
 /// `parent` ("" for the root).
-fn listed_children(parent: &str, raw: &[u8]) -> Vec<ObjectEntry> {
-    parse_ls_tree_long(raw)
+fn listed_children(parent: &str, raw: &[u8]) -> Result<Vec<ObjectEntry>, ViewError> {
+    Ok(parse_ls_tree_long(raw)?
         .into_iter()
         .filter_map(|(name, entry)| {
             let mut entry = entry?;
@@ -710,44 +769,72 @@ fn listed_children(parent: &str, raw: &[u8]) -> Vec<ObjectEntry> {
             };
             (!is_reserved_path(&entry.path)).then_some(entry)
         })
-        .collect()
+        .collect())
 }
 
 /// `(path, entry)` for each record of `ls-tree -l -z` output, where the
 /// entry is `None` for anything that is neither a regular file nor a folder
-/// (symlinks, submodules).
-fn parse_ls_tree_long(raw: &[u8]) -> Vec<(String, Option<ObjectEntry>)> {
-    raw.split(|byte| *byte == 0)
+/// (symlinks, submodules). A regular file whose size git could not read
+/// (`BAD`: its object is missing or corrupt) is an error, never a path that
+/// is not there: a client would take that for a deleted file.
+fn parse_ls_tree_long(raw: &[u8]) -> Result<Vec<(String, Option<ObjectEntry>)>, ViewError> {
+    let mut parsed = Vec::new();
+    for record in raw
+        .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
-        .filter_map(|record| {
-            let tab = record.iter().position(|byte| *byte == b'\t')?;
-            let meta = std::str::from_utf8(&record[..tab]).ok()?;
-            let path = std::str::from_utf8(&record[tab + 1..]).ok()?.to_string();
-            let mut fields = meta.split_whitespace();
-            let mode = fields.next()?.to_string();
-            let object_type = fields.next()?;
-            let oid = fields.next()?.to_string();
-            let size = fields.next()?;
-            let entry = match (mode.as_str(), object_type) {
-                ("100644" | "100755", "blob") => Some(ObjectEntry {
-                    path: path.clone(),
-                    kind: ObjectKind::File,
-                    mode,
-                    oid,
-                    size: Some(size.parse().ok()?),
-                }),
-                ("040000", "tree") => Some(ObjectEntry {
-                    path: path.clone(),
-                    kind: ObjectKind::Directory,
-                    mode,
-                    oid,
-                    size: None,
-                }),
-                _ => None,
+    {
+        if let Some(record) = parse_ls_tree_long_record(record)? {
+            parsed.push(record);
+        }
+    }
+    Ok(parsed)
+}
+
+fn parse_ls_tree_long_record(
+    record: &[u8],
+) -> Result<Option<(String, Option<ObjectEntry>)>, ViewError> {
+    let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+        return Ok(None);
+    };
+    let (Ok(meta), Ok(path)) = (
+        std::str::from_utf8(&record[..tab]),
+        std::str::from_utf8(&record[tab + 1..]),
+    ) else {
+        return Ok(None);
+    };
+    let path = path.to_string();
+    let mut fields = meta.split_whitespace();
+    let (Some(mode), Some(object_type), Some(oid), Some(size)) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return Ok(None);
+    };
+    let (mode, oid) = (mode.to_string(), oid.to_string());
+    let entry = match (mode.as_str(), object_type) {
+        ("100644" | "100755", "blob") => {
+            let Ok(size) = size.parse() else {
+                return Err(ViewError::Git(anyhow::anyhow!(
+                    "the object of {path} ({oid}) is missing or corrupt"
+                )));
             };
-            Some((path, entry))
-        })
-        .collect()
+            Some(ObjectEntry {
+                path: path.clone(),
+                kind: ObjectKind::File,
+                mode,
+                oid,
+                size: Some(size),
+            })
+        }
+        ("040000", "tree") => Some(ObjectEntry {
+            path: path.clone(),
+            kind: ObjectKind::Directory,
+            mode,
+            oid,
+            size: None,
+        }),
+        _ => None,
+    };
+    Ok(Some((path, entry)))
 }
 
 /// Up to `limit` (at most [`MAX_HISTORY_PAGE`]) commits of `head`'s
@@ -824,8 +911,8 @@ fn walk_history(
     if count == 0 || skip > MAX_HISTORY_SKIP {
         return Ok(Vec::new());
     }
-    let max_count = count.to_string();
-    let skip = skip.to_string();
+    let max_count = decimal(count);
+    let skip = decimal(skip);
     let mut walk_args = Vec::new();
     if walk == HistoryWalk::FirstParent {
         walk_args.push("--first-parent");
@@ -1444,6 +1531,36 @@ pub(crate) fn describe(
     Ok(items)
 }
 
+/// The reason a restore gives for a path the person chose to keep as the
+/// saved version has it.
+pub(crate) const KEPT: &str = "kept";
+
+/// A path a restore left as `main` (or the checkout) has it, and why:
+/// [`KEPT`], or the name of the reason it may never be restored here
+/// ([`crate::publish_policy::RejectReason::name`]). Desktop and the hosted
+/// gateway both answer `notRestored` as a list of these, by path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NotRestored {
+    pub path: String,
+    pub reason: &'static str,
+}
+
+/// Why a restore leaves a change of the work out, if it does: refused first
+/// (`refused`: why it may never be restored here), so a path that can never
+/// come back is refused even below a kept folder, and only then [`KEPT`]
+/// when the person kept it (`kept`). Only the person's own choices let a
+/// recovery ref go once the rest is on `main`, so the order decides whether
+/// work is removed on their behalf. Desktop and the gateway decide by it.
+pub(crate) fn left_out_reason(
+    refused: Option<crate::publish_policy::RejectReason>,
+    kept: bool,
+) -> Option<&'static str> {
+    match refused {
+        Some(reason) => Some(reason.name()),
+        None => kept.then_some(KEPT),
+    }
+}
+
 /// The trailer a restore commit names the ref it restored with. Only the
 /// origin itself writes it (as the commit's committer), in exactly
 /// [`restore_commit_message`]; saves drop it, like every `Instafy-` trailer
@@ -1674,10 +1791,37 @@ const MAX_RESTORE_COMMITS: usize = 500;
 /// clocks of the machines that made the commits may differ.
 const RESTORE_CLOCK_SLACK_SECONDS: i64 = 24 * 60 * 60;
 
+/// The committer addresses whose restore commits count as restores, on
+/// Desktop and on the gateway alike: this server's own (`own`), Desktop's
+/// origin identity ([`DEFAULT_ORIGIN_AUTHOR_EMAIL`], which Desktop commits
+/// under) and the gateway's ([`DEFAULT_GATEWAY_AUTHOR_EMAIL`]), in lower
+/// case, without repeats. One space's canonical history is shared by both
+/// modes, so a restore made in one shows as restored in the other and is
+/// never recorded twice. A caller can never write a restore commit under
+/// either address: both servers drop every `Instafy-` trailer git reads
+/// from the messages they commit for callers ([`without_origin_trailers`]).
+///
+/// [`DEFAULT_ORIGIN_AUTHOR_EMAIL`]: crate::config::DEFAULT_ORIGIN_AUTHOR_EMAIL
+/// [`DEFAULT_GATEWAY_AUTHOR_EMAIL`]: crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL
+pub(crate) fn restore_committers(own: &str) -> Vec<String> {
+    let mut committers: Vec<String> = Vec::new();
+    for email in [
+        own,
+        crate::config::DEFAULT_ORIGIN_AUTHOR_EMAIL,
+        crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL,
+    ] {
+        let email = email.trim().to_ascii_lowercase();
+        if !email.is_empty() && !committers.contains(&email) {
+            committers.push(email);
+        }
+    }
+    committers
+}
+
 /// Give every item a commit `main` reaches restored its `restored_rev`: the
 /// newest commit whose whole message is [`restore_commit_message`] of the
-/// item's ref and whose committer is `committer_email` (this origin's own
-/// identity). Every restore of a salvage ref that lands leaves one, an
+/// item's ref and whose committer is one of `committers`
+/// ([`restore_committers`]). Every restore of a salvage ref that lands leaves one, an
 /// empty one when the saved version already held the work (see
 /// `publish::restore`), so a salvage ref, which is never removed, shows as
 /// restored for good. The
@@ -1691,7 +1835,7 @@ pub(crate) fn mark_restored(
     git: &WorkspaceGit<'_>,
     items: &mut [RecoveryItem],
     main: Option<&str>,
-    committer_email: &str,
+    committers: &[String],
 ) -> Result<(), ViewError> {
     let (Some(main), Some(oldest)) = (main, items.iter().map(|item| item.timestamp).min()) else {
         return Ok(());
@@ -1699,7 +1843,7 @@ pub(crate) fn mark_restored(
     let main = parse_rev(main)?;
     let ids = restore_candidates(git, &main, "", oldest)?;
     let mut restored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (id, reference) in restore_commits(git, &ids, committer_email)? {
+    for (id, reference) in restore_commits(git, &ids, committers)? {
         // Newest first: the first commit seen for a ref wins.
         restored.entry(reference).or_insert(id);
     }
@@ -1709,19 +1853,56 @@ pub(crate) fn mark_restored(
     Ok(())
 }
 
+/// Whether a restore of `reference` onto `tips[0]` that brings nothing new
+/// there (`made` is false: the saved version already holds the work, or
+/// the rest was kept or refused) records itself with an empty restore
+/// commit ([`restore_commit_message`], that tip's tree), and the earlier
+/// restore commit of it the first of `tips` reaches, if any. Only a salvage
+/// ref is recorded: it is never removed, so only that commit tells the list
+/// it was restored ([`mark_restored`]); a recovery ref goes once its work is
+/// on `main`, so the commit would only be noise in history. And only once:
+/// not when one of `tips` (the commit restored onto, and for Desktop also
+/// canonical `main` as it last fetched it) already has a restore commit of
+/// it made since its work (`saved`) was ([`restore_of`]) by one of
+/// `committers` ([`restore_committers`]). Desktop and the hosted gateway
+/// decide by this.
+pub(crate) fn restore_marker(
+    git: &WorkspaceGit<'_>,
+    reference: &RecoveryRef,
+    made: bool,
+    tips: &[&str],
+    saved: &str,
+    committers: &[String],
+) -> Result<(bool, Option<String>), ViewError> {
+    if made || !reference.is_salvage() {
+        return Ok((false, None));
+    }
+    let made_at = git
+        .read_objects(std::slice::from_ref(&saved.to_string()))?
+        .first()
+        .map(|object| parse_commit(&object.data).timestamp)
+        .unwrap_or_default();
+    for tip in tips {
+        if let Some(earlier) = restore_of(git, tip, reference.as_str(), made_at, committers)? {
+            return Ok((false, Some(earlier)));
+        }
+    }
+    Ok((true, None))
+}
+
 /// The newest restore commit of `reference` (see [`mark_restored`]) that
 /// `tip` reaches, made since `made_at` (the time of the work's own commit,
-/// less the clock slack), when there is one.
+/// less the clock slack) by one of `committers`, when there is one.
 pub(crate) fn restore_of(
     git: &WorkspaceGit<'_>,
     tip: &str,
     reference: &str,
     made_at: i64,
-    committer_email: &str,
+    committers: &[String],
 ) -> Result<Option<String>, ViewError> {
     let tip = parse_rev(tip)?;
     let ids = restore_candidates(git, &tip, reference, made_at)?;
-    Ok(restore_commits(git, &ids, committer_email)?
+    Ok(restore_commits(git, &ids, committers)?
         .into_iter()
         .find(|(_, restored)| restored == reference)
         .map(|(id, _)| id))
@@ -1762,19 +1943,19 @@ fn restore_candidates(
 }
 
 /// `(id, ref)` of each of `ids` that is a restore commit
-/// ([`restore_commit_message`] of `ref`) committed by `committer_email`,
-/// in the order given, with one `cat-file --batch`.
+/// ([`restore_commit_message`] of `ref`) committed by one of `committers`
+/// (lower case, as [`restore_committers`] gives them), in the order given,
+/// with one `cat-file --batch`.
 pub(crate) fn restore_commits(
     git: &WorkspaceGit<'_>,
     ids: &[String],
-    committer_email: &str,
+    committers: &[String],
 ) -> Result<Vec<(String, String)>, ViewError> {
-    let committer_email = committer_email.trim().to_ascii_lowercase();
     let mut found = Vec::new();
     for (id, object) in ids.iter().zip(git.read_objects(ids)?) {
-        if object.kind != "commit"
-            || committer_of(&object.data).as_deref() != Some(committer_email.as_str())
-        {
+        let trusted = committer_of(&object.data)
+            .is_some_and(|committer| committers.iter().any(|email| *email == committer));
+        if object.kind != "commit" || !trusted {
             continue;
         }
         let text = String::from_utf8_lossy(&object.data);
@@ -2179,6 +2360,30 @@ mod tests {
     }
 
     #[test]
+    fn restores_by_desktop_and_the_gateway_count_in_both() {
+        for (own, expected) in [
+            (
+                "origin@instafy.dev",
+                vec!["origin@instafy.dev", "gateway@instafy.dev"],
+            ),
+            (
+                " Gateway@Instafy.dev ",
+                vec!["gateway@instafy.dev", "origin@instafy.dev"],
+            ),
+            (
+                "Bot@Example.com",
+                vec![
+                    "bot@example.com",
+                    "origin@instafy.dev",
+                    "gateway@instafy.dev",
+                ],
+            ),
+        ] {
+            assert_eq!(restore_committers(own), expected, "{own}");
+        }
+    }
+
+    #[test]
     fn names_and_ids_reach_git_as_copies_of_the_allowed_bytes() {
         let name = format!("refs/instafy/recovery/{ORIGIN}/Unsaved_0.x-1");
         assert_eq!(
@@ -2380,6 +2585,41 @@ mod tests {
             .collect()
     }
 
+    /// A file whose object is missing or corrupt is an error, never a
+    /// path that is not there (a client would take a 404 `not_found` for a
+    /// deleted file) and never left out of a listing.
+    #[test]
+    fn a_file_whose_object_is_damaged_is_an_error_not_an_absence() {
+        let (_dir, root) = tempdir();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let head = object_fixture(&workspace);
+        let mirror = bare(&root, "mirror.git");
+        let mirror_git = WorkspaceGit::bare(&mirror, None);
+        fetch(
+            &mirror_git,
+            &workspace.join(".instafy/.git"),
+            "+refs/heads/main:refs/heads/main",
+        );
+        let blob = ig(&workspace, &["rev-parse", &format!("{head}:src/lib.rs")]);
+        let loose = mirror.join("objects").join(&blob[..2]).join(&blob[2..]);
+        assert!(loose.is_file());
+        std::fs::remove_file(&loose).unwrap();
+
+        let unreadable = |error: ViewError| {
+            let text = format!("{error:#}");
+            assert!(text.contains("missing or corrupt"), "{text}");
+        };
+        unreadable(read_blob_at(&mirror_git, &head, "src/lib.rs", 1 << 20).unwrap_err());
+        unreadable(absence_at(&mirror_git, &head, "src/lib.rs").unwrap_err());
+        unreadable(read_tree_at(&mirror_git, &head, "src").unwrap_err());
+        // Other files read as before.
+        assert!(matches!(
+            read_blob_at(&mirror_git, &head, "README.md", 1 << 20).unwrap(),
+            BlobRead::Found { .. }
+        ));
+    }
+
     #[test]
     fn object_reads_show_regular_files_and_folders_only_in_either_layout() {
         let (_dir, root) = tempdir();
@@ -2462,6 +2702,25 @@ mod tests {
                 read_blob_at(&git, &head, "src", 1 << 20).unwrap(),
                 BlobRead::Missing
             );
+            // Why nothing was shown: only a path the tree lacks is absent.
+            for (path, why) in [
+                ("missing", Absence::Absent),
+                ("link/inside", Absence::Absent),
+                ("vendor/sub/file", Absence::Absent),
+                ("README.md/below", Absence::Absent),
+                ("link", Absence::Hidden),
+                ("vendor/sub", Absence::Hidden),
+                (".instafy", Absence::Hidden),
+                (".instafy/state.json", Absence::Hidden),
+                ("src", Absence::Directory),
+                ("src/nested", Absence::Directory),
+            ] {
+                assert_eq!(absence_at(&git, &head, path).unwrap(), why, "{path}");
+            }
+            assert!(matches!(
+                absence_at(&git, &head, "../x"),
+                Err(ViewError::InvalidPath)
+            ));
 
             let BlobRead::Found { data, mode, .. } =
                 read_blob_at(&git, &head, "README.md", 1 << 20).unwrap()
@@ -2549,6 +2808,10 @@ mod tests {
         let json = serde_json::to_value(&page).unwrap();
         assert_eq!(json[0]["firstParent"], merge.as_str());
         assert!(json[3].get("firstParent").is_none(), "{json}");
+        let parents: Vec<Option<usize>> = page.iter().map(|entry| entry.parent_count).collect();
+        assert_eq!(parents, vec![Some(1), Some(2), Some(1), Some(0)]);
+        assert_eq!(json[1]["parentCount"], 2);
+        assert_eq!(json[3]["parentCount"], 0);
 
         let skipped = first_parent_history(&git, &c, 2, 1).unwrap();
         assert_eq!(

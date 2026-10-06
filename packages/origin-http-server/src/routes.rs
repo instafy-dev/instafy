@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Path as AxumPath, Query, Request, State};
 use axum::http::{header, HeaderName, HeaderValue, Method};
 use axum::middleware::Next;
@@ -11,11 +11,10 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde::Serialize;
 use std::fs::Metadata;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::io::ReaderStream;
 use tower_http::cors::{Any, CorsLayer};
@@ -24,17 +23,20 @@ use uuid::Uuid;
 
 use crate::apply::{
     apply_changes_transactional, apply_changes_transactional_file, normalize_relative_path,
-    ApplyManifest, ApplySummary,
+    portable_key, ApplyManifest, ApplySummary, PATH_ALIAS_MESSAGE,
 };
 use crate::apply_idempotency::{
     abort_apply_idempotency_claim, claim_apply_idempotency, complete_apply_idempotency_claim,
     lookup_apply_idempotency, normalize_apply_idempotency_key, normalize_apply_request_fingerprint,
     ApplyIdempotencyClaimOutcome, ApplyIdempotencyLookup, ApplyIdempotencySuccess,
 };
+use crate::apply_request::{
+    read_apply_json, read_apply_multipart, validate_apply_lease, ApplyArchive,
+};
 use crate::auth::{OriginClaims, TokenValidator};
 use crate::browser;
 use crate::checkout_versions;
-use crate::config::{ServerConfig, MAX_APPLY_MANIFEST_BYTES};
+use crate::config::ServerConfig;
 use crate::error::OriginError;
 use crate::git;
 use crate::git_tokens;
@@ -42,6 +44,7 @@ use crate::paths::is_reserved_path;
 use crate::publish::{self, PublishContext, PublishReport, PublishRequest, Selection, SyncStatus};
 use crate::publish_policy::MAX_PUBLISH_BLOB_BYTES;
 use crate::recovery_view;
+use crate::route_auth::{self, bearer_token_from_headers, OriginAccessToken, RouteAuth};
 use crate::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
 use crate::workspace_git::{
     blob_oid, workspace_file_blob_oid, GitIdentity, WorkspaceGit, MAX_LISTED_BLOB_BYTES,
@@ -49,28 +52,6 @@ use crate::workspace_git::{
 use crate::workspace_lock::try_acquire_workspace_apply_lock;
 
 const GIT_WORKSPACE_SYNC_TTL_SECONDS: u64 = 120;
-const MAX_APPLY_JSON_ARCHIVE_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_APPLY_JSON_REQUEST_BYTES: usize = 24 * 1024 * 1024;
-
-#[derive(Clone, Debug)]
-struct OriginAccessToken {
-    token: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ActiveWorkspaceLeaseEnvelope {
-    lease: Option<ActiveWorkspaceLease>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ActiveWorkspaceLease {
-    lease_id: Uuid,
-    project_id: Uuid,
-    user_id: Option<Uuid>,
-    runtime_id: Option<Uuid>,
-    expires_at: DateTime<Utc>,
-}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -138,6 +119,9 @@ impl StopFence {
 }
 
 impl AppState {
+    /// The state of a single-tenant origin: one checkout at `workspace_root`.
+    /// A multi-tenant configuration is refused; the gateway serves
+    /// [`crate::hosted`] routes and keeps no checkout.
     pub fn new(
         config: Arc<ServerConfig>,
         token_validator: TokenValidator,
@@ -145,6 +129,12 @@ impl AppState {
         workspace_root: PathBuf,
         commit_receipt_url: Option<reqwest::Url>,
     ) -> std::io::Result<Self> {
+        if config.multi_tenant {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the single-tenant routes do not serve a multi-tenant gateway",
+            ));
+        }
         let workspace_fs = WorkspaceDir::open(&workspace_root)?;
         Ok(Self {
             config,
@@ -156,12 +146,20 @@ impl AppState {
             commit_receipt_url,
             apply_locks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             git_last_sync: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            // Archive parsing/staging can be memory and I/O intensive. Keep a
-            // single bounded admission point across all projects served by a
-            // multi-tenant origin process.
+            // Archive parsing and staging can be memory and I/O intensive:
+            // one apply at a time.
             apply_slots: Arc::new(Semaphore::new(1)),
             stopping: StopFence::default(),
         })
+    }
+
+    /// What the route middleware needs to authorize a request.
+    pub(crate) fn route_auth(&self) -> RouteAuth {
+        RouteAuth {
+            config: self.config.clone(),
+            token_validator: self.token_validator.clone(),
+            http_client: self.http_client.clone(),
+        }
     }
 }
 
@@ -235,7 +233,7 @@ pub fn router(state: AppState) -> Router {
         .route("/git/diff", get(handle_git_diff))
         .route("/git/history", get(handle_git_history))
         .route("/git/history/review", get(handle_git_history_review))
-        .merge(unsaved_work_read_routes(&state))
+        .merge(unsaved_work_read_routes())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_read,
@@ -260,7 +258,7 @@ pub fn router(state: AppState) -> Router {
         .route("/git/revert", post(handle_git_revert))
         .route("/git/revert-commit", post(handle_git_revert_commit))
         .route("/git/sync", post(handle_git_sync))
-        .merge(unsaved_work_write_routes(&state))
+        .merge(unsaved_work_write_routes())
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_write,
@@ -301,22 +299,16 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Unsaved work on a single-tenant checkout (Desktop and workspace
-/// runtimes): the list, behind `require_read`. A multi-tenant origin does
-/// not serve it.
-fn unsaved_work_read_routes(state: &AppState) -> Router<AppState> {
-    if state.config.multi_tenant {
-        return Router::new();
-    }
+/// Unsaved work kept on canonical for this checkout (Desktop and workspace
+/// runtimes): the list, behind `require_read`. The gateway serves its own
+/// from [`crate::hosted`].
+fn unsaved_work_read_routes() -> Router<AppState> {
     Router::new().route("/git/recovery", get(handle_git_recovery))
 }
 
-/// Restoring and dismissing unsaved work on a single-tenant checkout,
-/// behind `require_write`. A multi-tenant origin does not serve them.
-fn unsaved_work_write_routes(state: &AppState) -> Router<AppState> {
-    if state.config.multi_tenant {
-        return Router::new();
-    }
+/// Restoring and dismissing unsaved work on this checkout, behind
+/// `require_write`.
+fn unsaved_work_write_routes() -> Router<AppState> {
     Router::new()
         .route("/git/recovery/restore", post(handle_git_recovery_restore))
         .route("/git/recovery/dismiss", post(handle_git_recovery_dismiss))
@@ -413,200 +405,20 @@ async fn require_browser_view_and_control(
 
 async fn authorize_and_continue(
     state: AppState,
-    mut request: Request,
+    request: Request,
     next: Next,
     required_scopes: &[&str],
 ) -> Result<Response, OriginError> {
-    let mut headers = request.headers().clone();
-    let mut authenticated_from_query = false;
-
-    if !state.config.skip_auth && !headers.contains_key(header::AUTHORIZATION) {
-        if request.method() == Method::GET || request.method() == Method::HEAD {
-            if let Some(token) = token_from_query(request.uri().query()) {
-                if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
-                    headers.insert(header::AUTHORIZATION, value);
-                    authenticated_from_query = true;
-                }
-            }
-        }
-    }
-
-    let claims = state
-        .token_validator
-        .authorize(&state.config, &headers, required_scopes)
-        .await?;
-
-    let token = bearer_token_from_headers(&headers).unwrap_or_default();
-
-    // `fs.write` is a live-lease capability, not merely a signed bearer
-    // capability. Check the controller immediately before dispatching to any
-    // mutating handler so apply, JSON apply, Git sync, and both revert routes
-    // all fail closed through one authorization gate.
-    if required_scopes.contains(&"fs.write") {
-        authorize_active_write_lease(&state, &claims, &token).await?;
-    }
-
-    request.extensions_mut().insert(claims);
-    request.extensions_mut().insert(OriginAccessToken { token });
-    let mut response = next.run(request).await;
-    if authenticated_from_query {
-        response.headers_mut().insert(
-            HeaderName::from_static("referrer-policy"),
-            HeaderValue::from_static("no-referrer"),
-        );
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("private, no-store, max-age=0"),
-        );
-    }
-    Ok(response)
+    route_auth::authorize_and_continue(&state.route_auth(), request, next, required_scopes).await
 }
 
-fn bearer_token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            let mut parts = value.split_whitespace();
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some(scheme), Some(token), None) if scheme.eq_ignore_ascii_case("bearer") => {
-                    Some(token.trim().to_string())
-                }
-                _ => None,
-            }
-        })
-        .filter(|token| !token.is_empty())
-}
-
+#[cfg(test)]
 async fn authorize_active_write_lease(
     state: &AppState,
     claims: &OriginClaims,
     access_token: &str,
 ) -> Result<(), OriginError> {
-    // Explicitly preserve the documented local-development escape hatch.
-    if state.config.skip_auth {
-        return Ok(());
-    }
-
-    let token = access_token.trim();
-    if token.is_empty() {
-        return Err(OriginError::unauthorized(
-            "origin write authorization token is required",
-        ));
-    }
-
-    let project_id = project_id_for_request(state, claims)?;
-    let claimed_lease_id = claims
-        .lease_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| OriginError::unauthorized("origin write token is missing its lease"))
-        .and_then(|value| {
-            Uuid::parse_str(value)
-                .map_err(|_| OriginError::unauthorized("origin write token lease is invalid"))
-        })?;
-
-    let claimed_runtime_id = claims
-        .runtime_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            Uuid::parse_str(value)
-                .map_err(|_| OriginError::unauthorized("origin write token runtime is invalid"))
-        })
-        .transpose()?;
-
-    let mut url = state.config.controller_base_url.clone();
-    url.path_segments_mut()
-        .map_err(|_| OriginError::internal("controller base url missing path segments"))?
-        .extend(["projects", &project_id.to_string(), "lease"]);
-
-    let response = state
-        .http_client
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|error| {
-            OriginError::unavailable(format!(
-                "workspace lease authorization is unavailable: {error}"
-            ))
-        })?;
-    if !response.status().is_success() {
-        return Err(OriginError::unauthorized(format!(
-            "controller rejected workspace lease authorization (status {})",
-            response.status()
-        )));
-    }
-
-    let payload = response
-        .json::<ActiveWorkspaceLeaseEnvelope>()
-        .await
-        .map_err(|error| {
-            OriginError::unavailable(format!(
-                "workspace lease authorization response is invalid: {error}"
-            ))
-        })?;
-    let lease = payload
-        .lease
-        .ok_or_else(|| OriginError::unauthorized("an active workspace lease is required"))?;
-
-    if lease.lease_id != claimed_lease_id || lease.project_id != project_id {
-        return Err(OriginError::unauthorized(
-            "workspace lease does not match the origin write token",
-        ));
-    }
-    if lease.expires_at <= Utc::now() {
-        return Err(OriginError::unauthorized(
-            "workspace lease is no longer active",
-        ));
-    }
-
-    // When the controller minted a runtime-scoped origin token, preserve that
-    // exact runtime binding. User-driven hosted-origin calls may intentionally
-    // omit a runtime claim even though the UI recorded its runtime hint on the
-    // workspace lease, so absence is not upgraded into a runtime assertion.
-    if let Some(claimed_runtime_id) = claimed_runtime_id {
-        if lease.runtime_id != Some(claimed_runtime_id) {
-            return Err(OriginError::unauthorized(
-                "workspace lease runtime does not match the origin write token",
-            ));
-        }
-    }
-
-    let lease_user_id = lease.user_id.ok_or_else(|| {
-        OriginError::unauthorized("active workspace lease is missing its user binding")
-    })?;
-    let claimed_user_id = Uuid::parse_str(claims.sub.trim()).map_err(|_| {
-        OriginError::unauthorized("origin write token subject is not a workspace lease user")
-    })?;
-    if claimed_user_id != lease_user_id {
-        return Err(OriginError::unauthorized(
-            "workspace lease user does not match the origin write token",
-        ));
-    }
-
-    Ok(())
-}
-
-fn token_from_query(query: Option<&str>) -> Option<String> {
-    let query = query?.trim();
-    if query.is_empty() {
-        return None;
-    }
-
-    let parsed = reqwest::Url::parse(&format!("http://localhost/?{query}")).ok()?;
-    for (key, value) in parsed.query_pairs() {
-        if key == "token" || key == "access_token" {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
+    route_auth::authorize_active_write_lease(&state.route_auth(), claims, access_token).await
 }
 
 async fn handle_entries(
@@ -621,7 +433,7 @@ async fn handle_entries(
         rev,
         reference,
     } = query;
-    if let Some(version) = requested_version(&state, rev, reference) {
+    if let Some(version) = requested_version(rev, reference) {
         let relative = match path.as_deref().map(str::trim) {
             Some(relative) if !relative.is_empty() => normalize_relative_path(relative)
                 .ok_or_else(|| OriginError::bad_request("invalid path"))?,
@@ -665,7 +477,7 @@ async fn handle_entries(
         }
     }
 
-    let workspace = workspace_dir_for_project(&state, project_id)?;
+    let workspace = state.workspace_fs.clone();
     if let Some(relative) = normalized.as_deref() {
         match workspace
             .entry_kind(relative)
@@ -673,9 +485,7 @@ async fn handle_entries(
         {
             WorkspaceEntryKind::File => {
                 let mut entry = build_file_entry(&workspace, relative)?;
-                if !state.config.multi_tenant {
-                    add_blob_oids(&workspace, &mut entry);
-                }
+                add_blob_oids(&workspace, &mut entry);
                 return Ok(Json(entry).into_response());
             }
             WorkspaceEntryKind::Directory => {}
@@ -683,9 +493,7 @@ async fn handle_entries(
     }
 
     let mut entries = list_directory(&workspace, normalized.as_deref())?;
-    if !state.config.multi_tenant {
-        add_blob_oids(&workspace, &mut entries);
-    }
+    add_blob_oids(&workspace, &mut entries);
     Ok(Json(entries).into_response())
 }
 
@@ -696,7 +504,7 @@ async fn handle_file(
     AxumPath(path): AxumPath<String>,
     Query(version): Query<VersionQuery>,
 ) -> Result<Response, OriginError> {
-    if let Some(version) = requested_version(&state, version.rev, version.reference) {
+    if let Some(version) = requested_version(version.rev, version.reference) {
         let normalized = normalize_relative_path(&path)
             .ok_or_else(|| OriginError::bad_request("invalid file path"))?;
         return file_at_version(&state, &claims, &access_token, version, normalized, false).await;
@@ -718,7 +526,7 @@ async fn handle_file(
         return Err(OriginError::not_found("file not found"));
     }
 
-    let workspace = workspace_dir_for_project(&state, project_id)?;
+    let workspace = state.workspace_fs.clone();
     let file = workspace
         .open_file(&normalized)
         .map_err(|_| worktree_file_miss(&workspace, &normalized))?;
@@ -735,7 +543,7 @@ async fn handle_file(
     let mime = mime_type_for_path(&normalized);
     let modified = metadata.modified().ok().map(format_system_time);
     // The id of exactly the bytes served, from the same no-follow read.
-    let blob = (!state.config.multi_tenant).then(|| blob_oid(&data));
+    let blob = blob_oid(&data);
 
     let mut response = Json(FileContentResponse {
         path: normalized,
@@ -746,9 +554,7 @@ async fn handle_file(
         modified,
     })
     .into_response();
-    if let Some(blob) = blob {
-        set_blob_header(&mut response, &blob);
-    }
+    set_blob_header(&mut response, &blob);
     Ok(response)
 }
 
@@ -781,7 +587,7 @@ fn worktree_miss(error: &std::io::Error, absent: &str) -> OriginError {
     }
 }
 
-const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
+pub(crate) const INSTAFY_BLOB_HEADER: &str = "x-instafy-blob";
 /// `/raw` reads files up to this size into memory to send `X-Instafy-Blob`;
 /// larger files stream without it.
 const MAX_RAW_HASHED_BYTES: u64 = 32 * 1024 * 1024;
@@ -809,7 +615,7 @@ async fn handle_raw(
     AxumPath(path): AxumPath<String>,
     Query(version): Query<VersionQuery>,
 ) -> Result<Response, OriginError> {
-    if let Some(version) = requested_version(&state, version.rev, version.reference) {
+    if let Some(version) = requested_version(version.rev, version.reference) {
         let normalized = normalize_relative_path(&path)
             .ok_or_else(|| OriginError::bad_request("invalid file path"))?;
         return file_at_version(&state, &claims, &access_token, version, normalized, true).await;
@@ -831,7 +637,7 @@ async fn handle_raw(
         return Err(OriginError::not_found("file not found"));
     }
 
-    let workspace = workspace_dir_for_project(&state, project_id)?;
+    let workspace = state.workspace_fs.clone();
     let file = workspace
         .open_file(&normalized)
         .map_err(|_| worktree_file_miss(&workspace, &normalized))?;
@@ -842,7 +648,7 @@ async fn handle_raw(
     let mut file = tokio::fs::File::from_std(file);
 
     let mut blob = None;
-    let body = if !state.config.multi_tenant && size <= MAX_RAW_HASHED_BYTES {
+    let body = if size <= MAX_RAW_HASHED_BYTES {
         let mut data = Vec::with_capacity(size as usize);
         file.read_to_end(&mut data)
             .await
@@ -881,17 +687,12 @@ fn set_rev_header(response: &mut Response, rev: &str) {
     }
 }
 
-/// `(rev, ref)` when a single-tenant read names a saved version (an empty
-/// value counts as absent; sending both is refused when it is resolved).
-/// Multi-tenant reads ignore both, as before.
+/// `(rev, ref)` when a read names a saved version (an empty value counts as
+/// absent; sending both is refused when it is resolved).
 fn requested_version(
-    state: &AppState,
     rev: Option<String>,
     reference: Option<String>,
 ) -> Option<(Option<String>, Option<String>)> {
-    if state.config.multi_tenant {
-        return None;
-    }
     let rev = rev.filter(|value| !value.is_empty());
     let reference = reference.filter(|value| !value.is_empty());
     (rev.is_some() || reference.is_some()).then_some((rev, reference))
@@ -911,10 +712,10 @@ async fn read_at_version<T: Send + 'static>(
     read: impl FnOnce(&WorkspaceGit<'_>, &str) -> Result<T, recovery_view::ViewError> + Send + 'static,
 ) -> Result<(String, T), OriginError> {
     let project_id = project_id_for_request(state, claims)?;
-    let root = workspace_root_for_project(state, project_id);
+    let root = checkout_root(state);
     let remote = state.config.git_remote_url_for_project(project_id);
     let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
-    if remote.is_some() && !has_git_checkout(state, project_id) {
+    if remote.is_some() && !has_git_checkout(state) {
         ensure_workspace_ready(
             state,
             project_id,
@@ -1101,7 +902,7 @@ async fn fetch_ref_for_review(
     access_token: &OriginAccessToken,
     reference: String,
 ) -> Result<(), OriginError> {
-    let root = workspace_root_for_project(state, project_id);
+    let root = checkout_root(state);
     let remote = state.config.git_remote_url_for_project(project_id);
     let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
     let token = match remote {
@@ -1227,8 +1028,7 @@ async fn handle_git_status(
     Query(query): Query<GitStatusQuery>,
 ) -> Result<Json<GitStatusResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     if state
         .config
@@ -1248,7 +1048,7 @@ async fn handle_git_status(
         }));
     }
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
 
     if needs_checkout {
         let _ = ensure_workspace_ready(
@@ -1289,11 +1089,9 @@ async fn handle_git_status(
     let dirty = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
-        if !status_config.multi_tenant {
-            // Count changes only after copies an older sync left behind
-            // have been put right.
-            publish::repair_stale_checkout(&status_config, canonical_root.as_path())?;
-        }
+        // Count changes only after copies an older sync left behind have
+        // been put right.
+        publish::repair_stale_checkout(&status_config, canonical_root.as_path())?;
         git::list_dirty_files(canonical_root.as_path(), None)
     })
     .await
@@ -1341,8 +1139,7 @@ async fn handle_git_diff(
     Query(query): Query<GitDiffQuery>,
 ) -> Result<Json<GitDiffResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     if state
         .config
@@ -1371,7 +1168,7 @@ async fn handle_git_diff(
         _ => None,
     };
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
     if needs_checkout {
         let _ = ensure_workspace_ready(
             &state,
@@ -1400,8 +1197,8 @@ async fn handle_git_diff(
             }));
         }
     };
-    if let Some(reference) = requested_version(&state, None, query.reference.clone())
-        .and_then(|(_, reference)| reference)
+    if let Some(reference) =
+        requested_version(None, query.reference.clone()).and_then(|(_, reference)| reference)
     {
         fetch_ref_for_review(&state, project_id, &access_token, reference).await?;
     }
@@ -1483,8 +1280,7 @@ async fn handle_git_history_review(
     Query(query): Query<GitHistoryReviewQuery>,
 ) -> Result<Json<GitHistoryReviewResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     let normalized_commit = query.commit.as_deref().map(str::trim).unwrap_or("");
     if normalized_commit.is_empty() {
@@ -1496,6 +1292,25 @@ async fn handle_git_history_review(
             error: Some("missing commit".to_string()),
         }));
     }
+    // A version id, full or abbreviated: git gets a copy of its digits, never
+    // the request's text (which could be an option such as `--output=`).
+    let Some(commit_id) = git::is_safe_git_rev(normalized_commit)
+        .then(|| {
+            recovery_view::copy_from_alphabet(
+                &normalized_commit.to_ascii_lowercase(),
+                b"0123456789abcdef",
+            )
+        })
+        .flatten()
+    else {
+        return Ok(Json(GitHistoryReviewResponse {
+            supported: true,
+            commit: Some(normalized_commit.to_string()),
+            entries: Vec::new(),
+            parent_count: None,
+            error: Some("invalid commit: expected a version id".to_string()),
+        }));
+    };
 
     if state
         .config
@@ -1511,7 +1326,7 @@ async fn handle_git_history_review(
         }));
     }
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
     if needs_checkout {
         let _ = ensure_workspace_ready(
             &state,
@@ -1539,24 +1354,19 @@ async fn handle_git_history_review(
             }));
         }
     };
-    if let Some(reference) = requested_version(&state, None, query.reference.clone())
-        .and_then(|(_, reference)| reference)
+    if let Some(reference) =
+        requested_version(None, query.reference.clone()).and_then(|(_, reference)| reference)
     {
         fetch_ref_for_review(&state, project_id, &access_token, reference).await?;
     }
 
     let canonical_root = Arc::new(workspace_root);
-    let commit = normalized_commit.to_string();
-    let count_parents = !state.config.multi_tenant;
+    let commit = commit_id;
     let review = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
         let entries = git::list_commit_files(canonical_root.as_path(), &commit, None)?;
-        let parent_count = if count_parents {
-            commit_parent_count(canonical_root.as_path(), &commit)
-        } else {
-            None
-        };
+        let parent_count = commit_parent_count(canonical_root.as_path(), &commit);
         Ok::<_, OriginError>((entries, parent_count))
     })
     .await
@@ -1605,8 +1415,7 @@ async fn handle_git_history(
     Query(query): Query<GitHistoryQuery>,
 ) -> Result<Json<GitHistoryResponse>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     if state
         .config
@@ -1623,7 +1432,7 @@ async fn handle_git_history(
         }));
     }
 
-    let needs_checkout = !has_git_checkout(&state, project_id);
+    let needs_checkout = !has_git_checkout(&state);
     if needs_checkout {
         let _ = ensure_workspace_ready(
             &state,
@@ -1654,41 +1463,9 @@ async fn handle_git_history(
     };
 
     let canonical_root = Arc::new(workspace_root);
-    if !state.config.multi_tenant {
-        return Ok(Json(
-            checkout_history_page(&state, project_id, canonical_root, query.limit, query.skip)
-                .await?,
-        ));
-    }
-    let limit = query.limit.unwrap_or(8).clamp(1, 12);
-    let history = tokio::task::spawn_blocking(move || {
-        let _workspace_guard = try_acquire_workspace_apply_lock(canonical_root.as_path())?
-            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
-        let head = git::resolve_history_head_ref(canonical_root.as_path(), None)?;
-        let entries = git::list_recent_commits(canonical_root.as_path(), limit, None)?;
-        Ok::<_, OriginError>((head, entries))
-    })
-    .await
-    .map_err(|error| OriginError::internal(format!("git history task failed: {error}")))?;
-
-    match history {
-        Ok((head, entries)) => Ok(Json(GitHistoryResponse {
-            supported: true,
-            entries,
-            branch: head.branch,
-            head_ref: head.head_ref,
-            has_more: None,
-            error: None,
-        })),
-        Err(error) => Ok(Json(GitHistoryResponse {
-            supported: true,
-            entries: Vec::new(),
-            branch: None,
-            head_ref: None,
-            has_more: None,
-            error: Some(error.to_string()),
-        })),
-    }
+    Ok(Json(
+        checkout_history_page(&state, canonical_root, query.limit, query.skip).await?,
+    ))
 }
 
 /// A single-tenant checkout's history page: up to
@@ -1698,7 +1475,6 @@ async fn handle_git_history(
 /// the project's apply lock.
 async fn checkout_history_page(
     state: &AppState,
-    project_id: Uuid,
     root: Arc<PathBuf>,
     limit: Option<usize>,
     skip: Option<usize>,
@@ -1706,7 +1482,7 @@ async fn checkout_history_page(
     let limit = limit.unwrap_or(8).clamp(1, recovery_view::MAX_HISTORY_PAGE);
     let skip = skip.unwrap_or(0);
     let service_email = state.config.git_author_email.clone();
-    let has_checkout = has_git_checkout(state, project_id);
+    let has_checkout = has_git_checkout(state);
     let history = tokio::task::spawn_blocking(move || {
         let _workspace_guard = try_acquire_workspace_apply_lock(root.as_path())?
             .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
@@ -1765,96 +1541,9 @@ async fn handle_apply(
     Extension(access_token): Extension<OriginAccessToken>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    let mut manifest: Option<ApplyManifest> = None;
-    let mut archive: Option<ApplyArchive> = None;
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|error| OriginError::bad_request(format!("invalid multipart payload: {error}")))?
-    {
-        let name = field
-            .name()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        if name == "manifest" {
-            if manifest.is_some() {
-                return Err(OriginError::bad_request("duplicate manifest part"));
-            }
-            let mut field = field;
-            let mut bytes = Vec::new();
-            while let Some(chunk) = field.chunk().await.map_err(|error| {
-                OriginError::bad_request(format!("manifest read failed: {error}"))
-            })? {
-                let next_len = bytes
-                    .len()
-                    .checked_add(chunk.len())
-                    .ok_or_else(|| OriginError::bad_request("manifest size overflow"))?;
-                if next_len > MAX_APPLY_MANIFEST_BYTES {
-                    return Err(OriginError::bad_request("manifest exceeds size limit"));
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            let parsed: ApplyManifest = serde_json::from_slice(&bytes).map_err(|error| {
-                OriginError::bad_request(format!("manifest parse failed: {error}"))
-            })?;
-            manifest = Some(parsed);
-        } else if name == "archive" {
-            if archive.is_some() {
-                return Err(OriginError::bad_request("duplicate archive part"));
-            }
-            let std_file = tempfile::tempfile().map_err(|error| {
-                OriginError::internal(format!("failed to create archive staging file: {error}"))
-            })?;
-            let mut staged_file = tokio::fs::File::from_std(std_file);
-            let mut field = field;
-            let mut archive_size = 0u64;
-            while let Some(chunk) = field.chunk().await.map_err(|error| {
-                OriginError::bad_request(format!("archive read failed: {error}"))
-            })? {
-                archive_size = archive_size
-                    .checked_add(chunk.len() as u64)
-                    .ok_or_else(|| OriginError::bad_request("archive size overflow"))?;
-                if archive_size > state.config.max_archive_bytes {
-                    return Err(OriginError::bad_request("archive exceeds size limit"));
-                }
-                staged_file.write_all(&chunk).await.map_err(|error| {
-                    OriginError::internal(format!("archive staging write failed: {error}"))
-                })?;
-            }
-            staged_file.flush().await.map_err(|error| {
-                OriginError::internal(format!("archive staging flush failed: {error}"))
-            })?;
-            staged_file.sync_all().await.map_err(|error| {
-                OriginError::internal(format!("archive staging sync failed: {error}"))
-            })?;
-            archive = Some(ApplyArchive::TempFile {
-                file: staged_file.into_std().await,
-                size: archive_size,
-            });
-        } else {
-            return Err(OriginError::bad_request(format!(
-                "unexpected multipart part {name:?}"
-            )));
-        }
-    }
-
-    let manifest = manifest.ok_or_else(|| OriginError::bad_request("manifest part missing"))?;
-    let archive = archive.ok_or_else(|| OriginError::bad_request("archive part missing"))?;
-
+    let (manifest, archive) =
+        read_apply_multipart(&mut multipart, state.config.max_archive_bytes, None).await?;
     apply_manifest_archive(state, claims, access_token, manifest, archive).await
-}
-
-enum ApplyArchive {
-    InMemory(Vec<u8>),
-    TempFile { file: std::fs::File, size: u64 },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ApplyJsonRequest {
-    manifest: ApplyManifest,
-    archive_base64: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1869,12 +1558,12 @@ async fn handle_apply_status(
     Extension(claims): Extension<OriginClaims>,
     Json(payload): Json<ApplyStatusRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    let project_id = project_id_for_request(&state, &claims)?;
+    project_id_for_request(&state, &claims)?;
     let idempotency_key = normalize_apply_idempotency_key(Some(&payload.idempotency_key))?
         .ok_or_else(|| OriginError::bad_request("idempotencyKey is required"))?;
     let request_fingerprint =
         normalize_apply_request_fingerprint(payload.request_fingerprint.as_deref())?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
+    let workspace_root = checkout_root(&state);
     tokio::fs::create_dir_all(&workspace_root)
         .await
         .map_err(|error| {
@@ -1911,42 +1600,8 @@ async fn handle_apply_json(
     Extension(access_token): Extension<OriginAccessToken>,
     request: Request,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    let body = to_bytes(request.into_body(), MAX_APPLY_JSON_REQUEST_BYTES)
-        .await
-        .map_err(|error| {
-            OriginError::bad_request(format!("apply JSON body exceeds size limit: {error}"))
-        })?;
-    let payload: ApplyJsonRequest = serde_json::from_slice(&body)
-        .map_err(|error| OriginError::bad_request(format!("invalid apply JSON: {error}")))?;
-    let archive_raw = payload.archive_base64.trim();
-    if archive_raw.is_empty() {
-        return Err(OriginError::bad_request("archiveBase64 is required"));
-    }
-    let max_archive_bytes = state
-        .config
-        .max_archive_bytes
-        .min(MAX_APPLY_JSON_ARCHIVE_BYTES);
-    let max_encoded_len = max_archive_bytes
-        .saturating_add(2)
-        .saturating_div(3)
-        .saturating_mul(4);
-    if archive_raw.len() as u64 > max_encoded_len {
-        return Err(OriginError::bad_request("archiveBase64 exceeds size limit"));
-    }
-    let archive_bytes = BASE64_STANDARD
-        .decode(archive_raw)
-        .map_err(|error| OriginError::bad_request(format!("archive decode failed: {error}")))?;
-    if archive_bytes.len() as u64 > max_archive_bytes {
-        return Err(OriginError::bad_request("archive exceeds size limit"));
-    }
-    apply_manifest_archive(
-        state,
-        claims,
-        access_token,
-        payload.manifest,
-        ApplyArchive::InMemory(archive_bytes),
-    )
-    .await
+    let (manifest, archive) = read_apply_json(request, state.config.max_archive_bytes).await?;
+    apply_manifest_archive(state, claims, access_token, manifest, archive).await
 }
 
 async fn apply_manifest_archive(
@@ -1957,7 +1612,7 @@ async fn apply_manifest_archive(
     archive: ApplyArchive,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let config = state.config.clone();
     if let Some(manifest_project) = manifest.project_id.as_deref() {
         if manifest_project.trim() != claims.project_id.trim() {
@@ -1981,7 +1636,7 @@ async fn apply_manifest_archive(
     // Establish only the workspace directory itself before the write-ahead
     // claim. Git fetch/checkout/reset is intentionally deferred into the same
     // guarded blocking closure as apply and commit.
-    let workspace_path = workspace_root_for_project(&state, project_id);
+    let workspace_path = checkout_root(&state);
     tokio::fs::create_dir_all(&workspace_path)
         .await
         .map_err(|error| {
@@ -2073,15 +1728,30 @@ async fn apply_manifest_archive(
         None
     };
 
-    // Desktop and runtime origins check what each changed path held when the
-    // client read it; the gateway's conditional writes come with PR-5.
-    let expected = if config.multi_tenant {
-        None
-    } else {
-        manifest.expected.take()
-    };
+    // What each changed path held when the client read it.
+    let expected = manifest.expected.take();
     let manifest_deletes = manifest.deletes.clone();
     let auto_commit_after_apply = manifest.auto_commit_after_apply;
+    // A person's save (the controller's imports and managed-files bootstrap
+    // commit theirs, `autoCommitAfterApply`) never writes or deletes a path
+    // the folder holds under another spelling: see `check_destination_names`.
+    let person_destinations: Vec<String> = if auto_commit_after_apply {
+        Vec::new()
+    } else {
+        manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(manifest.deletes.iter().map(String::as_str))
+            .filter_map(normalize_relative_path)
+            .collect()
+    };
+    // The version the client read at: it tells a link the client could
+    // never have seen from one that changed since (see
+    // `check_expected_blobs`).
+    let read_at = (!auto_commit_after_apply)
+        .then(|| manifest.base_rev.clone())
+        .flatten();
     // Committed by the origin's identity: the caller's text never carries
     // a trailer the origin or the gateway trusts (a restore, a receipt).
     let commit_message = manifest
@@ -2091,8 +1761,6 @@ async fn apply_manifest_archive(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "instafy: apply imported files".to_string());
 
-    let token_for_commit =
-        (!access_token.token.trim().is_empty()).then_some(access_token.token.clone());
     let blocking_workspace = workspace_root.clone();
     let (apply_result, apply_base_rev) = tokio::task::spawn_blocking(move || {
         // Both guards live inside the blocking task. Dropping/cancelling the
@@ -2120,8 +1788,14 @@ async fn apply_manifest_archive(
                     }
                 }
             }
+            check_destination_names(blocking_workspace.as_path(), &person_destinations)?;
             if let Some(expected) = expected.as_ref() {
-                check_expected_blobs(blocking_workspace.as_path(), expected, &manifest_deletes)?;
+                check_expected_blobs(
+                    blocking_workspace.as_path(),
+                    expected,
+                    &manifest_deletes,
+                    read_at.as_deref(),
+                )?;
             }
             let (mut apply_result, mut apply_transaction) = match archive {
                 ApplyArchive::InMemory(archive_bytes) => apply_changes_transactional(
@@ -2141,15 +1815,14 @@ async fn apply_manifest_archive(
             let mut apply_base_rev = None;
             if auto_commit_after_apply {
                 // HEAD before this apply's own commit: the base for rendering this
-                // run's change as a tree-to-tree diff later.
-                let base =
-                    git::head_rev(blocking_workspace.as_path(), token_for_commit.as_deref());
+                // run's change as a tree-to-tree diff later. Both are local git,
+                // so neither carries the caller's bearer.
+                let base = git::head_rev(blocking_workspace.as_path(), None);
                 let baseline_commit = match git::commit_apply_locally(
                     blocking_workspace.as_path(),
                     &apply_result.applied_paths,
                     &apply_result.deleted_paths,
                     &commit_message,
-                    token_for_commit.as_deref(),
                 ) {
                     Ok(commit) => commit,
                     Err(error) => {
@@ -2208,7 +1881,7 @@ async fn apply_manifest_archive(
     .await
     .map_err(|error| OriginError::internal(format!("apply task failed: {error}")))??;
 
-    if let (Some(url), Some(origin_id)) = (state.commit_receipt_url.clone(), origin_id) {
+    if let Some(url) = state.commit_receipt_url.clone() {
         let lease_id = claims.lease_id.clone();
         tokio::spawn(post_commit_receipt(
             state.http_client.clone(),
@@ -2233,14 +1906,23 @@ async fn apply_manifest_archive(
 /// Refuse an apply when any path no longer holds the blob its client read.
 /// A deleted directory must list every file it holds, so a file someone else
 /// added under it is never removed unseen.
+///
+/// A symlink, which listings hide, never matches what a client read: 409
+/// `head_moved`, unless `read_at` (the `baseRev` the client read at; `None`
+/// for an `autoCommitAfterApply` apply, whose bootstrap reads again and
+/// leaves the path alone) had this same link there. Then reading again
+/// cannot help, and the write is 400 `unsupported_entry`, as on the hosted
+/// gateway.
 fn check_expected_blobs(
     workspace_root: &Path,
     expected: &std::collections::BTreeMap<String, Option<String>>,
     deletes: &[String],
+    read_at: Option<&str>,
 ) -> Result<(), OriginError> {
     let workspace = WorkspaceDir::open(workspace_root)
         .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
     let mut stale = Vec::new();
+    let mut unsupported = Vec::new();
     let mut normalized_expected = std::collections::BTreeMap::new();
     for (path, oid) in expected {
         let normalized = normalize_relative_path(path)
@@ -2263,7 +1945,13 @@ fn check_expected_blobs(
                 .unwrap_or_else(|_| Some("unreadable".to_string())),
         };
         if current != wanted {
-            stale.push(normalized.clone());
+            if read_at.is_some_and(|base| {
+                hidden_link_unchanged_since(workspace_root, &workspace, &normalized, base)
+            }) {
+                unsupported.push(normalized.clone());
+            } else {
+                stale.push(normalized.clone());
+            }
         }
         normalized_expected.insert(normalized, wanted);
     }
@@ -2283,8 +1971,17 @@ fn check_expected_blobs(
             }
         }
     }
+    // A 409 the client can act on (read again) comes before a refusal.
     if stale.is_empty() {
-        return Ok(());
+        if unsupported.is_empty() {
+            return Ok(());
+        }
+        return Err(OriginError::with_report(
+            axum::http::StatusCode::BAD_REQUEST,
+            "unsupported_entry",
+            "a link or a submodule cannot be changed here",
+            serde_json::json!({ "paths": unsupported }),
+        ));
     }
     stale.sort();
     stale.dedup();
@@ -2293,6 +1990,268 @@ fn check_expected_blobs(
         "files changed since they were read",
         stale,
     ))
+}
+
+/// Refuse (409 `path_alias`, before anything is written) a write or delete
+/// of a path the folder does not hold by its own name but holds under
+/// another spelling a disk ignoring case or Unicode form takes for it: an
+/// entry of its folded name ([`portable_key`]), or a folder it would lie in
+/// taken for a file. On such a disk the write would land in that other
+/// entry, which may hold edits that exist in no commit and that the
+/// client's checks, made for the path as named, never saw; on any disk the
+/// two names could not both be checked out there. The rule is the one the
+/// hosted gateway applies to a save over `main`'s tree
+/// ([`crate::restore_plan::alias_clashes`]), over the folder's entries.
+/// Links and special files, which listings never show, are left to the
+/// apply's own checks.
+///
+/// A path the checkout's `HEAD` tracks under exactly the name asked for is
+/// held by that name whatever the disk calls it (a folder pair `Shared/`
+/// and `shared/` kept as one folder, a name a native editor left
+/// decomposed): git takes that entry for the tracked file, so the client's
+/// checks of the path saw it. That holds only while `HEAD` has no other
+/// entry the same rule takes for it ([`crate::restore_plan::alias_clashes`]
+/// over `HEAD`'s tree); `HEAD` is read only when the disk shows another
+/// spelling.
+///
+/// A path reached only through a folder the disk spells otherwise is
+/// judged by `HEAD`'s tree as well: the disk shows a submodule's folder,
+/// which may hold a repository of the person's own, as a plain folder, so
+/// `Vendor/x.c` beside a submodule entry `vendor` is refused as the
+/// gateway refuses it, never written into that repository.
+fn check_destination_names(workspace_root: &Path, paths: &[String]) -> Result<(), OriginError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let workspace = WorkspaceDir::open(workspace_root)
+        .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
+    let mut listings = std::collections::HashMap::new();
+    let (mut aliased, mut respelled) = (Vec::new(), Vec::new());
+    for path in paths {
+        match name_on_disk(&workspace, &mut listings, path) {
+            NameOnDisk::Own => {}
+            NameOnDisk::Alias => aliased.push(path.clone()),
+            NameOnDisk::Respelled => respelled.push(path.clone()),
+        }
+    }
+    if aliased.is_empty() && respelled.is_empty() {
+        return Ok(());
+    }
+    let tracked = head_entries(workspace_root);
+    aliased.retain(|path| !tracked_by_its_own_name(&tracked, path));
+    aliased.extend(
+        respelled
+            .into_iter()
+            .filter(|path| tracked_takes_another_entry_for(&tracked, path)),
+    );
+    if aliased.is_empty() {
+        return Ok(());
+    }
+    aliased.sort();
+    aliased.dedup();
+    Err(OriginError::conflict_paths(
+        "path_alias",
+        PATH_ALIAS_MESSAGE,
+        aliased,
+    ))
+}
+
+/// The entries of the checkout's `HEAD`, each path with its kind (`blob`,
+/// `tree` or `commit`); none when `HEAD` cannot be read (a folder with no
+/// commit yet). Local git only.
+fn head_entries(workspace_root: &Path) -> Vec<(String, String)> {
+    WorkspaceGit::new(workspace_root, None)
+        .bytes(&[
+            "ls-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--full-tree",
+            "--end-of-options",
+            "HEAD",
+        ])
+        .map(|raw| {
+            crate::workspace_git::parse_ls_tree(&raw)
+                .into_iter()
+                .map(|entry| (entry.path, entry.kind))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `tracked` (`HEAD`'s entries, by [`head_entries`]) holds a file,
+/// link or folder at exactly `path`, and no other entry that a disk
+/// ignoring case or Unicode form takes for it or for a folder it lies in.
+fn tracked_by_its_own_name(tracked: &[(String, String)], path: &str) -> bool {
+    let held = tracked
+        .iter()
+        .any(|(name, kind)| name == path && kind != "commit");
+    held && crate::restore_plan::alias_clashes(
+        tracked
+            .iter()
+            .map(|(name, kind)| (name.clone(), kind == "tree")),
+        &[path],
+    )
+    .is_empty()
+}
+
+/// Whether `tracked` (`HEAD`'s entries, by [`head_entries`]), with `path`
+/// and the folders above it added where it lacks them, holds another entry
+/// a disk ignoring case or Unicode form takes for `path` or for a folder it
+/// lies in ([`crate::restore_plan::alias_clashes`]), as the gateway judges
+/// a new path over `main`'s tree.
+fn tracked_takes_another_entry_for(tracked: &[(String, String)], path: &str) -> bool {
+    let mut entries: Vec<(String, bool)> = tracked
+        .iter()
+        .map(|(name, kind)| (name.clone(), kind == "tree"))
+        .collect();
+    let held = |name: &str| tracked.iter().any(|(other, _)| other == name);
+    for (index, _) in path.match_indices('/') {
+        if !held(&path[..index]) {
+            entries.push((path[..index].to_string(), true));
+        }
+    }
+    if !held(path) {
+        entries.push((path.to_string(), false));
+    }
+    !crate::restore_plan::alias_clashes(entries, &[path]).is_empty()
+}
+
+/// What the folder holds at a path, as [`name_on_disk`] reads it.
+#[derive(Debug, PartialEq, Eq)]
+enum NameOnDisk {
+    /// The path by its own name, or nothing a disk ignoring case or
+    /// Unicode form takes for it.
+    Own,
+    /// The path only under another spelling (see
+    /// [`check_destination_names`]).
+    Alias,
+    /// Nothing at the path, but a folder it lies in only under another
+    /// spelling.
+    Respelled,
+}
+
+/// What the folder holds at `path` (normalized), by its names on the disk
+/// (see [`check_destination_names`]). Each folder is listed once
+/// (`listings`, by its path in the folder); a folder that cannot be listed
+/// holds nothing.
+fn name_on_disk(
+    workspace: &WorkspaceDir,
+    listings: &mut std::collections::HashMap<String, Vec<(String, bool)>>,
+    path: &str,
+) -> NameOnDisk {
+    let components: Vec<&str> = path.split('/').collect();
+    // The folders the path so far names under its folded name, and whether
+    // by its own spelling all the way.
+    let mut folders: Vec<(String, bool)> = vec![(String::new(), true)];
+    let (mut exact, mut alias, mut respelled) = (false, false, false);
+    for (index, component) in components.iter().enumerate() {
+        let last = index + 1 == components.len();
+        let key = portable_key(component);
+        let mut next = Vec::new();
+        for (folder, spelled) in &folders {
+            let entries = listings.entry(folder.clone()).or_insert_with(|| {
+                workspace
+                    .list((!folder.is_empty()).then_some(folder.as_str()))
+                    .map(|entries| {
+                        entries
+                            .into_iter()
+                            .map(|entry| {
+                                (
+                                    entry.name.to_string_lossy().to_string(),
+                                    entry.kind == WorkspaceEntryKind::Directory,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            for (name, is_folder) in entries.iter() {
+                if portable_key(name) != key {
+                    continue;
+                }
+                let same = *spelled && name == component;
+                if last {
+                    exact |= same;
+                    alias |= !same;
+                } else if *is_folder {
+                    let below = if folder.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{folder}/{name}")
+                    };
+                    respelled |= !same;
+                    next.push((below, same));
+                } else if !same {
+                    // A folder the path lies in, taken for a file.
+                    alias = true;
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        folders = next;
+    }
+    if exact {
+        NameOnDisk::Own
+    } else if alias {
+        NameOnDisk::Alias
+    } else if respelled {
+        NameOnDisk::Respelled
+    } else {
+        NameOnDisk::Own
+    }
+}
+
+/// Whether the work tree holds a symlink at `relative` (below real folders
+/// only) that is exactly the link the commit `base` of the checkout had
+/// there: the same mode and the same target.
+fn hidden_link_unchanged_since(
+    workspace_root: &Path,
+    workspace: &WorkspaceDir,
+    relative: &str,
+    base: &str,
+) -> bool {
+    let Ok(base) = recovery_view::parse_rev(base) else {
+        return false;
+    };
+    let parent_is_folder = match relative.rsplit_once('/') {
+        Some((parent, _)) => matches!(
+            workspace.entry_kind(parent),
+            Ok(WorkspaceEntryKind::Directory)
+        ),
+        None => true,
+    };
+    if !parent_is_folder {
+        return false;
+    }
+    let path = workspace_root.join(relative);
+    let is_link = std::fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !is_link {
+        return false;
+    }
+    let Ok(target) = std::fs::read_link(&path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    let target_bytes = {
+        use std::os::unix::ffi::OsStrExt as _;
+        target.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let target_bytes = target.to_string_lossy().replace('\\', "/").into_bytes();
+    let link_oid = blob_oid(&target_bytes);
+    // The base's entry is found with the path on stdin: the path is the
+    // request's own text and never an argument of git.
+    let Ok(mut found) =
+        WorkspaceGit::new(workspace_root, None).entries_by_path(&base, &[relative.to_string()])
+    else {
+        return false;
+    };
+    found
+        .remove(relative)
+        .is_some_and(|entry| entry.mode == "120000" && entry.oid == link_oid)
 }
 
 /// Regular files below a workspace directory (no links followed).
@@ -2315,24 +2274,6 @@ fn files_below(workspace: &WorkspaceDir, directory: &str) -> Vec<String> {
         }
     }
     files
-}
-
-fn validate_apply_lease(
-    manifest_lease_id: Option<&str>,
-    claims_lease_id: Option<&str>,
-) -> Result<(), OriginError> {
-    let manifest = manifest_lease_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let trusted = claims_lease_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if manifest != trusted {
-        return Err(OriginError::unauthorized(
-            "manifest leaseId does not match the authenticated lease",
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -2441,13 +2382,12 @@ async fn handle_git_revert_commit(
     Json(payload): Json<GitRevertCommitRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
 
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -2480,73 +2420,30 @@ async fn handle_git_revert_commit(
 
     let canonical_root = Arc::new(workspace_root);
     let target_commit = payload.commit.clone();
-
-    if !config.multi_tenant {
-        let base = payload.base.clone();
-        // A person's revert carries the per-space pseudonym from their
-        // token; jobs and tokens without one commit as the origin. User ids
-        // never enter history.
-        let author = claims.user_author();
-        let report = tokio::task::spawn_blocking(move || {
-            let _apply_guard = apply_guard;
-            let _workspace_apply_guard = workspace_apply_guard;
-            ensure_checkout_for_publish(&config_clone, token.as_deref())?;
-            publish::revert_commit(
-                &PublishContext {
-                    config: &config_clone,
-                    workspace_root: canonical_root.as_path(),
-                    token: token.as_deref(),
-                    can_write: token.is_some() || config_clone.skip_auth,
-                },
-                &target_commit,
-                base.as_deref(),
-                author,
-            )
-        })
-        .await
-        .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))??;
-        return publish_response(&state, &claims, project_id, origin_id, report, false);
-    }
-
-    let commit_hash = tokio::task::spawn_blocking(move || {
+    let base = payload.base.clone();
+    // A person's revert carries the per-space pseudonym from their token;
+    // jobs and tokens without one commit as the origin. User ids never
+    // enter history.
+    let author = claims.user_author();
+    let report = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
-        git::ensure_git_checkout(&config_clone, token.as_deref())?;
-        git::revert_commit_and_push(
-            &config_clone,
-            canonical_root.as_path(),
+        ensure_checkout_for_publish(&config_clone, token.as_deref())?;
+        publish::revert_commit(
+            &PublishContext {
+                config: &config_clone,
+                workspace_root: canonical_root.as_path(),
+                token: token.as_deref(),
+                can_write: token.is_some() || config_clone.skip_auth,
+            },
             &target_commit,
-            token.as_deref(),
+            base.as_deref(),
+            author,
         )
     })
     .await
     .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))??;
-
-    let summary = ApplySummary {
-        rev: commit_hash.clone(),
-        bytes_written: 0,
-        file_count: 0,
-        lease_id: claims.lease_id.clone(),
-        applied_paths: Vec::new(),
-        deleted_paths: Vec::new(),
-    };
-
-    if let (Some(url), Some(origin_id)) = (state.commit_receipt_url.clone(), origin_id) {
-        tokio::spawn(post_commit_receipt(
-            state.http_client.clone(),
-            url,
-            state.config.clone(),
-            project_id,
-            origin_id,
-            claims.lease_id.clone(),
-            Some(claims.sub.clone()),
-            summary,
-        ));
-    }
-
-    Ok(Json(serde_json::json!({
-        "rev": commit_hash,
-    })))
+    publish_response(&state, &claims, project_id, origin_id, report, false)
 }
 
 async fn handle_git_revert(
@@ -2556,8 +2453,7 @@ async fn handle_git_revert(
     Json(payload): Json<GitRevertRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
 
     let config = state.config.clone();
     let remote_url = config
@@ -2607,7 +2503,7 @@ async fn handle_git_revert(
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
         git::ensure_git_checkout(&config_clone, token.as_deref())?;
-        git::revert_paths(canonical_root.as_path(), &revert_paths, token.as_deref())
+        git::revert_paths(canonical_root.as_path(), &revert_paths)
     })
     .await
     .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))?;
@@ -2634,13 +2530,12 @@ async fn handle_git_sync(
     Json(payload): Json<GitSyncRequest>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
 
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
-    ensure_workspace_dir_for_project(&state, project_id)?;
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -2698,12 +2593,6 @@ async fn handle_git_sync(
             "refresh cannot be combined with paths or expectedRev",
         ));
     }
-    if refresh && config.multi_tenant {
-        return Err(OriginError::bad_request(
-            "refresh is only available on a workspace runtime",
-        ));
-    }
-
     if expected_rev.is_some() && paths.is_some() {
         return Err(OriginError::bad_request(
             "expectedRev cannot be combined with paths",
@@ -2723,9 +2612,7 @@ async fn handle_git_sync(
     };
     // A publish without a message gets a plain subject; user ids stay out of
     // permanent history.
-    let publish_message = message_override.clone().unwrap_or_default();
-    let message =
-        message_override.unwrap_or_else(|| format!("instafy: sync (user {})", claims.sub));
+    let publish_message = message_override.unwrap_or_default();
 
     let mut config_clone = (*config).clone();
     config_clone.workspace_root = workspace_root.clone();
@@ -2733,7 +2620,7 @@ async fn handle_git_sync(
 
     let canonical_root = Arc::new(workspace_root);
 
-    if !config.multi_tenant && expected_rev.is_none() {
+    let Some(expected_rev) = expected_rev else {
         let selection = if refresh {
             Selection::None
         } else {
@@ -2786,42 +2673,21 @@ async fn handle_git_sync(
         .await
         .map_err(|error| OriginError::internal(format!("git sync task failed: {error}")))??;
         return publish_response(&state, &claims, project_id, origin_id, report, refresh);
-    }
+    };
 
+    // `expectedRev`: push exactly the commit an earlier apply made here
+    // (imports), never anything else in the checkout.
     let (base_rev, commit_hash) = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
-        if let Some(expected_rev) = expected_rev {
-            let base = git::head_rev(canonical_root.as_path(), token.as_deref());
-            let commit = git::push_existing_head(
-                &config_clone,
-                canonical_root.as_path(),
-                &expected_rev,
-                token.as_deref(),
-            )?;
-            Ok::<_, OriginError>((base, commit))
-        } else {
-            git::ensure_git_checkout(&config_clone, token.as_deref())?;
-            // HEAD before this sync's own commit: the base for rendering the synced
-            // change as a tree-to-tree diff later.
-            let base = git::head_rev(canonical_root.as_path(), token.as_deref());
-            let commit = match selected_paths {
-                Some(paths) => git::commit_and_push_paths(
-                    &config_clone,
-                    canonical_root.as_path(),
-                    &paths,
-                    &message,
-                    token.as_deref(),
-                ),
-                None => git::commit_and_push_dirty(
-                    &config_clone,
-                    canonical_root.as_path(),
-                    &message,
-                    token.as_deref(),
-                ),
-            }?;
-            Ok::<_, OriginError>((base, commit))
-        }
+        let base = git::head_rev(canonical_root.as_path(), token.as_deref());
+        let commit = git::push_existing_head(
+            &config_clone,
+            canonical_root.as_path(),
+            &expected_rev,
+            token.as_deref(),
+        )?;
+        Ok::<_, OriginError>((base, commit))
     })
     .await
     .map_err(|error| OriginError::internal(format!("git sync task failed: {error}")))??;
@@ -2836,7 +2702,7 @@ async fn handle_git_sync(
         deleted_paths: Vec::new(),
     };
 
-    if let (Some(url), Some(origin_id)) = (state.commit_receipt_url.clone(), origin_id) {
+    if let Some(url) = state.commit_receipt_url.clone() {
         tokio::spawn(post_commit_receipt(
             state.http_client.clone(),
             url,
@@ -2876,7 +2742,7 @@ async fn handle_git_recovery(
         ));
     };
     let caller = (!access_token.token.trim().is_empty()).then_some(access_token.token.as_str());
-    if !has_git_checkout(&state, project_id) {
+    if !has_git_checkout(&state) {
         ensure_workspace_ready(
             &state,
             project_id,
@@ -2895,7 +2761,7 @@ async fn handle_git_recovery(
     )
     .await?
     .map(|minted| minted.token);
-    let root = workspace_root_for_project(&state, project_id);
+    let root = checkout_root(&state);
     let service_email = state.config.git_author_email.clone();
     // What the checkout last saw of canonical `main`.
     let canonical_main = format!(
@@ -2955,11 +2821,11 @@ async fn handle_git_recovery_restore(
         )));
     }
     let project_id = project_id_for_request(&state, &claims)?;
-    let origin_id = origin_id_for_receipt(&state, &claims);
+    let origin_id = state.config.origin_id;
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -3087,7 +2953,7 @@ async fn handle_git_recovery_dismiss(
         .git_remote_url_for_project(project_id)
         .ok_or_else(|| OriginError::bad_request("git remote is not configured for this project"))?;
     let token = mint_git_write_token(&state, project_id, &access_token).await?;
-    let root = workspace_root_for_project(&state, project_id);
+    let root = checkout_root(&state);
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
     tokio::task::spawn_blocking(move || {
@@ -3159,7 +3025,7 @@ fn publish_response(
     state: &AppState,
     claims: &OriginClaims,
     project_id: Uuid,
-    origin_id: Option<Uuid>,
+    origin_id: Uuid,
     report: PublishReport,
     refresh: bool,
 ) -> Result<Json<serde_json::Value>, OriginError> {
@@ -3183,12 +3049,9 @@ fn publish_response(
     }
 
     let moved = report.rev.is_some() && report.rev != report.base_rev;
-    if let (true, Some(rev), Some(url), Some(origin_id)) = (
-        moved,
-        report.rev.clone(),
-        state.commit_receipt_url.clone(),
-        origin_id,
-    ) {
+    if let (true, Some(rev), Some(url)) =
+        (moved, report.rev.clone(), state.commit_receipt_url.clone())
+    {
         tokio::spawn(post_commit_receipt(
             state.http_client.clone(),
             url,
@@ -3220,7 +3083,7 @@ async fn handle_git_flush(
     Extension(access_token): Extension<OriginAccessToken>,
     payload: Option<Json<GitFlushRequest>>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    if state.config.multi_tenant || !state.config.hosted_checkout {
+    if !state.config.hosted_checkout {
         return Err(OriginError::bad_request(
             "flush is only available on a hosted workspace runtime",
         ));
@@ -3232,7 +3095,7 @@ async fn handle_git_flush(
     let apply_lock = project_apply_lock(&state, project_id).await;
     let apply_guard = apply_lock.lock_owned().await;
     let config = state.config.clone();
-    let workspace_root = workspace_root_for_project(&state, project_id);
+    let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard =
         tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
@@ -3291,7 +3154,7 @@ async fn handle_git_flush_resume(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
-    if state.config.multi_tenant || !state.config.hosted_checkout {
+    if !state.config.hosted_checkout {
         return Err(OriginError::bad_request(
             "flush is only available on a hosted workspace runtime",
         ));
@@ -3313,11 +3176,6 @@ async fn handle_git_flush_resume(
 pub(crate) async fn refresh_checkout_read_only(
     state: &AppState,
 ) -> Result<PublishReport, OriginError> {
-    if state.config.multi_tenant {
-        return Err(OriginError::bad_request(
-            "refresh is only available on a workspace runtime",
-        ));
-    }
     let project_id = state.config.project_id;
     let Some(remote_url) = state.config.git_remote_url_for_project(project_id) else {
         return Ok(PublishReport::default());
@@ -3333,7 +3191,7 @@ pub(crate) async fn refresh_checkout_read_only(
     )
     .await?
     .map(|minted| minted.token);
-    let workspace_root = workspace_root_for_project(state, project_id);
+    let workspace_root = checkout_root(state);
     let mut config = (*state.config).clone();
     config.workspace_root = workspace_root.clone();
     config.git_remote_url = Some(remote_url);
@@ -3390,66 +3248,18 @@ async fn post_commit_receipt(
 }
 
 fn project_id_for_request(state: &AppState, claims: &OriginClaims) -> Result<Uuid, OriginError> {
-    if state.config.multi_tenant {
-        return Uuid::parse_str(claims.project_id.trim())
-            .map_err(|_| OriginError::unauthorized("invalid project id"));
-    }
-    Ok(state.config.project_id)
+    route_auth::project_id_for_claims(&state.config, claims)
 }
 
-fn origin_id_for_receipt(state: &AppState, claims: &OriginClaims) -> Option<Uuid> {
-    if !state.config.multi_tenant {
-        return Some(state.config.origin_id);
-    }
-    let raw = claims.origin_id.as_deref()?.trim();
-    Uuid::parse_str(raw).ok()
+/// The origin's one checkout.
+fn checkout_root(state: &AppState) -> PathBuf {
+    state.workspace_root.as_ref().clone()
 }
 
-fn workspace_root_for_project(state: &AppState, project_id: Uuid) -> PathBuf {
-    if state.config.multi_tenant {
-        state.workspace_root.join(project_id.to_string())
-    } else {
-        state.workspace_root.as_ref().clone()
-    }
-}
-
-fn workspace_dir_for_project(
-    state: &AppState,
-    project_id: Uuid,
-) -> Result<WorkspaceDir, OriginError> {
-    if state.config.multi_tenant {
-        state
-            .workspace_fs
-            .open_dir(&project_id.to_string())
-            .map_err(|_| OriginError::not_found("workspace not found"))
-    } else {
-        Ok(state.workspace_fs.clone())
-    }
-}
-
-fn ensure_workspace_dir_for_project(
-    state: &AppState,
-    project_id: Uuid,
-) -> Result<WorkspaceDir, OriginError> {
-    if state.config.multi_tenant {
-        state
-            .workspace_fs
-            .create_dir_all(&project_id.to_string())
-            .map_err(|error| {
-                OriginError::internal(format!("failed to create workspace directory: {error}"))
-            })
-    } else {
-        Ok(state.workspace_fs.clone())
-    }
-}
-
-fn has_git_checkout(state: &AppState, project_id: Uuid) -> bool {
-    workspace_dir_for_project(state, project_id)
-        .and_then(|workspace| {
-            workspace
-                .entry_kind(".instafy/.git")
-                .map_err(|_| OriginError::not_found("git checkout not found"))
-        })
+fn has_git_checkout(state: &AppState) -> bool {
+    state
+        .workspace_fs
+        .entry_kind(".instafy/.git")
         .is_ok_and(|kind| kind == WorkspaceEntryKind::Directory)
 }
 
@@ -3468,9 +3278,7 @@ async fn ensure_workspace_ready(
     origin_access_token: Option<&str>,
     sync_behavior: WorkspaceSyncBehavior,
 ) -> Result<PathBuf, OriginError> {
-    let workspace_root = workspace_root_for_project(state, project_id);
-
-    ensure_workspace_dir_for_project(state, project_id)?;
+    let workspace_root = checkout_root(state);
 
     let Some(remote_url) = state.config.git_remote_url_for_project(project_id) else {
         return Ok(workspace_root);
@@ -3496,7 +3304,7 @@ async fn ensure_workspace_ready(
         return Ok(workspace_root);
     }
 
-    let has_checkout = has_git_checkout(state, project_id);
+    let has_checkout = has_git_checkout(state);
 
     if has_checkout && matches!(sync_behavior, WorkspaceSyncBehavior::RefreshInBackground) {
         let apply_lock = project_apply_lock(state, project_id).await;
@@ -3575,7 +3383,7 @@ async fn refresh_git_checkout(
     now: Instant,
 ) -> Result<(), OriginError> {
     if has_checkout {
-        let workspace = workspace_dir_for_project(state, project_id)?;
+        let workspace = &state.workspace_fs;
         let operation_in_progress = [
             ".instafy/.git/rebase-apply",
             ".instafy/.git/rebase-merge",
@@ -3722,7 +3530,11 @@ fn file_entry_from_metadata(
     }
 }
 
-fn apply_raw_security_headers(response: &mut Response, relative: &str, mime: Option<&str>) {
+pub(crate) fn apply_raw_security_headers(
+    response: &mut Response,
+    relative: &str,
+    mime: Option<&str>,
+) {
     let headers = response.headers_mut();
     headers.insert(
         HeaderName::from_static("content-security-policy"),
@@ -3775,7 +3587,7 @@ fn is_active_raw_content(relative: &str, mime: Option<&str>) -> bool {
     active_mime || active_extension
 }
 
-fn mime_type_for_path(relative: &str) -> Option<String> {
+pub(crate) fn mime_type_for_path(relative: &str) -> Option<String> {
     let ext = Path::new(relative)
         .extension()
         .and_then(|ext| ext.to_str())
@@ -3783,7 +3595,7 @@ fn mime_type_for_path(relative: &str) -> Option<String> {
     ext.and_then(|e| mime_type_for_extension(&e))
 }
 
-fn mime_type_for_extension(ext: &str) -> Option<String> {
+pub(crate) fn mime_type_for_extension(ext: &str) -> Option<String> {
     let mime = match ext.to_ascii_lowercase().as_str() {
         "txt" => "text/plain",
         "md" | "mdx" => "text/markdown",
@@ -3999,8 +3811,9 @@ mod tests {
                     idempotency_key: Some(key.to_string()),
                     request_fingerprint: Some(fingerprint.to_string()),
                     expected: None,
+                    base_rev: None,
                 },
-                super::ApplyArchive::InMemory(Vec::new()),
+                crate::apply_request::ApplyArchive::InMemory(Vec::new()),
             ),
         )
         .await
@@ -4420,7 +4233,7 @@ mod tests {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("README.md".to_string(), Some(HELLO_BLOB.to_string()));
         expected.insert("new.txt".to_string(), None);
-        let error = super::check_expected_blobs(workspace.path(), &expected, &[])
+        let error = super::check_expected_blobs(workspace.path(), &expected, &[], None)
             .expect_err("a stale read must be refused");
         match error {
             crate::error::OriginError::ConflictPaths { code, paths, .. } => {
@@ -4437,8 +4250,9 @@ mod tests {
         // A directory delete must have seen every file below it.
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("old/seen.txt".to_string(), Some(HELLO_BLOB.to_string()));
-        let error = super::check_expected_blobs(workspace.path(), &expected, &["old".to_string()])
-            .expect_err("an unseen file must block the delete");
+        let error =
+            super::check_expected_blobs(workspace.path(), &expected, &["old".to_string()], None)
+                .expect_err("an unseen file must block the delete");
         match error {
             crate::error::OriginError::ConflictPaths { paths, .. } => {
                 assert_eq!(paths, vec!["old/added.txt".to_string()]);
@@ -4449,7 +4263,54 @@ mod tests {
         let mut expected = std::collections::BTreeMap::new();
         expected.insert("old/seen.txt".to_string(), Some(HELLO_BLOB.to_string()));
         expected.insert("missing.txt".to_string(), None);
-        super::check_expected_blobs(workspace.path(), &expected, &[]).expect("fresh reads pass");
+        super::check_expected_blobs(workspace.path(), &expected, &[], None)
+            .expect("fresh reads pass");
+    }
+
+    /// A path in `expected` is the request's own text. Telling whether a
+    /// hidden link is the one the base had finds the base's entry with the
+    /// path on stdin, so git's command line never holds it, even when it
+    /// reads as an option; the write is still 400 `unsupported_entry`.
+    #[cfg(unix)]
+    #[test]
+    fn a_hidden_link_check_never_hands_git_the_path() {
+        use crate::test_support::{commit_files, init_workspace_repo, with_entry, GitWrapper};
+
+        let workspace = TempDir::new().expect("workspace");
+        let root = workspace.path();
+        init_workspace_repo(root);
+        let path = "--output=from-request";
+        let seeded = commit_files(root, None, &[("README.md", Some("hello\n"))]);
+        let base = with_entry(root, &seeded, path, "120000", Some("README.md"));
+        symlink("README.md", root.join(path)).expect("link");
+
+        let calls = TempDir::new().expect("calls");
+        let log = calls.path().join("argv.log");
+        let wrapper = GitWrapper::install(
+            calls.path(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert(path.to_string(), Some(HELLO_BLOB.to_string()));
+        let error = super::check_expected_blobs(root, &expected, &[], Some(&base))
+            .expect_err("a link the base had is unsupported");
+        drop(wrapper);
+        match error {
+            crate::error::OriginError::WithReport {
+                status,
+                code,
+                report,
+                ..
+            } => {
+                assert_eq!((status.as_u16(), code), (400, "unsupported_entry"));
+                assert_eq!(report["paths"], json!([path]));
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+        let argv = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(!argv.is_empty(), "git was never asked");
+        assert!(!argv.contains("from-request"), "{argv}");
+        assert!(!root.join("from-request").exists());
     }
 
     #[cfg(unix)]

@@ -1,0 +1,1127 @@
+//! Which of a parked working copy's changes may go into its salvage commit,
+//! which stay private, which are left behind, and which are stale copies of
+//! versions canonical `main` already has.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use anyhow::{bail, Context, Result};
+use serde::Serialize;
+
+use crate::git::{is_full_object_id, is_sync_reserved_path};
+use crate::paths::is_reserved_path;
+use crate::publish_policy::{
+    deletion_allowed, is_legacy_attachment_path, is_secret_path, is_unsafe_path,
+    MAX_PUBLISH_BLOB_BYTES,
+};
+use crate::workspace_git::{RunOpts, TreeEntry, WorkspaceGit};
+
+/// Folders of build output, dependencies and caches. Anything skipped below
+/// them can be made again, so it never holds up removing an entry.
+const BUILD_OUTPUT_DIRS: &[&str] = &[
+    "node_modules",
+    "dist",
+    "build",
+    "target",
+    ".next",
+    ".turbo",
+    ".cache",
+    ".vite",
+    "coverage",
+];
+
+/// Dependency folders: what they hold is package content an install brings
+/// back, so they are never searched for credentials.
+const DEPENDENCY_DIRS: &[&str] = &["node_modules", ".pnpm-store"];
+
+/// How `git status` lists a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Listed {
+    /// Tracked, and changed or deleted in the work tree.
+    Tracked,
+    Untracked,
+    Ignored,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Candidate {
+    pub path: String,
+    pub listed: Listed,
+    /// Listed as a folder (an ignored folder, or a repository inside the
+    /// work tree), without its trailing `/`.
+    pub folder: bool,
+}
+
+/// A path left out of the salvage commit and out of the private archive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct Skipped {
+    /// The path; a folder ends with `/`.
+    pub path: String,
+    pub size: u64,
+    pub reason: &'static str,
+    /// For a version only a local commit held: that commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+impl Skipped {
+    /// Whether the path lies in build output, which may be made again.
+    pub(crate) fn rebuildable(&self) -> bool {
+        match self.path.strip_suffix('/') {
+            Some(folder) => within_build_output(folder, true),
+            None => within_build_output(&self.path, false),
+        }
+    }
+}
+
+/// A file kept in the private archive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct PrivatePath {
+    pub path: String,
+    pub reason: &'static str,
+    /// Bytes it takes in the archive (a link's target only).
+    pub size: u64,
+    /// For a version taken from a local commit rather than the work tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+}
+
+/// The candidates, sorted.
+#[derive(Debug, Default)]
+pub(crate) struct Sorted {
+    /// Paths whose work-tree state goes into the salvage commit (unless they
+    /// turn out to be stale copies).
+    pub work: Vec<String>,
+    /// Work-tree files for the private archive.
+    pub private: Vec<PrivatePath>,
+    /// Root chat images to export.
+    pub attachments: Vec<String>,
+    pub skipped: Vec<Skipped>,
+}
+
+/// What a work-tree entry is, never following a link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    File { size: u64 },
+    Link,
+    Folder,
+    Other,
+    Missing,
+}
+
+/// What `path`'s last component is (a link there is not followed; links in
+/// the components above it are: see [`kind_in`]).
+pub(crate) fn kind_of(path: &Path) -> Kind {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Kind::Link,
+        Ok(metadata) if metadata.is_file() => Kind::File {
+            size: metadata.len(),
+        },
+        Ok(metadata) if metadata.is_dir() => Kind::Folder,
+        Ok(_) => Kind::Other,
+        Err(_) => Kind::Missing,
+    }
+}
+
+/// What the work tree at `root` holds at the git path `path`, following no
+/// link in any component, as git sees it: a path below a link (or below a
+/// file) is `Missing`. A folder the work tree replaced with a link to one
+/// holding the same names never makes the salvage read, walk or archive
+/// through that link (which can lead outside the entry).
+pub(crate) fn kind_in(root: &Path, path: &str) -> Kind {
+    let mut at = root.to_path_buf();
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        at.push(part);
+        if parts.peek().is_some() && kind_of(&at) != Kind::Folder {
+            return Kind::Missing;
+        }
+    }
+    kind_of(&at)
+}
+
+/// Changed, untracked and ignored paths, as `git status` lists them
+/// (folders it does not descend into are listed once). Reserved paths are
+/// left out. Names that are not UTF-8 are returned apart.
+pub(crate) fn candidates(git: &WorkspaceGit<'_>) -> Result<(Vec<Candidate>, Vec<String>)> {
+    let raw = git.bytes_opts(
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "--ignore-submodules=all",
+            "--no-renames",
+        ],
+        &RunOpts {
+            // Never refresh the entry's own index.
+            env: vec![("GIT_OPTIONAL_LOCKS", "0".into())],
+            ..RunOpts::default()
+        },
+    )?;
+    let mut listed = Vec::new();
+    let mut unreadable = Vec::new();
+    for record in raw.split(|byte| *byte == 0).filter(|r| r.len() > 3) {
+        let code = &record[..2];
+        let Ok(path) = std::str::from_utf8(&record[3..]) else {
+            unreadable.push(String::from_utf8_lossy(&record[3..]).to_string());
+            continue;
+        };
+        let folder = path.ends_with('/');
+        let path = path.trim_end_matches('/').to_string();
+        if path.is_empty() || is_reserved_path(&path) || path == ".instafy" {
+            continue;
+        }
+        let listed_as = match code {
+            b"??" => Listed::Untracked,
+            b"!!" => Listed::Ignored,
+            _ => Listed::Tracked,
+        };
+        listed.push(Candidate {
+            path,
+            listed: listed_as,
+            folder,
+        });
+    }
+    listed.sort_by(|a, b| a.path.cmp(&b.path));
+    listed.dedup_by(|a, b| a.path == b.path);
+    Ok((listed, unreadable))
+}
+
+/// Sort the candidates of the work tree at `root`, and report the
+/// repositories inside it that `git status` never shows.
+pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
+    let mut sorted = Sorted::default();
+    let mut folders = BTreeSet::new();
+    let mut replaced = Vec::new();
+    for candidate in listed {
+        let path = candidate.path.as_str();
+        let kind = kind_in(root, path);
+        if candidate.listed == Listed::Tracked
+            && !candidate.folder
+            && kind == Kind::Folder
+            && kind_of(&root.join(path).join(".git")) == Kind::Missing
+        {
+            // A tracked file the work tree now has a folder in place of: its
+            // deletion goes into W, and the folder's files are sorted on
+            // their own, as `git add -A` takes them.
+            if deletion_allowed(path) {
+                sorted.work.push(path.to_string());
+            } else {
+                sorted.skipped.push(Skipped {
+                    path: path.to_string(),
+                    size: 0,
+                    reason: "excluded",
+                    commit: None,
+                });
+            }
+            replaced.push(path.to_string());
+            continue;
+        }
+        if candidate.folder || kind == Kind::Folder {
+            folders.insert(path.to_string());
+            if kind != Kind::Folder {
+                // Listed as a folder, but no real folder is there (a link,
+                // or gone since): never walked.
+                sorted.skipped.push(Skipped {
+                    path: format!("{path}/"),
+                    size: 0,
+                    reason: "unsupported",
+                    commit: None,
+                });
+                continue;
+            }
+            match candidate.listed {
+                Listed::Ignored if !within_build_output(path, true) => {
+                    walk_private(root, path, "ignored", &mut sorted);
+                }
+                Listed::Ignored => {
+                    let apart = private_files_in_build_output(root, path, &mut sorted);
+                    sorted.skipped.push(Skipped {
+                        path: format!("{path}/"),
+                        size: crate::hosted::tree_size(&root.join(path)).saturating_sub(apart),
+                        reason: "excluded",
+                        commit: None,
+                    })
+                }
+                // A repository inside the work tree, or a folder git will not
+                // descend into: never turned into a gitlink.
+                _ => sorted.skipped.push(Skipped {
+                    path: format!("{path}/"),
+                    size: crate::hosted::tree_size(&root.join(path)),
+                    reason: "unsupported",
+                    commit: None,
+                }),
+            }
+            continue;
+        }
+        if kind == Kind::Missing {
+            // A tracked file the work tree no longer has.
+            if deletion_allowed(path) {
+                sorted.work.push(path.to_string());
+            } else {
+                sorted.skipped.push(Skipped {
+                    path: path.to_string(),
+                    size: 0,
+                    reason: "excluded",
+                    commit: None,
+                });
+            }
+            continue;
+        }
+        sort_file(path, candidate.listed, kind, &mut sorted);
+    }
+    let named: BTreeSet<&str> = listed
+        .iter()
+        .map(|candidate| candidate.path.as_str())
+        .collect();
+    for path in replaced {
+        unlisted_files(root, &path, &named, &mut sorted);
+    }
+    nested_repositories(root, &folders, &mut sorted);
+    sorted.work.sort();
+    sorted.work.dedup();
+    sorted
+}
+
+/// The files in the folder `path` that took a tracked file's place and that
+/// `git status` does not list: it lists the folder's untracked files one by
+/// one, but none an ignore rule matching the folder itself covers (the
+/// index names the path as a file). Each is sorted as an ignored file, so
+/// it is kept privately (or skipped as build output, or as too large).
+/// Links are never followed; repositories are left to
+/// [`nested_repositories`].
+fn unlisted_files(root: &Path, path: &str, named: &BTreeSet<&str>, sorted: &mut Sorted) {
+    let mut pending = vec![path.to_string()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
+            continue;
+        };
+        let mut names: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            match entry.file_name().into_string() {
+                Ok(name) => names.push(name),
+                Err(name) => sorted.skipped.push(Skipped {
+                    path: format!("{folder}/{}", name.to_string_lossy()),
+                    size: 0,
+                    reason: "unsupported",
+                    commit: None,
+                }),
+            }
+        }
+        names.sort();
+        for name in names {
+            let child = format!("{folder}/{name}");
+            if is_reserved_path(&child) || named.contains(child.as_str()) {
+                continue;
+            }
+            match kind_in(root, &child) {
+                Kind::Folder => pending.push(child),
+                Kind::Missing => {}
+                kind => sort_file(&child, Listed::Ignored, kind, sorted),
+            }
+        }
+    }
+}
+
+/// Repositories inside the folders git reads, which `git status` never
+/// lists: a `.git` (a folder, or a file pointing elsewhere) in a folder that
+/// also holds tracked files, or one the old gateway renamed while it staged
+/// files and never put back. Their history is not copied, so each is
+/// skipped as `unsupported`, which holds up removal. The folders sorted
+/// above (ignored or untracked as a whole), build output and links are not
+/// entered; the entry's own `.instafy` and `.git` are the layout's.
+fn nested_repositories(root: &Path, sorted_folders: &BTreeSet<String>, sorted: &mut Sorted) {
+    let mut pending: Vec<(PathBuf, String)> = vec![(PathBuf::new(), String::new())];
+    while let Some((folder, shown)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
+            continue;
+        };
+        let mut children: Vec<(OsString, bool)> = entries
+            .flatten()
+            .map(|entry| {
+                let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                (entry.file_name(), is_folder)
+            })
+            .collect();
+        children.sort();
+        for (name, is_folder) in children {
+            let text = name.to_string_lossy();
+            let child = if shown.is_empty() {
+                text.to_string()
+            } else {
+                format!("{shown}/{text}")
+            };
+            if shown.is_empty() && (name == ".git" || name == ".instafy") {
+                continue;
+            }
+            if is_repository_name(&text) {
+                sorted.skipped.push(Skipped {
+                    path: if is_folder {
+                        format!("{child}/")
+                    } else {
+                        child
+                    },
+                    size: crate::hosted::tree_size(&root.join(&folder).join(&name)),
+                    reason: "unsupported",
+                    commit: None,
+                });
+            } else if is_folder
+                && !sorted_folders.contains(&child)
+                && !within_build_output(&child, true)
+            {
+                pending.push((folder.join(&name), child));
+            }
+        }
+    }
+}
+
+/// A name git takes for a repository (`.git` in any case, with trailing dots
+/// or spaces), or one the old gateway gave a repository it hid while it
+/// staged files.
+fn is_repository_name(name: &str) -> bool {
+    const HIDDEN: &str = ".git.instafy-hidden-";
+    let name = name.trim_end_matches([' ', '.']);
+    name.eq_ignore_ascii_case(".git")
+        || name
+            .get(..HIDDEN.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(HIDDEN))
+}
+
+fn sort_file(path: &str, listed: Listed, kind: Kind, sorted: &mut Sorted) {
+    let size = match kind {
+        Kind::File { size } => size,
+        _ => 0,
+    };
+    let skip = |reason: &'static str, sorted: &mut Sorted| {
+        sorted.skipped.push(Skipped {
+            path: path.to_string(),
+            size,
+            reason,
+            commit: None,
+        })
+    };
+    let private = |reason: &'static str, sorted: &mut Sorted| {
+        sorted.private.push(PrivatePath {
+            path: path.to_string(),
+            reason,
+            size,
+            commit: None,
+        })
+    };
+    let secret = is_secret_path(path);
+    if is_root_chat_upload(path) && matches!(kind, Kind::File { .. }) {
+        sorted.attachments.push(path.to_string());
+    } else if kind == Kind::Other {
+        skip("unsupported", sorted);
+    } else if within_build_output(path, false) && !secret {
+        skip("excluded", sorted);
+    } else if size > MAX_PUBLISH_BLOB_BYTES {
+        skip("too_large", sorted);
+    } else if is_legacy_attachment_path(path) {
+        private("attachment", sorted);
+    } else if secret {
+        private("secret", sorted);
+    } else if listed == Listed::Ignored {
+        private("ignored", sorted);
+    } else if git_service::policy::repo_policy_denies_path(path) || is_sync_reserved_path(path) {
+        skip("excluded", sorted);
+    } else if is_unsafe_path(path) {
+        skip("unsupported", sorted);
+    } else {
+        sorted.work.push(path.to_string());
+    }
+}
+
+/// Every file under the folder `path`, for the private archive: regular
+/// files and links (as links) up to the size cap; repositories inside it,
+/// special files and larger files are listed as skipped. Links to folders are
+/// never entered.
+pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted: &mut Sorted) {
+    let mut pending = vec![path.to_string()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
+            sorted.skipped.push(Skipped {
+                path: format!("{folder}/"),
+                size: 0,
+                reason: "unsupported",
+                commit: None,
+            });
+            continue;
+        };
+        let mut names: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            match entry.file_name().into_string() {
+                Ok(name) => names.push(name),
+                Err(name) => sorted.skipped.push(Skipped {
+                    path: format!("{folder}/{}", name.to_string_lossy()),
+                    size: 0,
+                    reason: "unsupported",
+                    commit: None,
+                }),
+            }
+        }
+        names.sort();
+        for name in names {
+            let child = if folder.is_empty() {
+                name.clone()
+            } else {
+                format!("{folder}/{name}")
+            };
+            if is_reserved_path(&child) || child == ".instafy" {
+                if is_repository_name(&name) {
+                    // A repository inside the folder: its history is not
+                    // copied file by file.
+                    sorted.skipped.push(Skipped {
+                        path: format!("{child}/"),
+                        size: crate::hosted::tree_size(&root.join(&child)),
+                        reason: "unsupported",
+                        commit: None,
+                    });
+                }
+                continue;
+            }
+            match kind_of(&root.join(&child)) {
+                Kind::Folder => pending.push(child),
+                Kind::File { size } if size > MAX_PUBLISH_BLOB_BYTES => {
+                    sorted.skipped.push(Skipped {
+                        path: child,
+                        size,
+                        reason: "too_large",
+                        commit: None,
+                    })
+                }
+                kind @ (Kind::File { .. } | Kind::Link) => {
+                    let reason = if is_secret_path(&child) {
+                        "secret"
+                    } else {
+                        reason
+                    };
+                    sorted.private.push(PrivatePath {
+                        path: child,
+                        reason,
+                        size: match kind {
+                            Kind::File { size } => size,
+                            _ => 0,
+                        },
+                        commit: None,
+                    });
+                }
+                Kind::Other => sorted.skipped.push(Skipped {
+                    path: child,
+                    size: 0,
+                    reason: "unsupported",
+                    commit: None,
+                }),
+                Kind::Missing => {}
+            }
+        }
+    }
+}
+
+/// The credentials inside the ignored build output folder `path`, for the
+/// private archive: build tools copy settings into their output (a bundler's
+/// `.env.production`, a server's key), and the parked copy may hold the only
+/// one. Links are never followed, and dependency folders and repositories
+/// are not entered; everything else stays skipped with the folder. Returns
+/// the bytes listed apart from the folder.
+fn private_files_in_build_output(root: &Path, path: &str, sorted: &mut Sorted) -> u64 {
+    let dependencies = |folder: &str| {
+        folder
+            .split('/')
+            .any(|segment| DEPENDENCY_DIRS.contains(&segment))
+    };
+    if dependencies(path) {
+        return 0;
+    }
+    let mut apart = 0u64;
+    let mut pending = vec![path.to_string()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
+            continue;
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        for name in names {
+            let child = format!("{folder}/{name}");
+            if is_reserved_path(&child) {
+                continue;
+            }
+            let kind = kind_of(&root.join(&child));
+            if kind == Kind::Folder {
+                if !dependencies(&name) {
+                    pending.push(child);
+                }
+                continue;
+            }
+            if !is_secret_path(&child) {
+                continue;
+            }
+            match kind {
+                Kind::File { size } if size > MAX_PUBLISH_BLOB_BYTES => {
+                    apart = apart.saturating_add(size);
+                    sorted.skipped.push(Skipped {
+                        path: child,
+                        size,
+                        reason: "too_large",
+                        commit: None,
+                    });
+                }
+                Kind::File { size } => {
+                    apart = apart.saturating_add(size);
+                    sorted.private.push(PrivatePath {
+                        path: child,
+                        reason: "secret",
+                        size,
+                        commit: None,
+                    });
+                }
+                Kind::Link => sorted.private.push(PrivatePath {
+                    path: child,
+                    reason: "secret",
+                    size: 0,
+                    commit: None,
+                }),
+                _ => {}
+            }
+        }
+    }
+    apart
+}
+
+/// A chat image the web app wrote into the space's root. It never named one
+/// with surrounding whitespace: such a file is another one than the image
+/// messages name, so it is kept privately, never exported as that image.
+pub(crate) fn is_root_chat_upload(path: &str) -> bool {
+    !path.contains('/')
+        && path.trim() == path
+        && path.len() > 12
+        && path
+            .get(..12)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("chat-upload-"))
+}
+
+/// Whether `path` lies in a build output folder (for a folder, or is one).
+pub(crate) fn within_build_output(path: &str, folder: bool) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    let parents = if folder {
+        &segments[..]
+    } else {
+        &segments[..segments.len().saturating_sub(1)]
+    };
+    parents
+        .iter()
+        .any(|segment| BUILD_OUTPUT_DIRS.contains(segment))
+}
+
+/// The commits an old sync moved the copy away from without its files, newest
+/// first: the reflog's `reset: moving to origin/main` entries, then
+/// `ORIG_HEAD`, each once and only as a full object id. Read before the
+/// salvage talks to canonical, so what it judges is the entry as it was
+/// parked.
+pub(crate) fn old_heads(git: &WorkspaceGit<'_>, root: &Path) -> Result<Vec<String>> {
+    let mut heads = Vec::new();
+    if let Ok(workspace) = crate::workspace_fs::WorkspaceDir::open(root) {
+        if let Some(lines) = crate::stale_align::read_reflog(&workspace) {
+            heads.extend(crate::stale_align::old_heads_before_resets(
+                &lines,
+                "origin/main",
+            ));
+        }
+    }
+    if let Some(orig) = git.commit_id("ORIG_HEAD")? {
+        heads.push(orig);
+    }
+    let mut seen = BTreeSet::new();
+    heads.retain(|id| is_full_object_id(id) && seen.insert(id.clone()));
+    Ok(heads)
+}
+
+/// The paths among `current` whose work-tree state is a copy of a version
+/// canonical `main` already has, left behind when an old sync moved the
+/// branch without the files:
+///
+/// - a file whose content (and mode) some commit of `main`'s history holds at
+///   that path (the version main has now included);
+/// - a deleted file that a commit the old sync reset away from lacked (or
+///   held as a folder), and that the commit's merge base with `main` lacked
+///   too: `main` added the file after the view the work tree came from. For a commit on `main` the
+///   merge base is the commit itself; for a local commit the reset abandoned
+///   it is the commit it was made on, so a file that commit deleted (its base
+///   had it) stays a deletion. Every one of `old_heads` ([`old_heads`]) is
+///   read, however old.
+///
+/// A version only a local commit held is never stale: it is not on
+/// canonical, so it is kept.
+pub(crate) fn stale_paths(
+    git: &WorkspaceGit<'_>,
+    old_heads: &[String],
+    main: &str,
+    current: &BTreeMap<String, Option<TreeEntry>>,
+) -> Result<BTreeSet<String>> {
+    let mut stale = BTreeSet::new();
+    let present: Vec<String> = current
+        .iter()
+        .filter(|(_, entry)| entry.is_some())
+        .map(|(path, _)| path.clone())
+        .collect();
+    let versions = canonical_versions(git, main, &present)?;
+    for path in &present {
+        let Some(Some(entry)) = current.get(path) else {
+            continue;
+        };
+        if versions
+            .get(path)
+            .is_some_and(|known| known.contains(&(entry.mode.clone(), entry.oid.clone())))
+        {
+            stale.insert(path.clone());
+        }
+    }
+
+    let absent: Vec<String> = current
+        .iter()
+        .filter(|(_, entry)| entry.is_none())
+        .map(|(path, _)| path.clone())
+        .collect();
+    if absent.is_empty() {
+        return Ok(stale);
+    }
+    let mut checked = BTreeSet::new();
+    for old in old_heads {
+        let open: Vec<String> = absent
+            .iter()
+            .filter(|path| !stale.contains(*path))
+            .cloned()
+            .collect();
+        if open.is_empty() {
+            break;
+        }
+        // Only an object id read from the reflog reaches git's arguments.
+        if !is_full_object_id(old) {
+            continue;
+        }
+        let Some(old) = git.commit_id(old).ok().flatten() else {
+            continue;
+        };
+        if !checked.insert(old.clone()) {
+            continue;
+        }
+        let Some(base) = git.merge_base(&old, main).ok().flatten() else {
+            continue;
+        };
+        let held = git.tree_entries(&old, &open)?;
+        let base_held = match base == old {
+            true => None,
+            false => Some(git.tree_entries(&base, &open)?),
+        };
+        // A folder at the path is not the file `main` put there: the copy
+        // came from a view that had the folder (its files are judged on
+        // their own, and the file comes back only in place of stale ones).
+        let file_at = |entries: &BTreeMap<String, TreeEntry>, path: &str| {
+            entries.get(path).is_some_and(|entry| entry.kind != "tree")
+        };
+        for path in open {
+            let in_base = base_held
+                .as_ref()
+                .is_some_and(|entries| file_at(entries, &path));
+            if !file_at(&held, &path) && !in_base {
+                stale.insert(path);
+            }
+        }
+    }
+    Ok(stale)
+}
+
+/// What W does with a change the work tree made to an older view of a file
+/// HEAD changed since.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum OnOldView {
+    /// The change merges onto HEAD's version: W takes this `(mode, blob)`
+    /// (`None`: no file).
+    Merged(Option<(String, String)>),
+    /// It does not: W keeps the work tree's version, which also undoes
+    /// HEAD's newer change.
+    Kept,
+}
+
+/// The paths among `changed` (W's entries for paths that are not stale
+/// copies) whose change from HEAD was made to an older view of the file:
+/// an old sync moved the branch onto a `main` that had changed the file
+/// without touching the work tree, and the person edited the copy the work
+/// tree still held. W's change would also undo `main`'s, unnoticed.
+///
+/// The views are the merge bases of [`old_heads`] with HEAD (for a local
+/// commit the reset abandoned, the commit it was made on, so its own edits
+/// count as the work tree's). Only a regular file the work tree holds is
+/// judged: a deletion drops the file whatever version it held, and a path
+/// HEAD holds as a folder is left to the folder rules. The work tree's file
+/// came from the version that lacks the fewest of its lines (then the one
+/// with the fewest lines the file lacks); when that is HEAD's, the change
+/// is the work tree's own. Otherwise it is merged with HEAD's version, as
+/// the old single-tenant repair merged such files: when it merges cleanly
+/// (from every view that near), W takes the result unless the work tree
+/// already holds it; when it does not (a conflict, binary content, a file
+/// `main` added or removed since), W keeps the work tree's version.
+pub(crate) fn changes_on_old_views(
+    git: &WorkspaceGit<'_>,
+    old_heads: &[String],
+    head: &str,
+    changed: &BTreeMap<String, Option<TreeEntry>>,
+) -> Result<BTreeMap<String, OnOldView>> {
+    let mut found = BTreeMap::new();
+    if changed.is_empty() || old_heads.is_empty() {
+        return Ok(found);
+    }
+    let paths: Vec<String> = changed.keys().cloned().collect();
+    let at_head = git.tree_entries(head, &paths)?;
+    let open: Vec<String> = paths
+        .into_iter()
+        .filter(|path| {
+            let ours = at_head.get(path);
+            let theirs = changed[path].as_ref();
+            theirs.is_some_and(is_regular)
+                && ours.is_none_or(is_regular)
+                && !same_entry(ours, theirs)
+        })
+        .collect();
+    if open.is_empty() {
+        return Ok(found);
+    }
+    let mut views = Vec::new();
+    let mut bases = BTreeSet::new();
+    for old in old_heads {
+        // Only an object id read from the reflog reaches git's arguments.
+        if !is_full_object_id(old) {
+            continue;
+        }
+        let Some(old) = git.commit_id(old).ok().flatten() else {
+            continue;
+        };
+        let Some(base) = git.merge_base(&old, head).ok().flatten() else {
+            continue;
+        };
+        if bases.insert(base.clone()) {
+            views.push(git.tree_entries(&base, &open)?);
+        }
+    }
+    let mut scratch = None;
+    let mut empty = None;
+    for path in open {
+        let ours = at_head.get(&path);
+        let theirs = changed[&path].as_ref();
+        // Each distinct version a view held that HEAD no longer has; a
+        // folder or a link there is no version of this file.
+        let mut older: Vec<Option<&TreeEntry>> = Vec::new();
+        for entries in &views {
+            let view = entries.get(&path);
+            if view.is_some_and(|entry| !is_regular(entry))
+                || same_entry(view, ours)
+                || older.iter().any(|known| same_entry(*known, view))
+            {
+                continue;
+            }
+            older.push(view);
+        }
+        if older.is_empty() {
+            continue;
+        }
+        let Some(from_head) = lines_apart(git, &mut empty, ours, theirs)? else {
+            found.insert(path, OnOldView::Kept);
+            continue;
+        };
+        let mut nearest: Vec<Option<&TreeEntry>> = Vec::new();
+        let mut best = None;
+        let mut unknown = false;
+        for view in older {
+            let Some(apart) = lines_apart(git, &mut empty, view, theirs)? else {
+                unknown = true;
+                break;
+            };
+            match best {
+                Some(known) if apart > known => {}
+                Some(known) if apart == known => nearest.push(view),
+                _ => {
+                    best = Some(apart);
+                    nearest = vec![view];
+                }
+            }
+        }
+        if unknown {
+            found.insert(path, OnOldView::Kept);
+            continue;
+        }
+        if best.is_none_or(|(lacking, _)| from_head.0 < lacking) {
+            // The work tree's file came from HEAD's version.
+            continue;
+        }
+        let mut result: Option<Option<(String, String)>> = None;
+        let mut kept = false;
+        for view in nearest {
+            match merge_view_onto_head(git, &mut scratch, view, ours, theirs)? {
+                Some(merged) if result.as_ref().is_none_or(|known| *known == merged) => {
+                    result = Some(merged);
+                }
+                _ => {
+                    kept = true;
+                    break;
+                }
+            }
+        }
+        if kept {
+            found.insert(path, OnOldView::Kept);
+            continue;
+        }
+        let Some(merged) = result else {
+            continue;
+        };
+        let held = theirs.map(|entry| (entry.mode.clone(), entry.oid.clone()));
+        if merged != held {
+            found.insert(path, OnOldView::Merged(merged));
+        }
+    }
+    Ok(found)
+}
+
+fn is_regular(entry: &TreeEntry) -> bool {
+    matches!(entry.mode.as_str(), "100644" | "100755")
+}
+
+/// How many lines of `to` the version `from` lacks, and how many of its
+/// own lines `to` lacks (no file counts as an empty one); `None` for binary
+/// content.
+fn lines_apart(
+    git: &WorkspaceGit<'_>,
+    empty: &mut Option<String>,
+    from: Option<&TreeEntry>,
+    to: Option<&TreeEntry>,
+) -> Result<Option<(u64, u64)>> {
+    if same_entry(from, to) {
+        return Ok(Some((0, 0)));
+    }
+    let mut blob = |entry: Option<&TreeEntry>| -> Result<String> {
+        if let Some(entry) = entry {
+            return Ok(entry.oid.clone());
+        }
+        if empty.is_none() {
+            *empty = Some(git.stdout_opts(
+                &["hash-object", "-w", "--stdin"],
+                &RunOpts {
+                    stdin: Some(&[][..]),
+                    ..RunOpts::default()
+                },
+            )?);
+        }
+        empty.clone().context("no empty blob")
+    };
+    let (from, to) = (blob(from)?, blob(to)?);
+    // Only object ids reach git's arguments.
+    if !is_full_object_id(&from) || !is_full_object_id(&to) {
+        return Ok(None);
+    }
+    let numstat = git.stdout(&[
+        "diff",
+        "--numstat",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        &from,
+        &to,
+    ])?;
+    let mut fields = numstat.split('\t');
+    let added = fields.next().unwrap_or("0");
+    let removed = fields.next().unwrap_or("0");
+    Ok(match (added.parse(), removed.parse()) {
+        (Ok(added), Ok(removed)) => Some((added, removed)),
+        _ if numstat.is_empty() => Some((0, 0)),
+        _ => None,
+    })
+}
+
+/// The work tree's change from `view` (`theirs`) made on HEAD's version
+/// (`ours`): `Some` with the entry W takes, or `None` when they do not
+/// merge. Merged content is written as a blob.
+fn merge_view_onto_head(
+    git: &WorkspaceGit<'_>,
+    scratch: &mut Option<tempfile::TempDir>,
+    view: Option<&TreeEntry>,
+    ours: Option<&TreeEntry>,
+    theirs: Option<&TreeEntry>,
+) -> Result<Option<Option<(String, String)>>> {
+    let entry = |entry: &TreeEntry| (entry.mode.clone(), entry.oid.clone());
+    if same_entry(view, theirs) {
+        // The work tree holds the view's version: HEAD's replaces it.
+        return Ok(Some(ours.map(entry)));
+    }
+    let (Some(view), Some(ours), Some(theirs)) = (view, ours, theirs) else {
+        return Ok(None);
+    };
+    if !(is_regular(view) && is_regular(ours) && is_regular(theirs)) {
+        return Ok(None);
+    }
+    let blobs = git.read_objects(&[view.oid.clone(), ours.oid.clone(), theirs.oid.clone()])?;
+    let [base, head, work] = blobs.as_slice() else {
+        bail!("git returned {} of three blobs", blobs.len());
+    };
+    if scratch.is_none() {
+        *scratch = Some(
+            tempfile::Builder::new()
+                .prefix("instafy-merge-")
+                .tempdir_in(git.git_dir())?,
+        );
+    }
+    let folder = scratch
+        .as_ref()
+        .map(|dir| dir.path())
+        .context("no folder to merge in")?;
+    let Some(content) =
+        crate::tree_merge::merge_file(git, folder, &base.data, &head.data, &work.data)?
+    else {
+        return Ok(None);
+    };
+    // Only one side changing the executable bit decides it.
+    let mode = if ours.mode == theirs.mode || theirs.mode == view.mode {
+        ours.mode.clone()
+    } else {
+        theirs.mode.clone()
+    };
+    let oid = git.stdout_opts(
+        &["hash-object", "-w", "--stdin"],
+        &RunOpts {
+            stdin: Some(&content),
+            ..RunOpts::default()
+        },
+    )?;
+    Ok(Some(Some((mode, oid))))
+}
+
+fn same_entry(a: Option<&TreeEntry>, b: Option<&TreeEntry>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.mode == b.mode && a.oid == b.oid,
+        _ => false,
+    }
+}
+
+/// Every `(mode, blob)` each path held anywhere in `main`'s history.
+fn canonical_versions(
+    git: &WorkspaceGit<'_>,
+    main: &str,
+    paths: &[String],
+) -> Result<BTreeMap<String, BTreeSet<(String, String)>>> {
+    let mut versions: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    for chunk in paths.chunks(256) {
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--format=",
+            "--raw",
+            "-z",
+            "--no-renames",
+            "--no-abbrev",
+            "-m",
+            "--full-history",
+            "--root",
+            "--end-of-options",
+            main,
+            "--",
+        ];
+        args.extend(chunk.iter().map(String::as_str));
+        let raw = git.bytes_opts(
+            &args,
+            &RunOpts {
+                literal_pathspecs: true,
+                ..RunOpts::default()
+            },
+        )?;
+        for change in parse_raw(&raw) {
+            let known = versions.entry(change.path).or_default();
+            for (mode, oid) in [change.old, change.new] {
+                if !oid.bytes().all(|byte| byte == b'0') {
+                    known.insert((mode, oid));
+                }
+            }
+        }
+    }
+    Ok(versions)
+}
+
+/// One `--raw` record with both sides.
+pub(crate) struct RawRecord {
+    pub old: (String, String),
+    pub new: (String, String),
+    pub path: String,
+}
+
+pub(crate) fn parse_raw(raw: &[u8]) -> Vec<RawRecord> {
+    let mut records = Vec::new();
+    let mut fields = raw.split(|byte| *byte == 0).filter(|r| !r.is_empty());
+    while let Some(meta) = fields.next() {
+        let meta = String::from_utf8_lossy(meta);
+        let Some(meta) = meta.trim_start().strip_prefix(':') else {
+            continue;
+        };
+        let Some(path) = fields.next() else { break };
+        let parts: Vec<&str> = meta.split(' ').collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        records.push(RawRecord {
+            old: (parts[0].to_string(), parts[2].to_string()),
+            new: (parts[1].to_string(), parts[3].to_string()),
+            path: String::from_utf8_lossy(path).to_string(),
+        });
+    }
+    records
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_output_is_recognised_by_folder() {
+        assert!(within_build_output("node_modules", true));
+        assert!(within_build_output("web/dist/app.js", false));
+        assert!(within_build_output("a/.next/cache", true));
+        assert!(!within_build_output("src/build.rs", false));
+        assert!(!within_build_output("build", false));
+        assert!(!within_build_output("tmp/big", false));
+        let skipped = |path: &str| Skipped {
+            path: path.to_string(),
+            size: 0,
+            reason: "excluded",
+            commit: None,
+        };
+        assert!(skipped("node_modules/").rebuildable());
+        assert!(skipped("pkg/target/debug/x").rebuildable());
+        assert!(!skipped("tmp/big").rebuildable());
+        assert!(!skipped("data/").rebuildable());
+    }
+
+    #[test]
+    fn root_chat_uploads_are_recognised() {
+        assert!(is_root_chat_upload("chat-upload-1-a.png"));
+        assert!(is_root_chat_upload("Chat-Upload-1"));
+        assert!(!is_root_chat_upload("chat-upload-"));
+        assert!(!is_root_chat_upload("img/chat-upload-1.png"));
+        assert!(!is_root_chat_upload("chat-uploads.md"));
+        assert!(!is_root_chat_upload("chat-upload-1-a.png "));
+        assert!(!is_root_chat_upload("chat-upload-1-a.png\u{a0}"));
+    }
+
+    #[test]
+    fn raw_records_keep_both_sides() {
+        let raw = b":100644 100755 aaaa bbbb M\0x/y z\0\n:000000 120000 0000 cccc A\0link\0";
+        let records = parse_raw(raw);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].old, ("100644".to_string(), "aaaa".to_string()));
+        assert_eq!(records[0].new, ("100755".to_string(), "bbbb".to_string()));
+        assert_eq!(records[0].path, "x/y z");
+        assert_eq!(records[1].new, ("120000".to_string(), "cccc".to_string()));
+        assert_eq!(records[1].path, "link");
+    }
+}

@@ -209,8 +209,18 @@ fn classify_output(output: &Output) -> PushClass {
     classify_push(&text)
 }
 
+/// The shard hook's refusal of any salvage ref change from a push that does
+/// not hold the salvage credential.
+const SALVAGE_REF_KEPT: &str = "holds salvaged work and cannot be changed by a push";
+
 /// Classify the combined stdout and stderr of a failed push.
 pub(crate) fn classify_push(text: &str) -> PushClass {
+    // A refusal about a salvage ref is final, whatever else the output says:
+    // the name is not one a salvage push may create, or the ref already
+    // exists. It is never a race to retry or a path to leave out.
+    if text.contains(git_service::policy::SALVAGE_PUSH_REFUSED) || text.contains(SALVAGE_REF_KEPT) {
+        return PushClass::Rejected(summary(text));
+    }
     let lower = text.to_ascii_lowercase();
     // Checked first: the shard hook's fast-forward refusal also reads
     // "hook declined", and must be retried rather than parked.
@@ -455,6 +465,119 @@ mod tests {
         let result = delete_with_lease(&local, &url, reference, &seen).unwrap();
         assert_eq!(result.class, PushClass::Pushed);
         assert!(!tip().status.success());
+    }
+
+    #[test]
+    fn salvage_refusals_are_permanent_even_when_they_read_like_a_race_or_a_path() {
+        let marker = git_service::policy::SALVAGE_PUSH_REFUSED;
+        let gateway = "refs/instafy/salvage/gateway/node-1-0123abcd";
+        for text in [
+            // The ref exists: the hook refuses any update, and git reports a
+            // failed ref update.
+            format!(
+                "remote: {marker} '{gateway}' holds salvaged work and may only be created\n\
+                 remote: error: hook declined to update {gateway}\n\
+                 !\tabc:{gateway}\t[remote rejected] (failed to update ref)"
+            ),
+            format!(
+                "remote: {marker} only refs/instafy/salvage/gateway/<name> refs may be \
+                 created, not 'refs/heads/main'\n\
+                 !\tabc:refs/heads/main\t[remote rejected] (hook declined)"
+            ),
+            // A name with a quoted path in it is still not a path refusal.
+            format!(
+                "remote: {marker} 'refs/instafy/salvage/gateway/Upper' is not a valid salvage \
+                 ref name ([0-9a-z] then [0-9a-z._-], at most 100 characters)\n\
+                 remote: instafy: blocked path 'x' (stale info)"
+            ),
+            // Without the credential every salvage ref change is refused.
+            format!(
+                "remote: instafy: '{gateway}' holds salvaged work and cannot be changed by a \
+                 push\n!\tabc:{gateway}\t[remote rejected] (cannot lock ref)"
+            ),
+        ] {
+            assert!(
+                matches!(classify_push(&text), PushClass::Rejected(_)),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_delete_under_a_lease_removes_only_the_listed_tip() {
+        use crate::test_support::git_in;
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let remote = base.join("remote.git");
+        git_in(
+            &base,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        let work = base.join("work");
+        git_in(&base, &["init", "-q", "-b", "main", work.to_str().unwrap()]);
+        let commit = |message: &str| {
+            git_in(
+                &work,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.com",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ],
+            );
+            git_in(&work, &["rev-parse", "HEAD"])
+        };
+        let first = commit("one");
+        let second = commit("two");
+        let listed = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/a";
+        let moved = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/b";
+        let remote_url = remote.to_str().unwrap();
+        git_in(
+            &work,
+            &[
+                "push",
+                "-q",
+                remote_url,
+                &format!("{first}:{listed}"),
+                &format!("{second}:{moved}"),
+            ],
+        );
+        let mirror = base.join("mirror.git");
+        WorkspaceGit::init_bare(&mirror).unwrap();
+        let git = WorkspaceGit::bare(&mirror, None);
+
+        // Listed at `first`, still there: deleted.
+        let deleted = delete_with_lease(&git, remote_url, listed, &first).unwrap();
+        assert_eq!(deleted.class, PushClass::Pushed);
+        assert_eq!(deleted.refs[0].flag, '-');
+        // Gone now, and one that moved since it was listed: both refused
+        // as stale, and the moved one stays.
+        for (reference, rev) in [(listed, &first), (moved, &first)] {
+            let refused = delete_with_lease(&git, remote_url, reference, rev).unwrap();
+            assert!(
+                matches!(refused.class, PushClass::LostRace(_)),
+                "{reference}: {:?}",
+                refused.class
+            );
+        }
+        let left = git_in(
+            &remote,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        );
+        assert!(left.contains(&format!("{moved} {second}")), "{left}");
+        assert!(!left.contains(listed), "{left}");
     }
 
     #[test]

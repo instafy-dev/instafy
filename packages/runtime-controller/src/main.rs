@@ -85,6 +85,8 @@ mod tests_ai_metering_schema;
 #[cfg(test)]
 mod tests_chat_attachment_lease;
 #[cfg(test)]
+mod tests_chat_attachment_legacy_export;
+#[cfg(test)]
 mod tests_chat_attachment_policies;
 #[cfg(test)]
 mod tests_managed_ai_refund;
@@ -489,6 +491,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(credential_rotation::router())
         .merge(secrets::router())
         .merge(browser_profile::router())
+        .merge(chat_attachments::router())
         .merge(skills_discovery::router())
         .merge(device_auth::router())
         .merge(conversations::router())

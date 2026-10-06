@@ -14,6 +14,7 @@ import {
   requestHostedRuntime,
   purgeRealUserCredential,
   resetRuntimeUserState,
+  runtimeCheckoutRoot,
   syncGitRemote,
   type HostedRuntimeReadyResult,
   waitForHostedRuntimeReady,
@@ -29,7 +30,6 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "../../../../../..");
 const dockerDir = path.join(repoRoot, "docker");
 const defaultWorkspaceRoot = path.join(repoRoot, "tmp", "runtime-sandbox");
-const defaultOriginWorkspaceRoot = path.join(repoRoot, "tmp", "origin-gateway-workspaces");
 
 function resolveWorkspacePath(value: string | undefined, fallback: string): string {
   if (!value || value.trim().length === 0) {
@@ -39,10 +39,12 @@ function resolveWorkspacePath(value: string | undefined, fallback: string): stri
   return path.isAbsolute(trimmed) ? trimmed : path.resolve(dockerDir, trimmed);
 }
 
+// The runtime's checkout: under the sandbox without git-canonical, else in
+// the provider's own folder. The origin gateway's folder holds no checkout.
 function workspaceRootsForTests(): string[] {
   return [
     resolveWorkspacePath(process.env.WORKSPACE_ROOT, defaultWorkspaceRoot),
-    resolveWorkspacePath(process.env.ORIGIN_GATEWAY_WORKSPACE_VOLUME, defaultOriginWorkspaceRoot),
+    runtimeCheckoutRoot(),
   ];
 }
 

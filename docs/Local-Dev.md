@@ -1,12 +1,13 @@
 # Local Development
 
 ## Start the stack
-- Full stack (Supabase + controller + proxy + provider): `pnpm stack:up`
+- Full stack (Supabase + controller + proxy + provider + git-canonical services): `pnpm stack:up`
 - Stop everything: `pnpm stack:down`
 
 ## Git-canonical (local git service)
-Enable git-canonical services (git-edge + git-shard-0 + origin-gateway):
-- `GIT_CANONICAL=1 pnpm stack:up`
+Git-canonical services (git-edge + git-shard-0 + origin-gateway) are on by default; set
+`GIT_CANONICAL=0` to opt out:
+- `GIT_CANONICAL=0 pnpm stack:up`
 
 Defaults:
 - `git-edge`: `http://127.0.0.1:8080` (override with `GIT_EDGE_PORT`)
@@ -14,6 +15,8 @@ Defaults:
 - Repos stored under `tmp/git-repos/` (override with `GIT_REPO_VOLUME`)
 - `git-edge` auth is enabled by default (`GIT_EDGE_SKIP_AUTH=0`); run `instafy login` to set up git auth (credential helper) for clone/push, or set `GIT_EDGE_SKIP_AUTH=1` for insecure local-only debugging.
 - `git-shard` enforces repo hygiene by default (`GIT_MAX_BLOB_BYTES=20971520`, denies common churn paths like `node_modules/`; see `docs/Git-Service.md`).
+- `origin-gateway` is the stateless multi-tenant gateway: it keeps no working copy, and each save is a commit pushed to the space's `main` through `git-edge`. Its root is `tmp/origin-gateway-workspaces/` (override with `ORIGIN_GATEWAY_WORKSPACE_VOLUME`), where it keeps a disposable mirror cache in `.git-cache/` (deleting it only costs a fetch; `ORIGIN_CACHE_MAX_BYTES` caps it, 20 GiB by default). At every start it moves each folder in that root named like a space id, such as an older gateway's working copy, to `.legacy/`; `origin-http-server salvage` keeps their work (see [Retiring gateway working copies](Git-Service.md#retiring-gateway-working-copies)).
+- Runtime checkouts live in a folder of their own, `tmp/runtime-checkouts/<space id>` (override with `DOCKER_REPO_HOST`), never in the gateway's root: the gateway would move them to `.legacy/` like an old working copy, and it refuses to start on a root that holds the provider's `.instafy-checkout-stamps/` or `.instafy-evicted/`, or a checkout with a runtime's clean-stop marker or local recovery refs (see [Configuration and start](Git-Service.md#configuration-and-start)). Each time the stack starts the provider service (`pnpm stack:up` does so before it starts the gateway), it moves the runtime checkouts an earlier local stack kept in the gateway's root to that folder, with the provider's stamp and eviction folders. A space whose runtime container still exists (running or stopped), or whose checkout the new folder already has, stays where it is with a warning, and so does every space when the containers cannot be listed; while one stays, the provider's stamp folder stays in the gateway's root too, so the gateway refuses to start until a later provider start has moved it. Checkouts an earlier gateway start already moved to `.legacy/` are not moved back; the provider's start names that folder, and they can be moved by hand. A `DOCKER_REPO_HOST` that names the gateway's root only gets a warning.
 
 ## Frontend
 - Install deps: `pnpm install`

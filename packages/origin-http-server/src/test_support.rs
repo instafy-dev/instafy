@@ -292,27 +292,100 @@ fn edit_commit(ws: &Path, parent: Option<&str>, edit: impl FnOnce(&[(&str, &str)
     )
 }
 
+/// Set only when [`install_script`] starts a script to see that it starts:
+/// the line after the script's `#!` line then exits at once.
+const SCRIPT_PROBE_ENV: &str = "INSTAFY_TEST_SCRIPT_PROBE";
+
+/// How long [`install_script`] waits for a new script to be startable.
+const SCRIPT_START_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Write `script` (a shell script whose first line is its `#!` line) to
+/// `path` as an executable that starts whenever it is run after this
+/// returns.
+///
+/// Linux refuses to start a file that any process holds open for writing
+/// (`ETXTBSY`). A child that another test thread forks while the script is
+/// being written keeps a copy of the writing descriptor until it starts its
+/// own program, so the first start of a script just written can fail for a
+/// moment on a busy host. The script is written under a temporary name and
+/// renamed into place, then started with [`SCRIPT_PROBE_ENV`] set (a guard
+/// right after the `#!` line exits at once, so none of the script's own
+/// work runs) until the system lets it start, for at most
+/// [`SCRIPT_START_WAIT`]. Nothing opens the file for writing again, so
+/// every later start succeeds too.
+pub(crate) fn install_script(path: &Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (interpreter, body) = script
+        .split_once('\n')
+        .filter(|(first, _)| first.starts_with("#!"))
+        .expect("a script starts with its #! line");
+    let folder = path.parent().expect("a script lives in a folder");
+    let name = path
+        .file_name()
+        .expect("a script has a name")
+        .to_string_lossy();
+    let temporary = folder.join(format!(".{name}.{}", uuid::Uuid::new_v4().simple()));
+    std::fs::write(
+        &temporary,
+        format!("{interpreter}\n[ -n \"${SCRIPT_PROBE_ENV}\" ] && exit 0\n{body}"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&temporary, path).unwrap();
+    start_once_free(path);
+}
+
+/// Start the script [`install_script`] wrote at `path`, with
+/// [`SCRIPT_PROBE_ENV`] set, until the system lets it start: a start that
+/// fails because a process still holds the file open for writing is tried
+/// again, for at most [`SCRIPT_START_WAIT`].
+fn start_once_free(path: &Path) {
+    let deadline = std::time::Instant::now() + SCRIPT_START_WAIT;
+    loop {
+        match probe_start(path) {
+            Ok(status) => {
+                assert!(status.success(), "{path:?} did not start cleanly: {status}");
+                return;
+            }
+            Err(error) if is_busy(&error) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("{path:?} could not be started: {error}"),
+        }
+    }
+}
+
+/// Run `path` once with [`SCRIPT_PROBE_ENV`] set.
+fn probe_start(path: &Path) -> std::io::Result<std::process::ExitStatus> {
+    Command::new(path)
+        .env(SCRIPT_PROBE_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+}
+
+/// The start failed because a process holds the file open for writing.
+fn is_busy(error: &std::io::Error) -> bool {
+    rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::TXTBSY)
+}
+
 /// Install the shard's update hook in the bare repository `remote`, with
 /// `env` exported for it (policy settings such as `GIT_DENY_PATHS`).
 pub(crate) fn install_shard_hook(remote: &Path, env: &[(&str, &str)]) {
-    use std::os::unix::fs::PermissionsExt as _;
     let hooks = remote.join("hooks");
     std::fs::create_dir_all(&hooks).unwrap();
     let real = hooks.join("update.shard");
-    std::fs::write(
+    install_script(
         &real,
-        git_service::policy::render_update_hook("main").unwrap(),
-    )
-    .unwrap();
-    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &git_service::policy::render_update_hook("main").unwrap(),
+    );
     let mut wrapper = String::from("#!/bin/sh\n");
     for (key, value) in env {
         wrapper.push_str(&format!("export {key}='{value}'\n"));
     }
     wrapper.push_str(&format!("exec '{}' \"$@\"\n", real.display()));
-    let update = hooks.join("update");
-    std::fs::write(&update, wrapper).unwrap();
-    std::fs::set_permissions(&update, std::fs::Permissions::from_mode(0o755)).unwrap();
+    install_script(&hooks.join("update"), &wrapper);
 }
 
 /// Runs git through a shell script for commands built on the current thread
@@ -322,10 +395,8 @@ pub(crate) struct GitWrapper;
 
 impl GitWrapper {
     pub(crate) fn install(dir: &Path, prelude: &str) -> Self {
-        use std::os::unix::fs::PermissionsExt as _;
         let script = dir.join(format!("git-wrapper-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::write(&script, format!("#!/bin/sh\n{prelude}\nexec git \"$@\"\n")).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        install_script(&script, &format!("#!/bin/sh\n{prelude}\nexec git \"$@\"\n"));
         crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(script));
         Self
     }
@@ -334,5 +405,112 @@ impl GitWrapper {
 impl Drop for GitWrapper {
     fn drop(&mut self) {
         crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+    }
+}
+
+/// Quarantines created under these parents fail with this OS error (a full
+/// disk is error 28), for tests of what a write does when the disk fills.
+static QUARANTINE_FAILURES: std::sync::Mutex<Vec<(PathBuf, i32)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Make every quarantine created under `parent` fail with OS error `code`
+/// until [`clear_quarantine_failure`].
+pub(crate) fn fail_quarantines_in(parent: &Path, code: i32) {
+    QUARANTINE_FAILURES
+        .lock()
+        .unwrap()
+        .push((parent.to_path_buf(), code));
+}
+
+pub(crate) fn clear_quarantine_failure(parent: &Path) {
+    QUARANTINE_FAILURES
+        .lock()
+        .unwrap()
+        .retain(|(failing, _)| failing != parent);
+}
+
+/// The OS error a quarantine under `parent` fails with, if any.
+pub(crate) fn quarantine_failure(parent: &Path) -> Option<std::io::Error> {
+    QUARANTINE_FAILURES
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(failing, _)| failing == parent)
+        .map(|(_, code)| std::io::Error::from_raw_os_error(*code))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use super::{install_script, is_busy, probe_start, start_once_free};
+
+    /// A script that another process holds open for writing (as a child
+    /// forked while the script was written does, until it starts its own
+    /// program) is started only once that process lets it go, and starting
+    /// it to see that it starts never runs its work.
+    #[test]
+    fn a_script_held_open_for_writing_starts_once_it_is_let_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("held");
+        let ran = dir.path().join("ran");
+        install_script(&script, &format!("#!/bin/sh\n: > '{}'\n", ran.display()));
+        assert!(
+            !ran.exists(),
+            "starting it to see that it starts ran its work"
+        );
+
+        // The holder keeps the script open for writing until its input
+        // ends.
+        let opened = dir.path().join("opened");
+        let mut holder = Command::new("sh")
+            .arg("-c")
+            .arg("exec 3>>\"$1\"; : > \"$2\"; read -r line; exit 0")
+            .arg("sh")
+            .arg(&script)
+            .arg(&opened)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !opened.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the holder never opened the script"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let first = probe_start(&script);
+        let input = holder.stdin.take().unwrap();
+        let let_go = Arc::new(AtomicBool::new(false));
+        let letting_go = {
+            let let_go = let_go.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                let_go.store(true, Ordering::SeqCst);
+                drop(input);
+            })
+        };
+        start_once_free(&script);
+        let started_after_let_go = let_go.load(Ordering::SeqCst);
+        letting_go.join().unwrap();
+        assert!(holder.wait().unwrap().success());
+        match first {
+            // Linux refuses to start a file open for writing: the start
+            // waited until the holder let it go.
+            Err(error) => {
+                assert!(is_busy(&error), "{error}");
+                assert!(started_after_let_go, "the script started while held");
+            }
+            // Other systems start it at once.
+            Ok(status) => assert!(status.success()),
+        }
+        assert!(!ran.exists());
+
+        Command::new(&script).status().unwrap();
+        assert!(ran.exists(), "the script's own work never ran");
     }
 }

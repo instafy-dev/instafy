@@ -33,9 +33,11 @@ use crate::publish_policy::{
 use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
-    parse_commit, parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
-    restore_commits, restore_of, without_origin_trailers, RecoveryRef, ViewError,
+    parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
+    restore_commits, restore_committers, without_origin_trailers, NotRestored, RecoveryRef,
+    ViewError,
 };
+use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
 use crate::stale_align;
 use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
 use crate::workspace_fs::WorkspaceDir;
@@ -339,10 +341,12 @@ pub struct RestoreReport {
     /// shows the entry restored. Only with `committed: false`; false too
     /// when the branch already had a restore commit of this ref on `main`.
     pub marked: bool,
-    /// Paths the work changes that kept the saved version: kept on request,
-    /// or never restorable here (ignored, excluded, secret, legacy
-    /// attachments, too large).
-    pub not_restored: Vec<String>,
+    /// Paths the work changes that kept the saved version, each with why:
+    /// `kept` on request, or the reason it is never restorable here
+    /// (`ignored`, `excluded`, `secret`, `attachment`, `too_large`,
+    /// `unsupported`, or the shard's own reason when it refused the path),
+    /// as the hosted gateway answers them.
+    pub not_restored: Vec<NotRestored>,
     /// The recovery ref is gone from canonical after the restore reached
     /// `main`: this call removed it, or found it already removed (the
     /// publish retires a ref whose commits reached `main`). It is removed
@@ -374,7 +378,7 @@ pub fn restore(
 struct Restored {
     committed: bool,
     marked: bool,
-    not_restored: Vec<String>,
+    not_restored: Vec<NotRestored>,
     ref_deleted: bool,
 }
 
@@ -1496,13 +1500,17 @@ impl<'a> Publisher<'a> {
         let records: BTreeSet<String> = if commits.is_empty() {
             BTreeSet::new()
         } else {
-            restore_commits(&self.git, &commits, &self.config.git_author_email)?
-                .into_iter()
-                .filter(|(_, reference)| {
-                    RecoveryRef::parse(reference).is_ok_and(|reference| reference.is_salvage())
-                })
-                .map(|(id, _)| id)
-                .collect()
+            restore_commits(
+                &self.git,
+                &commits,
+                &restore_committers(&self.config.git_author_email),
+            )?
+            .into_iter()
+            .filter(|(_, reference)| {
+                RecoveryRef::parse(reference).is_ok_and(|reference| reference.is_salvage())
+            })
+            .map(|(id, _)| id)
+            .collect()
         };
         let mut current = main.to_string();
         let mut conflicts = Vec::new();
@@ -2565,15 +2573,12 @@ impl Publisher<'_> {
     ///
     /// - The ref is read from the remote by exactly its name; `rev`, when
     ///   given, must still be its tip.
-    /// - `T = three_way(merge-base(Q, HEAD), HEAD, Q)`. Paths Q changes that
-    ///   are kept on request, reserved, never publishable (excluded, secret,
-    ///   legacy attachments, unsupported, too large) or ignored here keep
-    ///   `HEAD`'s entry and are reported as not restored.
-    /// - A conflict is settled when the work brings nothing in at or below
-    ///   it any more (kept on request, below a path left out, or with every
-    ///   change inside it left out); any other conflict is 409
-    ///   `restore_conflict {head, paths}`. An unsaved edit of a path the
-    ///   restore changes is 409 `dirty_paths`.
+    /// - What comes back onto `HEAD`, what stays out and why, which clashes
+    ///   are 409 `restore_conflict {head, paths}`, whether the ref may go
+    ///   and whether an empty restore commit records it are decided by
+    ///   [`restore_plan::plan`], the rule the hosted gateway restores by
+    ///   too. An unsaved edit of a path the restore changes is 409
+    ///   `dirty_paths`.
     /// - The commit (`Restore unsaved work`, with an
     ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
     ///   and committed by the origin, then published.
@@ -2590,6 +2595,10 @@ impl Publisher<'_> {
     ///   when every path left out was kept on request: a path refused here
     ///   keeps the ref, so work the person did not choose to leave out is
     ///   never removed. Salvage refs are kept.
+    /// - A path the restore changes that the shard refuses when the restore
+    ///   is published stays as `main` has it, like one the plan refused: it
+    ///   is listed in `notRestored` with the shard's reason, and the ref
+    ///   stays.
     fn restore(&mut self, request: RestoreRequest) -> Result<Restored, OriginError> {
         let reference = RecoveryRef::validate(&self.git, request.reference.trim())?;
         let expected = match request.rev.as_deref().map(str::trim) {
@@ -2636,97 +2645,52 @@ impl Publisher<'_> {
             .commit_id("HEAD")
             .map_err(internal)?
             .ok_or_else(|| OriginError::conflict("the workspace has no saved version yet"))?;
-        let head_tree = self.git.tree_id(&head).map_err(internal)?;
         let saved = fetched.commit.clone();
-        let base = self.git.merge_base(&saved, &head).map_err(internal)?;
-        let base_tree = match base.as_deref() {
-            Some(base) => self.git.tree_id(base).map_err(internal)?,
-            None => self.git.empty_tree().map_err(internal)?,
-        };
-        let merged = three_way(&self.git, base.as_deref(), &head, &saved).map_err(internal)?;
+        // Canonical `main` as last fetched: a restore recorded there (by the
+        // gateway, say) counts even before the branch has it.
+        let tracked = self.tracked_main().map_err(internal)?;
+        let restorers = restore_committers(&self.config.git_author_email);
 
-        // What the work changes, and which of it may not come back here.
-        let saved_tree = self.git.tree_id(&saved).map_err(internal)?;
-        let raw = self
-            .git
-            .bytes(&[
-                "diff-tree",
-                "-r",
-                "-z",
-                "--no-renames",
-                "--raw",
-                &base_tree,
-                &saved_tree,
-            ])
-            .map_err(internal)?;
-        let changes = parse_raw_changes(&raw);
-        let sizes = self.blob_sizes(&changes).map_err(internal)?;
-        let written: Vec<String> = changes
-            .iter()
-            .filter(|change| change.status != 'D')
-            .map(|change| change.path.clone())
-            .collect();
-        let ignored: BTreeSet<String> = self
-            .ignored(&written)
-            .map_err(internal)?
-            .into_iter()
-            .collect();
-        // Refused because it can never come back here, or left out on
-        // request (`keep`). Only the person's own choices let the ref go,
-        // so refusal is decided first: a secret or ignored file below a
-        // kept folder (which no conflict showed them) is refused, not kept.
-        let mut not_restored = Vec::new();
-        let mut refused = Vec::new();
-        for change in &changes {
-            if crate::paths::is_reserved_path(&change.path)
-                || self.policy_reason(change, &sizes).is_some()
-                || ignored.contains(&change.path)
-            {
-                not_restored.push(change.path.clone());
-                refused.push(change.path.clone());
-            } else if keep.covers(&change.path) {
-                not_restored.push(change.path.clone());
+        // What comes back, what stays out and why, which clashes the person
+        // must settle, and whether the ref may go: decided by the one rule
+        // the gateway restores by too.
+        let scratch = temp_index_dir(&self.git).map_err(internal)?;
+        let plan = match restore_plan::plan(
+            &self.git,
+            &RestoreInput {
+                reference: &reference,
+                onto: Some(&head),
+                saved: &saved,
+                keep: &keep,
+                refused_before: &self.filtered,
+                restorers: &restorers,
+                recorded_on: tracked.as_deref(),
+                salvage_committer: crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL,
+                scratch: scratch.path(),
+            },
+        ) {
+            Ok(plan) => plan,
+            Err(PlanError::Conflict(paths)) => {
+                return Err(OriginError::with_report(
+                    axum::http::StatusCode::CONFLICT,
+                    "restore_conflict",
+                    "the saved version changed the same files since; choose a version per file",
+                    serde_json::json!({ "head": head, "paths": paths }),
+                ))
             }
-        }
-        // A conflict (which keeps `HEAD`'s entry) is settled when the work
-        // brings nothing in at or below it any more: it was kept on request
-        // (itself or a folder above it), it lies below a path left out, or
-        // every change the work makes inside it was left out, as when the
-        // work adds a folder where `HEAD` has a file.
-        let left_out: PathRoots = not_restored.iter().cloned().collect();
-        let changed: PathRoots = changes.iter().map(|change| change.path.clone()).collect();
-        let conflicts: Vec<String> = merged
-            .conflicts
-            .iter()
-            .filter(|path| {
-                if left_out.covers(path) || keep.covers(path) {
-                    return false;
-                }
-                let mut inside = changed.at_or_below(path).peekable();
-                let any_inside = inside.peek().is_some();
-                !(any_inside && inside.all(|path| left_out.contains(path)))
-            })
-            .cloned()
-            .collect();
-        if !conflicts.is_empty() {
-            return Err(OriginError::with_report(
-                axum::http::StatusCode::CONFLICT,
-                "restore_conflict",
-                "the saved version changed the same files since; choose a version per file",
-                serde_json::json!({ "head": head, "paths": conflicts }),
-            ));
-        }
-        let tree = tree_with_entries_from(&self.git, &merged.tree, Some(&head), &not_restored)
-            .map_err(internal)?;
+            Err(PlanError::Failed(error)) => return Err(error),
+        };
+        drop(scratch);
+        let head_tree = plan.onto_tree.clone();
+        let tree = plan.tree.clone();
 
         let mut local = head.clone();
-        let made = tree != head_tree;
+        let made = plan.made();
         // The branch may hold changes canonical `main` (as just fetched)
         // does not: an earlier restore whose publish failed, or a save of
         // this checkout that could not reach `main` (as when the person
         // restores that save's own `unpublished` entry). This call
         // publishes them, so they are its new version too.
-        let tracked = self.tracked_main().map_err(internal)?;
         let committed = made
             || self
                 .unpublished_changes(&head, tracked.as_deref())
@@ -2737,25 +2701,7 @@ impl Publisher<'_> {
         // tells the list it was restored. A recovery ref needs none: it goes
         // once its work is on `main`, so an empty commit would only be noise
         // in history.
-        let earlier = if made || !reference.is_salvage() {
-            None
-        } else {
-            let made_at = self
-                .git
-                .read_objects(std::slice::from_ref(&saved))
-                .map_err(internal)?
-                .first()
-                .map(|object| parse_commit(&object.data).timestamp)
-                .unwrap_or_default();
-            restore_of(
-                &self.git,
-                &head,
-                reference.as_str(),
-                made_at,
-                &self.config.git_author_email,
-            )?
-        };
-        let marker = !made && reference.is_salvage() && earlier.is_none();
+        let (marker, earlier) = (plan.marker, plan.earlier_marker.clone());
         // An earlier marker whose publish failed goes out with this call.
         let earlier_pending = match earlier.as_deref() {
             Some(earlier) => !self
@@ -2764,9 +2710,14 @@ impl Publisher<'_> {
             None => false,
         };
         let marked = !committed && (marker || earlier_pending);
+        // The paths this restore changes.
+        let touched = if made {
+            changed_paths(&self.git, &head_tree, &tree).map_err(internal)?
+        } else {
+            Vec::new()
+        };
         if made {
-            let touched = changed_paths(&self.git, &head_tree, &tree).map_err(internal)?;
-            let dirty: Vec<String> = self
+            let mut dirty: Vec<String> = self
                 .status()
                 .map_err(internal)?
                 .into_iter()
@@ -2779,6 +2730,11 @@ impl Publisher<'_> {
                     })
                 })
                 .collect();
+            // Ignored and excluded files are in no status, and `read-tree`
+            // would replace them without asking.
+            dirty.extend(untracked_in_the_way(&self.git, &head_tree, &tree).map_err(internal)?);
+            dirty.sort();
+            dirty.dedup();
             if !dirty.is_empty() {
                 return Err(OriginError::conflict_paths(
                     "dirty_paths",
@@ -2818,15 +2774,34 @@ impl Publisher<'_> {
         ) && self
             .is_published(&local, self.report.rev.as_deref())
             .map_err(internal)?;
+        // A path this restore changed that the shard refused stays as
+        // `main` has it: it is listed with the shard's reason, as the
+        // gateway lists it, and the ref, its only copy, stays.
+        let planned_ref_go = plan.lets_ref_go();
+        let mut not_restored = plan.not_restored;
+        let touched: BTreeSet<&str> = touched.iter().map(String::as_str).collect();
+        let mut refused_on_save = false;
+        for rejected in &self.report.rejected_paths {
+            if touched.contains(rejected.path.as_str())
+                && !not_restored.iter().any(|entry| entry.path == rejected.path)
+            {
+                not_restored.push(NotRestored {
+                    path: rejected.path.clone(),
+                    reason: rejected.reason.name(),
+                });
+                refused_on_save = true;
+            }
+        }
+        not_restored.sort_by(|left, right| left.path.cmp(&right.path));
+        let lets_ref_go = planned_ref_go && !refused_on_save;
         let mut ref_deleted = false;
-        if landed && !refused.is_empty() && !reference.is_salvage() {
+        if landed && !lets_ref_go && !reference.is_salvage() {
             info!(
                 reference = reference.as_str(),
-                refused = refused.len(),
                 "kept the restored work's ref: part of it cannot be restored here"
             );
         }
-        if landed && refused.is_empty() && !reference.is_salvage() && self.can_write {
+        if landed && lets_ref_go && !reference.is_salvage() && self.can_write {
             match delete_with_lease(&self.git, &remote, reference.as_str(), &fetched.tip) {
                 Ok(result) if result.class == PushClass::Pushed => ref_deleted = true,
                 // Gone already: the publish retired it (its commits reached
@@ -2845,8 +2820,6 @@ impl Publisher<'_> {
                 }
             }
         }
-        not_restored.sort();
-        not_restored.dedup();
         Ok(Restored {
             committed,
             marked,
@@ -2871,47 +2844,6 @@ impl Publisher<'_> {
             None => self.git.empty_tree()?,
         };
         Ok(self.git.tree_id(head)? != base_tree)
-    }
-}
-
-/// Paths and folders, each matched by itself and by every path below it,
-/// in time that grows with a path's depth, not with the number of entries.
-#[derive(Default)]
-struct PathRoots(BTreeSet<String>);
-
-impl PathRoots {
-    fn insert(&mut self, path: String) {
-        self.0.insert(path);
-    }
-
-    fn contains(&self, path: &str) -> bool {
-        self.0.contains(path)
-    }
-
-    /// `path` is an entry or lies below one.
-    fn covers(&self, path: &str) -> bool {
-        self.contains(path)
-            || path
-                .match_indices('/')
-                .any(|(index, _)| self.contains(&path[..index]))
-    }
-
-    /// The entries that are `folder` or lie below it.
-    fn at_or_below<'s>(&'s self, folder: &'s str) -> impl Iterator<Item = &'s str> + 's {
-        self.0
-            .range::<str, _>((
-                std::ops::Bound::Included(folder),
-                std::ops::Bound::Unbounded,
-            ))
-            .map(String::as_str)
-            .take_while(move |path| path.starts_with(folder))
-            .filter(move |path| path.len() == folder.len() || path[folder.len()..].starts_with('/'))
-    }
-}
-
-impl FromIterator<String> for PathRoots {
-    fn from_iter<I: IntoIterator<Item = String>>(paths: I) -> Self {
-        Self(paths.into_iter().collect())
     }
 }
 
@@ -2965,6 +2897,165 @@ fn parse_ident(value: &str) -> Option<GitIdentity> {
         email,
         date: (!date.is_empty()).then(|| date.to_string()),
     })
+}
+
+/// The files of the checkout `git` that changing its files from `HEAD`'s
+/// tree `from` to `to` would replace although `HEAD` does not track them
+/// (ignored or excluded ones included, which no status lists and
+/// `read-tree -m -u` replaces without asking): a file or link at a path
+/// `to` adds, one where `to` makes a folder, and any file inside a folder
+/// `to` turns into a file. Each is named by the path in the way: the file
+/// above, or the path `to` writes. Links on disk are never followed.
+///
+/// A file this change removes is `HEAD`'s own (a status shows it when it
+/// was edited), whatever name finds it: on a disk that ignores case (or
+/// Unicode form) in names, a rename by case only (`notes.md` to
+/// `Notes.md`) finds the old file at the new name ([`Removed::holds`]).
+fn untracked_in_the_way(git: &WorkspaceGit<'_>, from: &str, to: &str) -> Result<Vec<String>> {
+    let raw = git.bytes(&["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to])?;
+    let changes = parse_raw_changes(&raw);
+    let root = git.root();
+    // What `HEAD` tracks and the change removes: its own files, which a
+    // status shows when they were edited.
+    let mut removed = Removed::new(
+        root,
+        changes
+            .iter()
+            .filter(|change| change.status == 'D')
+            .map(|change| change.path.as_str())
+            .collect(),
+    );
+    let mut found = BTreeSet::new();
+    'added: for change in changes.iter().filter(|change| change.status == 'A') {
+        let path = change.path.as_str();
+        for (index, _) in path.match_indices('/') {
+            let folder = &path[..index];
+            if removed.paths.contains(folder) {
+                continue 'added;
+            }
+            match std::fs::symlink_metadata(root.join(folder)) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(metadata) => {
+                    if !removed.holds(folder, &metadata) {
+                        found.insert(folder.to_string());
+                    }
+                    continue 'added;
+                }
+                Err(_) => continue 'added,
+            }
+        }
+        match std::fs::symlink_metadata(root.join(path)) {
+            Ok(metadata) if metadata.is_dir() => {
+                if holds_files_besides(&root.join(path), path, &mut removed) {
+                    found.insert(path.to_string());
+                }
+            }
+            Ok(metadata) => {
+                if !removed.holds(path, &metadata) {
+                    found.insert(path.to_string());
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+
+/// Whether the folder `dir` (the checkout's `path`) holds a file or link
+/// that is not one of the `removed` files, at any depth. Links are never
+/// followed.
+fn holds_files_besides(dir: &Path, path: &str, removed: &mut Removed<'_>) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            return true;
+        };
+        let inner = format!("{path}/{name}");
+        match entry.metadata() {
+            Ok(metadata) if metadata.is_dir() => {
+                if holds_files_besides(&entry.path(), &inner, removed) {
+                    return true;
+                }
+            }
+            Ok(metadata) if removed.holds(&inner, &metadata) => {}
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// The files of a checkout a change removes from `HEAD`'s tree.
+struct Removed<'a> {
+    root: &'a Path,
+    paths: BTreeSet<&'a str>,
+    /// Device and inode of each of them on disk, read on first use.
+    #[cfg(unix)]
+    on_disk: Option<std::collections::HashSet<(u64, u64)>>,
+}
+
+impl<'a> Removed<'a> {
+    fn new(root: &'a Path, paths: BTreeSet<&'a str>) -> Self {
+        Self {
+            root,
+            paths,
+            #[cfg(unix)]
+            on_disk: None,
+        }
+    }
+
+    /// Whether the entry found on disk at `path` (`metadata`, not following
+    /// a link) is one of these files: by its name, or, when the disk finds
+    /// it under another (one that differs in case or Unicode form), by
+    /// being the same file. A file the change removes is only ever reached
+    /// through real folders, never through a link.
+    fn holds(&mut self, path: &str, metadata: &std::fs::Metadata) -> bool {
+        if self.paths.contains(path) {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let (root, paths) = (self.root, &self.paths);
+            let on_disk = self.on_disk.get_or_insert_with(|| {
+                paths
+                    .iter()
+                    .filter_map(|path| metadata_below_folders(root, path))
+                    .map(|metadata| (metadata.dev(), metadata.ino()))
+                    .collect()
+            });
+            on_disk.contains(&(metadata.dev(), metadata.ino()))
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows folders ignore case: the same name ignoring case is
+            // the same file.
+            let _ = (self.root, metadata);
+            let wanted = path.to_lowercase();
+            self.paths
+                .iter()
+                .any(|removed| removed.to_lowercase() == wanted)
+        }
+    }
+}
+
+/// The entry at `path` below `root`, reached only through real folders
+/// (never a link), without following a link at `path` itself.
+#[cfg(unix)]
+fn metadata_below_folders(root: &Path, path: &str) -> Option<std::fs::Metadata> {
+    for (index, _) in path.match_indices('/') {
+        if !std::fs::symlink_metadata(root.join(&path[..index]))
+            .ok()?
+            .is_dir()
+        {
+            return None;
+        }
+    }
+    std::fs::symlink_metadata(root.join(path)).ok()
 }
 
 /// One `--raw` diff entry.
@@ -3034,39 +3125,4 @@ pub(crate) fn parse_stdin_diff_tree(raw: &[u8]) -> BTreeMap<String, Vec<RawChang
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PathRoots;
-
-    #[test]
-    fn path_roots_match_a_path_and_what_lies_below_it() {
-        let roots: PathRoots = ["docs", "src/lib.rs", "a/b"]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        for path in ["docs", "docs/a.md", "docs/x/y.md", "src/lib.rs", "a/b/c"] {
-            assert!(roots.covers(path), "{path}");
-        }
-        for path in ["docs2", "docs.md", "src", "src/lib.rs.bak", "a", "a/bc"] {
-            assert!(!roots.covers(path), "{path}");
-        }
-        let changed: PathRoots = [
-            "docs",
-            "docs.md",
-            "docs/a.md",
-            "docs/z/b.md",
-            "docs2/c.md",
-            "doc",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-        assert_eq!(
-            changed.at_or_below("docs").collect::<Vec<_>>(),
-            vec!["docs", "docs/a.md", "docs/z/b.md"]
-        );
-        assert_eq!(changed.at_or_below("missing").count(), 0);
-    }
 }

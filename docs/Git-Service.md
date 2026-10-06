@@ -9,12 +9,25 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
 - **Runtime Controller**: auth + scopes; issues access tokens; tracks repo metadata (which shard holds which space repo).
 - **Git Edge** (`git-edge`): stateless HTTPS front door for git traffic (auth + routing).
 - **Git Shards** (`git-shard-*`): stateful nodes that store bare repos on attached volumes and serve git protocol.
-- **Workspace Gateway** (Origin HTTP API): serves `/entries`, `/files`, `/raw`, `POST /apply`, and `POST /git/sync` by materializing a checkout cache of a ref.
+- **Workspace Gateway** (Origin HTTP API, `origin-http-server` with `ORIGIN_MULTI_TENANT=1`): serves every hosted space's `/entries`, `/files`, `/raw`, `POST /apply` and history routes straight from its canonical repository. Reads come from git objects in a disposable bare mirror, and each write is one commit pushed to `main`. It keeps no working copy; see [Hosted workspace gateway](#hosted-workspace-gateway).
 - **Runtime Agents**: compute that runs Codex/tools; uses local checkout(s) and pushes branches/commits back to the git service.
 
 ## Where files live at rest
 - **At rest**: `git-shard` volume(s) store bare repos, e.g. `/var/lib/instafy-git/repos/<project_id>.git`.
-- **Not at rest**: workspace gateway and runtime checkouts (cache/working copies on ephemeral disk).
+- **Not at rest**: the workspace gateway's mirror cache (`<workspace root>/.git-cache/`; deleting any of it only costs a fetch) and runtime checkouts (working copies on ephemeral disk).
+- **Until retired**: `<workspace root>/.legacy/` on the gateway's volume holds the working copies that
+  earlier, stateful gateway images kept per space, which may hold drafts that never reached
+  canonical.
+- **Kept after retirement**: `<workspace root>/.salvage/` on the same volume, readable only by the
+  gateway server's user, holds what retiring those copies keeps outside canonical: private
+  archives (ignored files, credentials, chat images that were not exported, versions of
+  credentials, chat uploads and files git cannot store that only local history holds, work-tree
+  files and links up to 20 MiB that git cannot store, the work tree's own versions of files the
+  salvage merged, and every regular file and link up to 20 MiB of an entry without a usable
+  repository) and bundles of local history canonical lacks. What neither holds, such as larger
+  files and repositories nested in an entry, exists only under `.legacy/`. Removing `.legacy/`
+  entries leaves `.salvage/` in place. Keep that volume until
+  [Retiring gateway working copies](#retiring-gateway-working-copies) is done.
 - **Backups**: shard volume snapshots plus periodic encrypted copies to independent durable
   storage. Replication is a later upgrade.
 
@@ -74,7 +87,9 @@ The hook checks every pushed ref:
   lower case. In a repository git marked `core.ignorecase` when it created it, ref names must also
   be ASCII, because some other letters fold onto ASCII ones there.
 - **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) hold work
-  recovered from retired workspaces and may be the only copy of it. An ordinary push may not
+  recovered from retired gateway working copies (see
+  [Retiring gateway working copies](#retiring-gateway-working-copies)) and may be the only copy
+  of it. An ordinary push may not
   create, move or delete them. Only a push the shard marked as a salvage push, because it carries
   the controller's exact salvage credential (see
   [Controller-only salvage pushes](#controller-only-salvage-pushes)), may create one, and only as
@@ -99,8 +114,9 @@ The hook checks every pushed ref:
 Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)
 - `GIT_DENY_PATHS` (optional, comma-separated glob patterns): additional blocked paths (e.g. `*/vendor/*,*.zip`)
-- `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB): largest pack one push may send. Any value
-  other than a positive whole number of bytes stops the shard from starting.
+- `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB; blank means the default): largest pack one
+  push may send. A non-blank value other than a positive whole number of bytes stops the shard
+  from starting.
 - `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rules and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
@@ -144,19 +160,24 @@ and `deleted`. A refused push updates no ref and sends no event.
 
 ## FS API vs git transport
 Browsers should not speak git for normal editing. The “phone UI” flow is:
-- `Studio → Controller (auth/token) → Workspace Gateway (/entries,/files,/raw,/apply,/git/sync)`
-- Workspace Gateway uses git under the hood (fetch/checkout cache). File writes land via `POST /apply`; persisting them to the canonical remote is an explicit sync step via `POST /git/sync` so agents can choose commit boundaries/messages and handle conflicts intentionally.
-- Every git command the Workspace Gateway runs against the remote (fetch, push, ls-remote) is bounded, because it runs while the space's apply lock is held. Each command carries curl's low-speed check: a transfer that stays under 1000 bytes/s for 300 seconds fails with `Operation too slow`. This covers a remote that accepts the connection and never answers, one that sends headers and then goes quiet, and one that stops mid-transfer. One 300 second window applies to every command because the longest quiet phase of a healthy exchange is a push waiting for the remote, which replies only after its update hook has checked every changed path; that takes longer for large commits. The speed check does not run while curl is still connecting; an unanswered connect ends at curl's default 300 second connect timeout, sooner where the OS stops retrying. A remote that stops responding fails the current command after one window (about five minutes) instead of holding the lock indefinitely, and the sync returns that error. The bound is on silence, not on total duration: a remote that keeps sending faster than 1000 bytes/s, or that goes quiet for less than 300 seconds at a time, is not cut off. A failed background refresh releases the lock and keeps the existing checkout until the next sync.
+- `Studio → Controller (auth/token) → origin (/entries,/files,/raw,/apply and the history routes)`,
+  where the origin is the Workspace Gateway for a cloud space and the Desktop origin for a
+  Desktop space.
+- On the Workspace Gateway each `POST /apply` is one commit on canonical `main`; there is no
+  separate sync step (see [Hosted workspace gateway](#hosted-workspace-gateway)).
+- On a workspace runtime or Desktop origin, `POST /apply` writes files into the checkout, and persisting them to the canonical remote is an explicit sync step via `POST /git/sync` so agents can choose commit boundaries/messages and handle conflicts intentionally.
+- Every git command an origin runs against the remote (fetch, push, ls-remote) is bounded. On a workspace runtime or Desktop origin it runs while the space's apply lock is held. Each command carries curl's low-speed check: a transfer that stays under 1000 bytes/s for 300 seconds fails with `Operation too slow`. This covers a remote that accepts the connection and never answers, one that sends headers and then goes quiet, and one that stops mid-transfer. One 300 second window applies to every command because the longest quiet phase of a healthy exchange is a push waiting for the remote, which replies only after its update hook has checked every changed path; that takes longer for large commits. The speed check does not run while curl is still connecting; an unanswered connect ends at curl's default 300 second connect timeout, sooner where the OS stops retrying. A remote that stops responding fails the current command after one window (about five minutes) instead of holding the lock indefinitely, and the sync returns that error. The bound is on silence, not on total duration: a remote that keeps sending faster than 1000 bytes/s, or that goes quiet for less than 300 seconds at a time, is not cut off. A failed background refresh releases the lock and keeps the existing checkout until the next sync. The Workspace Gateway's git commands carry the same speed check; it also stops a fetch of `main` after five minutes, and a read waits on one for at most ten seconds. A read of a recovery or salvage ref, a restore's fetch and removal of one, a dismissal and the `GET /git/recovery` list instead run their git commands for those refs against canonical inside the request, for at most 60 seconds.
 
 Native environments can choose:
-- **FS API** (same as Studio) via `/apply` (write) + `/git/sync` (commit/push), or
+- **FS API** (same as Studio): `/apply` alone on the Workspace Gateway, or `/apply` (write) + `/git/sync` (commit/push) on a workspace runtime or Desktop origin, or
 - **git client** directly (`clone/commit/push`), as long as `main` protections/hook policies are enforced.
 
 ### Saving files in Studio
 Studio picks how the Files editor saves from the space's default origin (the controller's
 `GET /projects/:id/origin`), probing `GET /git/status?limit=1` for a hosted origin:
-- **Stateful gateway** (no `stateless: true` in the status, or unknown): Save draft and Save
-  version, exactly as before.
+- **Stateful gateway** (an older gateway image: no `stateless: true` in the status, or unknown):
+  Save draft and Save version, exactly as before. The gateway built from this repository always
+  answers `stateless: true`.
 - **Stateless gateway** (`stateless: true`) and **Desktop origins**: one Save (Cmd/Ctrl+S, also
   Shift+Cmd/Ctrl+S). Each save is one `/apply` manifest pinned to the origin the file was read
   from, and checked the way that origin checks it, even after the default origin changed (the
@@ -307,11 +328,430 @@ for secrets and excluded paths before it pushes, or push a single filtered commi
 Only deleting the repository (`git.delete`) removes salvage refs through the service. Short of
 that, an operator can delete one on the shard host after review.
 
+`origin-http-server salvage` is the client that makes these pushes; see
+[Retiring gateway working copies](#retiring-gateway-working-copies).
+
 Upgrades: deploy shards before Git Edge. An older shard does not check the salvage credential and
 would run its push as an ordinary write, so no salvage token may be minted until every shard runs
 this policy. For the same reason, never roll a shard back to a version without salvage support
 while Git Edge still accepts the credential: roll Git Edge back first, or stop minting
 `git.salvage`.
+
+## Hosted workspace gateway
+
+The Workspace Gateway is `origin-http-server` started with `ORIGIN_MULTI_TENANT=1`. One process
+serves every hosted space from its canonical repository, `<ORIGIN_GIT_REMOTE_BASE_URL>/<space
+id>.git`, and keeps no working copy: nothing it writes to its disk is ever the only copy of a save.
+The code is `packages/origin-http-server/src/hosted/`. Workspace runtimes and Desktop origins
+(single-tenant origins) keep their checkouts and are described in
+`packages/origin-http-server/README.md`.
+
+### Configuration and start
+
+The gateway refuses to start when:
+
+- `ORIGIN_GIT_REMOTE_URL` is set to anything but blank. It would route every space to one
+  repository; the gateway builds each space's URL from `ORIGIN_GIT_REMOTE_BASE_URL`, which is
+  required.
+- `ORIGIN_STAGING_ROOT` is set, even to a blank value. Uploads are staged in the gateway's own
+  cache.
+- `ORIGIN_GIT_BRANCH` is set to anything but `main`.
+- `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL` is `origin@instafy.dev`, the address workspace runtimes and
+  Desktop commit under by default.
+- `ORIGIN_CACHE_MAX_BYTES` is set to a non-blank value other than a positive whole number of bytes
+  (blank means the 20 GiB default).
+
+The gateway commits as `ORIGIN_GATEWAY_GIT_AUTHOR_NAME` / `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL`. Without
+them it uses `ORIGIN_GIT_AUTHOR_NAME` / `ORIGIN_GIT_AUTHOR_EMAIL`, except that the runtimes' default
+address `origin@instafy.dev` is replaced by `gateway@instafy.dev` with a warning; with neither set,
+the address is `gateway@instafy.dev`. The gateway recognizes its own commits by that address (import
+receipts, restores, the salvage's commits below), so choose it once.
+
+Before it listens, the gateway:
+
+1. Moves every working copy an earlier, stateful gateway image left in its workspace root
+   (`ORIGIN_WORKSPACE_ROOT`) to `.legacy/`. A direct child of the root counts when its name is
+   exactly a space id as that gateway wrote it (a lower-case, hyphenated UUID) and it is a folder or
+   a link. It goes to `.legacy/<id>`, or `.legacy/<id>-<UTC time>` when that name is taken; nothing
+   is replaced, a link is moved as a link and never followed, and an empty folder is removed.
+   `.legacy/` is created with mode 0700. An older gateway image started on the same volume later,
+   such as an automatic rollback, finds no working copy there and clones each space fresh instead
+   of saving old drafts over newer work. When anything cannot be moved, the gateway does not start.
+2. Opens its mirror cache, `.git-cache/` under the same root (mode 0700; a link in its place is
+   refused), empties the cache's scratch folders, and removes the locks a git process that was
+   killed left in any mirror.
+
+`ORIGIN_WORKSPACE_ROOT` must be a folder of the gateway's own, never a runtime provider's
+checkout folder (`DOCKER_REPO_HOST`). A provider keeps each runtime's checkout there under the
+space id, the name step 1 moves, and such a checkout can hold work no runtime has pushed yet. So
+before it moves anything, the gateway refuses to start on a root that holds the provider's
+`.instafy-checkout-stamps/` or `.instafy-evicted/`, or a space folder whose `.instafy/.git` holds a
+runtime's clean-stop marker (`instafy-stopped-clean`) or a local recovery ref
+(`refs/instafy/local-recovery*`, loose or packed); it follows no link to find them. It then logs
+`could not move old gateway working copies to .legacy; refusing to start`, caused by an error that
+names the root and what was found there and ends with
+`ORIGIN_WORKSPACE_ROOT must be a folder of the gateway's own, never the providers' DOCKER_REPO_HOST`,
+and exits with status 1.
+
+Run the gateway with an init as PID 1 (`docker run --init`, or `init: true` in Compose, as
+`docker/docker-compose.runtime.yml` does), so any process the server leaves behind is reaped.
+
+### Mirror cache
+
+`.git-cache/<space id>.git` is a bare mirror of the space's canonical `main` (and, for a moment at
+a time, of a recovery or salvage commit a read asked for). Deleting a mirror, or the whole cache,
+only costs a fetch.
+
+- Fetches of `main` run once per space at a time, in a task of their own. A plain read reuses a
+  fetch that finished in the last two seconds, while the mirror it filled is still the one on
+  disk, or joins the one running; a write waits for a fetch that started after it arrived. A read
+  waits at most ten seconds for a fetch, a space's first clone included, and a write as long as
+  its own budget allows (see [Writes](#writes)); either is then answered 503 `fetch_pending` while
+  the fetch goes on. A fetch is stopped after five minutes. A failed fetch is an error, never older
+  data: a canonical repository out of reach is 502 `canonical_unreachable`.
+- Recovery and salvage refs are not fetched that way. A `?ref=` read (also `ref` on the diff and
+  review routes), a restore's fetch and removal of such a ref, a dismissal and the
+  `GET /git/recovery` list (after its read of `main`) run their git commands for those refs
+  against canonical inside the request, for at most 60 seconds, and are not answered
+  `fetch_pending` for that wait.
+- A mirror damaged on the gateway's disk (a lock a killed git left, a missing or corrupt object,
+  what a full disk left behind) is thrown away and cloned again. A read or write that finds the
+  damage is answered 503 `mirror_reset` meanwhile. Damage on canonical's side, or a transfer cut
+  off part way, is a 502 and the mirror is kept.
+- A full disk is answered 503 `disk_full` wherever a write or fetch finds it, and starts a sweep.
+- Every ten minutes a sweep removes scratch older than an hour and, while the mirrors together
+  exceed `ORIGIN_CACHE_MAX_BYTES` (default 20 GiB), the least recently used mirror that nobody
+  has used for an hour. The cap is soft: mirrors in use are never removed for it. When the cache's
+  disk has less than 2 GiB free, the sweep removes mirrors nobody holds, however recently used,
+  until it has that much again. `.legacy/` is never touched; when the disk is short of space, the
+  warning reports its size (measured at most once an hour). The sweep
+  also packs a mirror past git's own `gc --auto` limits (about 6,700 loose objects or 50 packs);
+  git never runs maintenance in a mirror on its own.
+
+The 503 answers (`fetch_pending`, `mirror_reset`, `disk_full`, and `writes_busy` below) carry
+`Retry-After: 2`, which browsers can read: the gateway exposes `Retry-After`, `X-Instafy-Rev` and
+`X-Instafy-Blob` through CORS. Reads fetch with a `git.read` credential minted with the gateway's
+`ORIGIN_INTERNAL_TOKEN` (or the caller's token). Writes
+exchange the caller's own `fs.write` token for `git.write` right before each push, never the
+gateway's credential, and every `fs.write` request must hold the caller's live workspace lease.
+
+### Reads
+
+- `/entries`, `/files/<path>` and `/raw/<path>` show canonical `main`; with `?rev=<commit>`, a
+  commit `main` reaches (`main` is fetched once when the mirror does not have it yet); with
+  `?ref=<recovery or salvage ref>`, that ref's commit, read on canonical by exactly that name.
+  `rev` and `ref` together are 400 `invalid_ref`.
+- Every read that looked at a commit answers `X-Instafy-Rev` naming it (for `?ref=`, the ref's own
+  id), errors included. A space without `main` answers an empty root and no header. Files carry
+  `X-Instafy-Blob`, and listings carry no modification time.
+- A 404 is `not_found` only when the commit's tree has nothing at the path. A folder where a file
+  was asked for, a link, a submodule or a reserved path is `unsupported_entry`, and a `rev` or
+  `ref` that does not resolve is `rev_not_found`. A file over 20 MiB is 413 `too_large`.
+- `GET /git/status` answers `stateless: true` with nothing unsaved, for every space and without a
+  fetch. Studio reads that flag to pick one Save and History (see
+  [Saving files in Studio](#saving-files-in-studio)).
+- `GET /git/history?limit&skip` lists `main`'s first-parent history, up to 50 commits a page (8 by
+  default), with `hasMore`.
+- `GET /git/diff` and `GET /git/history/review` answer a commit the space does not have with 200,
+  an empty answer, `error` and `code: "rev_not_found"` (clients read a 404 on these two routes as a
+  space without versioning), and remember that commit for 30 seconds without fetching again. A
+  diff `base` the space does not have is left out, so the change shows against the commit's first
+  parent.
+- `GET /git/recovery` lists unsaved work as single-tenant origins do. A restore commit counts when
+  the gateway's address, `origin@instafy.dev` or `gateway@instafy.dev` committed it.
+
+### Writes
+
+Each write is one commit on canonical `main`. The gateway builds it from git objects in a
+quarantine of its own, pushes it as a fast-forward of the `main` it built on (create-only for a
+space without `main`), and moves its objects into the mirror only after the push landed, so a
+refused write leaves nothing behind.
+
+- `POST /apply` (multipart) and `POST /apply-json` take the single-tenant manifest plus `baseRev`,
+  the `X-Instafy-Rev` the client read at, and `expected: {path: blobId | null}`, the blob each path
+  held when read (`null`: absent). A path that changed since is 409 `head_moved {head, paths}`, and
+  nothing is saved. Without `baseRev` (other than for an import) only the paths named are changed,
+  and the save is logged under the target `origin_apply_no_base_rev` with the client's
+  `X-Instafy-Client` label. Deleting a folder needs `baseRev` (400
+  `delete_requires_base_rev`). The answer is `{rev, baseRev, committed, fileCount, bytesWritten}`,
+  with `committed: false` when the save would not change `main`'s tree.
+- Refused, with nothing saved: 400 `unsupported_entry` (a link or submodule written over), 409
+  `path_type_conflict` (a file where a folder is, or the reverse), 409 `path_alias` (a new path
+  `main` holds under another spelling a disk that ignores case or Unicode form takes for it, with
+  case folded fully, so `Straße.md` and `STRASSE.md` are one name), 422
+  `ignored_path` (a new file the space's `.gitignore` ignores), 422 `excluded_path` with a `reason`
+  such as `secret`, `attachment` (a chat upload) or `excluded` (build output, dependencies, Instafy
+  files), 422 `policy_rejected` (a file over 20 MiB), and 502 `push_rejected` (canonical refused
+  the push).
+- A person's write is authored by the per-space pseudonym and display name the controller puts in
+  their token (`author_name`, `author_email`; only addresses under `@users.noreply.instafy.dev`
+  count), the rule Desktop saves by. A job's token, or one without those claims, is authored by the
+  gateway, and the gateway is always the committer, so no user id or token subject reaches history.
+  A caller's `commitMessage` keeps its prose; control characters other than newlines and tabs are
+  dropped, it is cut at 16 KiB, and the `Instafy-` trailers git reads in its last paragraph are
+  removed (`Instafy-Resolved-By` stays). Without one, the subject is `Update <path>`, `Delete <path>` or
+  `Update <n> files`.
+- Imports are writes whose token carries the `workspace.import` scope, which the controller adds
+  to its import tokens. Only they may send an `idempotencyKey` (400 `idempotency_requires_import`
+  otherwise). An import's commit carries `Instafy-Apply-Key`, `Instafy-Apply-Fingerprint`,
+  `Instafy-Apply-Files` and `Instafy-Apply-Bytes` trailers, and is made even when it changes
+  nothing: that commit is its receipt. An import leaves out the paths a save may never hold and
+  lists them in `skippedPaths` instead of being refused. A repeat with the same key answers the
+  first answer's counts with `replayed: true`, and a different fingerprint is 409 `idempotency_conflict`. `POST
+  /apply/status {idempotencyKey, requestFingerprint?}` finds the receipt on `main` (a commit under
+  the gateway's address, at most 31 days old by its committer date) and answers `{status:
+  "succeeded", rev, baseRev, fileCount, bytesWritten}`, or 404 `not_found`; it takes an import
+  token only (400 `idempotency_requires_import` otherwise), and a different `requestFingerprint`
+  is 409 `idempotency_conflict`. Imports, and the
+  controller's managed-files applies (`autoCommitAfterApply`), add ignored files as tracked content
+  and are not refused for `path_alias`.
+- `POST /git/revert-commit {commit, base?}` saves the inverse of a saved commit, merged onto
+  `main` (409 `revert_conflict` when later changes overlap). A merge or a first commit needs
+  `base`, which must be an ancestor of `commit`.
+- `POST /git/recovery/restore` and `POST /git/recovery/dismiss` follow the single-tenant rules
+  (one restore plan, `src/restore_plan.rs`); dismissing a salvage ref is 409 `salvage_ref_kept`.
+- `POST /git/sync` commits nothing: with `{expectedRev}` it checks that the commit is on `main`
+  (409 `rev_not_on_main` otherwise) and otherwise answers `main`. `{mode: "refresh"}` is 400
+  `not_supported`, and so is `POST /git/revert`: there is no working copy to refresh or discard.
+- `/apply`, `/apply-json`, `/git/revert-commit` and `/git/recovery/restore` take one of four write
+  slots shared by all spaces, and imports one of two slots of their own. A slot is let go while the
+  write waits on canonical, and before its push. A write that waits ten seconds for a slot (an
+  import, 60 seconds) is answered 503 `writes_busy`.
+- A push that loses the race to another save fetches `main`, builds the change again and retries,
+  at most five attempts within ten seconds for a person's write (840 seconds for an import), and
+  then answers 409 `main_busy`. A push that ends without an answer is settled by fetching `main`.
+- The controller's imports ask a busy gateway again within their budget (any 503 with
+  `Retry-After`, the four 503 codes above, and 409 `main_busy`). Its managed-files bootstrap reports
+  `workspace-busy` on a 503 and is tried again later.
+
+## Retiring gateway working copies
+
+Earlier gateway images kept one working copy per space at `<root>/<space id>` and saved from it,
+so a copy could hold drafts that never reached canonical. The stateless gateway moves those copies
+to `<root>/.legacy/` before it serves and never reads them. `origin-http-server salvage` keeps their
+work, so that they can be removed. It runs inside the gateway's container next to the server
+(`docker exec <gateway container> origin-http-server salvage ...`), touches only `.legacy/` and
+`<root>/.salvage/` (mode 0700), and runs one `--apply` at a time (`.salvage/.lock`). It never runs
+on a runtime provider's checkout folder: before it reads anything, a run (a dry run too) exits with
+status 2 when the root looks like one by the rule the gateway's start uses (see
+[Configuration and start](#configuration-and-start)), here also applied to the entries under
+`.legacy/`: a gateway started on a folder it shared with a runtime provider, as earlier local
+stacks set it up, may have parked runtime checkouts there.
+
+### Switching a deployment
+
+1. Deploy shards, then Git Edge, then a controller that mints `git.salvage` (see
+   [Controller-only salvage pushes](#controller-only-salvage-pushes)) and serves the chat image
+   export below.
+2. Drain imports. The stateful gateway kept import receipts inside each working copy, and the
+   stateless gateway finds a receipt only as its own commit on `main`. An import the controller
+   resumes after the switch (a retry with the same key) finds no receipt there: one not yet
+   recorded as applied is applied again, over anything saved since, and one recorded as applied
+   fails unless its commit is on `main`. Run this right before the image changes, and start no
+   import between the two:
+   ```sql
+   select id, project_id, status, claim_expires_at, error_message
+     from public.github_import_operations
+    where status in ('pending', 'applied')
+       or (status = 'failed' and prepared_json is not null);
+   ```
+   Wait for each `pending` or `applied` row whose claim is live (`claim_expires_at` in the future)
+   to finish. A row whose claim has expired is an import that stopped part way (at a controller
+   restart, for example), and a retry with the same key resumes it: have it retried while the
+   stateful gateway still serves, so that it finishes there, or, when it cannot be, check on that
+   gateway whether its files were applied and tell the space's owner before you switch. A `failed`
+   row the query lists kept its preparation (`prepared_json`) and is resumed the same way when its
+   import is retried; one that failed while its apply was under way (a timeout, for example) may
+   already have been applied on the stateful gateway. Treat these rows like the expired ones: have
+   them retried on the stateful gateway, or check there whether their files were applied, before
+   you switch.
+3. Deploy the stateless gateway image. Its start moves the working copies to `.legacy/`.
+4. Run the salvage without `--apply` and read the report, then run it with `--apply`.
+5. Check that every reported `salvageRef` is on canonical (`canonicalVerified: true`) and review
+   the private archives and bundles with the spaces' owners, with every `staleKept` path (a
+   version W keeps that also undoes a change `main` made after the view it came from, so a
+   restore of the ref can undo that change) and every `unsavedRefs` commit (local history only
+   the bundle holds).
+6. Only then remove entries: `--apply --remove`, naming with `--ack` the entries that need it.
+
+Keep the gateway's workspace volume until every entry under `.legacy/` has been removed (step 6)
+and the private archives and bundles under `.salvage/` have been reviewed with the spaces' owners
+or copied to durable storage that only operators can read. Do not change the gateway's server type,
+replace its node or recreate its volume before then: `.legacy/` may hold the only copy of a draft,
+and `.salvage/` stays on the volume after its entries are removed. Verified salvage refs are not
+enough. `.salvage/` holds the only copies of what no salvage ref carries: every private archive
+(ignored files, credentials, chat images that were not exported, versions of credentials, chat
+uploads and files git cannot store that only local history holds, work-tree files and links up to
+20 MiB that git cannot store, the work tree's own version of each file W takes merged), the
+regular files and links up to 20 MiB of an entry without a usable repository (`noRepository`,
+which gets no salvage ref), and in the bundles local commits outside HEAD's history
+(`unsavedRefs`) and the history of an entry whose history was filtered (`historyFiltered`, whose
+build output, deny-listed and oversized versions only the bundle keeps) or whose space has no
+canonical repository (`canonicalMissing`, which gets no salvage ref either). Neither holds the
+work-tree files `skippedPaths` lists, such as files over 20 MiB and repositories nested in an
+entry, nor a `noRepository` entry's own `.instafy`: those exist only under `.legacy/`, so review
+them before you pass `--ack`. Rolling the gateway image back is safe for the drafts, since no
+gateway image reads `.legacy/`.
+
+### What a run does
+
+For each entry under `.legacy/` (`<space id>` or `<space id>-<suffix>`):
+
+1. The entry's repository is `.instafy/.git`; a plain `.git` is first moved there inside the entry
+   (`legacyLayout`). A dry run moves nothing, so it leaves such an entry uninspected. An entry
+   without a usable repository (none, a link or a file where `.instafy`, its `.git` or a part git
+   needs should be, or one that points git at other objects or history) is `noRepository`: every
+   regular file and link of it up to 20 MiB goes to the private archive. Larger files, special
+   files and repositories inside the entry are listed in `skippedPaths`, and the entry's own
+   `.instafy` is left out (only a `.instafy/.git` in it is listed); these exist only under
+   `.legacy/`, so review them before you pass `--ack`. A link named like a space is never followed
+   (`linkEntry`).
+2. Canonical `main` is fetched from `<ORIGIN_GIT_REMOTE_BASE_URL>/<id>.git`, never from the entry's
+   own remote, with every received object checked and a `git.read` credential the controller mints
+   for the gateway's `ORIGIN_INTERNAL_TOKEN`. A space without a canonical repository is
+   `canonicalMissing`. The commits an old sync moved the copy away from without its files (the
+   reflog's `reset: moving to origin/main` entries, then `ORIG_HEAD`) are read before the fetch,
+   and the fetch never starts git's automatic maintenance, which could expire those reflog
+   entries. Every git command runs with hooks off, the entry's config reduced to data-only
+   settings, and replacement refs ignored.
+3. Changed, untracked and ignored paths are sorted. Ignored files, credentials and merge snapshots
+   go to the private archive. `chat-upload-*` images in the root are exported to the conversations
+   that name them (see [Chat images](#chat-images)). Build output, deny-listed paths, files over
+   20 MiB, repositories inside the work tree and anything git cannot store are `skippedPaths`. The
+   rest is the entry's work, taken as `git add -A` takes it: a file takes the place of a folder,
+   and a folder's files the place of a file. A swap that would drop an entry nothing changed is
+   left out whole. What git cannot store (such a swap, or a name git never records) is listed in
+   `skippedPaths` with its size, and a file of it up to 20 MiB, or a link, also goes to the private
+   archive (reason `unsupported`); anything else of it (a larger file, a folder with what it holds)
+   exists only under `.legacy/`.
+4. Stale copies are judged against the commits read in step 2:
+   - A path whose work-tree state is a copy of a version `main` already has (a version in `main`'s
+     history, or the absence of a file `main` added after the view the copy came from) is left
+     out, as HEAD has it (`stalePaths`); where HEAD has a folder, the whole folder comes back. A
+     copy that HEAD's version cannot replace without dropping another change of the work tree's
+     (a file it put where `main` added a folder, or the reverse) stays in W (`staleKept`).
+   - An edit made to a copy of an older view of a file HEAD changed since is merged onto HEAD's
+     version (`staleMerged`; the file as the work tree has it goes to the private archive, reason
+     `merged`). An edit that does not merge (a conflict, binary content, a file `main` added or
+     removed since) stays as the work tree has it, which also undoes HEAD's change (`staleKept`).
+   - HEAD's local commits are judged the same way, since an old save committed what an old sync
+     had left behind: W puts their stale copies back as the commit they were made on has them
+     (`stalePaths`; a copy it cannot put back without dropping another change stays,
+     `staleKept`), and merges their edits to an older view onto that commit's version
+     (`staleMerged`) or keeps them as they are (`staleKept`). The local commits stay below W.
+5. W is HEAD plus that work, committed under the gateway's identity at HEAD's commit date, so a
+   rerun makes the same commit. Its subject is `Keep unsaved edits from the retired file gateway`,
+   with an `Instafy-Recovery-Kind: salvage` trailer, an `Instafy-Path` trailer for each path the
+   work tree's edits change, and an `Instafy-Private-Path: <reason> <path>` trailer for each
+   work-tree file kept privately as `secret`, `ignored` or `attachment` (at most 200 of each). A
+   chat image that was not exported is archived without one, so a rerun makes the same commit.
+   Every local commit canonical lacks, and W's own change, is checked against the publish rules; on
+   any hit W becomes one commit on the last commit canonical shares (`historyFiltered`). Refused
+   local versions that are credentials, chat uploads or files git cannot store go to the private
+   archive; build output, deny-listed and oversized ones are listed in `skippedPaths` and kept only
+   in the bundle.
+6. When `main` does not already hold W, it is pushed create-only to
+   `refs/instafy/salvage/gateway/<node>-<first 8 hex digits of W>` with a `git.salvage` credential,
+   then read back with `git.read` (`canonicalVerified`). An existing ref with the same tip counts
+   as verified; one with another tip stops the entry. A path the shard refuses is left as `main` has
+   it and W is rebuilt as one commit and pushed again (at most 8 times). A rerun of an entry that
+   still holds what a verified run recorded reports that run's ref, with that run's
+   `archivedPaths`, `stalePaths`, `staleKept` and `staleMerged`, and pushes nothing.
+7. Local commits outside HEAD's history are listed in `unsavedRefs`: each `refs/heads/*` tip, and
+   the head a rebase the old gateway never finished started from (`rebase-merge/orig-head` or
+   `rebase-apply/orig-head`), with a commit neither W nor `main` holds. The old gateway saved to
+   its branch and rebased it onto canonical when canonical had moved, so one stopped part way
+   through a rebase left HEAD detached and its saves only on the branch. W is built on HEAD as it
+   is, and a note names the unfinished rebase. Such an entry is never `clean`.
+8. With `--apply`, `.salvage/<entry>.bundle` holds the entry's history canonical lacks (all of it
+   when there is no canonical repository), each `unsavedRefs` commit under
+   `refs/instafy/salvage-local/unsaved-<n>`, `.salvage/<entry>.private.tar` (mode 0600) the
+   private files, and `.salvage/report.jsonl` one line per entry and run. A rerun whose private
+   files differ keeps the earlier archive and writes `.salvage/<entry>.private-<UTC time>-<n>.tar`
+   (named in that run's `privateArchive`); review all of them. An entry whose outputs
+   would leave the volume with less than 2 GiB free (the mirror cache's floor) stops before
+   writing them.
+
+Without `--apply` nothing is pushed, exported, minted for writing or written under `.salvage/`,
+and no file of an entry's work tree changes. Each entry is still fetched into its own repository
+and W's objects are written there, so the report can name W.
+
+A restore of a salvage ref lists each `Instafy-Private-Path` file in `notRestored` with its reason:
+those files are only in the private archive. The gateway reads these trailers only on commits
+under its own address, and Desktop only on commits by `gateway@instafy.dev`. Files kept privately
+for another reason (`merged`, `unsupported`) and versions taken from local commits get no trailer;
+only the report names them.
+
+### Flags and environment
+
+```text
+origin-http-server salvage [--apply] [--remove] [--root <dir>] [--node <name>]
+                           [--project <id>]... [--ack <entry>]...
+```
+
+- `--apply` pushes salvage refs, exports chat images, and writes `.salvage/`.
+- `--remove` also removes each entry that was clean or whose salvage ref is verified, when nothing
+  was skipped outside build output, `unsavedRefs` and `staleKept` are empty, every chat image was
+  exported or got a final answer, and no history was filtered. Without `--apply` it only reports
+  `wouldRemove`. Any other entry needs `--ack <entry>` (its folder name under `.legacy/`) after
+  review. An entry whose run stopped early (an error, the free-space floor) is never removed, even
+  with `--ack`. A removed entry is first moved to `.salvage/trash/`. Salvage refs and private
+  archives are never removed, and a bundle only once canonical holds the history it has (the ref
+  verified, the history not filtered, and no `unsavedRefs`).
+- `--project <id>` (repeatable) limits the run to those spaces' entries.
+- `--root <dir>` is the workspace root; the default is `ORIGIN_WORKSPACE_ROOT`. A runtime
+  provider's checkout folder is refused (see above).
+- `--node <name>`, or `INSTAFY_NODE_NAME`, is this gateway's lasting name in salvage refs:
+  lower-cased, then `[0-9a-z]` followed by `[0-9a-z._-]`. `--apply` and `--remove` refuse to run
+  without one, because a container's host name changes when it is recreated and a new name would
+  push a second permanent ref for the same work. A dry run falls back to the host name with a
+  warning.
+- `ORIGIN_GIT_REMOTE_BASE_URL` is required. `ORIGIN_CONTROLLER_URL` and `ORIGIN_INTERNAL_TOKEN`
+  (the controller's internal token) mint `git.read` and `git.salvage` and authenticate the chat
+  image export. The salvage commits under the identity the gateway server resolves from
+  `ORIGIN_GATEWAY_GIT_AUTHOR_*` and `ORIGIN_GIT_AUTHOR_*`.
+
+The exit status is 0 when every entry was handled, 1 when an entry failed, was not removed, or is
+still there with a chat image a rerun may export, and 2 for a usage or configuration error (a root
+that looks like a runtime provider's checkout folder included). Report lines go to stdout and, with
+`--apply`, to `report.jsonl` (a run stops before the next entry when either cannot take a line); a
+summary goes to stderr.
+
+### Report
+
+Each line is one entry: `entry`, `project`, `node`, `dryRun`, `inspected`, `head`, `sourceTree`,
+`salvageRef`, `salvageRev`, `canonicalVerified`, `localOnlyCommits`, `subjects`, `unsavedRefs`
+(`{name, commit, commits, bundleRef}`: where the repository holds the commit, how many commits it
+has that neither W nor `main` has, and its ref in the bundle; they hold up `--remove`),
+`archivedPaths` (the paths the work tree's edits change in W), `stalePaths`, `staleKept` (they hold
+up `--remove`), `staleMerged`, `privateArchivedPaths` (`{path, reason, size, commit?}`),
+`privateArchiveBytes`, `exportedAttachments` (`{path, conversations: [{conversationId, storagePath,
+messages}]}`), `attachmentsToExport` (what `--apply` would export), `exportFailed` (images a rerun
+may still export; they hold up `--remove`), `skippedPaths` (`{path, size, reason, commit?}`),
+`historyFiltered`, `bootstrapOnly` (only the project-memory bootstrap wrote there), `bundle`,
+`privateArchive`, `clean`, `legacyLayout`, `noRepository`, `canonicalMissing`, `linkEntry`,
+`notes`, `error`, `removed`, `wouldRemove`, `removeRefused` and `bundleRemoved`.
+
+`.salvage/` stays on the gateway's volume and is readable only by the server's user: the private
+archives hold credentials and ignored files from the old working copies, and the bundles hold local
+history canonical never received.
+
+### Chat images
+
+Before chat attachments moved to Storage, the web app wrote each chat image into the space's root
+as `chat-upload-*` and recorded that `workspacePath` in the message, so on a hosted space the only
+copy may be in a gateway working copy. The salvage sends each such image once to the controller,
+`POST /internal/projects/<id>/chat-attachments/legacy?workspacePath=<name>` with the image's bytes,
+authenticated with the controller's internal token or the service-role key itself. Both take the
+name exactly as the file has it: a file whose name has surrounding whitespace is another file than
+the one messages name, so the salvage never exports it, and the controller refuses such a name
+(400) rather than trim it. For each conversation with a message that names the file, the controller
+stores the image once in Storage and adds `storagePath`, `mimeType` and `sizeBytes` to those
+attachment entries; a second call changes nothing. A file no message names is answered
+`unreferenced: true` and stays in the private archive. Answers about the file or the space (not an
+image, over 20 MiB, the space deleted) are final; any other failure, such as a server without
+Storage, keeps the image in the private archive as `exportFailed` for a rerun. See
+[Chat attachments](Chat-Attachments.md).
 
 ## Concurrency (human-style)
 - Agents/runtimes work on branches or local commits.
@@ -320,12 +760,15 @@ while Git Edge still accepts the credential: roll Git Edge back first, or stop m
 - If push is rejected, they fetch and retry; on conflicts `main` keeps its copy and the local copy
   goes to a recovery ref (`refs/instafy/recovery/<origin id>/<name>`) for the user or the agent.
 - No global merge queue service; the git ref update is the serialization point.
+- The Workspace Gateway builds each save on the `main` it just fetched and pushes it as a plain
+  fast-forward. A lost race fetches, builds the save again and retries, and conflicts are checked
+  against what the client read (see [Writes](#writes)); nothing goes to a recovery ref.
 
 ## History in Studio
 
 Studio picks its versioning UI per space from the project's default origin:
 
-- **Changes** (a cloud space on the stateful gateway, and any space whose mode is not known yet):
+- **Changes** (a cloud space on an older, stateful gateway, and any space whose mode is not known yet):
   the working-tree drawer with Save version and Discard, unchanged.
 - **History** (a cloud space whose gateway answers `/git/status` with `stateless: true`, and every
   Desktop space): saved versions read from the default origin, 20 per page with Show more where
@@ -351,7 +794,7 @@ Studio picks its versioning UI per space from the project's default origin:
   "Restored" once restored. A restore of work the saved version already has answers
   `committed: false` and says there was nothing to restore; with `marked: true` (salvage refs) the
   origin recorded it as an empty version on `main`, so History also reloads at that `rev` and the
-  entry shows "Restored". `notRestored` items may carry a `reason`: a file left out as an old chat
+  entry shows "Restored". `notRestored` items carry a `reason` on both Desktop and the gateway: a file left out as an old chat
   upload (`attachment`, which a salvage keeps privately) is named in a sentence of its own, apart
   from secret and ignored files, and a `kept` file is never named as refused. The section is
   hidden on servers without these routes.
@@ -369,12 +812,21 @@ unsaved work appears (opening History counts as seeing it); it is not written in
 conversation. What a viewer has seen lives in the browser's storage, and in memory for the session
 when the browser refuses storage.
 
-## Local dev (what we should wire into `pnpm stack:up`)
-- Start `git-shard-0` + `git-edge` in Docker (compose file), storing repos in a local docker volume.
+## Local dev
+- `pnpm stack:up` starts `git-shard-0`, `git-edge` and `origin-gateway` in Docker
+  (`docker/docker-compose.runtime.yml`) by default (`GIT_CANONICAL=0` opts out), storing repos
+  under `tmp/git-repos/` (`GIT_REPO_VOLUME`).
 - Dev convenience: `git-shard` can auto-init and seed `<project_id>.git` on first access (`GIT_AUTO_INIT=1`).
-- Run Origin in git mode by setting:
+- Run a single-tenant Origin (one space's checkout) in git mode by setting:
   - `ORIGIN_GIT_REMOTE_URL=http://git-edge:8080/<project_id>.git`
   - `ORIGIN_GIT_BRANCH=main`
+- The Compose `origin-gateway` service is the multi-tenant Workspace Gateway
+  (`ORIGIN_MULTI_TENANT=1`, `ORIGIN_GIT_REMOTE_BASE_URL=http://git-edge:8080`, no
+  `ORIGIN_GIT_REMOTE_URL`). In its workspace root, `tmp/origin-gateway-workspaces/` by default
+  (`ORIGIN_GATEWAY_WORKSPACE_VOLUME`), the gateway keeps `.git-cache/` and, after an upgrade from
+  an older gateway, `.legacy/` and `.salvage/`. Runtime checkouts do not belong there: the local
+  provider keeps them in `tmp/runtime-checkouts/<project_id>` (`DOCKER_REPO_HOST` overrides it;
+  see [Local Development](Local-Dev.md#git-canonical-local-git-service)).
 
 Why `<project_id>.git`?
 - Instafy already keys everything by `project_id` internally (JWT claims, workspace paths, controller APIs). Using it as the repo name avoids a second identifier during v0.
@@ -389,6 +841,12 @@ Why `<project_id>.git`?
 - Run each stateful `git-shard` with a persistent volume mounted at
   `/var/lib/instafy-git`; expose shards only to the private service network.
 - Keep routing deterministic per repository as described above.
+- Run the Workspace Gateway with a persistent volume of its own as its workspace root, never the
+  runtime provider's checkout folder (`DOCKER_REPO_HOST`), an init as PID 1, and a lasting
+  `INSTAFY_NODE_NAME`. Its mirror cache is disposable, but after an upgrade from a stateful
+  gateway image the same volume holds `.legacy/` and `.salvage/` until
+  [Retiring gateway working copies](#retiring-gateway-working-copies) is done. See
+  [docker/README.md](../docker/README.md#deployment-and-self-hosting).
 
 ## Backups
 

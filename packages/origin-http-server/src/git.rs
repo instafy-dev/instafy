@@ -673,65 +673,109 @@ pub(crate) fn is_network_git_command(args: &[&str]) -> bool {
     )
 }
 
-fn stage_applied_paths(
-    workspace_root: &Path,
-    applied_paths: &[String],
-    bearer_token: Option<&str>,
-) -> Result<(), OriginError> {
-    if applied_paths.is_empty() {
-        return Ok(());
-    }
-
-    for chunk in applied_paths.chunks(GIT_STAGE_CHUNK_SIZE) {
-        let mut args: Vec<&str> = Vec::with_capacity(3 + chunk.len());
-        args.push("add");
-        args.push("--force");
-        args.push("--");
-        for path in chunk {
-            args.push(path.as_str());
-        }
-        run_git_ok(workspace_root, &args, bearer_token)
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-
-    Ok(())
-}
-
-fn stage_deleted_paths(
-    workspace_root: &Path,
-    deleted_paths: &[String],
-    bearer_token: Option<&str>,
-) -> Result<(), OriginError> {
-    if deleted_paths.is_empty() {
-        return Ok(());
-    }
-
-    for chunk in deleted_paths.chunks(GIT_STAGE_CHUNK_SIZE) {
-        let mut args: Vec<&str> = Vec::with_capacity(4 + chunk.len());
-        args.push("rm");
-        args.push("-r");
-        args.push("--ignore-unmatch");
-        args.push("--");
-        for path in chunk {
-            args.push(path.as_str());
-        }
-        run_git_ok(workspace_root, &args, bearer_token)
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-
-    Ok(())
-}
-
-fn unstage_sync_reserved_paths(
-    workspace_root: &Path,
-    bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    let staged = git_stdout(
+fn stage_applied_paths(workspace_root: &Path, applied_paths: &[String]) -> Result<(), OriginError> {
+    git_with_literal_paths(
         workspace_root,
-        &["diff", "--cached", "--name-only"],
-        bearer_token,
+        &[
+            "add",
+            "--force",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        applied_paths,
     )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
+}
+
+fn stage_deleted_paths(workspace_root: &Path, deleted_paths: &[String]) -> Result<(), OriginError> {
+    git_with_literal_paths(
+        workspace_root,
+        &[
+            "rm",
+            "-r",
+            "--ignore-unmatch",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        deleted_paths,
+    )
+}
+
+/// Run `args` (a command that reads its paths with `--pathspec-from-file=-
+/// --pathspec-file-nul`) in the checkout under the workspace's git lock,
+/// with `paths` on stdin, each read as a name: an apply's paths come from
+/// the request, so they are never arguments of git, and a name such as
+/// `notes[1].md` never matches `notes1.md` as a pattern would.
+fn git_with_literal_paths<S: AsRef<str>>(
+    workspace_root: &Path,
+    args: &[&str],
+    paths: &[S],
+) -> Result<(), OriginError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let lock = workspace_git_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = crate::workspace_git::nul_list(paths);
+    crate::workspace_git::WorkspaceGit::new(workspace_root, None)
+        .ok_opts(
+            args,
+            &crate::workspace_git::RunOpts {
+                stdin: Some(&list),
+                literal_pathspecs: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| OriginError::internal(error.to_string()))
+}
+
+/// Run `args` (a command that reads its paths with `--pathspec-from-file=-
+/// --pathspec-file-nul`) in the checkout under the workspace's git lock,
+/// with `path` alone on stdin, read as a name, as
+/// [`git_with_literal_paths`] does; the output whatever the exit status,
+/// for callers that read git's own message.
+fn git_literal_path(
+    workspace_root: &Path,
+    args: &[&str],
+    path: &str,
+) -> Result<std::process::Output, OriginError> {
+    let lock = workspace_git_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let list = crate::workspace_git::nul_list(&[path]);
+    crate::workspace_git::WorkspaceGit::new(workspace_root, None)
+        .run_opts(
+            args,
+            &crate::workspace_git::RunOpts {
+                stdin: Some(&list),
+                literal_pathspecs: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|error| OriginError::internal(error.to_string()))
+}
+
+/// Commit what is staged in the checkout under the workspace's git lock,
+/// with `message` on stdin (`--file=-`): an apply's message comes from the
+/// request, so it is never an argument of git, and a long one is never cut
+/// off by the system's limit on an argument's length.
+fn commit_staged(workspace_root: &Path, message: &str) -> Result<(), OriginError> {
+    let lock = workspace_git_lock(workspace_root);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::workspace_git::WorkspaceGit::new(workspace_root, None)
+        .ok_opts(
+            &["commit", "--no-gpg-sign", "--file=-"],
+            &crate::workspace_git::RunOpts {
+                stdin: Some(message.as_bytes()),
+                ..Default::default()
+            },
+        )
+        .map_err(|error| OriginError::internal(error.to_string()))
+}
+
+/// Unstage what a sync never commits, and list what stays staged. Local
+/// git only: no credential goes with it.
+fn unstage_sync_reserved_paths(workspace_root: &Path) -> Result<String, OriginError> {
+    let staged = git_stdout(workspace_root, &["diff", "--cached", "--name-only"], None)
+        .map_err(|error| OriginError::internal(error.to_string()))?;
     let reserved = staged
         .lines()
         .filter(|path| is_sync_reserved_path(path))
@@ -747,16 +791,12 @@ fn unstage_sync_reserved_paths(
         for path in chunk {
             args.push(path);
         }
-        run_git_ok(workspace_root, &args, bearer_token)
+        run_git_ok(workspace_root, &args, None)
             .map_err(|error| OriginError::internal(error.to_string()))?;
     }
 
-    git_stdout(
-        workspace_root,
-        &["diff", "--cached", "--name-only"],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))
+    git_stdout(workspace_root, &["diff", "--cached", "--name-only"], None)
+        .map_err(|error| OriginError::internal(error.to_string()))
 }
 
 pub(crate) fn looks_like_transient_http_error(stderr: &str) -> bool {
@@ -793,82 +833,6 @@ fn remote_exists(
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.lines().any(|line| line.trim() == remote_name))
-}
-
-fn align_local_branch_to_remote_tip_preserving_worktree(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    bearer_token: Option<&str>,
-) -> Result<(), OriginError> {
-    run_git_ok(
-        workspace_root,
-        &[
-            "fetch",
-            "--prune",
-            &config.git_remote_name,
-            &config.git_branch,
-        ],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    let remote_branch = format!("{}/{}", config.git_remote_name, config.git_branch);
-    let has_remote_branch = git_status_success(
-        workspace_root,
-        &[
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/{}", remote_branch),
-        ],
-    )
-    .unwrap_or(false);
-
-    if !has_remote_branch {
-        return Ok(());
-    }
-
-    let has_head =
-        git_status_success(workspace_root, &["rev-parse", "--verify", "HEAD"]).unwrap_or(false);
-    if !has_head {
-        run_git_ok(
-            workspace_root,
-            &["checkout", "-B", &config.git_branch, &remote_branch],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-        return Ok(());
-    }
-
-    let remote_is_ancestor_of_head = git_status_success(
-        workspace_root,
-        &["merge-base", "--is-ancestor", &remote_branch, "HEAD"],
-    )
-    .unwrap_or(false);
-    if remote_is_ancestor_of_head {
-        return Ok(());
-    }
-
-    run_git_ok(
-        workspace_root,
-        &["reset", "--mixed", &remote_branch],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    Ok(())
-}
-
-fn discard_local_sync_commit_preserving_worktree(
-    workspace_root: &Path,
-    remote_branch: &str,
-    bearer_token: Option<&str>,
-) {
-    let _ = run_git(
-        workspace_root,
-        &["reset", "--mixed", remote_branch],
-        bearer_token,
-    );
 }
 
 pub(crate) struct EmbeddedGitDirGuard {
@@ -1342,12 +1306,14 @@ fn maybe_migrate_legacy_git_dir(
     Ok(())
 }
 
+/// Commit an apply's `applied_paths` and `deleted_paths` (and nothing else
+/// staged) on the checkout, with `message`. Every command it runs is local,
+/// so it takes no credential: a caller's bearer never reaches git here.
 pub fn commit_apply_locally(
     workspace_root: &Path,
     applied_paths: &[String],
     deleted_paths: &[String],
     message: &str,
-    bearer_token: Option<&str>,
 ) -> Result<Option<String>, OriginError> {
     if !is_git_repo(workspace_root) {
         return Ok(None);
@@ -1357,7 +1323,7 @@ pub fn commit_apply_locally(
     // from only its own paths; afterward the original index is restored and
     // just those touched entries are advanced to the new HEAD. This preserves
     // unrelated staged content byte-for-byte, including partial staging.
-    let base_head = optional_head_rev(workspace_root, bearer_token)?;
+    let base_head = optional_head_rev(workspace_root)?;
     let mut index_snapshot = GitIndexSnapshot::capture(workspace_root)?;
     let operation = (|| -> Result<Option<String>, OriginError> {
         let reset_args = if base_head.is_some() {
@@ -1365,7 +1331,7 @@ pub fn commit_apply_locally(
         } else {
             &["read-tree", "--empty"][..]
         };
-        run_git_ok(workspace_root, reset_args, bearer_token)
+        run_git_ok(workspace_root, reset_args, None)
             .map_err(|error| OriginError::internal(error.to_string()))?;
 
         let mut touched = Vec::with_capacity(applied_paths.len() + deleted_paths.len());
@@ -1374,26 +1340,21 @@ pub fn commit_apply_locally(
         let _embedded_guard = EmbeddedGitDirGuard::hide(workspace_root, &touched)
             .map_err(|error| OriginError::internal(error.to_string()))?;
 
-        stage_applied_paths(workspace_root, applied_paths, bearer_token)?;
-        stage_deleted_paths(workspace_root, deleted_paths, bearer_token)?;
+        stage_applied_paths(workspace_root, applied_paths)?;
+        stage_deleted_paths(workspace_root, deleted_paths)?;
 
-        let staged = unstage_sync_reserved_paths(workspace_root, bearer_token)?;
+        let staged = unstage_sync_reserved_paths(workspace_root)?;
         if staged.trim().is_empty() {
             index_snapshot.restore_original()?;
             return Ok(base_head.clone());
         }
 
-        run_git_ok(
-            workspace_root,
-            &["commit", "--no-gpg-sign", "-m", message],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
+        commit_staged(workspace_root, message)?;
 
-        let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
+        let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], None)
             .map_err(|error| OriginError::internal(error.to_string()))?;
         index_snapshot.restore_original()?;
-        reset_index_paths_to_head(workspace_root, &touched, bearer_token)?;
+        reset_index_paths_to_head(workspace_root, &touched)?;
         maybe_fail_commit_apply_after_path_reset()?;
         index_snapshot.flush_after_path_reset()?;
         Ok(Some(head))
@@ -1405,7 +1366,6 @@ pub fn commit_apply_locally(
             if let Err(rollback_error) = rollback_failed_local_apply_commit(
                 workspace_root,
                 base_head.as_deref(),
-                bearer_token,
                 &mut index_snapshot,
             ) {
                 return Err(OriginError::internal(format!(
@@ -1417,16 +1377,9 @@ pub fn commit_apply_locally(
     }
 }
 
-fn optional_head_rev(
-    workspace_root: &Path,
-    bearer_token: Option<&str>,
-) -> Result<Option<String>, OriginError> {
-    let output = run_git(
-        workspace_root,
-        &["rev-parse", "--verify", "HEAD"],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
+fn optional_head_rev(workspace_root: &Path) -> Result<Option<String>, OriginError> {
+    let output = run_git(workspace_root, &["rev-parse", "--verify", "HEAD"], None)
+        .map_err(|error| OriginError::internal(error.to_string()))?;
     if output.status.success() {
         let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if is_safe_git_rev(&head) {
@@ -1454,29 +1407,22 @@ fn optional_head_rev(
 fn rollback_failed_local_apply_commit(
     workspace_root: &Path,
     base_head: Option<&str>,
-    bearer_token: Option<&str>,
     index_snapshot: &mut GitIndexSnapshot,
 ) -> Result<()> {
     // The route-level workspace lock guarantees that a changed HEAD here was
     // produced by this apply attempt. CAS on the observed commit still keeps a
     // surprising concurrent ref update from being overwritten silently.
-    let current_head = optional_head_rev(workspace_root, bearer_token)
-        .map_err(|error| anyhow::anyhow!(error.to_string()));
+    let current_head =
+        optional_head_rev(workspace_root).map_err(|error| anyhow::anyhow!(error.to_string()));
     let head_rollback = match current_head {
         Err(error) => Err(error),
         Ok(current_head) => match (base_head, current_head.as_deref()) {
-            (Some(base), Some(current)) if !base.eq_ignore_ascii_case(current) => run_git_ok(
-                workspace_root,
-                &["update-ref", "HEAD", base, current],
-                bearer_token,
-            )
-            .map(|_| ()),
-            (None, Some(current)) => run_git_ok(
-                workspace_root,
-                &["update-ref", "-d", "HEAD", current],
-                bearer_token,
-            )
-            .map(|_| ()),
+            (Some(base), Some(current)) if !base.eq_ignore_ascii_case(current) => {
+                run_git_ok(workspace_root, &["update-ref", "HEAD", base, current], None).map(|_| ())
+            }
+            (None, Some(current)) => {
+                run_git_ok(workspace_root, &["update-ref", "-d", "HEAD", current], None).map(|_| ())
+            }
             (Some(_), None) => Err(anyhow::anyhow!(
                 "git HEAD disappeared while rolling back local apply commit"
             )),
@@ -1650,19 +1596,17 @@ fn sync_directory(path: &Path) -> Result<()> {
         .with_context(|| format!("failed to fsync directory {path:?}"))
 }
 
-fn reset_index_paths_to_head(
-    workspace_root: &Path,
-    touched: &[&str],
-    bearer_token: Option<&str>,
-) -> Result<(), OriginError> {
-    for chunk in touched.chunks(GIT_STAGE_CHUNK_SIZE) {
-        let mut args = Vec::with_capacity(3 + chunk.len());
-        args.extend(["reset", "HEAD", "--"]);
-        args.extend(chunk.iter().copied());
-        run_git_ok(workspace_root, &args, bearer_token)
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-    Ok(())
+fn reset_index_paths_to_head(workspace_root: &Path, touched: &[&str]) -> Result<(), OriginError> {
+    git_with_literal_paths(
+        workspace_root,
+        &[
+            "reset",
+            "-q",
+            "--pathspec-from-file=-",
+            "--pathspec-file-nul",
+        ],
+        touched,
+    )
 }
 
 fn is_dependency_churn_path(path: &str) -> bool {
@@ -2164,6 +2108,9 @@ pub fn list_commit_files(
     if normalized_commit.is_empty() || !is_git_repo(workspace_root) {
         return Ok(Vec::new());
     }
+    if !is_safe_git_rev(normalized_commit) {
+        return Err(OriginError::bad_request("invalid git rev"));
+    }
 
     let stdout = git_stdout(
         workspace_root,
@@ -2173,6 +2120,7 @@ pub fn list_commit_files(
             "--name-status",
             "--find-renames",
             "--find-copies",
+            "--end-of-options",
             normalized_commit,
         ],
         bearer_token,
@@ -2498,10 +2446,13 @@ pub struct GitRevertSummary {
     pub removed: Vec<String>,
 }
 
+/// Put each of `paths` back as `HEAD` has it, or remove it when `HEAD`
+/// lacks it. Local git only, so no credential goes with it, and every path
+/// reaches git on stdin as a name ([`git_literal_path`]): a request's
+/// `notes[1].md` is never a pattern that also puts back `notes1.md`.
 pub fn revert_paths(
     workspace_root: &Path,
     paths: &[String],
-    bearer_token: Option<&str>,
 ) -> Result<GitRevertSummary, OriginError> {
     let mut touched = paths
         .iter()
@@ -2531,12 +2482,16 @@ pub fn revert_paths(
 
     for path in touched {
         if has_head {
-            let output = run_git(
+            let output = git_literal_path(
                 workspace_root,
-                &["checkout", "HEAD", "--", path.as_str()],
-                bearer_token,
-            )
-            .map_err(|error| OriginError::internal(error.to_string()))?;
+                &[
+                    "checkout",
+                    "HEAD",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ],
+                &path,
+            )?;
 
             if output.status.success() {
                 reverted.push(path);
@@ -2571,17 +2526,17 @@ pub fn revert_paths(
             }
         }
 
-        let _ = run_git(
+        let _ = git_literal_path(
             workspace_root,
             &[
                 "rm",
                 "--cached",
                 "-r",
                 "--ignore-unmatch",
-                "--",
-                path.as_str(),
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
             ],
-            bearer_token,
+            &path,
         );
 
         let workspace = WorkspaceDir::open(workspace_root)
@@ -2803,488 +2758,6 @@ pub fn push_existing_head(
     )))
 }
 
-/// Multi-tenant gateway save of every dirty path. Single-tenant origins
-/// publish through [`crate::publish`] instead; this goes away with the
-/// gateway's working copies.
-pub fn commit_and_push_dirty(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    message: &str,
-    bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    let Some(_remote_url) = config.git_remote_url.as_deref() else {
-        return Err(OriginError::internal(
-            "commit_and_push_dirty called without git remote configured",
-        ));
-    };
-
-    align_local_branch_to_remote_tip_preserving_worktree(config, workspace_root, bearer_token)?;
-
-    let dirty = list_dirty_files(workspace_root, bearer_token)?;
-    let touched = dirty
-        .iter()
-        .map(|entry| entry.path.as_str())
-        .collect::<Vec<_>>();
-
-    let _embedded_guard = if touched.is_empty() {
-        None
-    } else {
-        Some(
-            EmbeddedGitDirGuard::hide(workspace_root, &touched)
-                .map_err(|error| OriginError::internal(error.to_string()))?,
-        )
-    };
-
-    if !touched.is_empty() {
-        for path in &touched {
-            run_git_ok(workspace_root, &["add", "-A", "--", path], bearer_token)
-                .map_err(|error| OriginError::internal(error.to_string()))?;
-        }
-
-        let staged = git_stdout(
-            workspace_root,
-            &["diff", "--cached", "--name-only"],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-        if !staged.trim().is_empty() {
-            run_git_ok(
-                workspace_root,
-                &["commit", "--no-gpg-sign", "-m", message],
-                bearer_token,
-            )
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-        }
-    }
-
-    // Human-like loop: fetch → rebase if needed → fast-forward push, retry once on race.
-    let remote_branch = format!("{}/{}", config.git_remote_name, config.git_branch);
-    for attempt in 0..2 {
-        run_git_ok(
-            workspace_root,
-            &[
-                "fetch",
-                "--prune",
-                &config.git_remote_name,
-                &config.git_branch,
-            ],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        let has_remote_branch = git_status_success(
-            workspace_root,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/{}", remote_branch),
-            ],
-        )
-        .unwrap_or(false);
-
-        if has_remote_branch {
-            let has_head = git_status_success(workspace_root, &["rev-parse", "--verify", "HEAD"])
-                .unwrap_or(false);
-            if !has_head {
-                // If the local branch is "unborn" but the remote branch exists, fast-forward the
-                // local checkout to the remote tip before attempting merge-base/rebase checks.
-                run_git_ok(
-                    workspace_root,
-                    &["checkout", "-B", &config.git_branch, &remote_branch],
-                    bearer_token,
-                )
-                .map_err(|error| OriginError::internal(error.to_string()))?;
-            }
-
-            let is_fast_forward_ok = git_status_success(
-                workspace_root,
-                &["merge-base", "--is-ancestor", &remote_branch, "HEAD"],
-            )
-            .unwrap_or(false);
-
-            if !is_fast_forward_ok {
-                let output = run_git(workspace_root, &["rebase", &remote_branch], bearer_token)
-                    .map_err(|error| OriginError::internal(error.to_string()))?;
-                if !output.status.success() {
-                    let _ = run_git(workspace_root, &["rebase", "--abort"], bearer_token);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(OriginError::conflict(format!(
-                        "git rebase onto {remote_branch} failed: {}",
-                        stderr.trim()
-                    )));
-                }
-            }
-        }
-
-        let dest_ref = format!("HEAD:refs/heads/{}", config.git_branch);
-        let push = run_git(
-            workspace_root,
-            &["push", &config.git_remote_name, &dest_ref],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        if push.status.success() {
-            break;
-        }
-
-        let stderr = String::from_utf8_lossy(&push.stderr);
-        let looks_like_non_ff = stderr.contains("non-fast-forward")
-            || stderr.contains("fetch first")
-            || stderr.contains("[rejected]");
-
-        if looks_like_non_ff && attempt == 0 {
-            continue;
-        }
-
-        if looks_like_non_ff {
-            discard_local_sync_commit_preserving_worktree(
-                workspace_root,
-                &remote_branch,
-                bearer_token,
-            );
-            return Err(OriginError::conflict(format!(
-                "git push rejected (non-fast-forward): {}",
-                stderr.trim()
-            )));
-        }
-
-        discard_local_sync_commit_preserving_worktree(workspace_root, &remote_branch, bearer_token);
-        return Err(OriginError::internal(format!(
-            "git push failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-    Ok(head)
-}
-
-/// Create a forward revert of `commit` on top of the remote tip and push it.
-/// Requires a clean tracked worktree so user edits are never entangled with
-/// the revert; conflicts abort cleanly and surface as HTTP 409. History is
-/// never rewritten — the revert is a new commit. Multi-tenant gateway only;
-/// single-tenant origins revert through [`crate::publish::revert_commit`].
-pub fn revert_commit_and_push(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    commit: &str,
-    bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    let Some(_remote_url) = config.git_remote_url.as_deref() else {
-        return Err(OriginError::internal(
-            "revert_commit_and_push called without git remote configured",
-        ));
-    };
-
-    let commit = commit.trim();
-    if commit.len() < 7
-        || commit.len() > 64
-        || !commit
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        return Err(OriginError::bad_request("invalid commit id"));
-    }
-
-    if has_tracked_worktree_changes(workspace_root, bearer_token)
-        .map_err(|error| OriginError::internal(error.to_string()))?
-    {
-        return Err(OriginError::conflict(
-            "workspace has unsaved changes; save or discard them before reverting a version",
-        ));
-    }
-
-    align_local_branch_to_remote_tip_preserving_worktree(config, workspace_root, bearer_token)?;
-
-    let commit_exists = git_status_success(
-        workspace_root,
-        &["cat-file", "-e", &format!("{commit}^{{commit}}")],
-    )
-    .unwrap_or(false);
-    if !commit_exists {
-        return Err(OriginError::not_found("commit not found"));
-    }
-
-    let revert = run_git(
-        workspace_root,
-        &["revert", "--no-edit", "--no-gpg-sign", commit],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
-    if !revert.status.success() {
-        let _ = run_git(workspace_root, &["revert", "--abort"], bearer_token);
-        let stderr = String::from_utf8_lossy(&revert.stderr);
-        return Err(OriginError::conflict(format!(
-            "git revert {commit} failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    // Human-like loop: fetch → rebase if needed → fast-forward push, retry once on race.
-    // The worktree was clean before the revert, so failure paths hard-reset to
-    // the remote tip instead of leaving reverted content as dirty state.
-    let remote_branch = format!("{}/{}", config.git_remote_name, config.git_branch);
-    let restore_remote_tip = |reason: String, conflict: bool| -> OriginError {
-        let _ = run_git(
-            workspace_root,
-            &["reset", "--hard", &remote_branch],
-            bearer_token,
-        );
-        if conflict {
-            OriginError::conflict(reason)
-        } else {
-            OriginError::internal(reason)
-        }
-    };
-    for attempt in 0..2 {
-        run_git_ok(
-            workspace_root,
-            &[
-                "fetch",
-                "--prune",
-                &config.git_remote_name,
-                &config.git_branch,
-            ],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        let is_fast_forward_ok = git_status_success(
-            workspace_root,
-            &["merge-base", "--is-ancestor", &remote_branch, "HEAD"],
-        )
-        .unwrap_or(false);
-
-        if !is_fast_forward_ok {
-            let output = run_git(workspace_root, &["rebase", &remote_branch], bearer_token)
-                .map_err(|error| OriginError::internal(error.to_string()))?;
-            if !output.status.success() {
-                let _ = run_git(workspace_root, &["rebase", "--abort"], bearer_token);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(restore_remote_tip(
-                    format!(
-                        "git rebase onto {remote_branch} failed while reverting: {}",
-                        stderr.trim()
-                    ),
-                    true,
-                ));
-            }
-        }
-
-        let dest_ref = format!("HEAD:refs/heads/{}", config.git_branch);
-        let push = run_git(
-            workspace_root,
-            &["push", &config.git_remote_name, &dest_ref],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        if push.status.success() {
-            let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
-                .map_err(|error| OriginError::internal(error.to_string()))?;
-            return Ok(head);
-        }
-
-        let stderr = String::from_utf8_lossy(&push.stderr);
-        let looks_like_non_ff = stderr.contains("non-fast-forward")
-            || stderr.contains("fetch first")
-            || stderr.contains("[rejected]");
-
-        if looks_like_non_ff && attempt == 0 {
-            continue;
-        }
-
-        return Err(restore_remote_tip(
-            format!("git push rejected while reverting: {}", stderr.trim()),
-            looks_like_non_ff,
-        ));
-    }
-
-    Err(OriginError::internal(
-        "git revert push did not complete".to_string(),
-    ))
-}
-
-/// Multi-tenant gateway save of the given paths. Single-tenant origins
-/// publish through [`crate::publish`] instead.
-pub fn commit_and_push_paths(
-    config: &ServerConfig,
-    workspace_root: &Path,
-    paths: &[String],
-    message: &str,
-    bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    let Some(_remote_url) = config.git_remote_url.as_deref() else {
-        return Err(OriginError::internal(
-            "commit_and_push_paths called without git remote configured",
-        ));
-    };
-
-    align_local_branch_to_remote_tip_preserving_worktree(config, workspace_root, bearer_token)?;
-
-    let normalized_paths = paths
-        .iter()
-        .map(|path| path.trim().trim_end_matches('/'))
-        .filter(|path| !path.is_empty())
-        .collect::<Vec<_>>();
-    let blocked = normalized_paths
-        .iter()
-        .copied()
-        .filter(|path| is_sync_reserved_path(path))
-        .collect::<Vec<_>>();
-    if !blocked.is_empty() {
-        let detail = blocked.join(", ");
-        return Err(OriginError::bad_request(format!(
-            "path is excluded from space history: {detail}"
-        )));
-    }
-
-    let mut touched = normalized_paths;
-    touched.sort();
-    touched.dedup();
-
-    if touched.is_empty() {
-        let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Ok(head);
-    }
-
-    run_git_ok(workspace_root, &["reset"], bearer_token)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    let _embedded_guard = EmbeddedGitDirGuard::hide(workspace_root, &touched)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    for path in &touched {
-        run_git_ok(workspace_root, &["add", "-A", "--", path], bearer_token)
-            .map_err(|error| OriginError::internal(error.to_string()))?;
-    }
-
-    let staged = git_stdout(
-        workspace_root,
-        &["diff", "--cached", "--name-only"],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
-    if staged.trim().is_empty() {
-        let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Ok(head);
-    }
-
-    run_git_ok(
-        workspace_root,
-        &["commit", "--no-gpg-sign", "-m", message],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
-
-    // Human-like loop: fetch → rebase if needed → fast-forward push, retry once on race.
-    let remote_branch = format!("{}/{}", config.git_remote_name, config.git_branch);
-    for attempt in 0..2 {
-        run_git_ok(
-            workspace_root,
-            &[
-                "fetch",
-                "--prune",
-                &config.git_remote_name,
-                &config.git_branch,
-            ],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        let has_remote_branch = git_status_success(
-            workspace_root,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                &format!("refs/remotes/{}", remote_branch),
-            ],
-        )
-        .unwrap_or(false);
-
-        if has_remote_branch {
-            let has_head = git_status_success(workspace_root, &["rev-parse", "--verify", "HEAD"])
-                .unwrap_or(false);
-            if !has_head {
-                run_git_ok(
-                    workspace_root,
-                    &["checkout", "-B", &config.git_branch, &remote_branch],
-                    bearer_token,
-                )
-                .map_err(|error| OriginError::internal(error.to_string()))?;
-            }
-
-            let is_fast_forward_ok = git_status_success(
-                workspace_root,
-                &["merge-base", "--is-ancestor", &remote_branch, "HEAD"],
-            )
-            .unwrap_or(false);
-
-            if !is_fast_forward_ok {
-                let output = run_git(workspace_root, &["rebase", &remote_branch], bearer_token)
-                    .map_err(|error| OriginError::internal(error.to_string()))?;
-                if !output.status.success() {
-                    let _ = run_git(workspace_root, &["rebase", "--abort"], bearer_token);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(OriginError::conflict(format!(
-                        "git rebase onto {remote_branch} failed: {}",
-                        stderr.trim()
-                    )));
-                }
-            }
-        }
-
-        let dest_ref = format!("HEAD:refs/heads/{}", config.git_branch);
-        let push = run_git(
-            workspace_root,
-            &["push", &config.git_remote_name, &dest_ref],
-            bearer_token,
-        )
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-
-        if push.status.success() {
-            break;
-        }
-
-        let stderr = String::from_utf8_lossy(&push.stderr);
-        let looks_like_non_ff = stderr.contains("non-fast-forward")
-            || stderr.contains("fetch first")
-            || stderr.contains("[rejected]");
-
-        if looks_like_non_ff && attempt == 0 {
-            continue;
-        }
-
-        if looks_like_non_ff {
-            discard_local_sync_commit_preserving_worktree(
-                workspace_root,
-                &remote_branch,
-                bearer_token,
-            );
-            return Err(OriginError::conflict(format!(
-                "git push rejected (non-fast-forward): {}",
-                stderr.trim()
-            )));
-        }
-
-        discard_local_sync_commit_preserving_worktree(workspace_root, &remote_branch, bearer_token);
-        return Err(OriginError::internal(format!(
-            "git push failed: {}",
-            stderr.trim()
-        )));
-    }
-
-    let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
-        .map_err(|error| OriginError::internal(error.to_string()))?;
-    Ok(head)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3309,7 +2782,7 @@ mod tests {
             .expect("symlink diff remains contained");
         assert!(!diff.diff.contains("outside-secret"));
 
-        assert!(revert_paths(workspace.path(), &["escape/secret.txt".to_string()], None,).is_err());
+        assert!(revert_paths(workspace.path(), &["escape/secret.txt".to_string()]).is_err());
         assert_eq!(
             fs::read_to_string(&outside_file).unwrap(),
             "outside-secret\n"
@@ -3442,50 +2915,6 @@ mod tests {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("git config {key} failed: {}", stderr.trim());
-        }
-        Ok(())
-    }
-
-    fn install_block_path_hook(remote_dir: &Path, blocked_segment: &str) -> anyhow::Result<()> {
-        let hook_path = remote_dir.join("hooks").join("update");
-        let escaped_segment = blocked_segment.replace('"', "\\\"");
-        fs::write(
-            &hook_path,
-            (
-                r#"#!/usr/bin/env bash
-set -euo pipefail
-oldrev="${1:-}"
-refname="${2:-}"
-newrev="${3:-}"
-
-diff_args=()
-if [[ "$oldrev" =~ ^0{40}$ ]]; then
-  diff_args=(--root "$newrev")
-else
-  diff_args=("$oldrev" "$newrev")
-fi
-
-while IFS=$'\t' read -r status path1 path2; do
-  [[ -z "$status" ]] && continue
-  local_path="$path1"
-  case "$status" in
-    R*|C*) local_path="$path2" ;;
-  esac
-  if [[ -n "$local_path" && ( "$local_path" == "__BLOCKED_SEGMENT__"/* || "$local_path" == */"__BLOCKED_SEGMENT__"/* ) ]]; then
-    echo "instafy: blocked path '$local_path' (repo hygiene policy)" >&2
-    exit 1
-  fi
-done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
-"#
-            )
-            .replace("__BLOCKED_SEGMENT__", &escaped_segment),
-        )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&hook_path)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&hook_path, perms)?;
         }
         Ok(())
     }
@@ -3687,7 +3116,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &["README.md".to_string()],
             &[],
             "test: import baseline",
-            None,
         )?;
         assert!(commit.is_some());
 
@@ -3695,6 +3123,104 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
         let tree = String::from_utf8_lossy(&tree.stdout).trim_end().to_string();
 
         assert_eq!(tree, "README.md");
+        Ok(())
+    }
+
+    /// An apply's local commit, and the HEAD the apply route reads before
+    /// it, run local git only, so no command carries a credential: none of
+    /// git's argument lists holds an HTTP header.
+    #[test]
+    fn an_apply_commit_hands_git_no_http_header() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = sandbox.path().join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        init_repo(&workspace_dir, "main")?;
+        run_git(&workspace_dir, &["config", "user.name", "Instafy Test"])?;
+        run_git(
+            &workspace_dir,
+            &["config", "user.email", "playwright@instafy.dev"],
+        )?;
+        fs::write(workspace_dir.join("kept.txt"), "kept\n")?;
+        run_git(&workspace_dir, &["add", "-A"])?;
+        run_git(&workspace_dir, &["commit", "-m", "init"])?;
+        fs::create_dir_all(workspace_dir.join(".instafy"))?;
+        fs::rename(
+            workspace_dir.join(".git"),
+            workspace_dir.join(".instafy").join(".git"),
+        )?;
+        fs::write(workspace_dir.join("applied.txt"), "applied\n")?;
+
+        let log = sandbox.path().join("argv.log");
+        let wrapper = crate::test_support::GitWrapper::install(
+            sandbox.path(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        let base = head_rev(&workspace_dir, None);
+        let commit = commit_apply_locally(
+            &workspace_dir,
+            &["applied.txt".to_string()],
+            &[],
+            "test: apply",
+        );
+        drop(wrapper);
+        let commit = commit?;
+        assert!(base.is_some() && commit.is_some() && base != commit);
+        let argv = fs::read_to_string(&log)?;
+        assert!(argv.lines().any(|line| line.contains("commit")), "{argv}");
+        assert!(!argv.to_ascii_lowercase().contains("header"), "{argv}");
+        Ok(())
+    }
+
+    /// A discard (`/git/revert`) runs local git only, so no command carries
+    /// a credential, and it hands git its paths on stdin, never as
+    /// arguments.
+    #[test]
+    fn a_discard_hands_git_no_http_header_and_no_path_argument() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = sandbox.path().join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        init_repo(&workspace_dir, "main")?;
+        run_git(&workspace_dir, &["config", "user.name", "Instafy Test"])?;
+        run_git(
+            &workspace_dir,
+            &["config", "user.email", "playwright@instafy.dev"],
+        )?;
+        fs::write(workspace_dir.join("kept.txt"), "kept\n")?;
+        run_git(&workspace_dir, &["add", "-A"])?;
+        run_git(&workspace_dir, &["commit", "-m", "init"])?;
+        fs::create_dir_all(workspace_dir.join(".instafy"))?;
+        fs::rename(
+            workspace_dir.join(".git"),
+            workspace_dir.join(".instafy").join(".git"),
+        )?;
+        fs::write(workspace_dir.join("kept.txt"), "edited\n")?;
+        fs::write(workspace_dir.join("fresh.txt"), "new\n")?;
+
+        let log = sandbox.path().join("argv.log");
+        let wrapper = crate::test_support::GitWrapper::install(
+            sandbox.path(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        let summary = revert_paths(
+            &workspace_dir,
+            &["kept.txt".to_string(), "fresh.txt".to_string()],
+        );
+        drop(wrapper);
+        let summary = summary?;
+        assert_eq!(summary.reverted, vec!["kept.txt".to_string()]);
+        assert_eq!(summary.removed, vec!["fresh.txt".to_string()]);
+        assert_eq!(
+            fs::read_to_string(workspace_dir.join("kept.txt"))?,
+            "kept\n"
+        );
+        assert!(!workspace_dir.join("fresh.txt").exists());
+        let argv = fs::read_to_string(&log)?;
+        assert!(argv.lines().any(|line| line.contains("checkout")), "{argv}");
+        assert!(!argv.to_ascii_lowercase().contains("header"), "{argv}");
+        assert!(
+            !argv.contains("kept.txt") && !argv.contains("fresh.txt"),
+            "{argv}"
+        );
         Ok(())
     }
 
@@ -3770,7 +3296,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &["applied.txt".to_string()],
             &["deleted.txt".to_string()],
             "test: scoped import",
-            None,
         )?
         .expect("scoped import commit");
 
@@ -3889,7 +3414,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &["applied.txt".to_string()],
             &[],
             "test: injected failure",
-            None,
         )
         .expect_err("injected post-commit failure must surface");
         assert!(error.to_string().contains("injected local apply failure"));
@@ -3977,7 +3501,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &["README.md".to_string()],
             &[],
             "test: hooks disabled",
-            None,
         )?;
         assert!(commit.is_some());
         assert!(
@@ -4056,7 +3579,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &[".gitattributes".to_string(), "filtered.txt".to_string()],
             &[],
             "test: helpers sanitized",
-            None,
         )?
         .expect("sanitized helper commit");
 
@@ -4119,7 +3641,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &["about.html".to_string()],
             &[],
             "test: baseline",
-            None,
         )?
         .expect("baseline commit");
 
@@ -4135,7 +3656,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &["about.html".to_string()],
             &[],
             "test: snapshot",
-            None,
         )?
         .expect("snapshot commit");
 
@@ -4310,81 +3830,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
     }
 
     #[test]
-    fn commit_and_push_paths_rejects_repo_hygiene_paths_before_git_push() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().into_owned()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: String::from("instafy-origin"),
-            git_author_email: String::from("origin@instafy.dev"),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-            hosted_checkout: false,
-        };
-
-        ensure_git_checkout(&config, None)?;
-
-        fs::create_dir_all(workspace_dir.join("tmp"))?;
-        fs::write(workspace_dir.join("tmp/random_01.txt"), "blocked\n")?;
-
-        let error = commit_and_push_paths(
-            &config,
-            workspace_dir.as_path(),
-            &[String::from("tmp/random_01.txt")],
-            "test: blocked",
-            None,
-        )
-        .expect_err("expected tmp path to be rejected before sync");
-        let message = error.to_string();
-        assert!(
-            message.contains("path is excluded from space history: tmp/random_01.txt"),
-            "expected explicit repo hygiene error, got: {message}"
-        );
-
-        Ok(())
-    }
-
-    #[test]
     fn summarize_dirty_files_collapses_single_child_folder_chains() {
         let entries = vec![
             DirtyPathEntry {
@@ -4417,314 +3862,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             "playwright/large-dirty-abc/file-0000.txt"
         );
         assert!(!summary.has_more_files);
-    }
-
-    #[test]
-    fn commit_and_push_dirty_persists_non_reserved_workspace_changes() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().to_string()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: "Instafy Test".to_string(),
-            git_author_email: "playwright@instafy.dev".to_string(),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-            hosted_checkout: false,
-        };
-
-        ensure_git_checkout(&config, None)?;
-
-        fs::write(workspace_dir.join("README.md"), "hello world\n")?;
-        fs::create_dir_all(workspace_dir.join("nested"))?;
-        fs::write(workspace_dir.join("nested/hello.txt"), "nested\n")?;
-        fs::create_dir_all(workspace_dir.join(".instafy"))?;
-        fs::write(
-            workspace_dir.join(".instafy/should-not-commit.txt"),
-            "nope\n",
-        )?;
-
-        let commit =
-            commit_and_push_dirty(&config, workspace_dir.as_path(), "test: sync dirty", None)?;
-
-        let verify_dir = root.join("verify");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                verify_dir.to_str().unwrap(),
-            ],
-        )?;
-
-        let readme = fs::read_to_string(verify_dir.join("README.md"))?;
-        assert_eq!(readme, "hello world\n");
-        let nested = fs::read_to_string(verify_dir.join("nested/hello.txt"))?;
-        assert_eq!(nested, "nested\n");
-        assert!(
-            !verify_dir.join(".instafy/should-not-commit.txt").exists(),
-            "reserved .instafy paths should not be committed (got commit {commit})"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn commit_and_push_dirty_persists_files_inside_embedded_git_repos() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().to_string()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: "Instafy Test".to_string(),
-            git_author_email: "playwright@instafy.dev".to_string(),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-            hosted_checkout: false,
-        };
-
-        ensure_git_checkout(&config, None)?;
-
-        let embedded_dir = workspace_dir.join("nested");
-        fs::create_dir_all(&embedded_dir)?;
-        init_repo(&embedded_dir, "main")?;
-        run_git(&embedded_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &embedded_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(embedded_dir.join("inner.txt"), "inner\n")?;
-        run_git(&embedded_dir, &["add", "inner.txt"])?;
-        run_git(&embedded_dir, &["commit", "-m", "inner"])?;
-
-        fs::write(embedded_dir.join("hello.txt"), "embedded-hello\n")?;
-
-        let commit = commit_and_push_dirty(
-            &config,
-            workspace_dir.as_path(),
-            "test: sync embedded",
-            None,
-        )?;
-
-        assert!(
-            embedded_dir.join(".git").exists(),
-            "embedded repo .git should be restored after sync (got commit {commit})"
-        );
-
-        let verify_dir = root.join("verify");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                verify_dir.to_str().unwrap(),
-            ],
-        )?;
-
-        let persisted = fs::read_to_string(verify_dir.join("nested/hello.txt"))?;
-        assert_eq!(persisted, "embedded-hello\n");
-        assert!(
-            !verify_dir.join("nested/.git").exists(),
-            "embedded .git directories should not be committed to canonical (got commit {commit})"
-        );
-
-        let tree = git_stdout(&verify_dir, &["ls-tree", "-r", "--name-only", "HEAD"])?;
-        assert!(
-            !tree.lines().any(|line| {
-                line == ".instafy/origin-staging"
-                    || line.starts_with(".instafy/origin-staging/")
-                    || line.contains("/.git/")
-                    || line.ends_with("/.git")
-                    || line.contains(".git.instafy-hidden-")
-            }),
-            "canonical commit should not include nested .git metadata (got commit {commit})"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn commit_and_push_dirty_pushes_clean_workspace_commits() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().to_string()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: "Instafy Test".to_string(),
-            git_author_email: "playwright@instafy.dev".to_string(),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-            hosted_checkout: false,
-        };
-
-        ensure_git_checkout(&config, None)?;
-
-        // Create a local commit without pushing (workspace remains clean afterwards).
-        fs::write(workspace_dir.join("README.md"), "local\n")?;
-        run_git_ok(&workspace_dir, &["add", "--", "README.md"], None)?;
-        run_git_ok(
-            &workspace_dir,
-            &["commit", "--no-gpg-sign", "-m", "local commit"],
-            None,
-        )?;
-
-        let verify_before = root.join("verify-before");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                verify_before.to_str().unwrap(),
-            ],
-        )?;
-        let before = fs::read_to_string(verify_before.join("README.md"))?;
-        assert_eq!(before, "hello\n");
-
-        // Sync should push the existing local commit even though there are no dirty paths.
-        let commit =
-            commit_and_push_dirty(&config, workspace_dir.as_path(), "test: sync clean", None)?;
-
-        let verify_after = root.join("verify-after");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                verify_after.to_str().unwrap(),
-            ],
-        )?;
-        let after = fs::read_to_string(verify_after.join("README.md"))?;
-        assert_eq!(after, "local\n");
-
-        let remote_head = git_stdout(&verify_after, &["rev-parse", "HEAD"])?;
-        assert_eq!(remote_head, commit);
-
-        Ok(())
     }
 
     #[test]
@@ -5027,213 +4164,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
     }
 
     #[test]
-    fn commit_and_push_paths_discards_failed_local_sync_commit_before_next_selected_sync(
-    ) -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-        install_block_path_hook(&remote_dir, "blocked")?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().to_string()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: "Instafy Test".to_string(),
-            git_author_email: "playwright@instafy.dev".to_string(),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-            hosted_checkout: false,
-        };
-
-        ensure_git_checkout(&config, None)?;
-
-        fs::create_dir_all(workspace_dir.join("blocked"))?;
-        fs::write(workspace_dir.join("blocked/random_01.txt"), "blocked\n")?;
-        fs::create_dir_all(workspace_dir.join("nested"))?;
-        fs::write(workspace_dir.join("nested/ok.txt"), "allowed\n")?;
-
-        let blocked_error = commit_and_push_paths(
-            &config,
-            workspace_dir.as_path(),
-            &[String::from("blocked/random_01.txt")],
-            "test: blocked",
-            None,
-        )
-        .expect_err("expected blocked path push to be rejected by remote hook");
-        let blocked_message = blocked_error.to_string();
-        assert!(
-            blocked_message.contains("blocked path 'blocked/random_01.txt'"),
-            "expected blocked-path error, got: {blocked_message}"
-        );
-
-        let commit = commit_and_push_paths(
-            &config,
-            workspace_dir.as_path(),
-            &[String::from("nested/ok.txt")],
-            "test: allowed",
-            None,
-        )?;
-        assert!(!commit.trim().is_empty());
-
-        let verify_dir = root.join("verify");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                verify_dir.to_str().unwrap(),
-            ],
-        )?;
-
-        let persisted = fs::read_to_string(verify_dir.join("nested/ok.txt"))?;
-        assert_eq!(persisted, "allowed\n");
-        assert!(
-            !verify_dir.join("blocked/random_01.txt").exists(),
-            "blocked file should not have been pushed after later selective sync"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn commit_and_push_dirty_handles_unborn_local_branch_when_remote_has_commits(
-    ) -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(workspace_dir.join(".instafy"))?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().to_string()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: "Instafy Test".to_string(),
-            git_author_email: "playwright@instafy.dev".to_string(),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-            hosted_checkout: false,
-        };
-
-        // Simulate a broken/unborn local branch state even though the remote branch exists.
-        run_git_ok(&workspace_dir, &["init", "-b", "main"], None)?;
-        run_git_ok(
-            &workspace_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-            None,
-        )?;
-        run_git_ok(&workspace_dir, &["fetch", "--prune", "origin"], None)?;
-        run_git_ok(&workspace_dir, &["checkout", "-B", "main"], None)?;
-
-        let has_remote_branch = git_status_success(
-            &workspace_dir,
-            &[
-                "show-ref",
-                "--verify",
-                "--quiet",
-                "refs/remotes/origin/main",
-            ],
-        )
-        .unwrap_or(false);
-        assert!(has_remote_branch, "expected origin/main to be fetched");
-
-        let has_head =
-            git_status_success(&workspace_dir, &["rev-parse", "--verify", "HEAD"]).unwrap_or(false);
-        assert!(!has_head, "expected HEAD to be unborn before sync");
-
-        let commit =
-            commit_and_push_dirty(&config, workspace_dir.as_path(), "test: sync unborn", None)?;
-
-        let remote_verify = root.join("remote-verify");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                remote_verify.to_str().unwrap(),
-            ],
-        )?;
-        let remote_head = git_stdout(&remote_verify, &["rev-parse", "HEAD"])?;
-        assert_eq!(remote_head, commit);
-
-        Ok(())
-    }
-
-    #[test]
     fn ensure_git_checkout_preserves_user_root_git_dir() -> anyhow::Result<()> {
         let sandbox = tempdir()?;
         let root = sandbox.path();
@@ -5392,98 +4322,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
         .to_string();
         let remote_head = git_stdout(&updater_dir, &["rev-parse", "HEAD"])?;
         assert_eq!(workspace_head, remote_head);
-
-        Ok(())
-    }
-
-    #[test]
-    fn align_local_branch_preserves_clean_local_commit_ahead_of_remote() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-
-        let remote_dir = root.join("remote.git");
-        run_git(root, &["init", "--bare", remote_dir.to_str().unwrap()])?;
-
-        let seed_dir = root.join("seed");
-        fs::create_dir_all(&seed_dir)?;
-        init_repo(&seed_dir, "main")?;
-        run_git(&seed_dir, &["config", "user.name", "Instafy Test"])?;
-        run_git(
-            &seed_dir,
-            &["config", "user.email", "playwright@instafy.dev"],
-        )?;
-        fs::write(seed_dir.join("README.md"), "hello\n")?;
-        run_git(&seed_dir, &["add", "README.md"])?;
-        run_git(&seed_dir, &["commit", "-m", "init"])?;
-        run_git(
-            &seed_dir,
-            &["remote", "add", "origin", remote_dir.to_str().unwrap()],
-        )?;
-        run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-
-        let config = ServerConfig {
-            project_id: Uuid::new_v4(),
-            origin_id: Uuid::new_v4(),
-            workspace_root: workspace_dir.clone(),
-            git_remote_url: Some(remote_dir.to_string_lossy().to_string()),
-            git_remote_base_url: None,
-            git_branch: "main".to_string(),
-            git_remote_name: "origin".to_string(),
-            git_author_name: "Instafy Test".to_string(),
-            git_author_email: "playwright@instafy.dev".to_string(),
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            controller_base_url: Url::parse("http://127.0.0.1:8788")?,
-            controller_internal_token: None,
-            controller_token_source: None,
-            jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json")?,
-            skip_auth: true,
-            enable_presence_heartbeat: false,
-            presence_interval: Duration::from_secs(1),
-            max_archive_bytes: 1024 * 1024,
-            staging_base: None,
-            multi_tenant: false,
-            hosted_checkout: false,
-        };
-
-        ensure_git_checkout(&config, None)?;
-
-        let imported_dir = workspace_dir.join("repos").join("octocat-hello-world");
-        fs::create_dir_all(&imported_dir)?;
-        fs::write(imported_dir.join("README"), "Hello World!\n")?;
-        run_git_ok(&workspace_dir, &["add", "-A", "--", "."], None)?;
-        run_git_ok(
-            &workspace_dir,
-            &["commit", "--no-gpg-sign", "-m", "imported baseline"],
-            None,
-        )?;
-
-        let head_before = String::from_utf8_lossy(
-            &run_git_ok(&workspace_dir, &["rev-parse", "HEAD"], None)?.stdout,
-        )
-        .trim()
-        .to_string();
-
-        align_local_branch_to_remote_tip_preserving_worktree(&config, &workspace_dir, None)?;
-
-        let head_after = String::from_utf8_lossy(
-            &run_git_ok(&workspace_dir, &["rev-parse", "HEAD"], None)?.stdout,
-        )
-        .trim()
-        .to_string();
-        assert_eq!(head_after, head_before);
-        assert_eq!(
-            fs::read_to_string(
-                workspace_dir
-                    .join("repos")
-                    .join("octocat-hello-world")
-                    .join("README")
-            )?,
-            "Hello World!\n"
-        );
 
         Ok(())
     }
@@ -5670,91 +4508,6 @@ done < <(git diff-tree --no-commit-id --name-status -r "${diff_args[@]}")
             &["remote", "add", "origin", remote_dir.to_str().unwrap()],
         )?;
         run_git(&seed_dir, &["push", "-u", "origin", "main"])?;
-        Ok(())
-    }
-
-    #[test]
-    fn revert_commit_and_push_creates_forward_revert() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-        let remote_dir = root.join("remote.git");
-        seed_remote_with_readme(root, &remote_dir)?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-        let config = revert_test_config(&workspace_dir, &remote_dir)?;
-        ensure_git_checkout(&config, None)?;
-
-        fs::write(workspace_dir.join("README.md"), "world\n")?;
-        let bad_commit = commit_and_push_dirty(
-            &config,
-            workspace_dir.as_path(),
-            "instafy: bad change",
-            None,
-        )?;
-
-        let revert_commit =
-            revert_commit_and_push(&config, workspace_dir.as_path(), &bad_commit, None)?;
-        assert_ne!(revert_commit, bad_commit);
-
-        // The workspace content is back to the pre-change state...
-        let local = fs::read_to_string(workspace_dir.join("README.md"))?;
-        assert_eq!(local, "hello\n");
-
-        // ...and so is a fresh clone of canonical, with history intact.
-        let verify_dir = root.join("verify");
-        run_git(
-            root,
-            &[
-                "clone",
-                "--branch",
-                "main",
-                remote_dir.to_str().unwrap(),
-                verify_dir.to_str().unwrap(),
-            ],
-        )?;
-        let persisted = fs::read_to_string(verify_dir.join("README.md"))?;
-        assert_eq!(persisted, "hello\n");
-        let log = git_stdout(&verify_dir, &["log", "--pretty=%s"])?;
-        let subjects = log.lines().collect::<Vec<_>>();
-        assert_eq!(subjects.len(), 3, "expected init, change, revert: {log}");
-        assert!(
-            subjects[0].starts_with("Revert"),
-            "tip should be the revert commit: {log}"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn revert_commit_and_push_requires_clean_worktree() -> anyhow::Result<()> {
-        let sandbox = tempdir()?;
-        let root = sandbox.path();
-        let remote_dir = root.join("remote.git");
-        seed_remote_with_readme(root, &remote_dir)?;
-
-        let workspace_dir = root.join("workspace");
-        fs::create_dir_all(&workspace_dir)?;
-        let config = revert_test_config(&workspace_dir, &remote_dir)?;
-        ensure_git_checkout(&config, None)?;
-
-        fs::write(workspace_dir.join("README.md"), "world\n")?;
-        let commit =
-            commit_and_push_dirty(&config, workspace_dir.as_path(), "instafy: change", None)?;
-
-        // Dirty the tracked worktree and expect the revert to refuse.
-        fs::write(workspace_dir.join("README.md"), "dirty edit\n")?;
-        let result = revert_commit_and_push(&config, workspace_dir.as_path(), &commit, None);
-        let error = result.expect_err("revert should refuse on dirty worktree");
-        assert!(
-            error.to_string().contains("unsaved changes"),
-            "unexpected error: {error}"
-        );
-
-        // The dirty edit must survive untouched.
-        let local = fs::read_to_string(workspace_dir.join("README.md"))?;
-        assert_eq!(local, "dirty edit\n");
-
         Ok(())
     }
 

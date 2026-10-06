@@ -80,6 +80,25 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   When the controller sets `GIT_REMOTE_BASE_URL`, a runtime whose workspace already has files
   but no `.instafy/.git` then fails to start. Roll the file out only to fresh nodes or empty
   workspaces; see [Workspace durability](../docs/Runtime-Machines.md#workspace-durability).
+- The origin gateway (`docker/origin-gateway/Dockerfile`, `origin-http-server` with
+  `ORIGIN_MULTI_TENANT=1`) is stateless: it serves every cloud space from its canonical repository
+  under `ORIGIN_GIT_REMOTE_BASE_URL` and keeps no working copy. Leave `ORIGIN_GIT_REMOTE_URL`
+  unset or blank and `ORIGIN_STAGING_ROOT` unset (a blank value counts as set) for it, or it
+  refuses to start. Its workspace volume holds a disposable
+  mirror cache in `.git-cache/` (soft cap `ORIGIN_CACHE_MAX_BYTES`, default 20 GiB; below 2 GiB
+  free on that disk it removes the mirrors no request holds). Give it a volume of its own, never
+  the runtime provider's checkout folder (`DOCKER_REPO_HOST`): it moves every space folder in its
+  root that is not empty to `.legacy/` when it starts, and refuses to start on a folder that holds
+  the provider's `.instafy-checkout-stamps/` or `.instafy-evicted/`, or a runtime checkout with a
+  clean-stop marker or local recovery refs. Run it with an init as PID 1
+  (`docker run --init`, or `init: true` as in `docker/docker-compose.runtime.yml`). Started on the
+  volume of an older, stateful gateway image, it first moves that image's per-space working copies
+  to `.legacy/` on the same volume. Keep that volume until
+  [Retiring gateway working copies](../docs/Git-Service.md#retiring-gateway-working-copies) is
+  done: run `origin-http-server salvage` with a lasting `INSTAFY_NODE_NAME`, remove every `.legacy/`
+  entry, and review the private archives and bundles it leaves in `.salvage/` with the spaces'
+  owners (or copy `.salvage/` to durable storage that only operators can read) before you replace
+  the node or recreate the volume.
 - Local development remains source-built through
   `docker/docker-compose.runtime.yml` and its
   `instafy-runtime-agent:webdev-local` tag.

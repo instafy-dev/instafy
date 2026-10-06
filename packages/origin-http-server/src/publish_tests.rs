@@ -22,7 +22,7 @@ use crate::push::{clear_push_hook, set_push_hook, PushHookAction};
 use crate::recovery::{
     LOCAL_RECOVERY_DISMISSED_ROOT, LOCAL_RECOVERY_PUSHED_ROOT, LOCAL_RECOVERY_ROOT,
 };
-use crate::test_support::{git_in, git_output, ig, install_shard_hook};
+use crate::test_support::{git_in, git_output, ig, install_script, install_shard_hook};
 use crate::workspace_git::GitIdentity;
 
 const README: &str = "one\ntwo\nthree\nfour\nfive\n";
@@ -496,20 +496,17 @@ fn r3b2_flush_publishes_finished_commits_and_parks_dirty_edits() {
 /// that rejects it still publishes a diverged checkout.
 #[test]
 fn r3c_publish_works_without_merge_tree_write_tree() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     let real_git = git_in(&sc.root, &["--exec-path"]);
     let real_git = Path::new(&real_git).join("git");
     let wrapper = sc.root.join("old-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = merge-tree ]; then\n    echo 'usage: git merge-tree <base-tree> <branch1> <branch2>' >&2\n    exit 129\n  fi\ndone\nexec '{}' \"$@\"\n",
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
 
     sc.write("feature.rs", b"fn agent_feature() {}\n");
@@ -580,7 +577,6 @@ fn r3d_unborn_race_replays_onto_the_winner_once() {
 /// the parked copy is retired.
 #[test]
 fn r3f_refused_save_keeps_everything_and_succeeds_later() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     sc.write("README.md", b"one\ntwo\nthree\nfour\nfive\nuser line\n");
     sc.write("draft.md", b"unsaved draft\n");
@@ -592,8 +588,7 @@ fn r3f_refused_save_keeps_everything_and_succeeds_later() {
         "runtime work",
     );
     let hook = sc.remote.join("hooks").join("pre-receive");
-    fs::write(&hook, "#!/bin/sh\necho 'policy says no' >&2\nexit 1\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    install_script(&hook, "#!/bin/sh\necho 'policy says no' >&2\nexit 1\n");
     let tip = sc.main();
 
     let refused = sc.publish_paths(&["README.md"]);
@@ -1146,7 +1141,6 @@ fn n09_recovery_refs_are_idempotent_and_content_named() {
 /// keeps conflict refs.
 #[test]
 fn n10_publish_retires_superseded_unpublished_refs_but_keeps_conflicts() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     // A conflict ref.
     sc.write("README.md", b"one\nTWO BY AGENT\nthree\nfour\nfive\n");
@@ -1158,12 +1152,10 @@ fn n10_publish_retires_superseded_unpublished_refs_but_keeps_conflicts() {
     let conflict_ref = conflict.recovery_ref.clone().unwrap();
     // An unpublished ref, pushed but its publish refused (only main is refused).
     let hook = sc.remote.join("hooks").join("update");
-    fs::write(
+    install_script(
         &hook,
         "#!/bin/sh\nif [ \"$1\" = refs/heads/main ]; then echo 'main is closed' >&2; exit 1; fi\nexit 0\n",
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     sc.write("x.rs", b"fn x() {}\n");
     let refused = sc.publish_paths(&["x.rs"]);
     assert_eq!(refused.git_sync_status, SyncStatus::Unpublished);
@@ -1935,6 +1927,15 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
     ("tree_merge.rs", include_str!("tree_merge.rs")),
     ("publish_policy.rs", include_str!("publish_policy.rs")),
     ("workspace_git.rs", include_str!("workspace_git.rs")),
+    ("salvage.rs", include_str!("salvage.rs")),
+    ("salvage/canonical.rs", include_str!("salvage/canonical.rs")),
+    ("salvage/classify.rs", include_str!("salvage/classify.rs")),
+    ("salvage/outputs.rs", include_str!("salvage/outputs.rs")),
+    (
+        "salvage/repository.rs",
+        include_str!("salvage/repository.rs"),
+    ),
+    ("salvage/work.rs", include_str!("salvage/work.rs")),
 ];
 
 /// Modules under `src/` written before these rules: the command builder
@@ -2260,6 +2261,122 @@ fn the_spawn_rule_catches_a_module_that_runs_git_itself() {
     .is_empty());
 }
 
+/// What keeps or moves a working copy: the checkout handle, the per-space
+/// folder and its locks, receipts and staging, the checkout refresh and
+/// local commits, the runtime publish over a checkout, and the
+/// single-tenant routes themselves.
+const WORKING_COPY_NAMES: &[&str] = &[
+    "AppState",
+    "EmbeddedGitDirGuard",
+    "PublishContext",
+    "WorkspaceDir",
+    "abort_apply_idempotency_claim",
+    "apply_changes_transactional",
+    "apply_changes_transactional_file",
+    "claim_apply_idempotency",
+    "cleanup_origin_staging",
+    "commit_apply_locally",
+    "complete_apply_idempotency_claim",
+    "ensure_git_checkout",
+    "ensure_workspace_ready",
+    "instafy_git_dir",
+    "list_dirty_files",
+    "lookup_apply_idempotency",
+    "push_existing_head",
+    "repair_stale_checkout",
+    "revert_paths",
+    "stale_align",
+    "try_acquire_workspace_apply_lock",
+    "workspace_fs",
+    "workspace_lock",
+];
+
+/// Uses of working-copy machinery in the production code of a gateway
+/// module: any name in [`WORKING_COPY_NAMES`], a checkout `WorkspaceGit`
+/// (`WorkspaceGit::new`; the gateway opens bare mirrors only), the runtime
+/// recovery module, or the single-tenant router.
+fn working_copy_violations(name: &str, source: &str) -> Vec<String> {
+    let code = production_source(source);
+    let mut violations = Vec::new();
+    for identifier in code
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty())
+    {
+        if WORKING_COPY_NAMES.contains(&identifier) {
+            violations.push(format!("{name} names {identifier}"));
+        }
+    }
+    let compact: String = code.split_whitespace().collect();
+    for path in [
+        "WorkspaceGit::new(",
+        "crate::recovery::",
+        "crate::recovery::{",
+        "crate::routes::router",
+        "crate::routes::{router",
+        "crate::publish::publish(",
+        "crate::publish::refresh(",
+        "crate::publish::flush(",
+        "crate::publish::revert_commit(",
+    ] {
+        if compact.contains(path) {
+            violations.push(format!("{name} uses {path}"));
+        }
+    }
+    violations
+}
+
+/// The gateway keeps no working copy: no production module under
+/// `src/hosted/` reaches the checkout machinery single-tenant origins use.
+#[test]
+fn the_gateway_never_reaches_working_copy_machinery() {
+    let hosted = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/hosted");
+    let mut checked = 0;
+    for entry in fs::read_dir(&hosted).unwrap() {
+        let path = entry.unwrap().path();
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !file.ends_with(".rs") || file == "tests.rs" || file.ends_with("_tests.rs") {
+            continue;
+        }
+        let name = format!("hosted/{file}");
+        let violations = working_copy_violations(&name, &fs::read_to_string(&path).unwrap());
+        assert!(violations.is_empty(), "{violations:#?}");
+        checked += 1;
+    }
+    assert!(checked >= 10, "checked {checked} gateway modules");
+
+    // The rule catches each kind of use.
+    for source in [
+        "use crate::git::ensure_git_checkout;\n",
+        "fn f(root: &Path) { let _ = crate::workspace_git::WorkspaceGit::new(root, None); }\n",
+        "fn f(root: &Path) { let _ = WorkspaceGit :: new (root, None); }\n",
+        "use crate::recovery::{park, RecoveryKind};\n",
+        "fn f(s: AppState) -> Router { crate::routes::router(s) }\n",
+        "use crate::routes::{router as single};\n",
+        "use crate::workspace_lock::try_acquire_workspace_apply_lock;\n",
+        "use crate::apply::{apply_changes_transactional, ApplyManifest};\n",
+        "fn f(dir: &WorkspaceDir) {}\n",
+        "fn f(c: &PublishContext) { let _ = crate::publish::publish(c, r); }\n",
+    ] {
+        assert!(
+            !working_copy_violations("hosted/new.rs", source).is_empty(),
+            "not caught: {source}"
+        );
+    }
+    for source in [
+        "use crate::recovery_view::{parse_rev, RecoveryRef};\n",
+        "fn f(dir: &Path) { let _ = WorkspaceGit::bare(dir, None); }\n",
+        "use crate::publish::parse_raw_changes;\n",
+        "use crate::routes::{mime_type_for_path, FileContentResponse};\n",
+        "pub(crate) use routes::{router, HostedState};\n",
+        "#[cfg(test)]\nmod tests {\n    use crate::git::ensure_git_checkout;\n}\n",
+    ] {
+        assert!(
+            working_copy_violations("hosted/new.rs", source).is_empty(),
+            "flagged: {source}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The HTTP routes on a single-tenant origin.
 // ---------------------------------------------------------------------------
@@ -2288,7 +2405,6 @@ async fn serve_config(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_route_reports_conflicts_refusals_and_refresh() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
@@ -2314,8 +2430,7 @@ async fn sync_route_reports_conflicts_refusals_and_refresh() {
     assert!(body["baseRev"].is_string());
 
     let hook = sc.remote.join("hooks").join("pre-receive");
-    fs::write(&hook, "#!/bin/sh\necho 'closed' >&2\nexit 1\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    install_script(&hook, "#!/bin/sh\necho 'closed' >&2\nexit 1\n");
     sc.write("x.rs", b"fn x() {}\n");
     let response = client
         .post(format!("{base}/git/sync"))
@@ -2476,7 +2591,8 @@ async fn history_review_counts_the_parents_of_a_version() {
     let merge = report.rev.expect("a merge was published");
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
-    for (commit, parents) in [(merge.clone(), 2), (format!("{merge}^2"), 1)] {
+    let second = git_in(&sc.remote, &["rev-parse", &format!("{merge}^2")]);
+    for (commit, parents) in [(merge.clone(), 2), (second, 1)] {
         let body: serde_json::Value = client
             .get(format!("{base}/git/history/review"))
             .query(&[("commit", commit.as_str())])
@@ -2488,6 +2604,71 @@ async fn history_review_counts_the_parents_of_a_version() {
             .unwrap();
         assert_eq!(body["parentCount"], parents, "{commit}: {body}");
     }
+    server.abort();
+}
+
+/// The review's `commit` is a version id, full or abbreviated, in either
+/// case. Anything else (an option such as `--output=<file>`, a name or a
+/// revision expression) is answered with an error and never reaches git:
+/// no file is written. `list_commit_files` refuses such a value itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn history_review_takes_a_version_id_never_an_option() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let (base, server) = serve(&sc).await;
+    let client = reqwest::Client::new();
+    let review = |commit: String| {
+        let request = client
+            .get(format!("{base}/git/history/review"))
+            .query(&[("commit", commit)]);
+        async move {
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            response.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+    let written = sc.root.join("written-by-review.txt");
+    for commit in [
+        format!("--output={}", written.display()),
+        "HEAD".to_string(),
+        format!("{}^", sc.main()),
+        "-p".to_string(),
+    ] {
+        let body = review(commit.clone()).await;
+        assert_eq!(body["supported"], true, "{commit}: {body}");
+        assert_eq!(body["entries"], serde_json::json!([]), "{commit}: {body}");
+        assert!(body["error"].is_string(), "{commit}: {body}");
+        assert!(body.get("parentCount").is_none(), "{commit}: {body}");
+    }
+    assert!(!written.exists(), "git wrote {written:?}");
+
+    let head = sc.main();
+    for commit in [
+        head.clone(),
+        head[..12].to_string(),
+        head.to_ascii_uppercase(),
+    ] {
+        let body = review(commit.clone()).await;
+        assert!(body.get("error").is_none(), "{commit}: {body}");
+        assert_eq!(body["parentCount"], 0, "{commit}: {body}");
+        let paths: Vec<&str> = body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["path"].as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            ["README.md", "doc.md", "logo.bin"],
+            "{commit}: {body}"
+        );
+    }
+
+    let option = format!("--output={}", written.display());
+    assert!(crate::git::list_commit_files(&sc.ws, &option, None).is_err());
+    assert!(!written.exists(), "git wrote {written:?}");
     server.abort();
 }
 
@@ -2505,6 +2686,9 @@ fn push_to_ref(
     for (path, contents) in files {
         match contents {
             Some(bytes) => write(&sc.other, path, bytes),
+            None if sc.other.join(path).is_dir() => {
+                fs::remove_dir_all(sc.other.join(path)).unwrap()
+            }
             None => fs::remove_file(sc.other.join(path)).unwrap(),
         }
     }
@@ -3196,49 +3380,6 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
     server.abort();
 }
 
-/// A multi-tenant `/git/sync` commits with `git commit` in the project's
-/// checkout, not through the publish, so only the route drops the trailers
-/// the origin or the gateway trusts from the caller's message; the rest of
-/// the message stays.
-#[tokio::test(flavor = "multi_thread")]
-async fn multi_tenant_saves_drop_origin_trailers_at_the_route() {
-    let sc = Scenario::new(Options::default());
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let mut config = sc.config.clone();
-    config.multi_tenant = true;
-    config.hosted_checkout = false;
-    config.workspace_root = root.clone();
-    let workspace = config.workspace_root_for_project(config.project_id);
-    fs::create_dir_all(&workspace).unwrap();
-    let project = ServerConfig {
-        workspace_root: workspace.clone(),
-        ..config.clone()
-    };
-    ensure_git_checkout(&project, None).expect("project checkout");
-    write(&workspace, "notes.md", b"notes\n");
-    let (base, server) = serve_config(config, root).await;
-
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    let (status, body) = post_json(
-        &reqwest::Client::new(),
-        format!("{base}/git/sync"),
-        serde_json::json!({
-            "paths": ["notes.md"],
-            "message": format!(
-                "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {salvage}\n\
-                 \u{1}INSTAFY-APPLY-KEY: imp:forged"
-            ),
-        }),
-    )
-    .await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(sc.remote_file("notes.md").as_deref(), Some("notes\n"));
-    let saved = git_in(&sc.remote, &["log", "-1", "--format=%B", "main"]);
-    assert_eq!(saved, "Tidy\n\nInstafy-Resolved-By: assistant");
-    server.abort();
-}
-
 /// The publish drops the same trailers from its own message, whoever calls
 /// it: a Desktop save never relies on the route alone.
 #[test]
@@ -3292,6 +3433,7 @@ async fn restore_route_restores_unsaved_work_once() {
             ("kept.md", Some(b"kept\n")),
             (".env", Some(b"TOKEN=1\n")),
             ("debug.log", Some(b"log\n")),
+            ("chat-upload-1-x.png", Some(b"png\n")),
         ],
         &[],
         "Unsaved edits with a secret",
@@ -3320,7 +3462,11 @@ async fn restore_route_restores_unsaved_work_once() {
     assert_eq!(body["gitSyncStatus"], "published");
     assert_eq!(
         body["notRestored"],
-        serde_json::json!([".env", "debug.log"])
+        serde_json::json!([
+            { "path": ".env", "reason": "secret" },
+            { "path": "chat-upload-1-x.png", "reason": "attachment" },
+            { "path": "debug.log", "reason": "ignored" },
+        ])
     );
     assert_eq!(sc.remote_file("kept.md").as_deref(), Some("kept\n"));
     assert!(sc.remote_file(".env").is_none());
@@ -3404,7 +3550,10 @@ async fn restore_route_restores_unsaved_work_once() {
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true);
-    assert_eq!(body["notRestored"], serde_json::json!(["README.md"]));
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": "README.md", "reason": "kept" }])
+    );
     // Everything left out was left out on request: the ref goes.
     assert_eq!(body["refDeleted"], true, "{body}");
     assert!(sc.remote_refs(&conflicted).is_empty());
@@ -3595,12 +3744,18 @@ async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
     fs::remove_file(sc.ws.join("unrelated.md")).unwrap();
 
     // What is left is a secret, or a file `main` now ignores.
-    for (reference, left_out) in [(refused, ".env"), (ignored, "notes/plan.md")] {
+    for (reference, left_out, reason) in [
+        (refused, ".env", "secret"),
+        (ignored, "notes/plan.md", "ignored"),
+    ] {
         let (status, body) = restore(serde_json::json!({ "ref": reference })).await;
         assert_eq!(status, reqwest::StatusCode::OK, "{reference}: {body}");
         assert_eq!(body["committed"], false, "{reference}: {body}");
         assert_eq!(body["marked"], true, "{reference}: {body}");
-        assert_eq!(body["notRestored"], serde_json::json!([left_out]));
+        assert_eq!(
+            body["notRestored"],
+            serde_json::json!([{ "path": left_out, "reason": reason }])
+        );
         let marker = body["localRev"].as_str().unwrap().to_string();
         assert!(on_main(&sc, &marker), "{reference}");
         assert!(is_marker(&marker, reference), "{reference}");
@@ -3734,7 +3889,11 @@ async fn a_salvage_marker_survives_the_first_publish_of_an_unrelated_history() {
 
     let (status, body) = restore().await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["notRestored"], serde_json::json!([".env"]), "{body}");
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": ".env", "reason": "secret" }]),
+        "{body}"
+    );
     assert_eq!(body["refDeleted"], false, "{body}");
     let marker = sc.main();
     assert_ne!(marker, main_before, "{body}");
@@ -4034,147 +4193,121 @@ async fn a_restore_keep_list_is_bounded() {
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["notRestored"], serde_json::json!(["docs/a.md"]));
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": "docs/a.md", "reason": "kept" }])
+    );
     assert_eq!(sc.remote_file("docs2/b.md").as_deref(), Some("b\n"));
     assert!(sc.remote_file("docs/a.md").is_none());
     server.abort();
 }
 
-/// Work that adds a folder where `main` now has a file conflicts on both
-/// paths. Keeping the saved version of either side, or of both, clears
-/// the clash and restores the rest; keeping only part of the folder does
-/// not, because the rest of it would still be dropped silently.
+/// A restore never replaces a file of the folder that `HEAD` does not
+/// track, ignored or excluded ones included: `git status` does not list
+/// them, and `read-tree -m -u` replaces them without asking. A local file at
+/// a path the restore writes (ignored by `.gitignore`, or excluded through
+/// the checkout's `info/exclude`), a local file where it makes a folder,
+/// and local files inside a folder it turns into a file are 409
+/// `dirty_paths`; they, `main` and the refs stay as they were. A new file
+/// next to local ones is restored, and leaves them alone.
 #[tokio::test(flavor = "multi_thread")]
-async fn keep_clears_a_file_and_folder_conflict() {
+async fn a_restore_never_replaces_files_head_does_not_track() {
     let sc = Scenario::new(Options {
         desktop: true,
+        seed: vec![
+            (".gitignore", b"*.log\n".to_vec()),
+            ("logs/keep.md", b"keep\n".to_vec()),
+        ],
         ..Options::default()
     });
     let mut refs = Vec::new();
     for (index, files) in [
-        vec!["docs/readme.md", "other-0.md"],
-        vec!["docs/readme.md", "other-1.md"],
-        vec!["docs/readme.md", "other-2.md"],
-        vec!["docs/readme.md", "docs/extra.md", "other-3.md"],
+        // Stops ignoring logs and brings its own `app.log`.
+        vec![
+            (".gitignore", Some(&b"# nothing ignored\n"[..])),
+            ("app.log", Some(&b"work log\n"[..])),
+        ],
+        // Agent settings, which the folder excludes through `info/exclude`.
+        vec![(".codex/config.toml", Some(&b"agent = true\n"[..]))],
+        // `logs` becomes a file.
+        vec![("logs", None), ("logs", Some(&b"a file now\n"[..]))],
+        // A folder where the folder holds an ignored file.
+        vec![
+            (".gitignore", Some(&b"# nothing ignored\n"[..])),
+            ("trace.log/inner.md", Some(&b"inner\n"[..])),
+        ],
     ]
     .into_iter()
     .enumerate()
     {
         let reference =
             recovery_ref_name(&sc, &format!("20261005T12000{index}Z-unsaved-0123456789ab"));
-        let contents: Vec<(&str, Option<&[u8]>)> = files
-            .iter()
-            .map(|path| (*path, Some(b"work\n".as_slice())))
-            .collect();
-        let commit = push_to_ref(&sc, &contents, &[], "Unsaved edits", &reference);
+        let commit = push_to_ref(&sc, &files, &[], "Unsaved edits", &reference);
+        git_in(&sc.other, &["clean", "-q", "-fdx"]);
         refs.push((reference, commit));
     }
-    sc.push_other(&[("docs", Some(b"a file now\n"))], "docs is a file");
-    sc.publish(Selection::None);
+    sc.write("app.log", b"the person's own log\n");
+    sc.write(".codex/config.toml", b"mine = true\n");
+    sc.write(".codex/other.toml", b"other = true\n");
+    sc.write("logs/local.log", b"a local log\n");
+    sc.write("trace.log", b"a local trace\n");
+    assert_eq!(sc.status(), "", "every local file is ignored or excluded");
+    let main = sc.main();
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
-    let restore =
-        |body: serde_json::Value| post_json(&client, format!("{base}/git/recovery/restore"), body);
 
-    let (status, body) = restore(serde_json::json!({ "ref": refs[0].0 })).await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["code"], "restore_conflict");
-    assert_eq!(body["paths"], serde_json::json!(["docs", "docs/readme.md"]));
-
-    for (index, keep) in [
-        serde_json::json!(["docs", "docs/readme.md"]),
-        serde_json::json!(["docs"]),
-        serde_json::json!(["docs/readme.md"]),
-    ]
-    .into_iter()
-    .enumerate()
+    for ((reference, commit), in_the_way) in
+        refs.iter()
+            .zip(["app.log", ".codex/config.toml", "logs", "trace.log"])
     {
-        let (reference, commit) = &refs[index];
-        let (status, body) =
-            restore(serde_json::json!({ "ref": reference, "rev": commit, "keep": keep })).await;
-        assert_eq!(status, reqwest::StatusCode::OK, "{keep}: {body}");
-        assert_eq!(body["committed"], true, "{keep}: {body}");
+        let (status, body) = post_json(
+            &client,
+            format!("{base}/git/recovery/restore"),
+            serde_json::json!({ "ref": reference, "rev": commit }),
+        )
+        .await;
         assert_eq!(
-            body["notRestored"],
-            serde_json::json!(["docs/readme.md"]),
-            "{keep}: {body}"
+            status,
+            reqwest::StatusCode::CONFLICT,
+            "{in_the_way}: {body}"
         );
-        assert_eq!(body["refDeleted"], true, "{keep}: {body}");
-        assert_eq!(
-            sc.remote_file(&format!("other-{index}.md")).as_deref(),
-            Some("work\n")
-        );
-        assert_eq!(sc.remote_file("docs").as_deref(), Some("a file now\n"));
+        assert_eq!(body["code"], "dirty_paths", "{in_the_way}: {body}");
+        assert_eq!(body["paths"], serde_json::json!([in_the_way]), "{body}");
+        assert_eq!(sc.main(), main, "{in_the_way}");
+        assert_eq!(sc.remote_refs(reference).len(), 1, "{in_the_way}");
     }
-
-    // Keeping one file of the folder leaves the other in the clash.
-    let (reference, commit) = &refs[3];
-    let (status, body) = restore(serde_json::json!({
-        "ref": reference,
-        "rev": commit,
-        "keep": ["docs/readme.md"],
-    }))
-    .await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["code"], "restore_conflict");
-    assert_eq!(body["paths"], serde_json::json!(["docs", "docs/extra.md"]));
-    assert!(sc.remote_file("other-3.md").is_none());
-    server.abort();
-}
-
-/// Keeping a folder settles its clash, but a file below it that can never
-/// come back here (a secret, which the conflict never showed) is still
-/// refused, not kept on request: the ref stays, so that work is not
-/// removed on the person's behalf.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_kept_folder_never_lets_refused_work_below_it_go() {
-    let sc = Scenario::new(Options {
-        desktop: true,
-        ..Options::default()
-    });
-    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
-    let commit = push_to_ref(
-        &sc,
-        &[
-            ("docs/readme.md", Some(b"work\n")),
-            ("docs/.env", Some(b"TOKEN=1\n")),
-            ("other.md", Some(b"other\n")),
-        ],
-        &[],
-        "Unsaved edits",
-        &reference,
+    assert_eq!(
+        sc.disk("app.log").as_deref(),
+        Some("the person's own log\n")
     );
-    sc.push_other(&[("docs", Some(b"a file now\n"))], "docs is a file");
-    sc.publish(Selection::None);
-    let (base, server) = serve(&sc).await;
-    let client = reqwest::Client::new();
-    let restore =
-        |body: serde_json::Value| post_json(&client, format!("{base}/git/recovery/restore"), body);
+    assert_eq!(
+        sc.disk(".codex/config.toml").as_deref(),
+        Some("mine = true\n")
+    );
+    assert_eq!(sc.disk("logs/local.log").as_deref(), Some("a local log\n"));
+    assert_eq!(sc.disk("logs/keep.md").as_deref(), Some("keep\n"));
+    assert_eq!(sc.disk("trace.log").as_deref(), Some("a local trace\n"));
 
-    let (status, body) = restore(serde_json::json!({ "ref": reference, "rev": commit })).await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["paths"], serde_json::json!(["docs", "docs/readme.md"]));
-
-    let (status, body) = restore(serde_json::json!({
-        "ref": reference,
-        "rev": commit,
-        "keep": ["docs", "docs/readme.md"],
-    }))
+    // With the person's copy moved away, the settings come back; the other
+    // local file in that folder stays.
+    fs::remove_file(sc.ws.join(".codex/config.toml")).unwrap();
+    let (reference, commit) = &refs[1];
+    let (status, body) = post_json(
+        &client,
+        format!("{base}/git/recovery/restore"),
+        serde_json::json!({ "ref": reference, "rev": commit }),
+    )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true, "{body}");
     assert_eq!(
-        body["notRestored"],
-        serde_json::json!(["docs/.env", "docs/readme.md"])
+        sc.disk(".codex/config.toml").as_deref(),
+        Some("agent = true\n")
     );
-    assert_eq!(body["refDeleted"], false, "{body}");
-    assert_eq!(sc.remote_refs(&reference).len(), 1);
     assert_eq!(
-        sc.recovery_file(&reference, "docs/.env").as_deref(),
-        Some("TOKEN=1\n")
+        sc.disk(".codex/other.toml").as_deref(),
+        Some("other = true\n")
     );
-    assert_eq!(sc.remote_file("other.md").as_deref(), Some("other\n"));
-    assert_eq!(sc.remote_file("docs").as_deref(), Some("a file now\n"));
     server.abort();
 }
 
@@ -4214,7 +4347,10 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], false, "{body}");
     assert_eq!(body["marked"], false, "{body}");
-    assert_eq!(body["notRestored"], serde_json::json!(["notes/plan.md"]));
+    assert_eq!(
+        body["notRestored"],
+        serde_json::json!([{ "path": "notes/plan.md", "reason": "ignored" }])
+    );
     assert_eq!(body["refDeleted"], false, "{body}");
     assert_eq!(body["rev"], main_before.as_str(), "{body}");
     assert_eq!(sc.main(), main_before);
@@ -4339,35 +4475,6 @@ async fn unsaved_work_without_a_canonical_repository_is_unsupported() {
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["code"], "not_supported", "{body}");
     assert!(body.get("entries").is_none(), "{body}");
-    server.abort();
-}
-
-/// A multi-tenant origin serves no recovery routes.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_multi_tenant_origin_mounts_no_recovery_routes() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let mut config = Scenario::new(Options::default()).config;
-    config.workspace_root = root.clone();
-    config.git_remote_url = None;
-    config.multi_tenant = true;
-    let (base, server) = serve_config(config, root).await;
-    let client = reqwest::Client::new();
-    let response = client
-        .get(format!("{base}/git/recovery"))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
-    for path in ["/git/recovery/restore", "/git/recovery/dismiss"] {
-        let response = client
-            .post(format!("{base}{path}"))
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{path}");
-    }
     server.abort();
 }
 
@@ -4883,14 +4990,11 @@ fn read_only_refresh_follows_main_and_never_pushes() {
 /// An update hook on the remote that refuses only `main`, so recovery refs
 /// still push. Returns the hook's path.
 fn close_main(sc: &Scenario) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
     let hook = sc.remote.join("hooks").join("update");
-    fs::write(
+    install_script(
         &hook,
         "#!/bin/sh\nif [ \"$1\" = refs/heads/main ]; then echo 'main is closed' >&2; exit 1; fi\nexit 0\n",
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     hook
 }
 
@@ -5049,7 +5153,6 @@ async fn shutdown_during_a_turn_keeps_its_commits_off_main() {
 /// and the unsaved edit, and pushes both copies.
 #[test]
 fn flush_keeps_everything_when_publishing_fails() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     sc.write("done.rs", b"fn done() {}\n");
     let commit = sc.agent_commit(&["done.rs"], "finished work");
@@ -5060,15 +5163,13 @@ fn flush_keeps_everything_when_publishing_fails() {
     let real_git = git_in(&sc.root, &["--exec-path"]);
     let real_git = Path::new(&real_git).join("git");
     let wrapper = sc.root.join("broken-merge-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = --aggressive ]; then\n    echo 'merge broke' >&2\n    exit 1\n  fi\ndone\nexec '{}' \"$@\"\n",
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
     let report = flush(&sc.ctx(true), false);
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
@@ -5615,15 +5716,12 @@ fn a_desktop_folder_meeting_a_file_keeps_the_users_bytes() {
 /// local; it is pushed for real once the remote keeps it.
 #[test]
 fn a_recovery_push_counts_only_when_the_remote_shows_it() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     let hook = sc.remote.join("hooks").join("post-receive");
-    fs::write(
+    install_script(
         &hook,
         "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/instafy/recovery/*) git update-ref -d \"$ref\" ;;\n  esac\ndone\nexit 0\n",
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nleft over\n");
     let report = flush(&sc.ctx(true), false).unwrap();
     assert_eq!(report.unpushed_refs, 1, "{report:?}");
@@ -5736,6 +5834,116 @@ fn apply_archive(path: &str, content: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(archive)
 }
 
+/// A Desktop apply that commits (`autoCommitAfterApply`) stages exactly the
+/// paths it names, read as names, never as patterns: removing `notes[1].md`
+/// keeps a committed `notes1.md`, and writing `local[1].md` never commits
+/// an ignored `local1.md` that the pattern also matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apply_commit_stages_its_paths_as_names_not_patterns() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        seed: vec![(".gitignore", b"local1.md\n".to_vec())],
+        ..Options::default()
+    });
+    sc.push_other(
+        &[
+            ("notes1.md", Some(b"keep me\n")),
+            ("notes[1].md", Some(b"remove me\n")),
+        ],
+        "notes",
+    );
+    sc.publish(Selection::None);
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("keep me\n"));
+    sc.write("local1.md", b"mine only\n");
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": [{ "path": "local[1].md", "size": 8 }],
+                "deletes": ["notes[1].md"],
+                "autoCommitAfterApply": true,
+            },
+            "archiveBase64": apply_archive("local[1].md", b"applied\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    let listed = ig(&sc.ws, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    let tracked: Vec<&str> = listed.lines().collect();
+    for path in ["notes1.md", "local[1].md"] {
+        assert!(tracked.contains(&path), "{path}: {tracked:?}");
+    }
+    for path in ["notes[1].md", "local1.md"] {
+        assert!(!tracked.contains(&path), "{path}: {tracked:?}");
+    }
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("keep me\n"));
+    assert_eq!(sc.disk("notes[1].md"), None);
+    assert_eq!(sc.disk("local[1].md").as_deref(), Some("applied\n"));
+    assert_eq!(sc.disk("local1.md").as_deref(), Some("mine only\n"));
+    server.abort();
+}
+
+/// A Desktop apply that commits (`autoCommitAfterApply`) hands git its
+/// message on stdin: a message longer than the system lets one argument be
+/// lands whole, as the commit's message.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apply_commit_carries_a_long_message_whole() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let mut message = String::from("Import the notes\n\n");
+    let mut line = 0usize;
+    while message.len() < 2 * 1024 * 1024 + 1 {
+        message.push_str(&format!("line {line} of the imported notes\n"));
+        line += 1;
+    }
+    let before = ig(&sc.ws, &["rev-parse", "HEAD"]);
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": [{ "path": "notes.md", "size": 6 }],
+                "deletes": [],
+                "autoCommitAfterApply": true,
+                "commitMessage": message,
+            },
+            "archiveBase64": apply_archive("notes.md", b"notes\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        &body[..body.len().min(300)]
+    );
+    assert_eq!(ig(&sc.ws, &["rev-parse", "HEAD~1"]), before);
+    let committed = ig(&sc.ws, &["log", "-1", "--format=%B", "HEAD"]);
+    assert!(
+        committed == message.trim_end(),
+        "the message was not kept whole"
+    );
+    assert_eq!(
+        ig(
+            &sc.ws,
+            &["ls-tree", "--name-only", "HEAD", "--", "notes.md"]
+        ),
+        "notes.md"
+    );
+    server.abort();
+}
+
 /// A Desktop `/apply` whose `expected` blob id is stale (the agent edited
 /// the file since the client read it) is refused with the path, and the
 /// agent's edit stays.
@@ -5790,22 +5998,109 @@ async fn apply_route_refuses_a_stale_expected_blob_and_keeps_the_edit() {
     server.abort();
 }
 
-/// The gateway's conditional writes come later: a multi-tenant origin
-/// ignores `expected`.
+/// Creating a file over a link listings hide (the client read the path as
+/// absent) answers as on the hosted gateway: 400 `unsupported_entry` when
+/// the version the client read (`baseRev`) had this same link, since
+/// reading again cannot show it; 409 `head_moved` when the link is not what
+/// that version had, when no version is named, and for an
+/// `autoCommitAfterApply` apply (the managed-files bootstrap reads again
+/// and leaves the path alone).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn multi_tenant_apply_ignores_expected() {
+async fn creating_over_a_hidden_link_is_unsupported_unless_it_changed_since() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let before = sc.push_other(&[("AGENTS.md", Some(b"agents\n"))], "agents");
+    std::os::unix::fs::symlink("AGENTS.md", sc.other.join("CLAUDE.md")).unwrap();
+    let linked = sc.push_other(&[], "a link");
+    sc.publish(Selection::None);
+    assert!(fs::symlink_metadata(sc.ws.join("CLAUDE.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let head = git_in(&sc.ws, &["--git-dir", ".instafy/.git", "rev-parse", "HEAD"]);
+    assert_eq!(head, linked);
+    let (base, server) = serve(&sc).await;
+    let create = |extra: serde_json::Value| {
+        let mut manifest = serde_json::json!({
+            "projectId": sc.config.project_id,
+            "files": [{ "path": "CLAUDE.md", "size": 5 }],
+            "deletes": [],
+            "expected": { "CLAUDE.md": null },
+        });
+        if let (Some(fields), serde_json::Value::Object(extra)) = (manifest.as_object_mut(), extra)
+        {
+            fields.extend(extra);
+        }
+        let base = base.clone();
+        async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/apply-json"))
+                .json(&serde_json::json!({
+                    "manifest": manifest,
+                    "archiveBase64": apply_archive("CLAUDE.md", b"mine\n"),
+                }))
+                .send()
+                .await
+                .unwrap();
+            let status = response.status().as_u16();
+            let body: serde_json::Value = response.json().await.unwrap();
+            (status, body)
+        }
+    };
+
+    // The version the person read had this same link.
+    let (status, body) = create(serde_json::json!({ "baseRev": linked })).await;
+    assert_eq!(
+        (status, body["code"].as_str()),
+        (400, Some("unsupported_entry")),
+        "{body}"
+    );
+    assert_eq!(body["paths"], serde_json::json!(["CLAUDE.md"]), "{body}");
+
+    // The link appeared after the version the person read; no version; a
+    // bootstrap.
+    for extra in [
+        serde_json::json!({ "baseRev": before }),
+        serde_json::json!({}),
+        serde_json::json!({ "baseRev": linked, "autoCommitAfterApply": true }),
+    ] {
+        let (status, body) = create(extra.clone()).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("head_moved")),
+            "{extra}: {body}"
+        );
+        assert_eq!(
+            body["paths"],
+            serde_json::json!(["CLAUDE.md"]),
+            "{extra}: {body}"
+        );
+    }
+    assert!(fs::symlink_metadata(sc.ws.join("CLAUDE.md"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(sc.main(), linked);
+    server.abort();
+}
+
+/// The single-tenant routes serve one checkout. A gateway configuration
+/// gets the hosted routes, which keep no working copy, so these refuse it
+/// before anything touches the workspace root.
+#[test]
+fn the_single_tenant_routes_refuse_a_gateway_configuration() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let project_id = Uuid::new_v4();
-    let workspace = root.join(project_id.to_string());
-    fs::create_dir_all(&workspace).unwrap();
-    fs::write(workspace.join("README.md"), b"agent edit\n").unwrap();
     let config = ServerConfig {
         project_id,
-        origin_id: Uuid::new_v4(),
+        origin_id: Uuid::nil(),
         workspace_root: root.clone(),
         git_remote_url: None,
-        git_remote_base_url: None,
+        git_remote_base_url: Some("file:///nowhere".to_string()),
         git_branch: "main".to_string(),
         git_remote_name: "origin".to_string(),
         git_author_name: "Instafy Origin".to_string(),
@@ -5824,28 +6119,19 @@ async fn multi_tenant_apply_ignores_expected() {
         multi_tenant: true,
         hosted_checkout: false,
     };
-    let (base, server) = serve_config(config, root.clone()).await;
-    let stale = crate::workspace_git::blob_oid(b"what the client read\n");
-    let response = reqwest::Client::new()
-        .post(format!("{base}/apply-json"))
-        .json(&serde_json::json!({
-            "manifest": {
-                "projectId": project_id,
-                "files": [{ "path": "README.md", "size": 12 }],
-                "deletes": [],
-                "expected": { "README.md": stale },
-            },
-            "archiveBase64": apply_archive("README.md", b"from editor\n"),
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        fs::read_to_string(workspace.join("README.md")).unwrap(),
-        "from editor\n"
-    );
-    server.abort();
+    let client = reqwest::Client::new();
+    let validator = crate::auth::TokenValidator::new(client.clone(), config.jwks_url.clone());
+    let refused = crate::routes::AppState::new(
+        std::sync::Arc::new(config),
+        validator,
+        client,
+        root.clone(),
+        None,
+    )
+    .err()
+    .expect("a gateway configuration is refused");
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
 }
 
 /// Restore and dismiss change canonical for everyone, so they take the
@@ -6180,19 +6466,16 @@ fn two_dismissals_on_one_chain_publish_neither() {
 
 /// A git whose branch moves fail, so a dismissal cannot be applied.
 fn with_branch_moves_failing<T>(sc: &Scenario, body: impl FnOnce() -> T) -> T {
-    use std::os::unix::fs::PermissionsExt as _;
     let real_git = git_in(&sc.root, &["--exec-path"]);
     let real_git = Path::new(&real_git).join("git");
     let wrapper = sc.root.join("stuck-branch-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nupdate=0\nhead=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    reset) echo 'reset broke' >&2; exit 1 ;;\n    update-ref) update=1 ;;\n    HEAD) head=1 ;;\n  esac\ndone\nif [ $update = 1 ] && [ $head = 1 ]; then echo 'branch move broke' >&2; exit 1; fi\nexec '{}' \"$@\"\n",
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
     let result = body();
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
@@ -6598,7 +6881,6 @@ async fn a_resume_after_a_skipped_stop_lets_saves_through() {
 /// can remove the lock files it holds before it exits.
 #[test]
 fn a_network_call_out_of_time_is_asked_to_stop_first() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     sc.write("done.rs", b"fn done() {}\n");
     sc.agent_commit(&["done.rs"], "finished work");
@@ -6606,16 +6888,14 @@ fn a_network_call_out_of_time_is_asked_to_stop_first() {
     let real_git = Path::new(&real_git).join("git");
     let marker = sc.root.join("asked-to-stop");
     let wrapper = sc.root.join("slow-fetch-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = fetch ]; then\n    sleep 30 &\n    pid=$!\n    trap 'touch \"{}\"; kill $pid; exit 143' TERM\n    wait $pid\n    exit 1\n  fi\ndone\nexec '{}' \"$@\"\n",
             marker.display(),
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
     let started = Instant::now();
     let report = crate::publish::flush_within(&sc.ctx(true), false, Duration::from_secs(3));
@@ -6628,4 +6908,67 @@ fn a_network_call_out_of_time_is_asked_to_stop_first() {
     );
     assert!(marker.exists(), "the fetch was killed without SIGTERM");
     assert_eq!(report.unpushed_refs, 1, "{report:?}");
+}
+
+/// Discarding a file through Desktop's `/git/revert` puts back that file
+/// alone: its name is read as a name, never as a pattern. A tracked
+/// sibling such a pattern would match (`notes1.md` for `notes[1].md`,
+/// `app/i.tsx` for `app/[id].tsx`) keeps its unsaved edit, and a new file
+/// of such a name is removed instead of a tracked sibling being put back
+/// in its place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_discard_puts_back_only_the_file_it_names() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    sc.push_other(
+        &[
+            ("notes1.md", Some(b"saved one\n")),
+            ("notes[1].md", Some(b"saved bracket\n")),
+            ("app/i.tsx", Some(b"saved i\n")),
+            ("app/[id].tsx", Some(b"saved id\n")),
+            ("draft1.md", Some(b"saved draft\n")),
+        ],
+        "names that read as patterns",
+    );
+    sc.publish(Selection::None);
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("saved one\n"));
+    sc.write("notes1.md", b"unsaved one\n");
+    sc.write("notes[1].md", b"discard me\n");
+    sc.write("app/i.tsx", b"unsaved i\n");
+    sc.write("app/[id].tsx", b"discard me\n");
+    sc.write("draft1.md", b"unsaved draft\n");
+    sc.write("draft[1].md", b"new, discard me\n");
+
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/git/revert"))
+        .json(&serde_json::json!({
+            "paths": ["notes[1].md", "app/[id].tsx", "draft[1].md"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    server.abort();
+
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(
+        body["reverted"],
+        serde_json::json!(["app/[id].tsx", "notes[1].md"]),
+        "{body}"
+    );
+    assert_eq!(
+        body["removed"],
+        serde_json::json!(["draft[1].md"]),
+        "{body}"
+    );
+    assert_eq!(sc.disk("notes[1].md").as_deref(), Some("saved bracket\n"));
+    assert_eq!(sc.disk("app/[id].tsx").as_deref(), Some("saved id\n"));
+    assert_eq!(sc.disk("draft[1].md"), None);
+    assert_eq!(sc.disk("notes1.md").as_deref(), Some("unsaved one\n"));
+    assert_eq!(sc.disk("app/i.tsx").as_deref(), Some("unsaved i\n"));
+    assert_eq!(sc.disk("draft1.md").as_deref(), Some("unsaved draft\n"));
 }

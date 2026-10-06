@@ -4,11 +4,14 @@ use std::process;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
-use origin_http_server::config::ServerConfig;
+use origin_http_server::config::{
+    resolve_gateway_identity, ServerConfig, DEFAULT_ORIGIN_AUTHOR_EMAIL,
+};
+use origin_http_server::hosted::HostedGatewayConfig;
 use origin_http_server::server::OriginHttpServer;
 
 #[tokio::main]
@@ -20,9 +23,24 @@ async fn main() {
 }
 
 async fn real_main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("salvage") {
+        // A one-shot run next to the server (`docker exec <gateway>
+        // origin-http-server salvage ...`): its report goes to stdout, and
+        // only warnings are logged.
+        init_salvage_tracing();
+        process::exit(origin_http_server::salvage::cli(args[2..].to_vec()).await);
+    }
     init_tracing()?;
     let config = load_config()?;
-    let mut server = OriginHttpServer::new(config.clone())?;
+    let mut server = if config.multi_tenant {
+        let hosted = HostedGatewayConfig::from_cache_max_bytes(
+            read_env("ORIGIN_CACHE_MAX_BYTES").as_deref(),
+        )?;
+        OriginHttpServer::new_hosted(config.clone(), hosted)?
+    } else {
+        OriginHttpServer::new(config.clone())?
+    };
 
     let start = server.start().await?;
     info!(
@@ -50,6 +68,15 @@ fn init_tracing() -> Result<()> {
         .init();
 
     Ok(())
+}
+
+fn init_salvage_tracing() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn load_config() -> Result<ServerConfig> {
@@ -84,10 +111,26 @@ fn load_config() -> Result<ServerConfig> {
     let git_branch = read_env("ORIGIN_GIT_BRANCH").unwrap_or_else(|| "main".to_string());
     let git_remote_name =
         read_env("ORIGIN_GIT_REMOTE_NAME").unwrap_or_else(|| "origin".to_string());
-    let git_author_name =
-        read_env("ORIGIN_GIT_AUTHOR_NAME").unwrap_or_else(|| "instafy-origin".to_string());
-    let git_author_email =
-        read_env("ORIGIN_GIT_AUTHOR_EMAIL").unwrap_or_else(|| "origin@instafy.dev".to_string());
+    // The gateway trusts commits under its own address (restores, import
+    // receipts), so it never commits under the runtimes' default address.
+    let (git_author_name, git_author_email) = if multi_tenant {
+        let identity = resolve_gateway_identity(
+            read_env("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL").as_deref(),
+            read_env("ORIGIN_GATEWAY_GIT_AUTHOR_NAME").as_deref(),
+            read_env("ORIGIN_GIT_AUTHOR_EMAIL").as_deref(),
+            read_env("ORIGIN_GIT_AUTHOR_NAME").as_deref(),
+        )?;
+        if let Some(warning) = &identity.warning {
+            warn!("{warning}");
+        }
+        (identity.name, identity.email)
+    } else {
+        (
+            read_env("ORIGIN_GIT_AUTHOR_NAME").unwrap_or_else(|| "instafy-origin".to_string()),
+            read_env("ORIGIN_GIT_AUTHOR_EMAIL")
+                .unwrap_or_else(|| DEFAULT_ORIGIN_AUTHOR_EMAIL.to_string()),
+        )
+    };
     let bind_host = read_env("ORIGIN_BIND_HOST").unwrap_or_else(|| "0.0.0.0".to_string());
     let bind_port: u16 = read_env("ORIGIN_BIND_PORT")
         .as_deref()
