@@ -375,6 +375,18 @@ Before it listens, the gateway:
    refused), empties the cache's scratch folders, and removes the locks a git process that was
    killed left in any mirror.
 
+`ORIGIN_WORKSPACE_ROOT` must be a folder of the gateway's own, never a runtime provider's
+checkout folder (`DOCKER_REPO_HOST`). A provider keeps each runtime's checkout there under the
+space id, the name step 1 moves, and such a checkout can hold work no runtime has pushed yet. So
+before it moves anything, the gateway refuses to start on a root that holds the provider's
+`.instafy-checkout-stamps/` or `.instafy-evicted/`, or a space folder whose `.instafy/.git` holds a
+runtime's clean-stop marker (`instafy-stopped-clean`) or a local recovery ref
+(`refs/instafy/local-recovery*`, loose or packed); it follows no link to find them. It then logs
+`could not move old gateway working copies to .legacy; refusing to start`, caused by an error that
+names the root and what was found there and ends with
+`ORIGIN_WORKSPACE_ROOT must be a folder of the gateway's own, never the providers' DOCKER_REPO_HOST`,
+and exits with status 1.
+
 Run the gateway with an init as PID 1 (`docker run --init`, or `init: true` in Compose, as
 `docker/docker-compose.runtime.yml` does), so any process the server leaves behind is reaped.
 
@@ -385,12 +397,12 @@ a time, of a recovery or salvage commit a read asked for). Deleting a mirror, or
 only costs a fetch.
 
 - Fetches of `main` run once per space at a time, in a task of their own. A plain read reuses a
-  fetch that finished in the last two seconds or joins the one running; a write waits for a fetch
-  that started after it arrived. A read waits at most ten seconds for a fetch, a space's first
-  clone included, and a write as long as its own budget allows (see [Writes](#writes)); either is
-  then answered 503 `fetch_pending` while the fetch goes on. A fetch is stopped after five
-  minutes. A failed fetch is an error, never older data: a canonical repository out of reach is
-  502 `canonical_unreachable`.
+  fetch that finished in the last two seconds, while the mirror it filled is still the one on
+  disk, or joins the one running; a write waits for a fetch that started after it arrived. A read
+  waits at most ten seconds for a fetch, a space's first clone included, and a write as long as
+  its own budget allows (see [Writes](#writes)); either is then answered 503 `fetch_pending` while
+  the fetch goes on. A fetch is stopped after five minutes. A failed fetch is an error, never older
+  data: a canonical repository out of reach is 502 `canonical_unreachable`.
 - Recovery and salvage refs are not fetched that way. A `?ref=` read (also `ref` on the diff and
   review routes), a restore's fetch and removal of such a ref, a dismissal and the
   `GET /git/recovery` list (after its read of `main`) run their git commands for those refs
@@ -458,7 +470,8 @@ refused write leaves nothing behind.
   with `committed: false` when the save would not change `main`'s tree.
 - Refused, with nothing saved: 400 `unsupported_entry` (a link or submodule written over), 409
   `path_type_conflict` (a file where a folder is, or the reverse), 409 `path_alias` (a new path
-  `main` holds under another spelling a disk that ignores case or Unicode form takes for it), 422
+  `main` holds under another spelling a disk that ignores case or Unicode form takes for it, with
+  case folded fully, so `Straße.md` and `STRASSE.md` are one name), 422
   `ignored_path` (a new file the space's `.gitignore` ignores), 422 `excluded_path` with a `reason`
   such as `secret`, `attachment` (a chat upload) or `excluded` (build output, dependencies, Instafy
   files), 422 `policy_rejected` (a file over 20 MiB), and 502 `push_rejected` (canonical refused
@@ -729,7 +742,9 @@ when the browser refuses storage.
   (`ORIGIN_MULTI_TENANT=1`, `ORIGIN_GIT_REMOTE_BASE_URL=http://git-edge:8080`, no
   `ORIGIN_GIT_REMOTE_URL`). In its workspace root, `tmp/origin-gateway-workspaces/` by default
   (`ORIGIN_GATEWAY_WORKSPACE_VOLUME`), the gateway keeps `.git-cache/` and, after an upgrade from
-  an older gateway, `.legacy/` and `.salvage/`.
+  an older gateway, `.legacy/` and `.salvage/`. Runtime checkouts never go there: the local
+  provider keeps them in `tmp/runtime-checkouts/<project_id>` (`DOCKER_REPO_HOST` overrides it;
+  see [Local Development](Local-Dev.md#git-canonical-local-git-service)).
 
 Why `<project_id>.git`?
 - Instafy already keys everything by `project_id` internally (JWT claims, workspace paths, controller APIs). Using it as the repo name avoids a second identifier during v0.
