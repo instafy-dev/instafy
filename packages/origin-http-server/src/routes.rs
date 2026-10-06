@@ -2004,6 +2004,15 @@ fn check_expected_blobs(
 /// ([`crate::restore_plan::alias_clashes`]), over the folder's entries.
 /// Links and special files, which listings never show, are left to the
 /// apply's own checks.
+///
+/// A path the checkout's `HEAD` tracks under exactly the name asked for is
+/// held by that name whatever the disk calls it (a folder pair `Shared/`
+/// and `shared/` kept as one folder, a name a native editor left
+/// decomposed): git takes that entry for the tracked file, so the client's
+/// checks of the path saw it. That holds only while `HEAD` has no other
+/// entry the same rule takes for it ([`crate::restore_plan::alias_clashes`]
+/// over `HEAD`'s tree); `HEAD` is read only when the disk shows another
+/// spelling.
 fn check_destination_names(workspace_root: &Path, paths: &[String]) -> Result<(), OriginError> {
     if paths.is_empty() {
         return Ok(());
@@ -2019,6 +2028,11 @@ fn check_destination_names(workspace_root: &Path, paths: &[String]) -> Result<()
     if aliased.is_empty() {
         return Ok(());
     }
+    let tracked = head_entries(workspace_root);
+    aliased.retain(|path| !tracked_by_its_own_name(&tracked, path));
+    if aliased.is_empty() {
+        return Ok(());
+    }
     aliased.sort();
     aliased.dedup();
     Err(OriginError::conflict_paths(
@@ -2026,6 +2040,45 @@ fn check_destination_names(workspace_root: &Path, paths: &[String]) -> Result<()
         PATH_ALIAS_MESSAGE,
         aliased,
     ))
+}
+
+/// The entries of the checkout's `HEAD`, each path with its kind (`blob`,
+/// `tree` or `commit`); none when `HEAD` cannot be read (a folder with no
+/// commit yet). Local git only.
+fn head_entries(workspace_root: &Path) -> Vec<(String, String)> {
+    WorkspaceGit::new(workspace_root, None)
+        .bytes(&[
+            "ls-tree",
+            "-r",
+            "-t",
+            "-z",
+            "--full-tree",
+            "--end-of-options",
+            "HEAD",
+        ])
+        .map(|raw| {
+            crate::workspace_git::parse_ls_tree(&raw)
+                .into_iter()
+                .map(|entry| (entry.path, entry.kind))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `tracked` (`HEAD`'s entries, by [`head_entries`]) holds a file,
+/// link or folder at exactly `path`, and no other entry that a disk
+/// ignoring case or Unicode form takes for it or for a folder it lies in.
+fn tracked_by_its_own_name(tracked: &[(String, String)], path: &str) -> bool {
+    let held = tracked
+        .iter()
+        .any(|(name, kind)| name == path && kind != "commit");
+    held && crate::restore_plan::alias_clashes(
+        tracked
+            .iter()
+            .map(|(name, kind)| (name.clone(), kind == "tree")),
+        &[path],
+    )
+    .is_empty()
 }
 
 /// Whether the folder holds `path` (normalized) only under another spelling

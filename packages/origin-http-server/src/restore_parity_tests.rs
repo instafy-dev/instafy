@@ -367,7 +367,10 @@ impl Space {
                     git(&["update-index", "--add", "--cacheinfo", &info], None);
                 }
                 None => {
-                    git(&["update-index", "--force-remove", "--", path], None);
+                    // Mode 0 removes the entry; a bare repository has no
+                    // work tree for `--force-remove`.
+                    let info = format!("0 {}\t{path}\n", "0".repeat(40));
+                    git(&["update-index", "--index-info"], Some(info.as_bytes()));
                 }
             }
         }
@@ -403,6 +406,14 @@ impl Space {
         .lines()
         .map(str::to_string)
         .collect()
+    }
+
+    /// Desktop's checkout catches up with canonical `main` (moved by
+    /// [`Space::park_built`]), as its own refresh does.
+    fn catch_up(&self) {
+        for server in &self.servers {
+            server.catch_up();
+        }
     }
 
     fn sync_work(&self) {
@@ -503,11 +514,33 @@ impl Space {
         bytes: &[u8],
         managed: bool,
     ) -> (u16, serde_json::Value) {
+        self.change_in(mode, path, Some(bytes), managed).await
+    }
+
+    /// [`Space::save_in`] of the version a ref holds without `path`: the
+    /// person's delete of it.
+    async fn delete_in(&self, mode: Mode, path: &str) -> (u16, serde_json::Value) {
+        self.change_in(mode, path, None, false).await
+    }
+
+    /// A person's save (`bytes`) or delete (`None`) of `path` through
+    /// `mode`, as [`Space::save_in`] describes.
+    async fn change_in(
+        &self,
+        mode: Mode,
+        path: &str,
+        bytes: Option<&[u8]>,
+        managed: bool,
+    ) -> (u16, serde_json::Value) {
         let server = self.server(mode);
         let client = reqwest::Client::new();
+        let (files, deletes) = match bytes {
+            Some(bytes) => (json!([{ "path": path, "size": bytes.len() }]), json!([])),
+            None => (json!([]), json!([path])),
+        };
         let mut manifest = json!({
-            "files": [{ "path": path, "size": bytes.len() }],
-            "deletes": [],
+            "files": files,
+            "deletes": deletes,
             "baseRev": self.main(),
             "autoCommitAfterApply": managed,
         });
@@ -531,10 +564,12 @@ impl Space {
             use base64::Engine as _;
             use std::io::Write as _;
             let mut writer = zip::write::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-            writer
-                .start_file(path, zip::write::FileOptions::<()>::default())
-                .unwrap();
-            writer.write_all(bytes).unwrap();
+            if let Some(bytes) = bytes {
+                writer
+                    .start_file(path, zip::write::FileOptions::<()>::default())
+                    .unwrap();
+                writer.write_all(bytes).unwrap();
+            }
             base64::engine::general_purpose::STANDARD.encode(writer.finish().unwrap().into_inner())
         };
         let response = client
@@ -1031,6 +1066,17 @@ fn ignores_case(dir: &Path) -> bool {
     found
 }
 
+/// Whether the folder `dir` is on a disk that takes a name in one Unicode
+/// form for the same name in the other (`café` composed and decomposed).
+fn ignores_unicode_form(dir: &Path) -> bool {
+    let stem = format!("form-probe-{}", Uuid::new_v4().simple());
+    let probe = dir.join(format!("{stem}-cafe\u{301}"));
+    std::fs::write(&probe, b"").unwrap();
+    let found = std::fs::symlink_metadata(dir.join(format!("{stem}-caf\u{e9}"))).is_ok();
+    std::fs::remove_file(probe).unwrap();
+    found
+}
+
 /// The names of the entries of the folder `dir`, as the disk keeps them.
 fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -1438,6 +1484,90 @@ async fn a_new_name_the_space_holds_in_another_case_is_never_saved() {
         assert_eq!(status, 200, "{mode:?}: {body}");
         let (status, body) = space.save_in(mode, "AGENTS.md", b"managed\n", true).await;
         assert_eq!(status, 200, "{mode:?}: {body}");
+    }
+}
+
+/// "Use this version" of a file the checkout tracks under exactly the name
+/// used is saved in both modes, however a disk that ignores case or
+/// Unicode form spells that file or a folder above it: `shared/new.md`,
+/// which such a disk keeps in the folder `Shared/` that `Shared/old.md`
+/// made first, and a `café.md` that a native editor left on the disk
+/// decomposed while git tracks it composed. The entry on the disk is that
+/// tracked file, not another one, so the saved version is written there
+/// (or the file deleted, when the work deleted it) and the restore then
+/// finishes with the path kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_saved_version_of_a_tracked_file_is_used_however_the_disk_spells_it() {
+    let composed = "caf\u{e9}.md";
+    let decomposed = "cafe\u{301}.md";
+    // (the path, what `main` holds beside it, whether the work deletes it)
+    let cases = [
+        ("shared/new.md", Some("Shared/old.md"), false),
+        ("shared/new.md", Some("Shared/old.md"), true),
+        (composed, None, false),
+        (composed, None, true),
+    ];
+    for mode in MODES {
+        for (path, beside, deletes) in cases {
+            let space = Space::new(mode, &[]).await;
+            // Built on `main`, so no checkout folds the folder pair.
+            let mut seed: Vec<(&str, Option<&[u8]>)> = vec![(path, Some(b"1\n2\n3\n"))];
+            if let Some(beside) = beside {
+                seed.push((beside, Some(b"old\n")));
+            }
+            space.park_built(&seed, "refs/heads/main");
+            space.catch_up();
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let work: Option<&[u8]> = (!deletes).then_some(b"1\nwork\n3\n");
+            let commit =
+                space.park_built(&[(path, work), ("other.md", Some(b"other\n"))], &reference);
+            space.park_built(&[(path, Some(b"1\nmain\n3\n"))], "refs/heads/main");
+            space.catch_up();
+            let root = space.server(mode).config.workspace_root.clone();
+            if mode == Mode::Desktop && path == composed && ignores_unicode_form(&root) {
+                // A native editor's save leaves the name decomposed.
+                let bytes = std::fs::read(root.join(composed)).unwrap();
+                std::fs::remove_file(root.join(composed)).unwrap();
+                std::fs::write(root.join(decomposed), bytes).unwrap();
+            }
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                json!([path]),
+                "{mode:?} {path} {deletes}"
+            );
+
+            let (status, body) = match work {
+                Some(bytes) => space.save_in(mode, path, bytes, false).await,
+                None => space.delete_in(mode, path).await,
+            };
+            assert_eq!(status, 200, "{mode:?} {path} {deletes}: {body}");
+            match mode {
+                Mode::Desktop => assert_eq!(
+                    std::fs::read(root.join(path)).ok().as_deref(),
+                    work,
+                    "{path} {deletes}"
+                ),
+                Mode::Gateway => {
+                    assert_eq!(space.on_main(path).as_deref(), work, "{path} {deletes}")
+                }
+            }
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": [path] }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {path} {deletes}: {body}");
+            assert_eq!(
+                body["refDeleted"], true,
+                "{mode:?} {path} {deletes}: {body}"
+            );
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} {path} {deletes}"
+            );
+        }
     }
 }
 
