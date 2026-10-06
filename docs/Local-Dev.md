@@ -1,12 +1,13 @@
 # Local Development
 
 ## Start the stack
-- Full stack (Supabase + controller + proxy + provider): `pnpm stack:up`
+- Full stack (Supabase + controller + proxy + provider + git-canonical services): `pnpm stack:up`
 - Stop everything: `pnpm stack:down`
 
 ## Git-canonical (local git service)
-Enable git-canonical services (git-edge + git-shard-0 + origin-gateway):
-- `GIT_CANONICAL=1 pnpm stack:up`
+Git-canonical services (git-edge + git-shard-0 + origin-gateway) are on by default; set
+`GIT_CANONICAL=0` to opt out:
+- `GIT_CANONICAL=0 pnpm stack:up`
 
 Defaults:
 - `git-edge`: `http://127.0.0.1:8080` (override with `GIT_EDGE_PORT`)
