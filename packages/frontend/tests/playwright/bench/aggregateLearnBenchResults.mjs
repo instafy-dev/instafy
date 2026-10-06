@@ -5,7 +5,12 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "../../../../..");
-const workspacesRoot = path.join(repoRoot, "tmp/origin-gateway-workspaces");
+// The runtimes' checkouts, where the bench writes its artifacts: the local
+// provider's DOCKER_REPO_HOST, else tmp/runtime-checkouts (never the origin
+// gateway's folder, which holds only its mirror cache).
+const workspacesRoot = (process.env.DOCKER_REPO_HOST ?? "").trim()
+  ? path.resolve(repoRoot, process.env.DOCKER_REPO_HOST.trim())
+  : path.join(repoRoot, "tmp/runtime-checkouts");
 const outputDir = path.join(repoRoot, "tmp/bench-rollup");
 const RECENT_WINDOW_SIZE = Number.parseInt(process.env.PLAYWRIGHT_BENCH_RECENT_WINDOW ?? "5", 10) || 5;
 

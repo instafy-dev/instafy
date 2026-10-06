@@ -4247,8 +4247,23 @@ export async function teardownPlaywrightProject(
   );
 
   removeProjectArtifactPath(path.join(workspaceRoot, normalizedProjectId));
+  removeProjectArtifactPath(path.join(runtimeCheckoutRoot(), normalizedProjectId));
+  // A working copy an older gateway image kept for the space.
   removeProjectArtifactPath(path.join(originGatewayWorkspaceRoot, normalizedProjectId));
   removeProjectArtifactPath(path.join(gitRepoRoot, `${normalizedProjectId}.git`));
+}
+
+/**
+ * Where the local provider keeps git-canonical runtimes' checkouts
+ * (`<root>/<space id>`): `DOCKER_REPO_HOST`, else `tmp/runtime-checkouts`, as
+ * `pnpm runtime:up` sets it. Never the origin gateway's folder, which holds
+ * only the gateway's mirror cache.
+ */
+export function runtimeCheckoutRoot(): string {
+  const configured = (process.env.DOCKER_REPO_HOST ?? "").trim();
+  return configured
+    ? path.resolve(REPO_ROOT, configured)
+    : path.join(REPO_ROOT, "tmp", "runtime-checkouts");
 }
 
 interface LocalWorkspaceRegistrationOptions {
