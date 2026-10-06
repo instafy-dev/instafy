@@ -1193,7 +1193,8 @@ async fn a_rename_by_case_only_is_restored() {
 /// `main` edited `notes.md`: keeping `main`'s `notes.md` leaves the new
 /// name to settle, and keeping both restores the rest and lets the ref go.
 /// A new `todo.md` beside a `TODO.md` that `main` gained since is the
-/// same.
+/// same, and so is a new `STRASSE.md` beside a `Straße.md`: such a disk
+/// folds case fully.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
     for mode in MODES {
@@ -1254,41 +1255,44 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
         );
 
         // A new name beside a file `main` gained since, which the work
-        // never touched.
-        let space = Space::new(mode, &[]).await;
-        let reference = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
-        let commit = space.park(
-            &[("todo.md", Some(b"work\n")), ("other.md", Some(b"other\n"))],
-            &reference,
-        );
-        space.push(&[("TODO.md", Some(b"main\n"))], "a todo list");
-        assert_eq!(
-            space
-                .conflict(json!({ "ref": reference, "rev": commit }))
-                .await,
-            json!(["todo.md"]),
-            "{mode:?}"
-        );
-        let body = space
-            .restored(json!({ "ref": reference, "rev": commit, "keep": ["todo.md"] }))
-            .await;
-        assert_eq!(
-            body["notRestored"],
-            reasons(&[("todo.md", "kept")]),
-            "{mode:?}: {body}"
-        );
-        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
-        assert_eq!(space.on_main("todo.md"), None, "{mode:?}");
-        assert_eq!(
-            space.on_main("TODO.md").as_deref(),
-            Some(&b"main\n"[..]),
-            "{mode:?}"
-        );
-        assert_eq!(
-            space.on_main("other.md").as_deref(),
-            Some(&b"other\n"[..]),
-            "{mode:?}"
-        );
+        // never touched: in another case, or another case under full case
+        // folding (`ß` and `SS`).
+        for (added, gained) in [("todo.md", "TODO.md"), ("STRASSE.md", "Stra\u{df}e.md")] {
+            let space = Space::new(mode, &[]).await;
+            let reference = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
+            let commit = space.park(
+                &[(added, Some(b"work\n")), ("other.md", Some(b"other\n"))],
+                &reference,
+            );
+            space.push(&[(gained, Some(b"main\n"))], "a todo list");
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                json!([added]),
+                "{mode:?}"
+            );
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": [added] }))
+                .await;
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[(added, "kept")]),
+                "{mode:?}: {body}"
+            );
+            assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+            assert_eq!(space.on_main(added), None, "{mode:?}");
+            assert_eq!(
+                space.on_main(gained).as_deref(),
+                Some(&b"main\n"[..]),
+                "{mode:?}"
+            );
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?}"
+            );
+        }
     }
 }
 
@@ -1352,8 +1356,9 @@ async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
 /// to such a clash: a new `todo.md` beside a `TODO.md` that `main` gained
 /// since; the work's edit of `todo.md` after `main` renamed it `TODO.md`;
 /// the work's rename of `notes.md` to `Notes.md` after `main` edited
-/// `notes.md`. Keeping the current version restores the rest, and the
-/// unsaved edit stays.
+/// `notes.md`. A new `STRASSE.md` beside a `Straße.md` is the first again,
+/// under full case folding. Keeping the current version restores the
+/// rest, and the unsaved edit stays.
 #[tokio::test(flavor = "multi_thread")]
 async fn using_the_saved_version_of_a_name_main_holds_in_another_case_is_refused() {
     type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
@@ -1386,6 +1391,16 @@ async fn using_the_saved_version_of_a_name_main_holds_in_another_case_is_refused
             b"1\n2\nwork\n",
             "notes.md",
             json!(["Notes.md", "notes.md"]),
+        ),
+        // Another case under full case folding: `ß` and `SS`.
+        (
+            vec![],
+            vec![("STRASSE.md", Some(&b"work\n"[..]))],
+            vec![("Stra\u{df}e.md", Some(&b"main\n"[..]))],
+            "STRASSE.md",
+            b"work\n",
+            "Stra\u{df}e.md",
+            json!(["STRASSE.md"]),
         ),
     ];
     for mode in MODES {

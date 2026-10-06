@@ -573,8 +573,15 @@ fn validate_portable_component(component: &str) -> Result<(), OriginError> {
 
 /// The name `path` has on a disk that ignores case and Unicode form (APFS,
 /// HFS+, Windows): two paths with the same key are one file there.
+///
+/// Case is folded fully, as such a disk folds it: `Straße` and `STRASSE`,
+/// a final sigma and a plain one, a long s and an s, a ligature and its
+/// letters each have one key. Upper case first, then lower case, gives
+/// that without a folding table; it also takes a dotless `ı` for `i`,
+/// which errs toward refusing a name.
 pub(crate) fn portable_key(path: &str) -> String {
-    path.nfc().flat_map(char::to_lowercase).collect()
+    let composed: String = path.nfc().collect();
+    composed.to_uppercase().to_lowercase().nfc().collect()
 }
 
 /// Why a person's save of a path that another file or folder of the space
@@ -1420,6 +1427,8 @@ mod tests {
             manifest(&config, &["same", "same"], &[]),
             manifest(&config, &["Case.txt", "case.txt"], &[]),
             manifest(&config, &["caf\u{e9}.txt", "cafe\u{301}.txt"], &[]),
+            manifest(&config, &["Stra\u{df}e.txt", "STRASSE.txt"], &[]),
+            manifest(&config, &["\u{fb01}le.txt", "FILE.txt"], &[]),
             manifest(&config, &["a", "a/b"], &[]),
             manifest(&config, &["a", "a/b"], &["unrelated"]),
             manifest(&config, &["tree/file"], &["tree"]),
