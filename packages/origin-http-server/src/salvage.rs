@@ -120,7 +120,12 @@ pub async fn cli(args: Vec<String>) -> i32 {
             .filter(|value| !value.is_empty())
     };
     let settings = match Settings::from_flags(&flags, &env) {
-        Ok(settings) => settings,
+        Ok((settings, warnings)) => {
+            for warning in warnings {
+                eprintln!("salvage: warning: {warning}");
+            }
+            settings
+        }
         Err(error) => {
             eprintln!("salvage: {error:#}");
             return 2;

@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use git_service::policy::{SALVAGE_GATEWAY_REF_ROOT, SALVAGE_REF_NAME_MAX_LEN};
 use uuid::Uuid;
 
-use crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL;
+use crate::config::resolve_gateway_identity;
 use crate::workspace_git::GitIdentity;
 
 pub(crate) const USAGE: &str = "\
@@ -35,7 +35,10 @@ each entry is classified and reported as one JSON line on stdout.
   --project <id>    only the entries of this space (repeatable)
 
 Environment: ORIGIN_GIT_REMOTE_BASE_URL (required), ORIGIN_CONTROLLER_URL,
-ORIGIN_INTERNAL_TOKEN, ORIGIN_GIT_AUTHOR_NAME, ORIGIN_GIT_AUTHOR_EMAIL.
+ORIGIN_INTERNAL_TOKEN, INSTAFY_NODE_NAME. Salvage commits are made under the
+gateway's own identity, by the rule the gateway server commits by:
+ORIGIN_GATEWAY_GIT_AUTHOR_NAME / _EMAIL, else ORIGIN_GIT_AUTHOR_NAME / _EMAIL
+unless that is the runtimes' origin@instafy.dev, else gateway@instafy.dev.
 
 Exit status: 0 when every entry was handled, 1 when an entry failed, was not
 removed, or is still there with a chat image a rerun may export, 2 for a
@@ -113,7 +116,11 @@ pub(crate) struct Settings {
     /// `ORIGIN_GIT_REMOTE_BASE_URL` without a trailing `/`; a space's
     /// canonical repository is `<base>/<id>.git`.
     pub remote_base: String,
-    /// The gateway's own identity, which salvage commits are made under.
+    /// The gateway's own identity, which salvage commits are made under:
+    /// the identity the gateway server commits under
+    /// ([`resolve_gateway_identity`]), so a restore of a salvage ref counts
+    /// its commit as the gateway's, and fixed by the environment, so a
+    /// rerun makes the same commit.
     pub identity: GitIdentity,
     /// Free space the volume keeps after an entry's outputs are written
     /// (the mirror cache's own floor), or the entry stops.
@@ -121,7 +128,11 @@ pub(crate) struct Settings {
 }
 
 impl Settings {
-    pub(crate) fn from_flags(flags: &Flags, env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+    /// The settings, and warnings to print before the run.
+    pub(crate) fn from_flags(
+        flags: &Flags,
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(Self, Vec<String>)> {
         Self::resolve(flags, env, &host_name)
     }
 
@@ -129,7 +140,8 @@ impl Settings {
         flags: &Flags,
         env: &dyn Fn(&str) -> Option<String>,
         host: &dyn Fn() -> Option<String>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Vec<String>)> {
+        let mut warnings = Vec::new();
         let root = flags
             .root
             .clone()
@@ -154,12 +166,14 @@ impl Settings {
             .map(|base| base.trim().trim_end_matches('/').to_string())
             .filter(|base| !base.is_empty())
             .context("ORIGIN_GIT_REMOTE_BASE_URL must name the canonical repositories")?;
-        let identity = GitIdentity::new(
-            env("ORIGIN_GIT_AUTHOR_NAME").unwrap_or_else(|| "instafy-origin".to_string()),
-            env("ORIGIN_GIT_AUTHOR_EMAIL")
-                .unwrap_or_else(|| DEFAULT_GATEWAY_AUTHOR_EMAIL.to_string()),
-        );
-        Ok(Self {
+        let gateway = resolve_gateway_identity(
+            env("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL").as_deref(),
+            env("ORIGIN_GATEWAY_GIT_AUTHOR_NAME").as_deref(),
+            env("ORIGIN_GIT_AUTHOR_EMAIL").as_deref(),
+            env("ORIGIN_GIT_AUTHOR_NAME").as_deref(),
+        )?;
+        warnings.extend(gateway.warning);
+        let settings = Self {
             root,
             node,
             apply: flags.apply,
@@ -167,9 +181,10 @@ impl Settings {
             projects: flags.projects.clone(),
             acks: flags.acks.clone(),
             remote_base,
-            identity,
+            identity: GitIdentity::new(gateway.name, gateway.email),
             min_free_bytes: crate::hosted::MIN_FREE_BYTES,
-        })
+        };
+        Ok((settings, warnings))
     }
 
     /// The canonical repository of a space.
@@ -326,7 +341,7 @@ mod tests {
                 _ => None,
             }
         };
-        let settings = Settings::from_flags(&Flags::default(), &env).unwrap();
+        let (settings, warnings) = Settings::from_flags(&Flags::default(), &env).unwrap();
         assert_eq!(settings.root, root);
         assert_eq!(settings.node, "node-a");
         assert!(!settings.apply);
@@ -334,13 +349,17 @@ mod tests {
             settings.remote_url(&Uuid::nil()),
             "https://edge.example/git/00000000-0000-0000-0000-000000000000.git"
         );
-        assert_eq!(settings.identity.email, DEFAULT_GATEWAY_AUTHOR_EMAIL);
+        assert_eq!(
+            settings.identity.email,
+            crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL
+        );
+        assert_eq!(warnings, Vec::<String>::new());
 
         let flags = Flags {
             node: Some("other".to_string()),
             ..Flags::default()
         };
-        assert_eq!(Settings::from_flags(&flags, &env).unwrap().node, "other");
+        assert_eq!(Settings::from_flags(&flags, &env).unwrap().0.node, "other");
 
         let no_base = |name: &str| -> Option<String> {
             (name != "ORIGIN_GIT_REMOTE_BASE_URL")
@@ -384,7 +403,7 @@ mod tests {
             ..Flags::default()
         };
         assert_eq!(
-            Settings::resolve(&named, &env, &container).unwrap().node,
+            Settings::resolve(&named, &env, &container).unwrap().0.node,
             "gateway-1"
         );
         let with_env = |name: &str| -> Option<String> {
@@ -396,6 +415,7 @@ mod tests {
         assert_eq!(
             Settings::resolve(&apply, &with_env, &container)
                 .unwrap()
+                .0
                 .node,
             "gateway-2"
         );
@@ -403,8 +423,101 @@ mod tests {
         assert_eq!(
             Settings::resolve(&Flags::default(), &env, &container)
                 .unwrap()
+                .0
                 .node,
             "3f2a9b8c1d4e"
+        );
+    }
+
+    /// Salvage commits are made under the identity the gateway server
+    /// commits under ([`resolve_gateway_identity`]), never under the
+    /// runtimes' address, and the same environment always gives the same
+    /// identity, so a rerun makes the same commit.
+    #[test]
+    fn the_salvage_commits_under_the_gateways_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_text = dir.path().to_string_lossy().to_string();
+        let identity = |vars: &[(&str, &str)]| {
+            let env = |name: &str| -> Option<String> {
+                match name {
+                    "ORIGIN_WORKSPACE_ROOT" => Some(root_text.clone()),
+                    "ORIGIN_GIT_REMOTE_BASE_URL" => Some("https://edge.example/git".to_string()),
+                    "INSTAFY_NODE_NAME" => Some("gateway-1".to_string()),
+                    other => vars
+                        .iter()
+                        .find(|(name, _)| *name == other)
+                        .map(|(_, value)| value.to_string()),
+                }
+            };
+            let apply = Flags {
+                apply: true,
+                ..Flags::default()
+            };
+            Settings::from_flags(&apply, &env).map(|(settings, warnings)| {
+                let gateway = resolve_gateway_identity(
+                    env("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL").as_deref(),
+                    env("ORIGIN_GATEWAY_GIT_AUTHOR_NAME").as_deref(),
+                    env("ORIGIN_GIT_AUTHOR_EMAIL").as_deref(),
+                    env("ORIGIN_GIT_AUTHOR_NAME").as_deref(),
+                )
+                .unwrap();
+                // The server's own rule, for the same environment.
+                assert_eq!(
+                    (
+                        settings.identity.name.as_str(),
+                        settings.identity.email.as_str()
+                    ),
+                    (gateway.name.as_str(), gateway.email.as_str())
+                );
+                (
+                    settings.identity.name.clone(),
+                    settings.identity.email.clone(),
+                    warnings,
+                )
+            })
+        };
+        let pair = |name: &str, email: &str| (name.to_string(), email.to_string());
+        let named = |result: (String, String, Vec<String>)| (result.0, result.1);
+
+        // Nothing set: the gateway's own default.
+        let (name, email, warnings) = identity(&[]).unwrap();
+        assert_eq!((name, email), pair("instafy-origin", "gateway@instafy.dev"));
+        assert_eq!(warnings, Vec::<String>::new());
+        // The runtimes' default address set for every service, as an
+        // existing deployment does: the gateway's default, with a warning.
+        let (name, email, warnings) = identity(&[
+            ("ORIGIN_GIT_AUTHOR_EMAIL", "origin@instafy.dev"),
+            ("ORIGIN_GIT_AUTHOR_NAME", "Instafy Origin"),
+        ])
+        .unwrap();
+        assert_eq!((name, email), pair("Instafy Origin", "gateway@instafy.dev"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        // The gateway's own variables win.
+        let gateway_vars = [
+            ("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL", "salvage@example.com"),
+            ("ORIGIN_GATEWAY_GIT_AUTHOR_NAME", "Example Gateway"),
+            ("ORIGIN_GIT_AUTHOR_EMAIL", "runtime@example.com"),
+            ("ORIGIN_GIT_AUTHOR_NAME", "Example Runtime"),
+        ];
+        assert_eq!(
+            named(identity(&gateway_vars).unwrap()),
+            pair("Example Gateway", "salvage@example.com")
+        );
+        // A self-hoster's own address for every service is used as is.
+        assert_eq!(
+            named(identity(&[("ORIGIN_GIT_AUTHOR_EMAIL", "git@example.com")]).unwrap()),
+            pair("instafy-origin", "git@example.com")
+        );
+        // The runtimes' address as the gateway's own is refused, as the
+        // server refuses to start with it.
+        let error = identity(&[("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL", "origin@instafy.dev")])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL"), "{error}");
+        // Deterministic: the same environment, the same identity.
+        assert_eq!(
+            named(identity(&gateway_vars).unwrap()),
+            named(identity(&gateway_vars).unwrap())
         );
     }
 }
