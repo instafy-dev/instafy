@@ -2391,7 +2391,7 @@ async fn handle_git_revert(
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
         git::ensure_git_checkout(&config_clone, token.as_deref())?;
-        git::revert_paths(canonical_root.as_path(), &revert_paths, token.as_deref())
+        git::revert_paths(canonical_root.as_path(), &revert_paths)
     })
     .await
     .map_err(|error| OriginError::internal(format!("git revert task failed: {error}")))?;
