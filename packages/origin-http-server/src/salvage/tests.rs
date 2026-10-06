@@ -2243,3 +2243,88 @@ fn a_reset_older_than_the_newest_forty_still_marks_a_stale_deletion() {
     assert_eq!(summary.exit_code(), 0);
     assert!(gateway.salvage_refs().is_empty());
 }
+
+/// A repository inside a folder git reads (one cloned into a tracked folder,
+/// or one whose `.git` the old gateway hid while it staged files and never
+/// put back): `git status` never shows it, so it is reported as skipped and
+/// the entry is removed only with an acknowledgement.
+#[test]
+fn a_repository_inside_a_tracked_folder_holds_up_removal() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            (".gitignore", Some("scratch/\n")),
+            ("vendor/lib/a.txt", Some("a\n")),
+            ("tools/x/b.txt", Some("b\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    // In an ignored folder too, which is walked for the private archive.
+    write(&entry.join("scratch/notes.txt"), b"notes\n");
+    write(
+        &entry.join("scratch/repo/.git.instafy-hidden-2/HEAD"),
+        b"ref: refs/heads/main\n",
+    );
+    let nested = entry.join("vendor/lib");
+    git_in(&nested, &["init", "-q", "-b", "main"]);
+    write(&nested.join("history-only.txt"), b"only in its history\n");
+    commit_all(&nested, "Add");
+    std::fs::remove_file(nested.join("history-only.txt")).unwrap();
+    commit_all(&nested, "Remove");
+    write(
+        &entry.join("tools/x/.git.instafy-hidden-1/HEAD"),
+        b"ref: refs/heads/main\n",
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    let skipped: BTreeMap<String, (String, u64)> = report["skippedPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["path"].as_str().unwrap().to_string(),
+                (
+                    item["reason"].as_str().unwrap().to_string(),
+                    item["size"].as_u64().unwrap(),
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(
+        skipped.keys().cloned().collect::<Vec<_>>(),
+        [
+            "scratch/repo/.git.instafy-hidden-2/",
+            "tools/x/.git.instafy-hidden-1/",
+            "vendor/lib/.git/"
+        ],
+        "{report:#}"
+    );
+    assert!(skipped
+        .values()
+        .all(|(reason, size)| reason == "unsupported" && *size > 0));
+    assert_eq!(
+        paths(&report["privateArchivedPaths"]),
+        ["scratch/notes.txt"]
+    );
+    assert_eq!(report["clean"], false, "{report:#}");
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert!(report["removeRefused"]
+        .as_str()
+        .unwrap()
+        .contains("outside build output"));
+    assert_eq!(summary.exit_code(), 1);
+    assert!(nested.join(".git").is_dir());
+
+    let entry_name = gateway.project.to_string();
+    let (summary, removed) = salvage(&gateway.settings(true, true, &[&entry_name]), &stub);
+    assert_eq!(removed[0]["removed"], true, "{:#}", removed[0]);
+    assert_eq!(summary.exit_code(), 0);
+    assert!(!entry.exists());
+}

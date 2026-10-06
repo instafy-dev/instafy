@@ -26,8 +26,9 @@
 //!    archive; root `chat-upload-*` images are exported to the conversations
 //!    that name them (and archived when they cannot be; when a rerun may
 //!    still export one, `exportFailed`); build output, deny
-//!    listed paths, files over 20 MiB and anything git cannot store are
-//!    `skippedPaths`; the rest goes into W.
+//!    listed paths, files over 20 MiB, repositories inside the work tree
+//!    (also those `git status` never lists) and anything git cannot store
+//!    are `skippedPaths`; the rest goes into W.
 //! 4. W is HEAD plus those paths, committed under the gateway's identity at
 //!    HEAD's commit date, so a rerun makes the same commit. Every commit
 //!    canonical lacks, and W's whole change, is checked with the publish
