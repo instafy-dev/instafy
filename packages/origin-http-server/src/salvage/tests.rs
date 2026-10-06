@@ -3217,3 +3217,86 @@ fn revisions_read_from_files_reach_git_only_as_object_ids() {
     assert!(!logged.contains("HEAD~2"), "{logged}");
     assert!(!logged.contains("main~0"), "{logged}");
 }
+
+/// A parked repository's config still names the folder the copy had before
+/// it was parked (`core.worktree = /workspaces/<id>`), where a fresh copy
+/// may live now. Every salvage git command runs with the entry's own
+/// repository and work tree: what the live copy holds is never read into
+/// W, and nothing of it changes.
+#[test]
+fn a_parked_config_never_points_the_salvage_at_another_work_tree() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[("README.md", Some("one\n")), ("notes.md", Some("n1\n"))],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("notes.md"), b"parked edit\n");
+    // The live copy at the folder the parked one came from.
+    let live = gateway.root.join(gateway.project.to_string());
+    std::fs::create_dir_all(&live).unwrap();
+    init_workspace_repo(&live);
+    ig(
+        &live,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(&live, &["reset", "-q", "--hard", &c1]);
+    write(&live.join("README.md"), b"live edit\n");
+    write(&live.join("live-only.txt"), b"live\n");
+    git_in(
+        &entry,
+        &[
+            "config",
+            "--file",
+            ".instafy/.git/config",
+            "core.worktree",
+            live.to_str().unwrap(),
+        ],
+    );
+    let live_files = snapshot(&live);
+    let live_git: Vec<Vec<u8>> = ["index", "HEAD", "config"]
+        .iter()
+        .map(|name| std::fs::read(live.join(".instafy/.git").join(name)).unwrap())
+        .collect();
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (_, dry) = salvage(&gateway.settings(false, false, &[]), &stub);
+    assert_eq!(
+        paths(&dry[0]["archivedPaths"]),
+        ["notes.md"],
+        "{:#}",
+        dry[0]
+    );
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(paths(&report["archivedPaths"]), ["notes.md"], "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["diff", "--name-status", &c1, salvaged]),
+        "M\tnotes.md"
+    );
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:notes.md")]),
+        "parked edit"
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+    assert_eq!(snapshot(&live), live_files);
+    let live_git_after: Vec<Vec<u8>> = ["index", "HEAD", "config"]
+        .iter()
+        .map(|name| std::fs::read(live.join(".instafy/.git").join(name)).unwrap())
+        .collect();
+    assert!(
+        live_git_after == live_git,
+        "the live copy's repository changed"
+    );
+}
