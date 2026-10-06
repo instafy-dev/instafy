@@ -22,7 +22,10 @@
 //!    is fetched from the computed URL `<ORIGIN_GIT_REMOTE_BASE_URL>/<id>.git`,
 //!    never the entry's own remote, with every received object checked, under
 //!    a `git.read` credential the controller mints for the gateway's internal
-//!    token. A missing repository is `canonicalMissing`.
+//!    token. A missing repository is `canonicalMissing`. The reflog and
+//!    `ORIG_HEAD` are read before that, and the fetch never starts git's
+//!    automatic maintenance, which would expire the reflog entries the stale
+//!    rules below read.
 //! 3. Changed, untracked and ignored paths are sorted ([`classify`]): stale
 //!    copies of versions `main` already has are left out (`stalePaths`), and
 //!    so are those HEAD's local commits took in (an old save committed what

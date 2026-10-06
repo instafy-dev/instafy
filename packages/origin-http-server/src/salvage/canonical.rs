@@ -28,7 +28,10 @@ pub(crate) enum Canonical {
 
 /// Fetch canonical `main` into the entry's `refs/remotes/origin/main`, from
 /// the computed URL (never the repository's own remote config), checking
-/// every object received.
+/// every object received. Git's automatic maintenance stays off: after a
+/// fetch it would expire the parked reflog (and prune what only the reflog
+/// held), which is the evidence the stale rule reads, so a dry run would
+/// change what it reports on.
 pub(crate) fn fetch_main(git: &WorkspaceGit<'_>, url: &str) -> Result<Canonical> {
     let refspec = format!("+refs/heads/main:{FETCHED_MAIN}");
     let git = git.with_network_deadline(Instant::now() + NETWORK_DEADLINE);
@@ -43,11 +46,15 @@ pub(crate) fn fetch_main(git: &WorkspaceGit<'_>, url: &str) -> Result<Canonical>
         ],
         &RunOpts {
             env: vec![
-                ("GIT_CONFIG_COUNT", "2".into()),
+                ("GIT_CONFIG_COUNT", "4".into()),
                 ("GIT_CONFIG_KEY_0", "fetch.fsckObjects".into()),
                 ("GIT_CONFIG_VALUE_0", "true".into()),
                 ("GIT_CONFIG_KEY_1", "transfer.fsckObjects".into()),
                 ("GIT_CONFIG_VALUE_1", "true".into()),
+                ("GIT_CONFIG_KEY_2", "maintenance.auto".into()),
+                ("GIT_CONFIG_VALUE_2", "false".into()),
+                ("GIT_CONFIG_KEY_3", "gc.auto".into()),
+                ("GIT_CONFIG_VALUE_3", "0".into()),
             ],
             ..RunOpts::default()
         },

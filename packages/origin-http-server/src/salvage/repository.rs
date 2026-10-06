@@ -214,6 +214,9 @@ fn salvage_repository(
     let read_access = services.mint_read(&project)?;
     let git = entry_git(root, read_access.as_deref());
     let url = settings.remote_url(&project);
+    // The views an old sync left the work tree at, read as the entry was
+    // parked, before anything talks to canonical.
+    let old_heads = classify::old_heads(&git, root)?;
     let canonical = canonical::fetch_main(&git, &url)?;
     report.canonical_missing = canonical == Canonical::Missing;
     let main = match &canonical {
@@ -270,7 +273,7 @@ fn salvage_repository(
     let source_tree = index.write_tree(&git)?;
     report.source_tree = Some(source_tree.clone());
     let stale = match main.as_deref() {
-        Some(main) => classify::stale_paths(&git, root, main, &current)?,
+        Some(main) => classify::stale_paths(&git, &old_heads, main, &current)?,
         None => BTreeSet::new(),
     };
     let copies: Vec<String> = stale.into_iter().collect();
@@ -300,7 +303,7 @@ fn salvage_repository(
     // commit those were made on has them.
     let history_stale = match (head.as_deref(), main.as_deref()) {
         (Some(head), Some(main)) => {
-            let (put_back, kept) = stale_in_history(&git, root, &index, head, main)?;
+            let (put_back, kept) = stale_in_history(&git, &old_heads, &index, head, main)?;
             report.stale_kept.extend(kept);
             put_back
         }
@@ -596,7 +599,7 @@ fn keep_refused(root: &Path, refused: Vec<String>, sorted: &mut Sorted) {
 /// the paths put back, and the stale copies W keeps as HEAD has them.
 fn stale_in_history(
     git: &WorkspaceGit<'_>,
-    root: &Path,
+    old_heads: &[String],
     index: &WorkIndex,
     head: &str,
     main: &str,
@@ -612,7 +615,7 @@ fn stale_in_history(
         return Ok(Default::default());
     }
     let held = index.entries(git, &paths)?;
-    let copies: Vec<String> = classify::stale_paths(git, root, main, &held)?
+    let copies: Vec<String> = classify::stale_paths(git, old_heads, main, &held)?
         .into_iter()
         .collect();
     // A path the merge base holds as a folder stays as W holds it: putting
