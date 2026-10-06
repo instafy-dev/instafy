@@ -1700,10 +1700,13 @@ fn an_entry_whose_run_stopped_early_is_never_removed_whatever_the_acks() {
     assert!(!entry.exists() && !files_only.exists());
 }
 
-/// A path git refuses to add (`cfg/x` while the index holds the file
-/// `cfg`) stops a whole `update-index` batch without changing the index; it
-/// is reported and left as it was, and the rest of the work tree's changes
-/// still go into W.
+/// What git cannot store is left out, reported with its size, and kept in
+/// the private archive, while the rest of the work tree's changes still go
+/// into W: a name git never records (a link named `.gitmodules`, which git
+/// passes over without failing), and a file in a folder's place when the
+/// folder holds a path whose deletion may never be sent (the swap is left
+/// out whole). A file's place taken by a folder of files is stored, as
+/// `git add -A` stores it.
 #[test]
 fn a_path_git_refuses_is_left_out_and_the_rest_kept() {
     let gateway = Gateway::new();
@@ -1711,6 +1714,8 @@ fn a_path_git_refuses_is_left_out_and_the_rest_kept() {
         .map(|n| (format!("src/f{n:02}.js"), Some(format!("v0 {n}\n"))))
         .collect();
     files.push(("cfg".to_string(), Some("file\n".to_string())));
+    files.push(("pkg/x.js".to_string(), Some("x\n".to_string())));
+    files.push(("pkg/dist/out.js".to_string(), Some("built\n".to_string())));
     let listed: Vec<(&str, Option<&str>)> = files
         .iter()
         .map(|(path, text)| (path.as_str(), text.as_deref()))
@@ -1722,6 +1727,9 @@ fn a_path_git_refuses_is_left_out_and_the_rest_kept() {
     }
     std::fs::remove_file(entry.join("cfg")).unwrap();
     write(&entry.join("cfg/x"), b"now a folder\n");
+    std::os::unix::fs::symlink("elsewhere", entry.join(".gitmodules")).unwrap();
+    std::fs::remove_dir_all(entry.join("pkg")).unwrap();
+    write(&entry.join("pkg"), b"one file now\n");
     gateway.salvage_mode_hook(&[]);
     let stub = Stub::default();
 
@@ -1729,22 +1737,30 @@ fn a_path_git_refuses_is_left_out_and_the_rest_kept() {
     let report = &lines[0];
     assert!(report["error"].is_null(), "{report:#}");
     assert_eq!(report["canonicalVerified"], true, "{report:#}");
-    let skipped: Vec<(String, String)> = report["skippedPaths"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| {
-            (
-                item["path"].as_str().unwrap().to_string(),
-                item["reason"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
     assert_eq!(
-        skipped,
+        report["skippedPaths"],
+        serde_json::json!([
+            { "path": "pkg/dist/out.js", "size": 0, "reason": "excluded" },
+            { "path": ".gitmodules", "size": 0, "reason": "unsupported" },
+            { "path": "pkg", "size": "one file now\n".len(), "reason": "unsupported" },
+            { "path": "pkg/x.js", "size": 0, "reason": "unsupported" },
+        ]),
+        "{report:#}"
+    );
+    assert_eq!(
+        report["privateArchivedPaths"],
+        serde_json::json!([
+            { "path": ".gitmodules", "reason": "unsupported", "size": 0 },
+            { "path": "pkg", "reason": "unsupported", "size": "one file now\n".len() },
+        ]),
+        "{report:#}"
+    );
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(
+        tar_listing(&archive),
         vec![
-            ("cfg/".to_string(), "unsupported".to_string()),
-            ("cfg/x".to_string(), "unsupported".to_string()),
+            "worktree/.gitmodules".to_string(),
+            "worktree/pkg".to_string()
         ]
     );
     let salvaged = report["salvageRev"].as_str().unwrap();
@@ -1756,9 +1772,92 @@ fn a_path_git_refuses_is_left_out_and_the_rest_kept() {
         );
     }
     assert_eq!(
-        git_in(&canonical, &["show", &format!("{salvaged}:cfg")]),
-        "file"
+        git_in(&canonical, &["show", &format!("{salvaged}:cfg/x")]),
+        "now a folder"
     );
+    // The swap git could not make is left out whole: pkg/ as HEAD has it.
+    assert_eq!(
+        git_in(&canonical, &["diff", "--name-status", &c1, salvaged]),
+        format!(
+            "D\tcfg\nA\tcfg/x\n{}",
+            (0..40)
+                .map(|n| format!("M\tsrc/f{n:02}.js"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    );
+    // Restores list only the reasons they know; these paths are not named.
+    let message = git_in(&canonical, &["log", "-1", "--format=%B", salvaged]);
+    assert!(!message.contains("Instafy-Private-Path"), "{message}");
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    assert_eq!(lines[0]["removed"], false, "{:#}", lines[0]);
+    assert!(lines[0]["removeRefused"]
+        .as_str()
+        .unwrap()
+        .contains("outside build output"));
+    assert_eq!(summary.exit_code(), 1);
+}
+
+/// A folder the work tree holds a file of the same name in place of is
+/// stored as `git add -A` stores it: the file in, the folder's files out,
+/// and nothing skipped. A tracked file whose place a folder took that its
+/// own ignore rule covers (`git status` lists none of its files) is a
+/// deletion, and the folder's files are kept privately as ignored ones.
+#[test]
+fn a_file_that_takes_a_folders_place_is_salvaged_whole() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            ("lib/a.js", Some("a\n")),
+            ("lib/b.js", Some("b\n")),
+            ("logs", Some("one log file\n")),
+            (".gitignore", Some("logs/\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    std::fs::remove_dir_all(entry.join("lib")).unwrap();
+    write(&entry.join("lib"), b"the new single-file module\n");
+    write(&entry.join("README.md"), b"edited\n");
+    std::fs::remove_file(entry.join("logs")).unwrap();
+    write(&entry.join("logs/today.txt"), b"today\n");
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["skippedPaths"], serde_json::json!([]), "{report:#}");
+    assert_eq!(
+        paths(&report["archivedPaths"]),
+        ["README.md", "lib", "lib/a.js", "lib/b.js", "logs"],
+        "{report:#}"
+    );
+    assert_eq!(
+        report["privateArchivedPaths"],
+        serde_json::json!([{ "path": "logs/today.txt", "reason": "ignored", "size": 6 }]),
+        "{report:#}"
+    );
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(
+        tar_listing(&archive),
+        vec!["worktree/logs/today.txt".to_string()]
+    );
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(&canonical, &["diff", "--name-status", &c1, salvaged]),
+        "M\tREADME.md\nA\tlib\nD\tlib/a.js\nD\tlib/b.js\nD\tlogs"
+    );
+    assert_eq!(
+        git_in(&canonical, &["show", &format!("{salvaged}:lib")]),
+        "the new single-file module"
+    );
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
 }
 
 /// Every read of canonical carries a `git.read` credential minted for it: a

@@ -28,7 +28,12 @@
 //!    still export one, `exportFailed`); build output, deny
 //!    listed paths, files over 20 MiB, repositories inside the work tree
 //!    (also those `git status` never lists) and anything git cannot store
-//!    are `skippedPaths`; the rest goes into W.
+//!    are `skippedPaths`; the rest goes into W. A file takes the place of a
+//!    folder (and a folder's files the place of a file) as `git add -A`
+//!    takes them; a swap that would drop an entry nothing changed is left
+//!    out whole. What git cannot store (that swap, a name git never
+//!    records) is reported with its size, and a file of it is kept in the
+//!    private archive too, so an `--ack` never drops the only copy.
 //! 4. W is HEAD plus those paths, committed under the gateway's identity at
 //!    HEAD's commit date, so a rerun makes the same commit. Every commit
 //!    canonical lacks, and W's whole change, is checked with the publish
