@@ -25,6 +25,7 @@ use super::change::{Change, Edits};
 use super::tests::{
     decoded, get, post, runtime_push, serve, serve_with, Answer, HostedScenario, Served,
 };
+use super::write::NO_BASE_REV_TARGET;
 use crate::apply::{stage_archive, validate_apply_paths, ManifestFileEntry};
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
@@ -882,33 +883,83 @@ async fn expected_blobs_must_still_be_on_main() {
     }
 }
 
-/// r3 test 16: a save without baseRev changes exact paths only, refuses a
-/// folder delete, and is logged with the client's label.
-#[tokio::test]
-async fn a_save_without_a_base_changes_exact_paths_only_and_is_logged() {
-    #[derive(Clone, Default)]
+/// Every line the gateway logs at [`NO_BASE_REV_TARGET`] in this test
+/// process, as its log formats them, whichever thread logs it.
+///
+/// Installed once, as the process's global subscriber. A subscriber set for
+/// the test's thread alone (`set_default`) misses the line whenever another
+/// test's thread, which has no subscriber, reaches that log call first:
+/// while only one subscriber exists, tracing asks the thread that registers
+/// a call site whether anyone wants it, caches that thread's "no" for every
+/// thread, and the test's own rebuild of the cache may already have run.
+/// Each test picks its own lines by its space's id.
+fn no_base_rev_log() -> Arc<Mutex<Vec<u8>>> {
+    #[derive(Clone)]
     struct Capture(Arc<Mutex<Vec<u8>>>);
     impl std::io::Write for Capture {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend_from_slice(bytes);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
     }
-    let capture = Capture::default();
-    let writer = capture.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_max_level(tracing::Level::INFO)
-        .with_ansi(false)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    // Another test's thread may have registered the log line's callsite
-    // while this subscriber was being set up, caching "no subscriber is
-    // interested"; ask every callsite again now that it exists.
-    tracing::callsite::rebuild_interest_cache();
+    static LOG: std::sync::OnceLock<Arc<Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    LOG.get_or_init(|| {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let writer = Capture(log.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_env_filter(tracing_subscriber::EnvFilter::new(format!(
+                "{NO_BASE_REV_TARGET}=info"
+            )))
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test sets a global subscriber");
+        log
+    })
+    .clone()
+}
+
+/// Another space's save without a base, served on a thread of its own with
+/// a runtime of its own, as another test's may be at any time.
+fn another_save_without_a_base_on_its_own_thread() {
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let sc = HostedScenario::new();
+                sc.push(&[("a.txt", Some(b"a\n"))], "seed");
+                let served = serve(&sc).await;
+                let answer = apply_as(
+                    &served,
+                    manifest(&[], &["a.txt"], json!({})),
+                    &zip(&[]),
+                    None,
+                    None,
+                )
+                .await;
+                assert_eq!(answer.status, 200, "{}", answer.json());
+            });
+    })
+    .join()
+    .unwrap();
+}
+
+/// r3 test 16: a save without baseRev changes exact paths only, refuses a
+/// folder delete, and is logged with the client's label, also when another
+/// test's thread reaches the log call first.
+#[tokio::test]
+async fn a_save_without_a_base_changes_exact_paths_only_and_is_logged() {
+    let log = no_base_rev_log();
+    another_save_without_a_base_on_its_own_thread();
 
     let sc = HostedScenario::new();
     sc.push(
@@ -940,17 +991,15 @@ async fn a_save_without_a_base_changes_exact_paths_only_and_is_logged() {
     assert_eq!(show(&sc, &rev(&answer), "dir/a.txt"), None);
     assert_eq!(show(&sc, &rev(&answer), "dir/b.txt").unwrap(), b"b\n");
 
-    let logged = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let logged = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+    let project = sc.project.to_string();
     let lines: Vec<&str> = logged
         .lines()
-        .filter(|line| line.contains("origin_apply_no_base_rev"))
+        .filter(|line| line.contains(NO_BASE_REV_TARGET) && line.contains(&project))
         .collect();
     assert_eq!(lines.len(), 2, "{logged}");
     assert!(lines[0].contains("client=web/abc123"), "{logged}");
     assert!(lines[1].contains("client=unknown"), "{logged}");
-    assert!(lines
-        .iter()
-        .all(|line| line.contains(&sc.project.to_string())));
 }
 
 /// Two saves of `path` (with and without a base) are refused with `code`.
