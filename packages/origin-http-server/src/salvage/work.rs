@@ -3,6 +3,7 @@
 //! commits may reach canonical as they are or only as one filtered commit.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::Bound;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -59,16 +60,43 @@ impl WorkIndex {
     }
 
     /// Record each path as the work tree holds it now: its content, a link
-    /// as a link, or no entry when it is gone. Ignore rules play no part.
-    /// Returns the paths git refuses (one below a link, a folder where the
-    /// index has a file), which are left as they were.
+    /// as a link, or no entry when it is gone. Ignore rules play no part. A
+    /// file takes the place of a folder the index has (and a folder's files
+    /// the place of a file), as `git add -A` does, when every entry it
+    /// displaces is among `paths` too. One that would displace any other
+    /// entry is refused without asking git, so W never drops an entry
+    /// nothing chose to change, and so are the paths it would have
+    /// displaced, so the swap is left out whole. Returns those paths and the
+    /// ones git refuses, which are left as they were.
     pub(crate) fn take_from_worktree(
         &self,
         git: &WorkspaceGit<'_>,
         paths: &[String],
     ) -> Result<Vec<String>> {
-        let args = ["update-index", "--add", "--remove", "-z", "--stdin"];
-        take_in_batches(paths, &mut |batch| {
+        let held = self.paths(git)?;
+        let chosen: BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+        let blocked: Vec<&str> = paths
+            .iter()
+            .map(String::as_str)
+            .filter(|path| !displaced(&held, *path).all(|entry| chosen.contains(entry)))
+            .collect();
+        let mut left_out: BTreeSet<&str> = blocked.iter().copied().collect();
+        for path in &blocked {
+            left_out.extend(displaced(&held, *path).filter(|entry| chosen.contains(entry)));
+        }
+        let (mut refused, clear): (Vec<String>, Vec<String>) = paths
+            .iter()
+            .cloned()
+            .partition(|path| left_out.contains(path.as_str()));
+        let args = [
+            "update-index",
+            "--add",
+            "--remove",
+            "--replace",
+            "-z",
+            "--stdin",
+        ];
+        refused.extend(take_in_batches(&clear, &mut |batch| {
             let list = nul_list(batch);
             let output = git.run_opts(
                 &args,
@@ -79,7 +107,19 @@ impl WorkIndex {
                 },
             )?;
             Ok(output.status.success())
-        })
+        })?);
+        refused.sort();
+        Ok(refused)
+    }
+
+    /// Every path the index holds.
+    fn paths(&self, git: &WorkspaceGit<'_>) -> Result<BTreeSet<String>> {
+        let raw = git.bytes_opts(&["ls-files", "-z"], &self.opts())?;
+        Ok(raw
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| String::from_utf8_lossy(record).to_string())
+            .collect())
     }
 
     /// The index's entry for each path (`None` when it has none).
@@ -162,6 +202,23 @@ impl WorkIndex {
     }
 }
 
+/// The entries of `held` that recording `path` would drop: those below it
+/// (a file where the index has a folder) and those above it (a folder's
+/// file where the index has a file).
+fn displaced<'h>(held: &'h BTreeSet<String>, path: &'h str) -> impl Iterator<Item = &'h str> {
+    let below = format!("{path}/");
+    let under: Vec<&'h str> = held
+        .range::<str, _>((Bound::Included(below.as_str()), Bound::Unbounded))
+        .take_while(|entry| entry.starts_with(&below))
+        .map(String::as_str)
+        .collect();
+    let above = path
+        .match_indices('/')
+        .map(move |(at, _)| &path[..at])
+        .filter(move |parent| held.contains(*parent));
+    under.into_iter().chain(above)
+}
+
 /// Take `paths` with `take`, which takes a batch whole or, refusing one
 /// path, none of it (as `update-index --stdin` does). A refused batch is
 /// taken again as two halves, in order, down to single paths: a few refused
@@ -218,8 +275,9 @@ pub(crate) fn committer_date(git: &WorkspaceGit<'_>, commit: Option<&str>) -> Re
 }
 
 /// The salvage commit's message: the subject, then trailers naming the
-/// changed paths and the paths kept privately (at most 200 of each; names
-/// with control characters are left out of the message).
+/// changed paths and the paths kept privately for a reason restores list
+/// (at most 200 of each; names with control characters are left out of the
+/// message).
 pub(crate) fn message(paths: &[String], private: &[PrivatePath]) -> Vec<u8> {
     let mut text = format!("{SUBJECT}\n\nInstafy-Recovery-Kind: salvage\n");
     let printable = |path: &str| !path.chars().any(char::is_control) && path.trim() == path;
@@ -232,7 +290,7 @@ pub(crate) fn message(paths: &[String], private: &[PrivatePath]) -> Vec<u8> {
     }
     for kept in private
         .iter()
-        .filter(|kept| kept.commit.is_none() && printable(&kept.path))
+        .filter(|kept| kept.commit.is_none() && restores_list(kept.reason) && printable(&kept.path))
         .take(MAX_TRAILER_PATHS)
     {
         text.push_str(&format!(
@@ -241,6 +299,13 @@ pub(crate) fn message(paths: &[String], private: &[PrivatePath]) -> Vec<u8> {
         ));
     }
     text.into_bytes()
+}
+
+/// The private reasons a restore of a salvage ref lists as not restored
+/// (see `restore_plan`); a path kept for another reason (one git refused)
+/// is reported by the salvage alone.
+fn restores_list(reason: &str) -> bool {
+    matches!(reason, "secret" | "ignored" | "attachment")
 }
 
 /// Commit `tree` under the gateway's identity at `date`.

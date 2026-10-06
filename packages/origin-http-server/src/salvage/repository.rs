@@ -20,7 +20,7 @@ use super::services::{ExportOutcome, Services};
 use super::work::{self, Version, WorkIndex};
 use super::{EntryReport, ExportedAttachment, UnsavedRef};
 use crate::hosted::{free_bytes, rename_no_replace, tree_size};
-use crate::publish_policy::RejectReason;
+use crate::publish_policy::{RejectReason, MAX_PUBLISH_BLOB_BYTES};
 use crate::tree_merge::changed_paths;
 use crate::workspace_git::WorkspaceGit;
 
@@ -230,23 +230,33 @@ fn salvage_repository(
         });
     }
     let index = WorkIndex::new(&git, head.as_deref())?;
-    let refused = index.take_from_worktree(&git, &sorted.work)?;
+    let mut refused = index.take_from_worktree(&git, &sorted.work)?;
+    sorted.work.retain(|path| !refused.contains(path));
+    let mut current = index.entries(&git, &sorted.work)?;
+    // A name git never stores (`git~1`, a link named `.gitmodules`) is
+    // passed over without an error: the index lacks what the work tree has.
+    for (path, entry) in &current {
+        let missed = match (classify::kind_of(&root.join(path)), entry) {
+            (Kind::File { .. }, Some(entry)) => matches!(entry.mode.as_str(), "120000" | "160000"),
+            (Kind::Link, Some(entry)) => entry.mode != "120000",
+            (Kind::File { .. } | Kind::Link, None) => true,
+            _ => false,
+        };
+        if missed {
+            refused.push(path.clone());
+        }
+    }
     if !refused.is_empty() {
+        refused.sort();
+        // Git recorded none of them: the index holds them as HEAD does.
         sorted.work.retain(|path| !refused.contains(path));
-        sorted
-            .skipped
-            .extend(refused.into_iter().map(|path| Skipped {
-                path,
-                size: 0,
-                reason: "unsupported",
-                commit: None,
-            }));
+        current.retain(|path, _| !refused.contains(path));
+        keep_refused(root, refused, &mut sorted);
     }
     report.skipped_paths.append(&mut sorted.skipped);
     // What the entry holds, before anything `main` has is left out.
     let source_tree = index.write_tree(&git)?;
     report.source_tree = Some(source_tree.clone());
-    let current = index.entries(&git, &sorted.work)?;
     let stale = match main.as_deref() {
         Some(main) => classify::stale_paths(&git, root, main, &current)?,
         None => BTreeSet::new(),
@@ -493,6 +503,35 @@ fn salvage_repository(
     pushed?;
     report.finished = true;
     Ok(())
+}
+
+/// Paths of the work tree W cannot hold as they are: each is reported
+/// skipped with its size (which holds up removal), and a file or link up to
+/// the size cap is kept in the private archive too, so acknowledging the
+/// entry never drops the only copy.
+fn keep_refused(root: &Path, refused: Vec<String>, sorted: &mut Sorted) {
+    for path in refused {
+        let (size, archived) = match classify::kind_of(&root.join(&path)) {
+            Kind::File { size } => (size, size <= MAX_PUBLISH_BLOB_BYTES),
+            Kind::Link => (0, true),
+            Kind::Folder => (tree_size(&root.join(&path)), false),
+            Kind::Other | Kind::Missing => (0, false),
+        };
+        if archived {
+            sorted.private.push(PrivatePath {
+                path: path.clone(),
+                reason: "unsupported",
+                size,
+                commit: None,
+            });
+        }
+        sorted.skipped.push(Skipped {
+            path,
+            size,
+            reason: "unsupported",
+            commit: None,
+        });
+    }
 }
 
 fn private_bytes(private: &[PrivatePath]) -> u64 {

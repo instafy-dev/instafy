@@ -176,9 +176,31 @@ pub(crate) fn candidates(git: &WorkspaceGit<'_>) -> Result<(Vec<Candidate>, Vec<
 pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
     let mut sorted = Sorted::default();
     let mut folders = BTreeSet::new();
+    let mut replaced = Vec::new();
     for candidate in listed {
         let path = candidate.path.as_str();
         let kind = kind_of(&root.join(path));
+        if candidate.listed == Listed::Tracked
+            && !candidate.folder
+            && kind == Kind::Folder
+            && kind_of(&root.join(path).join(".git")) == Kind::Missing
+        {
+            // A tracked file the work tree now has a folder in place of: its
+            // deletion goes into W, and the folder's files are sorted on
+            // their own, as `git add -A` takes them.
+            if deletion_allowed(path) {
+                sorted.work.push(path.to_string());
+            } else {
+                sorted.skipped.push(Skipped {
+                    path: path.to_string(),
+                    size: 0,
+                    reason: "excluded",
+                    commit: None,
+                });
+            }
+            replaced.push(path.to_string());
+            continue;
+        }
         if candidate.folder || kind == Kind::Folder {
             folders.insert(path.to_string());
             match candidate.listed {
@@ -221,10 +243,57 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
         }
         sort_file(path, candidate.listed, kind, &mut sorted);
     }
+    let named: BTreeSet<&str> = listed
+        .iter()
+        .map(|candidate| candidate.path.as_str())
+        .collect();
+    for path in replaced {
+        unlisted_files(root, &path, &named, &mut sorted);
+    }
     nested_repositories(root, &folders, &mut sorted);
     sorted.work.sort();
     sorted.work.dedup();
     sorted
+}
+
+/// The files in the folder `path` that took a tracked file's place and that
+/// `git status` does not list: it lists the folder's untracked files one by
+/// one, but none an ignore rule matching the folder itself covers (the
+/// index names the path as a file). Each is sorted as an ignored file, so
+/// it is kept privately (or skipped as build output, or as too large).
+/// Links are never followed; repositories are left to
+/// [`nested_repositories`].
+fn unlisted_files(root: &Path, path: &str, named: &BTreeSet<&str>, sorted: &mut Sorted) {
+    let mut pending = vec![path.to_string()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
+            continue;
+        };
+        let mut names: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            match entry.file_name().into_string() {
+                Ok(name) => names.push(name),
+                Err(name) => sorted.skipped.push(Skipped {
+                    path: format!("{folder}/{}", name.to_string_lossy()),
+                    size: 0,
+                    reason: "unsupported",
+                    commit: None,
+                }),
+            }
+        }
+        names.sort();
+        for name in names {
+            let child = format!("{folder}/{name}");
+            if is_reserved_path(&child) || named.contains(child.as_str()) {
+                continue;
+            }
+            match kind_of(&root.join(&child)) {
+                Kind::Folder => pending.push(child),
+                Kind::Missing => {}
+                kind => sort_file(&child, Listed::Ignored, kind, sorted),
+            }
+        }
+    }
 }
 
 /// Repositories inside the folders git reads, which `git status` never
