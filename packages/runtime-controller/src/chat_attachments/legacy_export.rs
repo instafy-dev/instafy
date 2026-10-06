@@ -230,11 +230,15 @@ async fn export_legacy_image(
     }))
 }
 
-/// `raw` when it names a chat image the web app wrote into a space's root:
+/// `path` when it names a chat image the web app wrote into a space's root:
 /// `chat-upload-*` (any letter case), one path segment, printable, at most
-/// 255 characters, and nothing JSON would escape.
-pub(crate) fn legacy_workspace_path(raw: &str) -> Option<&str> {
-    let path = raw.trim();
+/// 255 characters, and nothing JSON would escape. The name is taken exactly
+/// as given: one with surrounding whitespace is another file than the one
+/// messages name, so it is refused rather than trimmed into that one.
+pub(crate) fn legacy_workspace_path(path: &str) -> Option<&str> {
+    if path.trim() != path {
+        return None;
+    }
     let named = path
         .get(..LEGACY_PREFIX.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(LEGACY_PREFIX))
@@ -540,17 +544,16 @@ mod tests {
         for good in [
             "chat-upload-1700000000000-abc-photo.png",
             "Chat-Upload-1-x.JPG",
-            "  chat-upload-2-y.webp  ",
             "chat-upload-x y (1).gif",
         ] {
-            assert!(legacy_workspace_path(good).is_some(), "{good}");
+            assert_eq!(legacy_workspace_path(good), Some(good));
         }
-        assert_eq!(
-            legacy_workspace_path(" chat-upload-1.png "),
-            Some("chat-upload-1.png")
-        );
         for bad in [
             "",
+            // Another file than the one messages name, never trimmed into it.
+            " chat-upload-1.png ",
+            "chat-upload-1-a.png ",
+            "\u{a0}chat-upload-1-a.png",
             "chat-upload-",
             "photo.png",
             "images/chat-upload-1.png",
