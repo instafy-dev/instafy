@@ -12,11 +12,11 @@ use super::options::Settings;
 
 const JOURNAL: &str = "report.jsonl";
 
-/// The journal, opened for appending (created 0600).
+/// The journal, opened for appending and reading (created 0600).
 pub(super) fn open(settings: &Settings) -> Result<(std::fs::File, PathBuf)> {
     let path = settings.salvage_dir().join(JOURNAL);
     let mut options = std::fs::OpenOptions::new();
-    options.append(true).create(true);
+    options.read(true).append(true).create(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -28,12 +28,29 @@ pub(super) fn open(settings: &Settings) -> Result<(std::fs::File, PathBuf)> {
     Ok((file, path))
 }
 
-/// Append one line and wait until it is on disk.
+/// Append one line and wait until it is on disk. A journal whose last line
+/// was cut short (a full disk) gets the newline it lacks first, so the cut
+/// line never runs into this one and this one is read back.
 pub(super) fn append(settings: &Settings, line: &str) -> Result<()> {
     let (mut file, path) = open(settings)?;
-    writeln!(file, "{line}")
+    let cut =
+        ends_without_newline(&mut file).with_context(|| format!("failed to read {path:?}"))?;
+    let text = format!("{}{line}\n", if cut { "\n" } else { "" });
+    file.write_all(text.as_bytes())
         .and_then(|()| file.sync_all())
         .with_context(|| format!("failed to append to {path:?}"))
+}
+
+/// Whether the file is not empty and its last byte is not a newline.
+fn ends_without_newline(file: &mut std::fs::File) -> std::io::Result<bool> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    if file.metadata()?.len() == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last)?;
+    Ok(last[0] != b'\n')
 }
 
 /// A salvage ref an earlier run verified on canonical for an entry, and
@@ -134,8 +151,29 @@ mod tests {
         for line in lines {
             append(&settings, line).unwrap();
         }
+        // A line a full disk cut short, without its newline: the next run's
+        // first line still starts a line of its own.
+        use std::io::Write as _;
+        let journal = root.join(".salvage").join(JOURNAL);
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .unwrap()
+            .write_all(br#"{"entry":"e","dryRun":false,"canonicalVer"#)
+            .unwrap();
+        append(
+            &settings,
+            r#"{"entry":"f","dryRun":false,"canonicalVerified":true,"salvageRef":"refs/instafy/salvage/gateway/n-6","salvageRev":"r6"}"#,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&journal).unwrap();
+        assert!(
+            text.ends_with("\"canonicalVer\n{\"entry\":\"f\",\"dryRun\":false,\"canonicalVerified\":true,\"salvageRef\":\"refs/instafy/salvage/gateway/n-6\",\"salvageRev\":\"r6\"}\n"),
+            "{text}"
+        );
         let verified = verified_refs(&settings).unwrap();
-        assert_eq!(verified.len(), 2, "{verified:?}");
+        assert_eq!(verified.len(), 3, "{verified:?}");
+        assert_eq!(verified["f"].salvage_rev.as_deref(), Some("r6"));
         assert_eq!(
             verified["a"],
             Recorded {
