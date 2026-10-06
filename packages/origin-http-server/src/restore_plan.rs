@@ -741,6 +741,36 @@ mod tests {
         assert_eq!(alias_clashes(tree, &["vendor"]), vec!["vendor"]);
     }
 
+    /// A disk that ignores case folds it fully: `Straße.md` and
+    /// `STRASSE.md`, a final sigma and a plain one, a long s and an s, a
+    /// ligature and its letters each name one file there.
+    #[test]
+    fn names_full_case_folding_takes_for_one_are_a_clash() {
+        for (kept, added) in [
+            ("Stra\u{df}e.md", "STRASSE.md"),
+            (
+                "\u{39f}\u{394}\u{39f}\u{3a3}.md",
+                "\u{3bf}\u{3b4}\u{3bf}\u{3c2}.md",
+            ),
+            ("\u{17f}ize.md", "size.md"),
+            ("\u{fb01}le.md", "FILE.md"),
+        ] {
+            let tree = [(kept.to_string(), false), (added.to_string(), false)];
+            assert_eq!(alias_clashes(tree, &[added]), vec![added], "{kept} {added}");
+            let folders = [
+                (kept.to_string(), false),
+                (added.to_string(), true),
+                (format!("{added}/x"), false),
+            ];
+            let below = format!("{added}/x");
+            assert_eq!(
+                alias_clashes(folders, &[below.as_str()]),
+                vec![below.clone()],
+                "{kept} {added}"
+            );
+        }
+    }
+
     #[test]
     fn a_refusal_above_or_below_a_path_says_why_it_was_undone() {
         let left_out: BTreeMap<String, &'static str> = [
