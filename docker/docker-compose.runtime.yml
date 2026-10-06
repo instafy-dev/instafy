@@ -88,6 +88,9 @@ services:
       ORIGIN_GIT_AUTHOR_NAME: ${ORIGIN_GIT_AUTHOR_NAME:-}
       ORIGIN_GIT_AUTHOR_EMAIL: ${ORIGIN_GIT_AUTHOR_EMAIL:-}
       ORIGIN_MAX_ARCHIVE_BYTES: ${ORIGIN_MAX_ARCHIVE_BYTES:-134217728}
+      # Soft cap of the mirror cache under /workspaces/.git-cache, in bytes;
+      # blank means the default (20 GiB).
+      ORIGIN_CACHE_MAX_BYTES: ${ORIGIN_CACHE_MAX_BYTES:-}
       # This gateway's name in the refs `origin-http-server salvage --apply`
       # pushes (refs/instafy/salvage/gateway/<name>-...), lower case
       # [0-9a-z._-]. Keep it the same across redeploys: the container's host
