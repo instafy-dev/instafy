@@ -3300,3 +3300,88 @@ fn a_parked_config_never_points_the_salvage_at_another_work_tree() {
         "the live copy's repository changed"
     );
 }
+
+/// A root that looks like a runtime provider's checkout folder (a local
+/// stack once gave the gateway that folder, and the gateway parked the
+/// runtimes' checkouts with its own) is refused before anything is read or
+/// written, dry or not: the provider's own folders in it, or a space folder
+/// or parked entry a runtime used (its clean-stop marker, or local recovery
+/// refs, loose or packed).
+#[test]
+fn a_root_that_looks_like_a_provider_repo_base_is_refused() {
+    type Mark = fn(&Gateway, &Path);
+    let cases: [(&str, Mark); 6] = [
+        (".instafy-checkout-stamps", |gateway, _| {
+            std::fs::create_dir(gateway.root.join(".instafy-checkout-stamps")).unwrap()
+        }),
+        (".instafy-evicted", |gateway, _| {
+            std::fs::create_dir(gateway.root.join(".instafy-evicted")).unwrap()
+        }),
+        ("clean-stop marker", |_, entry| {
+            write(
+                &entry.join(".instafy/.git/instafy-stopped-clean"),
+                b"stopped\n",
+            )
+        }),
+        ("local recovery refs", |_, entry| {
+            ig(
+                entry,
+                &[
+                    "update-ref",
+                    "refs/instafy/local-recovery/20261003T101010Z-unsaved-abc",
+                    "HEAD",
+                ],
+            );
+        }),
+        ("local recovery refs", |_, entry| {
+            ig(
+                entry,
+                &["update-ref", "refs/instafy/local-recovery-pushed/x", "HEAD"],
+            );
+            ig(entry, &["pack-refs", "--all"]);
+            assert!(!entry
+                .join(".instafy/.git/refs/instafy/local-recovery-pushed/x")
+                .exists());
+        }),
+        ("clean-stop marker", |gateway, _| {
+            // A live space folder of the runtimes, beside the parked entry.
+            let live = gateway.root.join(Uuid::new_v4().to_string());
+            init_workspace_repo(&live);
+            write(
+                &live.join(".instafy/.git/instafy-stopped-clean"),
+                b"stopped\n",
+            );
+        }),
+    ];
+    for (marker, mark) in cases {
+        let gateway = Gateway::new();
+        let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+        let entry = gateway.park_checkout_at(&c1);
+        write(&entry.join("README.md"), b"edited\n");
+        mark(&gateway, &entry);
+        let files = snapshot(&entry);
+        let config = std::fs::read(entry.join(".instafy/.git/config")).unwrap();
+        let stub = Stub::default();
+        for settings in [
+            gateway.settings(false, false, &[]),
+            gateway.settings(true, true, &[&gateway.project.to_string()]),
+        ] {
+            let mut out = Vec::new();
+            let error = run(&settings, &stub, &mut out).unwrap_err();
+            let text = format!("{error:#}");
+            assert!(text.contains("provider's checkout folder"), "{text}");
+            assert!(text.contains(marker), "{marker}: {text}");
+            assert!(out.is_empty());
+        }
+        // Nothing was read with git or written.
+        assert_eq!(stub.read_mints.get(), 0, "{marker}");
+        assert!(!gateway.root.join(".salvage").exists(), "{marker}");
+        assert_eq!(snapshot(&entry), files, "{marker}");
+        assert_eq!(
+            std::fs::read(entry.join(".instafy/.git/config")).unwrap(),
+            config,
+            "{marker}"
+        );
+        assert!(gateway.salvage_refs().is_empty(), "{marker}");
+    }
+}
