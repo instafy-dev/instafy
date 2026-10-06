@@ -52,9 +52,12 @@
 //!
 //! A new name of the work that differs only in case or Unicode form from
 //! another entry of the restored tree (`Notes.md` beside a `notes.md` that
-//! `onto` keeps) is a clash too: a disk that ignores case takes the two for
-//! one file, so Desktop could not check both out, and `main` should not
-//! hold what such a checkout cannot.
+//! `onto` keeps) is a clash too, and so is a new path in a folder whose name
+//! is such a variant of a file, a link or a submodule (`Docs/guide.md`
+//! beside a file `docs`): a disk that ignores case takes the two for one, so
+//! Desktop could not check both out, and `main` should not hold what such a
+//! checkout cannot. Two folders whose names differ only so share one folder
+//! there, and stay allowed ([`alias_clashes`]).
 //!
 //! The ref may go once the restore is on `main` only when nothing was left
 //! out but on request: work refused here exists only on the ref, which then
@@ -315,10 +318,11 @@ pub(crate) fn plan(
     }
 
     // A new name of the work that a disk ignoring case or Unicode form
-    // takes for another entry of the restored tree cannot come in beside
-    // it: a Desktop checkout cannot hold both, and the gateway would leave
-    // `main` with two names such a checkout takes for one. It is a clash
-    // the person settles, in both modes.
+    // takes for another entry of the restored tree (itself, or a folder it
+    // lies in taken for a file) cannot come in beside it: a Desktop
+    // checkout cannot hold both, and the gateway would leave `main` with
+    // two names such a checkout takes for one. It is a clash the person
+    // settles, in both modes.
     let added: Vec<&str> = changes
         .iter()
         .filter(|change| {
@@ -441,10 +445,12 @@ fn undone(
     Ok(undone)
 }
 
-/// The paths of `added` that `tree` holds beside another entry (a file, a
-/// link, a submodule or a folder) whose name differs from it only in case
-/// or Unicode form ([`portable_key`]). The tree is listed once, by id.
-fn aliases_in(git: &WorkspaceGit<'_>, tree: &str, added: &[&str]) -> Result<Vec<String>> {
+/// [`alias_clashes`] of `added` in `tree` (a tree id), listed once.
+pub(crate) fn aliases_in(
+    git: &WorkspaceGit<'_>,
+    tree: &str,
+    added: &[&str],
+) -> Result<Vec<String>> {
     if added.is_empty() {
         return Ok(Vec::new());
     }
@@ -457,22 +463,53 @@ fn aliases_in(git: &WorkspaceGit<'_>, tree: &str, added: &[&str]) -> Result<Vec<
         "--end-of-options",
         tree,
     ])?;
-    let mut names: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for entry in parse_ls_tree(&raw) {
+    let entries = parse_ls_tree(&raw)
+        .into_iter()
+        .map(|entry| (entry.path, entry.kind == "tree"));
+    Ok(alias_clashes(entries, added))
+}
+
+/// The paths of `added` that a tree whose `entries` (path, and whether it is
+/// a folder) hold them cannot hold on a disk that ignores case or Unicode
+/// form ([`portable_key`]): a path beside another entry of its key (a file,
+/// a link, a submodule or a folder), or below a folder whose key another
+/// entry that is not a folder has (a folder `Docs` beside a file `docs`).
+/// Two folders of one key share one folder on such a disk, so a path below
+/// them is judged by its own key alone.
+pub(crate) fn alias_clashes(
+    entries: impl IntoIterator<Item = (String, bool)>,
+    added: &[&str],
+) -> Vec<String> {
+    let mut names: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
+    for (path, folder) in entries {
         names
-            .entry(portable_key(&entry.path))
+            .entry(portable_key(&path))
             .or_default()
-            .push(entry.path);
+            .push((path, folder));
     }
-    Ok(added
+    // The other entries of `name`'s key, with whether each is a folder.
+    let others = |name: &str| {
+        let name = name.to_string();
+        names
+            .get(&portable_key(&name))
+            .into_iter()
+            .flatten()
+            .filter(move |(other, _)| *other != name)
+            .map(|(_, folder)| *folder)
+    };
+    added
         .iter()
         .filter(|path| {
-            names.get(&portable_key(path)).is_some_and(|found| {
-                found.len() > 1 && found.iter().any(|name| name.as_str() == **path)
-            })
+            let held = names
+                .get(&portable_key(path))
+                .is_some_and(|found| found.iter().any(|(name, _)| name.as_str() == **path));
+            held && (others(path).next().is_some()
+                || path
+                    .match_indices('/')
+                    .any(|(index, _)| others(&path[..index]).any(|folder| !folder)))
         })
         .map(|path| path.to_string())
-        .collect())
+        .collect()
 }
 
 /// Why a path left out at a folder above `path`, or below `path`, was
@@ -657,7 +694,52 @@ impl FromIterator<String> for PathRoots {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use super::{gitignores_for, refused_around, PathRoots};
+    use super::{alias_clashes, gitignores_for, refused_around, PathRoots};
+
+    #[test]
+    fn a_new_path_whose_name_or_folder_another_entry_takes_is_a_clash() {
+        // (path, folder) of a tree.
+        let tree = [
+            ("Docs", true),
+            ("Docs/guide.md", false),
+            ("docs", false),
+            ("Notes.md", false),
+            ("notes.md", false),
+            ("Shared", true),
+            ("Shared/new.md", false),
+            ("shared", true),
+            ("shared/old.md", false),
+            ("Vendor", true),
+            ("Vendor/lib.rs", false),
+            ("vendor", false),
+            ("a", true),
+            ("a/B", true),
+            ("a/B/c.md", false),
+            ("a/b", false),
+            ("plain", true),
+            ("plain/new.md", false),
+        ]
+        .map(|(path, folder)| (path.to_string(), folder));
+        let added = [
+            // Below a folder another entry's file takes.
+            "Docs/guide.md",
+            "a/B/c.md",
+            // Beside a file of its key.
+            "Notes.md",
+            // Below two folders of one key: one folder on such a disk.
+            "Shared/new.md",
+            // Nothing of its key.
+            "plain/new.md",
+            // Not in the tree.
+            "Missing.md",
+        ];
+        assert_eq!(
+            alias_clashes(tree.clone(), &added),
+            vec!["Docs/guide.md", "a/B/c.md", "Notes.md"]
+        );
+        // A file the work adds where another entry is a folder of its key.
+        assert_eq!(alias_clashes(tree, &["vendor"]), vec!["vendor"]);
+    }
 
     #[test]
     fn a_refusal_above_or_below_a_path_says_why_it_was_undone() {
