@@ -15,14 +15,19 @@
 - Target a failing spec: `pnpm -C packages/frontend test:e2e -- tests/playwright/app.spec.ts -g "renders landing hero content"`
 - Gateway mode: `PLAYWRIGHT_GATEWAY_MODE=legacy|stateless` names the hosted gateway the local stack
   runs (helpers in `tests/playwright/utils/gatewayMode.ts`). Specs for the other mode skip, and specs
-  that name the mode fail (never skip) when the project's default origin answers otherwise. Unset
-  means the stateful gateway: the Files specs (`assertGatewayMode`) then make no probe. Specs that
-  use `requireGatewayMode` skip unless the declared mode is theirs and probe whenever they run, so
-  with the variable unset the History spec (written for `stateless`) skips, while the Changes spec
-  (written for `legacy`) still checks that the origin answers as the stateful gateway. A stack
-  started with `GIT_CANONICAL=1` runs the gateway built from this repository, which is stateless,
-  so run against it with `PLAYWRIGHT_GATEWAY_MODE=stateless`; with the variable unset there, the
-  Changes spec fails its probe.
+  that name the mode fail (never skip) when the project's default origin answers otherwise. No
+  runner sets the variable, and specs read it unset as `legacy` (the stateful gateway), but the
+  default local stack is stateless: `pnpm stack:up`, `pnpm runtime:test`,
+  `pnpm runtime:controller:start` and the frontend Playwright runner
+  (`packages/frontend/scripts/playwright-test.mjs`, which every `pnpm test:e2e` lane uses) set
+  `GIT_CANONICAL=1` when it is unset, and that stack runs the gateway built from this repository,
+  which answers `stateless: true`. Only the `smoke-core`, `controller` and `orgs` lanes set
+  `GIT_CANONICAL=0`, where the gateway specs skip. Run the gateway specs with
+  `PLAYWRIGHT_GATEWAY_MODE=stateless`. With the variable unset, the History spec (written for
+  `stateless`) skips and the specs written for the stateful gateway run against the stateless one
+  and fail: the Files specs' stateful flows (Save draft, then sync) make no probe
+  (`assertGatewayMode` probes only when the mode is named), so they fail without saying why, and
+  the Changes spec (`requireGatewayMode`, which probes whenever its spec runs) fails its probe.
 
 The default `pnpm test:e2e` loop is intentionally product-focused:
 - it covers the regular Playwright regression surface
