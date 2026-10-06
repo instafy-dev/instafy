@@ -2904,3 +2904,84 @@ fn paths_below_a_link_are_never_read_through_it() {
         target_before
     );
 }
+
+/// `main` replaced a link and a file with folders of the same names after
+/// the copy's view, and an old sync moved the branch without the files (and
+/// left no reset in the reflog). The link and the file are stale copies: W
+/// puts each folder back whole, as HEAD has it, and never writes a folder's
+/// own entry (which an index takes for a sparse folder, writing its files
+/// one level up as `shareda.ts`).
+#[test]
+fn a_stale_copy_where_main_has_a_folder_gets_the_whole_folder_back() {
+    let gateway = Gateway::new();
+    write(&gateway.seed.join("README.md"), b"one\n");
+    write(&gateway.seed.join("lib/shared/a.ts"), b"a1\n");
+    write(&gateway.seed.join("lib/shared/b.ts"), b"b1\n");
+    write(&gateway.seed.join("x"), b"old x\n");
+    std::os::unix::fs::symlink("lib/shared", gateway.seed.join("shared")).unwrap();
+    let c1 = gateway.publish(&[], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    std::fs::remove_file(gateway.seed.join("shared")).unwrap();
+    write(&gateway.seed.join("shared/a.ts"), b"a2\n");
+    write(&gateway.seed.join("shared/b.ts"), b"b2\n");
+    std::fs::remove_file(gateway.seed.join("x")).unwrap();
+    write(&gateway.seed.join("x/a"), b"new a\n");
+    let c2 = gateway.publish(&[], "c2");
+    ig(
+        &entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    ig(
+        &entry,
+        &["update-ref", "-m", "old sync", "refs/heads/main", &c2],
+    );
+    ig(&entry, &["read-tree", &c2]);
+    let _ = std::fs::remove_file(entry.join(".instafy/.git/ORIG_HEAD"));
+    write(&entry.join("README.md"), b"edited\n");
+    assert_eq!(
+        ig(&entry, &["status", "--porcelain"]),
+        " M README.md\n D shared/a.ts\n D shared/b.ts\n D x/a\n?? shared\n?? x"
+    );
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(
+        paths(&report["stalePaths"]),
+        ["shared", "x", "x/a"],
+        "{report:#}"
+    );
+    assert_eq!(paths(&report["archivedPaths"]), ["README.md"], "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(
+            &canonical,
+            &["diff", "--no-renames", "--name-status", &c2, salvaged]
+        ),
+        "M\tREADME.md"
+    );
+    assert_eq!(
+        git_in(&canonical, &["ls-tree", "-r", "--name-only", salvaged]),
+        "README.md\nlib/shared/a.ts\nlib/shared/b.ts\nshared/a.ts\nshared/b.ts\nx/a"
+    );
+    // Git would not record the paths below the link; they hold up removal.
+    assert_eq!(
+        report["skippedPaths"],
+        serde_json::json!([
+            { "path": "shared/a.ts", "size": 0, "reason": "unsupported" },
+            { "path": "shared/b.ts", "size": 0, "reason": "unsupported" },
+        ]),
+        "{report:#}"
+    );
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert_eq!(summary.exit_code(), 1);
+}

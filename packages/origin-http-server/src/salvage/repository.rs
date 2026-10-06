@@ -274,7 +274,20 @@ fn salvage_repository(
     };
     let stale: Vec<String> = stale.into_iter().collect();
     index.reset(&git, head.as_deref(), &stale)?;
+    // A stale copy where HEAD has a folder brings the folder back whole: the
+    // deletions below it only the copy made are as HEAD has them now.
+    let folded: Vec<String> = current
+        .iter()
+        .filter(|(path, entry)| {
+            entry.is_none()
+                && stale
+                    .iter()
+                    .any(|copy| path.starts_with(&format!("{copy}/")))
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
     report.stale_paths = stale;
+    report.stale_paths.extend(folded);
     // The same copies in HEAD's local commits: W puts them back as the
     // commit those were made on has them.
     let history_stale = match (head.as_deref(), main.as_deref()) {
@@ -588,8 +601,9 @@ fn stale_in_history(
     let mut stale: Vec<String> = classify::stale_paths(git, root, main, &held)?
         .into_iter()
         .collect();
-    // A path the merge base holds as a folder stays as W holds it: the
-    // index takes files back one path at a time.
+    // A path the merge base holds as a folder stays as W holds it: putting
+    // the folder back would also undo deletions below it that a local
+    // commit saved and no stale rule judged.
     let in_base = git.tree_entries(&base, &stale)?;
     stale.retain(|path| in_base.get(path).is_none_or(|entry| entry.kind != "tree"));
     index.reset(git, Some(base.as_str()), &stale)?;

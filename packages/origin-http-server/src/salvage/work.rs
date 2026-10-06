@@ -15,7 +15,8 @@ use crate::publish_policy::{
 };
 use crate::tree_merge::{changed_paths, tree_with_entries_from};
 use crate::workspace_git::{
-    nul_list, temp_index_dir, zero_oid, GitIdentity, RunOpts, TreeEntry, WorkspaceGit,
+    nul_list, parse_ls_tree, temp_index_dir, zero_oid, GitIdentity, RunOpts, TreeEntry,
+    WorkspaceGit,
 };
 
 /// The salvage commit's subject.
@@ -163,28 +164,47 @@ impl WorkIndex {
         Ok(entries)
     }
 
-    /// Put `head`'s entries (or none) back for `paths`.
+    /// Put `source`'s entries (or none) back for `paths`. A path the source
+    /// holds as a folder comes back as every entry below it: an index takes
+    /// a folder's own entry for a sparse one and writes its files one level
+    /// up (`shared/a.ts` as `shareda.ts`). Every path is taken out first, so
+    /// no entry put back meets one of them in its place.
     pub(crate) fn reset(
         &self,
         git: &WorkspaceGit<'_>,
-        head: Option<&str>,
+        source: Option<&str>,
         paths: &[String],
     ) -> Result<()> {
         if paths.is_empty() {
             return Ok(());
         }
-        let kept = match head {
-            Some(head) => git.tree_entries(head, paths)?,
+        let kept = match source {
+            Some(source) => git.tree_entries(source, paths)?,
             None => BTreeMap::new(),
+        };
+        let folders: Vec<String> = kept
+            .values()
+            .filter(|entry| entry.kind == "tree")
+            .map(|entry| entry.path.clone())
+            .collect();
+        let below = match source {
+            Some(source) if !folders.is_empty() => entries_below(git, source, &folders)?,
+            _ => Vec::new(),
         };
         let zero = zero_oid(&git.empty_tree()?);
         let mut info = Vec::new();
         for path in paths {
-            let line = match kept.get(path) {
-                Some(entry) => format!("{} {}\t{path}", entry.mode, entry.oid),
-                None => format!("0 {zero}\t{path}"),
-            };
-            info.extend_from_slice(line.as_bytes());
+            info.extend_from_slice(format!("0 {zero}\t{path}").as_bytes());
+            info.push(0);
+        }
+        for entry in kept
+            .values()
+            .filter(|entry| entry.kind != "tree")
+            .chain(&below)
+        {
+            info.extend_from_slice(
+                format!("{} {}\t{}", entry.mode, entry.oid, entry.path).as_bytes(),
+            );
             info.push(0);
         }
         git.ok_opts(
@@ -200,6 +220,32 @@ impl WorkIndex {
     pub(crate) fn write_tree(&self, git: &WorkspaceGit<'_>) -> Result<String> {
         git.stdout_opts(&["write-tree"], &self.opts())
     }
+}
+
+/// Every file, link and gitlink `source` holds below the folders `folders`.
+fn entries_below(
+    git: &WorkspaceGit<'_>,
+    source: &str,
+    folders: &[String],
+) -> Result<Vec<TreeEntry>> {
+    let mut entries = Vec::new();
+    for chunk in folders.chunks(256) {
+        let mut args: Vec<&str> = vec!["ls-tree", "-r", "-z", "--full-tree", source, "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        let raw = git.bytes_opts(
+            &args,
+            &RunOpts {
+                literal_pathspecs: true,
+                ..RunOpts::default()
+            },
+        )?;
+        entries.extend(parse_ls_tree(&raw).into_iter().filter(|entry| {
+            chunk
+                .iter()
+                .any(|folder| entry.path.starts_with(&format!("{folder}/")))
+        }));
+    }
+    Ok(entries)
 }
 
 /// The entries of `held` that recording `path` would drop: those below it
