@@ -3155,3 +3155,65 @@ fn a_stale_folder_where_main_has_a_file_never_deletes_the_file() {
     assert_eq!(report["removed"], false, "{report:#}");
     assert_eq!(summary.exit_code(), 1);
 }
+
+/// Revision text read from the entry's files (a reflog line) or from the
+/// journal reaches git's arguments only when it is a full object id: git
+/// reads `HEAD~2` or `main~0` as revisions, not as the ids those files
+/// should hold.
+#[test]
+fn revisions_read_from_files_reach_git_only_as_object_ids() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[("README.md", Some("one\n")), ("f.txt", Some("f\n"))],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    std::fs::remove_file(entry.join("f.txt")).unwrap();
+    {
+        use std::io::Write as _;
+        let mut reflog = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(entry.join(".instafy/.git/logs/HEAD"))
+            .unwrap();
+        writeln!(
+            reflog,
+            "HEAD~2 {c1} Old gateway <origin@instafy.dev> 1700000000 +0000\treset: moving to \
+             origin/main"
+        )
+        .unwrap();
+    }
+    let stub = Stub::default();
+    let (_, first) = salvage(&gateway.settings(false, false, &[]), &stub);
+    // A journal line for exactly what the entry holds, naming a revision.
+    let recorded = format!("refs/instafy/salvage/gateway/{NODE}-0123abcd");
+    let line = serde_json::json!({
+        "entry": gateway.project.to_string(),
+        "dryRun": false,
+        "canonicalVerified": true,
+        "head": first[0]["head"],
+        "sourceTree": first[0]["sourceTree"],
+        "salvageRef": recorded,
+        "salvageRev": "main~0",
+    });
+    let journal = gateway.root.join(".salvage");
+    std::fs::create_dir_all(&journal).unwrap();
+    std::fs::write(journal.join("report.jsonl"), format!("{line}\n")).unwrap();
+
+    let log = gateway.root.parent().unwrap().join("git.log");
+    let (_, lines) = {
+        let _wrapper = GitWrapper::install(
+            gateway.root.parent().unwrap(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        salvage(&gateway.settings(false, false, &[]), &stub)
+    };
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(paths(&report["archivedPaths"]), ["f.txt"], "{report:#}");
+    assert_ne!(report["salvageRef"], recorded.as_str(), "{report:#}");
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(logged.contains("rev-parse"), "{logged}");
+    assert!(!logged.contains("HEAD~2"), "{logged}");
+    assert!(!logged.contains("main~0"), "{logged}");
+}

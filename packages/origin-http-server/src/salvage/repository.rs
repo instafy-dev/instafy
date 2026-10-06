@@ -19,6 +19,7 @@ use super::outputs::{
 use super::services::{ExportOutcome, Services};
 use super::work::{self, Version, WorkIndex};
 use super::{EntryReport, ExportedAttachment, UnsavedRef};
+use crate::git::is_full_object_id;
 use crate::hosted::{free_bytes, rename_no_replace, tree_size};
 use crate::publish_policy::{RejectReason, MAX_PUBLISH_BLOB_BYTES};
 use crate::tree_merge::changed_paths;
@@ -791,7 +792,9 @@ fn reuse_recorded(
     let (Some(reference), Some(rev)) = (&earlier.salvage_ref, &earlier.salvage_rev) else {
         return Ok(false);
     };
+    // Only an object id read from the journal reaches git's arguments.
     if !is_salvage_ref_name(reference)
+        || !is_full_object_id(rev)
         || push.git.commit_id(rev)?.as_deref() != Some(rev.as_str())
         || read_salvage_tip(services, push, reference)?.as_deref() != Some(rev.as_str())
     {
@@ -893,7 +896,7 @@ fn unsaved_refs(
     let mut unsaved: Vec<UnsavedRef> = Vec::new();
     for (name, id) in tips {
         // Only an object id reaches git's arguments.
-        if !is_object_id(&id) {
+        if !is_full_object_id(&id) {
             continue;
         }
         let Some(commit) = git.commit_id(&id)? else {
@@ -941,11 +944,7 @@ fn read_object_id(path: &Path) -> Option<String> {
     }
     let text = std::fs::read_to_string(path).ok()?;
     let id = text.trim();
-    is_object_id(id).then(|| id.to_string())
-}
-
-fn is_object_id(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    is_full_object_id(id).then(|| id.to_string())
 }
 
 /// How many commits HEAD has that `main` lacks, and their subjects.
