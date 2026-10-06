@@ -20,6 +20,10 @@
 //!   path that may never be saved: Instafy metadata, build output and
 //!   dependencies, secrets, legacy chat uploads (422 `excluded_path`), or a
 //!   file over the size cap (422 `policy_rejected`);
+//! - a new path a disk that ignores case or Unicode form takes for another
+//!   entry of the new tree, itself or a folder it lies in taken for a file
+//!   (409 `path_alias`, as on Desktop; not for imports and
+//!   `autoCommitAfterApply` applies, which add content as they always did);
 //! - after the no-op check, a path the client read at another version
 //!   (`expected`, or a `baseRev` other than `main`) that changed since
 //!   (409 `head_moved`); a change that would need nothing is still 409
@@ -34,7 +38,8 @@ use uuid::Uuid;
 
 use super::answers::{
     delete_requires_base_rev, excluded_path, head_moved, hook_refusal, ignored_path, internal,
-    path_type_conflict, policy_rejected, rev_not_on_main, revert_conflict, unsupported_entry,
+    path_alias, path_type_conflict, policy_rejected, rev_not_on_main, revert_conflict,
+    unsupported_entry,
 };
 use super::read::readable;
 use super::restore::Restore;
@@ -45,7 +50,7 @@ use crate::publish::parse_raw_changes;
 use crate::publish_policy::{
     deletion_allowed, unpublishable_reason, RejectReason, MAX_PUBLISH_BLOB_BYTES,
 };
-use crate::restore_plan::{check_ignored, gitignores_for};
+use crate::restore_plan::{aliases_in, check_ignored, gitignores_for};
 use crate::tree_merge::three_way;
 use crate::workspace_git::{parse_ls_tree, zero_oid, RunOpts, TreeEntry, WorkspaceGit};
 
@@ -423,6 +428,9 @@ impl Edits {
             None => None,
         };
 
+        // A person's save (not an import or the managed files' bootstrap):
+        // its new paths are checked against the space's ignore rules and
+        // the names `main` holds.
         let check_ignores = !self.import && !self.add_ignored;
         let mut wanted = BTreeSet::new();
         for (file, _) in &writes {
@@ -598,6 +606,21 @@ impl Edits {
         }
 
         let tree = build_tree(git, scratch, main, &removals, &additions)?;
+        // A person's new path that a disk ignoring case takes for another
+        // entry of the new tree: a Desktop checkout of the space could not
+        // hold both, and on such a disk the save would write over the other
+        // (Desktop refuses it too).
+        if check_ignores {
+            let added: Vec<&str> = additions
+                .iter()
+                .map(|(_, _, path)| path.as_str())
+                .filter(|path| !at_main.contains_key(*path))
+                .collect();
+            let aliases = aliases_in(git, &tree, &added).map_err(internal)?;
+            if !aliases.is_empty() {
+                return Err(path_alias(main, aliases));
+            }
+        }
         let touched = additions
             .iter()
             .map(|(_, _, path)| path.clone())

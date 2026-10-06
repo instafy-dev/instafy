@@ -577,6 +577,13 @@ pub(crate) fn portable_key(path: &str) -> String {
     path.nfc().flat_map(char::to_lowercase).collect()
 }
 
+/// Why a person's save of a path that another file or folder of the space
+/// takes on such a disk is refused (409 `path_alias`, on Desktop and on the
+/// hosted gateway alike).
+pub(crate) const PATH_ALIAS_MESSAGE: &str = "another file or folder here has this name in \
+     another case or Unicode form, and a disk that ignores case takes the two for one; keep \
+     the current version or use another name";
+
 fn insert_portable_destination(
     destinations: &mut HashMap<String, String>,
     normalized: &str,

@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::apply::{
     apply_changes_transactional, apply_changes_transactional_file, normalize_relative_path,
-    ApplyManifest, ApplySummary,
+    portable_key, ApplyManifest, ApplySummary, PATH_ALIAS_MESSAGE,
 };
 use crate::apply_idempotency::{
     abort_apply_idempotency_claim, claim_apply_idempotency, complete_apply_idempotency_claim,
@@ -1732,6 +1732,20 @@ async fn apply_manifest_archive(
     let expected = manifest.expected.take();
     let manifest_deletes = manifest.deletes.clone();
     let auto_commit_after_apply = manifest.auto_commit_after_apply;
+    // A person's save (the controller's imports and managed-files bootstrap
+    // commit theirs, `autoCommitAfterApply`) never writes or deletes a path
+    // the folder holds under another spelling: see `check_destination_names`.
+    let person_destinations: Vec<String> = if auto_commit_after_apply {
+        Vec::new()
+    } else {
+        manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(manifest.deletes.iter().map(String::as_str))
+            .filter_map(normalize_relative_path)
+            .collect()
+    };
     // The version the client read at: it tells a link the client could
     // never have seen from one that changed since (see
     // `check_expected_blobs`).
@@ -1776,6 +1790,7 @@ async fn apply_manifest_archive(
                     }
                 }
             }
+            check_destination_names(blocking_workspace.as_path(), &person_destinations)?;
             if let Some(expected) = expected.as_ref() {
                 check_expected_blobs(
                     blocking_workspace.as_path(),
@@ -1978,6 +1993,106 @@ fn check_expected_blobs(
         "files changed since they were read",
         stale,
     ))
+}
+
+/// Refuse (409 `path_alias`, before anything is written) a write or delete
+/// of a path the folder does not hold by its own name but holds under
+/// another spelling a disk ignoring case or Unicode form takes for it: an
+/// entry of its folded name ([`portable_key`]), or a folder it would lie in
+/// taken for a file. On such a disk the write would land in that other
+/// entry, which may hold edits that exist in no commit and that the
+/// client's checks, made for the path as named, never saw; on any disk the
+/// two names could not both be checked out there. The rule is the one the
+/// hosted gateway applies to a save over `main`'s tree
+/// ([`crate::restore_plan::alias_clashes`]), over the folder's entries.
+/// Links and special files, which listings never show, are left to the
+/// apply's own checks.
+fn check_destination_names(workspace_root: &Path, paths: &[String]) -> Result<(), OriginError> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let workspace = WorkspaceDir::open(workspace_root)
+        .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
+    let mut listings = std::collections::HashMap::new();
+    let mut aliased: Vec<String> = paths
+        .iter()
+        .filter(|path| held_under_another_name(&workspace, &mut listings, path))
+        .cloned()
+        .collect();
+    if aliased.is_empty() {
+        return Ok(());
+    }
+    aliased.sort();
+    aliased.dedup();
+    Err(OriginError::conflict_paths(
+        "path_alias",
+        PATH_ALIAS_MESSAGE,
+        aliased,
+    ))
+}
+
+/// Whether the folder holds `path` (normalized) only under another spelling
+/// (see [`check_destination_names`]). Each folder is listed once
+/// (`listings`, by its path in the folder); a folder that cannot be listed
+/// holds nothing.
+fn held_under_another_name(
+    workspace: &WorkspaceDir,
+    listings: &mut std::collections::HashMap<String, Vec<(String, bool)>>,
+    path: &str,
+) -> bool {
+    let components: Vec<&str> = path.split('/').collect();
+    // The folders the path so far names under its folded name, and whether
+    // by its own spelling all the way.
+    let mut folders: Vec<(String, bool)> = vec![(String::new(), true)];
+    let (mut exact, mut alias) = (false, false);
+    for (index, component) in components.iter().enumerate() {
+        let last = index + 1 == components.len();
+        let key = portable_key(component);
+        let mut next = Vec::new();
+        for (folder, spelled) in &folders {
+            let entries = listings.entry(folder.clone()).or_insert_with(|| {
+                workspace
+                    .list((!folder.is_empty()).then_some(folder.as_str()))
+                    .map(|entries| {
+                        entries
+                            .into_iter()
+                            .map(|entry| {
+                                (
+                                    entry.name.to_string_lossy().to_string(),
+                                    entry.kind == WorkspaceEntryKind::Directory,
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            for (name, is_folder) in entries.iter() {
+                if portable_key(name) != key {
+                    continue;
+                }
+                let same = *spelled && name == component;
+                if last {
+                    exact |= same;
+                    alias |= !same;
+                } else if *is_folder {
+                    let below = if folder.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{folder}/{name}")
+                    };
+                    next.push((below, same));
+                } else if !same {
+                    // A folder the path lies in, taken for a file.
+                    alias = true;
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        folders = next;
+    }
+    alias && !exact
 }
 
 /// Whether the work tree holds a symlink at `relative` (below real folders
