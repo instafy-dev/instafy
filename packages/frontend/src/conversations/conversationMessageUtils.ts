@@ -427,6 +427,18 @@ function parseChangeType(value: unknown): ChatMessageFileChangeType {
   }
 }
 
+// The runtime lists files a turn only read in apply/files as read references
+// (packages/runtime-agent/README.md, "Structured file results"). They never
+// describe a change, so Studio leaves them out of ChatMessage.files.
+function isReadFileReference(entry: Record<string, unknown>): boolean {
+  const marker = (value: unknown) => typeof value === "string" && value.trim().toLowerCase() === "read";
+  return (
+    marker(entry.changeType) ||
+    marker(entry.change) ||
+    (isPlainObject(entry.change) && marker(entry.change.type))
+  );
+}
+
 function parseLineRangeValue(value: unknown): ChatMessageFileLineRange | null {
   if (isPlainObject(value)) {
     const from = typeof value.from === "number" && Number.isFinite(value.from) ? Math.floor(value.from) : null;
@@ -547,6 +559,7 @@ export function extractFileChangesFromMetadata(
     return [];
   }
   return filesValue
+    .filter((entry) => !(isPlainObject(entry) && isReadFileReference(entry)))
     .map((entry) => parseFileChange(entry))
     .filter((entry): entry is ChatMessageFileChange => entry !== null);
 }
