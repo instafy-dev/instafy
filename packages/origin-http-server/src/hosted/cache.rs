@@ -245,6 +245,9 @@ struct FetchState {
     /// starts after a push the mirror did not record: that fetch read
     /// canonical before the push, so no plain read reuses it.
     last_success: Option<Instant>,
+    /// The mirror that fetch filled: a plain read reuses the fetch only
+    /// while this same mirror is at the mirror's path.
+    last_mirror: Option<MirrorIdentity>,
     /// A write pushed to canonical at this time but could not move the
     /// mirror's `main`: until a fetch that started later has run, every
     /// read waits for one.
@@ -413,7 +416,37 @@ pub(crate) struct MirrorCache {
 fn forget_fetches(entry: &MirrorEntry) {
     let mut state = locked(&entry.fetches);
     state.last_success = None;
+    state.last_mirror = None;
     entry.remakes.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Which mirror a folder holds: its device and inode, and when it was made
+/// where the disk records that, so a mirror made again at the same path
+/// (which may get the old inode number) is told from the one a fetch
+/// filled. `None` when the folder is missing or cannot be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MirrorIdentity {
+    device: u64,
+    inode: u64,
+    made: Option<SystemTime>,
+}
+
+fn mirror_identity(dir: &Path) -> Option<MirrorIdentity> {
+    let metadata = std::fs::symlink_metadata(dir)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_dir())?;
+    #[cfg(unix)]
+    let (device, inode) = {
+        use std::os::unix::fs::MetadataExt as _;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (device, inode) = (0, 0);
+    Some(MirrorIdentity {
+        device,
+        inode,
+        made: metadata.created().ok(),
+    })
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -683,13 +716,15 @@ impl MirrorCache {
                         Some(self.fresh_fetch(&lease.entry, &mut state, since, caller_token))
                     }
                     (Freshness::Coalesced, None) => {
-                        // A recent fetch counts only while its mirror is
-                        // there.
+                        // A recent fetch counts only while the mirror it
+                        // filled is there: not one made again since at
+                        // the same path, which may still be empty.
+                        let filled = state.last_mirror;
                         let recent = state
                             .last_success
                             .filter(|finished| finished.elapsed() < self.coalesce_window)
                             .filter(|_| reuses_left > 0)
-                            .filter(|_| std::fs::symlink_metadata(lease.dir()).is_ok());
+                            .filter(|_| filled.is_some() && filled == mirror_identity(lease.dir()));
                         if let Some(finished) = recent {
                             reuses_left -= 1;
                             reused = Some(finished);
@@ -805,8 +840,11 @@ impl MirrorCache {
                 let _ = before.await;
             }
             cache.fetch_started(&guard.entry, id);
-            let outcome = cache.fetch_main(&guard, caller_token).await;
-            cache.fetch_finished(&guard.entry, id, &outcome);
+            let (outcome, filled) = match cache.fetch_main(&guard, caller_token).await {
+                Ok(filled) => (Ok(()), filled),
+                Err(error) => (Err(error), None),
+            };
+            cache.fetch_finished(&guard.entry, id, &outcome, filled);
             if matches!(outcome, Err(FetchError::DiskFull)) {
                 cache.request_sweep();
             }
@@ -853,7 +891,15 @@ impl MirrorCache {
         }
     }
 
-    fn fetch_finished(&self, entry: &MirrorEntry, id: u64, outcome: &FetchOutcome) {
+    /// Record that the fetch `id` ended with `outcome`, having filled the
+    /// mirror `filled` when it succeeded.
+    fn fetch_finished(
+        &self,
+        entry: &MirrorEntry,
+        id: u64,
+        outcome: &FetchOutcome,
+        filled: Option<MirrorIdentity>,
+    ) {
         self.size_changed(entry.project);
         let mut state = locked(&entry.fetches);
         if state
@@ -864,13 +910,16 @@ impl MirrorCache {
             state.running = None;
         }
         state.last_success = outcome.is_ok().then(Instant::now);
+        state.last_mirror = filled.filter(|_| outcome.is_ok());
     }
 
+    /// Fetch `main` into the guarded mirror (made, or made again when
+    /// damaged, as needed): the mirror it filled.
     async fn fetch_main(
         self: &Arc<Self>,
         guard: &MirrorLease,
         caller_token: Option<String>,
-    ) -> FetchOutcome {
+    ) -> Result<Option<MirrorIdentity>, FetchError> {
         #[cfg(test)]
         if let Some(delay) = self.test_fetch_delay {
             tokio::time::sleep(delay).await;
@@ -906,8 +955,9 @@ impl MirrorCache {
                         std::thread::sleep(delay);
                     }
                     fetch_main_into(&dir, &url, token.as_deref(), project)
+                        .map(|()| mirror_identity(&dir))
                 }
-                outcome => outcome,
+                outcome => outcome.map(|()| mirror_identity(&dir)),
             }
         })
         .await

@@ -1074,6 +1074,59 @@ async fn a_file_read_that_waited_for_a_fetch_is_never_answered_absent() {
     assert_eq!((status, body["rev"].as_str()), (200, Some(third.as_str())));
 }
 
+/// A fetch counts as recent for the mirror it filled only. Once that mirror
+/// is gone and an empty one stands at its path (made by another process on
+/// the same disk, or by hand after the cache was removed), a plain read in
+/// the reuse window fetches again instead of answering from the empty
+/// mirror as a space without `main`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recent_fetch_never_answers_for_a_mirror_made_since() {
+    let sc = HostedScenario::new();
+    let first = sc.push(&[("README.md", Some(b"one\n"))], "first");
+    let cache = Arc::new(
+        sc.open_cache()
+            .with_coalesce_window(Duration::from_secs(600)),
+    );
+    let lease = cache.lease(sc.project);
+    for _ in 0..2 {
+        assert_eq!(
+            cache
+                .resolve_main(&lease, Freshness::Coalesced, None)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(first.as_str())
+        );
+    }
+    // The second read reused the first one's fetch.
+    assert_eq!(cache.fetches_started(), 1);
+
+    let mirror = sc.mirror();
+    std::fs::remove_dir_all(&mirror).unwrap();
+    git_in(
+        mirror.parent().unwrap(),
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            mirror.to_str().unwrap(),
+        ],
+    );
+    assert!(made_empty(&mirror));
+
+    assert_eq!(
+        cache
+            .resolve_main(&lease, Freshness::Coalesced, None)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(first.as_str())
+    );
+    assert_eq!(cache.fetches_started(), 2);
+}
+
 /// The loose object file of `oid` in the mirror at `mirror`.
 fn loose_object(mirror: &Path, oid: &str) -> PathBuf {
     mirror.join("objects").join(&oid[..2]).join(&oid[2..])
