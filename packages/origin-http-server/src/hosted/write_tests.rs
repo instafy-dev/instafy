@@ -30,7 +30,7 @@ use crate::apply::{stage_archive, validate_apply_paths, ManifestFileEntry};
 use crate::auth::OriginClaims;
 use crate::error::OriginError;
 use crate::push::{clear_push_hook, set_push_hook, PushHookAction};
-use crate::test_support::{git_in, git_output, install_shard_hook, GitWrapper};
+use crate::test_support::{git_in, git_output, install_script, install_shard_hook, GitWrapper};
 use crate::workspace_git::GitIdentity;
 
 // ---------------------------------------------------------------------------
@@ -2856,7 +2856,6 @@ async fn a_push_recorded_while_a_fetch_runs_makes_reads_fetch() {
 /// it too, never reusing the save's own earlier fetch, however recent.
 #[tokio::test(flavor = "multi_thread")]
 async fn every_read_after_a_save_the_mirror_missed_shows_the_save() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = HostedScenario::new();
     let first = sc.push(&[("a.txt", Some(b"one\n"))], "first");
     let served = super::tests::serve_with_cache(
@@ -2880,16 +2879,14 @@ async fn every_read_after_a_save_the_mirror_missed_shows_the_save() {
     let release = sc.root.join("push-release");
     let hook = sc.remote().join("hooks/pre-receive");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(
+    install_script(
         &hook,
-        format!(
+        &format!(
             "#!/bin/sh\ncat >/dev/null\ntouch '{}'\nn=0\nwhile [ ! -e '{}' ] && [ $n -lt 600 ]; do\n  sleep 0.05\n  n=$((n + 1))\ndone\nexit 0\n",
             arrived.display(),
             release.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let save = {
         let base = served.base.clone();
         let request = json!({
@@ -3156,7 +3153,6 @@ done"#,
 /// `Retry-After`), and imports have slots of their own.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_slots_are_bounded_and_end_before_the_push() {
-    use std::os::unix::fs::PermissionsExt as _;
     let mut sc = HostedScenario::new();
     let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
     let controller = StubController::start(sc.project).await;
@@ -3173,15 +3169,13 @@ async fn write_slots_are_bounded_and_end_before_the_push() {
     let marker = sc.root.join("in-hook");
     let hook = sc.remote().join("hooks/pre-receive");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(
+    install_script(
         &hook,
-        format!(
+        &format!(
             "#!/bin/sh\ncat >/dev/null\ntouch '{}'\nsleep 3\nexit 0\n",
             marker.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let save = {
         let base = served.base.clone();
         let person = person.clone();

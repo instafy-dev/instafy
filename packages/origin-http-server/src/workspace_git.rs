@@ -2227,12 +2227,11 @@ mod tests {
 
     impl RecordingGit {
         fn install(dir: &Path) -> Self {
-            use std::os::unix::fs::PermissionsExt as _;
             let log = dir.join("git-calls.log");
             let script = dir.join("recording-git");
-            std::fs::write(
+            crate::test_support::install_script(
                 &script,
-                format!(
+                &format!(
                     "#!/bin/sh\n\
                      {{ printf 'argv'; for arg in \"$@\"; do printf ' [%s]' \"$arg\"; done; \
                      printf '\\n'; env | grep -E '^GIT_CONFIG_(COUNT|KEY_|VALUE_)' | sort; \
@@ -2240,9 +2239,7 @@ mod tests {
                      exec git \"$@\"\n",
                     log.display()
                 ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            );
             crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(script));
             Self { log }
         }
