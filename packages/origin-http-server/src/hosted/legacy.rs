@@ -7,6 +7,12 @@
 //! listener is bound, every such folder is moved to `<root>/.legacy/`, where
 //! no image looks for a checkout; the old image then clones fresh. The
 //! salvage subcommand reads `.legacy/` later.
+//!
+//! The root must be the gateway's own. A runtime provider keeps its
+//! runtimes' checkouts the same way (`<repo base>/<space id>`), and those
+//! hold work that exists nowhere else until a runtime pushes it, so a root
+//! that looks like a provider's repo base stops the start before anything
+//! is moved ([`provider_checkouts_in`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,7 +47,9 @@ pub(crate) struct ParkedCheckouts {
 /// nothing is ever replaced. `.legacy/` is created with mode 0700.
 ///
 /// Any failure is returned, and the caller must not start serving: an old
-/// image could otherwise find a folder that was left in place.
+/// image could otherwise find a folder that was left in place. So is a root
+/// that looks like a runtime provider's repo base, before anything is moved
+/// ([`provider_checkouts_in`]).
 pub(crate) fn park_legacy_checkouts(root: &Path) -> Result<ParkedCheckouts> {
     let mut parked = ParkedCheckouts::default();
     let mut ids = Vec::new();
@@ -54,6 +62,14 @@ pub(crate) fn park_legacy_checkouts(root: &Path) -> Result<ParkedCheckouts> {
         }
     }
     ids.sort();
+    if let Some(clash) = provider_checkouts_in(root, &ids) {
+        bail!(
+            "the workspace root {root:?} looks like a runtime provider's checkout folder \
+             ({clash}); the gateway moves every space folder of its root out of the way, so \
+             ORIGIN_WORKSPACE_ROOT must be a folder of the gateway's own, never the \
+             providers' DOCKER_REPO_HOST"
+        );
+    }
 
     for id in ids {
         let name = id.as_hyphenated().to_string();
@@ -94,6 +110,96 @@ pub(crate) fn park_legacy_checkouts(root: &Path) -> Result<ParkedCheckouts> {
         parked.moved.push((id, target));
     }
     Ok(parked)
+}
+
+/// The provider's folders next to its checkouts (`STAMP_DIR` and
+/// `TRASH_DIR` in `runtime-provider-core`'s checkout eviction).
+const PROVIDER_FOLDERS: [&str; 2] = [".instafy-checkout-stamps", ".instafy-evicted"];
+
+/// What a runtime's own origin leaves in its checkout and the stateful
+/// gateway never wrote: the clean-stop marker of its shutdown, and local
+/// recovery refs (`refs/instafy/local-recovery*`) a publish or a stop
+/// stored, loose or packed.
+const CLEAN_STOP_MARKER: &str = "instafy-stopped-clean";
+const LOCAL_RECOVERY_PREFIX: &str = "local-recovery";
+
+/// Why `root`, whose space folders are `ids`, looks like a runtime
+/// provider's repo base rather than the gateway's own folder, if it does:
+/// the provider's stamp or eviction folder in it, or a space folder holding
+/// what a runtime's origin leaves there. Nothing is followed through a link,
+/// and a folder that cannot be read says nothing.
+fn provider_checkouts_in(root: &Path, ids: &[Uuid]) -> Option<String> {
+    for name in PROVIDER_FOLDERS {
+        let path = root.join(name);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            return Some(format!("{path:?} exists"));
+        }
+    }
+    for id in ids {
+        let checkout = root.join(id.as_hyphenated().to_string());
+        let Some(git_dir) = real_dir(&checkout)
+            .then(|| checkout.join(".instafy"))
+            .filter(|path| real_dir(path))
+            .map(|path| path.join(".git"))
+            .filter(|path| real_dir(path))
+        else {
+            continue;
+        };
+        let marker = git_dir.join(CLEAN_STOP_MARKER);
+        if std::fs::symlink_metadata(&marker).is_ok() {
+            return Some(format!("{marker:?} exists"));
+        }
+        if let Some(reference) = local_recovery_ref(&git_dir) {
+            return Some(format!("{checkout:?} holds {reference}"));
+        }
+    }
+    None
+}
+
+/// Whether `path` is a directory itself, not a link to one.
+fn real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
+}
+
+/// A `refs/instafy/local-recovery*` ref of the repository `git_dir`, loose
+/// (any file below such a folder of `refs/instafy/`) or packed.
+fn local_recovery_ref(git_dir: &Path) -> Option<String> {
+    let refs = git_dir.join("refs").join("instafy");
+    if real_dir(&refs) {
+        for entry in std::fs::read_dir(&refs).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(LOCAL_RECOVERY_PREFIX) && holds_a_file(&entry.path(), 0) {
+                return Some(format!("refs/instafy/{name}/..."));
+            }
+        }
+    }
+    let packed = std::fs::read(git_dir.join("packed-refs")).ok()?;
+    let wanted = format!("refs/instafy/{LOCAL_RECOVERY_PREFIX}");
+    String::from_utf8_lossy(&packed)
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with('^'))
+        .filter_map(|line| line.split_once(' ').map(|(_, name)| name.trim()))
+        .find(|name| name.starts_with(&wanted))
+        .map(str::to_string)
+}
+
+/// Whether `path` is a file, or a real folder with a file somewhere below
+/// it (at most 16 folders deep).
+fn holds_a_file(path: &Path, depth: usize) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_file() {
+        return true;
+    }
+    if !metadata.file_type().is_dir() || depth >= 16 {
+        return false;
+    }
+    std::fs::read_dir(path).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| holds_a_file(&entry.path(), depth + 1))
+    })
 }
 
 /// The id a child of the workspace root names, when it is spelled exactly
@@ -210,6 +316,75 @@ mod tests {
             park_legacy_checkouts(&root).unwrap(),
             ParkedCheckouts::default()
         );
+    }
+
+    /// A root a runtime provider keeps its runtimes' checkouts in (the local
+    /// stack once mounted one folder as both) is never parked: those hold
+    /// work that exists nowhere else. The start stops before anything is
+    /// moved, and the error names what showed it.
+    #[test]
+    fn a_providers_checkout_folder_stops_the_start_before_anything_moves() {
+        let git_dir = |root: &Path| root.join(id(2)).join(".instafy/.git");
+        let cases: [(&str, &str); 5] = [
+            ("stamps", ".instafy-checkout-stamps"),
+            ("evicted", ".instafy-evicted"),
+            ("clean stop", "instafy-stopped-clean"),
+            ("loose ref", "refs/instafy/local-recovery/..."),
+            ("packed ref", "refs/instafy/local-recovery-pushed/x"),
+        ];
+        for (case, named) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            write(&root.join(id(1)).join("draft.md"), "draft\n");
+            write(&git_dir(&root).join("HEAD"), "ref: refs/heads/main\n");
+            std::fs::create_dir(root.join(id(3))).unwrap();
+            match case {
+                "stamps" => write(&root.join(".instafy-checkout-stamps").join(id(2)), ""),
+                "evicted" => std::fs::create_dir(root.join(".instafy-evicted")).unwrap(),
+                "clean stop" => write(&git_dir(&root).join("instafy-stopped-clean"), ""),
+                "loose ref" => write(
+                    &git_dir(&root)
+                        .join("refs/instafy/local-recovery/20261006T101010Z-unsaved-abc"),
+                    &format!("{}\n", "1".repeat(40)),
+                ),
+                _ => write(
+                    &git_dir(&root).join("packed-refs"),
+                    &format!(
+                        "# pack-refs with: peeled fully-peeled sorted\n{} refs/instafy/local-recovery-pushed/x\n",
+                        "1".repeat(40)
+                    ),
+                ),
+            }
+
+            let error = park_legacy_checkouts(&root).unwrap_err().to_string();
+
+            assert!(error.contains(named), "{case}: {error}");
+            assert!(error.contains("ORIGIN_WORKSPACE_ROOT"), "{case}: {error}");
+            assert_eq!(
+                std::fs::read_to_string(root.join(id(1)).join("draft.md")).unwrap(),
+                "draft\n",
+                "{case}"
+            );
+            assert!(git_dir(&root).join("HEAD").is_file(), "{case}");
+            assert!(
+                root.join(id(3)).is_dir(),
+                "{case}: an empty folder was removed"
+            );
+            assert!(!root.join(LEGACY_DIR).exists(), "{case}");
+        }
+
+        // A folder of local recovery refs with no ref left in it, and refs
+        // of other names, are what the stateful gateway may leave: parked.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(git_dir(&root).join("refs/instafy/local-recovery/x")).unwrap();
+        write(
+            &git_dir(&root).join("refs/instafy/recovery/a"),
+            &format!("{}\n", "1".repeat(40)),
+        );
+        let parked = park_legacy_checkouts(&root).unwrap();
+        assert_eq!(parked.moved.len(), 1);
+        assert!(root.join(LEGACY_DIR).join(id(2)).is_dir());
     }
 
     #[cfg(unix)]
