@@ -5898,6 +5898,62 @@ async fn an_apply_commit_stages_its_paths_as_names_not_patterns() {
     server.abort();
 }
 
+/// A Desktop apply that commits (`autoCommitAfterApply`) hands git its
+/// message on stdin: a message longer than the system lets one argument be
+/// lands whole, as the commit's message.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apply_commit_carries_a_long_message_whole() {
+    let sc = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let mut message = String::from("Import the notes\n\n");
+    let mut line = 0usize;
+    while message.len() < 2 * 1024 * 1024 + 1 {
+        message.push_str(&format!("line {line} of the imported notes\n"));
+        line += 1;
+    }
+    let before = ig(&sc.ws, &["rev-parse", "HEAD"]);
+    let (base, server) = serve(&sc).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": sc.config.project_id,
+                "files": [{ "path": "notes.md", "size": 6 }],
+                "deletes": [],
+                "autoCommitAfterApply": true,
+                "commitMessage": message,
+            },
+            "archiveBase64": apply_archive("notes.md", b"notes\n"),
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "{}",
+        &body[..body.len().min(300)]
+    );
+    assert_eq!(ig(&sc.ws, &["rev-parse", "HEAD~1"]), before);
+    let committed = ig(&sc.ws, &["log", "-1", "--format=%B", "HEAD"]);
+    assert!(
+        committed == message.trim_end(),
+        "the message was not kept whole"
+    );
+    assert_eq!(
+        ig(
+            &sc.ws,
+            &["ls-tree", "--name-only", "HEAD", "--", "notes.md"]
+        ),
+        "notes.md"
+    );
+    server.abort();
+}
+
 /// A Desktop `/apply` whose `expected` blob id is stale (the agent edited
 /// the file since the client read it) is refused with the path, and the
 /// agent's edit stays.
