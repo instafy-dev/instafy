@@ -13,7 +13,7 @@ use super::options::Settings;
 use super::services::{interpret_export, ExportOutcome, ExportedTo, Services};
 use super::{entry_project, run, Summary};
 use crate::test_support::{
-    git_in, git_output, ig, init_workspace_repo, install_shard_hook, GitWrapper,
+    git_in, git_output, ig, init_workspace_repo, install_script, install_shard_hook, GitWrapper,
 };
 use crate::workspace_git::GitIdentity;
 
@@ -2612,18 +2612,15 @@ fn settings_files_inside_ignored_build_output_are_kept_privately() {
 /// canonical `main`, or at the picks so far) and the saves only on the
 /// branch.
 fn stop_rebase(gateway: &Gateway, entry: &Path, picks: usize) {
-    use std::os::unix::fs::PermissionsExt as _;
     let editor = gateway.root.parent().unwrap().join("stop-rebase.sh");
-    std::fs::write(
+    install_script(
         &editor,
-        format!(
+        &format!(
             "#!/bin/sh\n{{ head -n {picks} \"$1\"; printf 'break\\n'; tail -n +{} \"$1\"; }} \
              > \"$1.new\" && mv \"$1.new\" \"$1\"\n",
             picks + 1
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     ig(
         entry,
         &[
