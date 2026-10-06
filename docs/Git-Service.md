@@ -510,12 +510,24 @@ work, so that they can be removed. It runs inside the gateway's container next t
    [Controller-only salvage pushes](#controller-only-salvage-pushes)) and serves the chat image
    export below.
 2. Drain imports. The stateful gateway kept import receipts inside each working copy, and the
-   stateless gateway finds a receipt only as its own commit on `main`, so no import may be in
-   flight while the gateway image changes. This must return no rows:
+   stateless gateway finds a receipt only as its own commit on `main`. An import the controller
+   resumes after the switch (a retry with the same key) finds no receipt there: one not yet
+   recorded as applied is applied again, over anything saved since, and one recorded as applied
+   fails unless its commit is on `main`. Run this right before the image changes, and start no
+   import between the two:
    ```sql
-   select id from public.github_import_operations
-    where status in ('pending', 'applied') and claim_expires_at > now();
+   select id, project_id, status, claim_expires_at
+     from public.github_import_operations
+    where status in ('pending', 'applied');
    ```
+   Wait for each row whose claim is live (`claim_expires_at` in the future) to finish. A row whose
+   claim has expired is an import that stopped part way (at a controller restart, for example),
+   and a retry with the same key resumes it: have it retried while the stateful gateway still
+   serves, so that it finishes there, or, when it cannot be, check on that gateway whether its
+   files were applied and tell the space's owner before you switch. A `failed` row that kept its
+   preparation (`prepared_json`) is resumed the same way when its import is retried; one that
+   failed while its apply was under way (a timeout, for example) may already have been applied on
+   the stateful gateway.
 3. Deploy the stateless gateway image. Its start moves the working copies to `.legacy/`.
 4. Run the salvage without `--apply` and read the report, then run it with `--apply`.
 5. Check that every reported `salvageRef` is on canonical (`canonicalVerified: true`) and review
