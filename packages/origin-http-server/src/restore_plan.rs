@@ -50,6 +50,12 @@
 //! when both sides replaced a file with a folder, the files inside may
 //! still differ.
 //!
+//! A new name of the work that differs only in case or Unicode form from
+//! another entry of the restored tree (`Notes.md` beside a `notes.md` that
+//! `onto` keeps) is a clash too: a disk that ignores case takes the two for
+//! one file, so Desktop could not check both out, and `main` should not
+//! hold what such a checkout cannot.
+//!
 //! The ref may go once the restore is on `main` only when nothing was left
 //! out but on request: work refused here exists only on the ref, which then
 //! stays. A salvage ref with nothing left to bring back is recorded with an
@@ -61,12 +67,13 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use uuid::Uuid;
 
+use crate::apply::portable_key;
 use crate::error::OriginError;
 use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
 use crate::recovery_view::{left_out_reason, restore_marker, NotRestored, RecoveryRef};
 use crate::tree_merge::{three_way, tree_with_entries_from};
-use crate::workspace_git::{nul_list, RunOpts, WorkspaceGit};
+use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, WorkspaceGit};
 
 /// What a restore is asked to do.
 pub(crate) struct RestoreInput<'a> {
@@ -307,6 +314,22 @@ pub(crate) fn plan(
         }
     }
 
+    // A new name of the work that a disk ignoring case or Unicode form
+    // takes for another entry of the restored tree cannot come in beside
+    // it: a Desktop checkout cannot hold both, and the gateway would leave
+    // `main` with two names such a checkout takes for one. It is a clash
+    // the person settles, in both modes.
+    let added: Vec<&str> = changes
+        .iter()
+        .filter(|change| {
+            change.status != 'D'
+                && !at_onto.contains_key(&change.path)
+                && !left_out.contains_key(&change.path)
+        })
+        .map(|change| change.path.as_str())
+        .collect();
+    let alias_clashes = aliases_in(git, &tree, &added)?;
+
     // A clash is settled when it lies below a path left out, or when the
     // work brings nothing in at or below it. A change already on `onto`
     // settles only its own path: below a file both sides removed for a
@@ -329,6 +352,7 @@ pub(crate) fn plan(
         })
         .cloned()
         .chain(undone_clashes)
+        .chain(alias_clashes)
         .collect();
     conflicts.sort();
     conflicts.dedup();
@@ -415,6 +439,40 @@ fn undone(
         .collect();
     undone.sort();
     Ok(undone)
+}
+
+/// The paths of `added` that `tree` holds beside another entry (a file, a
+/// link, a submodule or a folder) whose name differs from it only in case
+/// or Unicode form ([`portable_key`]). The tree is listed once, by id.
+fn aliases_in(git: &WorkspaceGit<'_>, tree: &str, added: &[&str]) -> Result<Vec<String>> {
+    if added.is_empty() {
+        return Ok(Vec::new());
+    }
+    let raw = git.bytes(&[
+        "ls-tree",
+        "-r",
+        "-t",
+        "-z",
+        "--full-tree",
+        "--end-of-options",
+        tree,
+    ])?;
+    let mut names: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in parse_ls_tree(&raw) {
+        names
+            .entry(portable_key(&entry.path))
+            .or_default()
+            .push(entry.path);
+    }
+    Ok(added
+        .iter()
+        .filter(|path| {
+            names.get(&portable_key(path)).is_some_and(|found| {
+                found.len() > 1 && found.iter().any(|name| name.as_str() == **path)
+            })
+        })
+        .map(|path| path.to_string())
+        .collect())
 }
 
 /// Why a path left out at a folder above `path`, or below `path`, was

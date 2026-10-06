@@ -571,17 +571,19 @@ fn validate_portable_component(component: &str) -> Result<(), OriginError> {
     Ok(())
 }
 
+/// The name `path` has on a disk that ignores case and Unicode form (APFS,
+/// HFS+, Windows): two paths with the same key are one file there.
+pub(crate) fn portable_key(path: &str) -> String {
+    path.nfc().flat_map(char::to_lowercase).collect()
+}
+
 fn insert_portable_destination(
     destinations: &mut HashMap<String, String>,
     normalized: &str,
 ) -> Result<(), OriginError> {
     // APFS/HFS and Windows commonly collapse case and canonical Unicode forms;
     // reject those aliases even when the current origin host is Linux.
-    let portable_key = normalized
-        .nfc()
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if let Some(existing) = destinations.insert(portable_key, normalized.to_string()) {
+    if let Some(existing) = destinations.insert(portable_key(normalized), normalized.to_string()) {
         return Err(OriginError::bad_request(format!(
             "manifest destinations collide: {existing:?} and {normalized:?}"
         )));
