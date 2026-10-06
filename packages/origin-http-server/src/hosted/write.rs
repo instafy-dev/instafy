@@ -20,7 +20,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use super::answers::{idempotency_conflict, is_disk_full, or_disk_full};
-use super::cache::Freshness;
+use super::cache::{Freshness, MirrorLease};
 use super::cas::{
     caller_message, cas_commit, default_message, find_applied, receipt_counts, save_author,
     ApplyKey, CachedCanonical, CasOutcome, CasTarget, IMPORT_BUDGET, SAVE_BUDGET,
@@ -487,14 +487,13 @@ pub(super) async fn handle_git_revert_commit(
     let lease = state.cache.lease(project);
     // Finding the commits may fetch: not work that needs the slot.
     let (commit, base) = admission
-        .paused(async {
-            let commit = resolve_rev(&state, &lease, caller, &commit).await?;
-            let base = match base {
-                Some(base) => Some(resolve_rev(&state, &lease, caller, &base).await?),
-                None => None,
-            };
-            Ok((commit, base))
-        })
+        .paused(revert_commits(
+            &state,
+            &lease,
+            caller,
+            &commit,
+            base.as_deref(),
+        ))
         .await?;
     let reverted = commit.clone();
     let (base, subject) = on_mirror(&state, &lease, caller, move |dir| {
@@ -553,6 +552,27 @@ pub(super) async fn handle_git_revert_commit(
         "baseRev": outcome.base_rev,
         "committed": outcome.committed,
     })))
+}
+
+/// The full ids of the commit a revert undoes and of the version it reverts
+/// to, each one `main` reaches ([`resolve_rev`], which may fetch).
+///
+/// A function of its own rather than an `async` block: the work takes the
+/// space's state and lease as arguments, the way a restore's ref fetch
+/// does, instead of capturing them beside the caller's bearer.
+async fn revert_commits(
+    state: &HostedState,
+    lease: &MirrorLease,
+    caller: Option<&str>,
+    commit: &str,
+    base: Option<&str>,
+) -> Result<(String, Option<String>), OriginError> {
+    let commit = resolve_rev(state, lease, caller, commit).await?;
+    let base = match base {
+        Some(base) => Some(resolve_rev(state, lease, caller, base).await?),
+        None => None,
+    };
+    Ok((commit, base))
 }
 
 /// [`commit`] for a person's change (the save budget, no import key).
