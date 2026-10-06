@@ -27,9 +27,11 @@
 //! the work made of a folder goes when a path below it is put back, and
 //! work below a folder left out gives way to `onto`'s entries there. Such a
 //! change is never dropped unlisted, whether or not `onto` moved since the
-//! work's base: it is left out for the reason a path above or below it was
-//! refused, or, when only kept paths undid it, it is a clash the person
-//! settles.
+//! work's base: it is left out for the reason a refused path that undid it
+//! was refused (one above it, or one below it where `onto` has an entry to
+//! put back), or otherwise it is a clash the person settles. A refused new
+//! file `onto` lacks puts nothing back, so a file the work made a folder of
+//! around it keeps its clash with `onto`'s edit.
 //!
 //! `ignored` comes from one snapshot: the `.gitignore` files of the
 //! restored tree itself (the merge with every path left out so far as
@@ -286,8 +288,16 @@ pub(crate) fn plan(
                 !left_out.contains_key(&change.path) && !nothing_in.contains(&change.path)
             })
             .collect();
+        // A refused path below a change undoes it only when `onto` has
+        // something there to put back, which needs a folder above it: a
+        // refused new file `onto` lacks leaves nothing behind.
+        let refused_paths: Vec<String> = refused.iter().cloned().collect();
+        let put_back: BTreeSet<String> = git
+            .entries_by_path(&onto_tree, &refused_paths)?
+            .into_keys()
+            .collect();
         for path in undone(git, &pending, &conflicted, &merged.tree, &tree)? {
-            match refused_around(&left_out, &refused, &path) {
+            match refused_around(&left_out, &refused, &put_back, &path) {
                 Some(reason) => {
                     left_out.insert(path.clone(), reason);
                     refused.insert(path);
@@ -409,27 +419,34 @@ fn undone(
 
 /// Why a path left out at a folder above `path`, or below `path`, was
 /// refused, if one was: the nearest folder above first, then the first
-/// path below.
+/// path below that `onto` holds an entry at (`put_back`). A refused path
+/// below that `onto` lacks puts nothing back, so it never stands in the way
+/// of the change at `path` (a file the work made a folder of keeps its
+/// clash with `onto`'s edit).
 fn refused_around(
     left_out: &BTreeMap<String, &'static str>,
     refused: &BTreeSet<String>,
+    put_back: &BTreeSet<String>,
     path: &str,
 ) -> Option<&'static str> {
     let above = path
         .match_indices('/')
         .map(|(index, _)| &path[..index])
-        .rev();
+        .rev()
+        .find(|path| refused.contains(*path));
     let below_prefix = format!("{path}/");
-    let below = left_out
-        .range::<str, _>((
-            std::ops::Bound::Included(below_prefix.as_str()),
-            std::ops::Bound::Unbounded,
-        ))
-        .map(|(path, _)| path.as_str())
-        .take_while(|path| path.starts_with(&below_prefix));
+    let below = || {
+        left_out
+            .range::<str, _>((
+                std::ops::Bound::Included(below_prefix.as_str()),
+                std::ops::Bound::Unbounded,
+            ))
+            .map(|(path, _)| path.as_str())
+            .take_while(|path| path.starts_with(&below_prefix))
+            .find(|path| refused.contains(*path) && put_back.contains(*path))
+    };
     above
-        .chain(below)
-        .find(|path| refused.contains(*path))
+        .or_else(below)
         .and_then(|path| left_out.get(path).copied())
 }
 
@@ -602,22 +619,32 @@ mod tests {
             .into_iter()
             .map(str::to_string)
             .collect();
+        // What `onto` holds an entry at, of the refused paths.
+        let put_back: BTreeSet<String> = ["a/b/c", "libs-x", "libs/vendor"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let around = |path: &str| refused_around(&left_out, &refused, &put_back, path);
         // A refused folder above, the nearest first; kept ones are passed.
-        assert_eq!(refused_around(&left_out, &refused, "x/y"), Some("ignored"));
+        assert_eq!(around("x/y"), Some("ignored"));
+        assert_eq!(around("x/y/z/w"), Some("ignored"));
+        // A refused path below, never a sibling that only shares a prefix.
+        assert_eq!(around("libs"), Some("unsupported"));
+        assert_eq!(around("a/b"), Some("secret"));
+        // Only kept paths around, or none.
+        assert_eq!(around("k"), None);
+        assert_eq!(around("lib"), None);
+        assert_eq!(around("q/r"), None);
+        // A refused path below that `onto` lacks puts nothing back.
+        let nothing_back = BTreeSet::new();
         assert_eq!(
-            refused_around(&left_out, &refused, "x/y/z/w"),
+            refused_around(&left_out, &refused, &nothing_back, "a/b"),
+            None
+        );
+        assert_eq!(
+            refused_around(&left_out, &refused, &nothing_back, "x/y"),
             Some("ignored")
         );
-        // A refused path below, never a sibling that only shares a prefix.
-        assert_eq!(
-            refused_around(&left_out, &refused, "libs"),
-            Some("unsupported")
-        );
-        assert_eq!(refused_around(&left_out, &refused, "a/b"), Some("secret"));
-        // Only kept paths around, or none.
-        assert_eq!(refused_around(&left_out, &refused, "k"), None);
-        assert_eq!(refused_around(&left_out, &refused, "lib"), None);
-        assert_eq!(refused_around(&left_out, &refused, "q/r"), None);
     }
 
     #[test]

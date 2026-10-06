@@ -1304,6 +1304,96 @@ async fn work_below_a_refused_file_is_listed_with_its_reason() {
     }
 }
 
+/// Work that turns the file `server` into a folder holding `index.js` and a
+/// file that is refused (a secret, or one the space ignores), after `main`
+/// edited `server`. The refused new file is not on `main`, so leaving it
+/// out puts nothing back there and does not stand in the folder's way: it
+/// never makes the work's real code look refused. The edit of `server`
+/// and the work's folder are a clash the person settles, as without the
+/// refused file; keeping both restores the rest, lists the refused file
+/// with its reason and keeps the ref, its only copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_file_in_a_folder_the_work_made_of_a_file_never_hides_the_clash() {
+    for mode in MODES {
+        for (refused, reason) in [("server/.env", "secret"), ("server/debug.log", "ignored")] {
+            let space = Space::new(
+                mode,
+                &[(".gitignore", b"*.log\n"), ("server", b"echo v1\n")],
+            )
+            .await;
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park(
+                &[
+                    ("server", None),
+                    ("server/index.js", Some(b"serve()\n")),
+                    (refused, Some(b"refused\n")),
+                    ("other.md", Some(b"other\n")),
+                ],
+                &reference,
+            );
+            space.push(&[("server", Some(b"echo v2\n"))], "edit server");
+            let before = space.main();
+
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                json!(["server", "server/index.js"]),
+                "{mode:?} {refused}"
+            );
+            assert_eq!(
+                space
+                    .conflict(
+                        json!({ "ref": reference, "rev": commit, "keep": ["server/index.js"] })
+                    )
+                    .await,
+                json!(["server"]),
+                "{mode:?} {refused}"
+            );
+            assert_eq!(space.main(), before, "{mode:?} {refused}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {refused}"
+            );
+
+            let body = space
+                .restored(json!({
+                    "ref": reference,
+                    "rev": commit,
+                    "keep": ["server", "server/index.js"],
+                }))
+                .await;
+            assert_eq!(body["committed"], true, "{mode:?} {refused}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[
+                    ("server", "kept"),
+                    (refused, reason),
+                    ("server/index.js", "kept"),
+                ]),
+                "{mode:?} {refused}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{mode:?} {refused}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {refused}"
+            );
+            assert_eq!(
+                space.on_main("server").as_deref(),
+                Some(&b"echo v2\n"[..]),
+                "{mode:?} {refused}"
+            );
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{mode:?} {refused}"
+            );
+        }
+    }
+}
+
 /// A file the plan restores but the shard refuses (a shard that takes
 /// smaller files than a save allows) stays out of `main` in both modes and
 /// is listed in `notRestored` with the shard's reason, so the person is
