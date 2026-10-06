@@ -997,6 +997,112 @@ async fn a_rename_by_case_only_is_restored() {
     }
 }
 
+/// A new name of the work that differs only in case from a file `main`
+/// keeps is a clash in both modes, never a restore that lands both names
+/// (the gateway) or an unsaved edit that is not there (Desktop on a disk
+/// that ignores case). Work that renames `notes.md` to `Notes.md` after
+/// `main` edited `notes.md`: keeping `main`'s `notes.md` leaves the new
+/// name to settle, and keeping both restores the rest and lets the ref go.
+/// A new `todo.md` beside a `TODO.md` that `main` gained since is the
+/// same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
+    for mode in MODES {
+        let space = Space::new(mode, &[("notes.md", b"1\n2\n3\n")]).await;
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let commit = space.park(
+            &[
+                ("notes.md", None),
+                ("Notes.md", Some(b"1\n2\nwork\n")),
+                ("other.md", Some(b"other\n")),
+            ],
+            &reference,
+        );
+        space.push(&[("notes.md", Some(b"main\n2\n3\n"))], "edit notes");
+        let before = space.main();
+
+        assert_eq!(
+            space
+                .conflict(json!({ "ref": reference, "rev": commit }))
+                .await,
+            json!(["Notes.md", "notes.md"]),
+            "{mode:?}"
+        );
+        assert_eq!(
+            space
+                .conflict(json!({ "ref": reference, "rev": commit, "keep": ["notes.md"] }))
+                .await,
+            json!(["Notes.md"]),
+            "{mode:?}"
+        );
+        assert_eq!(space.main(), before, "{mode:?}");
+        assert_eq!(
+            space.canonical_ref(&reference).as_deref(),
+            Some(commit.as_str()),
+            "{mode:?}"
+        );
+
+        let body = space
+            .restored(json!({ "ref": reference, "rev": commit, "keep": ["notes.md", "Notes.md"] }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("Notes.md", "kept"), ("notes.md", "kept")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(
+            space.on_main("notes.md").as_deref(),
+            Some(&b"main\n2\n3\n"[..]),
+            "{mode:?}"
+        );
+        assert_eq!(space.on_main("Notes.md"), None, "{mode:?}");
+        assert_eq!(
+            space.on_main("other.md").as_deref(),
+            Some(&b"other\n"[..]),
+            "{mode:?}"
+        );
+
+        // A new name beside a file `main` gained since, which the work
+        // never touched.
+        let space = Space::new(mode, &[]).await;
+        let reference = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
+        let commit = space.park(
+            &[("todo.md", Some(b"work\n")), ("other.md", Some(b"other\n"))],
+            &reference,
+        );
+        space.push(&[("TODO.md", Some(b"main\n"))], "a todo list");
+        assert_eq!(
+            space
+                .conflict(json!({ "ref": reference, "rev": commit }))
+                .await,
+            json!(["todo.md"]),
+            "{mode:?}"
+        );
+        let body = space
+            .restored(json!({ "ref": reference, "rev": commit, "keep": ["todo.md"] }))
+            .await;
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("todo.md", "kept")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(space.on_main("todo.md"), None, "{mode:?}");
+        assert_eq!(
+            space.on_main("TODO.md").as_deref(),
+            Some(&b"main\n"[..]),
+            "{mode:?}"
+        );
+        assert_eq!(
+            space.on_main("other.md").as_deref(),
+            Some(&b"other\n"[..]),
+            "{mode:?}"
+        );
+    }
+}
+
 /// A change `main` already holds as the work has it brings nothing in, so
 /// it is neither restored nor refused: nothing of the work exists only on
 /// the ref, which goes.
