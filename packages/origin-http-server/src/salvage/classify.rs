@@ -31,6 +31,10 @@ const BUILD_OUTPUT_DIRS: &[&str] = &[
     "coverage",
 ];
 
+/// Dependency folders: what they hold is package content an install brings
+/// back, so they are never searched for credentials.
+const DEPENDENCY_DIRS: &[&str] = &["node_modules", ".pnpm-store"];
+
 /// How `git status` lists a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Listed {
@@ -181,12 +185,15 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
                 Listed::Ignored if !within_build_output(path, true) => {
                     walk_private(root, path, "ignored", &mut sorted);
                 }
-                Listed::Ignored => sorted.skipped.push(Skipped {
-                    path: format!("{path}/"),
-                    size: crate::hosted::tree_size(&root.join(path)),
-                    reason: "excluded",
-                    commit: None,
-                }),
+                Listed::Ignored => {
+                    let apart = private_files_in_build_output(root, path, &mut sorted);
+                    sorted.skipped.push(Skipped {
+                        path: format!("{path}/"),
+                        size: crate::hosted::tree_size(&root.join(path)).saturating_sub(apart),
+                        reason: "excluded",
+                        commit: None,
+                    })
+                }
                 // A repository inside the work tree, or a folder git will not
                 // descend into: never turned into a gitlink.
                 _ => sorted.skipped.push(Skipped {
@@ -413,6 +420,79 @@ pub(crate) fn walk_private(root: &Path, path: &str, reason: &'static str, sorted
             }
         }
     }
+}
+
+/// The credentials inside the ignored build output folder `path`, for the
+/// private archive: build tools copy settings into their output (a bundler's
+/// `.env.production`, a server's key), and the parked copy may hold the only
+/// one. Links are never followed, and dependency folders and repositories
+/// are not entered; everything else stays skipped with the folder. Returns
+/// the bytes listed apart from the folder.
+fn private_files_in_build_output(root: &Path, path: &str, sorted: &mut Sorted) -> u64 {
+    let dependencies = |folder: &str| {
+        folder
+            .split('/')
+            .any(|segment| DEPENDENCY_DIRS.contains(&segment))
+    };
+    if dependencies(path) {
+        return 0;
+    }
+    let mut apart = 0u64;
+    let mut pending = vec![path.to_string()];
+    while let Some(folder) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&folder)) else {
+            continue;
+        };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        for name in names {
+            let child = format!("{folder}/{name}");
+            if is_reserved_path(&child) {
+                continue;
+            }
+            let kind = kind_of(&root.join(&child));
+            if kind == Kind::Folder {
+                if !dependencies(&name) {
+                    pending.push(child);
+                }
+                continue;
+            }
+            if !is_secret_path(&child) {
+                continue;
+            }
+            match kind {
+                Kind::File { size } if size > MAX_PUBLISH_BLOB_BYTES => {
+                    apart = apart.saturating_add(size);
+                    sorted.skipped.push(Skipped {
+                        path: child,
+                        size,
+                        reason: "too_large",
+                        commit: None,
+                    });
+                }
+                Kind::File { size } => {
+                    apart = apart.saturating_add(size);
+                    sorted.private.push(PrivatePath {
+                        path: child,
+                        reason: "secret",
+                        size,
+                        commit: None,
+                    });
+                }
+                Kind::Link => sorted.private.push(PrivatePath {
+                    path: child,
+                    reason: "secret",
+                    size: 0,
+                    commit: None,
+                }),
+                _ => {}
+            }
+        }
+    }
+    apart
 }
 
 /// A chat image the web app wrote into the space's root.

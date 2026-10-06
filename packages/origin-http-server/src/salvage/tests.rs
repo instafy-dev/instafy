@@ -2328,3 +2328,71 @@ fn a_repository_inside_a_tracked_folder_holds_up_removal() {
     assert_eq!(summary.exit_code(), 0);
     assert!(!entry.exists());
 }
+
+/// Build tools copy settings into their output, and the parked copy may hold
+/// the only one: credentials inside an ignored build output folder go to the
+/// private archive, and the rest of the folder is skipped as one entry.
+/// Dependency folders are not searched (an install brings their files back).
+#[test]
+fn settings_files_inside_ignored_build_output_are_kept_privately() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            (".gitignore", Some("dist/\nnode_modules/\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("dist/app.js"), b"built\n");
+    write(&entry.join("dist/.env.production"), b"API_KEY=1\n");
+    write(&entry.join("dist/server/tls.key"), b"key\n");
+    write(&entry.join("dist/node_modules/pkg/test.pem"), b"fixture\n");
+    write(&entry.join("node_modules/pkg/.env"), b"package\n");
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    let private: Vec<(String, String)> = report["privateArchivedPaths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["path"].as_str().unwrap().to_string(),
+                item["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        private,
+        [
+            ("dist/.env.production".to_string(), "secret".to_string()),
+            ("dist/server/tls.key".to_string(), "secret".to_string()),
+        ],
+        "{report:#}"
+    );
+    // What is left of each folder: dist/ without the two archived files.
+    assert_eq!(
+        report["skippedPaths"],
+        serde_json::json!([
+            { "path": "dist/", "size": "built\n".len() + "fixture\n".len(), "reason": "excluded" },
+            { "path": "node_modules/", "size": "package\n".len(), "reason": "excluded" },
+        ]),
+        "{report:#}"
+    );
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(
+        tar_listing(&archive),
+        vec![
+            "worktree/dist/.env.production".to_string(),
+            "worktree/dist/server/tls.key".to_string(),
+        ]
+    );
+    // Build output still never holds a removal up.
+    assert_eq!(report["clean"], true, "{report:#}");
+    assert_eq!(report["removed"], true, "{report:#}");
+    assert_eq!(summary.exit_code(), 0);
+}
