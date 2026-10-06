@@ -22,7 +22,7 @@ use crate::push::{clear_push_hook, set_push_hook, PushHookAction};
 use crate::recovery::{
     LOCAL_RECOVERY_DISMISSED_ROOT, LOCAL_RECOVERY_PUSHED_ROOT, LOCAL_RECOVERY_ROOT,
 };
-use crate::test_support::{git_in, git_output, ig, install_shard_hook};
+use crate::test_support::{git_in, git_output, ig, install_script, install_shard_hook};
 use crate::workspace_git::GitIdentity;
 
 const README: &str = "one\ntwo\nthree\nfour\nfive\n";
@@ -496,20 +496,17 @@ fn r3b2_flush_publishes_finished_commits_and_parks_dirty_edits() {
 /// that rejects it still publishes a diverged checkout.
 #[test]
 fn r3c_publish_works_without_merge_tree_write_tree() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     let real_git = git_in(&sc.root, &["--exec-path"]);
     let real_git = Path::new(&real_git).join("git");
     let wrapper = sc.root.join("old-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = merge-tree ]; then\n    echo 'usage: git merge-tree <base-tree> <branch1> <branch2>' >&2\n    exit 129\n  fi\ndone\nexec '{}' \"$@\"\n",
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
 
     sc.write("feature.rs", b"fn agent_feature() {}\n");
@@ -580,7 +577,6 @@ fn r3d_unborn_race_replays_onto_the_winner_once() {
 /// the parked copy is retired.
 #[test]
 fn r3f_refused_save_keeps_everything_and_succeeds_later() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     sc.write("README.md", b"one\ntwo\nthree\nfour\nfive\nuser line\n");
     sc.write("draft.md", b"unsaved draft\n");
@@ -592,8 +588,7 @@ fn r3f_refused_save_keeps_everything_and_succeeds_later() {
         "runtime work",
     );
     let hook = sc.remote.join("hooks").join("pre-receive");
-    fs::write(&hook, "#!/bin/sh\necho 'policy says no' >&2\nexit 1\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    install_script(&hook, "#!/bin/sh\necho 'policy says no' >&2\nexit 1\n");
     let tip = sc.main();
 
     let refused = sc.publish_paths(&["README.md"]);
@@ -1146,7 +1141,6 @@ fn n09_recovery_refs_are_idempotent_and_content_named() {
 /// keeps conflict refs.
 #[test]
 fn n10_publish_retires_superseded_unpublished_refs_but_keeps_conflicts() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     // A conflict ref.
     sc.write("README.md", b"one\nTWO BY AGENT\nthree\nfour\nfive\n");
@@ -1158,12 +1152,10 @@ fn n10_publish_retires_superseded_unpublished_refs_but_keeps_conflicts() {
     let conflict_ref = conflict.recovery_ref.clone().unwrap();
     // An unpublished ref, pushed but its publish refused (only main is refused).
     let hook = sc.remote.join("hooks").join("update");
-    fs::write(
+    install_script(
         &hook,
         "#!/bin/sh\nif [ \"$1\" = refs/heads/main ]; then echo 'main is closed' >&2; exit 1; fi\nexit 0\n",
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     sc.write("x.rs", b"fn x() {}\n");
     let refused = sc.publish_paths(&["x.rs"]);
     assert_eq!(refused.git_sync_status, SyncStatus::Unpublished);
@@ -2404,7 +2396,6 @@ async fn serve_config(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_route_reports_conflicts_refusals_and_refresh() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
@@ -2430,8 +2421,7 @@ async fn sync_route_reports_conflicts_refusals_and_refresh() {
     assert!(body["baseRev"].is_string());
 
     let hook = sc.remote.join("hooks").join("pre-receive");
-    fs::write(&hook, "#!/bin/sh\necho 'closed' >&2\nexit 1\n").unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    install_script(&hook, "#!/bin/sh\necho 'closed' >&2\nexit 1\n");
     sc.write("x.rs", b"fn x() {}\n");
     let response = client
         .post(format!("{base}/git/sync"))
@@ -4991,14 +4981,11 @@ fn read_only_refresh_follows_main_and_never_pushes() {
 /// An update hook on the remote that refuses only `main`, so recovery refs
 /// still push. Returns the hook's path.
 fn close_main(sc: &Scenario) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt as _;
     let hook = sc.remote.join("hooks").join("update");
-    fs::write(
+    install_script(
         &hook,
         "#!/bin/sh\nif [ \"$1\" = refs/heads/main ]; then echo 'main is closed' >&2; exit 1; fi\nexit 0\n",
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     hook
 }
 
@@ -5157,7 +5144,6 @@ async fn shutdown_during_a_turn_keeps_its_commits_off_main() {
 /// and the unsaved edit, and pushes both copies.
 #[test]
 fn flush_keeps_everything_when_publishing_fails() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     sc.write("done.rs", b"fn done() {}\n");
     let commit = sc.agent_commit(&["done.rs"], "finished work");
@@ -5168,15 +5154,13 @@ fn flush_keeps_everything_when_publishing_fails() {
     let real_git = git_in(&sc.root, &["--exec-path"]);
     let real_git = Path::new(&real_git).join("git");
     let wrapper = sc.root.join("broken-merge-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = --aggressive ]; then\n    echo 'merge broke' >&2\n    exit 1\n  fi\ndone\nexec '{}' \"$@\"\n",
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
     let report = flush(&sc.ctx(true), false);
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
@@ -5723,15 +5707,12 @@ fn a_desktop_folder_meeting_a_file_keeps_the_users_bytes() {
 /// local; it is pushed for real once the remote keeps it.
 #[test]
 fn a_recovery_push_counts_only_when_the_remote_shows_it() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     let hook = sc.remote.join("hooks").join("post-receive");
-    fs::write(
+    install_script(
         &hook,
         "#!/bin/sh\nwhile read old new ref; do\n  case \"$ref\" in\n    refs/instafy/recovery/*) git update-ref -d \"$ref\" ;;\n  esac\ndone\nexit 0\n",
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     sc.write("doc.md", b"alpha\nbeta\ngamma\ndelta\nleft over\n");
     let report = flush(&sc.ctx(true), false).unwrap();
     assert_eq!(report.unpushed_refs, 1, "{report:?}");
@@ -6476,19 +6457,16 @@ fn two_dismissals_on_one_chain_publish_neither() {
 
 /// A git whose branch moves fail, so a dismissal cannot be applied.
 fn with_branch_moves_failing<T>(sc: &Scenario, body: impl FnOnce() -> T) -> T {
-    use std::os::unix::fs::PermissionsExt as _;
     let real_git = git_in(&sc.root, &["--exec-path"]);
     let real_git = Path::new(&real_git).join("git");
     let wrapper = sc.root.join("stuck-branch-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nupdate=0\nhead=0\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    reset) echo 'reset broke' >&2; exit 1 ;;\n    update-ref) update=1 ;;\n    HEAD) head=1 ;;\n  esac\ndone\nif [ $update = 1 ] && [ $head = 1 ]; then echo 'branch move broke' >&2; exit 1; fi\nexec '{}' \"$@\"\n",
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
     let result = body();
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
@@ -6894,7 +6872,6 @@ async fn a_resume_after_a_skipped_stop_lets_saves_through() {
 /// can remove the lock files it holds before it exits.
 #[test]
 fn a_network_call_out_of_time_is_asked_to_stop_first() {
-    use std::os::unix::fs::PermissionsExt as _;
     let sc = Scenario::new(Options::default());
     sc.write("done.rs", b"fn done() {}\n");
     sc.agent_commit(&["done.rs"], "finished work");
@@ -6902,16 +6879,14 @@ fn a_network_call_out_of_time_is_asked_to_stop_first() {
     let real_git = Path::new(&real_git).join("git");
     let marker = sc.root.join("asked-to-stop");
     let wrapper = sc.root.join("slow-fetch-git");
-    fs::write(
+    install_script(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = fetch ]; then\n    sleep 30 &\n    pid=$!\n    trap 'touch \"{}\"; kill $pid; exit 143' TERM\n    wait $pid\n    exit 1\n  fi\ndone\nexec '{}' \"$@\"\n",
             marker.display(),
             real_git.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     crate::git::GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(wrapper));
     let started = Instant::now();
     let report = crate::publish::flush_within(&sc.ctx(true), false, Duration::from_secs(3));
