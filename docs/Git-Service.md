@@ -20,10 +20,13 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
   canonical.
 - **Kept after retirement**: `<workspace root>/.salvage/` on the same volume, readable only by the
   gateway server's user, holds what retiring those copies keeps outside canonical: private
-  archives (ignored files, credentials, chat images that were not exported, history versions the
-  publish rules refused, files git cannot store, the work tree's own versions of files the salvage
-  merged, and every file of an entry without a usable repository) and bundles of local history
-  canonical lacks. Removing `.legacy/` entries leaves it in place. Keep that volume until
+  archives (ignored files, credentials, chat images that were not exported, versions of
+  credentials, chat uploads and files git cannot store that only local history holds, work-tree
+  files and links up to 20 MiB that git cannot store, the work tree's own versions of files the
+  salvage merged, and every regular file and link up to 20 MiB of an entry without a usable
+  repository) and bundles of local history canonical lacks. What neither holds, such as larger
+  files and repositories nested in an entry, exists only under `.legacy/`. Removing `.legacy/`
+  entries leaves `.salvage/` in place. Keep that volume until
   [Retiring gateway working copies](#retiring-gateway-working-copies) is done.
 - **Backups**: shard volume snapshots plus periodic encrypted copies to independent durable
   storage. Replication is a later upgrade.
@@ -569,13 +572,18 @@ or copied to durable storage that only operators can read. Do not change the gat
 replace its node or recreate its volume before then: `.legacy/` may hold the only copy of a draft,
 and `.salvage/` stays on the volume after its entries are removed. Verified salvage refs are not
 enough. `.salvage/` holds the only copies of what no salvage ref carries: every private archive
-(ignored files, credentials, chat images that were not exported, history versions the publish rules
-refused, files git cannot store, the work tree's own version of each file W takes merged), all
-files of an entry without a usable repository (`noRepository`, which gets no salvage ref), and in
-the bundles local commits outside HEAD's history (`unsavedRefs`) and the history of an entry whose
-history was filtered (`historyFiltered`) or whose space has no canonical repository
-(`canonicalMissing`, which gets no salvage ref either). Rolling the gateway image back is safe for
-the drafts, since no gateway image reads `.legacy/`.
+(ignored files, credentials, chat images that were not exported, versions of credentials, chat
+uploads and files git cannot store that only local history holds, work-tree files and links up to
+20 MiB that git cannot store, the work tree's own version of each file W takes merged), the
+regular files and links up to 20 MiB of an entry without a usable repository (`noRepository`,
+which gets no salvage ref), and in the bundles local commits outside HEAD's history
+(`unsavedRefs`) and the history of an entry whose history was filtered (`historyFiltered`, whose
+build output, deny-listed and oversized versions only the bundle keeps) or whose space has no
+canonical repository (`canonicalMissing`, which gets no salvage ref either). Neither holds the
+work-tree files `skippedPaths` lists, such as files over 20 MiB and repositories nested in an
+entry, nor a `noRepository` entry's own `.instafy`: those exist only under `.legacy/`, so review
+them before you pass `--ack`. Rolling the gateway image back is safe for the drafts, since no
+gateway image reads `.legacy/`.
 
 ### What a run does
 
@@ -584,8 +592,12 @@ For each entry under `.legacy/` (`<space id>` or `<space id>-<suffix>`):
 1. The entry's repository is `.instafy/.git`; a plain `.git` is first moved there inside the entry
    (`legacyLayout`). A dry run moves nothing, so it leaves such an entry uninspected. An entry
    without a usable repository (none, a link or a file where `.instafy`, its `.git` or a part git
-   needs should be, or one that points git at other objects or history) goes to the private archive
-   whole (`noRepository`), and a link named like a space is never followed (`linkEntry`).
+   needs should be, or one that points git at other objects or history) is `noRepository`: every
+   regular file and link of it up to 20 MiB goes to the private archive. Larger files, special
+   files and repositories inside the entry are listed in `skippedPaths`, and the entry's own
+   `.instafy` is left out (only a `.instafy/.git` in it is listed); these exist only under
+   `.legacy/`, so review them before you pass `--ack`. A link named like a space is never followed
+   (`linkEntry`).
 2. Canonical `main` is fetched from `<ORIGIN_GIT_REMOTE_BASE_URL>/<id>.git`, never from the entry's
    own remote, with every received object checked and a `git.read` credential the controller mints
    for the gateway's `ORIGIN_INTERNAL_TOKEN`. A space without a canonical repository is
@@ -600,9 +612,10 @@ For each entry under `.legacy/` (`<space id>` or `<space id>-<suffix>`):
    20 MiB, repositories inside the work tree and anything git cannot store are `skippedPaths`. The
    rest is the entry's work, taken as `git add -A` takes it: a file takes the place of a folder,
    and a folder's files the place of a file. A swap that would drop an entry nothing changed is
-   left out whole. What git cannot store (such a swap, or a name git never records) is reported
-   with its size, and a file of it up to 20 MiB, or a link, also goes to the private archive
-   (reason `unsupported`), so an `--ack` never drops the only copy.
+   left out whole. What git cannot store (such a swap, or a name git never records) is listed in
+   `skippedPaths` with its size, and a file of it up to 20 MiB, or a link, also goes to the private
+   archive (reason `unsupported`); anything else of it (a larger file, a folder with what it holds)
+   exists only under `.legacy/`.
 4. Stale copies are judged against the commits read in step 2:
    - A path whose work-tree state is a copy of a version `main` already has (a version in `main`'s
      history, or the absence of a file `main` added after the view the copy came from) is left
@@ -625,8 +638,10 @@ For each entry under `.legacy/` (`<space id>` or `<space id>-<suffix>`):
    work-tree file kept privately as `secret`, `ignored` or `attachment` (at most 200 of each). A
    chat image that was not exported is archived without one, so a rerun makes the same commit.
    Every local commit canonical lacks, and W's own change, is checked against the publish rules; on
-   any hit W becomes one commit on the last commit canonical shares, and the refused local
-   versions go to the private archive (`historyFiltered`).
+   any hit W becomes one commit on the last commit canonical shares (`historyFiltered`). Refused
+   local versions that are credentials, chat uploads or files git cannot store go to the private
+   archive; build output, deny-listed and oversized ones are listed in `skippedPaths` and kept only
+   in the bundle.
 6. When `main` does not already hold W, it is pushed create-only to
    `refs/instafy/salvage/gateway/<node>-<first 8 hex digits of W>` with a `git.salvage` credential,
    then read back with `git.read` (`canonicalVerified`). An existing ref with the same tip counts
@@ -643,7 +658,9 @@ For each entry under `.legacy/` (`<space id>` or `<space id>-<suffix>`):
 8. With `--apply`, `.salvage/<entry>.bundle` holds the entry's history canonical lacks (all of it
    when there is no canonical repository), each `unsavedRefs` commit under
    `refs/instafy/salvage-local/unsaved-<n>`, `.salvage/<entry>.private.tar` (mode 0600) the
-   private files, and `.salvage/report.jsonl` one line per entry and run. An entry whose outputs
+   private files, and `.salvage/report.jsonl` one line per entry and run. A rerun whose private
+   files differ keeps the earlier archive and writes `.salvage/<entry>.private-<UTC time>-<n>.tar`
+   (named in that run's `privateArchive`); review all of them. An entry whose outputs
    would leave the volume with less than 2 GiB free (the mirror cache's floor) stops before
    writing them.
 
