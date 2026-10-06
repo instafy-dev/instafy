@@ -23,30 +23,30 @@ const NODE: &str = "node-1";
 /// The controller, as the salvage sees it.
 #[derive(Default)]
 struct Stub {
-    read_tokens: Cell<usize>,
-    salvage_tokens: Cell<usize>,
+    read_mints: Cell<usize>,
+    salvage_mints: Cell<usize>,
     exports: RefCell<Vec<(String, Vec<u8>)>>,
     /// The controller's answer to each export (status and body), read the
     /// way the salvage reads it; `None` exports to one conversation.
     export_answer: RefCell<Option<(u16, JsonValue)>>,
     /// Runs before each `git.read` mint.
-    on_read_token: RefCell<Option<Box<dyn FnMut()>>>,
+    on_read_mint: RefCell<Option<Box<dyn FnMut()>>>,
 }
 
 impl Services for Stub {
-    fn read_token(&self, _project: &Uuid) -> anyhow::Result<Option<String>> {
-        self.read_tokens.set(self.read_tokens.get() + 1);
-        if let Some(hook) = self.on_read_token.borrow_mut().as_mut() {
+    fn mint_read(&self, _project: &Uuid) -> anyhow::Result<Option<String>> {
+        self.read_mints.set(self.read_mints.get() + 1);
+        if let Some(hook) = self.on_read_mint.borrow_mut().as_mut() {
             hook();
         }
         // A local remote ignores the header; tests that log git's arguments
         // see which credential each command carried.
-        Ok(Some(format!("read-{}", self.read_tokens.get())))
+        Ok(Some(format!("read-{}", self.read_mints.get())))
     }
 
-    fn salvage_token(&self, _project: &Uuid) -> anyhow::Result<String> {
-        self.salvage_tokens.set(self.salvage_tokens.get() + 1);
-        Ok("salvage-token".to_string())
+    fn mint_salvage(&self, _project: &Uuid) -> anyhow::Result<String> {
+        self.salvage_mints.set(self.salvage_mints.get() + 1);
+        Ok("salvage-1".to_string())
     }
 
     fn export_attachment(&self, project: &Uuid, path: &str, bytes: Vec<u8>) -> ExportOutcome {
@@ -457,7 +457,7 @@ fn a_dry_run_reports_and_writes_nothing() {
     assert_eq!(report["canonicalVerified"], false);
     assert!(report["bundle"].is_null() && report["privateArchive"].is_null());
 
-    assert_eq!(stub.salvage_tokens.get(), 0);
+    assert_eq!(stub.salvage_mints.get(), 0);
     assert!(stub.exports.borrow().is_empty());
     assert!(gateway.salvage_refs().is_empty());
     assert!(!gateway.root.join(".salvage").exists());
@@ -681,7 +681,7 @@ fn a_diverged_checkout_is_salvaged_once_and_kept_private_where_it_must() {
 
     let journal = std::fs::read_to_string(gateway.root.join(".salvage/report.jsonl")).unwrap();
     assert_eq!(journal.lines().count(), 1);
-    assert_eq!(stub.salvage_tokens.get(), 1);
+    assert_eq!(stub.salvage_mints.get(), 1);
 
     // A rerun: the same ref, found and verified, with nothing pushed or
     // archived twice.
@@ -690,7 +690,7 @@ fn a_diverged_checkout_is_salvaged_once_and_kept_private_where_it_must() {
     assert_eq!(again[0]["salvageRef"], reference.as_str());
     assert_eq!(again[0]["salvageRev"], salvaged.as_str());
     assert_eq!(again[0]["canonicalVerified"], true);
-    assert_eq!(stub.salvage_tokens.get(), 1);
+    assert_eq!(stub.salvage_mints.get(), 1);
     assert_eq!(gateway.salvage_refs().len(), 1);
     assert_eq!(again[0]["privateArchive"], archive.to_str().unwrap());
     let kept: Vec<String> = std::fs::read_dir(gateway.root.join(".salvage"))
@@ -748,7 +748,7 @@ fn a_clean_checkout_keeps_its_ignored_files_and_is_removed() {
     assert_eq!(summary.exit_code(), 0);
     assert!(report["salvageRef"].is_null());
     assert!(report["bundle"].is_null());
-    assert_eq!(stub.salvage_tokens.get(), 0);
+    assert_eq!(stub.salvage_mints.get(), 0);
     assert!(gateway.salvage_refs().is_empty());
     let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
     assert_eq!(tar_listing(&archive), vec!["worktree/.env".to_string()]);
@@ -777,7 +777,7 @@ fn a_second_salvage_does_not_run_while_one_holds_the_lock() {
         .to_string();
     assert!(error.contains("another salvage"), "{error}");
     assert!(out.is_empty());
-    assert_eq!(stub.read_tokens.get(), 0);
+    assert_eq!(stub.read_mints.get(), 0);
     // A dry run takes no lock.
     let (summary, _) = salvage(&gateway.settings(false, false, &[]), &stub);
     assert_eq!(summary.entries, 1);
@@ -806,7 +806,7 @@ fn a_space_without_a_canonical_repository_gets_a_full_bundle() {
         .unwrap()
         .contains("no canonical repository"));
     assert_eq!(summary.exit_code(), 1);
-    assert_eq!(stub.salvage_tokens.get(), 0);
+    assert_eq!(stub.salvage_mints.get(), 0);
     let bundle = report["bundle"].as_str().unwrap();
     let heads = git_in(&entry, &["bundle", "list-heads", bundle]);
     assert!(
@@ -901,7 +901,7 @@ fn a_parked_link_is_never_followed() {
     assert_eq!(report["inspected"], false);
     assert!(report["removeRefused"].as_str().unwrap().contains("link"));
     assert_eq!(summary.exit_code(), 1);
-    assert_eq!(stub.read_tokens.get(), 0);
+    assert_eq!(stub.read_mints.get(), 0);
     assert!(gateway.salvage_refs().is_empty());
     assert_eq!(snapshot(&elsewhere), before);
     assert_eq!(snapshot(&elsewhere.join(".instafy/.git")), git_before);
@@ -979,7 +979,7 @@ fn files_without_a_usable_repository_go_to_the_private_archive() {
     let entry = replaced.park_checkout_at(&c1);
     write(&entry.join(".env.local"), b"KEY=1\n");
     ig(&entry, &["add", "-f", ".env.local"]);
-    let secret = entry_commit(&entry, "settings");
+    let settings_commit = entry_commit(&entry, "settings");
     let blob = ig(&entry, &["rev-parse", "HEAD:.env.local"]);
     let harmless = ig(&entry, &["hash-object", "-w", "--stdin"]);
     ig(&entry, &["replace", &blob, &harmless]);
@@ -994,7 +994,7 @@ fn files_without_a_usable_repository_go_to_the_private_archive() {
         .unwrap()
         .contains("replacement refs"));
     assert!(replaced.salvage_refs().is_empty());
-    assert!(secret.len() == 40);
+    assert!(settings_commit.len() == 40);
 }
 
 /// `git --version` as (major, minor).
@@ -1103,7 +1103,7 @@ fn replacement_refs_in_reftable_storage_never_hide_history() {
     write(&entry.join(".env.production"), b"SECRET=hunter2\n");
     ig(&entry, &["add", "-A"]);
     let leaking = entry_commit(&entry, "Add the app");
-    let secret = ig(&entry, &["hash-object", ".env.production"]);
+    let env_blob = ig(&entry, &["hash-object", ".env.production"]);
     // The same commit without the credential, as a replacement.
     let listing = ig(&entry, &["ls-tree", &leaking]);
     let kept: String = listing
@@ -1143,7 +1143,7 @@ fn replacement_refs_in_reftable_storage_never_hide_history() {
         !listed.lines().any(|path| path == ".env.production"),
         "{listed}"
     );
-    for object in [&secret, &leaking] {
+    for object in [&env_blob, &leaking] {
         assert!(
             !git_output(&canonical, &["cat-file", "-e", object], None)
                 .status
@@ -1193,7 +1193,7 @@ fn a_report_line_is_never_lost_when_one_of_its_sinks_fails() {
     let journal = gateway.root.join(".salvage/report.jsonl");
     let stub = Stub::default();
     let broken = journal.clone();
-    *stub.on_read_token.borrow_mut() = Some(Box::new(move || {
+    *stub.on_read_mint.borrow_mut() = Some(Box::new(move || {
         // The disk fills while the first entry is handled.
         let _ = std::fs::remove_file(&broken);
         let _ = std::fs::create_dir_all(&broken);
@@ -1289,7 +1289,7 @@ fn a_report_line_is_never_lost_when_one_of_its_sinks_fails() {
             .to_string();
         assert!(error.contains("report.jsonl"), "{broken}: {error}");
         assert!(out.is_empty(), "{broken}");
-        assert_eq!(stub.read_tokens.get(), 0, "{broken}");
+        assert_eq!(stub.read_mints.get(), 0, "{broken}");
         assert!(entry.join("README.md").is_file(), "{broken}");
         assert!(other.salvage_refs().is_empty(), "{broken}");
     }
@@ -1321,7 +1321,7 @@ fn a_salvage_ref_with_another_tip_stops_the_entry() {
         "{error}"
     );
     assert_eq!(summary.errors, 1);
-    assert_eq!(stub.salvage_tokens.get(), 0);
+    assert_eq!(stub.salvage_mints.get(), 0);
     assert_eq!(gateway.salvage_refs()[&reference], c1);
     assert!(gateway
         .root
@@ -1359,7 +1359,7 @@ fn a_salvage_refusal_is_never_retried() {
     let error = lines[0]["error"].as_str().unwrap();
     assert!(error.contains("refused"), "{error}");
     assert_eq!(summary.errors, 1);
-    assert_eq!(stub.salvage_tokens.get(), 1);
+    assert_eq!(stub.salvage_mints.get(), 1);
     assert!(gateway.salvage_refs().is_empty());
 }
 
@@ -1381,7 +1381,7 @@ fn a_path_the_shard_refuses_is_left_out_and_the_push_retried() {
     assert_eq!(report["canonicalVerified"], true);
     // W reached canonical only as a rebuilt commit.
     assert_eq!(report["historyFiltered"], true);
-    assert_eq!(stub.salvage_tokens.get(), 2);
+    assert_eq!(stub.salvage_mints.get(), 2);
     let skipped: Vec<(String, String)> = report["skippedPaths"]
         .as_array()
         .unwrap()
@@ -1424,7 +1424,7 @@ fn a_path_the_shard_refuses_is_left_out_and_the_push_retried() {
         again[0]
     );
     assert_eq!(again[0]["canonicalVerified"], true);
-    assert_eq!(stub.salvage_tokens.get(), 2);
+    assert_eq!(stub.salvage_mints.get(), 2);
     assert_eq!(gateway.salvage_refs().len(), 1);
 }
 
@@ -1765,7 +1765,7 @@ fn a_path_git_refuses_is_left_out_and_the_rest_kept() {
 /// long entry (a slow fetch, many exports, a large work tree) can outlast
 /// the one minted when it started.
 #[test]
-fn every_read_of_canonical_carries_its_own_credential() {
+fn every_read_of_canonical_is_minted_for_it() {
     let gateway = Gateway::new();
     let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
     let entry = gateway.park_checkout_at(&c1);
@@ -1801,7 +1801,7 @@ fn every_read_of_canonical_carries_its_own_credential() {
     assert_eq!(reads.len(), 3, "{logged}");
     let distinct: std::collections::BTreeSet<&String> = reads.iter().collect();
     assert_eq!(distinct.len(), reads.len(), "{reads:?}");
-    assert_eq!(stub.read_tokens.get(), reads.len());
+    assert_eq!(stub.read_mints.get(), reads.len());
 }
 
 /// A rerun of an entry that still holds the same work reports the salvage
@@ -1836,7 +1836,7 @@ fn a_rerun_reuses_the_ref_recorded_for_the_same_work() {
     assert_eq!(first["canonicalVerified"], true);
     let reference = first["salvageRef"].as_str().unwrap().to_string();
     let salvaged = first["salvageRev"].as_str().unwrap().to_string();
-    assert_eq!(stub.salvage_tokens.get(), 1);
+    assert_eq!(stub.salvage_mints.get(), 1);
     // What the ref changes from HEAD.
     let held = git_in(
         &gateway.canonical(),
@@ -1890,7 +1890,7 @@ fn a_rerun_reuses_the_ref_recorded_for_the_same_work() {
         gateway.salvage_refs(),
         BTreeMap::from([(reference, salvaged)])
     );
-    assert_eq!(stub.salvage_tokens.get(), 1);
+    assert_eq!(stub.salvage_mints.get(), 1);
 }
 
 /// A filtered entry's local commits reach canonical only as one commit, so
@@ -2066,7 +2066,7 @@ fn a_version_only_history_held_never_drops_the_tips_version() {
 /// commit: the filtered commit carries `main`'s version, which is no leak,
 /// and the local version stays in the private archive.
 #[test]
-fn a_credential_main_itself_changed_is_filtered_once() {
+fn an_npmrc_main_itself_changed_is_filtered_once() {
     let gateway = Gateway::new();
     let c1 = gateway.publish(
         &[("README.md", Some("one\n")), (".npmrc", Some("v1\n"))],
@@ -2077,7 +2077,7 @@ fn a_credential_main_itself_changed_is_filtered_once() {
     write(&entry.join("notes.md"), b"notes\n");
     ig(&entry, &["add", "-A"]);
     let local = entry_commit(&entry, "Local settings");
-    let local_secret = ig(&entry, &["rev-parse", "HEAD:.npmrc"]);
+    let local_npmrc = ig(&entry, &["rev-parse", "HEAD:.npmrc"]);
     let c2 = gateway.publish(&[(".npmrc", Some("v2\n"))], "c2");
     gateway.salvage_mode_hook(&[]);
     let stub = Stub::default();
@@ -2098,7 +2098,7 @@ fn a_credential_main_itself_changed_is_filtered_once() {
         "notes"
     );
     assert!(
-        !git_output(&canonical, &["cat-file", "-e", &local_secret], None)
+        !git_output(&canonical, &["cat-file", "-e", &local_npmrc], None)
             .status
             .success()
     );
