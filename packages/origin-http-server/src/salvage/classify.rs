@@ -625,9 +625,9 @@ pub(crate) fn within_build_output(path: &str, folder: bool) -> bool {
 ///
 /// - a file whose content (and mode) some commit of `main`'s history holds at
 ///   that path (the version main has now included);
-/// - a deleted file that a commit the old sync reset away from lacked, and
-///   that the commit's merge base with `main` lacked too: `main` added the
-///   file after the view the work tree came from. For a commit on `main` the
+/// - a deleted file that a commit the old sync reset away from lacked (or
+///   held as a folder), and that the commit's merge base with `main` lacked
+///   too: `main` added the file after the view the work tree came from. For a commit on `main` the
 ///   merge base is the commit itself; for a local commit the reset abandoned
 ///   it is the commit it was made on, so a file that commit deleted (its base
 ///   had it) stays a deletion. Every distinct old head is read (the reflog's
@@ -708,11 +708,17 @@ pub(crate) fn stale_paths(
             true => None,
             false => Some(git.tree_entries(&base, &open)?),
         };
+        // A folder at the path is not the file `main` put there: the copy
+        // came from a view that had the folder (its files are judged on
+        // their own, and the file comes back only in place of stale ones).
+        let file_at = |entries: &BTreeMap<String, TreeEntry>, path: &str| {
+            entries.get(path).is_some_and(|entry| entry.kind != "tree")
+        };
         for path in open {
             let in_base = base_held
                 .as_ref()
-                .is_some_and(|entries| entries.contains_key(&path));
-            if !held.contains_key(&path) && !in_base {
+                .is_some_and(|entries| file_at(entries, &path));
+            if !file_at(&held, &path) && !in_base {
                 stale.insert(path);
             }
         }
