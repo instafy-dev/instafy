@@ -9,7 +9,7 @@ use git_service::policy::{is_salvage_ref_name, SALVAGE_GATEWAY_REF_ROOT};
 use uuid::Uuid;
 
 use super::canonical::{self, Canonical, Pushed};
-use super::classify::{self, Kind, PrivatePath, Skipped, Sorted};
+use super::classify::{self, Kind, OnOldView, PrivatePath, Skipped, Sorted};
 use super::journal::Recorded;
 use super::options::Settings;
 use super::outputs::{
@@ -23,7 +23,7 @@ use crate::git::is_full_object_id;
 use crate::hosted::{free_bytes, rename_no_replace, tree_size};
 use crate::publish_policy::{RejectReason, MAX_PUBLISH_BLOB_BYTES};
 use crate::tree_merge::changed_paths;
-use crate::workspace_git::WorkspaceGit;
+use crate::workspace_git::{TreeEntry, WorkspaceGit};
 
 /// Git in a parked entry's repository: every salvage command, so the
 /// history checks read the objects a push sends. Replacement refs are
@@ -277,6 +277,7 @@ fn salvage_repository(
         None => BTreeSet::new(),
     };
     let copies: Vec<String> = stale.into_iter().collect();
+    let copied: BTreeSet<String> = copies.iter().cloned().collect();
     let stale = index.reset(&git, head.as_deref(), &copies)?;
     // Copies W holds all the same: HEAD's version in their place would drop
     // a change of the work tree's own (a file it put where `main` added a
@@ -299,18 +300,72 @@ fn salvage_repository(
         .collect();
     report.stale_paths = stale;
     report.stale_paths.extend(folded);
-    // The same copies in HEAD's local commits: W puts them back as the
-    // commit those were made on has them.
-    let history_stale = match (head.as_deref(), main.as_deref()) {
-        (Some(head), Some(main)) => {
-            let (put_back, kept) = stale_in_history(&git, &old_heads, &index, head, main)?;
-            report.stale_kept.extend(kept);
-            put_back
+    // Changes the person made to a copy of an older view of a file HEAD
+    // changed since: W takes them merged onto HEAD's version, and the
+    // private archive keeps the file as the work tree has it; one that does
+    // not merge stays as the work tree has it, and holds up removal.
+    if let Some(head) = head.as_deref() {
+        let left_out: BTreeSet<&String> = report.stale_paths.iter().collect();
+        let others: Vec<String> = current
+            .keys()
+            .filter(|path| !copied.contains(*path) && !left_out.contains(path))
+            .cloned()
+            .collect();
+        let in_w = index.entries(&git, &others)?;
+        let mut merged = Vec::new();
+        for (path, outcome) in classify::changes_on_old_views(&git, &old_heads, head, &in_w)? {
+            match outcome {
+                OnOldView::Merged(entry) => merged.push((path, entry)),
+                OnOldView::Kept => report.stale_kept.push(path),
+            }
         }
-        _ => Vec::new(),
-    };
+        index.put(&git, &merged)?;
+        report
+            .stale_merged
+            .extend(merged.into_iter().map(|(path, _)| path));
+    }
+    // The same in HEAD's local commits: W puts stale copies back as the
+    // commit those were made on has them, and merges changes made to an
+    // older view onto its version. Paths W changes only for that are no
+    // change of the work tree's own.
+    let mut history_only = Vec::new();
+    if let (Some(head), Some(main)) = (head.as_deref(), main.as_deref()) {
+        let mut judged: BTreeSet<String> = report.stale_kept.iter().cloned().collect();
+        judged.extend(report.stale_merged.iter().cloned());
+        let history = stale_in_history(&git, &old_heads, &index, head, main, &judged)?;
+        report.stale_kept.extend(history.kept);
+        history_only.extend(
+            history
+                .merged
+                .iter()
+                .filter(|path| !current.contains_key(*path))
+                .cloned(),
+        );
+        report.stale_merged.extend(history.merged);
+        report.stale_paths.extend(history.put_back.iter().cloned());
+        history_only.extend(history.put_back);
+    }
+    // The work tree's file, as it is, of each path W takes merged.
+    for path in &report.stale_merged {
+        if !current.contains_key(path) {
+            continue;
+        }
+        let size = match classify::kind_in(root, path) {
+            Kind::File { size } => size,
+            Kind::Link => 0,
+            _ => continue,
+        };
+        sorted.private.push(PrivatePath {
+            path: path.clone(),
+            reason: "merged",
+            size,
+            commit: None,
+        });
+    }
     report.stale_kept.sort();
-    report.stale_paths.extend(history_stale.iter().cloned());
+    report.stale_kept.dedup();
+    report.stale_merged.sort();
+    report.stale_merged.dedup();
     report.stale_paths.sort();
     report.stale_paths.dedup();
 
@@ -323,7 +378,7 @@ fn salvage_repository(
     let date = work::committer_date(&git, head.as_deref())?;
     let work_paths: Vec<String> = changed_paths(&git, &head_tree, &tree)?
         .into_iter()
-        .filter(|path| !history_stale.contains(path))
+        .filter(|path| !history_only.contains(path))
         .collect();
     let raw_tip = if tree == head_tree {
         head.clone()
@@ -588,6 +643,19 @@ fn keep_refused(root: &Path, refused: Vec<String>, sorted: &mut Sorted) {
     }
 }
 
+/// What W does with the old sync's leftovers HEAD's local commits hold.
+#[derive(Default)]
+struct HistoryStale {
+    /// Stale copies put back as the commit the local commits were made on
+    /// has them.
+    put_back: Vec<String>,
+    /// Stale copies, and changes made to an older view that do not merge,
+    /// that W keeps as it holds them.
+    kept: Vec<String>,
+    /// Changes made to an older view, merged onto that commit's version.
+    merged: Vec<String>,
+}
+
 /// The paths HEAD's local commits changed (from their merge base with
 /// `main`) that W holds as stale copies, by the rule the work tree's paths
 /// are sorted with ([`classify::stale_paths`]): a version `main`'s history
@@ -595,24 +663,32 @@ fn keep_refused(root: &Path, refused: Vec<String>, sorted: &mut Sorted) {
 /// that differed, so it committed what an old sync had left behind. Each is
 /// put back in the index as that merge base has it, so the salvage ref
 /// changes nothing of theirs and a restore never takes `main` back to them;
-/// the local commits stay below W, on canonical and in the bundle. Returns
-/// the paths put back, and the stale copies W keeps as HEAD has them.
+/// the local commits stay below W, on canonical and in the bundle. A change
+/// such a save made to a copy of an older view of a file the merge base
+/// changed since is merged onto the merge base's version
+/// ([`classify::changes_on_old_views`]), or kept as W holds it when it does
+/// not merge. Paths in `judged` (the work tree's own, judged already) are
+/// left as W holds them.
 fn stale_in_history(
     git: &WorkspaceGit<'_>,
     old_heads: &[String],
     index: &WorkIndex,
     head: &str,
     main: &str,
-) -> Result<(Vec<String>, Vec<String>)> {
+    judged: &BTreeSet<String>,
+) -> Result<HistoryStale> {
     let Some(base) = git.merge_base(head, main)? else {
-        return Ok(Default::default());
+        return Ok(HistoryStale::default());
     };
     if base == head {
-        return Ok(Default::default());
+        return Ok(HistoryStale::default());
     }
-    let paths = changed_paths(git, &git.tree_id(&base)?, &git.tree_id(head)?)?;
+    let paths: Vec<String> = changed_paths(git, &git.tree_id(&base)?, &git.tree_id(head)?)?
+        .into_iter()
+        .filter(|path| !judged.contains(path))
+        .collect();
     if paths.is_empty() {
-        return Ok(Default::default());
+        return Ok(HistoryStale::default());
     }
     let held = index.entries(git, &paths)?;
     let copies: Vec<String> = classify::stale_paths(git, old_heads, main, &held)?
@@ -628,11 +704,28 @@ fn stale_in_history(
         .cloned()
         .collect();
     let put_back = index.reset(git, Some(base.as_str()), &files)?;
-    let kept = copies
-        .into_iter()
+    let mut kept: Vec<String> = copies
+        .iter()
         .filter(|path| !put_back.contains(path))
+        .cloned()
         .collect();
-    Ok((put_back, kept))
+    let others: BTreeMap<String, Option<TreeEntry>> = held
+        .into_iter()
+        .filter(|(path, _)| !copies.contains(path))
+        .collect();
+    let mut merged = Vec::new();
+    for (path, outcome) in classify::changes_on_old_views(git, old_heads, &base, &others)? {
+        match outcome {
+            OnOldView::Merged(entry) => merged.push((path, entry)),
+            OnOldView::Kept => kept.push(path),
+        }
+    }
+    index.put(git, &merged)?;
+    Ok(HistoryStale {
+        put_back,
+        kept,
+        merged: merged.into_iter().map(|(path, _)| path).collect(),
+    })
 }
 
 fn private_bytes(private: &[PrivatePath]) -> u64 {
@@ -813,6 +906,7 @@ fn reuse_recorded(
     report.archived_paths = earlier.archived_paths.clone();
     report.stale_paths = earlier.stale_paths.clone();
     report.stale_kept = earlier.stale_kept.clone();
+    report.stale_merged = earlier.stale_merged.clone();
     // Paths the shard refused then are only known from that run.
     for skipped in &earlier.skipped_paths {
         let policy = reason_name(RejectReason::Policy);
@@ -831,8 +925,8 @@ fn reuse_recorded(
         }
     }
     report.notes.push(format!(
-        "{reference} holds this work from an earlier run, whose archivedPaths, stalePaths and \
-         staleKept this line repeats; nothing was pushed"
+        "{reference} holds this work from an earlier run, whose archivedPaths, stalePaths, \
+         staleKept and staleMerged this line repeats; nothing was pushed"
     ));
     Ok(true)
 }

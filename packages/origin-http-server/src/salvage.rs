@@ -30,7 +30,11 @@
 //!    copies of versions `main` already has are left out (`stalePaths`), and
 //!    so are those HEAD's local commits took in (an old save committed what
 //!    an old sync had left behind), which W puts back as the commit those
-//!    were made on has them; ignored files, credentials and merge snapshots
+//!    were made on has them. An edit the person made to a copy of an older
+//!    view of a file HEAD changed since (in the work tree, or in such a
+//!    save) is merged onto HEAD's version (`staleMerged`, with the work
+//!    tree's file kept privately), or kept as it is when it does not merge
+//!    (`staleKept`); ignored files, credentials and merge snapshots
 //!    go to the owner-only archive; root `chat-upload-*` images are exported
 //!    to the conversations that name them (and archived when they cannot be;
 //!    when a rerun may still export one, `exportFailed`); build output, deny
@@ -84,7 +88,8 @@
 //! salvage ref at W, nothing was skipped outside build output, no local
 //! commit lies outside HEAD's history, W keeps no stale copy (`staleKept`:
 //! one `main`'s version could not replace without dropping a change of the
-//! work tree's own), every chat image was exported or
+//! work tree's own, or a change made to an older view that does not merge
+//! onto HEAD's version), every chat image was exported or
 //! given a final answer, and no history was filtered, or the entry is named
 //! with `--ack`. Salvage refs and private archives are never removed; a
 //! bundle only once canonical holds the raw history it has (the ref
@@ -245,8 +250,18 @@ pub(crate) struct EntryReport {
     /// Stale copies W holds all the same, in its own change or in the local
     /// commits below it: `main`'s version in their place would drop other
     /// changes W holds (a file the work tree put where `main` added a
-    /// folder, or the reverse). They hold up `--remove`.
+    /// folder, or the reverse). Also the work tree's edits to a copy of an
+    /// older view of a file HEAD changed since that do not merge onto
+    /// HEAD's version (an edit next to HEAD's change, an edit of a file
+    /// HEAD no longer has): W keeps them as the work tree has them, which
+    /// also undoes HEAD's change. They hold up `--remove`.
     pub stale_kept: Vec<String>,
+    /// Edits made to a copy of an older view of a file HEAD changed since,
+    /// which W takes merged onto HEAD's version (for an edit an unpushed
+    /// save holds, onto the version of the commit it was made on). The file
+    /// as the work tree has it is in the private archive (reason `merged`);
+    /// a save's own version stays in the local commit below W.
+    pub stale_merged: Vec<String>,
     pub private_archived_paths: Vec<PrivatePath>,
     /// What the private files take, in bytes: the private archive's size,
     /// near enough (a dry run says how much room `.salvage/` needs).
@@ -619,7 +634,8 @@ fn removal_blocker(settings: &Settings, report: &EntryReport) -> Option<String> 
     } else if !report.unsaved_refs.is_empty() {
         "local commits HEAD does not hold (unsavedRefs) are only in the bundle"
     } else if !report.stale_kept.is_empty() {
-        "W holds copies of versions main had beside changes of its own (staleKept)"
+        "W keeps work-tree versions that also undo changes main made after the view they \
+         came from (staleKept)"
     } else if report
         .skipped_paths
         .iter()
