@@ -1761,8 +1761,6 @@ async fn apply_manifest_archive(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "instafy: apply imported files".to_string());
 
-    let token_for_commit =
-        (!access_token.token.trim().is_empty()).then_some(access_token.token.clone());
     let blocking_workspace = workspace_root.clone();
     let (apply_result, apply_base_rev) = tokio::task::spawn_blocking(move || {
         // Both guards live inside the blocking task. Dropping/cancelling the
@@ -1817,15 +1815,14 @@ async fn apply_manifest_archive(
             let mut apply_base_rev = None;
             if auto_commit_after_apply {
                 // HEAD before this apply's own commit: the base for rendering this
-                // run's change as a tree-to-tree diff later.
-                let base =
-                    git::head_rev(blocking_workspace.as_path(), token_for_commit.as_deref());
+                // run's change as a tree-to-tree diff later. Both are local git,
+                // so neither carries the caller's bearer.
+                let base = git::head_rev(blocking_workspace.as_path(), None);
                 let baseline_commit = match git::commit_apply_locally(
                     blocking_workspace.as_path(),
                     &apply_result.applied_paths,
                     &apply_result.deleted_paths,
                     &commit_message,
-                    token_for_commit.as_deref(),
                 ) {
                     Ok(commit) => commit,
                     Err(error) => {

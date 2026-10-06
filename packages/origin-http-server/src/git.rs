@@ -746,16 +746,11 @@ fn commit_staged(workspace_root: &Path, message: &str) -> Result<(), OriginError
         .map_err(|error| OriginError::internal(error.to_string()))
 }
 
-fn unstage_sync_reserved_paths(
-    workspace_root: &Path,
-    bearer_token: Option<&str>,
-) -> Result<String, OriginError> {
-    let staged = git_stdout(
-        workspace_root,
-        &["diff", "--cached", "--name-only"],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
+/// Unstage what a sync never commits, and list what stays staged. Local
+/// git only: no credential goes with it.
+fn unstage_sync_reserved_paths(workspace_root: &Path) -> Result<String, OriginError> {
+    let staged = git_stdout(workspace_root, &["diff", "--cached", "--name-only"], None)
+        .map_err(|error| OriginError::internal(error.to_string()))?;
     let reserved = staged
         .lines()
         .filter(|path| is_sync_reserved_path(path))
@@ -771,16 +766,12 @@ fn unstage_sync_reserved_paths(
         for path in chunk {
             args.push(path);
         }
-        run_git_ok(workspace_root, &args, bearer_token)
+        run_git_ok(workspace_root, &args, None)
             .map_err(|error| OriginError::internal(error.to_string()))?;
     }
 
-    git_stdout(
-        workspace_root,
-        &["diff", "--cached", "--name-only"],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))
+    git_stdout(workspace_root, &["diff", "--cached", "--name-only"], None)
+        .map_err(|error| OriginError::internal(error.to_string()))
 }
 
 pub(crate) fn looks_like_transient_http_error(stderr: &str) -> bool {
@@ -1290,12 +1281,14 @@ fn maybe_migrate_legacy_git_dir(
     Ok(())
 }
 
+/// Commit an apply's `applied_paths` and `deleted_paths` (and nothing else
+/// staged) on the checkout, with `message`. Every command it runs is local,
+/// so it takes no credential: a caller's bearer never reaches git here.
 pub fn commit_apply_locally(
     workspace_root: &Path,
     applied_paths: &[String],
     deleted_paths: &[String],
     message: &str,
-    bearer_token: Option<&str>,
 ) -> Result<Option<String>, OriginError> {
     if !is_git_repo(workspace_root) {
         return Ok(None);
@@ -1305,7 +1298,7 @@ pub fn commit_apply_locally(
     // from only its own paths; afterward the original index is restored and
     // just those touched entries are advanced to the new HEAD. This preserves
     // unrelated staged content byte-for-byte, including partial staging.
-    let base_head = optional_head_rev(workspace_root, bearer_token)?;
+    let base_head = optional_head_rev(workspace_root)?;
     let mut index_snapshot = GitIndexSnapshot::capture(workspace_root)?;
     let operation = (|| -> Result<Option<String>, OriginError> {
         let reset_args = if base_head.is_some() {
@@ -1313,7 +1306,7 @@ pub fn commit_apply_locally(
         } else {
             &["read-tree", "--empty"][..]
         };
-        run_git_ok(workspace_root, reset_args, bearer_token)
+        run_git_ok(workspace_root, reset_args, None)
             .map_err(|error| OriginError::internal(error.to_string()))?;
 
         let mut touched = Vec::with_capacity(applied_paths.len() + deleted_paths.len());
@@ -1325,7 +1318,7 @@ pub fn commit_apply_locally(
         stage_applied_paths(workspace_root, applied_paths)?;
         stage_deleted_paths(workspace_root, deleted_paths)?;
 
-        let staged = unstage_sync_reserved_paths(workspace_root, bearer_token)?;
+        let staged = unstage_sync_reserved_paths(workspace_root)?;
         if staged.trim().is_empty() {
             index_snapshot.restore_original()?;
             return Ok(base_head.clone());
@@ -1333,7 +1326,7 @@ pub fn commit_apply_locally(
 
         commit_staged(workspace_root, message)?;
 
-        let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], bearer_token)
+        let head = git_stdout(workspace_root, &["rev-parse", "HEAD"], None)
             .map_err(|error| OriginError::internal(error.to_string()))?;
         index_snapshot.restore_original()?;
         reset_index_paths_to_head(workspace_root, &touched)?;
@@ -1348,7 +1341,6 @@ pub fn commit_apply_locally(
             if let Err(rollback_error) = rollback_failed_local_apply_commit(
                 workspace_root,
                 base_head.as_deref(),
-                bearer_token,
                 &mut index_snapshot,
             ) {
                 return Err(OriginError::internal(format!(
@@ -1360,16 +1352,9 @@ pub fn commit_apply_locally(
     }
 }
 
-fn optional_head_rev(
-    workspace_root: &Path,
-    bearer_token: Option<&str>,
-) -> Result<Option<String>, OriginError> {
-    let output = run_git(
-        workspace_root,
-        &["rev-parse", "--verify", "HEAD"],
-        bearer_token,
-    )
-    .map_err(|error| OriginError::internal(error.to_string()))?;
+fn optional_head_rev(workspace_root: &Path) -> Result<Option<String>, OriginError> {
+    let output = run_git(workspace_root, &["rev-parse", "--verify", "HEAD"], None)
+        .map_err(|error| OriginError::internal(error.to_string()))?;
     if output.status.success() {
         let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if is_safe_git_rev(&head) {
@@ -1397,29 +1382,22 @@ fn optional_head_rev(
 fn rollback_failed_local_apply_commit(
     workspace_root: &Path,
     base_head: Option<&str>,
-    bearer_token: Option<&str>,
     index_snapshot: &mut GitIndexSnapshot,
 ) -> Result<()> {
     // The route-level workspace lock guarantees that a changed HEAD here was
     // produced by this apply attempt. CAS on the observed commit still keeps a
     // surprising concurrent ref update from being overwritten silently.
-    let current_head = optional_head_rev(workspace_root, bearer_token)
-        .map_err(|error| anyhow::anyhow!(error.to_string()));
+    let current_head =
+        optional_head_rev(workspace_root).map_err(|error| anyhow::anyhow!(error.to_string()));
     let head_rollback = match current_head {
         Err(error) => Err(error),
         Ok(current_head) => match (base_head, current_head.as_deref()) {
-            (Some(base), Some(current)) if !base.eq_ignore_ascii_case(current) => run_git_ok(
-                workspace_root,
-                &["update-ref", "HEAD", base, current],
-                bearer_token,
-            )
-            .map(|_| ()),
-            (None, Some(current)) => run_git_ok(
-                workspace_root,
-                &["update-ref", "-d", "HEAD", current],
-                bearer_token,
-            )
-            .map(|_| ()),
+            (Some(base), Some(current)) if !base.eq_ignore_ascii_case(current) => {
+                run_git_ok(workspace_root, &["update-ref", "HEAD", base, current], None).map(|_| ())
+            }
+            (None, Some(current)) => {
+                run_git_ok(workspace_root, &["update-ref", "-d", "HEAD", current], None).map(|_| ())
+            }
             (Some(_), None) => Err(anyhow::anyhow!(
                 "git HEAD disappeared while rolling back local apply commit"
             )),
@@ -3106,7 +3084,6 @@ mod tests {
             &["README.md".to_string()],
             &[],
             "test: import baseline",
-            None,
         )?;
         assert!(commit.is_some());
 
@@ -3114,6 +3091,51 @@ mod tests {
         let tree = String::from_utf8_lossy(&tree.stdout).trim_end().to_string();
 
         assert_eq!(tree, "README.md");
+        Ok(())
+    }
+
+    /// An apply's local commit, and the HEAD the apply route reads before
+    /// it, run local git only, so no command carries a credential: none of
+    /// git's argument lists holds an HTTP header.
+    #[test]
+    fn an_apply_commit_hands_git_no_http_header() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = sandbox.path().join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        init_repo(&workspace_dir, "main")?;
+        run_git(&workspace_dir, &["config", "user.name", "Instafy Test"])?;
+        run_git(
+            &workspace_dir,
+            &["config", "user.email", "playwright@instafy.dev"],
+        )?;
+        fs::write(workspace_dir.join("kept.txt"), "kept\n")?;
+        run_git(&workspace_dir, &["add", "-A"])?;
+        run_git(&workspace_dir, &["commit", "-m", "init"])?;
+        fs::create_dir_all(workspace_dir.join(".instafy"))?;
+        fs::rename(
+            workspace_dir.join(".git"),
+            workspace_dir.join(".instafy").join(".git"),
+        )?;
+        fs::write(workspace_dir.join("applied.txt"), "applied\n")?;
+
+        let log = sandbox.path().join("argv.log");
+        let wrapper = crate::test_support::GitWrapper::install(
+            sandbox.path(),
+            &format!("printf '%s\\n' \"$*\" >> '{}'", log.display()),
+        );
+        let base = head_rev(&workspace_dir, None);
+        let commit = commit_apply_locally(
+            &workspace_dir,
+            &["applied.txt".to_string()],
+            &[],
+            "test: apply",
+        );
+        drop(wrapper);
+        let commit = commit?;
+        assert!(base.is_some() && commit.is_some() && base != commit);
+        let argv = fs::read_to_string(&log)?;
+        assert!(argv.lines().any(|line| line.contains("commit")), "{argv}");
+        assert!(!argv.to_ascii_lowercase().contains("header"), "{argv}");
         Ok(())
     }
 
@@ -3189,7 +3211,6 @@ mod tests {
             &["applied.txt".to_string()],
             &["deleted.txt".to_string()],
             "test: scoped import",
-            None,
         )?
         .expect("scoped import commit");
 
@@ -3308,7 +3329,6 @@ mod tests {
             &["applied.txt".to_string()],
             &[],
             "test: injected failure",
-            None,
         )
         .expect_err("injected post-commit failure must surface");
         assert!(error.to_string().contains("injected local apply failure"));
@@ -3396,7 +3416,6 @@ mod tests {
             &["README.md".to_string()],
             &[],
             "test: hooks disabled",
-            None,
         )?;
         assert!(commit.is_some());
         assert!(
@@ -3475,7 +3494,6 @@ mod tests {
             &[".gitattributes".to_string(), "filtered.txt".to_string()],
             &[],
             "test: helpers sanitized",
-            None,
         )?
         .expect("sanitized helper commit");
 
@@ -3538,7 +3556,6 @@ mod tests {
             &["about.html".to_string()],
             &[],
             "test: baseline",
-            None,
         )?
         .expect("baseline commit");
 
@@ -3554,7 +3571,6 @@ mod tests {
             &["about.html".to_string()],
             &[],
             "test: snapshot",
-            None,
         )?
         .expect("snapshot commit");
 
