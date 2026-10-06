@@ -264,6 +264,15 @@ fn salvage_repository(
     let stale: Vec<String> = stale.into_iter().collect();
     index.reset(&git, head.as_deref(), &stale)?;
     report.stale_paths = stale;
+    // The same copies in HEAD's local commits: W puts them back as the
+    // commit those were made on has them.
+    let history_stale = match (head.as_deref(), main.as_deref()) {
+        (Some(head), Some(main)) => stale_in_history(&git, root, &index, head, main)?,
+        _ => Vec::new(),
+    };
+    report.stale_paths.extend(history_stale.iter().cloned());
+    report.stale_paths.sort();
+    report.stale_paths.dedup();
 
     // W: HEAD with the work tree's edits.
     let tree = index.write_tree(&git)?;
@@ -272,7 +281,10 @@ fn salvage_repository(
         None => git.empty_tree()?,
     };
     let date = work::committer_date(&git, head.as_deref())?;
-    let work_paths = changed_paths(&git, &head_tree, &tree)?;
+    let work_paths: Vec<String> = changed_paths(&git, &head_tree, &tree)?
+        .into_iter()
+        .filter(|path| !history_stale.contains(path))
+        .collect();
     let raw_tip = if tree == head_tree {
         head.clone()
     } else {
@@ -532,6 +544,43 @@ fn keep_refused(root: &Path, refused: Vec<String>, sorted: &mut Sorted) {
             commit: None,
         });
     }
+}
+
+/// The paths HEAD's local commits changed (from their merge base with
+/// `main`) that W holds as stale copies, by the rule the work tree's paths
+/// are sorted with ([`classify::stale_paths`]): a version `main`'s history
+/// holds, or an absence an old sync left. An old save staged every path
+/// that differed, so it committed what an old sync had left behind. Each is
+/// put back in the index as that merge base has it, so the salvage ref
+/// changes nothing of theirs and a restore never takes `main` back to them;
+/// the local commits stay below W, on canonical and in the bundle.
+fn stale_in_history(
+    git: &WorkspaceGit<'_>,
+    root: &Path,
+    index: &WorkIndex,
+    head: &str,
+    main: &str,
+) -> Result<Vec<String>> {
+    let Some(base) = git.merge_base(head, main)? else {
+        return Ok(Vec::new());
+    };
+    if base == head {
+        return Ok(Vec::new());
+    }
+    let paths = changed_paths(git, &git.tree_id(&base)?, &git.tree_id(head)?)?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let held = index.entries(git, &paths)?;
+    let mut stale: Vec<String> = classify::stale_paths(git, root, main, &held)?
+        .into_iter()
+        .collect();
+    // A path the merge base holds as a folder stays as W holds it: the
+    // index takes files back one path at a time.
+    let in_base = git.tree_entries(&base, &stale)?;
+    stale.retain(|path| in_base.get(path).is_none_or(|entry| entry.kind != "tree"));
+    index.reset(git, Some(base.as_str()), &stale)?;
+    Ok(stale)
 }
 
 fn private_bytes(private: &[PrivatePath]) -> u64 {

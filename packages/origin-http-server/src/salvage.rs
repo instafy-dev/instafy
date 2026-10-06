@@ -21,11 +21,13 @@
 //!    a `git.read` credential the controller mints for the gateway's internal
 //!    token. A missing repository is `canonicalMissing`.
 //! 3. Changed, untracked and ignored paths are sorted ([`classify`]): stale
-//!    copies of versions `main` already has are left out (`stalePaths`);
-//!    ignored files, credentials and merge snapshots go to the owner-only
-//!    archive; root `chat-upload-*` images are exported to the conversations
-//!    that name them (and archived when they cannot be; when a rerun may
-//!    still export one, `exportFailed`); build output, deny
+//!    copies of versions `main` already has are left out (`stalePaths`), and
+//!    so are those HEAD's local commits took in (an old save committed what
+//!    an old sync had left behind), which W puts back as the commit those
+//!    were made on has them; ignored files, credentials and merge snapshots
+//!    go to the owner-only archive; root `chat-upload-*` images are exported
+//!    to the conversations that name them (and archived when they cannot be;
+//!    when a rerun may still export one, `exportFailed`); build output, deny
 //!    listed paths, files over 20 MiB, repositories inside the work tree
 //!    (also those `git status` never lists) and anything git cannot store
 //!    are `skippedPaths`; the rest goes into W. A file takes the place of a
