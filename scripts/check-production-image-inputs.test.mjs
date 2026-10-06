@@ -193,6 +193,7 @@ test("base runtime explicitly refreshes inherited gzip, PCRE2 and SQLite and rej
 test("every published Debian service refreshes inherited packages at its release's security floors", () => {
   const bookwormPackages = [
     ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.42-1+deb12u1"],
+    ["perl-base", "PERL_BASE_MIN_VERSION", "5.36.0-7+deb12u4"],
   ];
   const trixiePackages = [
     ["gzip", "GZIP_MIN_VERSION", "1.13-1+deb13u1"],
