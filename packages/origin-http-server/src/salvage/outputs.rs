@@ -11,6 +11,7 @@ use super::archive::{EntryData, TarWriter};
 use super::canonical::FETCHED_MAIN;
 use super::classify::{self, Kind};
 use super::options::Settings;
+use super::UnsavedRef;
 use crate::hosted::{ensure_private_dir, rename_no_replace};
 use crate::workspace_fs::WorkspaceDir;
 use crate::workspace_git::WorkspaceGit;
@@ -18,6 +19,8 @@ use crate::workspace_git::WorkspaceGit;
 /// Local refs the bundle names besides the salvage ref.
 const LOCAL_HEAD_REF: &str = "refs/instafy/salvage-local/head";
 const LOCAL_WORK_REF: &str = "refs/instafy/salvage-local/work";
+/// Followed by a number: a local commit HEAD's history lacks.
+pub(super) const LOCAL_UNSAVED_REF_PREFIX: &str = "refs/instafy/salvage-local/unsaved-";
 
 /// One file of the private archive.
 pub(super) enum ArchiveItem {
@@ -171,10 +174,13 @@ pub(super) struct Bundled<'a> {
     /// The salvage ref and the commit it names.
     pub(super) pushed: Option<(&'a str, &'a str)>,
     pub(super) main: Option<&'a str>,
+    /// Local commits HEAD's history lacks, each under its bundle ref.
+    pub(super) unsaved: &'a [UnsavedRef],
 }
 
 /// `<entry>.bundle`: the entry's history canonical lacks (all of it without
-/// canonical `main`), under local refs of the entry's own repository.
+/// canonical `main`), under local refs of the entry's own repository: HEAD,
+/// the raw W, and every local commit HEAD's history lacks.
 pub(super) fn write_bundle(
     settings: &Settings,
     git: &WorkspaceGit<'_>,
@@ -190,6 +196,9 @@ pub(super) fn write_bundle(
     }
     if let Some(raw) = bundled.raw.filter(|raw| Some(*raw) != bundled.head) {
         refs.push((LOCAL_WORK_REF.to_string(), raw.to_string()));
+    }
+    for unsaved in bundled.unsaved {
+        refs.push((unsaved.bundle_ref.clone(), unsaved.commit.clone()));
     }
     let mut needed = Vec::new();
     for (reference, tip) in refs {

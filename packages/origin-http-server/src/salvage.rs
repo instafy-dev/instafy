@@ -50,7 +50,11 @@
 //!    that ref at its commit, that ref is reported and nothing is pushed,
 //!    whatever `main` (a restore of the ref) or the node name did since.
 //! 6. `.salvage/<entry>.bundle` holds the entry's local history (all of it
-//!    when canonical is missing), `.salvage/<entry>.private.tar` (0600) the
+//!    when canonical is missing), with every local commit HEAD's history
+//!    lacks that neither W nor `main` holds (`unsavedRefs`: a `refs/heads/*`
+//!    tip, or the head a rebase the old gateway never finished started
+//!    from) as `refs/instafy/salvage-local/unsaved-<n>`; such commits make
+//!    the entry not clean. `.salvage/<entry>.private.tar` (0600) holds the
 //!    private files, and `.salvage/report.jsonl` one line per entry and run.
 //!    Each line goes to stdout and to the journal, whatever the other does;
 //!    when either cannot take it, the run stops before the next entry. Private files carry their sizes
@@ -64,13 +68,14 @@
 //! each entry is still fetched into its own repository and W's objects are
 //! written there, so the report can name W. `--remove` (with `--apply`)
 //! deletes an entry only when it was clean, or canonical now holds its
-//! salvage ref at W, nothing was skipped outside build output, every chat
-//! image was exported or given a final answer, and no history was filtered,
-//! or the entry is named with `--ack`. Salvage refs and private archives are
-//! never removed; a bundle only once canonical holds the raw history it has
-//! (the ref verified at the unfiltered W). An entry whose run stopped before
-//! its outputs were written and checked (the free-space floor, any error) is
-//! never removed, even with `--ack`.
+//! salvage ref at W, nothing was skipped outside build output, no local
+//! commit lies outside HEAD's history, every chat image was exported or
+//! given a final answer, and no history was filtered, or the entry is named
+//! with `--ack`. Salvage refs and private archives are never removed; a
+//! bundle only once canonical holds the raw history it has (the ref
+//! verified at the unfiltered W, and no `unsavedRefs`). An entry whose run
+//! stopped before its outputs were written and checked (the free-space
+//! floor, any error) is never removed, even with `--ack`.
 
 mod archive;
 mod canonical;
@@ -170,6 +175,22 @@ pub(crate) struct ExportedAttachment {
     pub conversations: Vec<ExportedTo>,
 }
 
+/// A local commit the entry's repository holds outside HEAD's history, and
+/// outside canonical `main`'s: kept only in the bundle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnsavedRef {
+    /// Where the repository holds it: `refs/heads/<name>`, or the head an
+    /// unfinished rebase started from (`rebase-merge/orig-head`,
+    /// `rebase-apply/orig-head`).
+    pub name: String,
+    pub commit: String,
+    /// Commits it has that neither W nor `main` has.
+    pub commits: usize,
+    /// The ref that names it in the bundle.
+    pub bundle_ref: String,
+}
+
 /// What happened to one entry: one line of `report.jsonl`.
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -193,6 +214,10 @@ pub(crate) struct EntryReport {
     pub canonical_verified: bool,
     pub local_only_commits: usize,
     pub subjects: Vec<String>,
+    /// Local commits HEAD's history lacks (a branch the old gateway saved to
+    /// while HEAD was detached by a rebase it never finished): only the
+    /// bundle holds them, so they hold up `--remove` and keep the bundle.
+    pub unsaved_refs: Vec<UnsavedRef>,
     /// Paths W changes from HEAD (the work tree's edits). For a salvage ref
     /// an earlier run made and this one reports, that run's, as with
     /// `stale_paths`.
@@ -519,6 +544,8 @@ fn removal_blocker(settings: &Settings, report: &EntryReport) -> Option<String> 
         "it was not inspected"
     } else if report.no_repository {
         "it has no usable repository; its files are in the private archive"
+    } else if !report.unsaved_refs.is_empty() {
+        "local commits HEAD does not hold (unsavedRefs) are only in the bundle"
     } else if report
         .skipped_paths
         .iter()
@@ -564,7 +591,7 @@ fn remove(settings: &Settings, path: &Path, report: &mut EntryReport) {
         report.removed = true;
         remove_entry(&target).with_context(|| format!("failed to delete {target:?}"))?;
         // Only when canonical holds the raw history the bundle has.
-        if report.canonical_verified && !report.history_filtered {
+        if report.canonical_verified && !report.history_filtered && report.unsaved_refs.is_empty() {
             if let Some(bundle) = report.bundle.as_deref() {
                 std::fs::remove_file(bundle)
                     .with_context(|| format!("failed to delete {bundle:?}"))?;

@@ -2396,3 +2396,189 @@ fn settings_files_inside_ignored_build_output_are_kept_privately() {
     assert_eq!(report["removed"], true, "{report:#}");
     assert_eq!(summary.exit_code(), 0);
 }
+
+/// The old gateway's save committed to `main` and rebased it onto canonical
+/// `main` when canonical had moved. A rebase stopped after `picks` of its
+/// picks leaves what a gateway stopped mid-rebase left: HEAD detached (at
+/// canonical `main`, or at the picks so far) and the saves only on the
+/// branch.
+fn stop_rebase(gateway: &Gateway, entry: &Path, picks: usize) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let editor = gateway.root.parent().unwrap().join("stop-rebase.sh");
+    std::fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\n{{ head -n {picks} \"$1\"; printf 'break\\n'; tail -n +{} \"$1\"; }} \
+             > \"$1.new\" && mv \"$1.new\" \"$1\"\n",
+            picks + 1
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    ig(
+        entry,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    let sequence_editor = format!("sequence.editor={}", editor.display());
+    ig(
+        entry,
+        &["-c", &sequence_editor, "rebase", "-q", "-i", "origin/main"],
+    );
+    assert!(entry.join(".instafy/.git/rebase-merge").is_dir());
+}
+
+/// Fetch canonical `main`, then every ref of a bundle (which leaves out what
+/// `main` has), into a new repository, and read `spec` there.
+fn read_from_bundle(gateway: &Gateway, bundle: &str, spec: &str) -> String {
+    let restored = gateway.root.parent().unwrap().join("from-bundle");
+    if !restored.exists() {
+        git_in(
+            gateway.root.parent().unwrap(),
+            &["init", "-q", "--bare", restored.to_str().unwrap()],
+        );
+    }
+    git_in(
+        &restored,
+        &[
+            "fetch",
+            "-q",
+            &gateway.url(),
+            "+refs/heads/main:refs/heads/main",
+        ],
+    );
+    git_in(
+        &restored,
+        &["fetch", "-q", bundle, "+refs/instafy/*:refs/instafy/*"],
+    );
+    git_in(&restored, &["show", spec])
+}
+
+/// A gateway stopped right after its rebase checked out canonical `main`
+/// left HEAD there, the work tree clean, and the save only on `main`: the
+/// entry is not clean, its bundle keeps the save, and it is removed only
+/// with an acknowledgement, which keeps the bundle.
+#[test]
+fn a_save_a_stopped_rebase_left_on_the_branch_is_kept() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[("README.md", Some("one\n")), ("notes.md", Some("n1\n"))],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("notes.md"), b"the only copy of the notes\n");
+    ig(&entry, &["add", "-A", "--", "notes.md"]);
+    let save = entry_commit(&entry, "Save notes");
+    let c2 = gateway.publish(&[("README.md", Some("two\n"))], "c2");
+    stop_rebase(&gateway, &entry, 0);
+    assert_eq!(ig(&entry, &["rev-parse", "HEAD"]), c2);
+    assert_eq!(ig(&entry, &["rev-parse", "refs/heads/main"]), save);
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+    let unsaved = serde_json::json!([{
+        "name": "refs/heads/main",
+        "commit": save,
+        "commits": 1,
+        "bundleRef": "refs/instafy/salvage-local/unsaved-1",
+    }]);
+
+    let (_, dry) = salvage(&gateway.settings(false, true, &[]), &stub);
+    assert_eq!(dry[0]["unsavedRefs"], unsaved, "{:#}", dry[0]);
+    assert_eq!(dry[0]["clean"], false, "{:#}", dry[0]);
+    assert_eq!(dry[0]["wouldRemove"], false, "{:#}", dry[0]);
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["unsavedRefs"], unsaved, "{report:#}");
+    assert_eq!(report["clean"], false, "{report:#}");
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert!(report["removeRefused"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("unsavedRefs"));
+    assert_eq!(summary.exit_code(), 1);
+    assert!(entry.exists());
+    let bundle = report["bundle"].as_str().unwrap().to_string();
+    assert_eq!(
+        read_from_bundle(
+            &gateway,
+            &bundle,
+            "refs/instafy/salvage-local/unsaved-1:notes.md"
+        ),
+        "the only copy of the notes"
+    );
+
+    let entry_name = gateway.project.to_string();
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[&entry_name]), &stub);
+    assert_eq!(lines[0]["removed"], true, "{:#}", lines[0]);
+    assert_eq!(lines[0]["bundleRemoved"], false, "{:#}", lines[0]);
+    assert_eq!(summary.exit_code(), 0);
+    assert!(!entry.exists());
+    assert!(Path::new(&bundle).is_file());
+}
+
+/// A gateway stopped between the picks of two saves left HEAD at the first
+/// one, rebased: that goes to canonical as the salvage ref, and the second
+/// save, only on the branch, holds up removal and keeps the bundle.
+#[test]
+fn a_save_a_stopped_rebase_had_not_picked_yet_is_kept() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            ("a.md", Some("a1\n")),
+            ("b.md", Some("b1\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("a.md"), b"first save\n");
+    ig(&entry, &["add", "-A", "--", "a.md"]);
+    entry_commit(&entry, "Save a");
+    write(&entry.join("b.md"), b"second save, only copy\n");
+    ig(&entry, &["add", "-A", "--", "b.md"]);
+    let second = entry_commit(&entry, "Save b");
+    gateway.publish(&[("README.md", Some("two\n"))], "c2");
+    stop_rebase(&gateway, &entry, 1);
+    assert_eq!(ig(&entry, &["log", "-1", "--format=%s", "HEAD"]), "Save a");
+    assert_eq!(ig(&entry, &["rev-parse", "refs/heads/main"]), second);
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    assert_eq!(
+        report["unsavedRefs"],
+        serde_json::json!([{
+            "name": "refs/heads/main",
+            "commit": second,
+            "commits": 2,
+            "bundleRef": "refs/instafy/salvage-local/unsaved-1",
+        }]),
+        "{report:#}"
+    );
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert_eq!(summary.exit_code(), 1);
+    let bundle = report["bundle"].as_str().unwrap().to_string();
+    assert_eq!(
+        read_from_bundle(
+            &gateway,
+            &bundle,
+            "refs/instafy/salvage-local/unsaved-1:b.md"
+        ),
+        "second save, only copy"
+    );
+
+    let entry_name = gateway.project.to_string();
+    let (_, lines) = salvage(&gateway.settings(true, true, &[&entry_name]), &stub);
+    assert_eq!(lines[0]["removed"], true, "{:#}", lines[0]);
+    assert_eq!(lines[0]["bundleRemoved"], false, "{:#}", lines[0]);
+    assert!(Path::new(&bundle).is_file());
+}
