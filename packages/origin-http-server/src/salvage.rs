@@ -452,28 +452,16 @@ fn report_line(settings: &Settings, out: &mut dyn Write, name: &str, line: &str)
 }
 
 /// Why the workspace root looks like a runtime provider's checkout folder
-/// rather than the gateway's, if it does: the provider's own folders in it,
-/// or a checkout (a space folder, or one parked under `.legacy/`) a runtime
-/// used, with its clean-stop marker or local recovery refs (loose or
-/// packed). A local stack once gave the gateway the runtimes' checkout
-/// folder, and the gateway parked their checkouts with its own; the
-/// salvage never runs there, dry or not. Links are never followed.
+/// rather than the gateway's, if it does, by the rule that also stops the
+/// gateway's start ([`crate::hosted::provider_checkouts_in`]): the
+/// provider's own folders in it, or a checkout (a space folder, or one
+/// parked under `.legacy/`) a runtime used, with its clean-stop marker or
+/// local recovery refs (loose or packed). A local stack once gave the
+/// gateway the runtimes' checkout folder, and the gateway parked their
+/// checkouts with its own; the salvage never runs there, dry or not. An
+/// entry the gateway parks never stops it. Links are never followed.
 fn provider_repo_base(settings: &Settings) -> Option<String> {
-    let why = provider_marker(settings)?;
-    Some(format!(
-        "{:?} looks like a runtime provider's checkout folder, not the gateway's workspace \
-         root ({why}); the salvage never runs there: give it the gateway's own root",
-        settings.root
-    ))
-}
-
-fn provider_marker(settings: &Settings) -> Option<String> {
     let root = &settings.root;
-    for marker in [".instafy-checkout-stamps", ".instafy-evicted"] {
-        if classify::kind_of(&root.join(marker)) != Kind::Missing {
-            return Some(format!("it holds {marker}"));
-        }
-    }
     // Space folders in the root, and the entries parked under `.legacy/`.
     let mut checkouts: Vec<PathBuf> = folder_names(root)
         .into_iter()
@@ -488,9 +476,11 @@ fn provider_marker(settings: &Settings) -> Option<String> {
             .map(|name| legacy.join(name)),
     );
     checkouts.sort();
-    checkouts.iter().find_map(|checkout| {
-        runtime_marker(checkout).map(|marker| format!("{checkout:?} {marker}"))
-    })
+    let why = crate::hosted::provider_checkouts_in(root, &checkouts)?;
+    Some(format!(
+        "{root:?} looks like a runtime provider's checkout folder, not the gateway's workspace \
+         root ({why}); the salvage never runs there: give it the gateway's own root"
+    ))
 }
 
 /// The names in `folder`; none when it is not a real folder.
@@ -504,31 +494,6 @@ fn folder_names(folder: &Path) -> Vec<String> {
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().to_string())
         .collect()
-}
-
-/// What shows that a runtime used the checkout at `checkout`, if anything.
-fn runtime_marker(checkout: &Path) -> Option<&'static str> {
-    if classify::kind_of(checkout) != Kind::Folder
-        || classify::kind_in(checkout, ".instafy/.git") != Kind::Folder
-    {
-        return None;
-    }
-    let git_dir = checkout.join(".instafy/.git");
-    if classify::kind_of(&git_dir.join("instafy-stopped-clean")) != Kind::Missing {
-        return Some("has a runtime's clean-stop marker (.instafy/.git/instafy-stopped-clean)");
-    }
-    let loose = classify::kind_in(checkout, ".instafy/.git/refs/instafy") == Kind::Folder
-        && folder_names(&git_dir.join("refs/instafy"))
-            .iter()
-            .any(|name| name.starts_with("local-recovery"));
-    const PACKED: &[u8] = b" refs/instafy/local-recovery";
-    let packed = matches!(
-        classify::kind_of(&git_dir.join("packed-refs")),
-        Kind::File { .. }
-    ) && std::fs::read(git_dir.join("packed-refs"))
-        .is_ok_and(|packed| packed.windows(PACKED.len()).any(|window| window == PACKED));
-    (loose || packed)
-        .then_some("holds a runtime's local recovery refs (refs/instafy/local-recovery*)")
 }
 
 /// The space id an entry name starts with: `<id>` or `<id>-<suffix>`, the

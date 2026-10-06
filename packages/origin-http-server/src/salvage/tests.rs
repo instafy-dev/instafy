@@ -3306,7 +3306,8 @@ fn a_parked_config_never_points_the_salvage_at_another_work_tree() {
 /// runtimes' checkouts with its own) is refused before anything is read or
 /// written, dry or not: the provider's own folders in it, or a space folder
 /// or parked entry a runtime used (its clean-stop marker, or local recovery
-/// refs, loose or packed).
+/// refs, loose or packed). The error names what showed it, as the
+/// gateway's start does.
 #[test]
 fn a_root_that_looks_like_a_provider_repo_base_is_refused() {
     type Mark = fn(&Gateway, &Path);
@@ -3317,13 +3318,13 @@ fn a_root_that_looks_like_a_provider_repo_base_is_refused() {
         (".instafy-evicted", |gateway, _| {
             std::fs::create_dir(gateway.root.join(".instafy-evicted")).unwrap()
         }),
-        ("clean-stop marker", |_, entry| {
+        ("instafy-stopped-clean", |_, entry| {
             write(
                 &entry.join(".instafy/.git/instafy-stopped-clean"),
                 b"stopped\n",
             )
         }),
-        ("local recovery refs", |_, entry| {
+        ("refs/instafy/local-recovery/...", |_, entry| {
             ig(
                 entry,
                 &[
@@ -3333,7 +3334,7 @@ fn a_root_that_looks_like_a_provider_repo_base_is_refused() {
                 ],
             );
         }),
-        ("local recovery refs", |_, entry| {
+        ("refs/instafy/local-recovery-pushed/x", |_, entry| {
             ig(
                 entry,
                 &["update-ref", "refs/instafy/local-recovery-pushed/x", "HEAD"],
@@ -3343,7 +3344,7 @@ fn a_root_that_looks_like_a_provider_repo_base_is_refused() {
                 .join(".instafy/.git/refs/instafy/local-recovery-pushed/x")
                 .exists());
         }),
-        ("clean-stop marker", |gateway, _| {
+        ("instafy-stopped-clean", |gateway, _| {
             // A live space folder of the runtimes, beside the parked entry.
             let live = gateway.root.join(Uuid::new_v4().to_string());
             init_workspace_repo(&live);
@@ -3384,4 +3385,56 @@ fn a_root_that_looks_like_a_provider_repo_base_is_refused() {
         );
         assert!(gateway.salvage_refs().is_empty(), "{marker}");
     }
+}
+
+/// The salvage tells a runtime provider's checkout folder by the rule the
+/// gateway's start uses, so an entry the gateway parked never stops every
+/// run: a folder of local recovery refs with no ref left in it and refs of
+/// other names (the stateful gateway may leave those), or a `packed-refs`
+/// that is a link, which is never read through (the entry is then handled
+/// without its repository).
+#[test]
+fn an_entry_the_gateway_parks_never_stops_the_salvage() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = gateway.park_checkout_at(&c1);
+    write(&entry.join("README.md"), b"edited\n");
+    std::fs::create_dir_all(entry.join(".instafy/.git/refs/instafy/local-recovery/x")).unwrap();
+    ig(&entry, &["update-ref", "refs/instafy/recovery/a", "HEAD"]);
+    let stub = Stub::default();
+
+    let (summary, lines) = salvage(&gateway.settings(false, false, &[]), &stub);
+
+    assert_eq!(summary.entries, 1);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["inspected"], true, "{report:#}");
+    assert_eq!(paths(&report["archivedPaths"]), ["README.md"]);
+
+    // A `packed-refs` that is a link to a list naming a local recovery ref.
+    let linked = Gateway::new();
+    let c1 = linked.publish(&[("README.md", Some("one\n"))], "c1");
+    let entry = linked.park_checkout_at(&c1);
+    let elsewhere = linked.root.parent().unwrap().join("elsewhere-packed-refs");
+    write(
+        &elsewhere,
+        format!("# pack-refs with: peeled fully-peeled sorted\n{c1} refs/instafy/local-recovery-pushed/x\n")
+            .as_bytes(),
+    );
+    let packed_refs = entry.join(".instafy/.git/packed-refs");
+    let _ = std::fs::remove_file(&packed_refs);
+    std::os::unix::fs::symlink(&elsewhere, &packed_refs).unwrap();
+
+    let (summary, lines) = salvage(&linked.settings(false, false, &[]), &stub);
+
+    assert_eq!(summary.entries, 1);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["noRepository"], true, "{report:#}");
+    assert!(report["notes"][0]
+        .as_str()
+        .unwrap()
+        .contains("packed-refs is not a regular file"));
+    assert_eq!(stub.salvage_mints.get(), 0);
+    assert!(linked.salvage_refs().is_empty());
 }

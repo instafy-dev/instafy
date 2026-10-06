@@ -62,7 +62,11 @@ pub(crate) fn park_legacy_checkouts(root: &Path) -> Result<ParkedCheckouts> {
         }
     }
     ids.sort();
-    if let Some(clash) = provider_checkouts_in(root, &ids) {
+    let checkouts: Vec<PathBuf> = ids
+        .iter()
+        .map(|id| root.join(id.as_hyphenated().to_string()))
+        .collect();
+    if let Some(clash) = provider_checkouts_in(root, &checkouts) {
         bail!(
             "the workspace root {root:?} looks like a runtime provider's checkout folder \
              ({clash}); the gateway moves every space folder of its root out of the way, so \
@@ -123,21 +127,23 @@ const PROVIDER_FOLDERS: [&str; 2] = [".instafy-checkout-stamps", ".instafy-evict
 const CLEAN_STOP_MARKER: &str = "instafy-stopped-clean";
 const LOCAL_RECOVERY_PREFIX: &str = "local-recovery";
 
-/// Why `root`, whose space folders are `ids`, looks like a runtime
-/// provider's repo base rather than the gateway's own folder, if it does:
-/// the provider's stamp or eviction folder in it, or a space folder holding
-/// what a runtime's origin leaves there. Nothing is followed through a link,
-/// and a folder that cannot be read says nothing.
-fn provider_checkouts_in(root: &Path, ids: &[Uuid]) -> Option<String> {
+/// Why `root`, whose checkouts are `checkouts` (its space folders, and for
+/// the salvage subcommand also the entries parked under `.legacy/`), looks
+/// like a runtime provider's repo base rather than the gateway's own
+/// folder, if it does: the provider's stamp or eviction folder in it, or a
+/// checkout holding what a runtime's origin leaves there. Nothing is
+/// followed through a link, and a folder that cannot be read says nothing.
+/// The gateway's start and the salvage both decide by this one rule, so an
+/// entry the gateway parks never stops the salvage.
+pub(crate) fn provider_checkouts_in(root: &Path, checkouts: &[PathBuf]) -> Option<String> {
     for name in PROVIDER_FOLDERS {
         let path = root.join(name);
         if std::fs::symlink_metadata(&path).is_ok() {
             return Some(format!("{path:?} exists"));
         }
     }
-    for id in ids {
-        let checkout = root.join(id.as_hyphenated().to_string());
-        let Some(git_dir) = real_dir(&checkout)
+    for checkout in checkouts {
+        let Some(git_dir) = real_dir(checkout)
             .then(|| checkout.join(".instafy"))
             .filter(|path| real_dir(path))
             .map(|path| path.join(".git"))
@@ -162,7 +168,8 @@ fn real_dir(path: &Path) -> bool {
 }
 
 /// A `refs/instafy/local-recovery*` ref of the repository `git_dir`, loose
-/// (any file below such a folder of `refs/instafy/`) or packed.
+/// (any file below such a folder of `refs/instafy/`) or packed (in a
+/// `packed-refs` that is a file itself, never read through a link).
 fn local_recovery_ref(git_dir: &Path) -> Option<String> {
     let refs = git_dir.join("refs").join("instafy");
     if real_dir(&refs) {
@@ -173,7 +180,12 @@ fn local_recovery_ref(git_dir: &Path) -> Option<String> {
             }
         }
     }
-    let packed = std::fs::read(git_dir.join("packed-refs")).ok()?;
+    let packed_refs = git_dir.join("packed-refs");
+    if !std::fs::symlink_metadata(&packed_refs).is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return None;
+    }
+    let packed = std::fs::read(packed_refs).ok()?;
     let wanted = format!("refs/instafy/{LOCAL_RECOVERY_PREFIX}");
     String::from_utf8_lossy(&packed)
         .lines()
@@ -389,6 +401,31 @@ mod tests {
         let parked = park_legacy_checkouts(&root).unwrap();
         assert_eq!(parked.moved.len(), 1);
         assert!(root.join(LEGACY_DIR).join(id(2)).is_dir());
+    }
+
+    /// A `packed-refs` that is a link is never read through, whatever it
+    /// names: git never writes one, so it is no sign of a runtime's
+    /// checkout, and the folder is parked.
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_packed_refs_is_never_read_for_local_recovery_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let git_dir = root.join(id(2)).join(".instafy/.git");
+        write(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
+        let outside = tempfile::tempdir().unwrap();
+        let listed = outside.path().join("packed-refs");
+        write(
+            &listed,
+            &format!("{} refs/instafy/local-recovery-pushed/x\n", "1".repeat(40)),
+        );
+        std::os::unix::fs::symlink(&listed, git_dir.join("packed-refs")).unwrap();
+
+        let parked = park_legacy_checkouts(&root).unwrap();
+
+        assert_eq!(parked.moved.len(), 1);
+        assert!(root.join(LEGACY_DIR).join(id(2)).is_dir());
+        assert!(listed.is_file());
     }
 
     #[cfg(unix)]
