@@ -82,8 +82,9 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   workspaces; see [Workspace durability](../docs/Runtime-Machines.md#workspace-durability).
 - The origin gateway (`docker/origin-gateway/Dockerfile`, `origin-http-server` with
   `ORIGIN_MULTI_TENANT=1`) is stateless: it serves every cloud space from its canonical repository
-  under `ORIGIN_GIT_REMOTE_BASE_URL` and keeps no working copy. Leave `ORIGIN_GIT_REMOTE_URL` and
-  `ORIGIN_STAGING_ROOT` unset for it, or it refuses to start. Its workspace volume holds a disposable
+  under `ORIGIN_GIT_REMOTE_BASE_URL` and keeps no working copy. Leave `ORIGIN_GIT_REMOTE_URL`
+  unset or blank and `ORIGIN_STAGING_ROOT` unset (a blank value counts as set) for it, or it
+  refuses to start. Its workspace volume holds a disposable
   mirror cache in `.git-cache/` (soft cap `ORIGIN_CACHE_MAX_BYTES`, default 20 GiB; below 2 GiB
   free on that disk it removes the mirrors no request holds). Run it with an init as PID 1
   (`docker run --init`, or `init: true` as in `docker/docker-compose.runtime.yml`). Started on the

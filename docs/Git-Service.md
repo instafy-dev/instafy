@@ -345,9 +345,11 @@ The code is `packages/origin-http-server/src/hosted/`. Workspace runtimes and De
 
 The gateway refuses to start when:
 
-- `ORIGIN_GIT_REMOTE_URL` is set. It would route every space to one repository; the gateway
-  builds each space's URL from `ORIGIN_GIT_REMOTE_BASE_URL`, which is required.
-- `ORIGIN_STAGING_ROOT` is set. Uploads are staged in the gateway's own cache.
+- `ORIGIN_GIT_REMOTE_URL` is set to anything but blank. It would route every space to one
+  repository; the gateway builds each space's URL from `ORIGIN_GIT_REMOTE_BASE_URL`, which is
+  required.
+- `ORIGIN_STAGING_ROOT` is set, even to a blank value. Uploads are staged in the gateway's own
+  cache.
 - `ORIGIN_GIT_BRANCH` is set to anything but `main`.
 - `ORIGIN_GATEWAY_GIT_AUTHOR_EMAIL` is `origin@instafy.dev`, the address workspace runtimes and
   Desktop commit under by default.
