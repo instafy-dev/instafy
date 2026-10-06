@@ -40,10 +40,10 @@ pub(crate) enum ExportOutcome {
 pub(crate) trait Services {
     /// A `git.read` credential for the space's canonical repository, or
     /// `None` when the gateway has no internal token (a local remote).
-    fn read_token(&self, project: &Uuid) -> Result<Option<String>>;
+    fn mint_read(&self, project: &Uuid) -> Result<Option<String>>;
     /// A `git.salvage` credential: it may only create salvage refs, and only
     /// through a push.
-    fn salvage_token(&self, project: &Uuid) -> Result<String>;
+    fn mint_salvage(&self, project: &Uuid) -> Result<String>;
     fn export_attachment(
         &self,
         project: &Uuid,
@@ -132,11 +132,11 @@ impl ControllerServices {
 }
 
 impl Services for ControllerServices {
-    fn read_token(&self, project: &Uuid) -> Result<Option<String>> {
+    fn mint_read(&self, project: &Uuid) -> Result<Option<String>> {
         self.mint(project, "git.read")
     }
 
-    fn salvage_token(&self, project: &Uuid) -> Result<String> {
+    fn mint_salvage(&self, project: &Uuid) -> Result<String> {
         if self.config.controller_internal_token.is_none() {
             bail!("ORIGIN_INTERNAL_TOKEN is required to mint git.salvage");
         }

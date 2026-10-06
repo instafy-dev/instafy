@@ -200,8 +200,8 @@ fn salvage_repository(
     recorded: Option<&Recorded>,
     report: &mut EntryReport,
 ) -> Result<()> {
-    let read_token = services.read_token(&project)?;
-    let git = entry_git(root, read_token.as_deref());
+    let read_access = services.mint_read(&project)?;
+    let git = entry_git(root, read_access.as_deref());
     let url = settings.remote_url(&project);
     let canonical = canonical::fetch_main(&git, &url)?;
     report.canonical_missing = canonical == Canonical::Missing;
@@ -560,7 +560,7 @@ fn push_salvage_ref(
             None if !settings.apply => return Ok(true),
             None => {}
         }
-        let token = services.salvage_token(&push.project)?;
+        let token = services.mint_salvage(&push.project)?;
         let pusher = entry_git(push.root, Some(&token));
         match canonical::create_salvage_ref(&pusher, push.url, &current, &reference)? {
             Pushed::Created => {
@@ -695,7 +695,7 @@ fn read_salvage_tip(
     push: &PushState<'_, '_>,
     reference: &str,
 ) -> Result<Option<String>> {
-    let token = services.read_token(&push.project)?;
+    let token = services.mint_read(&push.project)?;
     let reader = entry_git(push.root, token.as_deref());
     canonical::salvage_tip(&reader, push.url, reference)
 }
