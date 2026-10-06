@@ -54,8 +54,8 @@ pub(crate) const APPLY_FINGERPRINT_TRAILER: &str = "Instafy-Apply-Fingerprint";
 /// import that changed nothing, and leaves out files it did not change).
 pub(crate) const APPLY_FILES_TRAILER: &str = "Instafy-Apply-Files";
 pub(crate) const APPLY_BYTES_TRAILER: &str = "Instafy-Apply-Bytes";
-/// How far back an import's key is looked for.
-const APPLY_KEY_WINDOW: &str = "--since=31.days.ago";
+/// How old (by its committer date) a receipt may be and still count.
+const APPLY_KEY_WINDOW: Duration = Duration::from_secs(31 * 24 * 3600);
 /// How many key matches are inspected (a forged one cannot hide a real one
 /// behind it for long).
 const APPLY_KEY_MATCHES: &str = "64";
@@ -598,6 +598,12 @@ const APPLY_KEY_BYTES: &[u8] =
 /// The newest commit on `main`'s first-parent chain from the last 31 days
 /// that the gateway committed (committer address exactly
 /// `gateway_email`) with exactly `key` in [`APPLY_KEY_TRAILER`].
+///
+/// The age is judged per commit, by its own committer date, never as a
+/// bound on the walk: git's `--since` stops at the first older commit, so
+/// a later commit dated in the past (a runtime's clock, a rebase that kept
+/// dates) would hide the receipt, and a retried import would be committed
+/// again over newer work.
 pub(crate) fn find_applied(
     git: &WorkspaceGit<'_>,
     main: Option<&str>,
@@ -613,7 +619,7 @@ pub(crate) fn find_applied(
     let field = format!("\u{1f}{token}\u{1f}");
     let record = format!("\u{1e}{token}\u{1e}");
     let pretty = format!(
-        "--pretty=format:%H%x1f{token}%x1f%P%x1f{token}%x1f%cE%x1f{token}%x1f%(trailers:key={APPLY_KEY_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FINGERPRINT_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FILES_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_BYTES_TRAILER},valueonly)%x1e{token}%x1e"
+        "--pretty=format:%H%x1f{token}%x1f%P%x1f{token}%x1f%cE%x1f{token}%x1f%ct%x1f{token}%x1f%(trailers:key={APPLY_KEY_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FINGERPRINT_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_FILES_TRAILER},valueonly)%x1f{token}%x1f%(trailers:key={APPLY_BYTES_TRAILER},valueonly)%x1e{token}%x1e"
     );
     let committer = format!("--committer=<{gateway_email}>");
     // The key comes from the caller: git is handed a copy built from the
@@ -630,21 +636,30 @@ pub(crate) fn find_applied(
             "--fixed-strings",
             &committer,
             &grep,
-            APPLY_KEY_WINDOW,
             &pretty,
             "--end-of-options",
             main,
             "--",
         ])
         .map_err(internal)?;
+    let oldest = SystemTime::now()
+        .checked_sub(APPLY_KEY_WINDOW)
+        .and_then(|oldest| oldest.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or(0, |oldest| oldest.as_secs());
     for raw_record in raw.split(record.as_str()) {
         let fields: Vec<&str> = raw_record.trim().split(field.as_str()).collect();
-        let [commit, parents, committer, keys, fingerprints, files, bytes] = fields.as_slice()
+        let [commit, parents, committer, committed_at, keys, fingerprints, files, bytes] =
+            fields.as_slice()
         else {
             continue;
         };
         if !is_full_object_id(commit) || !committer.eq_ignore_ascii_case(gateway_email) {
             continue;
+        }
+        // Older than the window by its own date: not this import's.
+        match committed_at.trim().parse::<u64>() {
+            Ok(committed_at) if committed_at >= oldest => {}
+            _ => continue,
         }
         if !keys.lines().any(|value| value.trim() == key) {
             continue;
