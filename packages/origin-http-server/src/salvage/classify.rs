@@ -110,6 +110,8 @@ pub(crate) enum Kind {
     Missing,
 }
 
+/// What `path`'s last component is (a link there is not followed; links in
+/// the components above it are: see [`kind_in`]).
 pub(crate) fn kind_of(path: &Path) -> Kind {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Kind::Link,
@@ -120,6 +122,23 @@ pub(crate) fn kind_of(path: &Path) -> Kind {
         Ok(_) => Kind::Other,
         Err(_) => Kind::Missing,
     }
+}
+
+/// What the work tree at `root` holds at the git path `path`, following no
+/// link in any component, as git sees it: a path below a link (or below a
+/// file) is `Missing`. A folder the work tree replaced with a link to one
+/// holding the same names never makes the salvage read, walk or archive
+/// through that link (which can lead outside the entry).
+pub(crate) fn kind_in(root: &Path, path: &str) -> Kind {
+    let mut at = root.to_path_buf();
+    let mut parts = path.split('/').peekable();
+    while let Some(part) = parts.next() {
+        at.push(part);
+        if parts.peek().is_some() && kind_of(&at) != Kind::Folder {
+            return Kind::Missing;
+        }
+    }
+    kind_of(&at)
 }
 
 /// Changed, untracked and ignored paths, as `git status` lists them
@@ -179,7 +198,7 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
     let mut replaced = Vec::new();
     for candidate in listed {
         let path = candidate.path.as_str();
-        let kind = kind_of(&root.join(path));
+        let kind = kind_in(root, path);
         if candidate.listed == Listed::Tracked
             && !candidate.folder
             && kind == Kind::Folder
@@ -203,6 +222,17 @@ pub(crate) fn sort(root: &Path, listed: &[Candidate]) -> Sorted {
         }
         if candidate.folder || kind == Kind::Folder {
             folders.insert(path.to_string());
+            if kind != Kind::Folder {
+                // Listed as a folder, but no real folder is there (a link,
+                // or gone since): never walked.
+                sorted.skipped.push(Skipped {
+                    path: format!("{path}/"),
+                    size: 0,
+                    reason: "unsupported",
+                    commit: None,
+                });
+                continue;
+            }
             match candidate.listed {
                 Listed::Ignored if !within_build_output(path, true) => {
                     walk_private(root, path, "ignored", &mut sorted);
@@ -287,7 +317,7 @@ fn unlisted_files(root: &Path, path: &str, named: &BTreeSet<&str>, sorted: &mut 
             if is_reserved_path(&child) || named.contains(child.as_str()) {
                 continue;
             }
-            match kind_of(&root.join(&child)) {
+            match kind_in(root, &child) {
                 Kind::Folder => pending.push(child),
                 Kind::Missing => {}
                 kind => sort_file(&child, Listed::Ignored, kind, sorted),

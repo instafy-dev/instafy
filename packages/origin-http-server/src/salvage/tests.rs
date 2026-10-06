@@ -2792,3 +2792,115 @@ fn a_chat_image_name_with_whitespace_around_it_is_kept_privately() {
         vec!["worktree/chat-upload-1-a.png ".to_string()]
     );
 }
+
+/// Tracked folders the work tree replaced with links to folders that hold
+/// the same names: one to a tracked sibling, one moved and linked back, one
+/// to a folder holding a folder where HEAD had a file, and one to a folder
+/// outside the entry. Git sees the paths below the links as gone: W stores
+/// the links, and what it cannot record below them is reported with no size,
+/// never read, walked or archived through the link. The entry finishes (its
+/// `.env` is archived) and is removed with an acknowledgement.
+#[test]
+fn paths_below_a_link_are_never_read_through_it() {
+    let gateway = Gateway::new();
+    let c1 = gateway.publish(
+        &[
+            ("README.md", Some("one\n")),
+            (".gitignore", Some(".env\n")),
+            ("doc/readme.md", Some("same\n")),
+            ("docs/readme.md", Some("same\n")),
+            ("assets/logo.txt", Some("logo\n")),
+            ("x/data", Some("a file\n")),
+            ("lnk/app", Some("app\n")),
+        ],
+        "c1",
+    );
+    let entry = gateway.park_checkout_at(&c1);
+    let outside = gateway.root.parent().unwrap().join("outside");
+    write(&outside.join("app/inner.txt"), b"not the entry's\n");
+    let outside_before = snapshot(&outside);
+    write(&entry.join("README.md"), b"edited\n");
+    write(&entry.join(".env"), b"KEY=1\n");
+    std::fs::remove_dir_all(entry.join("doc")).unwrap();
+    std::os::unix::fs::symlink("docs", entry.join("doc")).unwrap();
+    std::fs::create_dir_all(entry.join("public")).unwrap();
+    std::fs::rename(entry.join("assets"), entry.join("public/assets")).unwrap();
+    std::os::unix::fs::symlink("public/assets", entry.join("assets")).unwrap();
+    std::fs::remove_dir_all(entry.join("x")).unwrap();
+    write(&entry.join("real/data/f"), b"f\n");
+    std::os::unix::fs::symlink("real", entry.join("x")).unwrap();
+    std::fs::remove_dir_all(entry.join("lnk")).unwrap();
+    std::os::unix::fs::symlink(&outside, entry.join("lnk")).unwrap();
+    gateway.salvage_mode_hook(&[]);
+    let stub = Stub::default();
+    let below_links = serde_json::json!([
+        { "path": "assets/logo.txt", "size": 0, "reason": "unsupported" },
+        { "path": "doc/readme.md", "size": 0, "reason": "unsupported" },
+        { "path": "lnk/app", "size": 0, "reason": "unsupported" },
+        { "path": "x/data", "size": 0, "reason": "unsupported" },
+    ]);
+    let only_env = serde_json::json!([{ "path": ".env", "reason": "secret", "size": 6 }]);
+
+    // The dry run promises what --apply writes.
+    let (_, dry) = salvage(&gateway.settings(false, true, &[]), &stub);
+    let report = &dry[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["privateArchivedPaths"], only_env, "{report:#}");
+    assert_eq!(report["skippedPaths"], below_links, "{report:#}");
+    assert!(!report.to_string().contains("inner.txt"), "{report:#}");
+
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["privateArchivedPaths"], only_env, "{report:#}");
+    assert_eq!(report["skippedPaths"], below_links, "{report:#}");
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(tar_listing(&archive), vec!["worktree/.env".to_string()]);
+    assert_eq!(report["canonicalVerified"], true, "{report:#}");
+    let salvaged = report["salvageRev"].as_str().unwrap();
+    let canonical = gateway.canonical();
+    assert_eq!(
+        git_in(
+            &canonical,
+            &["diff", "--no-renames", "--name-status", &c1, salvaged]
+        ),
+        "M\tREADME.md\nA\tassets\nD\tassets/logo.txt\nA\tdoc\nD\tdoc/readme.md\n\
+         A\tlnk\nD\tlnk/app\nA\tpublic/assets/logo.txt\nA\treal/data/f\nA\tx\nD\tx/data"
+    );
+    assert_eq!(report["removed"], false, "{report:#}");
+    assert!(report["removeRefused"]
+        .as_str()
+        .unwrap()
+        .contains("outside build output"));
+    assert_eq!(summary.exit_code(), 1);
+
+    let name = gateway.project.to_string();
+    let (summary, lines) = salvage(&gateway.settings(true, true, &[name.as_str()]), &stub);
+    assert_eq!(lines[0]["removed"], true, "{:#}", lines[0]);
+    assert_eq!(summary.exit_code(), 0);
+    assert_eq!(snapshot(&outside), outside_before);
+
+    // A linked `.instafy` is never followed either: the entry's files are
+    // kept privately, and git never runs in the repository it leads to.
+    let linked = Gateway::new();
+    let target = linked.root.parent().unwrap().join("target");
+    init_workspace_repo(&target);
+    let target_before = std::fs::read(target.join(".instafy/.git/config")).unwrap();
+    let entry = linked.entry();
+    write(&entry.join("notes.md"), b"draft\n");
+    std::os::unix::fs::symlink(target.join(".instafy"), entry.join(".instafy")).unwrap();
+    let (_, lines) = salvage(&linked.settings(true, true, &[]), &stub);
+    let report = &lines[0];
+    assert!(report["error"].is_null(), "{report:#}");
+    assert_eq!(report["noRepository"], true, "{report:#}");
+    assert!(report["notes"][0].as_str().unwrap().contains(".instafy"));
+    let archive = PathBuf::from(report["privateArchive"].as_str().unwrap());
+    assert_eq!(tar_listing(&archive), vec!["worktree/notes.md".to_string()]);
+    let name = linked.project.to_string();
+    let (_, lines) = salvage(&linked.settings(true, true, &[name.as_str()]), &stub);
+    assert_eq!(lines[0]["removed"], true, "{:#}", lines[0]);
+    assert_eq!(
+        std::fs::read(target.join(".instafy/.git/config")).unwrap(),
+        target_before
+    );
+}
