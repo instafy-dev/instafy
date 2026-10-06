@@ -2013,6 +2013,12 @@ fn check_expected_blobs(
 /// entry the same rule takes for it ([`crate::restore_plan::alias_clashes`]
 /// over `HEAD`'s tree); `HEAD` is read only when the disk shows another
 /// spelling.
+///
+/// A path reached only through a folder the disk spells otherwise is
+/// judged by `HEAD`'s tree as well: the disk shows a submodule's folder,
+/// which may hold a repository of the person's own, as a plain folder, so
+/// `Vendor/x.c` beside a submodule entry `vendor` is refused as the
+/// gateway refuses it, never written into that repository.
 fn check_destination_names(workspace_root: &Path, paths: &[String]) -> Result<(), OriginError> {
     if paths.is_empty() {
         return Ok(());
@@ -2020,16 +2026,24 @@ fn check_destination_names(workspace_root: &Path, paths: &[String]) -> Result<()
     let workspace = WorkspaceDir::open(workspace_root)
         .map_err(|error| OriginError::internal(format!("failed to open workspace: {error}")))?;
     let mut listings = std::collections::HashMap::new();
-    let mut aliased: Vec<String> = paths
-        .iter()
-        .filter(|path| held_under_another_name(&workspace, &mut listings, path))
-        .cloned()
-        .collect();
-    if aliased.is_empty() {
+    let (mut aliased, mut respelled) = (Vec::new(), Vec::new());
+    for path in paths {
+        match name_on_disk(&workspace, &mut listings, path) {
+            NameOnDisk::Own => {}
+            NameOnDisk::Alias => aliased.push(path.clone()),
+            NameOnDisk::Respelled => respelled.push(path.clone()),
+        }
+    }
+    if aliased.is_empty() && respelled.is_empty() {
         return Ok(());
     }
     let tracked = head_entries(workspace_root);
     aliased.retain(|path| !tracked_by_its_own_name(&tracked, path));
+    aliased.extend(
+        respelled
+            .into_iter()
+            .filter(|path| tracked_takes_another_entry_for(&tracked, path)),
+    );
     if aliased.is_empty() {
         return Ok(());
     }
@@ -2081,20 +2095,56 @@ fn tracked_by_its_own_name(tracked: &[(String, String)], path: &str) -> bool {
     .is_empty()
 }
 
-/// Whether the folder holds `path` (normalized) only under another spelling
+/// Whether `tracked` (`HEAD`'s entries, by [`head_entries`]), with `path`
+/// and the folders above it added where it lacks them, holds another entry
+/// a disk ignoring case or Unicode form takes for `path` or for a folder it
+/// lies in ([`crate::restore_plan::alias_clashes`]), as the gateway judges
+/// a new path over `main`'s tree.
+fn tracked_takes_another_entry_for(tracked: &[(String, String)], path: &str) -> bool {
+    let mut entries: Vec<(String, bool)> = tracked
+        .iter()
+        .map(|(name, kind)| (name.clone(), kind == "tree"))
+        .collect();
+    let held = |name: &str| tracked.iter().any(|(other, _)| other == name);
+    for (index, _) in path.match_indices('/') {
+        if !held(&path[..index]) {
+            entries.push((path[..index].to_string(), true));
+        }
+    }
+    if !held(path) {
+        entries.push((path.to_string(), false));
+    }
+    !crate::restore_plan::alias_clashes(entries, &[path]).is_empty()
+}
+
+/// What the folder holds at a path, as [`name_on_disk`] reads it.
+#[derive(Debug, PartialEq, Eq)]
+enum NameOnDisk {
+    /// The path by its own name, or nothing a disk ignoring case or
+    /// Unicode form takes for it.
+    Own,
+    /// The path only under another spelling (see
+    /// [`check_destination_names`]).
+    Alias,
+    /// Nothing at the path, but a folder it lies in only under another
+    /// spelling.
+    Respelled,
+}
+
+/// What the folder holds at `path` (normalized), by its names on the disk
 /// (see [`check_destination_names`]). Each folder is listed once
 /// (`listings`, by its path in the folder); a folder that cannot be listed
 /// holds nothing.
-fn held_under_another_name(
+fn name_on_disk(
     workspace: &WorkspaceDir,
     listings: &mut std::collections::HashMap<String, Vec<(String, bool)>>,
     path: &str,
-) -> bool {
+) -> NameOnDisk {
     let components: Vec<&str> = path.split('/').collect();
     // The folders the path so far names under its folded name, and whether
     // by its own spelling all the way.
     let mut folders: Vec<(String, bool)> = vec![(String::new(), true)];
-    let (mut exact, mut alias) = (false, false);
+    let (mut exact, mut alias, mut respelled) = (false, false, false);
     for (index, component) in components.iter().enumerate() {
         let last = index + 1 == components.len();
         let key = portable_key(component);
@@ -2130,6 +2180,7 @@ fn held_under_another_name(
                     } else {
                         format!("{folder}/{name}")
                     };
+                    respelled |= !same;
                     next.push((below, same));
                 } else if !same {
                     // A folder the path lies in, taken for a file.
@@ -2142,7 +2193,15 @@ fn held_under_another_name(
         }
         folders = next;
     }
-    alias && !exact
+    if exact {
+        NameOnDisk::Own
+    } else if alias {
+        NameOnDisk::Alias
+    } else if respelled {
+        NameOnDisk::Respelled
+    } else {
+        NameOnDisk::Own
+    }
 }
 
 /// Whether the work tree holds a symlink at `relative` (below real folders

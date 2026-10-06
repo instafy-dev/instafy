@@ -1683,6 +1683,76 @@ async fn work_over_a_submodule_entry_is_never_restored() {
     }
 }
 
+/// A new path of the work in a folder whose name differs only in case from
+/// a submodule entry of `main` (`Vendor/x.c` beside `vendor`) is a clash in
+/// both modes, and "Use this version" of it is refused in both (409
+/// `path_alias`): on Desktop the disk shows the submodule's folder, which
+/// may hold a repository of the person's own, as a plain folder, and a
+/// disk that ignores case would write the file into that repository,
+/// where `main` never gets it. Keeping the path restores the rest.
+#[tokio::test(flavor = "multi_thread")]
+async fn using_the_saved_version_in_a_folder_a_submodule_entry_names_is_refused() {
+    for mode in MODES {
+        let space = Space::new(mode, &[]).await;
+        let seed = space.main();
+        space.push_entry("vendor", "160000", &seed, "a submodule");
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let commit = space.park_built(
+            &[
+                ("Vendor/x.c", Some(b"work\n")),
+                ("other.md", Some(b"other\n")),
+            ],
+            &reference,
+        );
+        let nested = (mode == Mode::Desktop).then(|| {
+            let folder = space
+                .server(Mode::Desktop)
+                .config
+                .workspace_root
+                .join("vendor");
+            std::fs::create_dir_all(&folder).unwrap();
+            git_in(&folder, &["init", "-q", "-b", "main"]);
+            std::fs::write(folder.join("lib.c"), b"mine\n").unwrap();
+            folder
+        });
+        let before = space.main();
+        assert_eq!(
+            space
+                .conflict(json!({ "ref": reference, "rev": commit }))
+                .await,
+            json!(["Vendor/x.c"]),
+            "{mode:?}"
+        );
+
+        let (status, body) = space.save_in(mode, "Vendor/x.c", b"work\n", false).await;
+        assert_eq!(
+            (status, body["code"].as_str()),
+            (409, Some("path_alias")),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["paths"], json!(["Vendor/x.c"]), "{mode:?}");
+        assert_eq!(space.main(), before, "{mode:?}");
+        if let Some(folder) = &nested {
+            assert_eq!(names_in(folder), vec![".git", "lib.c"]);
+        }
+
+        let body = space
+            .restored(json!({ "ref": reference, "rev": commit, "keep": ["Vendor/x.c"] }))
+            .await;
+        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(
+            space.on_main("other.md").as_deref(),
+            Some(&b"other\n"[..]),
+            "{mode:?}"
+        );
+        assert_eq!(space.mode_on_main("vendor").as_deref(), Some("160000"));
+        if let Some(folder) = &nested {
+            assert_eq!(names_in(folder), vec![".git", "lib.c"]);
+        }
+    }
+}
+
 /// Work that turns the folder `cfg/` into a file `cfg`, restored while the
 /// person keeps `main`'s `cfg/a.txt`: that file needs the folder, so the
 /// work's `cfg` file cannot come in with it, and `cfg` is a clash the
