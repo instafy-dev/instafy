@@ -2014,6 +2014,138 @@ async fn imports_are_committed_once_and_found_by_their_key() {
     );
 }
 
+/// Commit `files` on top of canonical `main` in the runtime clone as
+/// `name <email>` (author and committer) with `message` and the committer
+/// date `days_ago` days in the past, and push it.
+fn push_dated(
+    sc: &HostedScenario,
+    files: &[(&str, &[u8])],
+    name: &str,
+    email: &str,
+    message: &str,
+    days_ago: u64,
+) -> String {
+    sc.sync_work();
+    for (path, content) in files {
+        let target = sc.work.join(path);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, content).unwrap();
+        git_in(&sc.work, &["add", "--", path]);
+    }
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - days_ago * 86_400;
+    let output = std::process::Command::new("git")
+        .current_dir(&sc.work)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_COMMITTER_NAME", name)
+        .env("GIT_COMMITTER_EMAIL", email)
+        .env("GIT_COMMITTER_DATE", format!("{seconds} +0000"))
+        .env("GIT_AUTHOR_NAME", name)
+        .env("GIT_AUTHOR_EMAIL", email)
+        .args(["commit", "-q", "--allow-empty", "-m", message])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let remote = sc.remote();
+    git_in(
+        &sc.work,
+        &[
+            "push",
+            "-q",
+            remote.to_str().unwrap(),
+            "HEAD:refs/heads/main",
+        ],
+    );
+    git_in(&sc.work, &["rev-parse", "HEAD"])
+}
+
+/// An import's receipt is found whatever dates the commits after it carry:
+/// a runtime commit dated in the past (its clock, a rebase that kept dates)
+/// on top of the receipt never hides it, so a retry after a lost answer
+/// replays the import instead of committing it again over the newer work.
+/// A receipt dated before the 31-day window is not this import's.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_receipt_is_found_past_a_commit_dated_in_the_past() {
+    let mut sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"r\n"))], "seed");
+    let controller = StubController::start(sc.project).await;
+    controller.configure(&mut sc);
+    let served = serve(&sc).await;
+    let import = controller.token(&["fs.write", "workspace.import"], json!({}));
+    let key = "imp:0123456789abcdef";
+    let request = manifest(
+        &["src/app.ts"],
+        &[],
+        json!({
+            "projectId": sc.project.to_string(),
+            "leaseId": controller.lease.to_string(),
+            "idempotencyKey": key,
+            "requestFingerprint": "sha256:aaaa",
+            "commitMessage": "Import from GitHub",
+        }),
+    );
+    let archive = zip(&[("src/app.ts", b"imported\n")]);
+    let answer = apply_as(&served, request.clone(), &archive, Some(&import), None).await;
+    assert_eq!(answer.status, 200, "{}", answer.json());
+    let imported = rev(&answer);
+
+    // A runtime changes the imported file in a commit dated 40 days ago,
+    // and saves once more today.
+    push_dated(
+        &sc,
+        &[("src/app.ts", b"agent edit\n")],
+        "Runtime",
+        "agent@instafy.dev",
+        "agent edit",
+        40,
+    );
+    let latest = sc.push(&[("notes.md", Some(b"later\n"))], "later work");
+
+    let status = post_as(
+        &served,
+        "/apply/status",
+        json!({ "idempotencyKey": key, "requestFingerprint": "sha256:aaaa" }),
+        &import,
+    )
+    .await;
+    assert_eq!(status.status, 200, "{}", status.json());
+    assert_eq!(status.json()["rev"], imported.as_str());
+    let again = apply_as(&served, request, &archive, Some(&import), None).await;
+    assert_eq!(again.status, 200, "{}", again.json());
+    assert_eq!(again.json()["rev"], imported.as_str(), "{}", again.json());
+    assert_eq!(again.json()["replayed"], true);
+    assert_eq!(sc.canonical_main().as_deref(), Some(latest.as_str()));
+    assert_eq!(show(&sc, &latest, "src/app.ts").unwrap(), b"agent edit\n");
+
+    // A receipt the gateway committed 40 days ago is past the window.
+    let old_key = "imp:00000000feedface";
+    push_dated(
+        &sc,
+        &[],
+        "instafy-origin",
+        "gateway@instafy.dev",
+        &format!("Import\n\nInstafy-Apply-Key: {old_key}\nInstafy-Apply-Fingerprint: sha256:aaaa"),
+        40,
+    );
+    let status = post_as(
+        &served,
+        "/apply/status",
+        json!({ "idempotencyKey": old_key, "requestFingerprint": "sha256:aaaa" }),
+        &import,
+    )
+    .await;
+    assert_eq!(
+        (status.status, status.code().as_str()),
+        (404, "not_found"),
+        "{}",
+        status.json()
+    );
+}
+
 /// An import whose files `main` already holds still leaves its receipt (a
 /// commit with no changes carrying its key), so a retry after a lost
 /// answer replays it instead of writing over what was saved since.
