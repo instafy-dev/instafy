@@ -325,8 +325,11 @@ mod tests {
     #[test]
     fn a_providers_checkout_folder_stops_the_start_before_anything_moves() {
         let git_dir = |root: &Path| root.join(id(2)).join(".instafy/.git");
-        let cases: [(&str, &str); 5] = [
+        let cases: [(&str, &str); 6] = [
             ("stamps", ".instafy-checkout-stamps"),
+            // The local stack keeps an empty one while a runtime checkout
+            // it could not move stays (scripts/lib/runtimeEnvHelpers.mjs).
+            ("empty stamps", ".instafy-checkout-stamps"),
             ("evicted", ".instafy-evicted"),
             ("clean stop", "instafy-stopped-clean"),
             ("loose ref", "refs/instafy/local-recovery/..."),
@@ -340,6 +343,7 @@ mod tests {
             std::fs::create_dir(root.join(id(3))).unwrap();
             match case {
                 "stamps" => write(&root.join(".instafy-checkout-stamps").join(id(2)), ""),
+                "empty stamps" => std::fs::create_dir(root.join(".instafy-checkout-stamps")).unwrap(),
                 "evicted" => std::fs::create_dir(root.join(".instafy-evicted")).unwrap(),
                 "clean stop" => write(&git_dir(&root).join("instafy-stopped-clean"), ""),
                 "loose ref" => write(

@@ -245,7 +245,8 @@ export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
 
 // The provider's folders next to its checkouts (checkout stamps, evicted
 // checkouts), and a space folder's name (a lower-case, hyphenated UUID).
-const PROVIDER_FOLDERS = [".instafy-checkout-stamps", ".instafy-evicted"];
+const STAMP_FOLDER = ".instafy-checkout-stamps";
+const PROVIDER_FOLDERS = [STAMP_FOLDER, ".instafy-evicted"];
 const SPACE_FOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
@@ -272,7 +273,15 @@ export function resolveRuntimeCheckoutRoot({ env = process.env, repoRoot, sandbo
  * provider's own folder `to`, with the provider's stamp and eviction
  * folders, before either starts. A space whose runtime may still use its
  * checkout (`inUse(id)`), or whose folder `to` already has, stays where it
- * is, with a warning. Nothing is replaced and links are never followed.
+ * is, with a warning. `inUse` is `null` when the runtime containers could
+ * not be listed: then every space stays, and nothing of the provider's
+ * moves. Nothing is replaced and links are never followed.
+ *
+ * While a checkout stays in `from`, its stamp stays too, and the provider's
+ * folders are never removed from `from` (the stamp folder is made when
+ * there is none): the gateway refuses to start on a folder that holds them,
+ * where it would otherwise move that checkout into its `.legacy/`
+ * (`park_legacy_checkouts` in origin-http-server).
  */
 export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = console }) {
   const report = { moved: [], kept: [] };
@@ -288,9 +297,11 @@ export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = 
     }
     return report;
   }
-  const keep = (name, reason) => {
+  const keep = (name, reason, { quiet = false } = {}) => {
     report.kept.push({ name, reason });
-    log.warn(`[runtime-dev] Left ${path.join(from, name)} in place: ${reason}.`);
+    if (!quiet) {
+      log.warn(`[runtime-dev] Left ${path.join(from, name)} in place: ${reason}.`);
+    }
   };
   const move = (source, target) => {
     if (fs.existsSync(target)) {
@@ -304,6 +315,7 @@ export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = 
       return `it could not be moved (${error.message})`;
     }
   };
+  const providerFolders = [];
   for (const name of names) {
     const source = path.join(from, name);
     let stat;
@@ -313,6 +325,10 @@ export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = 
       continue;
     }
     if (SPACE_FOLDER.test(name) && stat.isDirectory()) {
+      if (inUse === null) {
+        keep(name, "the runtime containers could not be listed, so one of this space may still use it; start again");
+        continue;
+      }
       if (inUse(name)) {
         keep(name, "a runtime container of this space may still use it; stop it and start again");
         continue;
@@ -325,17 +341,56 @@ export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = 
         log.log(`[runtime-dev] Moved the runtime checkout ${name} to ${to}.`);
       }
     } else if (PROVIDER_FOLDERS.includes(name) && stat.isDirectory()) {
-      for (const entry of fs.readdirSync(source).sort()) {
-        const refused = move(path.join(source, entry), path.join(to, name, entry));
-        if (refused) {
-          keep(path.join(name, entry), refused);
-        }
+      providerFolders.push(name);
+    }
+  }
+  // The checkouts the gateway would still find here.
+  const stayed = report.kept.map((item) => item.name).filter((name) => SPACE_FOLDER.test(name));
+  for (const name of inUse === null ? [] : providerFolders) {
+    const source = path.join(from, name);
+    let entries;
+    try {
+      entries = fs.readdirSync(source).sort();
+    } catch (error) {
+      keep(name, `it could not be listed (${error.message})`);
+      continue;
+    }
+    for (const entry of entries) {
+      if (name === STAMP_FOLDER && stayed.includes(entry)) {
+        // Its checkout stayed, with a warning of its own.
+        keep(path.join(name, entry), "the checkout of its space stayed in place", { quiet: true });
+        continue;
       }
+      const refused = move(path.join(source, entry), path.join(to, name, entry));
+      if (refused) {
+        keep(path.join(name, entry), refused);
+      }
+    }
+    if (stayed.length === 0) {
       try {
         fs.rmdirSync(source);
       } catch {
         // Something stayed behind; the gateway names it if it refuses.
       }
+    }
+  }
+  if (stayed.length > 0) {
+    const stamps = path.join(from, STAMP_FOLDER);
+    try {
+      try {
+        fs.lstatSync(stamps);
+      } catch {
+        fs.mkdirSync(stamps);
+      }
+      log.warn(
+        `[runtime-dev] Keeping ${stamps} while runtime checkouts stay in ${from}: the origin gateway ` +
+          "refuses to start on that folder until they are moved, instead of moving them into its .legacy/ folder."
+      );
+    } catch (error) {
+      log.warn(
+        `[runtime-dev] Unable to create ${stamps} (${error.message}); the origin gateway may move the ` +
+          `runtime checkouts left in ${from} into its .legacy/ folder when it starts.`
+      );
     }
   }
   if (fs.existsSync(path.join(from, ".legacy"))) {
