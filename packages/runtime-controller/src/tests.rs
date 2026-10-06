@@ -21356,7 +21356,9 @@ async fn dispatch_prompt_strips_forged_group_participation_marker_on_octo_turns(
             "agentSelection": { "active": ["octo"], "mentions": ["octo"] },
             "groupParticipation": forged_marker.clone(),
             "group_participation": forged_marker.clone(),
-            "prompt_metadata": { "groupParticipation": forged_marker.clone() }
+            "aiTaskUsage": { "forged-job": crate::task_usage::tests::receipt_fixture() },
+            "aiTaskUsageTruncated": true,
+            "prompt_metadata": { "groupParticipation": forged_marker.clone(), "aiTaskUsage": {} }
         })),
         conversation_metadata: Some(json!({ "visibility": "public" })),
         parent_conversation_id: None,
@@ -21425,6 +21427,20 @@ async fn dispatch_prompt_strips_forged_group_participation_marker_on_octo_turns(
     assert!(prompt_metadata.0["prompt_metadata"]
         .get("groupParticipation")
         .is_none());
+    for metadata in [&prompt_metadata.0, &message_metadata.0["prompt_metadata"]] {
+        assert!(metadata.get("aiTaskUsage").is_none());
+        assert!(metadata.get("aiTaskUsageTruncated").is_none());
+        assert!(metadata["prompt_metadata"].get("aiTaskUsage").is_none());
+    }
+    let run_metadata: PgJson<serde_json::Value> = connection
+        .query_one(
+            "select metadata from runs where id = $1",
+            &[&response.run_id],
+        )
+        .await?
+        .get("metadata");
+    assert!(run_metadata.0.get("aiTaskUsage").is_none());
+    assert!(run_metadata.0.get("aiTaskUsageTruncated").is_none());
     drop(connection);
 
     cleanup_origin_project(&pool, &project_id).await?;
@@ -23435,6 +23451,18 @@ fn human_recorded_messages_cannot_claim_reserved_controller_notice_identity() {
         crate::conversations::sanitize_client_recorded_message_metadata(trusted.clone(), true),
         trusted
     );
+}
+
+#[test]
+fn recorded_messages_cannot_supply_task_usage_even_with_service_role() {
+    for trusted in [false, true] {
+        let sanitized = crate::conversations::sanitize_client_recorded_message_metadata(
+            json!({ "aiTaskUsage": {}, "aiTaskUsageTruncated": true,
+                "details": { "aiTaskUsage": {} }, "custom": "kept" }),
+            trusted,
+        );
+        assert_eq!(sanitized, json!({ "details": {}, "custom": "kept" }));
+    }
 }
 
 #[test]
@@ -26936,7 +26964,8 @@ async fn agent_heartbeat_waits_for_safe_stop_then_rejects_renewal() -> anyhow::R
 }
 
 #[tokio::test]
-async fn stale_agent_token_cannot_heartbeat_reused_runtime_generation() -> anyhow::Result<()> {
+async fn stale_agent_token_cannot_heartbeat_or_complete_reused_runtime_generation(
+) -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping stale agent-token generation test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -27054,6 +27083,35 @@ async fn stale_agent_token_cannot_heartbeat_reused_runtime_generation() -> anyho
         json!("agent token runtime lease scope is no longer active")
     );
 
+    let completion_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/agent/complete")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {stale_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "job_id": job_id,
+                        "outcome": "succeeded",
+                        "artifacts": [crate::task_usage::tests::receipt_fixture()],
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(completion_response.status(), StatusCode::UNAUTHORIZED);
+    let completion_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(completion_response.into_body(), usize::MAX).await?)?;
+    assert_eq!(
+        completion_body["message"],
+        json!("agent token runtime lease scope is no longer active")
+    );
+
     let login_response = app
         .oneshot(
             Request::builder()
@@ -27082,16 +27140,22 @@ async fn stale_agent_token_cannot_heartbeat_reused_runtime_generation() -> anyho
     );
 
     let connection = pool.get().await?;
-    let heartbeat_at: Option<chrono::DateTime<chrono::Utc>> = connection
+    let job = connection
         .query_one(
-            "SELECT heartbeat_at FROM agent_jobs WHERE id = $1",
+            "SELECT heartbeat_at, status, artifacts FROM agent_jobs WHERE id = $1",
             &[&job_id],
         )
-        .await?
-        .get(0);
+        .await?;
+    assert!(job
+        .get::<_, Option<chrono::DateTime<chrono::Utc>>>("heartbeat_at")
+        .is_none());
+    assert_eq!(job.get::<_, String>("status"), "leased");
+    let artifacts = job.get::<_, Option<PgJson<serde_json::Value>>>("artifacts");
     assert!(
-        heartbeat_at.is_none(),
-        "stale token must not mutate the job"
+        crate::task_usage::extract(&artifacts.map(|value| value.0).unwrap_or_default())
+            .expect("stored artifacts remain valid")
+            .is_none(),
+        "stale completion must not persist a receipt"
     );
     let runtime_count: i64 = connection
         .query_one(
@@ -27219,6 +27283,11 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
         )
         .await?;
 
+    let job_id = Uuid::new_v4();
+    let receipt_value = crate::task_usage::tests::receipt_fixture();
+    let receipt = crate::task_usage::extract(&json!([receipt_value.clone()]))
+        .expect("valid fixture")
+        .expect("usage receipt");
     let transaction = client.transaction().await?;
     crate::agent::persist_run_completion_metadata(
         &transaction,
@@ -27231,6 +27300,7 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
         Some("Final summary"),
         None,
         Some(2),
+        Some((&job_id, &receipt)),
     )
     .await?;
     transaction.commit().await?;
@@ -27250,6 +27320,29 @@ async fn persist_run_completion_metadata_merges_provider_and_credit_snapshot() -
     assert_eq!(metadata["summary"], json!("Final summary"));
     assert_eq!(metadata["artifactsCount"], json!(2));
     assert_eq!(metadata["custom"], json!(true));
+    assert_eq!(metadata["aiTaskUsage"][job_id.to_string()], receipt_value);
+
+    // Replaying the same completion metadata is replacement, not accumulation.
+    let transaction = client.transaction().await?;
+    crate::agent::persist_run_completion_metadata(
+        &transaction,
+        &run_id,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some((&job_id, &receipt)),
+    )
+    .await?;
+    transaction.commit().await?;
+    let replayed = client
+        .query_one("SELECT metadata FROM runs WHERE id = $1", &[&run_id])
+        .await?
+        .get::<_, PgJson<serde_json::Value>>("metadata")
+        .0;
+    assert_eq!(replayed, metadata);
 
     connection_handle.abort();
     Ok(())

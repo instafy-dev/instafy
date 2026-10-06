@@ -21,6 +21,7 @@ use crate::model_environment::{
     INTERNAL_CREDENTIAL_ENV_KEYS, TERMINAL_HELPER_ENV_KEYS, apply_allowlisted_tokio_environment,
 };
 use crate::origin::LocalOriginSync;
+use crate::task_usage::{TaskUsage, UsagePhase};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -2093,6 +2094,30 @@ pub fn extract_job_failure_message(error: &anyhow::Error) -> Option<&str> {
     error
         .downcast_ref::<JobFailureWithArtifacts>()
         .map(|failure| failure.message.as_str())
+}
+
+fn attach_task_usage(result: Result<JobExecution>, task_usage: &TaskUsage) -> Result<JobExecution> {
+    let Some(receipt) = task_usage.artifact() else {
+        return result;
+    };
+    match result {
+        Ok(mut execution) => {
+            execution.artifacts.push(receipt);
+            Ok(execution)
+        }
+        Err(error) => {
+            let mut artifacts = extract_job_failure_artifacts(&error)
+                .unwrap_or_default()
+                .to_vec();
+            artifacts.push(receipt);
+            let message = extract_job_failure_message(&error)
+                .map(str::to_owned)
+                .unwrap_or_else(|| error.to_string());
+            // Keep the original error chain and typed provider error. Lease-loss handling
+            // remains authoritative and may deliberately skip persisting this artifact.
+            Err(error.context(JobFailureWithArtifacts { message, artifacts }))
+        }
+    }
 }
 
 fn parse_terminal_command(prompt: &str) -> Option<String> {
@@ -5613,6 +5638,31 @@ impl JobProcessor {
         cancel_signal: Option<JobCancelSignal>,
         active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
+        let task_usage = TaskUsage::default();
+        let result = self
+            .run_apply_job_observed(
+                registration,
+                job,
+                commit_to_workspace,
+                progress,
+                cancel_signal,
+                active_turn_input,
+                &task_usage,
+            )
+            .await;
+        attach_task_usage(result, &task_usage)
+    }
+
+    async fn run_apply_job_observed(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+        commit_to_workspace: bool,
+        progress: Option<JobProgress>,
+        cancel_signal: Option<JobCancelSignal>,
+        active_turn_input: Option<ActiveTurnInputReceiver>,
+        task_usage: &TaskUsage,
+    ) -> Result<JobExecution> {
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
 
         let proxy_source = if job.proxy.is_some() {
@@ -5963,6 +6013,7 @@ impl JobProcessor {
                 agent_routing_primary_prompt(&preflight_prompt, &job.payload);
             tracing::info!(job_id = %job.id, context = %primary_context, "routing preflight history projection");
             let preflight_options = CodexRunOptions {
+                usage_observer: Some(task_usage.call(UsagePhase::Routing)),
                 disable_shell_tool: true,
                 disable_final_output_json_schema: false,
                 final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
@@ -6073,6 +6124,7 @@ impl JobProcessor {
         };
         let evidence_requirements = routing_evidence_requirements(job, runtime_expectations);
         let mut codex_run_options = CodexRunOptions {
+            usage_observer: Some(task_usage.call(UsagePhase::Main)),
             project_id: Some(project_id),
             disable_shell_tool: explicit_personal_browser_execution
                 || explicit_shared_browser_execution,
@@ -6820,6 +6872,7 @@ impl JobProcessor {
                 prompt.to_string()
             };
             let mut retry_codex_run_options = codex_run_options.clone();
+            retry_codex_run_options.usage_observer = Some(task_usage.call(UsagePhase::Recovery));
             if retry_team_planning_on_provider_thread {
                 retry_codex_run_options.require_first_tool_call = false;
                 retry_codex_run_options.disable_shell_tool = true;
@@ -6922,6 +6975,8 @@ impl JobProcessor {
             if use_evidence_recovery {
                 retry_codex_run_options =
                     evidence_recovery_plan.unwrap().options(&codex_run_options);
+                retry_codex_run_options.usage_observer =
+                    Some(task_usage.call(UsagePhase::Recovery));
                 update_prompt_context_require_first_tool_call(&mut retry_prompt_context, true);
                 retry_prompt_context["evidenceRecoveryContract"] =
                     json!(routing_recovery::CONTRACT);
@@ -7251,6 +7306,8 @@ impl JobProcessor {
                     &mut finalization_prompt_context,
                 );
                 let mut finalization_options = codex_run_options.clone();
+                finalization_options.usage_observer =
+                    Some(task_usage.call(UsagePhase::Finalization));
                 finalization_options.require_first_tool_call = false;
                 finalization_options.disable_shell_tool = true;
                 finalization_options.disable_final_output_json_schema = true;
@@ -17707,6 +17764,91 @@ mod tests {
         assert_eq!(parse_terminal_command("/terminal"), None);
         assert_eq!(parse_terminal_command("/terminalfoo"), None);
         assert_eq!(parse_terminal_command("ls -la"), None);
+    }
+
+    #[test]
+    fn task_usage_receipt_survives_a_silent_success_without_creating_messages() {
+        let task = TaskUsage::default();
+        let observation = task.call(UsagePhase::Main).start_attempt(1);
+        observation.finish(crate::task_usage::UsageOutcome::Success);
+        let execution = JobExecution {
+            summary: "NO_RESPONSE".to_string(),
+            suggested_replies: Vec::new(),
+            provider: "codex-embedded".to_string(),
+            artifacts: vec![json!({"kind": "codex/run-log", "events": []})],
+            credit_snapshot: None,
+            provider_conversation_state: None,
+            messages: Vec::new(),
+            messages_streamed: false,
+            final_messages: Vec::new(),
+        };
+        let result = attach_task_usage(Ok(execution), &task).unwrap();
+        assert_eq!(result.summary, "NO_RESPONSE");
+        assert!(result.messages.is_empty());
+        assert!(result.final_messages.is_empty());
+        assert_eq!(result.artifacts.len(), 2);
+        assert_eq!(result.artifacts[1]["kind"], "ai/task-usage");
+        assert_eq!(result.artifacts[1]["calls"][0]["usageStatus"], "unknown");
+    }
+
+    #[test]
+    fn task_usage_receipt_keeps_first_attempt_after_recovery_failure_and_preserves_error_chain() {
+        use crate::task_usage::{UsageCounts, UsageOutcome};
+
+        let task = TaskUsage::default();
+        let first = task.call(UsagePhase::Main).start_attempt(1);
+        first.observe_response(
+            "response",
+            Some(UsageCounts {
+                input_tokens: 10,
+                cached_input_tokens: 4,
+                cache_write_input_tokens: 0,
+                output_tokens: 2,
+                reasoning_output_tokens: 0,
+                total_tokens: 12,
+            }),
+        );
+        first.completed();
+        first.finish(UsageOutcome::Success);
+        task.call(UsagePhase::Recovery)
+            .start_attempt(1)
+            .finish(UsageOutcome::Error);
+        let original = anyhow!(crate::codex::CodexExecutionError {
+            message: "lease lost".to_string(),
+            codex_error_info: None,
+        })
+        .context(JobFailureWithArtifacts {
+            message: "Recovery failed".to_string(),
+            artifacts: vec![json!({"kind": "existing-evidence"})],
+        });
+        let error = attach_task_usage(Err(original), &task).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::codex::CodexExecutionError>()
+                .is_some()
+        );
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("lease lost"))
+        );
+        let artifacts = extract_job_failure_artifacts(&error).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0]["kind"], "existing-evidence");
+        let calls = artifacts[1]["calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["phase"], "main");
+        assert_eq!(calls[0]["usage"]["input_tokens"], 10);
+        assert_eq!(calls[1]["phase"], "recovery");
+        assert_eq!(calls[1]["usageStatus"], "unknown");
+    }
+
+    #[test]
+    fn task_usage_does_not_add_an_empty_receipt_before_any_model_call() {
+        let error = attach_task_usage(Err(anyhow!("no model configured")), &TaskUsage::default())
+            .unwrap_err();
+        assert!(extract_job_failure_artifacts(&error).is_none());
+        assert_eq!(error.to_string(), "no model configured");
     }
 
     #[test]

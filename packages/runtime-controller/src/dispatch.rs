@@ -941,6 +941,7 @@ pub(crate) async fn process_dispatch_prompt(
     context: &RequestContext,
     mut request: DispatchPromptNormalized,
 ) -> Result<DispatchPromptResponse, (StatusCode, Json<ApiError>)> {
+    crate::task_usage::strip_authoring_claims(&mut request.metadata);
     conversations::normalize_human_mention_metadata(&mut request.metadata)?;
     // Parity with the record path: untrusted callers must not persist a forged
     // controller participation marker through gate-bypassing dispatches (e.g.

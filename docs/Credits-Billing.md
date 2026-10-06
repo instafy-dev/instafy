@@ -247,6 +247,49 @@ Starter guidance with the current defaults:
 - tunnels and hosted runtimes burn from the same pool, so heavy infra usage reduces how much managed AI remains that day
 - the balance resets once per day in UTC; there is no carry-over
 
+### Measuring root-call usage
+
+The runtime also emits a content-free `ai/task-usage` artifact (`version: 1`) for
+instrumented root Codex invocations. Its calls distinguish `routing`, `main`,
+`recovery` and `finalization`, and identify each root invocation and internal
+attempt separately. This is diagnostic measurement: it does not change customer
+credit deductions, prompt counting or participation, and adds no conversation messages.
+The existing credit reconciliation still uses the primary run log's usage.
+
+The controller validates the receipt and stores it under
+`runs.metadata.aiTaskUsage[<job UUID>]`, including successful silent evaluations
+and failed completions. A repeated write replaces that job's receipt rather than
+adding its tokens again. This is the latest accepted completion's receipt, not
+an accumulated history of every lease attempt. The receipt is extracted before
+the general 1 MiB artifact cap, so large logs do not erase this bounded measurement.
+Receipt validation allows at most 128 calls and 64 KiB; run metadata retains at most 32
+job receipts and sets `aiTaskUsageTruncated: true` if another is omitted.
+Duplicate receipts or call identities, unsupported schemas and malformed
+counters are rejected. Older runtimes without receipts leave this field absent.
+Dispatch and recorded-message authoring strip `aiTaskUsage` and
+`aiTaskUsageTruncated`; only authenticated job completion records these results.
+
+For analysis, use only one copy of each receipt and its
+`(invocationId, attempt)` call identity. Do not add the same job's artifact,
+streamed `token_usage` messages, completion usage message or ledger usage to it.
+Each attempt sums the valid usage counts attached to its native
+`RawResponseCompleted` events. This includes ordinary root responses and root
+compaction responses when Codex emits those events; it does not derive usage
+from changes in the thread's context-window total. `usageStatus: reported`
+requires a successfully completed root turn and no observed response with missing
+or invalid usage. `partial` retains known counts when the turn fails or response
+coverage is incomplete; `unknown` has no trustworthy usage and omits the counters.
+Unknown and absent usage are not zero. A receipt with `truncated: true` is
+incomplete. Counters remain separate, including cached input, cache writes and
+reasoning output; they must not all be summed as disjoint tokens.
+
+Coverage is explicitly `root_turns_only`. Detached/subagent work, HTTP attempts
+without a reported response, process loss and lease loss can leave costs unreported,
+and a lost process or rejected stale completion may prevent the receipt from reaching
+the controller at all. These measurements therefore do not establish a complete
+provider bill. Compare actual models and credential paths separately before
+applying prices; diagnostic receipt totals do not authorize new charges.
+
 ### Ledger guard
 Every `org_credit_ledger` insert moves the team balance through the ledger's balance trigger,
 under a lock on the team's balance row:
