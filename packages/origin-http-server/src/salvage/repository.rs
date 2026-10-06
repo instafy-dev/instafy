@@ -14,10 +14,11 @@ use super::journal::Recorded;
 use super::options::Settings;
 use super::outputs::{
     read_blob, read_worktree_file, write_bundle, write_private_archive, ArchiveItem, Bundled,
+    LOCAL_UNSAVED_REF_PREFIX,
 };
 use super::services::{ExportOutcome, Services};
 use super::work::{self, Version, WorkIndex};
-use super::{EntryReport, ExportedAttachment};
+use super::{EntryReport, ExportedAttachment, UnsavedRef};
 use crate::hosted::{free_bytes, rename_no_replace, tree_size};
 use crate::publish_policy::RejectReason;
 use crate::tree_merge::changed_paths;
@@ -276,6 +277,10 @@ fn salvage_repository(
     };
     report.archived_paths = work_paths.clone();
 
+    // Local commits HEAD's history lacks: only the bundle keeps them.
+    let unsaved = unsaved_refs(&git, raw_tip.as_deref(), main.as_deref(), report)?;
+    report.unsaved_refs = unsaved;
+
     // Private files and chat images of the work tree.
     let mut items: Vec<ArchiveItem> = sorted
         .private
@@ -464,7 +469,8 @@ fn salvage_repository(
 
     report.clean = nothing_to_push
         && (canonical != Canonical::Missing || tip.is_none())
-        && report.skipped_paths.iter().all(Skipped::rebuildable);
+        && report.skipped_paths.iter().all(Skipped::rebuildable)
+        && report.unsaved_refs.is_empty();
     report.private_archived_paths = private;
     report.private_archive_bytes = private_bytes(&report.private_archived_paths);
     if settings.apply {
@@ -478,6 +484,7 @@ fn salvage_repository(
                 raw: raw_tip.as_deref(),
                 pushed: report.salvage_ref.as_deref().zip(tip.as_deref()),
                 main: main.as_deref(),
+                unsaved: &report.unsaved_refs,
             },
         )?;
         report.private_archive =
@@ -711,6 +718,97 @@ fn salvage_ref(node: &str, tip: &str) -> Result<String> {
         bail!("{reference} is not a valid salvage ref name");
     }
     Ok(reference)
+}
+
+/// The local commits the repository holds outside the history of `kept`
+/// (W, or HEAD) and of `main`: each `refs/heads/*` tip, and the head an
+/// unfinished rebase started from. The old gateway saved to `main` and
+/// rebased it onto canonical when canonical had moved; a gateway stopped
+/// mid-rebase left HEAD detached (at canonical `main`, or at the commits
+/// picked so far) and the saves only on the branch. One commit is listed
+/// once, under the first name that holds it. `ORIG_HEAD` and the reflog
+/// are not read: a reset moved HEAD without the files, which W takes from
+/// the work tree, and a rebase's starting head is its `orig-head`.
+fn unsaved_refs(
+    git: &WorkspaceGit<'_>,
+    kept: Option<&str>,
+    main: Option<&str>,
+    report: &mut EntryReport,
+) -> Result<Vec<UnsavedRef>> {
+    let mut tips: Vec<(String, String)> = git
+        .refs_under("refs/heads/")?
+        .into_iter()
+        .map(|(name, id)| (name, id.trim().to_string()))
+        .collect();
+    let git_dir = git.git_dir();
+    for state in ["rebase-merge", "rebase-apply"] {
+        if classify::kind_of(&git_dir.join(state)) == Kind::Missing {
+            continue;
+        }
+        report.notes.push(format!(
+            "a rebase the old gateway never finished ({state}) left HEAD where it stopped; \
+             W is built on HEAD as it is"
+        ));
+        if let Some(id) = read_object_id(&git_dir.join(state).join("orig-head")) {
+            tips.push((format!("{state}/orig-head"), id));
+        }
+    }
+    let mut unsaved: Vec<UnsavedRef> = Vec::new();
+    for (name, id) in tips {
+        // Only an object id reaches git's arguments.
+        if !is_object_id(&id) {
+            continue;
+        }
+        let Some(commit) = git.commit_id(&id)? else {
+            continue;
+        };
+        if unsaved.iter().any(|known| known.commit == commit) {
+            continue;
+        }
+        let mut held = false;
+        for base in kept.into_iter().chain(main) {
+            held |= git.is_ancestor(&commit, base)?;
+        }
+        if held {
+            continue;
+        }
+        let excluded: Vec<String> = kept
+            .into_iter()
+            .chain(main)
+            .map(|base| format!("^{base}"))
+            .collect();
+        let mut args = vec!["rev-list", "--count", commit.as_str()];
+        args.extend(excluded.iter().map(String::as_str));
+        let commits = git
+            .stdout(&args)?
+            .trim()
+            .parse()
+            .context("rev-list printed no count")?;
+        let bundle_ref = format!("{LOCAL_UNSAVED_REF_PREFIX}{}", unsaved.len() + 1);
+        unsaved.push(UnsavedRef {
+            name,
+            commit,
+            commits,
+            bundle_ref,
+        });
+    }
+    Ok(unsaved)
+}
+
+/// The object id a small state file of the repository holds (a link or a
+/// larger file is not read).
+fn read_object_id(path: &Path) -> Option<String> {
+    match classify::kind_of(path) {
+        Kind::File { size } if size <= 256 => {}
+        _ => return None,
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let id = text.trim();
+    is_object_id(id).then(|| id.to_string())
+}
+
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// How many commits HEAD has that `main` lacks, and their subjects.
