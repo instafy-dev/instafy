@@ -27,7 +27,8 @@ each entry is classified and reported as one JSON line on stdout.
   --ack <entry>     remove this entry even without a canonical record
                     (repeatable; the entry's folder name under .legacy/);
                     never one whose run stopped with an error
-  --root <dir>      the gateway's workspace root (default: ORIGIN_WORKSPACE_ROOT)
+  --root <dir>      the gateway's workspace root (default: ORIGIN_WORKSPACE_ROOT);
+                    never a runtime provider's checkout folder, which is refused
   --node <name>     this gateway's name in salvage refs (default: INSTAFY_NODE_NAME;
                     one of the two is required with --apply or --remove, and
                     a dry run falls back to the host name with a warning);
