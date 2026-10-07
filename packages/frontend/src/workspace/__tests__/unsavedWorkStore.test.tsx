@@ -352,8 +352,7 @@ describe("useUnsavedWork", () => {
 
   function Publisher(props: {
     projectId: string | null;
-    runtimeStatuses: ControllerRuntimeStatusEntry[];
-    resolved: boolean;
+    answer: { projectId: string; statuses: ControllerRuntimeStatusEntry[] } | null;
   }) {
     usePublishUnsavedWorkLiveOrigins(props);
     return null;
@@ -421,27 +420,26 @@ describe("useUnsavedWork", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const unpublished = entry(`refs/instafy/recovery/${LIVE}/run-1`, { origin: LIVE });
     mocks.fetchRecovery.mockResolvedValue(ok([unpublished, rollingSave("folder-1", LIVE, "1")]));
-    const live = [runtimeStatus(LIVE)];
-    const view = (statuses: ControllerRuntimeStatusEntry[], resolved: boolean) => (
+    const view = (answer: { projectId: string; statuses: ControllerRuntimeStatusEntry[] } | null) => (
       <>
-        <Publisher projectId="p" runtimeStatuses={statuses} resolved={resolved} />
+        <Publisher projectId="p" answer={answer} />
         <Probe projectId="p" originId="o" enabled />
       </>
     );
 
     // Before the runtime status answers, no rolling save shows.
-    await act(async () => root.render(view([], false)));
+    await act(async () => root.render(view(null)));
     await flush();
     expect(latest?.entries).toHaveLength(2);
     expect(refsOf(latest?.visibleEntries ?? [])).toEqual([unpublished.ref]);
 
-    await act(async () => root.render(view(live, true)));
+    await act(async () => root.render(view({ projectId: "p", statuses: [runtimeStatus(LIVE)] })));
     await flush();
     expect(refsOf(latest?.visibleEntries ?? [])).toEqual([unpublished.ref]);
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(1);
 
     mocks.fetchRecovery.mockResolvedValue(ok([unpublished, rollingSave("folder-1", LIVE, "2")]));
-    await act(async () => root.render(view([], true)));
+    await act(async () => root.render(view({ projectId: "p", statuses: [] })));
     await flush();
     expect(refsOf(latest?.visibleEntries ?? [])).toEqual([unpublished.ref]);
 
@@ -456,23 +454,25 @@ describe("useUnsavedWork", () => {
     ]);
   });
 
-  it("counts statuses still held from the previous project as unknown", async () => {
-    const fromP = [runtimeStatus(LIVE)];
-    await act(async () => root.render(<Publisher projectId="p" runtimeStatuses={fromP} resolved />));
+  it("counts only a status answer for the current project, and keeps it while no new one arrives", async () => {
+    const fromP = { projectId: "p", statuses: [runtimeStatus(LIVE)] };
+    await act(async () => root.render(<Publisher projectId="p" answer={fromP} />));
     expect(getRollingSaveScope("p").hidden.has(LIVE)).toBe(true);
 
-    // The switch commits before the new project's statuses replace these.
-    await act(async () => root.render(<Publisher projectId="q" runtimeStatuses={fromP} resolved />));
+    // The switch commits before the new project's status answers.
+    await act(async () => root.render(<Publisher projectId="q" answer={fromP} />));
+    expect(getRollingSaveScope("q").known).toBe(false);
+    await act(async () => root.render(<Publisher projectId="q" answer={null} />));
     expect(getRollingSaveScope("q").known).toBe(false);
 
-    const fromQ = [runtimeStatus(OTHER)];
-    await act(async () => root.render(<Publisher projectId="q" runtimeStatuses={fromQ} resolved />));
+    const fromQ = { projectId: "q", statuses: [runtimeStatus(OTHER)] };
+    await act(async () => root.render(<Publisher projectId="q" answer={fromQ} />));
     expect(getRollingSaveScope("q").known).toBe(true);
     expect(getRollingSaveScope("q").hidden.has(OTHER)).toBe(true);
     expect(getRollingSaveScope("q").hidden.has(LIVE)).toBe(false);
 
-    // Loading again keeps the last answer.
-    await act(async () => root.render(<Publisher projectId="q" runtimeStatuses={[]} resolved={false} />));
+    // A failed or skipped refresh leaves the answer: the set stays as it was.
+    await act(async () => root.render(<Publisher projectId="q" answer={{ ...fromQ }} />));
     expect(getRollingSaveScope("q").hidden.has(OTHER)).toBe(true);
   });
 

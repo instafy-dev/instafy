@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+} from "react";
 import type { RuntimeAction } from "../runtimeStore";
 import type { RuntimeState } from "../../types";
 import { controllerClient, type ControllerRuntimeStatusEntry } from "../../sdk/instafy";
@@ -6,6 +14,16 @@ import { clearProjectState } from "../../workspace/projectClear";
 import { recordRuntimeResourceSample } from "../runtimeResourceHistory";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
+
+/**
+ * The runtime status of one project, as the controller last answered it. A
+ * failed, skipped or not-yet-sent request leaves the previous answer in
+ * place; a project switch clears it.
+ */
+export interface RuntimeStatusAnswer {
+  projectId: string;
+  statuses: readonly ControllerRuntimeStatusEntry[];
+}
 
 interface UseRuntimeStatusRefreshArgs {
   activeProjectId: string | null;
@@ -36,6 +54,19 @@ export function useRuntimeStatusRefresh({
   }>({ projectId: null, at: 0 });
   const runtimeStatusAbortRef = useRef<AbortController | null>(null);
   const [runtimeStatusesResolved, setRuntimeStatusesResolved] = useState(false);
+  // `runtimeStatuses` also reads [] after a failure, a skip or a switch, so
+  // a reader that must tell "nothing runs" from "not known" uses this.
+  const answerProjectId = activeProjectId?.trim() || null;
+  const answerProjectIdRef = useRef(answerProjectId);
+  const [runtimeStatusAnswer, setRuntimeStatusAnswer] = useState<RuntimeStatusAnswer | null>(null);
+
+  useLayoutEffect(() => {
+    if (answerProjectIdRef.current === answerProjectId) {
+      return;
+    }
+    answerProjectIdRef.current = answerProjectId;
+    setRuntimeStatusAnswer(null);
+  }, [answerProjectId]);
 
   useEffect(
     () => () => {
@@ -193,6 +224,10 @@ export function useRuntimeStatusRefresh({
         });
         lastPreferredRuntimeIdRef.current = effectivePreferred;
         preferenceClearRequestedRef.current = false;
+        // An answer that lands after a switch belongs to the project left.
+        if (answerProjectIdRef.current === effectiveProjectId) {
+          setRuntimeStatusAnswer({ projectId: effectiveProjectId, statuses: rawStatuses });
+        }
         debugLog("runtime-status:success", {
           projectId: effectiveProjectId,
           count: rawStatuses.length,
@@ -275,6 +310,7 @@ export function useRuntimeStatusRefresh({
   return {
     runtimeStatusesResolved,
     setRuntimeStatusesResolved,
+    runtimeStatusAnswer,
     markControllerUnavailable,
     resolveProjectId,
     refreshRuntimeStatuses,

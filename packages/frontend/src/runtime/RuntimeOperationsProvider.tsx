@@ -153,6 +153,7 @@ export function RuntimeOperationsProvider({
   const {
     runtimeStatusesResolved,
     setRuntimeStatusesResolved,
+    runtimeStatusAnswer,
     markControllerUnavailable,
     resolveProjectId,
     refreshRuntimeStatuses,
@@ -170,8 +171,7 @@ export function RuntimeOperationsProvider({
   // Unsaved work hides a running workspace's rolling save, so it needs the live origins.
   usePublishUnsavedWorkLiveOrigins({
     projectId: activeProjectId,
-    runtimeStatuses: state.runtimeStatuses,
-    resolved: runtimeStatusesResolved,
+    answer: runtimeStatusAnswer,
   });
   useRuntimeControllerSync({
     activeProjectId,

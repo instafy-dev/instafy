@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import {
   controllerClient,
   type ControllerRuntimeStatusEntry,
@@ -204,8 +204,8 @@ export function liveOriginIds(statuses: readonly ControllerRuntimeStatusEntry[])
 
 /**
  * Record the live origins of `projectId`, or `null` while they are not
- * known (before the first runtime status, or while it loads again). An
- * unknown moment keeps the last known set. An origin that leaves the set
+ * known (before the project's first status answer, or while a refresh
+ * loads, fails or is skipped). An unknown moment keeps the last known set. An origin that leaves the set
  * keeps its rolling saves hidden until the project's lists are fetched
  * again, so the final save appears once, with its final rev.
  */
@@ -290,32 +290,23 @@ export function getRollingSaveScope(projectId: string | null | undefined): Rolli
 
 /**
  * Feed the live origins from the runtime status. Mounted once, where the
- * statuses are kept. Statuses still held from the previous project count as
- * unknown, so a project switch never shows the new project's live saves.
+ * statuses are kept. Only a status answer for `projectId` says which origins
+ * are live: until one arrives the set is unknown, and a failed or skipped
+ * refresh, which leaves the last answer in place, keeps the last known set.
  */
 export function usePublishUnsavedWorkLiveOrigins({
   projectId,
-  runtimeStatuses,
-  resolved,
+  answer,
 }: {
   projectId: string | null | undefined;
-  runtimeStatuses: readonly ControllerRuntimeStatusEntry[];
-  /** The runtime status has answered for the current project. */
-  resolved: boolean;
+  /** The last successful runtime status, and the project it answered for. */
+  answer: { projectId: string; statuses: readonly ControllerRuntimeStatusEntry[] } | null;
 }): void {
   const project = projectId?.trim() || null;
-  const seenRef = useRef<{
-    projectId: string | null;
-    statuses: readonly ControllerRuntimeStatusEntry[];
-    stale: readonly ControllerRuntimeStatusEntry[] | null;
-  } | null>(null);
   useEffect(() => {
-    const previous = seenRef.current;
-    const stale = previous && previous.projectId !== project ? previous.statuses : (previous?.stale ?? null);
-    seenRef.current = { projectId: project, statuses: runtimeStatuses, stale };
-    const known = resolved && runtimeStatuses !== stale;
-    setUnsavedWorkLiveOrigins(project, known ? liveOriginIds(runtimeStatuses) : null);
-  }, [project, resolved, runtimeStatuses]);
+    const known = answer !== null && answer.projectId === project;
+    setUnsavedWorkLiveOrigins(project, known ? liveOriginIds(answer.statuses) : null);
+  }, [answer, project]);
 }
 
 /**
