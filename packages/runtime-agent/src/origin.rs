@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use origin_http_server::config::{ServerConfig, SharedControllerToken};
 use origin_http_server::server::OriginHttpServer;
+use origin_http_server::working_state::WorkingState;
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::{Map as JsonMap, Value};
@@ -50,6 +51,11 @@ pub struct LocalOriginSync {
     /// Brings this origin's checkout up to date without a write credential,
     /// for a turn that could not get a workspace lease.
     pub read_only_refresh: Option<ReadOnlyRefresh>,
+    /// What the working folder holds that canonical does not, asked in
+    /// process: the change check of a rolling save. `None` for a Desktop
+    /// folder or a checkout without a canonical remote, which never take
+    /// rolling saves.
+    pub working_state: Option<WorkingStateProbe>,
 }
 
 type ReadOnlyRefreshFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
@@ -88,6 +94,41 @@ impl PartialEq for ReadOnlyRefresh {
 }
 
 impl Eq for ReadOnlyRefresh {}
+
+type WorkingStateFuture = Pin<Box<dyn Future<Output = Result<WorkingState>> + Send>>;
+
+/// The in-process working state of the origin hosted by this process (see
+/// `origin_http_server::working_state`): no network, no credential, no lock.
+#[derive(Clone)]
+pub struct WorkingStateProbe(Arc<dyn Fn() -> WorkingStateFuture + Send + Sync>);
+
+impl WorkingStateProbe {
+    pub fn new<F, Fut>(probe: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<WorkingState>> + Send + 'static,
+    {
+        Self(Arc::new(move || Box::pin(probe())))
+    }
+
+    pub async fn state(&self) -> Result<WorkingState> {
+        (self.0)().await
+    }
+}
+
+impl std::fmt::Debug for WorkingStateProbe {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("WorkingStateProbe")
+    }
+}
+
+impl PartialEq for WorkingStateProbe {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for WorkingStateProbe {}
 
 pub struct OriginService {
     server: Option<OriginHttpServer>,
@@ -192,6 +233,18 @@ impl OriginService {
             })
         });
 
+        let working_state = server.working_state_reader().map(|reader| {
+            WorkingStateProbe::new(move || {
+                let reader = reader.clone();
+                async move {
+                    reader
+                        .state()
+                        .await
+                        .map_err(|error| anyhow!("working state failed: {error}"))
+                }
+            })
+        });
+
         let endpoint = settings
             .tunnel_url
             .clone()
@@ -268,6 +321,7 @@ impl OriginService {
                 origin_id: settings.origin_id,
                 endpoint: Self::derive_endpoint(start.address),
                 read_only_refresh,
+                working_state,
             }),
         }))
     }

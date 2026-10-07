@@ -1585,6 +1585,7 @@ mod tests {
             origin_id,
             endpoint: "http://127.0.0.1:54332/".to_string(),
             read_only_refresh: None,
+            working_state: None,
         };
 
         let (endpoint, is_local) =
@@ -1599,6 +1600,7 @@ mod tests {
             origin_id: Uuid::new_v4(),
             endpoint: "http://127.0.0.1:54332".to_string(),
             read_only_refresh: None,
+            working_state: None,
         };
 
         let (endpoint, is_local) = resolve_origin_sync_endpoint(
@@ -1622,6 +1624,7 @@ mod tests {
             origin_id,
             endpoint: "   ".to_string(),
             read_only_refresh: None,
+            working_state: None,
         };
 
         let (endpoint, is_local) =
@@ -1767,6 +1770,7 @@ mod tests {
                 origin_id,
                 endpoint: format!("http://{local_origin_address}"),
                 read_only_refresh: None,
+                working_state: None,
             }),
         )
         .await?
@@ -1819,6 +1823,7 @@ mod tests {
                 origin_id: Uuid::new_v4(),
                 endpoint: format!("http://{local_origin_address}"),
                 read_only_refresh: None,
+                working_state: None,
             }),
         )
         .await?
@@ -2375,6 +2380,7 @@ mod tests {
                 origin_id,
                 endpoint: format!("http://{origin_address}"),
                 read_only_refresh: Some(read_only),
+                working_state: None,
             }),
         ))
         .await;
@@ -2411,6 +2417,7 @@ mod tests {
                 origin_id: Uuid::new_v4(),
                 endpoint: "http://127.0.0.1:9".to_string(),
                 read_only_refresh: Some(read_only.clone()),
+                working_state: None,
             }),
         ))
         .await;
@@ -2431,6 +2438,7 @@ mod tests {
                 origin_id: Uuid::new_v4(),
                 endpoint: "http://127.0.0.1:9".to_string(),
                 read_only_refresh: Some(read_only),
+                working_state: None,
             }),
         ))
         .await;
@@ -2453,6 +2461,7 @@ mod tests {
             origin_id: Uuid::new_v4(),
             endpoint: "http://127.0.0.1:9".to_string(),
             read_only_refresh: Some(read_only),
+            working_state: None,
         };
 
         let outcome = refresh_before_turn(pre_turn_refresh(

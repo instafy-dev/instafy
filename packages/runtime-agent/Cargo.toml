@@ -69,6 +69,8 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
+# Paused time for the rolling saves' cadence tests.
+tokio = { version = "1", features = ["test-util"] }
 openai-proxy-server = { path = "../openai-proxy-server" }
 futures-util = "0.3"
 ring = { version = "0.17", features = ["std"] }

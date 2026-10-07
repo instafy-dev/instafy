@@ -498,6 +498,16 @@ loses only work that never reached the remote:
   `origin_unreachable`, `origin_timeout` or `origin_refused:<status>`, never
   the origin's own text). A failure is logged and the stop goes on; whatever
   was stored stays on the local refs.
+- With rolling saves on (`WORKING_STATE_SAVES`, below), the flush body also
+  carries `workingState: true`: the stop ends with the working folder's own
+  save. The origin then stores no `unsaved` copy of work that save already
+  holds, holds back the copy it does store from every push until that save
+  settles (removed when the save landed or nothing is unsaved, pushed as
+  before otherwise), raises a stop flag so a rolling save in flight gives up,
+  waits for the workspace instead of refusing, and keeps the whole stop
+  under 22 seconds. The answer, the stop's `flush` and the `workspace_flush`
+  event add `workingState: {durable, persistedAt, error?}`: whether
+  canonical holds everything the folder held, and since when.
 - An idle stop (the idle sweep, the idle reaper, an idle-slot reclaim) can
   wait up to 25 seconds on its flush. When someone comes back meanwhile (a
   new workspace lease this runtime serves, or a user's activity ping), the
@@ -517,13 +527,65 @@ loses only work that never reached the remote:
   job started since (a fenced runtime may be shut down long after its stop),
   its commits are set aside instead of left for the next publish; each job
   counts on its own, as the controller's `turnActive` does, so one worker
-  finishing never hides another's cancel. After it succeeds it writes
-  `.instafy/.git/instafy-stopped-clean`, which every origin start removes. The
-  next publish or pre-turn refresh with `git.write` pushes the refs. Work
-  parked only locally is lost if the node is replaced before that push.
-  Desktop folders are never flushed.
-- Residual exposure: a hard node loss mid-run (the in-flight run's work), work
-  parked locally whose push has not happened yet, and gitignored files.
+  finishing never hides another's cancel. It raises the stop flag and waits
+  up to ten seconds for a rolling save to let the workspace go, so an
+  unfinished turn always steps back, and stores no `unsaved` copy of work
+  the folder's last confirmed save holds. It writes the durable-stop marker
+  `.instafy/.git/instafy-stopped-clean` (`durable v1`) only when the folder's
+  final state is durable: nothing only this node holds, and canonical holds
+  everything the folder held. Every origin start removes it. The next publish
+  or pre-turn refresh with `git.write` pushes the refs. Work parked only
+  locally is lost if the node is replaced before that push. Desktop folders
+  are never flushed.
+- Residual exposure: a hard node loss mid-run loses the folder's edits since
+  its last confirmed rolling save (about two minutes while saves succeed,
+  plus files a rolling save defers), work parked locally whose push has not
+  happened yet, writes by background processes after a turn ended that no
+  controller stop flushed, and gitignored files.
+
+**Rolling saves.** While a write job runs on a hosted checkout, the runtime
+saves the working folder's unfinished work to canonical every two minutes and
+once more when the job ends, without moving the checkout's HEAD, index, files
+or nested repositories. Canonical git is then the only permanent copy and the
+node's checkout a cache.
+
+- Each working folder has one save, its slot:
+  `refs/instafy/recovery/<working-set id>/working`. The working-set id is a
+  random UUID the first save writes to the checkout's repository config
+  (`instafy.workingSet`), so runtimes that share a folder on a node share one
+  slot, and a fresh clone (another node) gets a new one. Each save replaces
+  the slot under a lease on the exact commit it last confirmed (the shard
+  lets only a slot move; every other recovery ref is created or deleted),
+  and the slot is deleted once nothing is unsaved and nothing waits on a
+  local recovery ref. Its commit sits on `main` (the merge base, or `main`
+  for an unrelated history), names its last writer in `Instafy-Origin`, and
+  passes the same publish filter as every save.
+- A tick first asks the origin in process whether the folder changed since
+  its last confirmed save (`git status` without taking `index.lock`, then
+  each candidate's size, mode and mtime). Unchanged, it ends with no
+  controller call. Otherwise the runtime asks the controller for a one-minute
+  `workspace.persist` grant with the job's workspace token. The controller
+  grants it only for a write job leased by this runtime (or cancelled in the
+  last minute), whose user may still write, for this runtime generation's
+  own online origin, and checks all of it again when the origin exchanges the
+  grant for `git.write`. A rolling save takes no workspace lease.
+- A tick never adds a path inside a nested repository and leaves out files
+  over 2 MiB: both keep the slot's earlier entry until the job's end or a
+  stop saves them. A tick that finds the workspace busy answers 409 and waits
+  for the next one; while a stop's fence is up it answers 503. Ticks never
+  overlap and a missed one is not queued.
+- When the job's body returns, whatever it returned (a terminal command and a
+  turn that changed no file included), the ticker stops and the job's own
+  save runs. A save that did not land is recorded on the job as a
+  `working-state` artifact (`durable: false` and a fixed error code).
+- A slot a person removed (or restored) is gone from canonical while the
+  folder's record still names it: its paths are not saved again until they
+  change.
+- `WORKING_STATE_SAVES=off` on the controller turns rolling saves off: the
+  grant answers 403 `rolling_saves_off`, the runtime stops ticking, and
+  stops ask the origin for no save of their own. Between turns nothing ticks;
+  a requested stop (a user's or a runtime's) does not save under anyone's
+  write access, so the last turn-end save covers the agent's work.
 
 **Recovery refs.** Work that cannot reach `main` is never dropped. It is
 committed first to a local ref, `refs/instafy/local-recovery/<name>`, without
@@ -575,7 +637,10 @@ checkouts:
   (`.instafy/.git/instafy-stopped-clean`, see above). A crash, a kill or a
   stop that could not keep its work may leave files or commits that exist
   nowhere else; such a checkout is kept until a later start and clean stop.
-  Checkouts from before this marker are kept the same way.
+  Checkouts from before this marker are kept the same way. Origins with
+  rolling saves write the marker only after a durable stop, so a checkout
+  whose last save did not land, or that holds work only this node has, is
+  kept too.
 
 A stop takes the same per-project lock as a start while it runs and marks the
 checkout as used, and the sweep reads that mark again once it holds the lock,
@@ -593,7 +658,8 @@ controller pool, the release workflow asks that controller (directly, with
 the service-role bearer; user, operator and scoped tokens get 403) to drain
 its node. A controller that serves these routes answers `/healthz` with
 `x-instafy-runtime-drain: 1`, so release tooling can tell it apart from one
-that predates them:
+that predates them, and one whose running workspaces take rolling saves
+answers `x-instafy-working-state: 1` (`0` when `WORKING_STATE_SAVES` is off):
 
 - `GET /operator/runtime-drain/census` lists what the node-local provider
   holds (`POST /runtime/census`: runtimes from their containers' `SPACE_ID`,
