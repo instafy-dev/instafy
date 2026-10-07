@@ -534,7 +534,11 @@ loses only work that never reached the remote:
   the folder's last confirmed save holds. It writes the durable-stop marker
   `.instafy/.git/instafy-stopped-clean` (`durable v1`) only when the folder's
   final state is durable: nothing only this node holds, and canonical holds
-  everything the folder held. Every origin start removes it. The next publish
+  everything the folder held. Every origin start removes it, and so does
+  every shutdown before its flush, so a marker another runtime on the same
+  folder (or the workspace itself) left never outlives a shutdown that was
+  not durable or could not run. The marker sits in a directory the workspace
+  can write, so it is a hint for eviction, never proof on its own. The next publish
   or pre-turn refresh with `git.write` pushes the refs. Work parked only
   locally is lost if the node is replaced before that push. Desktop folders
   are never flushed.

@@ -1522,3 +1522,64 @@ async fn the_durable_stop_marker_is_written_only_when_durable() {
     server.stop_flushing_workspace().await.unwrap();
     assert!(!ws.join(crate::server::CLEAN_STOP_MARKER).exists());
 }
+
+/// Every shutdown decides the durable-stop marker on its own: one left by
+/// a sibling runtime's durable stop, or written by the workspace itself,
+/// never survives a shutdown that is not durable, whether its flush kept
+/// the work locally or could not run at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_shutdown_decides_the_durable_stop_marker() {
+    let marker = |fx: &Fixture| fs::read(fx.ws.join(crate::server::CLEAN_STOP_MARKER)).ok();
+
+    // Two runtimes share the folder; the first stops durably.
+    let fx = Fixture::new();
+    let mut first = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    first.start().await.unwrap();
+    let mut second_config = fx.config.clone();
+    second_config.origin_id = Uuid::new_v4();
+    let mut second = crate::server::OriginHttpServer::new(second_config).unwrap();
+    second.start().await.unwrap();
+    let state = first.app_state().unwrap();
+    fx.write("notes.md", b"saved\n");
+    let ctx = fx.ctx();
+    let mut publisher = publisher(&ctx, TICK_BUDGET);
+    let Planned::Network(plan) = plan_route_save(
+        &mut publisher,
+        PersistReason::TurnEnd,
+        &state.working_memory,
+        &state.stop_flag,
+    ) else {
+        panic!("work to save");
+    };
+    publisher.execute_working_save(plan, &state.working_memory, None);
+    first.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+    // The second keeps working, then stops with work only this node has.
+    fx.write("sibling.md", b"sibling\n");
+    second.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx), None, "a non-durable stop leaves no marker");
+    assert!(!fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty());
+
+    // The workspace writes the marker itself during a turn.
+    let fx = Fixture::new();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    fs::write(fx.ws.join(crate::server::CLEAN_STOP_MARKER), DURABLE_MARKER).unwrap();
+    fx.write("notes.md", b"never saved\n");
+    server.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx), None, "a planted marker is not kept");
+    assert_eq!(fx.local_refs(LOCAL_RECOVERY_ROOT).len(), 1);
+
+    // ... and the shutdown's flush cannot run at all.
+    let fx = Fixture::new();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    fs::write(fx.ws.join(crate::server::CLEAN_STOP_MARKER), DURABLE_MARKER).unwrap();
+    fx.write("notes.md", b"never saved\n");
+    let holder = crate::workspace_lock::try_acquire_workspace_apply_lock(&fx.ws)
+        .unwrap()
+        .expect("the lock");
+    server.stop_flushing_workspace().await.unwrap();
+    drop(holder);
+    assert_eq!(marker(&fx), None, "a skipped flush keeps no marker");
+}

@@ -33,6 +33,13 @@ use serde_json::Value as JsonValue;
 /// runtime that last used it crashed, was killed, could not save, or left
 /// work only this node holds. A Desktop folder or a checkout without a
 /// remote never gets it.
+///
+/// Every shutdown decides it again: it is removed before the shutdown's
+/// flush and written back only by a durable answer, so a marker another
+/// runtime on the same folder left, or one the workspace wrote itself,
+/// never outlives a shutdown that was not durable or could not run. It sits
+/// in a directory the workspace can write, so it is a hint for eviction to
+/// combine with what it can check itself, never proof on its own.
 pub const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
 
 /// How long a shutdown waits for a rolling save to let the workspace go.
@@ -49,7 +56,7 @@ fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
 }
 
 /// Write [`CLEAN_STOP_MARKER`] when the folder's state after a shutdown's
-/// flush is durable; otherwise leave none, so eviction keeps the checkout.
+/// flush is durable; otherwise remove any, so eviction keeps the checkout.
 fn record_durable_stop(
     ctx: &crate::publish::PublishContext<'_>,
     memory: &crate::working_state::WorkingMemory,
@@ -63,12 +70,16 @@ fn record_durable_stop(
                 warn!(%error, "could not record the durable stop");
             }
         }
-        Ok(state) => info!(
-            local_only = state.local_only,
-            unsaved = state.unsaved,
-            "the stop is not durable; the checkout keeps its work for the next start"
-        ),
+        Ok(state) => {
+            clear_clean_stop_marker(ctx.workspace_root);
+            info!(
+                local_only = state.local_only,
+                unsaved = state.unsaved,
+                "the stop is not durable; the checkout keeps its work for the next start"
+            )
+        }
         Err(error) => {
+            clear_clean_stop_marker(ctx.workspace_root);
             warn!(error = %format!("{error:#}"), "could not read the working state at shutdown")
         }
     }
@@ -438,6 +449,11 @@ impl OriginHttpServer {
         if self.config.multi_tenant || !self.config.hosted_checkout {
             return;
         }
+        // Only this shutdown's own durable answer leaves a marker: one left
+        // by another runtime on this folder, or by the workspace, goes now,
+        // whether or not the flush below runs.
+        let root = self.config.workspace_root.clone();
+        let _ = tokio::task::spawn_blocking(move || clear_clean_stop_marker(&root)).await;
         let Some(remote_url) = self
             .config
             .git_remote_url_for_project(self.config.project_id)
