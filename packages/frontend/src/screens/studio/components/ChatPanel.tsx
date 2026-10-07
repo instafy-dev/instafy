@@ -253,8 +253,7 @@ import { useChatVoiceComposerController } from "./useChatVoiceComposerController
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
 import { mergeMentionableMembers } from "./mentionableMembers";
 import { sendWorkspaceFileStaleMerge } from "./workspaceFileStaleMerge";
-import { loadLatestIntoStaleBuffer, prepareStaleWorkspaceFileReload } from "./workspaceFileStaleReload";
-import { SAVE_COPY } from "./versioningCopy";
+import { reloadStaleWorkspaceFile } from "./workspaceFileStaleReload";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
@@ -1402,39 +1401,21 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (!notice || typeof window === "undefined") {
       return;
     }
-    const projectId = notice.projectId ?? activeProjectId ?? null;
     setWorkspaceFileStaleBusy("reload");
     setWorkspaceFileStaleError(null);
-    // A Desktop save left the user's version in the folder: discard that
-    // copy first, so the reload reads the space's version.
-    if (!(await prepareStaleWorkspaceFileReload(notice, projectId))) {
-      setWorkspaceFileStaleBusy(null);
-      setWorkspaceFileStaleError(SAVE_COPY.desktopReloadFailed);
-      return;
-    }
-    // Into the buffer directly: no Files viewer may be listening for an
-    // open event while the chat is showing.
-    const loaded = projectId
-      ? await loadLatestIntoStaleBuffer({
-          projectId,
-          path: notice.path,
-          versioning: { mode: filesVersioningMode, originId: filesVersioningOriginId },
-          runtimeId: effectiveRuntimeId ?? null,
-          updateWorkspace,
-        })
-      : false;
+    const result = await reloadStaleWorkspaceFile({
+      notice,
+      projectId: notice.projectId ?? activeProjectId ?? null,
+      versioning: { mode: filesVersioningMode, originId: filesVersioningOriginId },
+      runtimeId: effectiveRuntimeId ?? null,
+      updateWorkspace,
+    });
     setWorkspaceFileStaleBusy(null);
-    if (!loaded) {
-      setWorkspaceFileStaleError(SAVE_COPY.reloadLatestFailed);
-      return;
+    if (result.status === "reloaded") {
+      handleWorkspaceFileStaleDismiss();
+    } else if (result.status === "failed") {
+      setWorkspaceFileStaleError(result.error);
     }
-
-    // A Files viewer that is showing opens the file and reads it as before.
-    // No pending open is left for a viewer mounted later: it would reload
-    // again over edits made after this one.
-    const detail = { projectId, path: notice.path };
-    window.dispatchEvent(new CustomEvent("instafy:open-workspace-file", { detail }));
-    handleWorkspaceFileStaleDismiss();
   }, [
     activeProjectId,
     effectiveRuntimeId,

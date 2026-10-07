@@ -1,6 +1,8 @@
 import { controllerClient } from "../../../sdk/instafy";
+import { useWorkspaceStore } from "../../../store";
 import type { CodeFile, CodeWorkspace } from "../../../types";
 import { isVersionedFilesMode, type FilesVersioning } from "./filesVersioning";
+import { SAVE_COPY } from "./versioningCopy";
 import type { WorkspaceFileStaleNotice } from "./workspaceFileStaleNoticeStore";
 
 /**
@@ -28,14 +30,24 @@ export async function prepareStaleWorkspaceFileReload(
   return reverted?.ok === true;
 }
 
+type UpdateWorkspace = (
+  updater: (current: CodeWorkspace) => CodeWorkspace,
+  options?: { recordHistory?: boolean },
+) => void;
+
+/**
+ * What became of a Reload latest read. `superseded`: another space became
+ * active while it was on the wire.
+ */
+export type StaleBufferLoad = "loaded" | "superseded" | "failed";
+
 /**
  * "Reload latest" puts the space's version into the shared Files buffer
  * itself: every Files viewer shows that buffer, but the viewer that reloads
  * on an open event may not be mounted (the chat is showing, and a file shown
  * in the chat takes no open events). Reads the way the Files panel does:
  * pinned to the default origin in the versioned modes, through the runtime
- * in legacy mode. Resolves false, with the buffer untouched, when the
- * version could not be read as text.
+ * in legacy mode. The buffer is untouched unless the result is `loaded`.
  */
 export async function loadLatestIntoStaleBuffer({
   projectId,
@@ -48,8 +60,8 @@ export async function loadLatestIntoStaleBuffer({
   path: string;
   versioning: FilesVersioning;
   runtimeId: string | null;
-  updateWorkspace: (updater: (current: CodeWorkspace) => CodeWorkspace, options?: { recordHistory?: boolean }) => void;
-}): Promise<boolean> {
+  updateWorkspace: UpdateWorkspace;
+}): Promise<StaleBufferLoad> {
   const versioned = isVersionedFilesMode(versioning);
   const read = await controllerClient.workspace.files
     .readAt(
@@ -58,9 +70,15 @@ export async function loadLatestIntoStaleBuffer({
         : { projectId, path, runtimeId },
     )
     .catch(() => null);
+  // The buffers are the active space's: CodeProvider takes another space's
+  // code without remounting, so a read that answers after a switch would
+  // land on that space's file at the same path.
+  if (useWorkspaceStore.getState().activeProjectId !== projectId) {
+    return "superseded";
+  }
   const file = read?.ok ? read.file : null;
   if (!file?.isText) {
-    return false;
+    return "failed";
   }
   const text = file.contentText ?? "";
   const readAt = Date.now();
@@ -97,5 +115,53 @@ export async function loadLatestIntoStaleBuffer({
     }),
     { recordHistory: false },
   );
-  return true;
+  return "loaded";
+}
+
+export type StaleReloadResult =
+  | { status: "reloaded" }
+  /** Another space is active: its card is hidden, and this one stays for later. */
+  | { status: "superseded" }
+  /** The card stays, with this error, and the buffer keeps the edits. */
+  | { status: "failed"; error: string };
+
+/**
+ * The chat card's "Reload latest". On `reloaded` the card can go: the buffer
+ * holds the space's version, and a Files viewer that is showing has been told
+ * to open the file.
+ */
+export async function reloadStaleWorkspaceFile({
+  notice,
+  projectId,
+  versioning,
+  runtimeId,
+  updateWorkspace,
+}: {
+  notice: WorkspaceFileStaleNotice;
+  projectId: string | null;
+  versioning: FilesVersioning;
+  runtimeId: string | null;
+  updateWorkspace: UpdateWorkspace;
+}): Promise<StaleReloadResult> {
+  if (!(await prepareStaleWorkspaceFileReload(notice, projectId))) {
+    return { status: "failed", error: SAVE_COPY.desktopReloadFailed };
+  }
+  // Into the buffer directly: no Files viewer may be listening for an
+  // open event while the chat is showing.
+  const loaded = projectId
+    ? await loadLatestIntoStaleBuffer({ projectId, path: notice.path, versioning, runtimeId, updateWorkspace })
+    : "failed";
+  if (loaded === "superseded") {
+    return { status: "superseded" };
+  }
+  if (loaded !== "loaded") {
+    return { status: "failed", error: SAVE_COPY.reloadLatestFailed };
+  }
+  // A Files viewer that is showing opens the file and reads it as before.
+  // No pending open is left for a viewer mounted later: it would reload
+  // again over edits made after this one.
+  window.dispatchEvent(
+    new CustomEvent("instafy:open-workspace-file", { detail: { projectId, path: notice.path } }),
+  );
+  return { status: "reloaded" };
 }

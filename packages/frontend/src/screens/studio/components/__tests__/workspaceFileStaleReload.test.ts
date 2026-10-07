@@ -1,8 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { controllerClient } from "../../../../sdk/instafy";
+import { useWorkspaceStore } from "../../../../store";
 import type { CodeFile, CodeWorkspace } from "../../../../types";
 import { isFileBufferDirty } from "../filesVersioning";
-import { loadLatestIntoStaleBuffer, prepareStaleWorkspaceFileReload } from "../workspaceFileStaleReload";
+import { SAVE_COPY } from "../versioningCopy";
+import {
+  loadLatestIntoStaleBuffer,
+  prepareStaleWorkspaceFileReload,
+  reloadStaleWorkspaceFile,
+} from "../workspaceFileStaleReload";
+import type { WorkspaceFileStaleNotice } from "../workspaceFileStaleNoticeStore";
 
 vi.mock("../../../../sdk/instafy", () => ({
   controllerClient: { workspace: { git: { revertPaths: vi.fn() }, files: { readAt: vi.fn() } } },
@@ -34,27 +43,34 @@ describe("prepareStaleWorkspaceFileReload", () => {
   });
 });
 
+const other: CodeFile = { id: "notes.md", path: "notes.md", label: "notes.md", generated: "n", modified: "n edited" };
+
+function workspaceWith(buffer: CodeFile) {
+  let workspace = { files: [buffer, other], activeFileId: "notes.md" } as unknown as CodeWorkspace;
+  const update = vi.fn<(updater: (current: CodeWorkspace) => CodeWorkspace, options?: { recordHistory?: boolean }) => void>(
+    (updater) => {
+      workspace = updater(workspace);
+    },
+  );
+  return { current: () => workspace, update };
+}
+
+function served(contentText: string, extra: Record<string, unknown> = {}) {
+  return {
+    ok: true,
+    file: { path: "check.md", size: contentText.length, encoding: "utf8", mimeType: "text/markdown", contentBase64: "", contentText, isText: true, ...extra },
+  };
+}
+
+function readFailure(code: string, notFound = false) {
+  return { ok: false, notFound, error: { status: 0, code, message: code }, originId: null, originMode: null };
+}
+
 describe("loadLatestIntoStaleBuffer", () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  const other: CodeFile = { id: "notes.md", path: "notes.md", label: "notes.md", generated: "n", modified: "n edited" };
-
-  function workspaceWith(buffer: CodeFile) {
-    let workspace = { files: [buffer, other], activeFileId: "notes.md" } as unknown as CodeWorkspace;
-    const update = vi.fn<(updater: (current: CodeWorkspace) => CodeWorkspace, options?: { recordHistory?: boolean }) => void>(
-      (updater) => {
-        workspace = updater(workspace);
-      },
-    );
-    return { current: () => workspace, update };
-  }
-
-  function served(contentText: string, extra: Record<string, unknown> = {}) {
-    return {
-      ok: true,
-      file: { path: "check.md", size: contentText.length, encoding: "utf8", mimeType: "text/markdown", contentBase64: "", contentText, isText: true, ...extra },
-    };
-  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useWorkspaceStore.setState({ activeProjectId: "space-a" });
+  });
 
   it("puts the space's version into the buffer and clears its edits with no Files viewer open", async () => {
     const store = workspaceWith({
@@ -73,7 +89,7 @@ describe("loadLatestIntoStaleBuffer", () => {
       updateWorkspace: store.update,
     });
 
-    expect(loaded).toBe(true);
+    expect(loaded).toBe("loaded");
     expect(controllerClient.workspace.files.readAt).toHaveBeenCalledExactlyOnceWith({
       projectId: "space-a", path: "check.md", routing: "default", originId: "gateway",
     });
@@ -96,7 +112,7 @@ describe("loadLatestIntoStaleBuffer", () => {
         runtimeId: "runtime-1",
         updateWorkspace: store.update,
       }),
-    ).toBe(true);
+    ).toBe("loaded");
     expect(controllerClient.workspace.files.readAt).toHaveBeenCalledExactlyOnceWith({
       projectId: "space-a", path: "check.md", runtimeId: "runtime-1",
     });
@@ -116,14 +132,68 @@ describe("loadLatestIntoStaleBuffer", () => {
         updateWorkspace: store.update,
       });
     vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(null as never);
-    expect(await attempt()).toBe(false);
-    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce({ ok: false, notFound: true } as never);
-    expect(await attempt()).toBe(false);
-    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(served("", { isText: false }) as never);
-    expect(await attempt()).toBe(false);
+    expect(await attempt()).toBe("failed");
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(readFailure("timeout") as never);
+    expect(await attempt()).toBe("failed");
     vi.mocked(controllerClient.workspace.files.readAt).mockRejectedValueOnce(new Error("offline"));
-    expect(await attempt()).toBe(false);
+    expect(await attempt()).toBe("failed");
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(readFailure("not_found", true) as never);
+    expect(await attempt()).toBe("failed");
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(served("", { isText: false }) as never);
+    expect(await attempt()).toBe("failed");
     expect(store.update).not.toHaveBeenCalled();
     expect(store.current().files[0]?.modified).toBe("mine");
+  });
+});
+
+describe("reloadStaleWorkspaceFile", () => {
+  const opened = vi.fn();
+  const pending = window as typeof window & { __INSTAFY_PENDING_OPEN_WORKSPACE_FILE__?: unknown };
+  const onOpen = (event: Event) => opened((event as CustomEvent).detail);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useWorkspaceStore.setState({ activeProjectId: "space-a" });
+    delete pending.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__;
+    window.addEventListener("instafy:open-workspace-file", onOpen);
+  });
+  afterEach(() => window.removeEventListener("instafy:open-workspace-file", onOpen));
+
+  const stale = { ...notice, path: "check.md", label: "check.md" };
+  const reload = (store: ReturnType<typeof workspaceWith>, card: WorkspaceFileStaleNotice = stale) =>
+    reloadStaleWorkspaceFile({
+      notice: card,
+      projectId: "space-a",
+      versioning: { mode: "stateless", originId: "gateway" },
+      runtimeId: null,
+      updateWorkspace: store.update,
+    });
+
+  it("replaces the buffer and tells a showing Files viewer, leaving no open for a later one", async () => {
+    const store = workspaceWith({ id: "check.md", path: "check.md", label: "check.md", generated: "base", modified: "mine" });
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue(served("theirs", { rev: "rev-2" }) as never);
+
+    expect(await reload(store)).toEqual({ status: "reloaded" });
+    expect(store.current().files[0]).toMatchObject({ generated: "theirs", modified: "theirs" });
+    expect(opened).toHaveBeenCalledExactlyOnceWith({ projectId: "space-a", path: "check.md" });
+    expect(pending.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__).toBeUndefined();
+  });
+
+  it("keeps the card and the edits when the read fails", async () => {
+    const store = workspaceWith({ id: "check.md", path: "check.md", label: "check.md", generated: "base", modified: "mine" });
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(readFailure("timeout") as never);
+    expect(await reload(store)).toEqual({ status: "failed", error: SAVE_COPY.reloadLatestFailed });
+
+    vi.mocked(controllerClient.workspace.git.revertPaths).mockResolvedValueOnce({ ok: false, conflict: false } as never);
+    expect(await reload(store, { ...stale, variant: "desktop" })).toEqual({
+      status: "failed",
+      error: SAVE_COPY.desktopReloadFailed,
+    });
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledTimes(1);
+
+    expect(store.update).not.toHaveBeenCalled();
+    expect(store.current().files[0]?.modified).toBe("mine");
+    expect(opened).not.toHaveBeenCalled();
+    expect(pending.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__).toBeUndefined();
   });
 });
