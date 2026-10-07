@@ -7289,7 +7289,7 @@ fn git_access_token_ttl_seconds(
 /// Whether the request's bearer is exactly the controller's internal token or
 /// the configured service-role key, unscoped. Required for the controller-only
 /// git capabilities (`git.delete`, `git.salvage`).
-pub(crate) fn has_direct_service_authentication(
+fn has_direct_service_authentication(
     config: &AppConfig,
     headers: &HeaderMap,
     context: &RequestContext,
