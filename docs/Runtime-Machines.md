@@ -551,9 +551,11 @@ node's checkout a cache.
 
 - Each working folder has one save, its slot:
   `refs/instafy/recovery/<working-set id>/working`. The working-set id is a
-  random UUID the first save writes to the checkout's repository config
-  (`instafy.workingSet`), so runtimes that share a folder on a node share one
-  slot, and a fresh clone (another node) gets a new one. Each save replaces
+  one-way hash of a random seed the first save writes to the checkout's
+  repository config (`instafy.workingSet`), so runtimes that share a folder
+  on a node share one slot, a fresh clone (another node) gets a new one, and
+  a turn that copies another folder's visible slot id into its own config
+  only renames its own slot. Each save replaces
   the slot under a lease on the exact commit it last confirmed (the shard
   lets only a slot move; every other recovery ref is created or deleted;
   when a push's answer is lost the slot is looked at again, and a commit

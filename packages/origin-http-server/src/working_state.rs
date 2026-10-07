@@ -15,9 +15,13 @@
 //! The git backend keeps each working folder's unfinished work on one
 //! recovery ref, its slot: `refs/instafy/recovery/<working-set id>/working`
 //! ([`git_service::policy::WORKING_SLOT_NAME`]). The working-set id is a
-//! random UUID kept in the checkout's own repository config
-//! ([`WORKING_SET_CONFIG_KEY`]), so it names the folder, and a fresh clone
-//! gets a new one. A save:
+//! one-way hash of a random seed kept in the checkout's own repository
+//! config ([`WORKING_SET_CONFIG_KEY`]), so it names the folder, and a fresh
+//! clone gets a new one. Only the folder holds its seed: a turn that sees
+//! another folder's slot (every fetch mirrors canonical's recovery refs)
+//! and writes that slot's id into its own config only renames its own
+//! slot, and a record naming another folder's commit is dropped, never used
+//! as a lease. A save:
 //!
 //! 1. pushes local recovery refs still waiting for a push, first;
 //! 2. takes a snapshot of the folder through the publish filter, with no
@@ -69,7 +73,8 @@ use crate::tree_merge::{changed_paths, overlay, tree_with_entries_from};
 use crate::workspace_fs::WorkspaceDir;
 use crate::workspace_git::WorkspaceGit;
 
-/// The checkout's repository config key holding its working-set id.
+/// The checkout's repository config key holding the seed its working-set id
+/// is made from (see [`working_set_id_for`]).
 pub const WORKING_SET_CONFIG_KEY: &str = "instafy.workingSet";
 
 /// The last slot commit canonical confirmed for this folder. Outside every
@@ -285,7 +290,8 @@ fn count(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// A lower-case hyphenated UUID, the only form a working-set id takes.
+/// A lower-case hyphenated UUID, the only form a working-set id or its seed
+/// takes.
 pub fn is_working_set_id(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| match index {
@@ -294,21 +300,41 @@ pub fn is_working_set_id(value: &str) -> bool {
         })
 }
 
-/// The folder's working-set id, written to its repository config the first
-/// time a save needs it.
+/// The folder's working-set id: the name of its slot on canonical, made from
+/// the seed the first save writes to its repository config.
 pub(crate) fn working_set_id(git: &WorkspaceGit<'_>) -> Result<String> {
-    if let Some(id) = read_working_set_id(git)? {
-        return Ok(id);
+    Ok(working_set_id_for(&working_set_seed(git)?))
+}
+
+/// The working-set id of `seed`: the first 128 bits of a SHA-256 of it, as a
+/// UUID. Slot names are public to everyone who may read the space; the seed
+/// stays in the folder, and no slot name leads back to it.
+pub fn working_set_id_for(seed: &str) -> String {
+    let digest = Sha256::new()
+        .chain_update(b"instafy-working-set-v1\0")
+        .chain_update(seed.as_bytes())
+        .finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .as_hyphenated()
+        .to_string()
+}
+
+fn working_set_seed(git: &WorkspaceGit<'_>) -> Result<String> {
+    if let Some(seed) = read_working_set_seed(git)? {
+        return Ok(seed);
     }
-    let id = Uuid::new_v4().as_hyphenated().to_string();
-    git.ok(&["config", WORKING_SET_CONFIG_KEY, &id])?;
-    match read_working_set_id(git)? {
-        Some(stored) if stored == id => Ok(id),
-        _ => bail!("the working-set id did not stay in the repository config"),
+    let seed = Uuid::new_v4().as_hyphenated().to_string();
+    git.ok(&["config", WORKING_SET_CONFIG_KEY, &seed])?;
+    match read_working_set_seed(git)? {
+        Some(stored) if stored == seed => Ok(seed),
+        _ => bail!("the working-set seed did not stay in the repository config"),
     }
 }
 
-fn read_working_set_id(git: &WorkspaceGit<'_>) -> Result<Option<String>> {
+fn read_working_set_seed(git: &WorkspaceGit<'_>) -> Result<Option<String>> {
     let output = git.run(&["config", "--get", WORKING_SET_CONFIG_KEY])?;
     if !output.status.success() {
         return Ok(None);
@@ -362,6 +388,8 @@ struct Record {
     parent: Option<String>,
     tree: String,
     origin: Option<Uuid>,
+    /// The working set the commit was made for.
+    working_set: Option<String>,
 }
 
 fn read_commit(git: &WorkspaceGit<'_>, reference: &str) -> Result<Option<Record>> {
@@ -385,9 +413,26 @@ fn read_commit(git: &WorkspaceGit<'_>, reference: &str) -> Result<Option<Record>
         origin: parsed
             .trailer(ORIGIN_TRAILER)
             .and_then(|value| Uuid::parse_str(value).ok()),
+        working_set: parsed.trailer(WORKING_SET_TRAILER).map(str::to_string),
         tree,
         commit,
     }))
+}
+
+/// The folder's record ([`RECORD_REF`]), when it names a slot commit made
+/// for this folder's working set. A record naming anything else (another
+/// folder's save, which a fetch mirrors into this repository and a turn can
+/// point the record at) is dropped, so it never becomes a lease.
+fn read_record(git: &WorkspaceGit<'_>) -> Result<Option<Record>> {
+    let Some(record) = read_commit(git, RECORD_REF)? else {
+        return Ok(None);
+    };
+    if record.working_set.as_deref() == Some(working_set_id(git)?.as_str()) {
+        return Ok(Some(record));
+    }
+    warn!("the working folder's record names a commit made for another working set; dropped it");
+    git.delete_ref(RECORD_REF, &record.commit)?;
+    Ok(None)
 }
 
 /// Whether the folder's last confirmed save holds `tree` on `parent`: a
@@ -400,7 +445,7 @@ pub(crate) fn record_holds(
     if unsettled(git)? {
         return Ok(false);
     }
-    Ok(read_commit(git, RECORD_REF)?
+    Ok(read_record(git)?
         .is_some_and(|record| record.parent.as_deref() == parent && record.tree == tree))
 }
 
@@ -651,7 +696,7 @@ impl Publisher<'_> {
             (None, _, Some(main)) => overlay(&self.git, main, &dirty_tree, &frozen)?,
             _ => tree_with_entries_from(&self.git, &dirty_tree, parent.as_deref(), &frozen)?,
         };
-        let record = read_commit(&self.git, RECORD_REF)?;
+        let record = read_record(&self.git)?;
         if !deferred.is_empty() {
             // A tick never drops what an earlier save held.
             let source = record
@@ -788,7 +833,7 @@ impl Publisher<'_> {
             if seen == Seen::Moved {
                 return Err(SaveError::SlotMoved);
             }
-            record = read_commit(&self.git, RECORD_REF).map_err(local)?;
+            record = read_record(&self.git).map_err(local)?;
             if seen == Seen::Removed {
                 tree =
                     without_dismissed(&self.git, &tree, plan.parent.as_deref()).map_err(local)?;
@@ -894,7 +939,7 @@ impl Publisher<'_> {
                         // try again on what the slot holds.
                         Seen::Adopted | Seen::Deleted | Seen::Recorded => {}
                     }
-                    record = read_commit(&self.git, RECORD_REF).map_err(local)?;
+                    record = read_record(&self.git).map_err(local)?;
                     if tree != parent_tree
                         && holds(record.as_ref(), plan.parent.as_deref(), &tree, origin)
                     {
@@ -1013,7 +1058,7 @@ impl Publisher<'_> {
     /// folder knows it holds, and drop the markers of the push or delete
     /// whose answer this was.
     fn settle_markers(&self, tip: Option<&str>) -> Result<Seen> {
-        let record = read_commit(&self.git, RECORD_REF)?;
+        let record = read_record(&self.git)?;
         let recorded = record.as_ref().map(|record| record.commit.as_str());
         let attempt = self.git.commit_id(ATTEMPT_REF)?;
         let deleting = self.git.commit_id(DELETING_REF)?;
@@ -1056,9 +1101,9 @@ impl Publisher<'_> {
         let parsed = crate::recovery_view::parse_commit(&object.data);
         Ok(
             parsed.trailer(KIND_TRAILER) == Some(recovery::RecoveryKind::Unsaved.as_str())
-                && parsed.trailer(WORKING_SET_TRAILER).is_some_and(|id| {
-                    Some(id) == read_working_set_id(&self.git).ok().flatten().as_deref()
-                }),
+                && parsed
+                    .trailer(WORKING_SET_TRAILER)
+                    .is_some_and(|id| Some(id) == working_set_id(&self.git).ok().as_deref()),
         )
     }
 

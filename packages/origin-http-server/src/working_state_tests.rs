@@ -217,7 +217,8 @@ impl Fixture {
             .collect()
     }
 
-    fn working_set_id(&self) -> Option<String> {
+    /// The seed the folder's working-set id is made from.
+    fn working_set_seed(&self) -> Option<String> {
         let output = git_output(
             &self.ws,
             &[
@@ -294,7 +295,9 @@ fn the_first_save_creates_the_slot_on_main_and_a_second_replaces_it() {
     assert_eq!(state.unsaved, 2);
     assert!(state.persisted_at.is_some());
     let (slot, first) = fx.slot().expect("a slot");
-    let id = fx.working_set_id().expect("a working-set id");
+    let seed = fx.working_set_seed().expect("a working-set seed");
+    let id = working_set_id_for(&seed);
+    assert_ne!(id, seed, "the slot never names the seed");
     assert_eq!(
         slot,
         format!(
@@ -330,7 +333,7 @@ fn the_first_save_creates_the_slot_on_main_and_a_second_replaces_it() {
     assert_eq!(fx.slot_parent(), fx.main(), "each save sits on main");
     assert_eq!(fx.slot_file("notes.md").as_deref(), Some("newer\n"));
     assert_eq!(fx.record().as_deref(), Some(second.as_str()));
-    assert_eq!(fx.working_set_id().as_deref(), Some(id.as_str()));
+    assert_eq!(fx.working_set_seed().as_deref(), Some(seed.as_str()));
     // Content-addressed recovery refs are the only other kind; none exist.
     assert_eq!(fx.remote_recovery_refs(), vec![slot]);
 }
@@ -980,19 +983,19 @@ fn a_stop_without_the_flag_is_unchanged() {
 #[test]
 fn the_working_set_id_is_made_once_and_never_cloned() {
     let fx = Fixture::new();
-    assert!(fx.working_set_id().is_none());
+    assert!(fx.working_set_seed().is_none());
     fx.write("notes.md", b"new\n");
     fx.save(PersistReason::Tick);
-    let id = fx.working_set_id().expect("made by the first save");
+    let id = fx.working_set_seed().expect("made by the first save");
     assert!(is_working_set_id(&id));
     fx.write("notes.md", b"newer\n");
     fx.save(PersistReason::Tick);
-    assert_eq!(fx.working_set_id().as_deref(), Some(id.as_str()));
-    // Every git command reduces the config to data-only settings; the id
+    assert_eq!(fx.working_set_seed().as_deref(), Some(id.as_str()));
+    // Every git command reduces the config to data-only settings; the seed
     // stays.
     ig(&fx.ws, &["status", "--porcelain"]);
     WorkspaceGit::new(&fx.ws, None).commit_id("HEAD").unwrap();
-    assert_eq!(fx.working_set_id().as_deref(), Some(id.as_str()));
+    assert_eq!(fx.working_set_seed().as_deref(), Some(id.as_str()));
 
     // Another checkout of the same space is another folder.
     let other_ws = fx.root.join("other-ws");
@@ -1018,7 +1021,7 @@ fn the_working_set_id_is_made_once_and_never_cloned() {
         panic!("the other folder has work to save");
     };
     other.execute_working_save(plan, &other_memory, None);
-    let other_id = read_working_set_id(&WorkspaceGit::new(&other_ws, None))
+    let other_id = read_working_set_seed(&WorkspaceGit::new(&other_ws, None))
         .unwrap()
         .expect("its own id");
     assert_ne!(other_id, id);
@@ -1028,6 +1031,118 @@ fn the_working_set_id_is_made_once_and_never_cloned() {
         .filter(|name| name.ends_with("/working"))
         .collect();
     assert_eq!(slots.len(), 2, "{slots:?}");
+}
+
+/// Another working folder of the same space, saved once: its slot is the
+/// only copy of `only-copy.md`. Returns `(slot ref, slot commit)`.
+fn another_folders_save(fx: &Fixture) -> (String, String) {
+    let other_ws = fx.root.join("other-ws");
+    fs::create_dir_all(&other_ws).unwrap();
+    let mut other_config = config_for(&other_ws, &fx.remote);
+    other_config.project_id = fx.config.project_id;
+    ensure_git_checkout(&other_config, None).unwrap();
+    write(&other_ws, "only-copy.md", b"only here\n");
+    let memory = WorkingMemory::default();
+    let ctx = PublishContext {
+        config: &other_config,
+        workspace_root: &other_ws,
+        token: None,
+        can_write: true,
+    };
+    let mut other = publisher(&ctx, TICK_BUDGET);
+    let Planned::Network(plan) = plan_route_save(
+        &mut other,
+        PersistReason::Tick,
+        &memory,
+        &StopFlag::default(),
+    ) else {
+        panic!("the other folder has work to save");
+    };
+    let state = other.execute_working_save(plan, &memory, None).state;
+    assert_eq!(state.error, None, "{state:?}");
+    fx.slot().expect("the other folder's slot")
+}
+
+/// What a turn in this folder can do to its own repository: name the slot
+/// of another folder it sees (a fetch mirrors canonical's recovery refs) as
+/// its working set, and that slot's commit as its record.
+fn point_at(fx: &Fixture, slot: &str) {
+    ig(
+        &fx.ws,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/instafy/recovery/*:refs/instafy/recovery/*",
+        ],
+    );
+    let visible = slot.split('/').nth(3).expect("the slot's working-set id");
+    ig(&fx.ws, &["config", WORKING_SET_CONFIG_KEY, visible]);
+    ig(&fx.ws, &["update-ref", RECORD_REF, slot]);
+}
+
+fn remote_rev(fx: &Fixture, reference: &str) -> Option<String> {
+    let output = git_output(
+        &fx.remote,
+        &["rev-parse", "--verify", "-q", reference],
+        None,
+    );
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// A turn that points this folder's working set and record at another
+/// folder's slot cannot make a save delete it: its slot name is not
+/// something the folder's repository can choose.
+#[test]
+fn a_turn_cannot_make_a_save_delete_another_folders_slot() {
+    let fx = Fixture::new();
+    let (slot, tip) = another_folders_save(&fx);
+    point_at(&fx, &slot);
+
+    let state = fx.save(PersistReason::TurnEnd);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(remote_rev(&fx, &slot).as_deref(), Some(tip.as_str()));
+    // Nor does a stop.
+    flush_saving(&fx.ctx(), false, Duration::from_secs(18), Some(&fx.memory)).unwrap();
+    assert_eq!(remote_rev(&fx, &slot).as_deref(), Some(tip.as_str()));
+}
+
+/// Nor replace it with this folder's own work.
+#[test]
+fn a_turn_cannot_make_a_save_replace_another_folders_slot() {
+    let fx = Fixture::new();
+    let (slot, tip) = another_folders_save(&fx);
+    point_at(&fx, &slot);
+    fx.write("junk.md", b"junk\n");
+
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(remote_rev(&fx, &slot).as_deref(), Some(tip.as_str()));
+    let held = git_in(&fx.remote, &["show", &format!("{slot}:only-copy.md")]);
+    assert_eq!(held, "only here");
+    // This folder's own work went to a slot of its own.
+    let own: Vec<String> = fx
+        .remote_recovery_refs()
+        .into_iter()
+        .filter(|name| name.ends_with("/working") && *name != slot)
+        .collect();
+    assert_eq!(own.len(), 1, "{own:?}");
+    let junk = git_in(&fx.remote, &["show", &format!("{}:junk.md", own[0])]);
+    assert_eq!(junk, "junk");
+    assert!(
+        git_output(
+            &fx.remote,
+            &["show", &format!("{}:only-copy.md", own[0])],
+            None
+        )
+        .status
+        .code()
+            != Some(0),
+        "this folder's save took nothing from the other one"
+    );
 }
 
 /// The list marks a slot as a rolling save, names its last writer as its
