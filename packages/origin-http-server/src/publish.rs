@@ -2425,10 +2425,20 @@ impl<'a> Publisher<'a> {
         }
         self.unpark(&covered, flush)?;
         self.held_back.clear();
-        if released && self.can_write && self.fetched {
-            self.push_parked_into(flush);
+        let mut state = saved.state;
+        if released {
+            if self.can_write && self.fetched {
+                self.push_parked_into(flush);
+            }
+            // A released copy that is still local is work only this node
+            // holds, whatever the slot holds.
+            let left = recovery::pending(&self.git)?.len();
+            state.local_only = u32::try_from(left).unwrap_or(u32::MAX);
+            if left > 0 {
+                state.durable = false;
+            }
         }
-        flush.working_state = Some(saved.state);
+        flush.working_state = Some(state);
         Ok(())
     }
 
