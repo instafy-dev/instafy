@@ -14,7 +14,7 @@ const SEEN_LIMIT = 200;
 const seenListeners = new Set<() => void>();
 let seenVersion = 0;
 
-/** Called whenever this browser marks entries seen (the badge and the row follow). */
+/** Called whenever this browser marks entries seen (the one-time chat row follows). */
 export function subscribeUnsavedWorkSeen(listener: () => void): () => void {
   seenListeners.add(listener);
   return () => {
