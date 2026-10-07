@@ -265,7 +265,7 @@ describe("versioning copy shared across surfaces", () => {
     ).toBe("Restored as a new version. Kept the current version of src/lib.");
   });
 
-  it("says a kept name the space holds in another case stays in Unsaved work", () => {
+  it("says a kept name a disk ignoring case takes for another stays in Unsaved work", () => {
     // `Docs/guide.md` is below the kept folder `Docs`; both are on the ref only.
     expect(
       restoreSuccessCopy({
@@ -275,7 +275,31 @@ describe("versioning copy shared across surfaces", () => {
         reasons: { "Docs/guide.md": "path_alias", "notes.md": "kept", "todo.md": "path_alias" },
       }),
     ).toBe(
-      "Restored as a new version. Kept the current version of Docs and notes.md. Docs/guide.md and todo.md stay in Unsaved work, because the space has other files with those names in a different case.",
+      "Restored as a new version. Kept the current version of Docs and notes.md. Docs/guide.md and todo.md stay in Unsaved work, because a disk that ignores case or Unicode form takes them for other names in the space or in this work.",
+    );
+  });
+
+  it("never says the space has the other name when two kept names of the work clash", () => {
+    // The work adds both todo.md and TODO.md and the space has neither: each is the other's alias.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["TODO.md", "todo.md"],
+        kept: ["TODO.md", "todo.md"],
+        reasons: { "TODO.md": "path_alias", "todo.md": "path_alias" },
+      }),
+    ).toBe(
+      "Restored as a new version. TODO.md and todo.md stay in Unsaved work, because a disk that ignores case or Unicode form takes them for other names in the space or in this work.",
+    );
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["todo.md"],
+        kept: ["todo.md"],
+        reasons: { "todo.md": "path_alias" },
+      }),
+    ).toBe(
+      "Restored as a new version. todo.md stays in Unsaved work, because a disk that ignores case or Unicode form takes it for another name in the space or in this work.",
     );
   });
 

@@ -627,7 +627,10 @@ export function unsavedWorkUnconfirmedDeleteCopy(path: string): string {
 /** A restore with nothing to bring back: the saved version already held the work. */
 export const NOTHING_TO_RESTORE_COPY = "Nothing to restore. The saved version already has this work.";
 
-/** The reason a restore gives a kept path whose name another file of the space has in another case. */
+/**
+ * The reason a restore gives a kept path that a disk ignoring case or Unicode
+ * form takes for another name, of the space or of the same work.
+ */
 export const PATH_ALIAS_REASON = "path_alias";
 
 /** The reason a restore gives a kept path where the space had no current version left to keep. */
@@ -650,11 +653,11 @@ export function restoreLeftWorkOnRef(reasons: Readonly<Record<string, string>> |
  * rest of `notRestored` were refused. `reasons` says why, when the origin
  * does: old chat uploads (`attachment`) get a sentence of their own, and every other refusal reads as secret or
  * ignored, as it does without reasons (Desktop lists bare paths). A kept path
- * the server lists as `path_alias` (another file of the space has its name in
- * another case, so keeping chose no version of the work's file) is said to
- * stay in Unsaved work instead of being kept, and so is one listed as
- * `nothing_to_keep` (the space had no current version left to keep, so it can
- * be restored later).
+ * the server lists as `path_alias` (a disk ignoring case takes it for another
+ * name, of the space or of the work itself, so keeping chose no version of
+ * the work's file) is said to stay in Unsaved work instead of being kept, and
+ * so is one listed as `nothing_to_keep` (the space had no current version left
+ * to keep, so it can be restored later).
  * `committed: false` means no version with changes was made: the saved
  * version already held everything that could be restored, so the copy says
  * what was left out first (never that the space has the refused files).
@@ -691,8 +694,8 @@ export function restoreSuccessCopy({
   if (held.length > 0) {
     leftOut.push(
       held.length === 1
-        ? `${formatPathList(held)} stays in Unsaved work, because the space has another file with that name in a different case.`
-        : `${formatPathList(held)} stay in Unsaved work, because the space has other files with those names in a different case.`,
+        ? `${formatPathList(held)} stays in Unsaved work, because a disk that ignores case or Unicode form takes it for another name in the space or in this work.`
+        : `${formatPathList(held)} stay in Unsaved work, because a disk that ignores case or Unicode form takes them for other names in the space or in this work.`,
     );
   }
   if (unchosen.length > 0) {

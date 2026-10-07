@@ -409,7 +409,7 @@ describe("HistoryDrawer: Unsaved work", () => {
     await press(row(container, KEPT), "unsaved-work-restore-rest");
     expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ ref: KEPT, keep: ["todo.md"] }));
     expect(q(container, "history-status")?.textContent).toBe(
-      "Restored as a new version. todo.md stays in Unsaved work, because the space has another file with that name in a different case.",
+      "Restored as a new version. todo.md stays in Unsaved work, because a disk that ignores case or Unicode form takes it for another name in the space or in this work.",
     );
     // The work's todo.md is only on the ref: the entry still counts as unsaved work.
     expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
