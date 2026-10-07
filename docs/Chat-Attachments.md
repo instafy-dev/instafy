@@ -142,9 +142,11 @@ A runtime that downloads attachments advertises the `attachmentDownloads` capabi
    - Writes never follow a symlink.
    - A failure is logged by name and the turn continues.
 5. The prompt lists an attachment only when it belongs to the job's own conversation, this
-   lease signed it and its file is present, with `view_image` for images. It names the rest as
-   unavailable. Storage attachments older than the last 10 user messages are not offered at
-   all.
+   lease signed it and its file is present. It names the rest as unavailable. Storage
+   attachments older than the last 10 user messages are not offered at all. The main lane
+   sends the first images of the turn's own message to the model with the prompt (see
+   [Images as model input](#images-as-model-input)); every other image is listed for
+   `view_image`.
 6. The downloads last as long as the turn. When the last running turn of a conversation ends,
    the runtime removes that conversation's folder. A leased batch, which the controller fills
    only with one conversation's jobs, keeps the folder until its last job is done, so a later
@@ -156,6 +158,41 @@ A runtime that downloads attachments advertises the `attachmentDownloads` capabi
 `.instafy/` is reserved: nothing under it is published. A `.gitignore` in
 `.instafy/attachments/` also keeps the downloads out of every git status.
 
+### Images as model input
+
+The model should not have to decide to open an image the user attached, and it must never
+guess one from its file name.
+
+- The main turn lane sends up to 4 downloaded images of the turn's own message to Codex with
+  the prompt. Codex reads each file once when the turn starts, resizes it as it does a
+  `view_image` result, and sends it inline after the prompt text, labelled `[Image #1]`,
+  `[Image #2]` and so on. The prompt marks the same images `[Image #N]`, in the same order,
+  and tells the agent to look at them directly and to use `view_image` only to re-inspect
+  one or when one did not come through.
+- Every other image stays on `view_image`: an image after the fourth, an image of an earlier
+  message (offered from the history; a restored thread already holds what was sent with it),
+  a legacy `workspacePath` image (a client-supplied path the runtime does not read itself),
+  and the images of parallel worker lanes. A Personal or Shared Browser turn has no image
+  tools and gets none. For code-mode models, whose `view_image` runs inside `exec`, the prompt
+  gives the exact form, `const img = await tools.view_image({ path }); image(img);`, because
+  the image reaches the model only through `image()`.
+- The prompt has no file-name fallback. It says: "If you could not see an attached image, say
+  so; never describe it from its file name."
+- A run whose resolved model does not take image input sends none. Codex assumes an unknown
+  model, such as a bring-your-own one, takes images. On an upstream that speaks chat
+  completions the proxy forwards only text, so such a model never receives them; the rule
+  above keeps its answer honest.
+- A recovery retry on a new or ephemeral Codex thread sends the images again. A retry that
+  resumes the turn's provider thread does not, because that thread already holds them.
+- `codex/prompt-context` records how many images a run sent, as `nativeImageInputs`. Logs
+  carry counts only, never paths, file names or image bytes.
+- Each image adds image input tokens to the turn. On a persisted thread it stays in the
+  history and is sent again, at cached rates, with every later request until compaction, as
+  a successful `view_image` result does. Codex also stores the image bytes inline in the
+  thread's saved rollout, which outlives the turn's attachments folder.
+- `INSTAFY_NATIVE_CHAT_IMAGES=0` on the runtime turns this off: the prompt then lists every
+  image for `view_image`, as before.
+
 Storage and the controller keep a private conversation's attachments to its own readers and
 its own turns. On the runtime, a turn sees only its own conversation's downloads, under their
 own folder, and never another conversation's file of the same name. A turn of another
@@ -166,7 +203,7 @@ a space runs on the same runtime, in the same workspace, and the agent can read 
 files, the saved threads of other conversations included. A writer's turn in one conversation
 can therefore read what a private conversation's turns left behind, such as a file that
 conversation's agent copied out of `.instafy/attachments/`, or its saved thread, which records
-what it read and viewed. Viewers never run turns, and the workspace file routes hide
+what it read and viewed and the images sent with its messages. Viewers never run turns, and the workspace file routes hide
 `.instafy/`.
 
 A signed URL lets anyone fetch that object until it expires. It goes only into the leased
@@ -229,4 +266,13 @@ wherever that file exists.
     name in another conversation's folder is never used;
   - existing files and symlinks;
   - the prompt section, and the prompt of both turn lanes: the main lane and the parallel
-    write-scoped worker.
+    write-scoped worker;
+  - which images the main lane sends as model input: only downloaded images of the turn's own
+    message, at most 4, never a history, legacy or text attachment, with the turn input built
+    as the prompt followed by one local image each, none in a bounded browser lane, for a
+    model without image input or with `INSTAFY_NATIVE_CHAT_IMAGES=0`, and none on a retry
+    that resumes the thread.
+- `cargo test --test proxy_integration native_images` runs two turns through the real proxy
+  against a local provider stub with inert credentials. The first request carries the
+  attached image as an inline `input_image` after the prompt; the follow-up, which resumes the
+  thread, carries it once and adds none.

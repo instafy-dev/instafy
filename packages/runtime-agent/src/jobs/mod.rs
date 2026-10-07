@@ -4602,8 +4602,10 @@ impl JobProcessor {
             .load_relevant_project_context_cards(job, project_id, prompt_text)
             .await;
         // As in run_apply_job: a worker may run on another runtime than the
-        // turn that received the attachments, so it fetches its own.
-        let (prompt, _loaded_learned_blocks, mut prompt_context, _turn_attachments) = self
+        // turn that received the attachments, so it fetches its own. This
+        // lane calls the proxy without Codex, so its images stay on
+        // `view_image`.
+        let (prompt, _loaded_learned_blocks, mut prompt_context, _turn_attachments, _) = self
             .build_turn_prompt(
                 &project_id,
                 job,
@@ -4614,6 +4616,7 @@ impl JobProcessor {
                 None,
                 None,
                 &ProjectPreferencesSnapshot::load(&workspace_dir),
+                0,
             )
             .await?;
         annotate_prompt_context_final_output_mode(
@@ -6156,6 +6159,7 @@ impl JobProcessor {
                 || explicit_personal_browser_execution,
             cancel_signal: cancel_signal.clone(),
             active_turn_input,
+            input_images: Vec::new(),
         };
 
         let routing_pre_observation = if should_run_routing_pre_observation_before_main(
@@ -6181,15 +6185,28 @@ impl JobProcessor {
         );
 
         let project_preferences = ProjectPreferencesSnapshot::load(&workspace_dir);
-        // The turn's chat attachments stay on disk until it returns.
+        // The images of the turn's own message go to Codex with the prompt.
+        // A bounded browser turn has no image tools, and a worker may finish
+        // in a direct lane without Codex, so theirs stay on `view_image`.
+        let native_image_limit = if crate::codex::native_chat_images_enabled()
+            && !explicit_personal_browser_execution
+            && !explicit_shared_browser_execution
+            && !is_multi_agent_worker_job(job)
+        {
+            NATIVE_IMAGE_INPUTS_MAX
+        } else {
+            0
+        };
+        // The turn's chat attachments stay on disk until it returns, through
+        // the main run and every retry.
         let (mut prompt, loaded_learned_blocks, mut prompt_context, _turn_attachments) =
             if expects_generic_mcp_tool_execution {
                 let (prompt, metrics) =
                     self.build_mcp_task_prompt(&project_id, prompt_text, &project_preferences)?;
                 (prompt, Vec::new(), metrics, None)
             } else {
-                let (prompt, loaded_learned_blocks, prompt_context, attachments) = self
-                    .build_turn_prompt(
+                let (prompt, loaded_learned_blocks, prompt_context, attachments, input_images) =
+                    self.build_turn_prompt(
                         &project_id,
                         job,
                         &workspace_dir,
@@ -6199,8 +6216,10 @@ impl JobProcessor {
                         scoped_worker_path_observation.as_ref(),
                         routing_pre_observation.as_ref(),
                         &project_preferences,
+                        native_image_limit,
                     )
                     .await?;
+                codex_run_options.input_images = input_images;
                 (
                     prompt,
                     loaded_learned_blocks,
@@ -6208,6 +6227,12 @@ impl JobProcessor {
                     Some(attachments),
                 )
             };
+        if !codex_run_options.input_images.is_empty() {
+            annotate_prompt_context_native_image_inputs(
+                &mut prompt_context,
+                codex_run_options.input_images.len(),
+            );
+        }
 
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
         if provider_thread_not_restorable && let Some(metrics) = prompt_context.as_object_mut() {
@@ -6981,6 +7006,15 @@ impl JobProcessor {
                 retry_prompt_context["evidenceRecoveryContract"] =
                     json!(routing_recovery::CONTRACT);
             }
+            // The first attempt's thread already holds the attached images; a
+            // retry on a new or ephemeral thread sends them again.
+            retry_codex_run_options = retry_codex_run_options.for_another_attempt();
+            if !codex_run_options.input_images.is_empty() {
+                annotate_prompt_context_native_image_inputs(
+                    &mut retry_prompt_context,
+                    retry_codex_run_options.input_images.len(),
+                );
+            }
 
             // Brief jittered backoff before the recovery retry: re-hitting the
             // same degraded upstream milliseconds after a failed turn mostly
@@ -7316,6 +7350,8 @@ impl JobProcessor {
                 finalization_options.suppress_contextual_instructions = true;
                 finalization_options.persist_conversation_thread = false;
                 finalization_options.provider_conversation_state = None;
+                // It only formats the retry's answer, so it needs no images.
+                finalization_options.input_images.clear();
                 annotate_prompt_context_codex_context_strategy(
                     &mut finalization_prompt_context,
                     Some("finalization"),
@@ -7880,6 +7916,11 @@ impl JobProcessor {
     /// attachment out of the list. Every lane that runs a turn from a prompt
     /// builds it here. The downloads stay until the returned
     /// [`chat_attachments::TurnAttachments`] drops at the end of the turn.
+    ///
+    /// A lane that sends attached images as image input passes how many it
+    /// may send. It gets back the absolute paths of the downloaded images of
+    /// the turn's own message that the prompt lists as `[Image #N]`, in order;
+    /// they stay on disk as long as the returned hold.
     #[allow(clippy::too_many_arguments)]
     async fn build_turn_prompt(
         &self,
@@ -7892,11 +7933,13 @@ impl JobProcessor {
         scoped_worker_path_observation: Option<&ScopedWorkerPathObservation>,
         routing_pre_observation: Option<&RoutingPreObservation>,
         preferences: &ProjectPreferencesSnapshot,
+        native_image_limit: usize,
     ) -> Result<(
         String,
         Vec<LoadedLearnedBlock>,
         JsonValue,
         chat_attachments::TurnAttachments,
+        Vec<PathBuf>,
     )> {
         let attachments = chat_attachments::download_job_attachments(
             job.id,
@@ -7905,19 +7948,31 @@ impl JobProcessor {
             workspace_dir,
         )
         .await;
-        let (prompt, loaded_learned_blocks, prompt_context) = self.build_prompt_with_preferences(
-            project_id,
-            job,
-            workspace_dir,
-            prompt_text,
-            true,
-            provider_conversation_state,
-            project_context_cards,
-            scoped_worker_path_observation,
-            routing_pre_observation,
-            preferences,
-        )?;
-        Ok((prompt, loaded_learned_blocks, prompt_context, attachments))
+        let (prompt, loaded_learned_blocks, prompt_context, native_images) = self
+            .build_prompt_with_preferences(
+                project_id,
+                job,
+                workspace_dir,
+                prompt_text,
+                true,
+                provider_conversation_state,
+                project_context_cards,
+                scoped_worker_path_observation,
+                routing_pre_observation,
+                preferences,
+                native_image_limit,
+            )?;
+        let native_images = native_images
+            .iter()
+            .map(|relative| workspace_dir.join(relative))
+            .collect();
+        Ok((
+            prompt,
+            loaded_learned_blocks,
+            prompt_context,
+            attachments,
+            native_images,
+        ))
     }
 
     #[cfg(test)]
@@ -7945,9 +8000,16 @@ impl JobProcessor {
             scoped_worker_path_observation,
             routing_pre_observation,
             &preferences,
+            0,
         )
+        .map(|(prompt, loaded_learned_blocks, prompt_context, _)| {
+            (prompt, loaded_learned_blocks, prompt_context)
+        })
     }
 
+    /// Also returns the workspace-relative paths of the images the prompt
+    /// says are attached as `[Image #N]`: at most `native_image_limit`, all
+    /// from the turn's own message.
     fn build_prompt_with_preferences(
         &self,
         project_id: &Uuid,
@@ -7960,7 +8022,8 @@ impl JobProcessor {
         scoped_worker_path_observation: Option<&ScopedWorkerPathObservation>,
         routing_pre_observation: Option<&RoutingPreObservation>,
         preferences: &ProjectPreferencesSnapshot,
-    ) -> Result<(String, Vec<LoadedLearnedBlock>, JsonValue)> {
+        native_image_limit: usize,
+    ) -> Result<(String, Vec<LoadedLearnedBlock>, JsonValue, Vec<String>)> {
         let trimmed_prompt = prompt_text.trim();
         if trimmed_prompt.is_empty() {
             return Err(anyhow!("job payload missing prompt_text"));
@@ -8062,7 +8125,7 @@ impl JobProcessor {
                 prompt_sections = %JsonValue::Object(prompt_section_metrics),
                 "built Studio Codex prompt"
             );
-            return Ok((prompt, Vec::new(), metrics));
+            return Ok((prompt, Vec::new(), metrics, Vec::new()));
         }
 
         let mut prompt = String::new();
@@ -8650,8 +8713,11 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             project_id,
             job.conversation_id.as_ref(),
             &leased_attachments,
+            native_image_limit,
         )
         .or_else(|| {
+            // An earlier message's images stay on `view_image`: a restored
+            // thread already holds whatever was sent with that message.
             let attachments =
                 collect_image_attachments_from_history(job.payload.get("conversation_history"));
             format_image_attachment_section_from_attachments(
@@ -8660,15 +8726,18 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 project_id,
                 job.conversation_id.as_ref(),
                 &leased_attachments,
+                0,
             )
         });
 
+        let mut native_images = Vec::new();
         if let Some(section) = attachment_section {
+            native_images = section.native_images;
             append_prompt_section(
                 &mut prompt,
                 &mut prompt_section_metrics,
                 "attachments",
-                &section,
+                &section.text,
             );
         }
 
@@ -8809,7 +8878,12 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             "built Studio Codex prompt"
         );
 
-        Ok((prompt, loaded_learned_blocks, conversation_context.metrics))
+        Ok((
+            prompt,
+            loaded_learned_blocks,
+            conversation_context.metrics,
+            native_images,
+        ))
     }
 
     pub async fn run_plan_job(
@@ -12616,6 +12690,14 @@ fn update_prompt_context_require_first_tool_call(
     );
 }
 
+/// How many attached images a run sends Codex as image input.
+fn annotate_prompt_context_native_image_inputs(prompt_context: &mut JsonValue, count: usize) {
+    let JsonValue::Object(map) = prompt_context else {
+        return;
+    };
+    map.insert("nativeImageInputs".to_string(), json!(count));
+}
+
 fn annotate_prompt_context_retry_provider_thread_reuse(prompt_context: &mut JsonValue) {
     let JsonValue::Object(map) = prompt_context else {
         return;
@@ -15134,7 +15216,8 @@ fn format_image_attachment_section(
     project_id: &Uuid,
     conversation_id: Option<&Uuid>,
     leased_attachments: &HashSet<String>,
-) -> Option<String> {
+    native_image_limit: usize,
+) -> Option<AttachmentSection> {
     let Some(metadata) = metadata.and_then(JsonValue::as_object) else {
         return None;
     };
@@ -15149,6 +15232,7 @@ fn format_image_attachment_section(
         project_id,
         conversation_id,
         leased_attachments,
+        native_image_limit,
     )
 }
 
@@ -15940,22 +16024,40 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
     Some(formatted)
 }
 
+/// Most attached images one turn sends the model as image input. The others
+/// stay listed for `view_image`.
+const NATIVE_IMAGE_INPUTS_MAX: usize = 4;
+
+/// The prompt's attachments section, and the downloaded images it says are
+/// attached to the message as image input.
+struct AttachmentSection {
+    text: String,
+    /// Workspace-relative paths of the images listed as `[Image #N]`, in that
+    /// order.
+    native_images: Vec<String>,
+}
+
 /// The prompt's attachments section. Legacy images name their workspace
 /// path. A Storage image or text file is listed at
 /// `.instafy/attachments/<conversationId>/` only when it belongs to the job's
 /// own conversation, this lease signed it and the pre-turn download left its
 /// file there; the others are named as unavailable so the agent neither
-/// guesses a path nor pretends to have read them.
+/// guesses a path nor pretends to have read them. The first
+/// `native_image_limit` downloaded Storage images are marked `[Image #N]` and
+/// returned, for the run to send them with the prompt; any other image is left
+/// for `view_image`.
 fn format_image_attachment_section_from_attachments(
     attachments: &[JsonValue],
     workspace_dir: &Path,
     project_id: &Uuid,
     conversation_id: Option<&Uuid>,
     leased_attachments: &HashSet<String>,
-) -> Option<String> {
+    native_image_limit: usize,
+) -> Option<AttachmentSection> {
     let mut lines = Vec::new();
     let mut unavailable = Vec::new();
-    let mut lists_image = false;
+    let mut native_images = Vec::new();
+    let mut lists_view_image = false;
     let mut lists_text_file = false;
     for attachment in attachments {
         let Some(entry) = attachment.as_object() else {
@@ -15975,6 +16077,10 @@ fn format_image_attachment_section_from_attachments(
             .and_then(JsonValue::as_u64)
             .or_else(|| entry.get("size_bytes").and_then(JsonValue::as_u64));
 
+        // Only a downloaded Storage image is sent as image input. A legacy
+        // path comes from the client and is not checked here, so only
+        // `view_image` opens it.
+        let mut native = false;
         let workspace_path = match attachment_text_field(entry, "storagePath", "storage_path") {
             Some(storage_path) => {
                 let downloaded = conversation_id
@@ -15997,6 +16103,9 @@ fn format_image_attachment_section_from_attachments(
                     ));
                     continue;
                 };
+                native = is_image
+                    && chat_attachments::is_image_file_name(name)
+                    && native_images.len() < native_image_limit;
                 chat_attachments::attachment_workspace_path(conversation_id, name)
             }
             None => {
@@ -16007,13 +16116,16 @@ fn format_image_attachment_section_from_attachments(
                 path.to_string()
             }
         };
-        if is_image {
-            lists_image = true;
+
+        let mut line = String::new();
+        if native {
+            native_images.push(workspace_path.clone());
+            line.push_str(&format!("[Image #{}] ", native_images.len()));
+        } else if is_image {
+            lists_view_image = true;
         } else {
             lists_text_file = true;
         }
-
-        let mut line = String::new();
         line.push_str("workspacePath: ");
         line.push_str(&workspace_path);
         if file_name.is_some() || mime_type.is_some() || size_bytes.is_some() {
@@ -16063,11 +16175,22 @@ fn format_image_attachment_section_from_attachments(
             "\nPaths above are relative to the workspace root \"{}\".\n",
             workspace_dir.display()
         ));
-        if lists_image {
+        if !native_images.is_empty() {
             section.push_str(
-                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
-When calling `view_image`, use the `workspacePath` value (not the fileName).\n\
-If you cannot view the image for any reason, do your best using the filename/path context.\n",
+                "The images marked [Image #N] are attached to this message in the order listed. Look at them directly; call `view_image` on one only to re-inspect it, or if it did not come through.\n",
+            );
+        }
+        if lists_view_image {
+            section.push_str(if native_images.is_empty() {
+                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n"
+            } else {
+                "Before answering, call the `view_image` tool on each image path not marked [Image #N], then respond to the latest request.\n"
+            });
+        }
+        if lists_view_image || !native_images.is_empty() {
+            section.push_str(
+                "When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({ path: \"<workspacePath>\" }); image(img);`: the image reaches you only through `image(img)`.\n\
+If you could not see an attached image, say so; never describe it from its file name.\n",
             );
         }
         if lists_text_file {
@@ -16093,7 +16216,10 @@ If you cannot view the image for any reason, do your best using the filename/pat
             "You cannot open these. If the answer depends on one, say that it could not be loaded and ask the user to attach it again.\n",
         );
     }
-    Some(section)
+    Some(AttachmentSection {
+        text: section,
+        native_images,
+    })
 }
 
 const UNAVAILABLE_ATTACHMENTS_LISTED: usize = 10;
@@ -17559,7 +17685,7 @@ mod tests {
         .expect("shared preference");
         let preferences = ProjectPreferencesSnapshot::load(&workspace);
 
-        let (prompt, _, _, attachments) = processor
+        let (prompt, _, _, attachments, _) = processor
             .build_turn_prompt(
                 &project_id,
                 &job,
@@ -17570,6 +17696,7 @@ mod tests {
                 None,
                 None,
                 &preferences,
+                0,
             )
             .await
             .expect("turn prompt");
@@ -17609,6 +17736,207 @@ mod tests {
 
         drop(attachments);
         assert!(!folder.exists(), "the downloads outlived the turn");
+    }
+
+    /// The main lane sends the downloaded images of the turn's own message to
+    /// Codex with the prompt. Only those: not another conversation's image, an
+    /// unsigned one, a failed download, a text file or a legacy workspace
+    /// image. Their files stay as long as the turn.
+    #[tokio::test]
+    async fn a_turn_attaches_its_messages_downloaded_images_as_model_input() {
+        let app = axum::Router::new()
+            .route(
+                "/object/photo",
+                axum::routing::get(|| async { "png bytes" }),
+            )
+            .route("/object/notes", axum::routing::get(|| async { "# notes" }))
+            .route(
+                "/object/missing",
+                axum::routing::get(|| async { axum::http::StatusCode::NOT_FOUND }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let other_conversation_id = Uuid::new_v4();
+        let photo = "6a000000-0000-4000-8000-000000000001.png";
+        let notes = "6a000000-0000-4000-8000-000000000002.md";
+        let missing = "6a000000-0000-4000-8000-000000000003.png";
+        let unsigned = "6a000000-0000-4000-8000-000000000004.png";
+        let prompt_text = "Describe the attached image in one sentence.";
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": prompt_text,
+                "metadata": { "attachments": [
+                    { "kind": "image", "storagePath": format!("{project_id}/{other_conversation_id}/{photo}"),
+                      "fileName": "elsewhere.png" },
+                    { "kind": "image", "workspacePath": "chat-upload-1-legacy.png", "fileName": "legacy.png" },
+                    { "kind": "file", "storagePath": format!("{project_id}/{conversation_id}/{notes}"),
+                      "fileName": "notes.md" },
+                    { "kind": "image", "storagePath": format!("{project_id}/{conversation_id}/{missing}"),
+                      "fileName": "missing.png" },
+                    { "kind": "image", "storagePath": format!("{project_id}/{conversation_id}/{unsigned}"),
+                      "fileName": "unsigned.png" },
+                    { "kind": "image", "storagePath": format!("{project_id}/{conversation_id}/{photo}"),
+                      "fileName": "gateway-check-b.png", "mimeType": "image/png" }
+                ]},
+                "attachment_downloads": [
+                    { "name": photo, "url": format!("{base}/object/photo?token=signed") },
+                    { "name": notes, "url": format!("{base}/object/notes?token=signed") },
+                    { "name": missing, "url": format!("{base}/object/missing?token=signed") }
+                ]
+            }),
+        );
+        job.project_id = Some(project_id);
+        job.conversation_id = Some(conversation_id);
+        let workspace = processor.prepare_workspace(&project_id).expect("workspace");
+
+        let (prompt, _, _, attachments, input_images) = processor
+            .build_turn_prompt(
+                &project_id,
+                &job,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+                &ProjectPreferencesSnapshot::load(&workspace),
+                NATIVE_IMAGE_INPUTS_MAX,
+            )
+            .await
+            .expect("turn prompt");
+
+        let folder = workspace
+            .join(".instafy/attachments")
+            .join(conversation_id.to_string());
+        assert_eq!(input_images, vec![folder.join(photo)]);
+        assert_eq!(
+            fs::read(&input_images[0]).expect("downloaded"),
+            b"png bytes"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "- [Image #1] workspacePath: .instafy/attachments/{conversation_id}/{photo} (fileName: gateway-check-b.png, mimeType: image/png)\n"
+            )),
+            "{prompt}"
+        );
+        assert_eq!(prompt.matches("- [Image #").count(), 1, "{prompt}");
+        assert!(
+            prompt.contains("- workspacePath: chat-upload-1-legacy.png (fileName: legacy.png)\n"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{notes} (fileName: notes.md)\n"
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "not available in this workspace:\n- elsewhere.png\n- missing.png\n- unsigned.png\n"
+            ),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The images marked [Image #N] are attached to this message"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "If you could not see an attached image, say so; never describe it from its file name."
+            ),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("filename/path context"), "{prompt}");
+        assert!(!prompt.contains("token=signed"), "{prompt}");
+
+        drop(attachments);
+        assert!(!folder.exists(), "the downloads outlived the turn");
+    }
+
+    /// An earlier message's image is offered from the conversation history
+    /// and stays on `view_image`: a restored thread already holds what was
+    /// sent with that message.
+    #[tokio::test]
+    async fn an_earlier_messages_images_stay_on_view_image() {
+        let app = axum::Router::new().route(
+            "/object/photo",
+            axum::routing::get(|| async { "png bytes" }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let base = format!("http://{}", listener.local_addr().expect("stub address"));
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve stub") });
+
+        let tmp = tempdir().expect("temp dir");
+        let processor = test_job_processor(tmp.path());
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let name = "6a000000-0000-4000-8000-000000000001.png";
+        let prompt_text = "What was in the photo I sent before?";
+        let mut job = test_lease_job(
+            Some("feature"),
+            json!({
+                "prompt_text": prompt_text,
+                "metadata": {},
+                "conversation_history": [{
+                    "role": "user",
+                    "content": "Here is the photo.",
+                    "metadata": { "attachments": [{
+                        "kind": "image",
+                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+                        "fileName": "photo.png"
+                    }]}
+                }],
+                "attachment_downloads": [{
+                    "name": name,
+                    "url": format!("{base}/object/photo?token=signed")
+                }]
+            }),
+        );
+        job.project_id = Some(project_id);
+        job.conversation_id = Some(conversation_id);
+        let workspace = processor.prepare_workspace(&project_id).expect("workspace");
+
+        let (prompt, _, _, _attachments, input_images) = processor
+            .build_turn_prompt(
+                &project_id,
+                &job,
+                &workspace,
+                prompt_text,
+                None,
+                &[],
+                None,
+                None,
+                &ProjectPreferencesSnapshot::load(&workspace),
+                NATIVE_IMAGE_INPUTS_MAX,
+            )
+            .await
+            .expect("turn prompt");
+
+        assert!(input_images.is_empty());
+        assert!(
+            prompt.contains(&format!(
+                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: photo.png)\n"
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(
+                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request."
+            ),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("[Image #"), "{prompt}");
     }
 
     /// A leased batch is one conversation's jobs, which may run one after
@@ -17667,7 +17995,7 @@ mod tests {
         let batch = processor
             .hold_batch_attachments(&[first.clone(), second.clone()])
             .expect("a batch of one conversation is held");
-        let (_, _, _, turn) = processor
+        let (_, _, _, turn, _) = processor
             .build_turn_prompt(
                 &project_id,
                 &first,
@@ -17678,6 +18006,7 @@ mod tests {
                 None,
                 None,
                 &ProjectPreferencesSnapshot::load(&workspace),
+                0,
             )
             .await
             .expect("first prompt");
@@ -17686,7 +18015,7 @@ mod tests {
             fs::read(folder.join(name)).expect("kept for the batch"),
             b"png bytes"
         );
-        let (prompt, _, _, turn) = processor
+        let (prompt, _, _, turn, _) = processor
             .build_turn_prompt(
                 &project_id,
                 &second,
@@ -17697,6 +18026,7 @@ mod tests {
                 None,
                 None,
                 &ProjectPreferencesSnapshot::load(&workspace),
+                0,
             )
             .await
             .expect("second prompt");
