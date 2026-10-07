@@ -431,31 +431,64 @@ fn render_trusted_git_config(mut entries: Vec<TrustedGitConfigEntry>) -> String 
 }
 
 /// The data-only config each checkout's `.instafy/.git/config` was last
-/// reduced to, by path. A file that still holds exactly those bytes is
-/// data-only already, so it is not parsed again: before every git command
-/// that would otherwise cost one more `git config` process.
-static REDUCED_CONFIGS: Lazy<Mutex<HashMap<PathBuf, Vec<u8>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+/// reduced to, by path, most recently used last. A file that still holds
+/// exactly those bytes is data-only already, so it is not parsed again:
+/// before every git command that would otherwise cost one more `git config`
+/// process.
+static REDUCED_CONFIGS: Lazy<Mutex<ReducedConfigs>> = Lazy::new(Mutex::default);
 
-/// Checkouts whose reduced config is remembered at once; more start over.
+/// Checkouts whose reduced config is remembered at once; the one used least
+/// recently is forgotten first.
 const MAX_REDUCED_CONFIGS: usize = 256;
 
-fn already_reduced(config_path: &Path, existing: &[u8]) -> bool {
-    REDUCED_CONFIGS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(config_path)
-        .is_some_and(|reduced| reduced.as_slice() == existing)
+#[derive(Default)]
+struct ReducedConfigs {
+    by_path: HashMap<PathBuf, Vec<u8>>,
+    order: std::collections::VecDeque<PathBuf>,
 }
 
-fn remember_reduced(config_path: &Path, reduced: &[u8]) {
-    let mut reduced_configs = REDUCED_CONFIGS
+impl ReducedConfigs {
+    fn touch(&mut self, config_path: &Path) {
+        if let Some(index) = self.order.iter().position(|path| path == config_path) {
+            if let Some(path) = self.order.remove(index) {
+                self.order.push_back(path);
+            }
+        }
+    }
+}
+
+fn already_reduced(config_path: &Path, existing: &[u8]) -> bool {
+    let mut reduced = REDUCED_CONFIGS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if reduced_configs.len() >= MAX_REDUCED_CONFIGS && !reduced_configs.contains_key(config_path) {
-        reduced_configs.clear();
+    let same = reduced
+        .by_path
+        .get(config_path)
+        .is_some_and(|bytes| bytes.as_slice() == existing);
+    if same {
+        reduced.touch(config_path);
     }
-    reduced_configs.insert(config_path.to_path_buf(), reduced.to_vec());
+    same
+}
+
+fn remember_reduced(config_path: &Path, bytes: &[u8]) {
+    let mut reduced = REDUCED_CONFIGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if reduced
+        .by_path
+        .insert(config_path.to_path_buf(), bytes.to_vec())
+        .is_some()
+    {
+        reduced.touch(config_path);
+        return;
+    }
+    reduced.order.push_back(config_path.to_path_buf());
+    while reduced.order.len() > MAX_REDUCED_CONFIGS {
+        if let Some(oldest) = reduced.order.pop_front() {
+            reduced.by_path.remove(&oldest);
+        }
+    }
 }
 
 pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Result<()> {
