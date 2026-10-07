@@ -19,6 +19,7 @@ import {
 import { useProject } from "../projects/useProject";
 import { useStatus } from "../status/useStatus";
 import { useTelemetry } from "../telemetry/useTelemetry";
+import { usePublishUnsavedWorkLiveOrigins } from "../workspace/unsavedWorkStore";
 import { cloneRuntimeState } from "./defaults";
 import { useDesktopRuntimeEnsure } from "./hooks/useDesktopRuntimeEnsure";
 import { useHostedRuntimeEnsure, type EnsureHostedRuntimeOptions } from "./hooks/useHostedRuntimeEnsure";
@@ -165,6 +166,12 @@ export function RuntimeOperationsProvider({
     lastPreferredRuntimeIdRef,
     preferenceClearRequestedRef,
     allowPreferenceMutation: runtimeMutationEnabled,
+  });
+  // Unsaved work hides a running workspace's rolling save, so it needs the live origins.
+  usePublishUnsavedWorkLiveOrigins({
+    projectId: activeProjectId,
+    runtimeStatuses: state.runtimeStatuses,
+    resolved: runtimeStatusesResolved,
   });
   useRuntimeControllerSync({
     activeProjectId,

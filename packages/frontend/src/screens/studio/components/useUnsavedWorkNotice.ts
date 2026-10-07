@@ -54,8 +54,8 @@ export function useUnsavedWorkNotice({
     if (!enabled || unsavedWork.status !== "ok") {
       return [];
     }
-    return pendingUnsavedWorkEntries(unsavedWork.entries).filter((entry) => !seen.has(unsavedWorkSeenKey(entry)));
-  }, [enabled, seen, unsavedWork.entries, unsavedWork.status]);
+    return pendingUnsavedWorkEntries(unsavedWork.visibleEntries).filter((entry) => !seen.has(unsavedWorkSeenKey(entry)));
+  }, [enabled, seen, unsavedWork.visibleEntries, unsavedWork.status]);
 
   const markSeen = useCallback(() => {
     markUnsavedWorkSeen(projectId, userId, unseen.map(unsavedWorkSeenKey));

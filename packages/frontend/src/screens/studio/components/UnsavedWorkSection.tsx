@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Check } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
@@ -10,9 +10,11 @@ import { decodeBase64 } from "../../../services/runtimeController/workspaceUtils
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { markUnsavedWorkSeen, readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../workspace/unsavedWorkSeen";
 import {
+  getRollingSaveScope,
   patchUnsavedWorkEntries,
   useUnsavedWork,
   useUnsavedWorkConflicts,
+  visibleUnsavedWorkEntries,
   type UnsavedWorkPathChoice,
 } from "../../../workspace/unsavedWorkStore";
 import { HistoryConfirmDialog } from "./HistoryConfirmDialog";
@@ -130,8 +132,8 @@ export function UnsavedWorkSection({
   const focusRequestRef = useRef<FocusRequest | null>(null);
   // Bumped with a request made after the render it needs already happened.
   const [, setFocusRequests] = useState(0);
-  const entriesRef = useRef(unsavedWork.entries);
-  entriesRef.current = unsavedWork.entries;
+  const entriesRef = useRef(unsavedWork.visibleEntries);
+  entriesRef.current = unsavedWork.visibleEntries;
 
   const requestFocus = useCallback((request: FocusRequest) => {
     focusRequestRef.current = request;
@@ -564,7 +566,8 @@ export function UnsavedWorkSection({
     [openGitReviewTab, originId, requestUrlPush],
   );
 
-  const entries = useMemo(() => unsavedWork.entries, [unsavedWork.entries]);
+  // A running workspace's rolling save is left out (see visibleUnsavedWorkEntries).
+  const entries = unsavedWork.visibleEntries;
 
   // This viewer has now seen these entries: the one-time chat row skips them.
   useEffect(() => {
@@ -584,7 +587,10 @@ export function UnsavedWorkSection({
       // The error row stays, and Retry kept focus while it waited.
       return;
     }
-    if (snapshot.status === "ok" && snapshot.entries.length === 0) {
+    if (
+      snapshot.status === "ok" &&
+      visibleUnsavedWorkEntries(snapshot.entries, getRollingSaveScope(projectId)).length === 0
+    ) {
       onNotice({ tone: "info", text: NO_UNSAVED_WORK_COPY });
     }
     requestFocus({ kind: "section" });

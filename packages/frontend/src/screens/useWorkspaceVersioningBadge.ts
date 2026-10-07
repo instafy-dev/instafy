@@ -47,7 +47,7 @@ export function useWorkspaceVersioningBadge({
       legacyInput.projectReadyForWorkspace &&
       !legacyInput.controllerProjectMissing,
   });
-  const unsavedCount = historyReady && !legacy ? pendingUnsavedWorkEntries(unsavedWork.entries).length : 0;
+  const unsavedCount = historyReady && !legacy ? pendingUnsavedWorkEntries(unsavedWork.visibleEntries).length : 0;
 
   const badge = useMemo<SidebarCountBadge | null>(() => {
     if (legacy) {
