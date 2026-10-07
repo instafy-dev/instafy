@@ -260,6 +260,28 @@ fn lose_slot_pushes() -> PushHookGuard {
     })
 }
 
+/// Report every push to the slot as lost without running it: canonical
+/// never sees it.
+fn drop_slot_pushes() -> PushHookGuard {
+    with_push_hook(|specs| {
+        if specs.iter().any(|spec| spec.ends_with("/working")) {
+            PushHookAction::DropRequest
+        } else {
+            PushHookAction::Proceed
+        }
+    })
+}
+
+impl Fixture {
+    /// Fail every `ls-remote` on this thread until the guard is dropped.
+    fn blind_ls_remote(&self) -> GitWrapper {
+        GitWrapper::install(
+            &self.root,
+            "case \" $* \" in *\" ls-remote \"*) exit 128 ;; esac",
+        )
+    }
+}
+
 #[test]
 fn the_first_save_creates_the_slot_on_main_and_a_second_replaces_it() {
     let fx = Fixture::new();
@@ -616,25 +638,150 @@ fn an_unrelated_history_saves_on_main() {
     assert_eq!(fx.slot_file("README.md").as_deref(), Some(README));
 }
 
+/// A push whose answer was lost is checked against the slot right away:
+/// one that landed is confirmed and recorded, one that never reached
+/// canonical records nothing.
 #[test]
-fn an_ambiguous_push_records_nothing() {
+fn a_lost_answer_is_checked_against_the_slot() {
     let fx = Fixture::new();
     fx.write("notes.md", b"one\n");
     let first = fx.save(PersistReason::Tick);
-    let record = fx.record();
     let persisted = first.persisted_at;
     assert!(persisted.is_some());
 
+    // Landed: the slot shows the push, so it is recorded.
     fx.write("notes.md", b"two\n");
     let lost = lose_slot_pushes();
     let state = fx.save(PersistReason::Tick);
     drop(lost);
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(state.durable, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("two\n"));
+    assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
+    let landed = state.persisted_at;
+    assert!(landed.is_some());
+
+    // Never reached canonical: nothing is recorded.
+    fx.write("notes.md", b"three\n");
+    let record = fx.record();
+    let dropped = drop_slot_pushes();
+    let state = fx.save(PersistReason::Tick);
+    drop(dropped);
     assert_eq!(state.error.as_deref(), Some("push_ambiguous"), "{state:?}");
     assert!(!state.durable);
     assert_eq!(fx.record(), record, "the record did not move");
-    assert_eq!(state.persisted_at, persisted);
-    assert_eq!(fx.state().persisted_at, persisted);
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("two\n"));
+    assert_eq!(state.persisted_at, landed);
+    assert_eq!(fx.state().persisted_at, landed);
     assert!(fx.state().changed, "the next tick tries again");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("three\n"));
+}
+
+/// A push that landed while its answer, or the `ls-remote` that confirms
+/// it, never came back leaves the record behind the slot. The next save
+/// finds this folder's own commit there and goes on from it, on the first
+/// save of a folder as on any later one.
+#[test]
+fn a_push_that_landed_unconfirmed_never_stops_later_saves() {
+    for (first_save, lose_answer) in [(false, true), (false, false), (true, true)] {
+        let case = format!("first save {first_save}, answer lost {lose_answer}");
+        let fx = Fixture::new();
+        if !first_save {
+            fx.write("notes.md", b"one\n");
+            assert_eq!(fx.save(PersistReason::Tick).error, None, "{case}");
+        }
+        fx.write("notes.md", b"two\n");
+        let blind = fx.blind_ls_remote();
+        let lost = lose_answer.then(lose_slot_pushes);
+        let state = fx.save(PersistReason::Tick);
+        drop(lost);
+        drop(blind);
+        assert!(state.error.is_some() && !state.durable, "{case}: {state:?}");
+        assert_eq!(
+            fx.slot_file("notes.md").as_deref(),
+            Some("two\n"),
+            "{case}: the push landed"
+        );
+        assert!(
+            !fx.state().durable,
+            "{case}: not durable before it is confirmed"
+        );
+
+        for round in ["three", "four"] {
+            fx.write("notes.md", format!("{round}\n").as_bytes());
+            let state = fx.save(PersistReason::Tick);
+            assert_eq!(state.error, None, "{case}, {round}: {state:?}");
+            assert!(state.durable, "{case}, {round}: {state:?}");
+            assert_eq!(
+                fx.slot_file("notes.md"),
+                Some(format!("{round}\n")),
+                "{case}"
+            );
+        }
+        fx.write("notes.md", b"five\n");
+        let state = fx.save(PersistReason::TurnEnd);
+        assert_eq!(state.error, None, "{case}: {state:?}");
+        assert_eq!(
+            fx.slot_file("notes.md").as_deref(),
+            Some("five\n"),
+            "{case}"
+        );
+        assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev), "{case}");
+    }
+}
+
+/// A delete of the slot that landed without an answer: until the folder
+/// knows what canonical holds, nothing reads as saved. Bringing the same
+/// files back saves them again, and the gone slot is never taken for a
+/// person's Remove.
+#[test]
+fn a_delete_that_landed_unconfirmed_is_neither_durable_nor_a_removal() {
+    // The same files come back: they are saved again, not taken as held.
+    let fx = Fixture::new();
+    fx.write("notes.md", b"kept\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    fs::remove_file(fx.ws.join("notes.md")).unwrap();
+    let blind = fx.blind_ls_remote();
+    let lost = lose_slot_pushes();
+    let state = fx.save(PersistReason::Tick);
+    drop(lost);
+    drop(blind);
+    assert!(state.error.is_some(), "{state:?}");
+    assert!(fx.slot().is_none(), "the delete landed");
+    fx.write("notes.md", b"kept\n");
+    assert!(!fx.state().durable);
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(state.durable, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("kept\n"));
+    let report = flush_saving(&fx.ctx(), false, Duration::from_secs(18), Some(&fx.memory)).unwrap();
+    let working = report.working_state.clone().expect("workingState");
+    assert!(working.durable, "{working:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("kept\n"));
+    assert!(fx.local_refs(DISMISSED_REF).is_empty());
+
+    // Other files come back: an unchanged one is not taken as removed.
+    let fx = Fixture::new();
+    fx.write("a.md", b"same\n");
+    fx.write("b.md", b"first\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    fs::remove_file(fx.ws.join("a.md")).unwrap();
+    fs::remove_file(fx.ws.join("b.md")).unwrap();
+    let blind = fx.blind_ls_remote();
+    let lost = lose_slot_pushes();
+    fx.save(PersistReason::Tick);
+    drop(lost);
+    drop(blind);
+    assert!(fx.slot().is_none());
+    fx.write("a.md", b"same\n");
+    fx.write("b.md", b"second\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("a.md").as_deref(), Some("same\n"));
+    assert_eq!(fx.slot_file("b.md").as_deref(), Some("second\n"));
+    assert!(fx.local_refs(DISMISSED_REF).is_empty());
 }
 
 /// A slot gone from canonical while the record names it was removed (or
@@ -797,7 +944,7 @@ fn a_stop_with_a_save_leaves_only_the_slot() {
 fn a_stop_whose_save_fails_pushes_its_unsaved_copy() {
     let fx = Fixture::new();
     fx.write("doc.md", b"alpha\nbeta\nat the stop\n");
-    let lost = lose_slot_pushes();
+    let lost = drop_slot_pushes();
     let report = flush_saving(&fx.ctx(), false, Duration::from_secs(18), Some(&fx.memory)).unwrap();
     drop(lost);
     let working = report.working_state.clone().expect("workingState");

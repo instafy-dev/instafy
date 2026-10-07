@@ -59,6 +59,10 @@ pub(crate) enum PushHookAction {
     Proceed,
     /// Run the push, then report the connection as lost.
     LoseResponse,
+    /// Report the connection as lost without running the push, so the
+    /// remote never sees it (a working slot's replace or a leased delete
+    /// only).
+    DropRequest,
 }
 
 #[cfg(test)]
@@ -158,10 +162,13 @@ pub(crate) fn delete_with_lease(
     let delete = format!(":{destination}");
 
     #[cfg(test)]
-    let lose_response = matches!(
-        run_push_hook(std::slice::from_ref(&delete)),
-        PushHookAction::LoseResponse
-    );
+    let action = run_push_hook(std::slice::from_ref(&delete));
+    #[cfg(test)]
+    if matches!(action, PushHookAction::DropRequest) {
+        return Ok(lost_connection());
+    }
+    #[cfg(test)]
+    let lose_response = matches!(action, PushHookAction::LoseResponse);
 
     let output = git.run(&[
         "push",
@@ -212,10 +219,13 @@ pub(crate) fn push_replace_with_lease(
     let spec = format!("{commit}:{destination}");
 
     #[cfg(test)]
-    let lose_response = matches!(
-        run_push_hook(std::slice::from_ref(&spec)),
-        PushHookAction::LoseResponse
-    );
+    let action = run_push_hook(std::slice::from_ref(&spec));
+    #[cfg(test)]
+    if matches!(action, PushHookAction::DropRequest) {
+        return Ok(lost_connection());
+    }
+    #[cfg(test)]
+    let lose_response = matches!(action, PushHookAction::LoseResponse);
 
     let output = git.run(&["push", "--porcelain", "--no-verify", &lease, remote, &spec])?;
 
@@ -236,6 +246,20 @@ pub(crate) fn push_replace_with_lease(
         class: classify_output(&output),
         refs: parse_porcelain(&output.stdout),
     })
+}
+
+/// What a push whose connection failed answers (tests only).
+#[cfg(test)]
+fn lost_connection() -> PushResult {
+    let lost = Output {
+        status: failed_status(),
+        stdout: Vec::new(),
+        stderr: b"fatal: the remote end hung up unexpectedly\n".to_vec(),
+    };
+    PushResult {
+        class: classify_output(&lost),
+        refs: Vec::new(),
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -555,7 +555,9 @@ node's checkout a cache.
   (`instafy.workingSet`), so runtimes that share a folder on a node share one
   slot, and a fresh clone (another node) gets a new one. Each save replaces
   the slot under a lease on the exact commit it last confirmed (the shard
-  lets only a slot move; every other recovery ref is created or deleted),
+  lets only a slot move; every other recovery ref is created or deleted;
+  when a push's answer is lost the slot is looked at again, and a commit
+  this folder wrote becomes the one it last confirmed),
   and the slot is deleted once nothing is unsaved and nothing waits on a
   local recovery ref. Its commit sits on `main` (the merge base, or `main`
   for an unrelated history), names its last writer in `Instafy-Origin`, and
