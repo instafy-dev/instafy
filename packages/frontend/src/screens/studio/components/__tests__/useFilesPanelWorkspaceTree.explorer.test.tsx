@@ -212,4 +212,63 @@ describe("Files explorer folders and loading copy", () => {
       expect(options.setActiveFile).not.toHaveBeenCalled();
     });
   });
+
+  describe("an expanded folder", () => {
+    const listSkills = async () => {
+      list.mockImplementation(async ({ path }) => path === "skills" ? [file("skills/write.md")] : [folder("skills")]);
+      await render();
+      await act(async () => current.toggleDirectory(folder("skills")));
+      expect(current.directoryEntries.skills).toEqual([file("skills/write.md")]);
+    };
+
+    it("is listed again after the listing scope changes", async () => {
+      let pending = deferred<ControllerWorkspaceEntry[]>();
+      list.mockImplementation(({ path }) => path === "skills" ? pending.promise : Promise.resolve([folder("skills")]));
+      await render();
+      await act(async () => current.toggleDirectory(folder("skills")));
+      await act(async () => pending.resolve([file("skills/write.md")]));
+      list.mockClear();
+      pending = deferred();
+      statusPath = "skills";
+
+      await render({ workspaceOwnerKey: "origin-b" });
+
+      expect(listedFolders()).toEqual(["skills"]);
+      // Only the root listing waits on a runtime sync.
+      expect(list).toHaveBeenCalledWith(expect.objectContaining({ path: "skills", syncMode: "background" }));
+      expect(statusText()).toBe("Loading files…");
+      await act(async () => pending.resolve([file("skills/write.md")]));
+      expect(current.directoryEntries.skills).toEqual([file("skills/write.md")]);
+      expect(current.expandedDirectories.has("skills")).toBe(true);
+      expect(statusText()).toBe("");
+    });
+
+    it("is closed, and never listed, when another space opens", async () => {
+      await listSkills();
+      list.mockClear();
+
+      await render({ activeProjectId: "space-b" });
+
+      expect(list.mock.calls.map(([params]) => [params.projectId, params.path ?? ""])).toEqual([["space-b", ""]]);
+      expect(current.expandedDirectories.size).toBe(0);
+    });
+
+    it("waits while the workspace is not browse-ready and is listed once when it is again", async () => {
+      await listSkills();
+      list.mockClear();
+
+      // Unreachable: only the root is listed, as before; the folder keeps its
+      // listing instead of retrying against a workspace that can't answer.
+      await render({ workspaceBrowseReady: false });
+      expect(listedFolders()).toEqual([]);
+      expect(list).toHaveBeenCalledOnce();
+      expect(current.directoryEntries.skills).toEqual([file("skills/write.md")]);
+      list.mockClear();
+
+      await render({ workspaceBrowseReady: true });
+
+      expect(listedFolders()).toEqual(["skills"]);
+      expect(list.mock.calls.filter(([params]) => !params.path)).toHaveLength(1);
+    });
+  });
 });

@@ -1,10 +1,16 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, useLayoutEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunRecord, RuntimeState } from "../../../types";
-import type { RuntimeAction } from "../../runtimeStore";
+import type { ControllerOriginSummary, LocalWorkspacePresence } from "../../../sdk/instafy";
+import {
+  createInitialRuntimeStoreState,
+  runtimeReducer,
+  type RuntimeAction,
+  type RuntimeStoreState,
+} from "../../runtimeStore";
 import type {
   ControllerEventPayload,
   FetchControllerRunsResult,
@@ -14,8 +20,13 @@ import type {
 const controllerMocks = vi.hoisted(() => ({
   fetchRuns: vi.fn(),
   subscribeToRuns: vi.fn(),
-  fetchLocalWorkspacePresence: vi.fn(),
-  fetchOriginSummary: vi.fn(),
+  fetchLocalWorkspacePresenceResult: vi.fn(),
+  fetchOriginSummaryResult: vi.fn(),
+}));
+
+const originMappingMocks = vi.hoisted(() => ({
+  mapOriginSummaryFromPayload: vi.fn(),
+  mapOriginSummaryToLocalWorkspacePresence: vi.fn(),
 }));
 
 vi.mock("../../../sdk/instafy", () => ({
@@ -26,14 +37,15 @@ vi.mock("../../../sdk/instafy", () => ({
     },
     workspace: {
       origin: {
-        fetchLocalPresence: controllerMocks.fetchLocalWorkspacePresence,
-        fetchSummary: controllerMocks.fetchOriginSummary,
+        fetchLocalPresenceResult: controllerMocks.fetchLocalWorkspacePresenceResult,
+        fetchSummaryResult: controllerMocks.fetchOriginSummaryResult,
       },
     },
   },
-  mapOriginSummaryToLocalWorkspacePresence: vi.fn(() => null),
+  mapOriginSummaryToLocalWorkspacePresence:
+    originMappingMocks.mapOriginSummaryToLocalWorkspacePresence,
   mapLocalWorkspacePresenceFromPayload: vi.fn(() => null),
-  mapOriginSummaryFromPayload: vi.fn(() => null),
+  mapOriginSummaryFromPayload: originMappingMocks.mapOriginSummaryFromPayload,
   mapTunnelGrantFromPayload: vi.fn(() => null),
 }));
 
@@ -54,6 +66,7 @@ vi.mock("../../utils/runtimeDebug", () => ({
 import { useRuntimeControllerSync } from "../useRuntimeControllerSync";
 import { MEMBERS_CHANGED_EVENT } from "../../../projects/projectAccessEvents";
 import { CREDITS_UPDATED_EVENT } from "../../../credits/creditsEvents";
+import { getStudioWorkspaceOwnerKey } from "../../../screens/studio/useStudioKnownFiles";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -168,6 +181,112 @@ function createHookDependencies() {
 
 type HookDependencies = ReturnType<typeof createHookDependencies>;
 
+// Simplified stand-ins for the SDK mappers: an event payload is the summary
+// itself (without runtimeId, like the controller's), and the derived
+// presence is keyed by the origin id.
+function mapOriginSummaryFromTestPayload(
+  data: Record<string, unknown> | null,
+): ControllerOriginSummary | null {
+  const originId = typeof data?.originId === "string" ? data.originId : null;
+  if (!originId) {
+    return null;
+  }
+  return {
+    originId,
+    runtimeId: null,
+    endpoint: `https://ctl/origin/${originId}`,
+    mode: typeof data?.mode === "string" ? data.mode : "desktop",
+    presence: (data?.presence as ControllerOriginSummary["presence"]) ?? null,
+  };
+}
+
+function mapOriginSummaryToTestPresence(
+  summary: ControllerOriginSummary | null,
+): LocalWorkspacePresence | null {
+  if (!summary) {
+    return null;
+  }
+  return {
+    deviceId: summary.originId,
+    status: summary.presence?.status === "offline" ? "offline" : "online",
+    presenceStatus: summary.presence?.status ?? null,
+    lastHeartbeat: summary.presence?.lastHeartbeat ?? undefined,
+  };
+}
+
+function ownerKey(state: RuntimeStoreState): string {
+  return getStudioWorkspaceOwnerKey({
+    effectiveRuntimeId: null,
+    localWorkspace: state.localWorkspace,
+    desktopOrigin: state.desktopOrigin,
+  });
+}
+
+const gatewayOrigin: ControllerOriginSummary = {
+  originId: "gateway",
+  runtimeId: null,
+  endpoint: "https://ctl/origin/gateway",
+  mode: "hosted",
+  presence: null,
+};
+
+const desktopOrigin: ControllerOriginSummary = {
+  originId: "desk-origin",
+  runtimeId: "runtime-desk",
+  endpoint: "https://ctl/origin/desk-origin",
+  mode: "desktop",
+  presence: { status: "online", lastHeartbeat: "2026-10-07T10:00:00Z" },
+};
+
+/** An answer to GET /projects/:id/origin (`null`: the space has no default origin). */
+function found(summary: ControllerOriginSummary | null) {
+  return { ok: true as const, summary };
+}
+
+function originEvent(kind: string, data: Record<string, unknown>): ControllerEventPayload {
+  return { kind, project_id: "project-current", data };
+}
+
+async function flushMicrotasks() {
+  for (let i = 0; i < 10; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+/** Drives the hook through the real runtime reducer and records each commit. */
+function StoreHarness({
+  dependencies,
+  commits,
+}: {
+  dependencies: HookDependencies;
+  commits: RuntimeStoreState[];
+}) {
+  const [state, dispatch] = useReducer(
+    runtimeReducer,
+    undefined,
+    createInitialRuntimeStoreState,
+  );
+  useLayoutEffect(() => {
+    commits.push(state);
+  });
+  useRuntimeControllerSync({
+    activeProjectId: "project-current",
+    projectInitialized: true,
+    runtimeControllerEnabled: true,
+    syncEpoch: 0,
+    dispatch,
+    updateRuntime: dependencies.updateRuntime,
+    upsertRun: dependencies.upsertRun,
+    removeRun: dependencies.removeRun,
+    markRunLeased: dependencies.markRunLeased,
+    refreshRuntimeStatuses: dependencies.refreshRuntimeStatuses,
+    logRunEvent: dependencies.logRunEvent,
+    handleRuntimeTelemetryEvent: dependencies.handleRuntimeTelemetryEvent,
+    markControllerUnavailable: dependencies.markControllerUnavailable,
+  });
+  return null;
+}
+
 function Harness({
   projectId,
   dependencies,
@@ -204,8 +323,14 @@ describe("useRuntimeControllerSync controller access results", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     Object.values(controllerMocks).forEach((mock) => mock.mockReset());
-    controllerMocks.fetchLocalWorkspacePresence.mockResolvedValue(null);
-    controllerMocks.fetchOriginSummary.mockResolvedValue(null);
+    controllerMocks.fetchLocalWorkspacePresenceResult.mockResolvedValue({ ok: true, workspace: null });
+    controllerMocks.fetchOriginSummaryResult.mockResolvedValue(found(null));
+    originMappingMocks.mapOriginSummaryFromPayload
+      .mockReset()
+      .mockReturnValue(null);
+    originMappingMocks.mapOriginSummaryToLocalWorkspacePresence
+      .mockReset()
+      .mockReturnValue(null);
     delete (
       window as typeof window & { __INSTAFY_ACTIVE_PROJECT_ID__?: string | null }
     ).__INSTAFY_ACTIVE_PROJECT_ID__;
@@ -215,6 +340,7 @@ describe("useRuntimeControllerSync controller access results", () => {
   });
 
   afterEach(async () => {
+    vi.useRealTimers();
     await act(async () => root.unmount());
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean })
@@ -307,7 +433,7 @@ describe("useRuntimeControllerSync controller access results", () => {
     const summary = { originId: "desk-origin", mode: "desktop", endpoint: "http://desk" };
     controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
     controllerMocks.subscribeToRuns.mockReturnValue(() => {});
-    controllerMocks.fetchOriginSummary.mockResolvedValue(summary);
+    controllerMocks.fetchOriginSummaryResult.mockResolvedValue(found(summary));
     await act(async () => root.render(<Harness projectId="project-current" dependencies={dependencies} />));
     await act(async () => {
       for (let i = 0; i < 6; i += 1) {
@@ -315,11 +441,199 @@ describe("useRuntimeControllerSync controller access results", () => {
       }
     });
     expect(dependencies.dispatch).toHaveBeenCalledWith({
-      type: "applyOriginSummary",
+      type: "applyOriginHydration",
+      workspace: null,
       summary,
       derivedPresence: null,
       projectId: "project-current",
     });
+  });
+
+  async function renderStore() {
+    const dependencies = createHookDependencies();
+    const commits: RuntimeStoreState[] = [];
+    let subscription: SubscribeControllerRunsParams | null = null;
+    originMappingMocks.mapOriginSummaryFromPayload.mockImplementation(
+      mapOriginSummaryFromTestPayload,
+    );
+    originMappingMocks.mapOriginSummaryToLocalWorkspacePresence.mockImplementation(
+      mapOriginSummaryToTestPresence,
+    );
+    controllerMocks.fetchRuns.mockResolvedValue(fetchResult());
+    controllerMocks.subscribeToRuns.mockImplementation(
+      (params: SubscribeControllerRunsParams) => {
+        subscription = params;
+        return vi.fn();
+      },
+    );
+    await act(async () => {
+      root.render(<StoreHarness dependencies={dependencies} commits={commits} />);
+      await flushMicrotasks();
+    });
+    expect(dependencies.refreshRuntimeStatuses).toHaveBeenCalledOnce();
+    const emit = (event: ControllerEventPayload) =>
+      act(async () => {
+        subscription?.onEvent?.(event);
+        await flushMicrotasks();
+      });
+    return { commits, emit, latest: () => commits[commits.length - 1] };
+  }
+
+  it("keeps the default origin when another origin of the project heartbeats", async () => {
+    controllerMocks.fetchOriginSummaryResult
+      .mockResolvedValueOnce(found(gatewayOrigin))
+      .mockReturnValueOnce(new Promise(() => {}));
+    const { emit, latest } = await renderStore();
+    const before = latest();
+    expect(before.desktopOrigin).toEqual(gatewayOrigin);
+
+    // A hosted runtime's own origin heartbeats every 20 s; the controller
+    // still resolves the gateway as the default.
+    await emit(originEvent("origin.heartbeat", {
+      originId: "runtime-origin",
+      mode: "hosted",
+      presence: { status: "online" },
+    }));
+
+    expect(latest().desktopOrigin).toBe(before.desktopOrigin);
+    expect(ownerKey(latest())).toBe(ownerKey(before));
+    expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes presence from the default origin's heartbeat and keeps its runtime and endpoint", async () => {
+    controllerMocks.fetchOriginSummaryResult
+      .mockResolvedValueOnce(found(desktopOrigin))
+      .mockReturnValueOnce(new Promise(() => {}));
+    const { emit, latest } = await renderStore();
+    const before = latest();
+
+    await emit(originEvent("origin.heartbeat", {
+      originId: "desk-origin",
+      mode: "desktop",
+      presence: { status: "online", lastHeartbeat: "2026-10-07T10:00:20Z" },
+    }));
+
+    expect(latest().desktopOrigin).toEqual({
+      ...desktopOrigin,
+      presence: { status: "online", lastHeartbeat: "2026-10-07T10:00:20Z" },
+    });
+    expect(latest().localWorkspace?.lastHeartbeat).toBe("2026-10-07T10:00:20Z");
+    expect(ownerKey(latest())).toBe(ownerKey(before));
+  });
+
+  it("lands origin hydration in one owner key while another origin heartbeats", async () => {
+    const secondHydration = deferred<ReturnType<typeof found>>();
+    controllerMocks.fetchOriginSummaryResult
+      .mockResolvedValueOnce(found(gatewayOrigin))
+      .mockReturnValueOnce(secondHydration.promise);
+    const { commits, emit, latest } = await renderStore();
+    const firstHydrated = commits.length - 1;
+    expect(latest().desktopOrigin).toEqual(gatewayOrigin);
+
+    await emit(originEvent("origin.heartbeat", {
+      originId: "runtime-origin",
+      mode: "hosted",
+      presence: { status: "online" },
+    }));
+    await act(async () => {
+      secondHydration.resolve(found({ ...gatewayOrigin }));
+      await flushMicrotasks();
+    });
+
+    expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledTimes(2);
+    expect(latest().desktopOrigin).toEqual(gatewayOrigin);
+    expect(new Set(commits.slice(firstHydrated).map(ownerKey)).size).toBe(1);
+  });
+
+  it.each(["origin", "local workspace"])(
+    "keeps the default origin and the owner key when a hydration's %s fetch gets no answer",
+    async (failing) => {
+      // The SDK answers a 502, a timeout or a missing session with ok: false;
+      // only a 404 means the space has none.
+      const folder: LocalWorkspacePresence = {
+        deviceId: "device-1",
+        path: "/workspace/me/space",
+        runtimeId: "runtime-desk",
+        status: "online",
+      };
+      controllerMocks.fetchLocalWorkspacePresenceResult
+        .mockResolvedValueOnce({ ok: true, workspace: folder })
+        .mockResolvedValueOnce(failing === "local workspace" ? { ok: false } : { ok: true, workspace: folder });
+      controllerMocks.fetchOriginSummaryResult
+        .mockResolvedValueOnce(found(desktopOrigin))
+        .mockResolvedValueOnce(failing === "origin" ? { ok: false } : found(desktopOrigin));
+      const { emit, latest } = await renderStore();
+      const before = latest();
+      expect(before.desktopOrigin).toEqual(desktopOrigin);
+      expect(before.localWorkspace?.path).toBe("/workspace/me/space");
+
+      await emit(originEvent("origin.heartbeat", { originId: "runtime-origin", mode: "hosted" }));
+
+      expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledTimes(2);
+      expect(latest()).toBe(before);
+      expect(ownerKey(latest())).toBe(ownerKey(before));
+    },
+  );
+
+  it("marks an expired Desktop default origin offline without resolving a new default", async () => {
+    controllerMocks.fetchOriginSummaryResult.mockResolvedValue(found(desktopOrigin));
+    const { emit, latest } = await renderStore();
+    const before = latest();
+
+    await emit(originEvent("origin.expired", {
+      originId: "desk-origin",
+      mode: "desktop",
+      presence: { status: "offline", lastHeartbeat: "2026-10-07T10:00:00Z" },
+    }));
+
+    expect(latest().desktopOrigin).toMatchObject({
+      originId: "desk-origin",
+      runtimeId: "runtime-desk",
+      presence: { status: "offline" },
+    });
+    expect(latest().localWorkspace?.status).toBe("offline");
+    expect(ownerKey(latest())).toBe(ownerKey(before));
+    expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an origin.expired payload it cannot read", async () => {
+    controllerMocks.fetchOriginSummaryResult.mockResolvedValue(found(desktopOrigin));
+    const { emit, latest } = await renderStore();
+    const before = latest();
+
+    await emit(originEvent("origin.expired", { status: "offline" }));
+
+    expect(latest()).toBe(before);
+  });
+
+  it("hydrates once at the end of the throttle window when an origin registers inside it", async () => {
+    controllerMocks.fetchOriginSummaryResult
+      .mockResolvedValueOnce(found(gatewayOrigin))
+      .mockResolvedValueOnce(found(gatewayOrigin))
+      .mockResolvedValueOnce(found(desktopOrigin));
+    const { emit, latest } = await renderStore();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+
+    await emit(originEvent("origin.heartbeat", { originId: "runtime-origin", mode: "hosted" }));
+    expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledTimes(2);
+
+    // The Desktop app comes online right after that hydration.
+    await emit(originEvent("origin.registered", { originId: "desk-origin", mode: "desktop" }));
+    await emit(originEvent("origin.heartbeat", { originId: "desk-origin", mode: "desktop" }));
+    expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await flushMicrotasks();
+    });
+    expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledTimes(3);
+    expect(latest().desktopOrigin).toEqual(desktopOrigin);
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      await flushMicrotasks();
+    });
+    expect(controllerMocks.fetchOriginSummaryResult).toHaveBeenCalledTimes(3);
   });
 
   it("clears every project-derived runtime slice when there is no active project", async () => {
@@ -775,7 +1089,7 @@ describe("useRuntimeControllerSync controller access results", () => {
         controllerStreamDisconnectMessage: null,
       });
       expect(controllerMocks.subscribeToRuns).not.toHaveBeenCalled();
-      expect(controllerMocks.fetchLocalWorkspacePresence).not.toHaveBeenCalled();
+      expect(controllerMocks.fetchLocalWorkspacePresenceResult).not.toHaveBeenCalled();
       expect(dependencies.refreshRuntimeStatuses).not.toHaveBeenCalled();
       expect(dependencies.markControllerUnavailable).not.toHaveBeenCalled();
     },

@@ -112,10 +112,8 @@ describe("Files tree in the versioned modes", () => {
   it("lists the pinned default origin and records the listing rev", async () => {
     await render();
     expect(list).not.toHaveBeenCalled();
-    // Listed on mount and again once the origin reports ready, as in legacy mode.
-    expect(new Set(listCalls().map((params) => JSON.stringify(params)))).toEqual(
-      new Set([JSON.stringify({ projectId: "space-a", routing: "default", originId: "origin-1" })]),
-    );
+    // Listed once on mount, though the origin also reports ready then.
+    expect(listCalls()).toEqual([{ projectId: "space-a", path: undefined, routing: "default", originId: "origin-1" }]);
     expect(current.directoryRevsRef.current[""]).toBe(REV_1);
   });
 
@@ -211,6 +209,99 @@ describe("Files tree in the versioned modes", () => {
       { projectId: "space-a", path: undefined, routing: "default", originId: "origin-1" },
       { projectId: "space-a", path: "src", routing: "default", originId: "origin-1", rev: REV_1 },
     ]);
+  });
+
+  it("lists expanded folders again at the root's rev after a legacy and stateless flip", async () => {
+    await render();
+    await act(async () => current.setExpandedDirectories(new Set(["src"])));
+    await act(async () => { await current.loadDirectory("src"); });
+    listAt.mockClear();
+
+    await render({ versioning: { mode: "legacy", originId: null }, versionedOptions: null });
+    await render({ versioning: { mode: "stateless", originId: "origin-1" }, versionedOptions: hooks });
+
+    expect(listCalls()).toEqual([
+      { projectId: "space-a", path: undefined, routing: "default", originId: "origin-1" },
+      { projectId: "space-a", path: "src", routing: "default", originId: "origin-1", rev: REV_1 },
+    ]);
+    expect(current.directoryEntries.src).toEqual([file("src/a.ts", BLOB_A)]);
+  });
+
+  describe("an own commit", () => {
+    const REV_3 = "3".repeat(40);
+    const saveCheck = (parentRev: string) => act(async () => {
+      hooks.ownRevisions.recordCommit({
+        projectId: "space-a", originId: "origin-1", parentRev, rev: REV_3,
+        writes: [{ path: "notes/check.md", blobOid: BLOB_A }], deletes: [],
+      });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    async function expandNotes() {
+      // A folder that is not in the space yet lists as empty (a 404) at the commit it was read from.
+      listAt.mockImplementation(async ({ path }: { path?: string }) =>
+        path === "notes" ? listing([], REV_1) : listing([folder("src")], REV_1));
+      await render();
+      await act(async () => current.setExpandedDirectories(new Set(["notes"])));
+      await act(async () => { await current.loadDirectory("notes"); });
+      expect(current.directoryRevsRef.current.notes).toBe(REV_1);
+      listAt.mockImplementation(async ({ path }: { path?: string }) =>
+        path === "notes" ? listing([file("notes/check.md", BLOB_A)], REV_3) : listing([folder("notes"), folder("src")], REV_3));
+      listAt.mockClear();
+    }
+
+    it("is shown in place in the folders listed at its parent", async () => {
+      await expandNotes();
+      await saveCheck(REV_1);
+      expect(listAt).not.toHaveBeenCalled();
+      expect(current.directoryEntries.notes).toEqual([file("notes/check.md", BLOB_A)]);
+      expect(current.directoryRevsRef.current.notes).toBe(REV_3);
+    });
+
+    it("lists a shown folder it wrote into again when its listing is at another commit", async () => {
+      await expandNotes();
+      await saveCheck(REV_2);
+      // The root was listed at another commit too.
+      expect(listCalls()).toHaveLength(2);
+      expect(listCalls()).toEqual(expect.arrayContaining([
+        { projectId: "space-a", path: undefined, routing: "default", originId: "origin-1", rev: REV_3 },
+        { projectId: "space-a", path: "notes", routing: "default", originId: "origin-1", rev: REV_3 },
+      ]));
+      expect(current.directoryEntries.notes).toEqual([file("notes/check.md", BLOB_A)]);
+      expect(current.directoryEntries[""]).toEqual([folder("notes"), folder("src")]);
+    });
+
+    it("lists in the current scope after a scope change that kept its subscription", async () => {
+      await expandNotes();
+      await render({ workspaceOwnerKey: "origin-b" });
+      listAt.mockClear();
+      await saveCheck(REV_2);
+      expect(listCalls()).toContainEqual(
+        { projectId: "space-a", path: "notes", routing: "default", originId: "origin-1", rev: REV_3 },
+      );
+    });
+
+    it("forgets a closed folder it wrote into when its listing is at another commit", async () => {
+      await expandNotes();
+      await act(async () => current.setExpandedDirectories(new Set()));
+      await saveCheck(REV_2);
+      expect(listCalls().map((params) => params.path)).toEqual([undefined]);
+      expect(current.directoryEntries.notes).toBeUndefined();
+      expect(current.directoryRevsRef.current.notes).toBeUndefined();
+    });
+
+    it("made while the scope was legacy is listed once the scope is versioned again", async () => {
+      await expandNotes();
+      await render({ versioning: { mode: "legacy", originId: null }, versionedOptions: null });
+      await saveCheck(REV_1);
+      expect(listAt).not.toHaveBeenCalled();
+
+      await render({ versioning: { mode: "stateless", originId: "origin-1" }, versionedOptions: hooks });
+
+      expect(listCalls()).toContainEqual(
+        { projectId: "space-a", path: "notes", routing: "default", originId: "origin-1", rev: REV_3 },
+      );
+      expect(current.directoryEntries.notes).toEqual([file("notes/check.md", BLOB_A)]);
+    });
   });
 
   it("deletes a file with the parent listing's rev and the listed blob", async () => {

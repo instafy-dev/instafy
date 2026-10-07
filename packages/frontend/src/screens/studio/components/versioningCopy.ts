@@ -209,6 +209,9 @@ export const SAVE_COPY = Object.freeze({
   desktopStaleDescription:
     "It changed in the space while you edited. Your version is still in the folder on this computer. Merge keeps both; Reload uses the space's version.",
   desktopReloadFailed: "Couldn't replace the folder's copy with the space's version. Try again in a moment.",
+  reloadLatestFailed: `Couldn't load the space's version. ${EDITS_KEPT_HERE} ${TRY_AGAIN_IN_A_MOMENT}`,
+  reloadLatestNotFound: `This file is no longer in the space. ${EDITS_KEPT_HERE}`,
+  reloadLatestUnreadable: `The space's version can't be opened as text. ${EDITS_KEPT_HERE}`,
 });
 
 /** `"README.md" changed while you were editing. Your edits are kept.` */

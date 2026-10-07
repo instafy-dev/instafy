@@ -31,10 +31,12 @@ vi.mock("../HistoryDrawer", () => ({
   HistoryDrawer: ({
     versioning,
     probeFailed,
+    arrived,
     arrivalNotice,
   }: {
     versioning: { historyReady: boolean; chromeMode: string };
     probeFailed?: boolean;
+    arrived?: boolean;
     arrivalNotice?: string | null;
   }) => (
     <div
@@ -42,6 +44,7 @@ vi.mock("../HistoryDrawer", () => ({
       data-ready={String(versioning.historyReady)}
       data-mode={versioning.chromeMode}
       data-probe-failed={String(probeFailed === true)}
+      data-arrived={String(arrived === true)}
       data-arrival={arrivalNotice ?? ""}
     >
       <button type="button" data-testid="history-retry">
@@ -171,6 +174,8 @@ describe("SourceControlDrawer switch", () => {
     });
 
     it("hands the keyboard to History when Changes goes away under it", async () => {
+      // This device last saw the space in Changes.
+      window.localStorage.setItem("instafy.versioning.mode.project-1", "legacy");
       mocks.origin = { originId: "gateway", mode: "hosted" };
       const answer = pendingProbe();
       await render();
@@ -178,7 +183,22 @@ describe("SourceControlDrawer switch", () => {
       await act(async () => refresh?.focus());
       await act(async () => answer(status(true)));
       await flush();
+      expect(body("history-body")?.getAttribute("data-arrived")).toBe("true");
       expect(body("history-body")?.getAttribute("data-arrival")).toBe("This space shows History instead of Changes.");
+    });
+
+    it("does not say History replaced Changes in a space that never showed Changes", async () => {
+      // A new space: no mode remembered here and no answer yet, so Changes
+      // only stood in while the mode was checked.
+      mocks.origin = { originId: "gateway", mode: "hosted" };
+      const answer = pendingProbe();
+      await render();
+      const refresh = container.querySelector<HTMLButtonElement>('[data-testid="legacy-refresh"]');
+      await act(async () => refresh?.focus());
+      await act(async () => answer(status(true)));
+      await flush();
+      expect(body("history-body")?.getAttribute("data-arrived")).toBe("true");
+      expect(body("history-body")?.getAttribute("data-arrival")).toBe("");
     });
 
     it("moves nothing when the keyboard was elsewhere", async () => {

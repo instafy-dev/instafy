@@ -10,6 +10,7 @@ import {
   type ControllerConversationMessage,
   type ControllerConversationCreated,
   type ControllerConversationUpdated,
+  type ControllerOriginSummary,
 } from "../../sdk/instafy";
 import {
   fetchRuns,
@@ -36,8 +37,10 @@ import {
 } from "../../credits/creditsEvents";
 
 const { fetch: fetchRunsFromController, subscribe: subscribeToRunsFromController } = controllerClient.runs;
-const { fetchLocalPresence: fetchLocalWorkspacePresence, fetchSummary: fetchOriginSummary } =
-  controllerClient.workspace.origin;
+const {
+  fetchLocalPresenceResult: fetchLocalWorkspacePresenceResult,
+  fetchSummaryResult: fetchOriginSummaryResult,
+} = controllerClient.workspace.origin;
 
 interface Options {
   activeProjectId: string | null;
@@ -68,6 +71,8 @@ const ORIGIN_STATUS_EVENT_KINDS = new Set([
   "origin.registered",
   "origin.expired",
 ]);
+
+const ORIGIN_HYDRATION_INTERVAL_MS = 2_000;
 
 export function useRuntimeControllerSync({
   activeProjectId,
@@ -110,6 +115,7 @@ export function useRuntimeControllerSync({
     let controllerSyncTerminated = false;
     let unsubscribe: () => void = () => {};
     let lastOriginHydrationAt = 0;
+    let trailingOriginHydration: ReturnType<typeof setTimeout> | null = null;
     let runEventSequence = 0;
     let runReconciliationGeneration = 0;
     const latestRunEvents = new Map<
@@ -186,45 +192,59 @@ export function useRuntimeControllerSync({
     const projectId = resolvedProjectId as string;
 
     const hydrateWorkspaceOriginState = async () => {
-      const localWorkspacePresence = await fetchLocalWorkspacePresence({
+      const workspace = await fetchLocalWorkspacePresenceResult({
         projectId,
       });
       if (cancelled) {
         return;
       }
-      dispatch({
-        type: "setLocalWorkspace",
-        workspace: localWorkspacePresence,
-      });
 
-      try {
-        const originSummary = await fetchOriginSummary({
-          projectId,
-          protocol: "http",
-        });
-        if (!cancelled) {
-          const originPresence =
-            mapOriginSummaryToLocalWorkspacePresence(originSummary);
-          dispatch({
-            type: "applyOriginSummary",
-            summary: originSummary,
-            derivedPresence: originPresence,
-            projectId,
-          });
-        }
-      } catch (originError) {
+      const origin = await fetchOriginSummaryResult({
+        projectId,
+        protocol: "http",
+      }).catch((originError: unknown) => {
         if (import.meta.env.DEV) {
           console.warn("fetch origin summary failed", originError);
         }
-      }
-    };
-
-    const scheduleOriginHydration = () => {
-      const now = Date.now();
-      if (now - lastOriginHydrationAt < 2_000) {
+        return { ok: false } as const;
+      });
+      if (cancelled || controllerSyncTerminated) {
         return;
       }
-      lastOriginHydrationAt = now;
+      // A fetch that got no answer (a 5xx, a timeout, no session) says
+      // nothing about the space: keep what is shown until the next pass.
+      // Taken as "none", it would change the workspace owner and reset the
+      // Files panel.
+      if (!workspace.ok || !origin.ok) {
+        return;
+      }
+      // One action: a render between the workspace and the origin would see
+      // a different workspace owner and reset the Files panel.
+      dispatch({
+        type: "applyOriginHydration",
+        workspace: workspace.workspace,
+        summary: origin.summary,
+        derivedPresence: mapOriginSummaryToLocalWorkspacePresence(origin.summary),
+        projectId,
+      });
+    };
+
+    // Trailing throttle: a call inside the window runs once when it ends, so
+    // an origin that registers right after another hydration is not missed.
+    const scheduleOriginHydration = () => {
+      if (trailingOriginHydration !== null) {
+        return;
+      }
+      const waitMs =
+        lastOriginHydrationAt + ORIGIN_HYDRATION_INTERVAL_MS - Date.now();
+      if (waitMs > 0) {
+        trailingOriginHydration = setTimeout(() => {
+          trailingOriginHydration = null;
+          scheduleOriginHydration();
+        }, waitMs);
+        return;
+      }
+      lastOriginHydrationAt = Date.now();
       void hydrateWorkspaceOriginState();
     };
 
@@ -526,25 +546,30 @@ export function useRuntimeControllerSync({
             }
           }
           if (event.kind?.startsWith("origin.")) {
-            const originSummary = mapOriginSummaryFromPayload(
+            const eventSummary = mapOriginSummaryFromPayload(
               event.data ?? null,
             );
-            if (originSummary) {
-              const originPresence =
-                mapOriginSummaryToLocalWorkspacePresence(originSummary);
+            if (eventSummary) {
+              const originSummary: ControllerOriginSummary =
+                event.kind === "origin.expired"
+                  ? {
+                      ...eventSummary,
+                      presence: { ...eventSummary.presence, status: "offline" },
+                    }
+                  : eventSummary;
+              // A project can have several origins, such as a hosted
+              // runtime's own origin next to the gateway. The reducer takes
+              // presence only from the default one; which origin is the
+              // default is the controller's decision, read by hydration.
               dispatch({
-                type: "applyOriginSummary",
+                type: "applyOriginEvent",
                 summary: originSummary,
-                derivedPresence: originPresence,
-                projectId,
-              });
-            } else if (event.kind === "origin.expired") {
-              dispatch({
-                type: "applyOriginSummary",
-                summary: null,
-                derivedPresence: null,
+                derivedPresence:
+                  mapOriginSummaryToLocalWorkspacePresence(originSummary),
               });
             }
+            // Not on expiry: the controller skips offline origins, so an
+            // offline Desktop default would be replaced by the hosted gateway.
             if (
               event.kind === "origin.registered" ||
               event.kind === "origin.heartbeat"
@@ -758,6 +783,9 @@ export function useRuntimeControllerSync({
     return () => {
       cancelled = true;
       runReconciliationGeneration += 1;
+      if (trailingOriginHydration !== null) {
+        clearTimeout(trailingOriginHydration);
+      }
       unsubscribe();
     };
   }, [

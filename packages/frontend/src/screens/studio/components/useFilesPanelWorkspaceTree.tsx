@@ -14,6 +14,7 @@ import {
   applyOwnCommitToEntries,
   applyOwnCommitToListings,
   EMPTY_DIRECTORY_PLACEHOLDER,
+  foldersMissingOwnCommit,
   isVersionedFilesMode,
   LEGACY_FILES_VERSIONING,
   type FilesVersioning,
@@ -120,6 +121,17 @@ type RefreshFromWorkspaceCommit = (
   options?: { forceSync?: boolean; rev?: string | null },
 ) => Promise<void>;
 
+function withoutKeys<T>(record: Record<string, T>, keys: readonly string[]): Record<string, T> {
+  if (!keys.some((key) => key in record)) {
+    return record;
+  }
+  const next = { ...record };
+  for (const key of keys) {
+    delete next[key];
+  }
+  return next;
+}
+
 function clampExplorerMenuPosition(clientX: number, clientY: number) {
   return clampFloatingSurfacePositionToStudioViewport({
     clientX,
@@ -195,7 +207,7 @@ export function useFilesPanelWorkspaceTree({
   const directoryAttemptsRef = useRef<Record<string, number>>({});
   const directoryRequestsRef = useRef(new Map<string, object>());
   const previousRuntimeReadyRef = useRef(runtimeReady);
-  const previousWorkspaceBrowseReadyRef = useRef(false);
+  const loadDirectoryRef = useRef<LoadDirectory | null>(null);
   const pendingWorkspaceRefreshTimerRef = useRef<number | null>(null);
   const pendingWorkspaceRefreshProjectRef = useRef<string | null>(null);
   const pendingWorkspaceRefreshForceSyncRef = useRef(false);
@@ -217,7 +229,16 @@ export function useFilesPanelWorkspaceTree({
     directoryStatusRef.current = directoryStatus;
   }, [directoryStatus]);
 
+  // Synced before the scope reset below, which can close every folder.
   useEffect(() => {
+    expandedDirectoriesRef.current = expandedDirectories;
+  }, [expandedDirectories]);
+
+  // A new scope starts with no listings; the tree effects below list the root
+  // and every expanded folder again. Folders open in another space are
+  // closed first, so none of them is listed in this one.
+  useEffect(() => {
+    const projectChanged = lifetimeRef.current.scope.activeProjectId !== requestScope.activeProjectId;
     const lifetime = { active: true, scope: requestScope };
     lifetimeRef.current = lifetime;
     directoryEntriesRef.current = {};
@@ -228,12 +249,12 @@ export function useFilesPanelWorkspaceTree({
     directoryRequestsRef.current.clear();
     setDirectoryEntries({});
     setDirectoryStatus({});
+    if (projectChanged) {
+      expandedDirectoriesRef.current = new Set();
+      setExpandedDirectories((previous) => (previous.size > 0 ? new Set() : previous));
+    }
     return () => { lifetime.active = false; };
   }, [requestScope]);
-
-  useEffect(() => {
-    expandedDirectoriesRef.current = expandedDirectories;
-  }, [expandedDirectories]);
 
   // A commit this tab made from any Files panel (this one included) is shown
   // here as it is made: its event is ignored as own, so the folders are not
@@ -257,17 +278,28 @@ export function useFilesPanelWorkspaceTree({
         { revs: directoryRevsRef.current, keepFolders: keepFoldersRef.current },
         commit,
       );
-      directoryRevsRef.current = applied.revs;
+      // A folder the commit changed but could not update (its listing was
+      // cleared by a scope change, or is at another commit) is listed at the
+      // commit while it is shown, and otherwise forgotten so opening it lists it.
+      const expanded = expandedDirectoriesRef.current;
+      const missing = foldersMissingOwnCommit(commit, applied.folders, normalizedRootPath);
+      const shown = missing.filter((folder) => folder === normalizedRootPath || expanded.has(folder));
+      const hidden = missing.filter((folder) => !shown.includes(folder));
+      directoryRevsRef.current = withoutKeys(applied.revs, hidden);
       keepFoldersRef.current = applied.keepFolders;
-      directoryEntriesRef.current = applyOwnCommitToEntries(
-        directoryEntriesRef.current,
-        applied.folders,
-        commit,
-        sortEntries,
+      hidden.forEach((folder) => keepFoldersRef.current.delete(folder));
+      directoryEntriesRef.current = withoutKeys(
+        applyOwnCommitToEntries(directoryEntriesRef.current, applied.folders, commit, sortEntries),
+        hidden,
       );
-      setDirectoryEntries((previous) => applyOwnCommitToEntries(previous, applied.folders, commit, sortEntries));
+      setDirectoryEntries((previous) =>
+        withoutKeys(applyOwnCommitToEntries(previous, applied.folders, commit, sortEntries), hidden));
+      // Read through a ref: a loadDirectory from an earlier scope lists nothing.
+      for (const folder of shown) {
+        void loadDirectoryRef.current?.(folder, { force: true, rev: commit.rev });
+      }
     });
-  }, [ownRevisionsForCommits, sortEntries]);
+  }, [normalizedRootPath, ownRevisionsForCommits, sortEntries]);
 
   useEffect(() => {
     if (!explorerMenu) {
@@ -442,15 +474,82 @@ export function useFilesPanelWorkspaceTree({
     [activeProjectId, effectiveRuntimeId, normalizePath, onDirectoryEntriesLoaded, pinnedOriginId, requestScope, sortEntries,
       versioned, workspaceBrowseReady],
   );
+  loadDirectoryRef.current = loadDirectory;
 
+  // List the root and every expanded folder again (only the root with
+  // `rootOnly`); the viewer is left alone. Versioned modes read them all at
+  // one commit: `rev`, or whatever the root listing was served from. Legacy
+  // mode lists them together, and only the root waits on a runtime sync
+  // unless `syncMode` is "blocking".
+  const reloadTree = useCallback(
+    async (options?: { rev?: string | null; syncMode?: "background" | "blocking"; rootOnly?: boolean }) => {
+      const pathsToRefresh = new Set<string>([normalizedRootPath]);
+      if (!options?.rootOnly) {
+        expandedDirectoriesRef.current.forEach((path) => {
+          if (path) {
+            pathsToRefresh.add(path);
+          }
+        });
+      }
+
+      let servedRev: string | null = null;
+      // The listings this reload read. React shows them on its next render,
+      // so the explorer's state still holds the previous ones here.
+      const reloaded: DirectoryEntries = {};
+      if (versioned) {
+        const reload = (path: string, rev: string | null) =>
+          loadDirectory(path, { force: true, ...(rev ? { rev } : {}) })
+            .then((entries) => {
+              if (entries) {
+                reloaded[normalizePath(path)] = entries;
+              }
+            })
+            .catch((error) => {
+              console.warn("[files-panel] failed to refresh directory", path, error);
+            });
+        let rev = options?.rev?.trim() || null;
+        const others = Array.from(pathsToRefresh).filter((path) => path !== normalizedRootPath);
+        if (rev) {
+          await Promise.all(Array.from(pathsToRefresh).map((path) => reload(path, rev)));
+        } else {
+          await reload(normalizedRootPath, null);
+          rev = directoryRevsRef.current[normalizedRootPath] ?? null;
+          await Promise.all(others.map((path) => reload(path, rev)));
+        }
+        servedRev = rev;
+      } else {
+        await Promise.all(
+          Array.from(pathsToRefresh).map((path) =>
+            loadDirectory(path, {
+              force: true,
+              syncMode: path === normalizedRootPath || options?.syncMode === "blocking"
+                ? options?.syncMode
+                : "background",
+            }).catch((error) => {
+              console.warn("[files-panel] failed to refresh directory", path, error);
+            }),
+          ),
+        );
+      }
+      return { reloaded, rev: servedRev };
+    },
+    [loadDirectory, normalizePath, normalizedRootPath, versioned],
+  );
+
+  // List the whole tree when a scope change cleared it (loadDirectory changes
+  // with the scope) and when the workspace becomes browse-ready. One effect
+  // covers both, so no folder is listed twice. While the workspace is not
+  // browse-ready only the root is listed: the open folders keep their
+  // listings, or wait for the ready edge, rather than each running its
+  // retries against a workspace that can't answer.
   useEffect(() => {
     if (!activeProjectId || !runtimeControllerEnabled) {
       return;
     }
-    void loadDirectory(normalizedRootPath, { force: true }).catch((error) => {
+    void reloadTree({ rootOnly: !workspaceBrowseReady }).catch((error) => {
       console.warn("[files-panel] failed to load directory:", error);
     });
-  }, [activeProjectId, loadDirectory, normalizedRootPath]);
+  }, [activeProjectId, reloadTree, workspaceBrowseReady]);
 
   useEffect(() => {
     const wasRuntimeReady = previousRuntimeReadyRef.current;
@@ -461,30 +560,10 @@ export function useFilesPanelWorkspaceTree({
     if (!runtimeReady || wasRuntimeReady) {
       return;
     }
-    void loadDirectory(normalizedRootPath, {
-      force: true,
-      syncMode: "blocking",
-    }).catch((error) => {
-      console.warn("[files-panel] failed to reload root directory after runtime recovery:", error);
+    void reloadTree({ syncMode: "blocking" }).catch((error) => {
+      console.warn("[files-panel] failed to reload directories after runtime recovery:", error);
     });
-  }, [activeProjectId, loadDirectory, normalizedRootPath, runtimeReady]);
-
-  useEffect(() => {
-    const wasWorkspaceBrowseReady = previousWorkspaceBrowseReadyRef.current;
-    previousWorkspaceBrowseReadyRef.current = workspaceBrowseReady;
-    if (!activeProjectId || !runtimeControllerEnabled) {
-      return;
-    }
-    if (!workspaceBrowseReady || wasWorkspaceBrowseReady) {
-      return;
-    }
-    void loadDirectory(normalizedRootPath, {
-      force: true,
-      syncMode: "blocking",
-    }).catch((error) => {
-      console.warn("[files-panel] failed to reload root directory after origin recovery:", error);
-    });
-  }, [activeProjectId, loadDirectory, normalizedRootPath, workspaceBrowseReady]);
+  }, [activeProjectId, reloadTree, runtimeReady]);
 
   useEffect(() => {
     const targetPath = normalizePath(activeFilePath ?? "");
@@ -689,52 +768,12 @@ export function useFilesPanelWorkspaceTree({
         return;
       }
 
-      const pathsToRefresh = new Set<string>([normalizedRootPath]);
-      expandedDirectoriesRef.current.forEach((path) => {
-        if (path) {
-          pathsToRefresh.add(path);
-        }
+      // Every listing is read at one commit: the event's, or (for a manual
+      // refresh) whatever the root listing was served from.
+      const { reloaded, rev: viewerRev } = await reloadTree({
+        rev: options?.rev,
+        syncMode: options?.forceSync ? "blocking" : undefined,
       });
-
-      let viewerRev: string | null = null;
-      // The listings this refresh read. React shows them on its next render,
-      // so the explorer's state still holds the previous ones here.
-      const reloaded: DirectoryEntries = {};
-      if (versioned) {
-        // Every listing is read at one commit: the event's, or (for a manual
-        // refresh) whatever the root listing was served from.
-        const reload = (path: string, rev: string | null) =>
-          loadDirectory(path, { force: true, ...(rev ? { rev } : {}) })
-            .then((entries) => {
-              if (entries) {
-                reloaded[normalizePath(path)] = entries;
-              }
-            })
-            .catch((error) => {
-              console.warn("[files-panel] failed to refresh directory", path, error);
-            });
-        let rev = options?.rev?.trim() || null;
-        const others = Array.from(pathsToRefresh).filter((path) => path !== normalizedRootPath);
-        if (rev) {
-          await Promise.all(Array.from(pathsToRefresh).map((path) => reload(path, rev)));
-        } else {
-          await reload(normalizedRootPath, null);
-          rev = directoryRevsRef.current[normalizedRootPath] ?? null;
-          await Promise.all(others.map((path) => reload(path, rev)));
-        }
-        viewerRev = rev;
-      } else {
-        await Promise.all(
-          Array.from(pathsToRefresh).map((path) =>
-            loadDirectory(path, {
-              force: true,
-              syncMode: options?.forceSync ? "blocking" : undefined,
-            }).catch((error) => {
-              console.warn("[files-panel] failed to refresh directory", path, error);
-            }),
-          ),
-        );
-      }
 
       const currentViewer = viewerStateRef.current;
       if (!currentViewer?.entry) {
@@ -760,10 +799,9 @@ export function useFilesPanelWorkspaceTree({
     [
       activeProjectId,
       getParentPath,
-      loadDirectory,
       normalizePath,
-      normalizedRootPath,
       refreshViewerEntryFromWorkspace,
+      reloadTree,
       versioned,
       viewerStateRef,
     ],

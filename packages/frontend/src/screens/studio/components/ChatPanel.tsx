@@ -100,6 +100,8 @@ import {
 import { useAuth } from "../../../providers/AuthProvider";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { useWorkspaceUi } from "../../../workspace/useWorkspace";
+import { useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
+import { useCodeUpdater } from "../../../code/useCode";
 import { useWorkspaceControls } from "../workspaceControls";
 import { hasSupabaseConfig, supabase } from "../../../lib/supabaseClient";
 import { chatAttachmentsUnavailableReason as resolveChatAttachmentsUnavailableReason } from "../../../lib/chatAttachments";
@@ -251,8 +253,7 @@ import { useChatVoiceComposerController } from "./useChatVoiceComposerController
 import { useChatGettingStartedState } from "./useChatGettingStartedState";
 import { mergeMentionableMembers } from "./mentionableMembers";
 import { sendWorkspaceFileStaleMerge } from "./workspaceFileStaleMerge";
-import { prepareStaleWorkspaceFileReload } from "./workspaceFileStaleReload";
-import { SAVE_COPY } from "./versioningCopy";
+import { reloadStaleWorkspaceFile } from "./workspaceFileStaleReload";
 import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
@@ -1178,6 +1179,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   );
   const [workspaceFileStaleBusy, setWorkspaceFileStaleBusy] = useState<null | "merge" | "reload">(null);
   const [workspaceFileStaleError, setWorkspaceFileStaleError] = useState<string | null>(null);
+  // Reload latest reads the way the Files panel does and writes its buffer.
+  const updateWorkspace = useCodeUpdater();
+  const { mode: filesVersioningMode, originId: filesVersioningOriginId } = useActiveWorkspaceVersioning();
   const [imageLightbox, setImageLightbox] = useState<ImageLightboxState | null>(null);
   const [sendingAttachment, setSendingAttachment] = useState(false);
 
@@ -1397,31 +1401,30 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (!notice || typeof window === "undefined") {
       return;
     }
-    if (notice.variant === "desktop") {
-      // A Desktop save left the user's version in the folder: discard that
-      // copy first, so the reload reads the space's version.
-      setWorkspaceFileStaleBusy("reload");
-      setWorkspaceFileStaleError(null);
-      const prepared = await prepareStaleWorkspaceFileReload(notice, notice.projectId ?? activeProjectId ?? null);
-      setWorkspaceFileStaleBusy(null);
-      if (!prepared) {
-        setWorkspaceFileStaleError(SAVE_COPY.desktopReloadFailed);
-        return;
-      }
-    }
-
-    const detail = {
+    setWorkspaceFileStaleBusy("reload");
+    setWorkspaceFileStaleError(null);
+    const result = await reloadStaleWorkspaceFile({
+      notice,
       projectId: notice.projectId ?? activeProjectId ?? null,
-      path: notice.path,
-    };
-
-    const runtimeWindow = window as typeof window & {
-      __INSTAFY_PENDING_OPEN_WORKSPACE_FILE__?: unknown;
-    };
-    runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__ = detail;
-    window.dispatchEvent(new CustomEvent("instafy:open-workspace-file", { detail }));
-    handleWorkspaceFileStaleDismiss();
-  }, [activeProjectId, handleWorkspaceFileStaleDismiss, workspaceFileStaleNotice]);
+      versioning: { mode: filesVersioningMode, originId: filesVersioningOriginId },
+      runtimeId: effectiveRuntimeId ?? null,
+      updateWorkspace,
+    });
+    setWorkspaceFileStaleBusy(null);
+    if (result.status === "reloaded") {
+      handleWorkspaceFileStaleDismiss();
+    } else if (result.status === "failed") {
+      setWorkspaceFileStaleError(result.error);
+    }
+  }, [
+    activeProjectId,
+    effectiveRuntimeId,
+    filesVersioningMode,
+    filesVersioningOriginId,
+    handleWorkspaceFileStaleDismiss,
+    updateWorkspace,
+    workspaceFileStaleNotice,
+  ]);
 
   const handleWorkspaceFileStaleMerge = useCallback(async () => {
     if (!ensureProjectWriteAccess()) {

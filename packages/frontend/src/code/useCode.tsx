@@ -139,6 +139,9 @@ function reducer(state: CodeHistoryState, action: CodeAction): CodeHistoryState 
 }
 
 const CodeContext = createContext<CodeContextValue | null>(null);
+// `updateWorkspace` never changes, so a reader of this context alone does not
+// render again on every edit.
+const CodeUpdaterContext = createContext<CodeContextValue["updateWorkspace"] | null>(null);
 
 export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) {
   const storeCode = useWorkspaceStore((store) => store.state.code);
@@ -333,7 +336,11 @@ export function CodeProvider({ children, initialWorkspace }: CodeProviderProps) 
     ]
   );
 
-  return <CodeContext.Provider value={value}>{children}</CodeContext.Provider>;
+  return (
+    <CodeContext.Provider value={value}>
+      <CodeUpdaterContext.Provider value={updateWorkspace}>{children}</CodeUpdaterContext.Provider>
+    </CodeContext.Provider>
+  );
 }
 
 export function useCode(): CodeContextValue {
@@ -342,4 +349,16 @@ export function useCode(): CodeContextValue {
     throw new Error("useCode must be used within a CodeProvider");
   }
   return context;
+}
+
+/**
+ * Only `updateWorkspace`, for a component that writes buffers without showing
+ * them (the chat's Reload latest): it does not render again on every edit.
+ */
+export function useCodeUpdater(): CodeContextValue["updateWorkspace"] {
+  const updateWorkspace = useContext(CodeUpdaterContext);
+  if (!updateWorkspace) {
+    throw new Error("useCodeUpdater must be used within a CodeProvider");
+  }
+  return updateWorkspace;
 }

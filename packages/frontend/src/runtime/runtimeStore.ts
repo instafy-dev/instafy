@@ -78,6 +78,27 @@ export type RuntimeAction =
       /** The project the summary belongs to. */
       projectId?: string | null;
     }
+  | {
+      /**
+       * An origin.* stream event. Only the current default origin's presence
+       * is taken from it; events from any other origin of the project leave
+       * the state unchanged.
+       */
+      type: "applyOriginEvent";
+      summary: ControllerOriginSummary;
+      derivedPresence: LocalWorkspacePresence | null;
+    }
+  | {
+      /**
+       * One hydration pass: the local workspace and the default origin,
+       * applied together so no render sees one without the other.
+       */
+      type: "applyOriginHydration";
+      workspace: LocalWorkspacePresence | null;
+      summary: ControllerOriginSummary | null;
+      derivedPresence: LocalWorkspacePresence | null;
+      projectId: string;
+    }
   | { type: "setSessionRuntime"; runtimeId: string | null }
   | { type: "upsertAgentToken"; runtimeId: string; snapshot: AgentTokenSnapshot }
   | { type: "upsertTunnelGrant"; grant: ControllerTunnelGrant };
@@ -483,6 +504,37 @@ export function runtimeReducer(
         desktopOriginProjectId: nextOrigin ? (action.projectId ?? null) : null,
         localWorkspace: nextWorkspace,
       };
+    }
+    case "applyOriginEvent": {
+      const current = state.desktopOrigin;
+      if (!current || current.originId !== action.summary.originId) {
+        return state;
+      }
+      // Event payloads carry no runtimeId, so keep the resolved summary and
+      // take only presence from the event.
+      return {
+        ...state,
+        desktopOrigin: {
+          ...current,
+          presence: action.summary.presence ?? current.presence,
+        },
+        localWorkspace: mergeWorkspacePresenceWithOrigin(
+          state.localWorkspace,
+          action.derivedPresence,
+        ),
+      };
+    }
+    case "applyOriginHydration": {
+      const withWorkspace = runtimeReducer(state, {
+        type: "setLocalWorkspace",
+        workspace: action.workspace,
+      });
+      return runtimeReducer(withWorkspace, {
+        type: "applyOriginSummary",
+        summary: action.summary,
+        derivedPresence: action.derivedPresence,
+        projectId: action.projectId,
+      });
     }
     case "setRuntimeStatuses": {
       const nextAgentTokens = { ...state.agentTokens };
