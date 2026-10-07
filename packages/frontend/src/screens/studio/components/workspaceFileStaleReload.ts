@@ -37,9 +37,11 @@ type UpdateWorkspace = (
 
 /**
  * What became of a Reload latest read. `superseded`: another space became
- * active while it was on the wire.
+ * active while it was on the wire. `notFound` and `unreadable` (not text, or
+ * too large) are the space's answer and asking again changes nothing;
+ * `failed` may pass.
  */
-export type StaleBufferLoad = "loaded" | "superseded" | "failed";
+export type StaleBufferLoad = "loaded" | "superseded" | "notFound" | "unreadable" | "failed";
 
 /**
  * "Reload latest" puts the space's version into the shared Files buffer
@@ -76,9 +78,15 @@ export async function loadLatestIntoStaleBuffer({
   if (useWorkspaceStore.getState().activeProjectId !== projectId) {
     return "superseded";
   }
-  const file = read?.ok ? read.file : null;
-  if (!file?.isText) {
-    return "failed";
+  if (!read?.ok) {
+    if (read?.notFound) {
+      return "notFound";
+    }
+    return read?.error.code === "too_large" ? "unreadable" : "failed";
+  }
+  const file = read.file;
+  if (!file.isText) {
+    return "unreadable";
   }
   const text = file.contentText ?? "";
   const readAt = Date.now();
@@ -118,6 +126,12 @@ export async function loadLatestIntoStaleBuffer({
   return "loaded";
 }
 
+const RELOAD_LATEST_ERRORS: Record<Exclude<StaleBufferLoad, "loaded" | "superseded">, string> = {
+  notFound: SAVE_COPY.reloadLatestNotFound,
+  unreadable: SAVE_COPY.reloadLatestUnreadable,
+  failed: SAVE_COPY.reloadLatestFailed,
+};
+
 export type StaleReloadResult =
   | { status: "reloaded" }
   /** Another space is active: its card is hidden, and this one stays for later. */
@@ -155,7 +169,7 @@ export async function reloadStaleWorkspaceFile({
     return { status: "superseded" };
   }
   if (loaded !== "loaded") {
-    return { status: "failed", error: SAVE_COPY.reloadLatestFailed };
+    return { status: "failed", error: RELOAD_LATEST_ERRORS[loaded] };
   }
   // A Files viewer that is showing opens the file and reads it as before.
   // No pending open is left for a viewer mounted later: it would reload

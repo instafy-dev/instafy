@@ -121,7 +121,7 @@ describe("loadLatestIntoStaleBuffer", () => {
     });
   });
 
-  it("leaves the buffer alone when the version can't be read as text", async () => {
+  it("leaves the buffer alone when the version can't be read as text, and says why", async () => {
     const store = workspaceWith({ id: "check.md", path: "check.md", label: "check.md", generated: "base", modified: "mine" });
     const attempt = () =>
       loadLatestIntoStaleBuffer({
@@ -138,9 +138,11 @@ describe("loadLatestIntoStaleBuffer", () => {
     vi.mocked(controllerClient.workspace.files.readAt).mockRejectedValueOnce(new Error("offline"));
     expect(await attempt()).toBe("failed");
     vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(readFailure("not_found", true) as never);
-    expect(await attempt()).toBe("failed");
+    expect(await attempt()).toBe("notFound");
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(readFailure("too_large") as never);
+    expect(await attempt()).toBe("unreadable");
     vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(served("", { isText: false }) as never);
-    expect(await attempt()).toBe("failed");
+    expect(await attempt()).toBe("unreadable");
     expect(store.update).not.toHaveBeenCalled();
     expect(store.current().files[0]?.modified).toBe("mine");
   });
@@ -179,17 +181,23 @@ describe("reloadStaleWorkspaceFile", () => {
     expect(pending.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__).toBeUndefined();
   });
 
-  it("keeps the card and the edits when the read fails", async () => {
+  it("keeps the card and the edits when the read fails, saying to try again only when that can help", async () => {
     const store = workspaceWith({ id: "check.md", path: "check.md", label: "check.md", generated: "base", modified: "mine" });
     vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(readFailure("timeout") as never);
     expect(await reload(store)).toEqual({ status: "failed", error: SAVE_COPY.reloadLatestFailed });
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(readFailure("not_found", true) as never);
+    expect(await reload(store)).toEqual({ status: "failed", error: SAVE_COPY.reloadLatestNotFound });
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValueOnce(served("", { isText: false }) as never);
+    expect(await reload(store)).toEqual({ status: "failed", error: SAVE_COPY.reloadLatestUnreadable });
+    expect(SAVE_COPY.reloadLatestNotFound).not.toMatch(/try again/i);
+    expect(SAVE_COPY.reloadLatestUnreadable).not.toMatch(/try again/i);
 
     vi.mocked(controllerClient.workspace.git.revertPaths).mockResolvedValueOnce({ ok: false, conflict: false } as never);
     expect(await reload(store, { ...stale, variant: "desktop" })).toEqual({
       status: "failed",
       error: SAVE_COPY.desktopReloadFailed,
     });
-    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledTimes(1);
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledTimes(3);
 
     expect(store.update).not.toHaveBeenCalled();
     expect(store.current().files[0]?.modified).toBe("mine");
