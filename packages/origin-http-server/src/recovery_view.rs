@@ -2155,6 +2155,9 @@ mod tests {
             "refs/instafy/recovery/not-a-uuid/name",
             "refs/instafy/local-recovery/name",
             "refs/instafy/other/name",
+            // The retired gateway salvage namespace is not unsaved work.
+            "refs/instafy/salvage",
+            "refs/instafy/salvage/gateway/node-1-0123abcd",
         ]
         .map(str::to_string)
         .to_vec();
@@ -2882,6 +2885,11 @@ mod tests {
                 conflict.as_str(),
             ),
             ("refs/instafy/other/x", conflict.as_str()),
+            // A ref of the retired gateway salvage is never listed.
+            (
+                "refs/instafy/salvage/gateway/node-1-0123abcd",
+                conflict.as_str(),
+            ),
         ] {
             remote.update_ref(reference, rev, None, "test").unwrap();
         }
@@ -2889,6 +2897,12 @@ mod tests {
         let mirror = bare(&root, "mirror.git");
         let git = WorkspaceGit::bare(&mirror, None);
         let url = canonical.to_str().unwrap();
+        // Only the recovery namespace is asked for.
+        let names = remote_names(&git, url).unwrap();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names
+            .iter()
+            .all(|(name, _)| name.starts_with(&format!("{RECOVERY_REF_ROOT}/"))));
         let mut listed = list_remote_refs(&git, url).unwrap();
         listed.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         assert_eq!(

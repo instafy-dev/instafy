@@ -2931,6 +2931,15 @@ async fn reads_at_a_ref_or_rev_serve_the_commit_not_the_folder() {
             400,
             "invalid_ref",
         ),
+        // The retired gateway salvage namespace is not unsaved work.
+        (
+            vec![(
+                "ref",
+                "refs/instafy/salvage/gateway/node-1-0123abcd".to_string(),
+            )],
+            400,
+            "invalid_ref",
+        ),
         (
             vec![("ref", unsaved.clone()), ("rev", seed.clone())],
             400,

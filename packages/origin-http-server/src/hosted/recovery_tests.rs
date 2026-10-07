@@ -401,6 +401,37 @@ async fn a_dismiss_removes_only_what_was_listed() {
     assert_eq!(sc.canonical_main(), main, "main is never touched");
 }
 
+/// A ref of the retired gateway salvage namespace is not unsaved work: it is
+/// not listed, read, restored or dismissed, and canonical keeps it as is.
+#[tokio::test(flavor = "multi_thread")]
+async fn salvage_refs_are_neither_listed_nor_served() {
+    let sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"r\n"))], "seed");
+    let work = sc.side_commit(&[("README.md", b"kept\n")], "kept");
+    let reference = recovery_ref("unsaved-12");
+    sc.push_ref(&work, &reference);
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    sc.push_ref(&work, salvage);
+    let main = sc.canonical_main();
+    let served = serve(&sc).await;
+
+    let entries = listed(&served).await;
+    assert!(entry(&entries, &reference).is_some());
+    assert!(entry(&entries, salvage).is_none(), "{entries:?}");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+
+    let answer = get(&served, &format!("/files/README.md?ref={salvage}")).await;
+    assert_eq!(refused(&answer), (400, "invalid_ref".to_string()));
+    assert_eq!(answer.rev(), None);
+    let answer = restore(&served, json!({ "ref": salvage, "rev": work })).await;
+    assert_eq!(refused(&answer), (400, "invalid_ref".to_string()));
+    let answer = dismiss(&served, json!({ "ref": salvage, "rev": work })).await;
+    assert_eq!(refused(&answer), (400, "invalid_ref".to_string()));
+
+    assert_eq!(canonical_ref(&sc, salvage).as_deref(), Some(work.as_str()));
+    assert_eq!(sc.canonical_main(), main, "main is never touched");
+}
+
 /// With a `baseRev` other than `main`, a restore checks that nothing it
 /// changes moved since (409 `head_moved`, as for a save); moves elsewhere
 /// do not matter, and the merge keeps both sides' lines.
