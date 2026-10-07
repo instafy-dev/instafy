@@ -7,6 +7,8 @@ import {
   DEFAULT_SERVICE_RUNTIME_EMAIL,
   deleteEnvFileValue,
   ensureServiceRuntimeUserId,
+  recordedProviderCheckoutRoot,
+  recordProviderCheckoutRoot,
   relocateRuntimeCheckouts,
   resolveRuntimeCheckoutRoot,
   setEnvFileValue,
@@ -347,4 +349,57 @@ test("relocateRuntimeCheckouts moves nothing from under a provider that is alrea
   assert.equal(fs.readFileSync(path.join(to, busy, "draft.md"), "utf8"), "unsaved work\n");
   assert.ok(fs.existsSync(path.join(to, ".instafy-evicted", `${gone}-1`)));
   assert.deepEqual(fs.readdirSync(from), []);
+});
+
+test("relocateRuntimeCheckouts keeps the gateway off its folder under a reused provider whose folder is unknown", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-checkouts-test-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const from = path.join(dir, "origin-gateway-workspaces");
+  const to = path.join(dir, "runtime-checkouts");
+  const log = { log: () => {}, warn: () => {} };
+  const stamps = path.join(from, ".instafy-checkout-stamps");
+
+  // A provider started before runtime checkouts had a folder of their own
+  // has made none yet, or this run cannot tell which folder it uses: the
+  // gateway's folder is marked anyway, before the provider clones into it.
+  for (const providerRoot of [undefined, null, from]) {
+    fs.rmSync(from, { recursive: true, force: true });
+    fs.mkdirSync(from, { recursive: true });
+    const report = relocateRuntimeCheckouts({ from, to, providerRunning: true, providerRoot, log });
+    assert.deepEqual(report, { moved: [], kept: [] });
+    assert.deepEqual(fs.readdirSync(stamps), [], String(providerRoot));
+  }
+  // Also when the folder holds only what an earlier gateway parked, or
+  // does not exist yet.
+  fs.rmSync(from, { recursive: true, force: true });
+  fs.mkdirSync(path.join(from, ".legacy"), { recursive: true });
+  relocateRuntimeCheckouts({ from, to, providerRunning: true, log });
+  assert.deepEqual(fs.readdirSync(from).sort(), [".instafy-checkout-stamps", ".legacy"]);
+  fs.rmSync(from, { recursive: true, force: true });
+  relocateRuntimeCheckouts({ from, to, providerRunning: true, log });
+  assert.deepEqual(fs.readdirSync(from), [".instafy-checkout-stamps"]);
+
+  // The next start, with the provider stopped, takes the empty stamp
+  // folder away again.
+  relocateRuntimeCheckouts({ from, to, inUse: () => false, log });
+  assert.deepEqual(fs.readdirSync(from), []);
+
+  // A provider this script launched on its own folder leaves the gateway's
+  // folder alone.
+  relocateRuntimeCheckouts({ from, to, providerRunning: true, providerRoot: to, log });
+  assert.deepEqual(fs.readdirSync(from), []);
+});
+
+test("a provider's checkout folder is known only for the process it was recorded for", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-provider-root-test-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, ".provider.checkout-root");
+  const root = path.join(dir, "runtime-checkouts");
+
+  assert.equal(recordedProviderCheckoutRoot(file, 4242), null);
+  recordProviderCheckoutRoot(file, 4242, root);
+  assert.equal(recordedProviderCheckoutRoot(file, 4242), root);
+  assert.equal(recordedProviderCheckoutRoot(file, 4243), null);
+  fs.writeFileSync(file, "not json");
+  assert.equal(recordedProviderCheckoutRoot(file, 4242), null);
 });

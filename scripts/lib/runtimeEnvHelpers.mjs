@@ -250,6 +250,71 @@ const PROVIDER_FOLDERS = [STAMP_FOLDER, ".instafy-evicted"];
 const SPACE_FOLDER = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
+ * Make the stamp folder in the gateway's folder `folder` (and `folder`
+ * itself when there is none yet), so the origin gateway refuses to start on
+ * it instead of moving the runtime checkouts there into its `.legacy/`
+ * folder. `why` says why it is kept, after "Keeping <stamps> ". Whether the
+ * stamp folder exists now.
+ */
+export function stampGatewayFolder(folder, { log = console, why }) {
+  const stamps = path.join(folder, STAMP_FOLDER);
+  try {
+    try {
+      fs.lstatSync(stamps);
+    } catch {
+      fs.mkdirSync(stamps, { recursive: true });
+    }
+    log.warn(
+      `[runtime-dev] Keeping ${stamps} ${why}. The origin gateway refuses to start on that folder ` +
+        "until it is gone, instead of moving runtime checkouts there into its .legacy/ folder."
+    );
+    return true;
+  } catch (error) {
+    log.warn(
+      `[runtime-dev] Unable to create ${stamps} (${error.message}); the origin gateway may move ` +
+        `runtime checkouts in ${folder} into its .legacy/ folder when it starts.`
+    );
+    return false;
+  }
+}
+
+function runningProviderReason(from, to) {
+  return (
+    `because the runtime provider is already running and may keep runtime checkouts in ${from}. ` +
+    `Stop the provider and start again so new checkouts go to ${to}`
+  );
+}
+
+/**
+ * Record, in `file` (next to the provider's pid file), that the provider
+ * this script launched as process `pid` keeps its runtimes' checkouts in
+ * `root`.
+ */
+export function recordProviderCheckoutRoot(file, pid, root) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, `${JSON.stringify({ pid, root: path.resolve(root) })}\n`);
+  } catch {
+    // Without a record, a later run treats that provider's folder as unknown.
+  }
+}
+
+/**
+ * The folder the provider running as process `pid` keeps its checkouts in,
+ * as `recordProviderCheckoutRoot` recorded it when this script launched
+ * that process; `null` when no record names that process (a provider an
+ * older script, another run or a person started).
+ */
+export function recordedProviderCheckoutRoot(file, pid) {
+  try {
+    const record = JSON.parse(fs.readFileSync(file, "utf8"));
+    return record?.pid === pid && typeof record.root === "string" && record.root ? record.root : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The folder the local runtime provider keeps its runtimes' checkouts in
  * (`DOCKER_REPO_HOST`, one `<space id>` folder each). With git-canonical on,
  * that is a folder of its own, never the gateway's (`tmp/origin-gateway-
@@ -281,7 +346,12 @@ export function resolveRuntimeCheckoutRoot({ env = process.env, repoRoot, sandbo
  * and it may be one started before its checkouts had a folder of their own:
  * it keeps them in `from`, makes new ones there and holds any of them open.
  * Then nothing moves either; every space stays, with a warning to stop the
- * provider and start again, so that start moves them.
+ * provider and start again, so that start moves them. `providerRoot` is
+ * the folder that provider keeps its checkouts in, when this script
+ * launched it and recorded it (`recordedProviderCheckoutRoot`); unless it
+ * is known to be another folder than `from`, the provider may clone a space
+ * into `from` at any moment before the gateway starts, so the stamp folder
+ * is made there even while `from` holds no checkout yet.
  *
  * While a checkout stays in `from`, its stamp stays too, and the provider's
  * folders are never removed from `from` (the stamp folder is made when
@@ -294,18 +364,24 @@ export function relocateRuntimeCheckouts({
   to,
   inUse = () => false,
   providerRunning = false,
+  providerRoot = null,
   log = console,
 }) {
   const report = { moved: [], kept: [] };
   if (path.resolve(from) === path.resolve(to)) {
     return report;
   }
+  // A running provider that may keep its checkouts in `from`.
+  const providerMayUseFrom =
+    providerRunning && (providerRoot == null || path.resolve(providerRoot) === path.resolve(from));
   let names;
   try {
     names = fs.readdirSync(from).sort();
   } catch (error) {
     if (error?.code !== "ENOENT") {
       log.warn(`[runtime-dev] Unable to list ${from}: ${error.message}`);
+    } else if (providerMayUseFrom) {
+      stampGatewayFolder(from, { log, why: runningProviderReason(from, to) });
     }
     return report;
   }
@@ -399,23 +475,9 @@ export function relocateRuntimeCheckouts({
     }
   }
   if (stayed.length > 0) {
-    const stamps = path.join(from, STAMP_FOLDER);
-    try {
-      try {
-        fs.lstatSync(stamps);
-      } catch {
-        fs.mkdirSync(stamps);
-      }
-      log.warn(
-        `[runtime-dev] Keeping ${stamps} while runtime checkouts stay in ${from}: the origin gateway ` +
-          "refuses to start on that folder until they are moved, instead of moving them into its .legacy/ folder."
-      );
-    } catch (error) {
-      log.warn(
-        `[runtime-dev] Unable to create ${stamps} (${error.message}); the origin gateway may move the ` +
-          `runtime checkouts left in ${from} into its .legacy/ folder when it starts.`
-      );
-    }
+    stampGatewayFolder(from, { log, why: `while runtime checkouts stay in ${from}` });
+  } else if (providerMayUseFrom) {
+    stampGatewayFolder(from, { log, why: runningProviderReason(from, to) });
   }
   if (fs.existsSync(path.join(from, ".legacy"))) {
     log.warn(

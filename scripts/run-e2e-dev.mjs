@@ -20,9 +20,12 @@ import {
   deleteEnvFileValue,
   DEFAULT_SUPABASE_PROJECT_URL,
   ensureServiceRuntimeUserId,
+  recordedProviderCheckoutRoot,
+  recordProviderCheckoutRoot,
   relocateRuntimeCheckouts,
   resolveRuntimeCheckoutRoot,
   setEnvFileValue,
+  stampGatewayFolder,
 } from "./lib/runtimeEnvHelpers.mjs";
 import {
   isIsolatedByocProxyAuthPath,
@@ -116,6 +119,8 @@ function hasConfiguredPrebuiltBinary(envKey, env = process.env) {
 // Provider service (external allocator) bits
 const providerManifest = path.join(repoRoot, "packages", "runtime-provider-service", "Cargo.toml");
 const providerPidFile = path.join(repoRoot, "tmp", ".provider.pid");
+// The checkout folder of the provider this script launched, by its pid.
+const providerCheckoutRootFile = path.join(repoRoot, "tmp", ".provider.checkout-root");
 const providerLogPath = path.join(logsDir, "provider.log");
 const providerPort = Number(process.env.PROVIDER_PORT || 9090);
 const providerBaseUrl = hasConfiguredPrebuiltBinary(
@@ -248,9 +253,15 @@ function ensureGitCanonicalBindRoots() {
  * With `providerRunning` (a provider this run reuses, which may be one that
  * keeps its checkouts in the gateway's folder), nothing moves: every
  * checkout there stays and keeps the gateway from starting on it, with a
- * warning to stop the provider so the next start moves them.
+ * warning to stop the provider so the next start moves them. Unless
+ * `providerRoot` (the folder this script recorded when it launched that
+ * provider) is another folder, the gateway's folder is kept from the
+ * gateway even before the provider makes a checkout there.
  */
-function separateRuntimeCheckoutsFromGateway(checkoutRoot, { providerRunning = false } = {}) {
+function separateRuntimeCheckoutsFromGateway(
+  checkoutRoot,
+  { providerRunning = false, providerRoot = null } = {}
+) {
   if ((process.env.GIT_CANONICAL || "").trim() !== "1") {
     return;
   }
@@ -265,10 +276,11 @@ function separateRuntimeCheckoutsFromGateway(checkoutRoot, { providerRunning = f
         "the gateway refuses to start on a folder that holds runtime checkouts. Unset DOCKER_REPO_HOST " +
         "or point it elsewhere."
     );
+    stampGatewayFolder(gatewayRoot, { why: "because DOCKER_REPO_HOST keeps runtime checkouts there" });
     return;
   }
   if (providerRunning) {
-    relocateRuntimeCheckouts({ from: gatewayRoot, to: checkouts, providerRunning: true });
+    relocateRuntimeCheckouts({ from: gatewayRoot, to: checkouts, providerRunning: true, providerRoot });
     return;
   }
   const containers = tryCapture("docker", [
@@ -2581,6 +2593,9 @@ function clearProviderPid() {
   try {
     fs.rmSync(providerPidFile, { force: true });
   } catch {}
+  try {
+    fs.rmSync(providerCheckoutRootFile, { force: true });
+  } catch {}
 }
 function killPid(pid, signal = "SIGINT") {
   try {
@@ -2718,12 +2733,17 @@ async function waitForProvider(port) {
  * before runtime checkouts had a folder of their own, so the checkouts it
  * keeps in the gateway's folder stay there, and the gateway refuses to
  * start on that folder instead of moving them into its .legacy/ folder.
+ * Unless this script launched it with a folder of its own, that holds
+ * before it makes its first checkout there too.
  */
 function reuseRunningProvider(pid) {
   console.log(`[runtime-dev] Provider already running (pid=${pid}).`);
   separateRuntimeCheckoutsFromGateway(
     resolveRuntimeCheckoutRoot({ env: process.env, repoRoot, sandboxDir }),
-    { providerRunning: true }
+    {
+      providerRunning: true,
+      providerRoot: recordedProviderCheckoutRoot(providerCheckoutRootFile, pid),
+    }
   );
   return { running: true, started: false, pid };
 }
@@ -2802,6 +2822,11 @@ async function startProviderService() {
     }
   );
   writeProviderPid(child.pid);
+  recordProviderCheckoutRoot(
+    providerCheckoutRootFile,
+    child.pid,
+    path.resolve(repoRoot, env.DOCKER_REPO_HOST)
+  );
   child.unref();
 
   const ready = await waitForProvider(providerPort);
