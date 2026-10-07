@@ -244,8 +244,13 @@ function ensureGitCanonicalBindRoots() {
  * provider's own folder once, except for a space whose runtime container
  * still exists; while such a checkout stays, the gateway refuses to start
  * (see relocateRuntimeCheckouts).
+ *
+ * With `providerRunning` (a provider this run reuses, which may be one that
+ * keeps its checkouts in the gateway's folder), nothing moves: every
+ * checkout there stays and keeps the gateway from starting on it, with a
+ * warning to stop the provider so the next start moves them.
  */
-function separateRuntimeCheckoutsFromGateway(checkoutRoot) {
+function separateRuntimeCheckoutsFromGateway(checkoutRoot, { providerRunning = false } = {}) {
   if ((process.env.GIT_CANONICAL || "").trim() !== "1") {
     return;
   }
@@ -260,6 +265,10 @@ function separateRuntimeCheckoutsFromGateway(checkoutRoot) {
         "the gateway refuses to start on a folder that holds runtime checkouts. Unset DOCKER_REPO_HOST " +
         "or point it elsewhere."
     );
+    return;
+  }
+  if (providerRunning) {
+    relocateRuntimeCheckouts({ from: gatewayRoot, to: checkouts, providerRunning: true });
     return;
   }
   const containers = tryCapture("docker", [
@@ -2704,6 +2713,21 @@ async function waitForProvider(port) {
   return waitForPort(port, { attempts, delayMs, host });
 }
 
+/**
+ * Keep the provider that is already running. It may have been started
+ * before runtime checkouts had a folder of their own, so the checkouts it
+ * keeps in the gateway's folder stay there, and the gateway refuses to
+ * start on that folder instead of moving them into its .legacy/ folder.
+ */
+function reuseRunningProvider(pid) {
+  console.log(`[runtime-dev] Provider already running (pid=${pid}).`);
+  separateRuntimeCheckoutsFromGateway(
+    resolveRuntimeCheckoutRoot({ env: process.env, repoRoot, sandboxDir }),
+    { providerRunning: true }
+  );
+  return { running: true, started: false, pid };
+}
+
 async function startProviderService() {
   const prebuiltLaunch = hasConfiguredPrebuiltBinary(
     "INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN"
@@ -2733,8 +2757,7 @@ async function startProviderService() {
     if (pid && killPid(pid, 0)) {
       const ready = await waitForProvider(providerPort);
       if (ready) {
-        console.log(`[runtime-dev] Provider already running (pid=${pid}).`);
-        return { running: true, started: false, pid };
+        return reuseRunningProvider(pid);
       }
     }
     clearProviderPid();
@@ -2743,8 +2766,7 @@ async function startProviderService() {
   const existingPid = prebuiltLaunch ? 0 : findProviderPidByPort();
   if (existingPid) {
     writeProviderPid(existingPid);
-    console.log(`[runtime-dev] Provider already running (pid=${existingPid}).`);
-    return { running: true, started: false, pid: existingPid };
+    return reuseRunningProvider(existingPid);
   }
 
   const stdio = ["ignore", providerLogFd(), providerLogFd()];

@@ -277,13 +277,25 @@ export function resolveRuntimeCheckoutRoot({ env = process.env, repoRoot, sandbo
  * not be listed: then every space stays, and nothing of the provider's
  * moves. Nothing is replaced and links are never followed.
  *
+ * With `providerRunning`, a provider this start did not launch is serving,
+ * and it may be one started before its checkouts had a folder of their own:
+ * it keeps them in `from`, makes new ones there and holds any of them open.
+ * Then nothing moves either; every space stays, with a warning to stop the
+ * provider and start again, so that start moves them.
+ *
  * While a checkout stays in `from`, its stamp stays too, and the provider's
  * folders are never removed from `from` (the stamp folder is made when
  * there is none): the gateway refuses to start on a folder that holds them,
  * where it would otherwise move that checkout into its `.legacy/`
  * (`park_legacy_checkouts` in origin-http-server).
  */
-export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = console }) {
+export function relocateRuntimeCheckouts({
+  from,
+  to,
+  inUse = () => false,
+  providerRunning = false,
+  log = console,
+}) {
   const report = { moved: [], kept: [] };
   if (path.resolve(from) === path.resolve(to)) {
     return report;
@@ -325,6 +337,11 @@ export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = 
       continue;
     }
     if (SPACE_FOLDER.test(name) && stat.isDirectory()) {
+      if (providerRunning) {
+        // One warning names them all, below.
+        keep(name, "the runtime provider is already running and may use it", { quiet: true });
+        continue;
+      }
       if (inUse === null) {
         keep(name, "the runtime containers could not be listed, so one of this space may still use it; start again");
         continue;
@@ -346,7 +363,14 @@ export function relocateRuntimeCheckouts({ from, to, inUse = () => false, log = 
   }
   // The checkouts the gateway would still find here.
   const stayed = report.kept.map((item) => item.name).filter((name) => SPACE_FOLDER.test(name));
-  for (const name of inUse === null ? [] : providerFolders) {
+  if (providerRunning && stayed.length > 0) {
+    log.warn(
+      `[runtime-dev] Left ${stayed.length} runtime checkout(s) in ${from}: the runtime provider is already ` +
+        "running, and one started before runtime checkouts had a folder of their own keeps them there and " +
+        `may still use them. Stop the provider and start again to move them to ${to}.`
+    );
+  }
+  for (const name of inUse === null || providerRunning ? [] : providerFolders) {
     const source = path.join(from, name);
     let entries;
     try {

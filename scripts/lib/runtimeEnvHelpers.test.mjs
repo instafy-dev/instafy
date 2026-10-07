@@ -295,3 +295,56 @@ test("relocateRuntimeCheckouts makes the stamp folder for a checkout that stays 
   assert.deepEqual(relocateRuntimeCheckouts({ from, to, inUse: () => false, log }).moved, [busy]);
   assert.deepEqual(fs.readdirSync(from), []);
 });
+
+test("relocateRuntimeCheckouts moves nothing from under a provider that is already running", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-checkouts-test-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const from = path.join(dir, "origin-gateway-workspaces");
+  const to = path.join(dir, "runtime-checkouts");
+  const idle = "88888888-8888-4888-8888-888888888888";
+  const busy = "99999999-9999-4999-8999-999999999999";
+  const gone = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+  };
+  // A provider started before runtime checkouts had a folder of their own
+  // keeps them in the gateway's folder, without stamps.
+  write(path.join(from, idle, "a.md"), "idle\n");
+  write(path.join(from, busy, "draft.md"), "unsaved work\n");
+  fs.mkdirSync(path.join(from, ".instafy-evicted", `${gone}-1`), { recursive: true });
+  const messages = [];
+  const log = { log: (line) => messages.push(line), warn: (line) => messages.push(line) };
+
+  // Reusing it: no container stands in the way of either space, and still
+  // nothing moves.
+  const reused = relocateRuntimeCheckouts({
+    from,
+    to,
+    inUse: () => false,
+    providerRunning: true,
+    log,
+  });
+
+  assert.deepEqual(reused.moved, []);
+  assert.deepEqual(reused.kept.map((item) => item.name), [busy, idle].sort());
+  assert.ok(!fs.existsSync(to));
+  assert.equal(fs.readFileSync(path.join(from, idle, "a.md"), "utf8"), "idle\n");
+  assert.equal(fs.readFileSync(path.join(from, busy, "draft.md"), "utf8"), "unsaved work\n");
+  assert.ok(fs.existsSync(path.join(from, ".instafy-evicted", `${gone}-1`)));
+  // The stamp folder keeps the gateway from moving them into its .legacy/.
+  assert.deepEqual(fs.readdirSync(path.join(from, ".instafy-checkout-stamps")), []);
+  assert.ok(
+    messages.some(
+      (line) => line.includes("already running") && line.includes("Stop the provider") && line.includes(to)
+    ),
+    messages.join("\n")
+  );
+
+  // The next start, with the provider stopped, moves them.
+  const started = relocateRuntimeCheckouts({ from, to, inUse: () => false, log });
+  assert.deepEqual(started.moved, [busy, idle].sort());
+  assert.equal(fs.readFileSync(path.join(to, busy, "draft.md"), "utf8"), "unsaved work\n");
+  assert.ok(fs.existsSync(path.join(to, ".instafy-evicted", `${gone}-1`)));
+  assert.deepEqual(fs.readdirSync(from), []);
+});
