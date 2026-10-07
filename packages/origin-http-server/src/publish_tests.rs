@@ -6474,7 +6474,7 @@ async fn a_persist_grant_opens_the_rolling_save_and_nothing_else() {
 /// workspace: a stop that comes meanwhile takes the workspace at once and
 /// answers in time, and the save gives up once its own answer comes.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_slow_write_credential_for_a_rolling_save_never_holds_up_a_stop() {
+async fn a_rolling_save_waiting_on_the_controller_never_holds_up_a_stop() {
     let sc = Scenario::new(Options::default());
     let user = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();

@@ -489,7 +489,7 @@ async fn a_refusal_stops_the_ticker() {
 /// grant can succeed, so the ticks end, and the job's own save records why
 /// it did not land.
 #[tokio::test]
-async fn an_expired_workspace_token_ends_the_ticks_and_is_recorded() {
+async fn a_401_from_the_controller_ends_the_ticks_and_is_recorded() {
     let seen = Seen::default();
     let origin_id = Uuid::new_v4();
     let controller_url = controller(
