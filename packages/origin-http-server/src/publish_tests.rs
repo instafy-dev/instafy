@@ -6657,6 +6657,55 @@ async fn a_stop_with_a_save_waits_for_the_workspace_and_answers_in_time() {
     server.abort();
 }
 
+/// The controller gives up on a stop's flush while it waits for the
+/// workspace, and the stop does not happen. The stop flag goes down with the
+/// dropped request, so rolling saves go on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flush_the_controller_gave_up_on_lowers_the_stop_flag() {
+    let sc = Scenario::new(Options::default());
+    sc.write("notes.md", b"in progress\n");
+    let (base, server) = serve(&sc).await;
+    let held = crate::workspace_lock::try_acquire_workspace_apply_lock(&sc.ws)
+        .unwrap()
+        .expect("the workspace lock");
+    let impatient = reqwest::Client::builder()
+        .timeout(Duration::from_millis(500))
+        .build()
+        .unwrap();
+    let flushed = impatient
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": false, "workingState": true }))
+        .send()
+        .await;
+    assert!(flushed.is_err(), "the flush answered: {flushed:?}");
+    drop(held);
+    // The abandoned flush lets the workspace go once its wait ends.
+    let waited = Instant::now();
+    loop {
+        if let Some(free) = crate::workspace_lock::try_acquire_workspace_apply_lock(&sc.ws).unwrap()
+        {
+            drop(free);
+            break;
+        }
+        assert!(waited.elapsed() < Duration::from_secs(30), "still held");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(sc.remote_refs("refs/instafy/").is_empty(), "the flush ran");
+
+    let response = reqwest::Client::new()
+        .post(format!("{base}/workspace/persist"))
+        .json(&serde_json::json!({ "reason": "tick" }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+    assert_eq!(body["durable"], true, "{body}");
+    server.abort();
+}
+
 /// Whether `commit` is an ancestor of any recovery ref on the remote.
 fn under_a_remote_recovery_ref(sc: &Scenario, commit: &str) -> bool {
     sc.remote_refs("refs/instafy/").iter().any(|(_, rev)| {

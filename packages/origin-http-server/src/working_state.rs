@@ -57,7 +57,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -213,21 +213,31 @@ impl SaveError {
 }
 
 /// The process-wide flag a stop raises: a rolling save in flight gives up
-/// at its next step, and the stop's own flush takes the locks.
+/// at its next step, and the stop's own flush takes the locks. It is up
+/// while any stop holds the [`Raised`] its `raise` returned, so it goes down
+/// when the last of them is dropped, also when a stop's request is
+/// cancelled, and one stop never lowers it under another.
 #[derive(Clone, Default)]
-pub struct StopFlag(Arc<AtomicBool>);
+pub struct StopFlag(Arc<AtomicUsize>);
+
+/// One stop's hold on the [`StopFlag`].
+#[must_use = "the stop flag goes down when this is dropped"]
+pub struct Raised(StopFlag);
+
+impl Drop for Raised {
+    fn drop(&mut self) {
+        self.0 .0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 impl StopFlag {
-    pub fn raise(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    pub fn lower(&self) {
-        self.0.store(false, Ordering::SeqCst);
+    pub fn raise(&self) -> Raised {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Raised(self.clone())
     }
 
     pub fn is_raised(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.load(Ordering::SeqCst) > 0
     }
 }
 

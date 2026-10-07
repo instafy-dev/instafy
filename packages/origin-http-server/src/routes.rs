@@ -3158,18 +3158,18 @@ async fn handle_git_flush(
     }
     // A rolling save in flight gives up at its next step, so the stop gets
     // the locks quickly; the fence this flush raises keeps saves out after.
+    // The flag goes down with this request, also when the controller gives
+    // up on it and the request is dropped.
     let started = Instant::now();
-    state.stop_flag.raise();
-    let flushed = flush_checkout(
+    let _stopping = state.stop_flag.raise();
+    flush_checkout(
         &state,
         project_id,
         turn_active,
         &access_token,
         Some(started),
     )
-    .await;
-    state.stop_flag.lower();
-    flushed
+    .await
 }
 
 /// The flush itself. With `saving_since` (the stop asked for the working

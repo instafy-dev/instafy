@@ -1059,17 +1059,29 @@ fn a_new_origin_on_the_same_folder_rewrites_only_the_trailer() {
 }
 
 #[test]
+fn the_stop_flag_is_up_while_any_stop_holds_it() {
+    let stop = StopFlag::default();
+    let first = stop.raise();
+    let second = stop.clone().raise();
+    drop(first);
+    assert!(stop.is_raised(), "one stop lowered it under another");
+    drop(second);
+    assert!(!stop.is_raised());
+}
+
+#[test]
 fn a_tick_gives_up_once_a_stop_raises_its_flag() {
     let fx = Fixture::new();
     fx.write("notes.md", b"new\n");
     let stop = StopFlag::default();
-    stop.raise();
+    let raised = stop.raise();
     let state = fx.save_stopping(PersistReason::Tick, &stop);
     assert_eq!(state.error.as_deref(), Some("stopping"), "{state:?}");
     assert!(fx.slot().is_none());
 
     // Raised while the tick lists the folder: it stops before staging.
-    stop.lower();
+    drop(raised);
+    assert!(!stop.is_raised());
     let marker = fx.root.join("listing");
     let release = fx.root.join("release");
     let _wrapper = GitWrapper::install(
@@ -1088,12 +1100,13 @@ fn a_tick_gives_up_once_a_stop_raises_its_flag() {
             while !marker.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            stop.raise();
+            let raised = stop.raise();
             fs::write(release, b"").unwrap();
+            raised
         })
     };
     let state = fx.save_stopping(PersistReason::Tick, &stop);
-    raiser.join().unwrap();
+    let _raised = raiser.join().unwrap();
     assert_eq!(state.error.as_deref(), Some("stopping"), "{state:?}");
     assert!(fx.slot().is_none());
 }

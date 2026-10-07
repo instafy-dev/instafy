@@ -465,7 +465,8 @@ impl OriginHttpServer {
             None => (crate::working_state::WorkingMemory::default(), None),
         };
         if let Some(stop) = stop.as_ref() {
-            stop.raise();
+            // The process is ending: the flag stays up for good.
+            std::mem::forget(stop.raise());
         }
         let mut config = (*self.config).clone();
         config.git_remote_url = Some(remote_url);
