@@ -2018,7 +2018,7 @@ export function FilesPanel({
                   className="justify-start gap-2"
                 onPress={() => {
                   setExplorerMenu(null);
-                  void refreshFromWorkspaceCommit(null);
+                  void refreshFromWorkspaceCommit(null, { forceSync: true });
                 }}
                 isDisabled={!workspaceBrowseReady}
                   data-testid="files-explorer-menu-refresh"

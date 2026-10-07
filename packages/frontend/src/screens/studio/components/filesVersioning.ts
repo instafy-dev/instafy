@@ -483,6 +483,34 @@ export function applyOwnCommitToEntries(
   return next;
 }
 
+/**
+ * The folders an own commit changed that did not take it in place (`folders`
+ * from `applyOwnCommitToListings`): every folder above a written or deleted
+ * path, up to `rootPath`, since the commit can add or drop an entry in each.
+ * Their listing was cleared by a scope change or is at another commit.
+ */
+export function foldersMissingOwnCommit(
+  commit: Pick<OwnCommit, "writes" | "deletes">,
+  folders: ReadonlySet<string>,
+  rootPath = "",
+): string[] {
+  const missing = new Set<string>();
+  const changed = [...commit.writes.map((write) => write.path), ...commit.deletes];
+  for (const path of changed) {
+    let folder = path;
+    while (folder !== rootPath) {
+      folder = parentOf(folder);
+      if (rootPath && !isAtOrUnder(folder, rootPath)) {
+        break;
+      }
+      if (!folders.has(folder)) {
+        missing.add(folder);
+      }
+    }
+  }
+  return Array.from(missing);
+}
+
 function parentOf(path: string): string {
   const index = path.lastIndexOf("/");
   return index > 0 ? path.slice(0, index) : "";

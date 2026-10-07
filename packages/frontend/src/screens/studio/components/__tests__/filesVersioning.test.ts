@@ -8,6 +8,7 @@ import {
   bufferVersioningMode,
   createOwnRevisions,
   decideCachedOpen,
+  foldersMissingOwnCommit,
   isFileBufferDirty,
   isVersionedFilesMode,
   mergeNewFileBuffers,
@@ -263,6 +264,13 @@ describe("Files versioning helpers", () => {
       expect(withoutDocs.docs).toBeUndefined();
       expect(applyOwnCommitToEntries(entries, new Set(), { writes: [{ path: "README.md", blobOid: BLOB_B }], deletes: [] }, sort as never))
         .toBe(entries);
+    });
+
+    it("names every folder above a changed path, up to the root, that did not take it", () => {
+      const commit = { writes: [{ path: "notes/deep/todo.md", blobOid: BLOB_B }], deletes: ["docs/old.md", "src/x.ts"] };
+      expect(foldersMissingOwnCommit(commit, new Set(["", "docs"])).sort()).toEqual(["notes", "notes/deep", "src"]);
+      expect(foldersMissingOwnCommit(commit, new Set(["", "docs", "notes", "notes/deep", "src"]))).toEqual([]);
+      expect(foldersMissingOwnCommit(commit, new Set(), "notes").sort()).toEqual(["notes", "notes/deep"]);
     });
   });
 
