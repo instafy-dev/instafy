@@ -435,6 +435,23 @@ fn read_record(git: &WorkspaceGit<'_>) -> Result<Option<Record>> {
     Ok(None)
 }
 
+/// The paths `record` changes against its own parent that lie at or under
+/// one of `roots`.
+fn changed_under(git: &WorkspaceGit<'_>, record: &Record, roots: &[String]) -> Result<Vec<String>> {
+    let base = match record.parent.as_deref() {
+        Some(parent) => git.tree_id(parent)?,
+        None => git.empty_tree()?,
+    };
+    Ok(changed_paths(git, &base, &record.tree)?
+        .into_iter()
+        .filter(|path| {
+            roots
+                .iter()
+                .any(|root| path == root || path.starts_with(&format!("{root}/")))
+        })
+        .collect())
+}
+
 /// Whether the folder's last confirmed save holds `tree` on `parent`: a
 /// stop then stores no `unsaved` copy of the same work.
 pub(crate) fn record_holds(
@@ -700,12 +717,16 @@ impl Publisher<'_> {
         };
         let record = read_record(&self.git)?;
         if !deferred.is_empty() {
-            // A tick never drops what an earlier save held.
-            let source = record
-                .as_ref()
-                .map(|record| record.commit.clone())
-                .or_else(|| parent.clone());
-            tree = tree_with_entries_from(&self.git, &tree, source.as_deref(), &deferred)?;
+            // A tick never drops what an earlier save held: a deferred path
+            // keeps the earlier save's entry where that save changed it, and
+            // the parent's everywhere else. An earlier save on an older
+            // `main` would otherwise carry that `main`'s version of a file
+            // onto this parent, as if the folder had changed it.
+            tree = tree_with_entries_from(&self.git, &tree, parent.as_deref(), &deferred)?;
+            if let Some(record) = record.as_ref() {
+                let kept = changed_under(&self.git, record, &deferred)?;
+                tree = tree_with_entries_from(&self.git, &tree, Some(&record.commit), &kept)?;
+            }
         }
         tree = without_dismissed(&self.git, &tree, parent.as_deref())?;
         stopping(stop)?;

@@ -575,7 +575,8 @@ node's checkout a cache.
   own online origin, and checks all of it again when the origin exchanges the
   grant for `git.write`. A rolling save takes no workspace lease.
 - A tick never adds a path inside a nested repository and leaves out files
-  over 2 MiB: both keep the slot's earlier entry until the job's end or a
+  over 2 MiB: both keep the slot's earlier entry (where that earlier save
+  changed them; otherwise the current parent's) until the job's end or a
   stop saves them. A tick that finds the workspace busy answers 409 and waits
   for the next one; while a stop's fence is up it answers 503. Ticks never
   overlap and a missed one is not queued.

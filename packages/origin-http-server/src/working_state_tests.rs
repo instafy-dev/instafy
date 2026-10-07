@@ -536,6 +536,69 @@ fn a_tick_defers_a_large_file_to_the_turns_end() {
     );
 }
 
+/// A deferred file keeps the earlier save's entry only where that save
+/// changed it. Otherwise it keeps the current parent's: a save on a newer
+/// `main` never carries an older `main`'s version of a file (which a
+/// Restore would then apply over someone else's published one).
+#[test]
+fn a_deferred_file_the_earlier_save_never_changed_keeps_the_new_mains_version() {
+    let fx = Fixture::new();
+    let big = |fill: u8| vec![fill; 3 * 1024 * 1024];
+    let other = fx.root.join("other");
+    git_in(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            fx.remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    let publish = |bytes: &[u8], message: &str| {
+        write(&other, "data/big.bin", bytes);
+        git_in(&other, &["add", "-A"]);
+        git_in(
+            &other,
+            &[
+                "-c",
+                "user.name=Other",
+                "-c",
+                "user.email=other@example.com",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+        git_in(&other, &["push", "-q", "origin", "main"]);
+    };
+    let follow_main = || {
+        ig(&fx.ws, &["fetch", "-q", "origin"]);
+        ig(&fx.ws, &["merge", "-q", "--ff-only", "origin/main"]);
+    };
+    publish(&big(1), "v1");
+    follow_main();
+
+    // An earlier save on that main, which never touched the big file.
+    fx.write("a.md", b"edited\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+
+    // Someone publishes a new version; the checkout follows it, and the
+    // agent rewrites the file, which a tick leaves for later.
+    publish(&big(2), "v2");
+    follow_main();
+    let main = fx.main();
+    fx.write("data/big.bin", &big(3));
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    let (_, slot) = fx.slot().unwrap();
+    assert_eq!(fx.slot_parent(), main);
+    let blob = |rev: &str| git_in(&fx.remote, &["rev-parse", &format!("{rev}:data/big.bin")]);
+    assert_eq!(blob(&slot), blob(&main), "the slot kept main's version");
+    let changed = git_in(&fx.remote, &["diff", "--name-only", &main, &slot]);
+    assert_eq!(changed, "a.md");
+}
+
 /// A tick reads the folder and writes only objects and its own refs: HEAD,
 /// the real index and what `git status` says are the same afterwards, and
 /// it never needs `index.lock`, which another git command may hold.
