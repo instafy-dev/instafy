@@ -329,12 +329,19 @@ retry the stop") and the quarantine stays in place:
   event is recorded.
 
 The provider serializes ensure and release per runtime, so a retried release
-queues behind any release or late launch still running there. When an ensure's
-retried release queued behind another stop of the same lease, such as an idle
-stop still waiting on its own release, that stop has finalized by the time the
-ensure's release returns. The ensure then launches the next lease instead of
-failing, so a prompt sent while an idle stop is releasing the machine starts
-it again without a "Workspace startup failed" alert.
+queues behind any release or late launch still running there. Two stops of the
+same lease can therefore both be acknowledged, and they race to finalize it:
+whichever locks the runtime first finalizes the lease, and the other gets a
+409 ("runtime lease generation is no longer current"). For a person's Stop
+that 409 is an error even though the machine was released. When the 409 goes
+to an ensure's stale-generation cleanup, for example one queued behind an idle
+stop still waiting on its own release, the ensure takes it to mean the
+generation is gone and launches the next lease, unless the other stop removed
+the runtime. A prompt sent while an idle stop is releasing the machine
+therefore starts it again without a "Workspace startup failed" alert, at the
+standard size as after any idle stop. The cleanup stops only the lease its
+probe found, so a lease that another ensure launched meanwhile is reused, not
+released.
 
 ## Caches
 

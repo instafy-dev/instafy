@@ -29244,14 +29244,16 @@ async fn spawn_serialized_release_provider(
     })
 }
 
-/// Seed a registered hosted runtime holding an active exclusive lease, and
-/// return the runtime and lease ids. The stop a test runs on it does not
-/// check idleness, and its fresh heartbeat and lease keep the heartbeat,
-/// idle and launch-timeout sweeps that other tests run on the shared
-/// database away from it.
+/// Seed a registered hosted runtime holding an active exclusive lease whose
+/// metadata `lease_metadata` builds from the lease id, and return the
+/// runtime and lease ids. The stop a test runs on it does not check
+/// idleness, and its fresh heartbeat and lease keep the heartbeat, idle and
+/// launch-timeout sweeps that other tests run on the shared database away
+/// from it.
 async fn seed_registered_hosted_runtime(
     pool: &PgPool,
     project_id: Uuid,
+    lease_metadata: impl FnOnce(Uuid) -> serde_json::Value,
 ) -> anyhow::Result<(Uuid, Uuid)> {
     let runtime_id = Uuid::new_v4();
     let lease_id = Uuid::new_v4();
@@ -29273,7 +29275,7 @@ async fn seed_registered_hosted_runtime(
                 &lease_id,
                 &project_id,
                 &runtime_id,
-                &PgJson(json!({ "source": "studio", "sizeId": "standard" })),
+                &PgJson(lease_metadata(lease_id)),
             ],
         )
         .await?;
@@ -29286,13 +29288,65 @@ async fn seed_registered_hosted_runtime(
     Ok((runtime_id, lease_id))
 }
 
-/// Run `during` while the idle stop of `runtime_id` waits on its provider
-/// release, as the idle sweep's stop does for most of a minute in
-/// production. `during` must release the same runtime again: once that
-/// second release reaches the provider, the idle stop's release finishes and
-/// the idle stop finalizes, and only then does the second release finish.
-/// The sweep itself is not run here because it stops every idle runtime in
-/// the shared database; this is the same stop, of this runtime only.
+/// What the launch path stores for a plain Studio launch.
+fn studio_standard_lease_metadata(_lease_id: Uuid) -> serde_json::Value {
+    json!({ "source": "studio", "sizeId": "standard" })
+}
+
+/// Run `during` while `first_stop` waits on its provider release, as the
+/// idle sweep's stop does for most of a minute in production. `during` must
+/// release the same runtime again, `during_releases` times: once those
+/// releases reach the provider, the first stop's release finishes and that
+/// stop finalizes, and only then do the others finish, in the order they
+/// arrived.
+async fn run_during_stop_release<S: Send + 'static, T: Send + 'static>(
+    provider: &SerializedReleaseProvider,
+    first_stop: impl std::future::Future<Output = anyhow::Result<S>> + Send + 'static,
+    during_releases: usize,
+    during: impl std::future::Future<Output = T> + Send + 'static,
+) -> anyhow::Result<(S, T)> {
+    let wait = std::time::Duration::from_secs(10);
+    let mut releases_arrived = provider.releases_arrived.clone();
+    let first_stop = spawn_aborting(first_stop);
+    // The first stop has quarantined the lease and is waiting on its release.
+    timeout(wait, releases_arrived.wait_for(|count| *count >= 1)).await??;
+
+    let during = spawn_aborting(during);
+    timeout(
+        wait,
+        releases_arrived.wait_for(|count| *count >= 1 + during_releases),
+    )
+    .await??;
+
+    provider.release_permits.add_permits(1);
+    let stopped = timeout(wait, first_stop).await???;
+
+    provider.release_permits.add_permits(during_releases);
+    let during = timeout(std::time::Duration::from_secs(30), during).await??;
+    Ok((stopped, during))
+}
+
+/// The idle stop of `runtime_id`. The sweep itself is not run here because
+/// it stops every idle runtime in the shared database; this is the same
+/// stop, of this runtime only.
+async fn idle_stop_runtime(
+    state: AppState,
+    project_id: Uuid,
+    runtime_id: Uuid,
+) -> anyhow::Result<runtime::RuntimeStopResponse> {
+    runtime::stop_runtime_for_project(
+        &state,
+        &project_id,
+        &runtime_id,
+        Some("idle".to_string()),
+        "idle_stop",
+    )
+    .await
+    .map_err(|(status, body)| anyhow::anyhow!("idle stop failed ({status}): {}", body.0.message))
+}
+
+/// [`run_during_stop_release`] with the idle stop of `runtime_id` as the
+/// first stop and one release in `during`.
 async fn run_during_idle_stop_release<T: Send + 'static>(
     state: &AppState,
     provider: &SerializedReleaseProvider,
@@ -29300,35 +29354,36 @@ async fn run_during_idle_stop_release<T: Send + 'static>(
     runtime_id: Uuid,
     during: impl std::future::Future<Output = T> + Send + 'static,
 ) -> anyhow::Result<(runtime::RuntimeStopResponse, T)> {
-    let wait = std::time::Duration::from_secs(10);
-    let mut releases_arrived = provider.releases_arrived.clone();
-    let idle_stop = spawn_aborting({
-        let state = state.clone();
-        async move {
-            runtime::stop_runtime_for_project(
-                &state,
-                &project_id,
-                &runtime_id,
-                Some("idle".to_string()),
-                "idle_stop",
-            )
-            .await
-        }
-    });
-    // The idle stop has quarantined the lease and is waiting on its release.
-    timeout(wait, releases_arrived.wait_for(|count| *count >= 1)).await??;
+    let idle_stop = idle_stop_runtime(state.clone(), project_id, runtime_id);
+    run_during_stop_release(provider, idle_stop, 1, during).await
+}
 
-    let during = spawn_aborting(during);
-    timeout(wait, releases_arrived.wait_for(|count| *count >= 2)).await??;
-
-    provider.release_permits.add_permits(1);
-    let idle_stopped = timeout(wait, idle_stop).await??.map_err(|(status, body)| {
-        anyhow::anyhow!("idle stop failed ({status}): {}", body.0.message)
-    })?;
-
-    provider.release_permits.add_permits(1);
-    let during = timeout(std::time::Duration::from_secs(30), during).await??;
-    Ok((idle_stopped, during))
+/// `POST /runtime/ensure` for `runtime_id` as the Studio sends it, and the
+/// lease it answered with.
+async fn studio_ensure_runtime(
+    state: AppState,
+    project_id: Uuid,
+    runtime_id: Uuid,
+) -> anyhow::Result<Uuid> {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/runtime/ensure")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer service-role-token")
+        .body(Body::from(serde_json::to_vec(&json!({
+            "project_id": project_id,
+            "provider": "instafy-cloud",
+            "runtimeId": runtime_id,
+        }))?))?;
+    let response = runtime::router().with_state(state).oneshot(request).await?;
+    let status = response.status();
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+    anyhow::ensure!(status == StatusCode::OK, "ensure answered {status}: {body}");
+    body["leaseId"]
+        .as_str()
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("the ensure names its lease: {body}"))
 }
 
 /// The idle stop quarantines a runtime's lease and then waits on the
@@ -29342,6 +29397,10 @@ async fn run_during_idle_stop_release<T: Send + 'static>(
 /// alert, and nothing relaunched the runtime for its queued job. The
 /// generation the cleanup was for is gone, so the reconnect now goes on and
 /// launches the next lease.
+///
+/// The reconnect relaunches the runtime as it would a minute later, once the
+/// idle stop has finalized: a webdev runtime comes back as webdev, at the
+/// standard size and not at the Boost size its stopped lease had.
 #[tokio::test]
 async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert(
 ) -> anyhow::Result<()> {
@@ -29360,7 +29419,8 @@ async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert
         let mut config = dispatch_reconnect_test_config(label);
         config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
         let state = build_test_state(pool.clone(), config);
-        let (runtime_id, idle_lease_id) = seed_registered_hosted_runtime(&pool, project_id).await?;
+        let (runtime_id, idle_lease_id) =
+            seed_registered_hosted_runtime(&pool, project_id, webdev_boost_lease_metadata).await?;
 
         let (idle_stopped, dispatched) = run_during_idle_stop_release(
             &state,
@@ -29398,8 +29458,21 @@ async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert
             "a prompt sent during an idle stop's release must not get a startup alert: {:?}",
             dispatched.alerts
         );
-        let (successor_id, _) = reconnect_successor_lease(&pool, &dispatched).await?;
+        let (successor_id, metadata) = reconnect_successor_lease(&pool, &dispatched).await?;
         assert_ne!(successor_id, idle_lease_id);
+        assert_eq!(metadata["runtimeFlavor"], json!("webdev"), "{metadata}");
+        assert_eq!(
+            metadata["_instafyManagedRuntimeLaunch"]["generation"],
+            json!(successor_id.to_string()),
+            "the successor is attested for its own generation: {metadata}"
+        );
+        assert_eq!(metadata["sizeId"], json!("standard"), "{metadata}");
+        assert_eq!(metadata["env"]["RUNTIME_MEMORY_LIMIT"], json!("4g"));
+        assert_eq!(
+            metadata["env"]["INSTAFY_ENABLE_BROWSER_SESSION"],
+            json!("1"),
+            "{metadata}"
+        );
 
         let connection = pool.get().await?;
         let lease_statuses: HashMap<Uuid, String> = connection
@@ -29471,6 +29544,8 @@ async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert
         assert_eq!(calls[0].1["lease_id"], json!(idle_lease_id.to_string()));
         assert_eq!(calls[1].1["lease_id"], json!(idle_lease_id.to_string()));
         assert_eq!(calls[2].1["lease_id"], json!(successor_id.to_string()));
+        assert_eq!(calls[2].1["metadata"]["runtimeFlavor"], json!("webdev"));
+        assert_eq!(calls[2].1["metadata"]["sizeId"], json!("standard"));
         Ok(())
     })
     .await
@@ -29496,33 +29571,19 @@ async fn studio_ensure_during_an_idle_stop_release_launches_the_next_lease() -> 
         let mut config = dispatch_reconnect_test_config(label);
         config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
         let state = build_test_state(pool.clone(), config);
-        let (runtime_id, idle_lease_id) = seed_registered_hosted_runtime(&pool, project_id).await?;
+        let (runtime_id, idle_lease_id) =
+            seed_registered_hosted_runtime(&pool, project_id, studio_standard_lease_metadata)
+                .await?;
 
-        let app = runtime::router().with_state(state.clone());
-        let request = Request::builder()
-            .method("POST")
-            .uri("/runtime/ensure")
-            .header("content-type", "application/json")
-            .header("authorization", "Bearer service-role-token")
-            .body(Body::from(serde_json::to_vec(&json!({
-                "project_id": project_id,
-                "provider": "instafy-cloud",
-                "runtimeId": runtime_id,
-            }))?))?;
-        let (_, response) =
-            run_during_idle_stop_release(&state, &provider, project_id, runtime_id, async move {
-                app.oneshot(request).await
-            })
-            .await?;
-        let response = response?;
-        let status = response.status();
-        let body: serde_json::Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let successor_id = body["leaseId"]
-            .as_str()
-            .and_then(|value| Uuid::parse_str(value).ok())
-            .ok_or_else(|| anyhow::anyhow!("the ensure names its lease: {body}"))?;
+        let (_, successor_id) = run_during_idle_stop_release(
+            &state,
+            &provider,
+            project_id,
+            runtime_id,
+            studio_ensure_runtime(state.clone(), project_id, runtime_id),
+        )
+        .await?;
+        let successor_id = successor_id?;
         assert_ne!(successor_id, idle_lease_id);
 
         let row = pool
@@ -29549,6 +29610,191 @@ async fn studio_ensure_during_an_idle_stop_release_launches_the_next_lease() -> 
             .map(|(kind, _)| *kind)
             .collect();
         assert_eq!(kinds, vec!["release", "release", "launch"]);
+        Ok(())
+    })
+    .await
+}
+
+/// Two ensures sent while the idle stop is releasing the runtime, such as a
+/// prompt's reconnect and the Studio's own ensure, both queue a release of
+/// the same lease behind the idle stop's. Each then finds the generation
+/// gone and goes on, but they share one launch: the allocation re-reads the
+/// runtime under its row lock, so the second reuses the lease the first
+/// launched.
+#[tokio::test]
+async fn concurrent_ensures_during_an_idle_stop_release_share_one_launch() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("concurrent ensures during idle stop release test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "concurrent-ensures-during-idle-stop-release";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let provider = spawn_serialized_release_provider(StatusCode::NO_CONTENT).await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        let state = build_test_state(pool.clone(), config);
+        let (runtime_id, idle_lease_id) =
+            seed_registered_hosted_runtime(&pool, project_id, studio_standard_lease_metadata)
+                .await?;
+
+        let idle_stop = idle_stop_runtime(state.clone(), project_id, runtime_id);
+        let ensures = futures_util::future::join(
+            studio_ensure_runtime(state.clone(), project_id, runtime_id),
+            studio_ensure_runtime(state.clone(), project_id, runtime_id),
+        );
+        let (idle_stopped, (first, second)) =
+            run_during_stop_release(&provider, idle_stop, 2, ensures).await?;
+        assert!(idle_stopped.status_changed, "the idle stop finalized first");
+        let (first, second) = (first?, second?);
+        assert_eq!(first, second, "both ensures answer with the same lease");
+        assert_ne!(first, idle_lease_id);
+
+        let lease_statuses: HashMap<Uuid, String> = pool
+            .get()
+            .await?
+            .query(
+                "select id, status from runtime_leases where runtime_id = $1",
+                &[&runtime_id],
+            )
+            .await?
+            .iter()
+            .map(|row| (row.get("id"), row.get("status")))
+            .collect();
+        assert_eq!(
+            lease_statuses,
+            HashMap::from([
+                (idle_lease_id, "released".to_string()),
+                (first, "launching".to_string()),
+            ])
+        );
+        let calls = provider.calls.lock().await.clone();
+        let kinds: Vec<&str> = calls.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            kinds,
+            vec!["release", "release", "release", "launch"],
+            "exactly one launch: {calls:?}"
+        );
+        assert_eq!(calls[3].1["lease_id"], json!(first.to_string()));
+        Ok(())
+    })
+    .await
+}
+
+/// A Remove waits on the provider's release like any stop, and a prompt sent
+/// in that window queues a second release of the same lease. Once the
+/// Remove has finalized, the runtime is gone, not merely stopped, so the
+/// reconnect must not go on to launch: an ensure would commit a lease on the
+/// removed runtime that the launch guard then refuses, and nothing would ever
+/// release that lease. The reconnect fails as it did before, with the
+/// terminal alert, and commits nothing.
+#[tokio::test]
+async fn dispatch_during_a_remove_release_launches_nothing() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("dispatch during remove release test").await?;
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        organizations: vec![org_id],
+        projects: vec![project_id],
+    };
+
+    with_shared_db_fixture(fixture, async {
+        let label = "dispatch-during-remove-release";
+        seed_dispatch_reconnect_projects(&pool, org_id, &[project_id], label).await?;
+        let provider = spawn_serialized_release_provider(StatusCode::NO_CONTENT).await?;
+        let mut config = dispatch_reconnect_test_config(label);
+        config.runtime_providers[0].endpoint = Some(provider.endpoint.clone());
+        let state = build_test_state(pool.clone(), config);
+        let (runtime_id, removed_lease_id) =
+            seed_registered_hosted_runtime(&pool, project_id, studio_standard_lease_metadata)
+                .await?;
+
+        let remove = {
+            let app = runtime::router().with_state(state.clone());
+            let request = Request::builder()
+                .method("POST")
+                .uri("/runtime/remove")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer service-role-token")
+                .body(Body::from(serde_json::to_vec(&json!({
+                    "runtimeId": runtime_id,
+                    "reason": "user_remove",
+                }))?))?;
+            async move {
+                let response = app.oneshot(request).await?;
+                let status = response.status();
+                let body: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+                anyhow::ensure!(status == StatusCode::OK, "remove answered {status}: {body}");
+                Ok(body)
+            }
+        };
+        let dispatch = {
+            let pool = pool.clone();
+            let state = state.clone();
+            async move {
+                dispatch_prompt_to_seeded_runtime(
+                    &pool,
+                    &state,
+                    project_id,
+                    runtime_id,
+                    Some(removed_lease_id),
+                )
+                .await
+            }
+        };
+        let (removed, dispatched) = run_during_stop_release(&provider, remove, 1, dispatch).await?;
+        assert_eq!(removed["ok"], json!(true), "{removed}");
+        let dispatched = dispatched?;
+
+        let reconnect = &dispatched.reconnect;
+        assert_eq!(reconnect["status"], json!("failed"), "{reconnect}");
+        assert!(
+            reconnect["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("no longer current")),
+            "{reconnect}"
+        );
+        assert_eq!(
+            dispatched.alerts,
+            vec![WORKSPACE_STARTUP_FAILED_ALERT.to_string()]
+        );
+
+        let connection = pool.get().await?;
+        let runtime_row = connection
+            .query_one(
+                "select status, active_lease_id from runtimes where id = $1",
+                &[&runtime_id],
+            )
+            .await?;
+        assert_eq!(runtime_row.get::<_, String>("status"), "removed");
+        assert_eq!(runtime_row.get::<_, Option<Uuid>>("active_lease_id"), None);
+        let lease_statuses: HashMap<Uuid, String> = connection
+            .query(
+                "select id, status from runtime_leases where runtime_id = $1",
+                &[&runtime_id],
+            )
+            .await?
+            .iter()
+            .map(|row| (row.get("id"), row.get("status")))
+            .collect();
+        assert_eq!(
+            lease_statuses,
+            HashMap::from([(removed_lease_id, "released".to_string())]),
+            "no lease is committed on the removed runtime"
+        );
+        let kinds: Vec<&str> = provider
+            .calls
+            .lock()
+            .await
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect();
+        assert_eq!(kinds, vec!["release", "release"], "nothing is launched");
         Ok(())
     })
     .await

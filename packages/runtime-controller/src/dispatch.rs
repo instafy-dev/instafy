@@ -4222,12 +4222,19 @@ async fn load_live_runtime_lease(
 /// anything, and it stays terminal like a runtime with no live lease.
 ///
 /// A reconnect that arrives while another stop, such as the idle sweep, is
-/// releasing the runtime does not end up here: its stale-generation cleanup
-/// waits for that release and then launches the next lease itself, so it
-/// records "requested". A cleanup_pending lease seen here therefore means the
-/// reconnect's own provider release failed or timed out. Nothing on the
-/// server relaunches the runtime for the queued job after that, so it stays
-/// terminal on purpose.
+/// releasing the runtime usually does not end up here. Its stale-generation
+/// cleanup releases the same lease again, queued behind that stop's release,
+/// and whichever of the two stops finalizes the lease, the cleanup then
+/// launches the next lease itself and records "requested". It still ends up
+/// here when that other stop removed the runtime, when the runtime could not
+/// be re-read after the refusal, and for a forced handoff (`forceNewLease`),
+/// whose own stop is refused with a 409 when the other stop finalizes first.
+/// A cleanup_pending lease seen here means some stop's provider release is
+/// still outstanding. That is usually the reconnect's own release that failed
+/// or timed out, but it can be a person's Stop that quarantined the lease
+/// before the reconnect allocated. Nothing on the server relaunches the
+/// runtime for the queued job in any of these cases, so they stay terminal
+/// on purpose.
 ///
 /// The live lease can instead be the reconnect's own: the launch path can
 /// fail after it committed this reconnect's launching lease, for example on
