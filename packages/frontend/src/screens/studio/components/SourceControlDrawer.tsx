@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { readLastVersioningMode } from "../../../services/runtimeController/workspaceVersioning";
 import type { GitReviewMode } from "../../../workspace/gitReviewTypes";
 import { isHistoryMode, useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import { HistoryDrawer } from "./HistoryDrawer";
@@ -46,7 +47,11 @@ export function SourceControlDrawer({
   const kind: DrawerKind = isHistoryMode(versioning.chromeMode) ? "history" : "changes";
   const kindRef = useRef(kind);
   const lastFocusedRef = useRef<Element | null>(null);
-  const [arrival, setArrival] = useState<DrawerKind | null>(null);
+  const [arrival, setArrival] = useState<{ kind: DrawerKind; explained: boolean } | null>(null);
+  // The Changes on screen is this space's own: a probe answered legacy, or
+  // this device last saw the space in Changes. In a new space Changes only
+  // stands in while the mode is checked, so History does not replace it.
+  const changesWereShownRef = useRef(false);
 
   useEffect(() => {
     const track = (event: FocusEvent) => {
@@ -56,17 +61,26 @@ export function SourceControlDrawer({
     return () => document.removeEventListener("focusin", track);
   }, []);
 
+  useEffect(() => {
+    if (kind === "changes") {
+      changesWereShownRef.current =
+        versioning.resolved || readLastVersioningMode(versioning.projectId) === "legacy";
+    }
+  }, [kind, versioning.projectId, versioning.resolved]);
+
   // A probe answered another mode and one drawer replaced the other. When
   // the keyboard was in the drawer that went away, focus fell to the page:
-  // the new drawer takes it on its title and says why. Otherwise nothing
-  // moves, and a space that is never shown as History never sees this.
+  // the new drawer takes it on its title and says why (History only where
+  // the space showed Changes before). Otherwise nothing moves, and a space
+  // that is never shown as History never sees this.
   useEffect(() => {
     if (kindRef.current === kind) {
       return;
     }
     kindRef.current = kind;
     const last = lastFocusedRef.current;
-    setArrival(focusWasLost() && last !== null && !last.isConnected ? kind : null);
+    const lost = focusWasLost() && last !== null && !last.isConnected;
+    setArrival(lost ? { kind, explained: kind === "changes" || changesWereShownRef.current } : null);
   }, [kind]);
 
   useEffect(() => {
@@ -91,7 +105,8 @@ export function SourceControlDrawer({
         versioning={versioning}
         onRequestClose={onRequestClose}
         probeFailed={probeFailed}
-        arrivalNotice={arrival === "history" ? SOURCE_CONTROL_ARRIVAL_COPY.history : null}
+        arrived={arrival?.kind === "history"}
+        arrivalNotice={arrival?.kind === "history" && arrival.explained ? SOURCE_CONTROL_ARRIVAL_COPY.history : null}
       />
     );
   }
@@ -101,7 +116,7 @@ export function SourceControlDrawer({
       actionsPortalTarget={actionsPortalTarget}
       onRequestClose={onRequestClose}
       openRequest={openRequest}
-      arrivalNotice={arrival === "changes" ? SOURCE_CONTROL_ARRIVAL_COPY.changes : null}
+      arrivalNotice={arrival?.kind === "changes" ? SOURCE_CONTROL_ARRIVAL_COPY.changes : null}
     />
   );
 }
