@@ -35,7 +35,7 @@ export interface ListControllerWorkspaceParams {
   syncMode?: "background" | "blocking";
 }
 
-/** Where to read from: a full commit id (`rev`) or a recovery/salvage ref (`ref`), never both. */
+/** Where to read from: a full commit id (`rev`) or a recovery ref (`ref`), never both. */
 export interface WorkspaceReadPin {
   rev?: string | null;
   ref?: string | null;

@@ -412,7 +412,6 @@ const UNSAVED_WORK_TITLES: Record<string, string> = {
   unpublished: "Agent work that couldn't be saved",
   unsaved: "Unsaved edits from a stopped workspace",
   stale: "Older copies found in a workspace",
-  salvage: "Archived from the old file server",
 };
 
 export function unsavedWorkTitle(kind: string): string {
@@ -625,11 +624,7 @@ export function unsavedWorkUnconfirmedDeleteCopy(path: string): string {
   return `Couldn't tell whether this unsaved work deletes ${path}, so nothing was saved. Ask the agent instead.`;
 }
 
-/**
- * A restore with nothing to bring back: the saved version already held the
- * work. Also when the origin marked it (an empty version on `main` now
- * records the restore): no files changed either way.
- */
+/** A restore with nothing to bring back: the saved version already held the work. */
 export const NOTHING_TO_RESTORE_COPY = "Nothing to restore. The saved version already has this work.";
 
 /**
@@ -637,8 +632,7 @@ export const NOTHING_TO_RESTORE_COPY = "Nothing to restore. The saved version al
  * for (the server reports them in `notRestored` too, the gateway with the
  * reason `kept`, which also covers files below a kept folder); only the
  * rest of `notRestored` were refused. `reasons` says why, when the origin
- * does: old chat uploads (`attachment`, files a salvage kept privately) get
- * a sentence of their own, and every other refusal reads as secret or
+ * does: old chat uploads (`attachment`) get a sentence of their own, and every other refusal reads as secret or
  * ignored, as it does without reasons (Desktop lists bare paths).
  * `committed: false` means no version with changes was made: the saved
  * version already held everything that could be restored, so the copy says

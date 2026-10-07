@@ -166,7 +166,7 @@ export interface WorkspaceGitDiffPanelProps {
   // With base set, the origin diffs base→commit (or base→worktree) tree-to-tree:
   // the pinned per-run view used by chat diff cards.
   base?: string | null;
-  /** Read objects from a recovery or salvage ref (History, unsaved work). */
+  /** Read objects from a recovery ref (History, unsaved work). */
   gitRef?: string | null;
   /** History pins its reads to the default origin; unset keeps legacy routing. */
   routing?: "default";

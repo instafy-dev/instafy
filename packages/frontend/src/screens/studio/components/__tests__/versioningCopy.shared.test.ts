@@ -225,7 +225,7 @@ describe("versioning copy shared across surfaces", () => {
     );
   });
 
-  it("names old chat uploads a salvage kept privately in a sentence of their own on Restore", () => {
+  it("names old chat uploads in a sentence of their own on Restore", () => {
     const placement = { unsavedWorkInHistory: true };
     const attachmentRule = describeFileNotSaved({ reason: "attachment", keptSavedVersion: false }, placement);
     expect(attachmentRule).toBe("Old chat upload files aren't saved to the space.");
@@ -265,7 +265,7 @@ describe("versioning copy shared across surfaces", () => {
     ).toBe("Restored as a new version. Kept the current version of src/lib.");
   });
 
-  it("says there was nothing to restore when main already had the work, marked or not", () => {
+  it("says there was nothing to restore when main already had the work", () => {
     expect(NOTHING_TO_RESTORE_COPY).toBe("Nothing to restore. The saved version already has this work.");
     expect(restoreSuccessCopy({ committed: false, notRestored: [] })).toBe(NOTHING_TO_RESTORE_COPY);
   });

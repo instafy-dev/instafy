@@ -239,8 +239,8 @@ describe("default routing", () => {
     fetchMock().mockResolvedValue(json(200, { supported: true, diff: "", entries: [] }));
     await fetchWorkspaceGitDiffFromController({ projectId: "p", path: "a", base: "b", commit: "c", ref: "refs/instafy/recovery/o/n", routing: "default" });
     expect(lastRequest().url).toBe(`${ENDPOINT}/git/diff?path=a&commit=c&base=b&ref=refs%2Finstafy%2Frecovery%2Fo%2Fn`);
-    await fetchWorkspaceGitHistoryReviewFromController({ projectId: "p", commit: "c", ref: "refs/instafy/salvage/gateway/x", routing: "default" });
-    expect(lastRequest().url).toBe(`${ENDPOINT}/git/history/review?commit=c&ref=refs%2Finstafy%2Fsalvage%2Fgateway%2Fx`);
+    await fetchWorkspaceGitHistoryReviewFromController({ projectId: "p", commit: "c", ref: "refs/instafy/recovery/o/x", routing: "default" });
+    expect(lastRequest().url).toBe(`${ENDPOINT}/git/history/review?commit=c&ref=refs%2Finstafy%2Frecovery%2Fo%2Fx`);
     expect(mocks.token.mock.calls[1][0]).not.toHaveProperty("preferHosted");
   });
 
@@ -539,18 +539,16 @@ describe("unsaved work (recovery)", () => {
       origin: "11111111-2222-4333-8444-555555555555",
       paths: ["a.md"],
       base: "b1",
-      dismissible: true,
     },
     {
-      ref: "refs/instafy/salvage/gateway/project-1",
+      ref: "refs/instafy/recovery/11111111-2222-4333-8444-555555555555/turn-2",
       rev: "r2",
-      kind: "salvage",
-      subject: "Archived",
+      kind: "unsaved",
+      subject: "Unsaved edits",
       date: "2026-10-01T09:00:00Z",
-      origin: null,
+      origin: "11111111-2222-4333-8444-555555555555",
       paths: ["x", { path: "y" }],
       base: "b2",
-      dismissible: false,
       restoredRev: "m9",
     },
   ];
@@ -566,23 +564,16 @@ describe("unsaved work (recovery)", () => {
     expect(result?.status).toBe("ok");
     expect(result?.entries[0]).toEqual({ ...listed[0] });
     expect(result?.entries[0]).not.toHaveProperty("restoredRev");
-    expect(result?.entries[1]).toMatchObject({ kind: "salvage", paths: ["x", "y"], dismissible: false, restoredRev: "m9" });
+    expect(result?.entries[1]).toMatchObject({ kind: "unsaved", paths: ["x", "y"], restoredRev: "m9" });
     expect(mocks.signal).toHaveBeenCalledWith("gateway", "recovery_supported");
   });
 
   it("accepts an {entries} envelope and fills defaults", async () => {
-    fetchMock().mockResolvedValue(json(200, { entries: [{ ref: "refs/instafy/salvage/gateway/x", rev: "r" }, { rev: "missing-ref" }] }));
+    fetchMock().mockResolvedValue(json(200, { entries: [{ ref: "refs/instafy/recovery/o/x", rev: "r" }, { rev: "missing-ref" }] }));
     const result = await fetchWorkspaceRecoveryFromController({ projectId: "p" });
     expect(result?.entries).toEqual([
-      { ref: "refs/instafy/salvage/gateway/x", rev: "r", kind: "salvage", subject: "", date: null, origin: null, paths: [], base: null, dismissible: false },
+      { ref: "refs/instafy/recovery/o/x", rev: "r", kind: "unpublished", subject: "", date: null, origin: null, paths: [], base: null },
     ]);
-  });
-
-  it("knows a salvage ref without a kind in any letter case", async () => {
-    // The git service treats salvage refs in any letter case.
-    fetchMock().mockResolvedValue(json(200, { entries: [{ ref: "refs/Instafy/SALVAGE/gateway/x", rev: "r" }] }));
-    const result = await fetchWorkspaceRecoveryFromController({ projectId: "p" });
-    expect(result?.entries[0]).toMatchObject({ kind: "salvage", dismissible: false });
   });
 
   it("treats 404 as unsupported, never as an error", async () => {
@@ -624,7 +615,6 @@ describe("unsaved work (recovery)", () => {
       rev: "m2",
       baseRev: "m1",
       committed: true,
-      marked: false,
       notRestored: [".env"],
       notRestoredReasons: {},
       refDeleted: true,
@@ -635,22 +625,9 @@ describe("unsaved work (recovery)", () => {
 
   it("omits keep when empty and reads an older answer", async () => {
     fetchMock().mockResolvedValue(json(200, { rev: "m2" }));
-    const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/salvage/gateway/x", keep: [] });
-    expect(lastRequest().init.body).toBe(JSON.stringify({ ref: "refs/instafy/salvage/gateway/x" }));
-    expect(result).toMatchObject({ ok: true, committed: null, marked: false, notRestored: [], notRestoredReasons: {}, refDeleted: false });
-  });
-
-  it("reads marked: an empty version on main records the restore of work main already had", async () => {
-    // Desktop (and the gateway once it converges) answers a salvage restore
-    // with nothing left to bring back like this.
-    fetchMock().mockResolvedValue(
-      json(200, { rev: "m3", baseRev: "m2", committed: false, marked: true, notRestored: [], refDeleted: false }),
-    );
-    const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/salvage/gateway/x" });
-    expect(result).toMatchObject({ ok: true, rev: "m3", committed: false, marked: true });
-    // Only a boolean true counts.
-    fetchMock().mockResolvedValue(json(200, { rev: "m3", committed: false, marked: "true" }));
-    expect(await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "r" })).toMatchObject({ marked: false });
+    const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/recovery/o/x", keep: [] });
+    expect(lastRequest().init.body).toBe(JSON.stringify({ ref: "refs/instafy/recovery/o/x" }));
+    expect(result).toMatchObject({ ok: true, committed: null, notRestored: [], notRestoredReasons: {}, refDeleted: false });
   });
 
   it("reads why each path was not restored when the answer says", async () => {
@@ -669,7 +646,7 @@ describe("unsaved work (recovery)", () => {
         refDeleted: false,
       }),
     );
-    const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/salvage/gateway/x" });
+    const result = await restoreWorkspaceRecoveryFromController({ projectId: "p", ref: "refs/instafy/recovery/o/x" });
     expect(result).toMatchObject({
       ok: true,
       notRestored: [".env", "chat-upload-1.png", "src/kept.ts", "no-reason.txt", "bare.txt"],
@@ -695,11 +672,11 @@ describe("unsaved work (recovery)", () => {
     expect(lastRequest().init.body).toBe(JSON.stringify({ ref: "r", rev: "x" }));
     fetchMock().mockResolvedValue(json(200, { dismissed: false, missing: true }));
     expect(await dismissWorkspaceRecoveryFromController({ projectId: "p", ref: "r", rev: "x" })).toMatchObject({ ok: true, dismissed: false, missing: true });
-    fetchMock().mockResolvedValue(json(409, { error: "kept", code: "salvage_ref_kept" }));
+    fetchMock().mockResolvedValue(json(409, { error: "moved", code: "recovery_ref_moved" }));
     expect(await dismissWorkspaceRecoveryFromController({ projectId: "p", ref: "r", rev: "x" })).toMatchObject({
       ok: false,
       stage: "response",
-      error: { code: "salvage_ref_kept" },
+      error: { code: "recovery_ref_moved" },
     });
   });
 });

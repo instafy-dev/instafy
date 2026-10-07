@@ -20,7 +20,6 @@ export type KnownOriginErrorCode =
   | "rev_not_on_main"
   | "idempotency_conflict"
   | "recovery_ref_moved"
-  | "salvage_ref_kept"
   | "dirty_paths"
   | "not_saved"
   // 422

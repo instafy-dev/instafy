@@ -35,7 +35,7 @@ describe("unsaved work seen set", () => {
   });
 
   it("is per project and per viewer", () => {
-    const key = unsavedWorkSeenKey({ ref: "refs/instafy/recovery/o/a", rev: "1".repeat(40), kind: "unpublished" });
+    const key = unsavedWorkSeenKey({ ref: "refs/instafy/recovery/o/a", rev: "1".repeat(40) });
     markUnsavedWorkSeen("p", "user-1", [key]);
     expect(readUnsavedWorkSeen("p", "user-1").has(key)).toBe(true);
     expect(readUnsavedWorkSeen("p", "user-2").has(key)).toBe(false);
@@ -44,10 +44,8 @@ describe("unsaved work seen set", () => {
   });
 
   it("treats a moved ref as new", () => {
-    markUnsavedWorkSeen("p", "u", [unsavedWorkSeenKey({ ref: "r", rev: "1", kind: "unpublished" })]);
-    expect(readUnsavedWorkSeen("p", "u").has(unsavedWorkSeenKey({ ref: "r", rev: "2", kind: "unpublished" }))).toBe(
-      false,
-    );
+    markUnsavedWorkSeen("p", "u", [unsavedWorkSeenKey({ ref: "r", rev: "1" })]);
+    expect(readUnsavedWorkSeen("p", "u").has(unsavedWorkSeenKey({ ref: "r", rev: "2" }))).toBe(false);
   });
 
   it("survives storage that throws", () => {

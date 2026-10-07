@@ -73,7 +73,7 @@ function unsavedWorkMetaLine(entry: WorkspaceRecoveryEntry): string {
 }
 
 /**
- * Unsaved work kept on recovery and salvage refs. Hidden while empty or
+ * Unsaved work kept on recovery refs. Hidden while empty or
  * when the server has no recovery route; an error row (never hidden) when
  * the list fails. Restore commits the work as a new version; a conflict
  * expands the row into one choice per file; Remove deletes it for everyone.
@@ -109,7 +109,7 @@ export function UnsavedWorkSection({
   onReloadHistory: () => Promise<string | null>;
   /** Focus a stable place when nothing in this section can take focus. */
   onFocusFallback?: () => void;
-  /** The viewer: entries shown here count as seen (no chat row, no salvage badge). */
+  /** The viewer: entries shown here count as seen (no chat row). */
   userId?: string | null;
 }) {
   const { openGitReviewTab, requestUrlPush } = useWorkspaceTabs();
@@ -249,9 +249,6 @@ export function UnsavedWorkSection({
       }
       if (result.ok) {
         requestRowFocus(entry.ref);
-        // committed: false with marked: main already had the work, and an
-        // empty version (result.rev) now records the restore. The copy
-        // stays "nothing to restore", but main moved.
         onNotice({
           tone: result.committed === false ? "info" : "success",
           text: restoreSuccessCopy({
@@ -269,7 +266,7 @@ export function UnsavedWorkSection({
             ? entries.filter((item) => item.ref !== entry.ref)
             : entries.map((item) => (item.ref === entry.ref ? { ...item, restoredRev: result.rev ?? item.rev } : item)),
         );
-        if (result.committed !== false || result.marked) {
+        if (result.committed !== false) {
           onCommitted(result.rev);
         }
         void refresh({ force: true });
@@ -545,8 +542,7 @@ export function UnsavedWorkSection({
 
   const entries = useMemo(() => unsavedWork.entries, [unsavedWork.entries]);
 
-  // This viewer has now seen these entries: the one-time chat row skips them,
-  // and salvage (which cannot be removed) stops counting on the badge.
+  // This viewer has now seen these entries: the one-time chat row skips them.
   useEffect(() => {
     if (!userId || unsavedWork.status !== "ok" || entries.length === 0) {
       return;
@@ -666,20 +662,18 @@ export function UnsavedWorkSection({
                     Restore
                   </Button>
                 )}
-                {entry.dismissible ? (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    radius="xl"
-                    isPending={busyKey === `${entry.ref}:remove`}
-                    isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:remove`)}
-                    aria-describedby={rowDescription}
-                    onPress={() => setPendingRemove(entry)}
-                    data-testid="unsaved-work-remove"
-                  >
-                    Remove
-                  </Button>
-                ) : null}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  radius="xl"
+                  isPending={busyKey === `${entry.ref}:remove`}
+                  isDisabled={!canWrite || (locked && busyKey !== `${entry.ref}:remove`)}
+                  aria-describedby={rowDescription}
+                  onPress={() => setPendingRemove(entry)}
+                  data-testid="unsaved-work-remove"
+                >
+                  Remove
+                </Button>
               </div>
             </div>
 
@@ -770,7 +764,7 @@ export function UnsavedWorkSection({
                       variant="outline"
                       size="sm"
                       radius="xl"
-                      isDisabled={!canWrite || locked || !entry.dismissible}
+                      isDisabled={!canWrite || locked}
                       aria-describedby={rowDescription}
                       onPress={() => setPendingRemove(entry)}
                       data-testid="unsaved-work-finish-remove"
@@ -795,8 +789,8 @@ export function UnsavedWorkSection({
                       Restore the rest
                     </Button>
                   )}
-                  {/* The way out without restoring: salvage cannot be removed,
-                      and the choices outlive closing the drawer. */}
+                  {/* The way out without restoring: the choices outlive closing
+                      the drawer. */}
                   <Button
                     variant="ghost"
                     size="sm"

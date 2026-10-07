@@ -178,7 +178,7 @@ describe("readWorkspaceFileAt", () => {
   it("refuses rev and ref together without a request", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const result = await readWorkspaceFileAt({ projectId: "p", path: "a.md", rev: "r", ref: "refs/instafy/salvage/gateway/x" });
+    const result = await readWorkspaceFileAt({ projectId: "p", path: "a.md", rev: "r", ref: "refs/instafy/recovery/o/x" });
     expect(result).toMatchObject({ ok: false, error: { code: "invalid_request" } });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(requestOriginAccessTokenMock).not.toHaveBeenCalled();
