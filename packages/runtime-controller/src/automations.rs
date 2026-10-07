@@ -1761,10 +1761,8 @@ async fn create_project_automation(
 
     let automation_id = Uuid::new_v4();
     let conversation_id = if is_review {
-        if active_job.is_some() {
-            return Err(crate::forbidden(
-                "space_review schedules require a user session",
-            ));
+        if let Some(active_job) = active_job.as_ref() {
+            authorize_review_creation_job(&transaction, active_job).await?;
         }
         // Serialize creation/recreation for the same owner and space. The
         // anchor survives schedule deletion and preserves recommendation scope.
@@ -1980,6 +1978,47 @@ async fn create_project_automation(
     }
 
     Ok(Json(record_to_payload(row_to_record(&inserted))))
+}
+
+/// An ordinary live user turn can opt its subject into reviews. A background
+/// job must not subscribe its owner while performing a previously scheduled
+/// task, including from a child of that task's conversation. Check persisted
+/// job and conversation provenance rather than flags in the create request.
+async fn authorize_review_creation_job(
+    transaction: &tokio_postgres::Transaction<'_>,
+    active_job: &ActiveJobAuthorization,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if active_job.subject_context().is_service_role {
+        return Err(crate::forbidden("space reviews require a user-owned job"));
+    }
+    let background: bool = transaction
+        .query_one(
+            "select coalesce(j.payload #>> '{metadata,spaceReview,enforcedBy}' = 'runtime-controller', false)
+                    or coalesce(j.payload #> '{metadata,automation}' <> 'null'::jsonb, false)
+                    or exists (
+                        select 1 from conversations c
+                        where c.id in ($2, $3)
+                          and (lower(trim(coalesce(c.thread_kind, ''))) = 'automation'
+                               or c.internal_purpose = 'space_review')
+                    )
+             from agent_jobs j where j.id = $1",
+            &[
+                &active_job.job_id,
+                &active_job.conversation_id,
+                &active_job.root_conversation_id,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to check review creation provenance: {error}"))
+        })?
+        .get(0);
+    if background {
+        return Err(crate::forbidden(
+            "space review schedules must be requested in an ordinary user chat, not by an automation",
+        ));
+    }
+    Ok(())
 }
 
 async fn update_automation(

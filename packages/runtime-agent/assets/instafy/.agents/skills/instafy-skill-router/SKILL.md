@@ -85,9 +85,16 @@ Use these mappings unless a project-specific skill overrides them.
   - Prefer normal-language lookup over teaching special composer syntax.
   - Search first with `instafy conversation search "<keywords>"`, then inspect with `instafy conversation show <id>`.
 
-- **Review this space / useful next actions / “what should I do next here?”**
+- **Getting started / “I'm new here; what should I work on first?”**
+  - When no goal is stated and the person is not asking to inspect existing work, ask one short question about what they want to build or solve in this chat. Do not require a history review just to ask it, or claim the space is empty without evidence.
+  - If they already gave a goal, help with that goal directly.
+
+- **Review this space / useful next actions from existing work / “what should we pick up next?”**
   - Use `instafy-space-review` for a bounded, on-demand review in the current chat.
   - Read prior recommendations and accessible conversation evidence before proposing at most one useful next step. Respect delivered, accepted, dismissed and postponed topics; do not schedule reviews or execute the suggestion.
+
+- **Start recurring space reviews / schedule check-ins / start check-ins and review now**
+  - Use `instafy-automations` to list and create or update the `space_review` schedule. For an explicit immediate review too, trigger that schedule once after saving it; do not also review in the setup chat.
 
 - **Failed run / runtime error / diagnose / investigate / support report**
   - Use `instafy-diagnostics`.

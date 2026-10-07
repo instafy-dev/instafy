@@ -9,10 +9,6 @@ Find one useful reason to start a private conversation with the person who reque
 
 If the person is replying to an existing suggestion with “don't remind me,” “remind me tonight,” “let's do this weekend,” or a change to check-in frequency, use `instafy-automations` to save that preference instead of starting another review. Explicit conversational feedback is different from inferring a choice during a background review.
 
-For a direct request to start recurring space reviews, use `instafy-automations`. If they also ask to review now, create or update the schedule and trigger its managed run through that skill; do not conduct a second review in the setup chat. The restrictions below apply while executing a review, not to a separate explicit scheduling request.
-
-For a general getting-started question with no stated goal and no request to inspect existing work, ask one short question about what the person wants to build or solve in the current chat. Do not audit chat history just to ask that question or claim the space is empty without evidence. An explicit request to review existing work still follows the grounded review below.
-
 ## Read a bounded slice
 
 Use the existing scoped CLI session; do not request credentials or try another account to expand access.
