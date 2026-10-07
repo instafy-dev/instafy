@@ -15,19 +15,9 @@ This is **not GitHub**: we host the git servers and expose standard git remotes 
 ## Where files live at rest
 - **At rest**: `git-shard` volume(s) store bare repos, e.g. `/var/lib/instafy-git/repos/<project_id>.git`.
 - **Not at rest**: the workspace gateway's mirror cache (`<workspace root>/.git-cache/`; deleting any of it only costs a fetch) and runtime checkouts (working copies on ephemeral disk).
-- **Until retired**: `<workspace root>/.legacy/` on the gateway's volume holds the working copies that
-  earlier, stateful gateway images kept per space, which may hold drafts that never reached
-  canonical.
-- **Kept after retirement**: `<workspace root>/.salvage/` on the same volume, readable only by the
-  gateway server's user, holds what retiring those copies keeps outside canonical: private
-  archives (ignored files, credentials, chat images that were not exported, versions of
-  credentials, chat uploads and files git cannot store that only local history holds, work-tree
-  files and links up to 20 MiB that git cannot store, the work tree's own versions of files the
-  salvage merged, and every regular file and link up to 20 MiB of an entry without a usable
-  repository) and bundles of local history canonical lacks. What neither holds, such as larger
-  files and repositories nested in an entry, exists only under `.legacy/`. Removing `.legacy/`
-  entries leaves `.salvage/` in place. Keep that volume until
-  [Retiring gateway working copies](#retiring-gateway-working-copies) is done.
+- **Disposable**: `<workspace root>/.legacy/` on the gateway's volume holds the working copies that
+  earlier, stateful gateway images kept per space. Nothing reads them; see
+  [Retiring gateway working copies](#retiring-gateway-working-copies).
 - **Backups**: shard volume snapshots plus periodic encrypted copies to independent durable
   storage. Replication is a later upgrade.
 
@@ -50,7 +40,7 @@ We implement git transport as **Git Smart HTTP** by wrapping git’s own backend
 - `git-shard` also owns **server-side policy** (see [Repository policy](#repository-policy)):
   - `main` is **fast-forward only** (reject non-FF / force pushes)
   - blob/path limits (deny common churn like `node_modules/`, cap per-blob size)
-  - object checks on every push, a push size bound, and protected salvage refs
+  - object checks on every push, a push size bound, and a reserved salvage ref namespace
   - optional `git.push.received` webhook emission (`GIT_EVENTS_WEBHOOK_URL`)
 
 This avoids re-implementing git protocol and keeps correctness high.
@@ -86,22 +76,14 @@ The hook checks every pushed ref:
   `refs/heads/MAIN` and `refs/heads/main` are the same file, so protected names are compared in
   lower case. In a repository git marked `core.ignorecase` when it created it, ref names must also
   be ASCII, because some other letters fold onto ASCII ones there.
-- **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) hold work
-  recovered from retired gateway working copies (see
-  [Retiring gateway working copies](#retiring-gateway-working-copies)) and may be the only copy
-  of it. An ordinary push may not
-  create, move or delete them. Only a push the shard marked as a salvage push, because it carries
-  the controller's exact salvage credential (see
-  [Controller-only salvage pushes](#controller-only-salvage-pushes)), may create one, and only as
-  `refs/instafy/salvage/gateway/<name>` with a lower-case name of at most 100 characters. No push
-  can move or delete a salvage ref, and every other ref update in a salvage push is refused. The shard sets the
-  hook environment for this itself, never from a request header. These rules and the ASCII rule run
-  before `GIT_POLICY_DISABLED`.
+- **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) are
+  reserved: no push may create, move or delete one. This check and the ASCII rule run before
+  `GIT_POLICY_DISABLED`.
 - **`main`** is fast-forward only and cannot be deleted. A name that differs from it only in letter
   case is refused.
 - **`refs/instafy/`** holds only recovery refs, `refs/instafy/recovery/<origin id>/<name>` with a
-  lower-case UUID and a name of `[0-9A-Za-z._-]`, and the salvage refs above. A push may create or
-  move nothing else there, so a stray ref such as `refs/instafy/recovery` cannot block them.
+  lower-case UUID and a name of `[0-9A-Za-z._-]`. A push may create or move nothing else there, so
+  a stray ref such as `refs/instafy/recovery` cannot block them.
 - **Other refs**, recovery refs included, may be deleted by any client allowed to push
   (`git.write`).
 - **Every ref points to a commit**, directly or through an annotated tag.
@@ -117,7 +99,7 @@ Knobs:
 - `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB; blank means the default): largest pack one
   push may send. A non-blank value other than a positive whole number of bytes stops the shard
   from starting.
-- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rules and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
 roll it back to an older shard image: older shards rewrite per-repository hooks on each request
@@ -136,10 +118,10 @@ cannot be created.
 
 Payload schema is `instafy.git-service.event.v1` with `kind=git.push.received`, repo name, optional `projectId`, `defaultBranch`, and the pushed ref updates. Controller can consume these via `/git/hooks/events` and fan out `workspace.commit` SSE events so Studio refreshes quickly after external pushes.
 
-For each push the shard names a fresh report file under `<GIT_REPO_ROOT>/.instafy-push-reports/`
-in the hook environment (when push events are on, and for every salvage push, whose created refs
-the shard logs). The shared `post-receive` hook appends the refs that push updated, and the
-shard builds the event once `git receive-pack` has exited. An event lists the push's own updates to
+When push events are on, the shard names a fresh report file for each push under
+`<GIT_REPO_ROOT>/.instafy-push-reports/` in the hook environment. The shared `post-receive` hook
+appends the refs that push updated, and the shard builds the event once `git receive-pack` has
+exited. An event lists the push's own updates to
 branches and tags, so pushes that overlap in time never show up in each other's events. Each
 update carries `refName`, `oldRev` (absent for a created ref), `newRev` (absent for a deleted ref)
 and `deleted`. A refused push updates no ref and sends no event.
@@ -166,7 +148,7 @@ Browsers should not speak git for normal editing. The “phone UI” flow is:
 - On the Workspace Gateway each `POST /apply` is one commit on canonical `main`; there is no
   separate sync step (see [Hosted workspace gateway](#hosted-workspace-gateway)).
 - On a workspace runtime or Desktop origin, `POST /apply` writes files into the checkout, and persisting them to the canonical remote is an explicit sync step via `POST /git/sync` so agents can choose commit boundaries/messages and handle conflicts intentionally.
-- Every git command an origin runs against the remote (fetch, push, ls-remote) is bounded. On a workspace runtime or Desktop origin it runs while the space's apply lock is held. Each command carries curl's low-speed check: a transfer that stays under 1000 bytes/s for 300 seconds fails with `Operation too slow`. This covers a remote that accepts the connection and never answers, one that sends headers and then goes quiet, and one that stops mid-transfer. One 300 second window applies to every command because the longest quiet phase of a healthy exchange is a push waiting for the remote, which replies only after its update hook has checked every changed path; that takes longer for large commits. The speed check does not run while curl is still connecting; an unanswered connect ends at curl's default 300 second connect timeout, sooner where the OS stops retrying. A remote that stops responding fails the current command after one window (about five minutes) instead of holding the lock indefinitely, and the sync returns that error. The bound is on silence, not on total duration: a remote that keeps sending faster than 1000 bytes/s, or that goes quiet for less than 300 seconds at a time, is not cut off. A failed background refresh releases the lock and keeps the existing checkout until the next sync. The Workspace Gateway's git commands carry the same speed check; it also stops a fetch of `main` after five minutes, and a read waits on one for at most ten seconds. A read of a recovery or salvage ref, a restore's fetch and removal of one, a dismissal and the `GET /git/recovery` list instead run their git commands for those refs against canonical inside the request, for at most 60 seconds.
+- Every git command an origin runs against the remote (fetch, push, ls-remote) is bounded. On a workspace runtime or Desktop origin it runs while the space's apply lock is held. Each command carries curl's low-speed check: a transfer that stays under 1000 bytes/s for 300 seconds fails with `Operation too slow`. This covers a remote that accepts the connection and never answers, one that sends headers and then goes quiet, and one that stops mid-transfer. One 300 second window applies to every command because the longest quiet phase of a healthy exchange is a push waiting for the remote, which replies only after its update hook has checked every changed path; that takes longer for large commits. The speed check does not run while curl is still connecting; an unanswered connect ends at curl's default 300 second connect timeout, sooner where the OS stops retrying. A remote that stops responding fails the current command after one window (about five minutes) instead of holding the lock indefinitely, and the sync returns that error. The bound is on silence, not on total duration: a remote that keeps sending faster than 1000 bytes/s, or that goes quiet for less than 300 seconds at a time, is not cut off. A failed background refresh releases the lock and keeps the existing checkout until the next sync. The Workspace Gateway's git commands carry the same speed check; it also stops a fetch of `main` after five minutes, and a read waits on one for at most ten seconds. A read of a recovery ref, a restore's fetch and removal of one, a dismissal and the `GET /git/recovery` list instead run their git commands for those refs against canonical inside the request, for at most 60 seconds.
 
 Native environments can choose:
 - **FS API** (same as Studio): `/apply` alone on the Workspace Gateway, or `/apply` (write) + `/git/sync` (commit/push) on a workspace runtime or Desktop origin, or
@@ -280,63 +262,6 @@ the exact-root validation; refuses symlinks, non-direct children, non-directorie
 entries (including nested mounts), and directories that do not have the structural markers of a
 bare Git repository; and never auto-initializes a repository while handling `DELETE`.
 
-### Controller-only salvage pushes
-
-Work recovered from retired workspace copies is kept on canonical as salvage refs. Writing one
-needs a separate controller capability, `git.salvage`, which can do nothing else:
-
-1. Use an unscoped controller-internal or Supabase service-role bearer to call
-   `POST /projects/<uuid>/git/access_token` with `{"scopes":["git.salvage"]}`.
-2. Push with the returned token as the bearer credential through Git Edge, creating
-   `refs/instafy/salvage/gateway/<name>` with an empty expected old value, for example
-   `git push --force-with-lease=<ref>: origin <commit>:<ref>`. The name starts with `[0-9a-z]`,
-   continues with `[0-9a-z._-]` and has at most 100 characters (`policy::is_salvage_ref_name`).
-
-`git.salvage` must be the only requested scope, always mints with a fixed 120-second lifetime, and
-cannot be minted by a human session or any scoped runtime, job, origin or pre-stop grant token. The
-controller logs each issuance with the project id and the token id (`jti`), never the token.
-
-Git Edge accepts the token for exactly two requests, the two of a push:
-`GET /<uuid>.git/info/refs?service=git-receive-pack` with no other query, and
-`POST /<uuid>.git/git-receive-pack` without a query. Any other request is refused, including the
-reads `git http-backend` would serve for shapes that only mention `git-receive-pack` (an
-upload-pack request with that query appended, a second `service=` parameter, dumb-HTTP `HEAD` and
-object paths). The push's ref advertisement lists the repository's refs and their commit ids, but
-the token cannot fetch any object. The token must also have its exact shape: protocol `git`, the
-repository's project, subject `instafy-controller-salvage`, `git.salvage` as the only scope, the
-fixed lifetime, and no runtime, origin, lease, run or browser binding. A token that names
-`git.salvage` is refused in any other shape, whatever else it holds.
-
-Git Shard checks the token again with the same request matcher: a request whose bearer lists
-`git.salvage` must be one of those two requests, verify against `GIT_JWKS_URL` and `GIT_AUDIENCE`
-and have the same exact shape, or the shard refuses it before it touches the repository. So the
-credential can never read, and never push as an ordinary `git.write` one. Other requests are left
-to Git Edge as before. The shard logs each accepted salvage credential with its token id and, after
-a salvage push, the refs it created; never the token.
-
-A verified salvage push may only create salvage refs: it cannot move or delete one, and every other
-ref update in the same push (`main`, branches, tags, recovery refs) is refused. Every refusal
-specific to a salvage push starts with `instafy: salvage push refused:` and is permanent; retrying
-the same ref cannot succeed. Object checks and the push size bound apply to every pushed object.
-Deny paths and the blob size cap apply as for any push, which means to the net change between the
-new tip and the current `main`, not to each commit in the ref's history: a path or blob that one
-pushed commit adds and a later one removes is not checked, and the hook has no secret patterns at
-all. Because salvage refs are permanent and readable by every `git.read` holder, the client that
-builds a salvage commit must filter its whole history itself (every commit not already on `main`)
-for secrets and excluded paths before it pushes, or push a single filtered commit on top of `main`.
-
-Only deleting the repository (`git.delete`) removes salvage refs through the service. Short of
-that, an operator can delete one on the shard host after review.
-
-`origin-http-server salvage` is the client that makes these pushes; see
-[Retiring gateway working copies](#retiring-gateway-working-copies).
-
-Upgrades: deploy shards before Git Edge. An older shard does not check the salvage credential and
-would run its push as an ordinary write, so no salvage token may be minted until every shard runs
-this policy. For the same reason, never roll a shard back to a version without salvage support
-while Git Edge still accepts the credential: roll Git Edge back first, or stop minting
-`git.salvage`.
-
 ## Hosted workspace gateway
 
 The Workspace Gateway is `origin-http-server` started with `ORIGIN_MULTI_TENANT=1`. One process
@@ -365,7 +290,7 @@ The gateway commits as `ORIGIN_GATEWAY_GIT_AUTHOR_NAME` / `ORIGIN_GATEWAY_GIT_AU
 them it uses `ORIGIN_GIT_AUTHOR_NAME` / `ORIGIN_GIT_AUTHOR_EMAIL`, except that the runtimes' default
 address `origin@instafy.dev` is replaced by `gateway@instafy.dev` with a warning; with neither set,
 the address is `gateway@instafy.dev`. The gateway recognizes its own commits by that address (import
-receipts, restores, the salvage's commits below), so choose it once.
+receipts, restores), so choose it once.
 
 Before it listens, the gateway:
 
@@ -399,7 +324,7 @@ Run the gateway with an init as PID 1 (`docker run --init`, or `init: true` in C
 ### Mirror cache
 
 `.git-cache/<space id>.git` is a bare mirror of the space's canonical `main` (and, for a moment at
-a time, of a recovery or salvage commit a read asked for). Deleting a mirror, or the whole cache,
+a time, of a recovery commit a read asked for). Deleting a mirror, or the whole cache,
 only costs a fetch.
 
 - Fetches of `main` run once per space at a time, in a task of their own. A plain read reuses a
@@ -409,7 +334,7 @@ only costs a fetch.
   its own budget allows (see [Writes](#writes)); either is then answered 503 `fetch_pending` while
   the fetch goes on. A fetch is stopped after five minutes. A failed fetch is an error, never older
   data: a canonical repository out of reach is 502 `canonical_unreachable`.
-- Recovery and salvage refs are not fetched that way. A `?ref=` read (also `ref` on the diff and
+- Recovery refs are not fetched that way. A `?ref=` read (also `ref` on the diff and
   review routes), a restore's fetch and removal of such a ref, a dismissal and the
   `GET /git/recovery` list (after its read of `main`) run their git commands for those refs
   against canonical inside the request, for at most 60 seconds, and are not answered
@@ -439,7 +364,7 @@ gateway's credential, and every `fs.write` request must hold the caller's live w
 
 - `/entries`, `/files/<path>` and `/raw/<path>` show canonical `main`; with `?rev=<commit>`, a
   commit `main` reaches (`main` is fetched once when the mirror does not have it yet); with
-  `?ref=<recovery or salvage ref>`, that ref's commit, read on canonical by exactly that name.
+  `?ref=<recovery ref>`, that ref's commit, read on canonical by exactly that name.
   `rev` and `ref` together are 400 `invalid_ref`.
 - Every read that looked at a commit answers `X-Instafy-Rev` naming it (for `?ref=`, the ref's own
   id), errors included. A space without `main` answers an empty root and no header. Files carry
@@ -509,7 +434,7 @@ refused write leaves nothing behind.
   `main` (409 `revert_conflict` when later changes overlap). A merge or a first commit needs
   `base`, which must be an ancestor of `commit`.
 - `POST /git/recovery/restore` and `POST /git/recovery/dismiss` follow the single-tenant rules
-  (one restore plan, `src/restore_plan.rs`); dismissing a salvage ref is 409 `salvage_ref_kept`.
+  (one restore plan, `src/restore_plan.rs`).
 - `POST /git/sync` commits nothing: with `{expectedRev}` it checks that the commit is on `main`
   (409 `rev_not_on_main` otherwise) and otherwise answers `main`. `{mode: "refresh"}` is 400
   `not_supported`, and so is `POST /git/revert`: there is no working copy to refresh or discard.
@@ -526,24 +451,16 @@ refused write leaves nothing behind.
 
 ## Retiring gateway working copies
 
-Earlier gateway images kept one working copy per space at `<root>/<space id>` and saved from it,
-so a copy could hold drafts that never reached canonical. The stateless gateway moves those copies
-to `<root>/.legacy/` before it serves and never reads them. `origin-http-server salvage` keeps their
-work, so that they can be removed. It runs inside the gateway's container next to the server
-(`docker exec <gateway container> origin-http-server salvage ...`), touches only `.legacy/` and
-`<root>/.salvage/` (mode 0700), and runs one `--apply` at a time (`.salvage/.lock`). It never runs
-on a runtime provider's checkout folder: before it reads anything, a run (a dry run too) exits with
-status 2 when the root looks like one by the rule the gateway's start uses (see
-[Configuration and start](#configuration-and-start)), here also applied to the entries under
-`.legacy/`: a gateway started on a folder it shared with a runtime provider, as earlier local
-stacks set it up, may have parked runtime checkouts there.
+Earlier gateway images kept one working copy per space at `<root>/<space id>` and saved from it.
+The stateless gateway moves those copies to `<root>/.legacy/` before it serves (see
+[Configuration and start](#configuration-and-start)), and no gateway image reads `.legacy/`
+again. The copies are disposable: once the switch is done, an operator may delete `.legacy/`.
+Copy a file out by hand first only when a space's owner asks for a draft that never reached
+canonical.
 
 ### Switching a deployment
 
-1. Deploy shards, then Git Edge, then a controller that mints `git.salvage` (see
-   [Controller-only salvage pushes](#controller-only-salvage-pushes)) and serves the chat image
-   export below.
-2. Drain imports. The stateful gateway kept import receipts inside each working copy, and the
+1. Drain imports. The stateful gateway kept import receipts inside each working copy, and the
    stateless gateway finds a receipt only as its own commit on `main`. An import the controller
    resumes after the switch (a retry with the same key) finds no receipt there: one not yet
    recorded as applied is applied again, over anything saved since, and one recorded as applied
@@ -565,193 +482,7 @@ stacks set it up, may have parked runtime checkouts there.
    already have been applied on the stateful gateway. Treat these rows like the expired ones: have
    them retried on the stateful gateway, or check there whether their files were applied, before
    you switch.
-3. Deploy the stateless gateway image. Its start moves the working copies to `.legacy/`.
-4. Run the salvage without `--apply` and read the report, then run it with `--apply`.
-5. Check that every reported `salvageRef` is on canonical (`canonicalVerified: true`) and review
-   the private archives and bundles with the spaces' owners, with every `staleKept` path (a
-   version W keeps that also undoes a change `main` made after the view it came from, so a
-   restore of the ref can undo that change) and every `unsavedRefs` commit (local history only
-   the bundle holds).
-6. Only then remove entries: `--apply --remove`, naming with `--ack` the entries that need it.
-
-Keep the gateway's workspace volume until every entry under `.legacy/` has been removed (step 6)
-and the private archives and bundles under `.salvage/` have been reviewed with the spaces' owners
-or copied to durable storage that only operators can read. Do not change the gateway's server type,
-replace its node or recreate its volume before then: `.legacy/` may hold the only copy of a draft,
-and `.salvage/` stays on the volume after its entries are removed. Verified salvage refs are not
-enough. `.salvage/` holds the only copies of what no salvage ref carries: every private archive
-(ignored files, credentials, chat images that were not exported, versions of credentials, chat
-uploads and files git cannot store that only local history holds, work-tree files and links up to
-20 MiB that git cannot store, the work tree's own version of each file W takes merged), the
-regular files and links up to 20 MiB of an entry without a usable repository (`noRepository`,
-which gets no salvage ref), and in the bundles local commits outside HEAD's history
-(`unsavedRefs`) and the history of an entry whose history was filtered (`historyFiltered`, whose
-build output, deny-listed and oversized versions only the bundle keeps) or whose space has no
-canonical repository (`canonicalMissing`, which gets no salvage ref either). Neither holds the
-work-tree files `skippedPaths` lists, such as files over 20 MiB and repositories nested in an
-entry, nor a `noRepository` entry's own `.instafy`: those exist only under `.legacy/`, so review
-them before you pass `--ack`. Rolling the gateway image back is safe for the drafts, since no
-gateway image reads `.legacy/`.
-
-### What a run does
-
-For each entry under `.legacy/` (`<space id>` or `<space id>-<suffix>`):
-
-1. The entry's repository is `.instafy/.git`; a plain `.git` is first moved there inside the entry
-   (`legacyLayout`). A dry run moves nothing, so it leaves such an entry uninspected. An entry
-   without a usable repository (none, a link or a file where `.instafy`, its `.git` or a part git
-   needs should be, or one that points git at other objects or history) is `noRepository`: every
-   regular file and link of it up to 20 MiB goes to the private archive. Larger files, special
-   files and repositories inside the entry are listed in `skippedPaths`, and the entry's own
-   `.instafy` is left out (only a `.instafy/.git` in it is listed); these exist only under
-   `.legacy/`, so review them before you pass `--ack`. A link named like a space is never followed
-   (`linkEntry`).
-2. Canonical `main` is fetched from `<ORIGIN_GIT_REMOTE_BASE_URL>/<id>.git`, never from the entry's
-   own remote, with every received object checked and a `git.read` credential the controller mints
-   for the gateway's `ORIGIN_INTERNAL_TOKEN`. A space without a canonical repository is
-   `canonicalMissing`. The commits an old sync moved the copy away from without its files (the
-   reflog's `reset: moving to origin/main` entries, then `ORIG_HEAD`) are read before the fetch,
-   and the fetch never starts git's automatic maintenance, which could expire those reflog
-   entries. Every git command runs with hooks off, the entry's config reduced to data-only
-   settings, and replacement refs ignored.
-3. Changed, untracked and ignored paths are sorted. Ignored files, credentials and merge snapshots
-   go to the private archive. `chat-upload-*` images in the root are exported to the conversations
-   that name them (see [Chat images](#chat-images)). Build output, deny-listed paths, files over
-   20 MiB, repositories inside the work tree and anything git cannot store are `skippedPaths`. The
-   rest is the entry's work, taken as `git add -A` takes it: a file takes the place of a folder,
-   and a folder's files the place of a file. A swap that would drop an entry nothing changed is
-   left out whole. What git cannot store (such a swap, or a name git never records) is listed in
-   `skippedPaths` with its size, and a file of it up to 20 MiB, or a link, also goes to the private
-   archive (reason `unsupported`); anything else of it (a larger file, a folder with what it holds)
-   exists only under `.legacy/`.
-4. Stale copies are judged against the commits read in step 2:
-   - A path whose work-tree state is a copy of a version `main` already has (a version in `main`'s
-     history, or the absence of a file `main` added after the view the copy came from) is left
-     out, as HEAD has it (`stalePaths`); where HEAD has a folder, the whole folder comes back. A
-     copy that HEAD's version cannot replace without dropping another change of the work tree's
-     (a file it put where `main` added a folder, or the reverse) stays in W (`staleKept`).
-   - An edit made to a copy of an older view of a file HEAD changed since is merged onto HEAD's
-     version (`staleMerged`; the file as the work tree has it goes to the private archive, reason
-     `merged`). An edit that does not merge (a conflict, binary content, a file `main` added or
-     removed since) stays as the work tree has it, which also undoes HEAD's change (`staleKept`).
-   - HEAD's local commits are judged the same way, since an old save committed what an old sync
-     had left behind: W puts their stale copies back as the commit they were made on has them
-     (`stalePaths`; a copy it cannot put back without dropping another change stays,
-     `staleKept`), and merges their edits to an older view onto that commit's version
-     (`staleMerged`) or keeps them as they are (`staleKept`). The local commits stay below W.
-5. W is HEAD plus that work, committed under the gateway's identity at HEAD's commit date, so a
-   rerun makes the same commit. Its subject is `Keep unsaved edits from the retired file gateway`,
-   with an `Instafy-Recovery-Kind: salvage` trailer, an `Instafy-Path` trailer for each path the
-   work tree's edits change, and an `Instafy-Private-Path: <reason> <path>` trailer for each
-   work-tree file kept privately as `secret`, `ignored` or `attachment` (at most 200 of each). A
-   chat image that was not exported is archived without one, so a rerun makes the same commit.
-   Every local commit canonical lacks, and W's own change, is checked against the publish rules; on
-   any hit W becomes one commit on the last commit canonical shares (`historyFiltered`). Refused
-   local versions that are credentials, chat uploads or files git cannot store go to the private
-   archive; build output, deny-listed and oversized ones are listed in `skippedPaths` and kept only
-   in the bundle.
-6. When `main` does not already hold W, it is pushed create-only to
-   `refs/instafy/salvage/gateway/<node>-<first 8 hex digits of W>` with a `git.salvage` credential,
-   then read back with `git.read` (`canonicalVerified`). An existing ref with the same tip counts
-   as verified; one with another tip stops the entry. A path the shard refuses is left as `main` has
-   it and W is rebuilt as one commit and pushed again (at most 8 times). A rerun of an entry that
-   still holds what a verified run recorded reports that run's ref, with that run's
-   `archivedPaths`, `stalePaths`, `staleKept` and `staleMerged`, and pushes nothing.
-7. Local commits outside HEAD's history are listed in `unsavedRefs`: each `refs/heads/*` tip, and
-   the head a rebase the old gateway never finished started from (`rebase-merge/orig-head` or
-   `rebase-apply/orig-head`), with a commit neither W nor `main` holds. The old gateway saved to
-   its branch and rebased it onto canonical when canonical had moved, so one stopped part way
-   through a rebase left HEAD detached and its saves only on the branch. W is built on HEAD as it
-   is, and a note names the unfinished rebase. Such an entry is never `clean`.
-8. With `--apply`, `.salvage/<entry>.bundle` holds the entry's history canonical lacks (all of it
-   when there is no canonical repository), each `unsavedRefs` commit under
-   `refs/instafy/salvage-local/unsaved-<n>`, `.salvage/<entry>.private.tar` (mode 0600) the
-   private files, and `.salvage/report.jsonl` one line per entry and run. A rerun whose private
-   files differ keeps the earlier archive and writes `.salvage/<entry>.private-<UTC time>-<n>.tar`
-   (named in that run's `privateArchive`); review all of them. An entry whose outputs
-   would leave the volume with less than 2 GiB free (the mirror cache's floor) stops before
-   writing them.
-
-Without `--apply` nothing is pushed, exported, minted for writing or written under `.salvage/`,
-and no file of an entry's work tree changes. Each entry is still fetched into its own repository
-and W's objects are written there, so the report can name W.
-
-A restore of a salvage ref lists each `Instafy-Private-Path` file in `notRestored` with its reason:
-those files are only in the private archive. The gateway reads these trailers only on commits
-under its own address, and Desktop only on commits by `gateway@instafy.dev`. Files kept privately
-for another reason (`merged`, `unsupported`) and versions taken from local commits get no trailer;
-only the report names them.
-
-### Flags and environment
-
-```text
-origin-http-server salvage [--apply] [--remove] [--root <dir>] [--node <name>]
-                           [--project <id>]... [--ack <entry>]...
-```
-
-- `--apply` pushes salvage refs, exports chat images, and writes `.salvage/`.
-- `--remove` also removes each entry that was clean or whose salvage ref is verified, when nothing
-  was skipped outside build output, `unsavedRefs` and `staleKept` are empty, every chat image was
-  exported or got a final answer, and no history was filtered. Without `--apply` it only reports
-  `wouldRemove`. Any other entry needs `--ack <entry>` (its folder name under `.legacy/`) after
-  review. An entry whose run stopped early (an error, the free-space floor) is never removed, even
-  with `--ack`. A removed entry is first moved to `.salvage/trash/`. Salvage refs and private
-  archives are never removed, and a bundle only once canonical holds the history it has (the ref
-  verified, the history not filtered, and no `unsavedRefs`).
-- `--project <id>` (repeatable) limits the run to those spaces' entries.
-- `--root <dir>` is the workspace root; the default is `ORIGIN_WORKSPACE_ROOT`. A runtime
-  provider's checkout folder is refused (see above).
-- `--node <name>`, or `INSTAFY_NODE_NAME`, is this gateway's lasting name in salvage refs:
-  lower-cased, then `[0-9a-z]` followed by `[0-9a-z._-]`. `--apply` and `--remove` refuse to run
-  without one, because a container's host name changes when it is recreated and a new name would
-  push a second permanent ref for the same work. A dry run falls back to the host name with a
-  warning.
-- `ORIGIN_GIT_REMOTE_BASE_URL` is required. `ORIGIN_CONTROLLER_URL` and `ORIGIN_INTERNAL_TOKEN`
-  (the controller's internal token) mint `git.read` and `git.salvage` and authenticate the chat
-  image export. The salvage commits under the identity the gateway server resolves from
-  `ORIGIN_GATEWAY_GIT_AUTHOR_*` and `ORIGIN_GIT_AUTHOR_*`.
-
-The exit status is 0 when every entry was handled, 1 when an entry failed, was not removed, or is
-still there with a chat image a rerun may export, and 2 for a usage or configuration error (a root
-that looks like a runtime provider's checkout folder included). Report lines go to stdout and, with
-`--apply`, to `report.jsonl` (a run stops before the next entry when either cannot take a line); a
-summary goes to stderr.
-
-### Report
-
-Each line is one entry: `entry`, `project`, `node`, `dryRun`, `inspected`, `head`, `sourceTree`,
-`salvageRef`, `salvageRev`, `canonicalVerified`, `localOnlyCommits`, `subjects`, `unsavedRefs`
-(`{name, commit, commits, bundleRef}`: where the repository holds the commit, how many commits it
-has that neither W nor `main` has, and its ref in the bundle; they hold up `--remove`),
-`archivedPaths` (the paths the work tree's edits change in W), `stalePaths`, `staleKept` (they hold
-up `--remove`), `staleMerged`, `privateArchivedPaths` (`{path, reason, size, commit?}`),
-`privateArchiveBytes`, `exportedAttachments` (`{path, conversations: [{conversationId, storagePath,
-messages}]}`), `attachmentsToExport` (what `--apply` would export), `exportFailed` (images a rerun
-may still export; they hold up `--remove`), `skippedPaths` (`{path, size, reason, commit?}`),
-`historyFiltered`, `bootstrapOnly` (only the project-memory bootstrap wrote there), `bundle`,
-`privateArchive`, `clean`, `legacyLayout`, `noRepository`, `canonicalMissing`, `linkEntry`,
-`notes`, `error`, `removed`, `wouldRemove`, `removeRefused` and `bundleRemoved`.
-
-`.salvage/` stays on the gateway's volume and is readable only by the server's user: the private
-archives hold credentials and ignored files from the old working copies, and the bundles hold local
-history canonical never received.
-
-### Chat images
-
-Before chat attachments moved to Storage, the web app wrote each chat image into the space's root
-as `chat-upload-*` and recorded that `workspacePath` in the message, so on a hosted space the only
-copy may be in a gateway working copy. The salvage sends each such image once to the controller,
-`POST /internal/projects/<id>/chat-attachments/legacy?workspacePath=<name>` with the image's bytes,
-authenticated with the controller's internal token or the service-role key itself. Both take the
-name exactly as the file has it: a file whose name has surrounding whitespace is another file than
-the one messages name, so the salvage never exports it, and the controller refuses such a name
-(400) rather than trim it. For each conversation with a message that names the file, the controller
-stores the image once in Storage and adds `storagePath`, `mimeType` and `sizeBytes` to those
-attachment entries; a second call changes nothing. A file no message names is answered
-`unreferenced: true` and stays in the private archive. Answers about the file or the space (not an
-image, over 20 MiB, the space deleted) are final; any other failure, such as a server without
-Storage, keeps the image in the private archive as `exportFailed` for a rerun. See
-[Chat attachments](Chat-Attachments.md).
+2. Deploy the stateless gateway image. Its start moves the working copies to `.legacy/`.
 
 ## Concurrency (human-style)
 - Agents/runtimes work on branches or local commits.
@@ -774,11 +505,11 @@ Studio picks its versioning UI per space from the project's default origin:
   Desktop space): saved versions read from the default origin, 20 per page with Show more where
   the origin pages history. Each version can be reviewed or reverted; Revert saves a new version
   that undoes it (`POST /git/revert-commit {commit, base}`) and never rewrites history.
-- **Unsaved work** (History only): work kept on `refs/instafy/recovery/*` and
-  `refs/instafy/salvage/*`, listed with `GET /git/recovery`. Restore commits it as a new version
+- **Unsaved work** (History only): work kept on `refs/instafy/recovery/*`, listed with
+  `GET /git/recovery`. Restore commits it as a new version
   (`POST /git/recovery/restore`); when files changed since, Studio asks per file (use the kept
   version, keep the current one, or ask the agent) and finishes with a `keep` list, or Cancel,
-  which closes the choices and restores nothing else (the only way out for salvage). "Use this
+  which closes the choices and restores nothing else. "Use this
   version" reads the file at the ref and saves it on top of the head the restore reported. A read
   answers 404 `not_found` only when the path is absent from the tree at that commit,
   `unsupported_entry` when the path is a symlink or submodule (which reads and listings both
@@ -793,12 +524,11 @@ Studio picks its versioning UI per space from the project's default origin:
   removes a recovery ref once `main` holds its work, all of it but what the person kept; a kept
   new name that a disk ignoring case takes for another file of `main` (`todo.md` beside `TODO.md`,
   `Docs/guide.md` beside a file `docs`) keeps the ref, because `main` holds that work under neither
-  name. Remove deletes a recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs
-  stay and show "Restored" once restored. A restore of work the saved version already has answers
-  `committed: false` and says there was nothing to restore; with `marked: true` (salvage refs) the
-  origin recorded it as an empty version on `main`, so History also reloads at that `rev` and the
-  entry shows "Restored". `notRestored` items carry a `reason` on both Desktop and the gateway: a file left out as an old chat
-  upload (`attachment`, which a salvage keeps privately) is named in a sentence of its own, apart
+  name, and a ref a restore keeps shows "Restored". Remove deletes a recovery ref for everyone
+  (`POST /git/recovery/dismiss`). A restore of work the saved version already has answers
+  `committed: false` and says there was nothing to restore. `notRestored` items carry a `reason`
+  on both Desktop and the gateway: a file left out as an old chat upload (`attachment`) is named
+  in a sentence of its own, apart
   from secret and ignored files, and a `kept` file is never named as refused. The section is
   hidden on servers without these routes.
 - **Desktop**: History also counts files changed in the folder outside Studio and saves them as a
@@ -808,9 +538,8 @@ When a mode check swaps one drawer for the other while it has keyboard focus, th
 title takes focus and says which one the space uses; a space only ever shown as Changes never
 sees this.
 
-The nav badge counts uncommitted changes in Changes and unsaved-work entries in History; salvage
-entries (by their kind, whatever the ref's letter case), which cannot be removed, count only until
-the viewer has seen them (newer recovery entries never push a seen salvage entry out). Each viewer sees one chat row the first time new
+The nav badge counts uncommitted changes in Changes and, in History, unsaved-work entries that are
+not restored yet. Each viewer sees one chat row the first time new
 unsaved work appears (opening History counts as seeing it); it is not written into the
 conversation. What a viewer has seen lives in the browser's storage, and in memory for the session
 when the browser refuses storage.
@@ -827,7 +556,7 @@ when the browser refuses storage.
   (`ORIGIN_MULTI_TENANT=1`, `ORIGIN_GIT_REMOTE_BASE_URL=http://git-edge:8080`, no
   `ORIGIN_GIT_REMOTE_URL`). In its workspace root, `tmp/origin-gateway-workspaces/` by default
   (`ORIGIN_GATEWAY_WORKSPACE_VOLUME`), the gateway keeps `.git-cache/` and, after an upgrade from
-  an older gateway, `.legacy/` and `.salvage/`. Runtime checkouts do not belong there: the local
+  an older gateway, the disposable `.legacy/`. Runtime checkouts do not belong there: the local
   provider keeps them in `tmp/runtime-checkouts/<project_id>` (`DOCKER_REPO_HOST` overrides it;
   see [Local Development](Local-Dev.md#git-canonical-local-git-service)).
 
@@ -845,10 +574,9 @@ Why `<project_id>.git`?
   `/var/lib/instafy-git`; expose shards only to the private service network.
 - Keep routing deterministic per repository as described above.
 - Run the Workspace Gateway with a persistent volume of its own as its workspace root, never the
-  runtime provider's checkout folder (`DOCKER_REPO_HOST`), an init as PID 1, and a lasting
-  `INSTAFY_NODE_NAME`. Its mirror cache is disposable, but after an upgrade from a stateful
-  gateway image the same volume holds `.legacy/` and `.salvage/` until
-  [Retiring gateway working copies](#retiring-gateway-working-copies) is done. See
+  runtime provider's checkout folder (`DOCKER_REPO_HOST`), and an init as PID 1. Its mirror cache
+  is disposable, and so are the working copies an upgrade from a stateful gateway image leaves in
+  `.legacy/` (see [Retiring gateway working copies](#retiring-gateway-working-copies)). See
   [docker/README.md](../docker/README.md#deployment-and-self-hosting).
 
 ## Backups
