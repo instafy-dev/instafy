@@ -3186,22 +3186,16 @@ async fn flush_checkout(
     let apply_lock = project_apply_lock(state, project_id).await;
     let apply_guard = match saving_since {
         // Within the stop's deadline, whoever holds the project.
-        Some(since) => tokio::time::timeout(
-            STOP_FLUSH_DEADLINE.saturating_sub(since.elapsed()),
-            apply_lock.lock_owned(),
-        )
-        .await
-        .map_err(|_| OriginError::conflict("workspace is already mutating"))?,
+        Some(since) => tokio::time::timeout(stop_time_left(since), apply_lock.lock_owned())
+            .await
+            .map_err(|_| OriginError::conflict("workspace is already mutating"))?,
         None => apply_lock.lock_owned().await,
     };
     let config = state.config.clone();
     let workspace_root = checkout_root(state);
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard = tokio::task::spawn_blocking(move || match saving_since {
-        Some(_) => acquire_workspace_apply_lock_within(
-            &lock_workspace,
-            crate::working_state::TURN_END_LOCK_WAIT,
-        ),
+        Some(since) => acquire_workspace_apply_lock_within(&lock_workspace, stop_time_left(since)),
         None => try_acquire_workspace_apply_lock(&lock_workspace),
     })
     .await
@@ -3211,8 +3205,20 @@ async fn flush_checkout(
         .git_remote_url_for_project(project_id)
         .ok_or_else(|| OriginError::bad_request("git remote is not configured for this project"))?;
 
-    // Without write access the flush still parks everything locally.
-    let token = match mint_git_write_token(state, project_id, access_token).await {
+    // Without write access the flush still parks everything locally. A stop
+    // waits for it only within what is left of its deadline.
+    let minted = mint_git_write_token(state, project_id, access_token);
+    let minted = match saving_since {
+        Some(since) => match tokio::time::timeout(stop_time_left(since), minted).await {
+            Ok(minted) => minted,
+            Err(_) => {
+                warn!("flush got no answer about write access in time; keeping work locally");
+                Ok(None)
+            }
+        },
+        None => minted.await,
+    };
+    let token = match minted {
         Ok(token) => token,
         Err(error) => {
             warn!(
@@ -3241,9 +3247,7 @@ async fn flush_checkout(
             Some(since) => publish::flush_saving(
                 &ctx,
                 turn_active,
-                STOP_FLUSH_DEADLINE
-                    .saturating_sub(since.elapsed())
-                    .min(publish::STOP_FLUSH_BUDGET),
+                stop_time_left(since).min(publish::STOP_FLUSH_BUDGET),
                 Some(&memory),
             )?,
             None => publish::flush(&ctx, turn_active)?,
@@ -3281,8 +3285,14 @@ async fn handle_git_flush_resume(
 }
 
 /// How long a stop that ends with the working folder's own save may take in
-/// all, waiting for the locks included: below the controller's 25 s wait.
+/// all, waiting for the locks and for write access included: below the
+/// controller's 25 s wait.
 const STOP_FLUSH_DEADLINE: Duration = Duration::from_secs(22);
+
+/// What is left of [`STOP_FLUSH_DEADLINE`] for a stop that began at `since`.
+fn stop_time_left(since: Instant) -> Duration {
+    STOP_FLUSH_DEADLINE.saturating_sub(since.elapsed())
+}
 
 fn busy() -> OriginError {
     OriginError::with_report(

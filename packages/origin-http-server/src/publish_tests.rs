@@ -6657,6 +6657,63 @@ async fn a_stop_with_a_save_waits_for_the_workspace_and_answers_in_time() {
     server.abort();
 }
 
+/// A stop that ends with the working folder's own save answers within its
+/// deadline when the workspace is busy at first and write access is slow to
+/// come: it waits for each only with what is left of that deadline, and
+/// keeps the work locally once it runs out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_with_a_save_keeps_to_its_deadline_when_write_access_is_slow() {
+    let sc = Scenario::new(Options::default());
+    let controller = StubController::start(
+        sc.config.project_id,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    )
+    .await;
+    let mut config = sc.config.clone();
+    config.skip_auth = false;
+    config.controller_base_url = Url::parse(&controller.base).unwrap();
+    config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
+    config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
+    let save_only =
+        controller.save_grant_token(&config, Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    sc.write("notes.md", b"in progress\n");
+    *controller.git_write_delay.lock().unwrap() = Some(Duration::from_secs(40));
+    let held = crate::workspace_lock::try_acquire_workspace_apply_lock(&sc.ws)
+        .unwrap()
+        .expect("the workspace lock");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(8));
+        drop(held);
+    });
+
+    let started = Instant::now();
+    let response = reqwest::Client::new()
+        .post(format!("{base}/git/flush"))
+        .bearer_auth(&save_only)
+        .json(&serde_json::json!({ "turnActive": false, "workingState": true }))
+        .send()
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    release.join().unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    // The waits end at the 22 s deadline; the local parking after it is
+    // not timed and takes a few seconds on a loaded machine. Waiting for
+    // the controller's answer instead would take 8 s + 40 s.
+    assert!(
+        elapsed >= Duration::from_secs(21) && elapsed < Duration::from_secs(32),
+        "the stop took {elapsed:?}"
+    );
+    assert_eq!(body["workingState"]["durable"], false, "{body}");
+    assert!(sc.remote_refs("refs/instafy/").is_empty(), "{body}");
+    server.abort();
+    controller.server.abort();
+}
+
 /// The controller gives up on a stop's flush while it waits for the
 /// workspace, and the stop does not happen. The stop flag goes down with the
 /// dropped request, so rolling saves go on.
