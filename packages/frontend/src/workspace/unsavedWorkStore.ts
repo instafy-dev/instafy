@@ -13,8 +13,8 @@ import {
  *
  * Fetched on Studio load and project switch, when the drawer opens, on focus
  * when older than five minutes, when a finished turn reports a recovery
- * ref, and when a runtime whose rolling save may be listed stops. There is
- * no interval: no event exists for ref creation.
+ * ref, and when a runtime stops (once per stop, for a project whose list has
+ * loaded). There is no interval: no event exists for ref creation.
  */
 
 export type UnsavedWorkStatus = "idle" | "ok" | "unsupported" | "error";
@@ -45,11 +45,6 @@ const inflight = new Map<string, { seq: number; promise: Promise<UnsavedWorkSnap
 const latestSeq = new Map<string, number>();
 const listeners = new Set<() => void>();
 let fetchSeq = 0;
-/**
- * A list has carried a rolling save. Until one does, a stop fetches nothing
- * again, so a server without the flag sees no change.
- */
-let rollingSavesListed = false;
 
 function storeKey(projectId: string, originId: string): string {
   return `${projectId}:${originId}`;
@@ -69,9 +64,6 @@ function writeSnapshot(key: string, snapshot: UnsavedWorkSnapshot): UnsavedWorkS
   snapshots.set(key, snapshot);
   if (snapshot.status === "ok" || snapshot.status === "unsupported") {
     pruneConflicts(key, snapshot.entries);
-  }
-  if (!rollingSavesListed && snapshot.entries.some((entry) => entry.rollingSave === true)) {
-    rollingSavesListed = true;
   }
   notify();
   return snapshot;
@@ -233,8 +225,9 @@ export function setUnsavedWorkLiveOrigins(
     return;
   }
   const live = new Set(originIds);
-  const departed =
-    rollingSavesListed && current.live ? [...current.live].filter((id) => !live.has(id)) : [];
+  // Any stop counts, listed or not: the slot a turn wrote since the list
+  // loaded may be the only copy of that work, and no list carries it yet.
+  const departed = current.live ? [...current.live].filter((id) => !live.has(id)) : [];
   if (current.live && departed.length === 0 && sameOrigins(current.live, live)) {
     return;
   }
@@ -513,7 +506,6 @@ export function resetUnsavedWorkStoreForTests(): void {
   fetchSeq = 0;
   cancelSettle();
   liveOrigins = null;
-  rollingSavesListed = false;
   notify();
 }
 

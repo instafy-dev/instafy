@@ -299,7 +299,7 @@ describe("rolling saves", () => {
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
   });
 
-  it("changes nothing on a stop while no list has carried the flag", async () => {
+  it("lists again once on a stop before any list carried the flag, and shows a list without it as it is", async () => {
     vi.useFakeTimers();
     mocks.fetchRecovery.mockResolvedValue(ok([entry("refs/instafy/recovery/x/a", { origin: LIVE })]));
     await refreshUnsavedWork({ projectId: "p", originId: "o" });
@@ -307,7 +307,7 @@ describe("rolling saves", () => {
     setUnsavedWorkLiveOrigins("p", []);
     await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS * 5);
     await microtasks();
-    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(1);
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
     expect(getRollingSaveScope("p").hidden.size).toBe(0);
     expect(visible()).toBe(getUnsavedWorkSnapshot("p", "o").entries);
   });
@@ -452,6 +452,32 @@ describe("useUnsavedWork", () => {
       unpublished.rev,
       rollingSave("folder-1", LIVE, "2").rev,
     ]);
+  });
+
+  it("shows a crashed turn's save that no list carried yet once its origin stops", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // Studio opened before the turn's first rolling save existed.
+    mocks.fetchRecovery.mockResolvedValue(ok([]));
+    const view = (statuses: ControllerRuntimeStatusEntry[]) => (
+      <>
+        <Publisher projectId="p" answer={{ projectId: "p", statuses }} />
+        <Probe projectId="p" originId="o" enabled />
+      </>
+    );
+    await act(async () => root.render(view([runtimeStatus(LIVE)])));
+    await flush();
+    expect(latest?.visibleEntries).toEqual([]);
+
+    // The turn's ticks wrote the slot; lists are not polled, so none has it.
+    mocks.fetchRecovery.mockResolvedValue(ok([rollingSave("folder-1", LIVE, "3")]));
+    // The runtime is killed: its origin leaves the live set.
+    await act(async () => root.render(view([])));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS * 10);
+    });
+    await flush();
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
+    expect(latest?.visibleEntries.map((item) => item.rev)).toEqual([rollingSave("folder-1", LIVE, "3").rev]);
   });
 
   it("counts only a status answer for the current project, and keeps it while no new one arrives", async () => {
