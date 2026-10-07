@@ -45,7 +45,10 @@ import {
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
 
 type WorkspaceFileReferencePresentation = {
-  displayLabel: string;
+  // The chip shows the folder as a muted lead before the name, so two files
+  // with the same name read apart. Null when the file sits at the root.
+  folderLabel: string | null;
+  nameLabel: string;
   title: string;
   ariaLabel: string;
   previewHeaderLabel: string;
@@ -347,7 +350,8 @@ function formatWorkspaceFileReferencePresentation(
   const path = reference.path.trim();
   if (!path) {
     return {
-      displayLabel: rawLabel,
+      folderLabel: null,
+      nameLabel: rawLabel,
       title: rawLabel,
       ariaLabel: `Open workspace file: ${rawLabel}`,
       previewHeaderLabel: rawLabel,
@@ -362,7 +366,15 @@ function formatWorkspaceFileReferencePresentation(
   const userPath = importedRepoPath?.relativePath ?? path;
   const segments = userPath.split("/").filter(Boolean);
   const fileName = segments[segments.length - 1]?.trim();
-  const displayLabel = fileName ? `${fileName}${suffix}` : rawLabel;
+  const nameLabel = fileName ? `${fileName}${suffix}` : rawLabel;
+  // Keep the folders nearest the file: a deep path collapses from the left.
+  const folderSegments = segments.slice(0, -1);
+  const folderLabel =
+    folderSegments.length === 0
+      ? null
+      : folderSegments.length <= 2
+        ? `${folderSegments.join("/")}/`
+        : `…/${folderSegments.slice(-2).join("/")}/`;
   const previewHeaderLabel = `${userPath}${suffix}`;
   const previewHeaderContext = importedRepoPath
     ? `Imported repo: ${importedRepoPath.repoFolder}`
@@ -378,7 +390,8 @@ function formatWorkspaceFileReferencePresentation(
     : `Open workspace file: ${previewHeaderLabel}`;
 
   return {
-    displayLabel,
+    folderLabel,
+    nameLabel,
     title,
     ariaLabel,
     previewHeaderLabel,
@@ -786,7 +799,6 @@ function WorkspaceFileReferenceChip({
 
   const canNavigate = Boolean(reference.path.trim().length > 0);
   const presentation = formatWorkspaceFileReferencePresentation(reference);
-  const displayLabel = presentation.displayLabel;
   const previewHeaderParts = formatWorkspaceFilePreviewHeaderParts(presentation.previewHeaderLabel);
   const previewLanguage = inferWorkspaceFilePreviewLanguage(
     reference.path,
@@ -1180,17 +1192,34 @@ function WorkspaceFileReferenceChip({
         className={[
           WORKSPACE_FILE_REFERENCE_TOKEN_CLASS,
           canNavigate
-            ? "cursor-pointer hover:bg-primary-100/80 hover:text-primary-800 dark:hover:bg-primary-300/15 dark:hover:text-primary-100"
+            ? "group/file-ref cursor-pointer hover:bg-primary-100/80 hover:text-primary-800 dark:hover:bg-primary-300/15 dark:hover:text-primary-100"
             : "cursor-default opacity-60",
         ].join(" ")}
       >
-        <span className="block min-w-0 max-w-full truncate">{displayLabel}</span>
+        {presentation.folderLabel ? (
+          // The folder gives way first, so the name and its line stay readable.
+          <span className="flex min-w-0 max-w-full items-baseline">
+            <span
+              data-testid="chat-message-file-reference-folder"
+              className="min-w-0 truncate text-slate-600 group-hover/file-ref:text-slate-700 dark:text-slate-400 dark:group-hover/file-ref:text-slate-300"
+            >
+              {presentation.folderLabel}
+            </span>
+            <span data-testid="chat-message-file-reference-name" className="min-w-0 max-w-full flex-none truncate">
+              {presentation.nameLabel}
+            </span>
+          </span>
+        ) : (
+          <span data-testid="chat-message-file-reference-name" className="block min-w-0 max-w-full truncate">
+            {presentation.nameLabel}
+          </span>
+        )}
       </button>
       {actionMenuPosition ? (
         <span
           ref={actionMenuRef}
           role="menu"
-          aria-label={`File actions for ${displayLabel}`}
+          aria-label={`File actions for ${presentation.previewHeaderLabel}`}
           data-testid="chat-message-file-reference-menu"
           className="fixed z-[80] block w-44 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-1 text-left text-sm shadow-xl shadow-slate-950/15 ring-1 ring-slate-950/5 dark:border-[color:var(--color-studio-dark-floating-border)] dark:bg-[var(--color-studio-dark-floating)] dark:shadow-black/25 dark:ring-white/[0.08]"
           style={{

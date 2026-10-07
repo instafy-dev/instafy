@@ -32,6 +32,11 @@ export interface ControllerRuntimeStatusEntry {
   idleTtlSeconds: number;
   createdAt?: string | null;
   lastSeenAt?: string | null;
+  /**
+   * When the runtime's active lease was requested. Absent when it has no
+   * active lease, and from controllers older than the field.
+   */
+  launchRequestedAt?: string | null;
   endpointUrl?: string | null;
   taskRef?: string | null;
   isLocal: boolean;
@@ -159,6 +164,12 @@ interface EnsureRuntimeParams {
   originProtocols?: string[] | null;
   originMetadata?: Record<string, unknown> | null;
   provider?: string | null;
+  /**
+   * Ask the controller to replace a launch that has not come up after five
+   * minutes instead of handing it back. The controller decides whether the
+   * launch qualifies; a younger or live one is reused as usual.
+   */
+  replaceStalledLaunch?: boolean;
 }
 
 export interface StartRuntimeParams {
@@ -169,6 +180,8 @@ export interface StartRuntimeParams {
   originMode?: string | null;
   originProtocols?: string[] | null;
   originMetadata?: Record<string, unknown> | null;
+  /** See EnsureRuntimeParams.replaceStalledLaunch. */
+  replaceStalledLaunch?: boolean;
 }
 
 export async function startRuntime(
@@ -182,6 +195,7 @@ export async function startRuntime(
     originMode: params.originMode ?? undefined,
     originProtocols: params.originProtocols ?? undefined,
     originMetadata: params.originMetadata ?? undefined,
+    replaceStalledLaunch: params.replaceStalledLaunch,
   });
   return Boolean(result);
 }
@@ -238,6 +252,9 @@ export async function ensureRuntime(
   }
   if (params.originMetadata) {
     payload.origin_metadata = params.originMetadata;
+  }
+  if (params.replaceStalledLaunch === true) {
+    payload.replaceStalledLaunch = true;
   }
   try {
     const response = await fetch(`${requestContext.baseUrl}/runtime/ensure`, {

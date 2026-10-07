@@ -5,7 +5,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { createMemoryRouter, RouterProvider, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getStudioVisitKey } from "../../navigation/studioVisit";
-import { clearRestoredAwaitingIntent, isRestoredAwaitingIntent } from "../../runtime/idlePauseRegistry";
 import { useWorkspaceStore } from "../../store";
 import { ProjectAccessProvider, useProjectAccess } from "../ProjectAccessProvider";
 import { ProjectStateProvider } from "../ProjectStateProvider";
@@ -123,8 +122,6 @@ describe("ProjectAccessProvider inside a real router", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
-    clearRestoredAwaitingIntent(PROJECT_ID);
-    clearRestoredAwaitingIntent(OTHER_PROJECT_ID);
     useWorkspaceStore.setState({ projects: {}, activeProjectId: "" });
     window.localStorage.clear();
     window.sessionStorage.clear();
@@ -156,9 +153,6 @@ describe("ProjectAccessProvider inside a real router", () => {
     expect(mocks.getSummaryResult).toHaveBeenCalledWith(PROJECT_ID, { signal: expect.any(AbortSignal) });
     expect(probe?.getAttribute("data-initialized")).toBe("true");
     expect(probe?.getAttribute("data-pending")).toBe("false");
-    // Reopened from memory, not chosen in the URL: its machine still waits
-    // for intent (#397), even though the URL now names it.
-    expect(isRestoredAwaitingIntent(PROJECT_ID)).toBe(true);
     expect(mocks.create).not.toHaveBeenCalled();
   });
 

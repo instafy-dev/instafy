@@ -105,6 +105,10 @@ test.describe("Chat file links", () => {
       "title",
       `firmware/esp32/rust/src/runtime_telemetry.rs - Imported repo: instafy-dev-demo. Workspace path: ${longPath}`,
     );
+    // The chip leads with its nearest folders and keeps the file name in view.
+    const firstFileChip = latestUserBubble.getByTestId("chat-message-file-reference-inline").first();
+    await expect(firstFileChip.getByTestId("chat-message-file-reference-folder")).toHaveText("…/rust/src/");
+    await expect(firstFileChip.getByTestId("chat-message-file-reference-name")).toBeVisible();
     await expect(latestUserBubble.getByTestId("chat-message-file-reference-inline").filter({ hasText: veryLongFileName })).toHaveAttribute(
       "title",
       `firmware/esp32/rust/src/${veryLongFileName} - Imported repo: instafy-dev-demo. Workspace path: ${veryLongFilePath}`,

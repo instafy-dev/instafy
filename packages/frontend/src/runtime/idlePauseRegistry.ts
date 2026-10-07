@@ -3,29 +3,31 @@
  *
  * The state-driven auto-ensure would otherwise see "no ready runtime" and
  * relaunch the machine ~10 seconds after every idle stop, turning the pause
- * into a stop/restart billing loop for any open tab. A pause holds until a
- * genuine user interaction (or an explicit start) clears it.
+ * into a stop/restart billing loop for any open tab. A pause holds until the
+ * person writes in or clicks into the composer, sends, or starts the machine.
  */
 export const IDLE_PAUSE_CLEARED_EVENT = "instafy:idle-pause-cleared";
 
 /**
  * Projects whose hosted machine the user stopped on purpose.
  *
- * Unlike the idle pause, a manual stop must survive pointer and keyboard
- * activity: the user is still working in the tab, they just do not want the
- * machine back. The hold lifts only on an explicit start, reconnect or send.
+ * Unlike the idle pause, a manual stop must survive typing in the composer:
+ * the user is still working in the tab, they just do not want the machine
+ * back. The hold lifts only on an explicit start, reconnect or send.
  */
 export const MANUAL_STOP_CHANGED_EVENT = "instafy:manual-stop-changed";
 
 const paused = new Set<string>();
 const manualStops = new Set<string>();
 /**
- * Spaces that startup reopened from memory rather than the person choosing
- * them. On a plan with one hosted machine, starting that machine at sign-in
- * took the only slot before the person had done anything there, and the
- * space they actually went on to use then waited behind it. The hold lifts on
- * the first intent in that space (the composer, a send, an explicit Start),
- * and nothing else about auto-start changes.
+ * Spaces whose machine waits for the person to ask for it. Every time a space
+ * becomes the active one (startup, a switch, a link, a Machines deep link) it
+ * is marked here: opening a space is not a request for its machine. On a plan
+ * with one hosted machine an automatic start took the only slot, from another
+ * space when that one looked idle, before the person had done anything. The
+ * hold lifts on the first intent in that space (writing in or clicking into
+ * the composer, a send, an explicit Start), and nothing else about auto-start
+ * changes.
  */
 const restoredAwaitingIntent = new Set<string>();
 

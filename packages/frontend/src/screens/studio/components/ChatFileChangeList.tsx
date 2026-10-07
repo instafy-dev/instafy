@@ -112,7 +112,6 @@ type ChatChangeRevertScope =
 type ResolvedChatFileChange = {
   file: ChatMessageFileChange;
   workspacePath: string;
-  displayLabel: string;
 };
 
 const MAX_FILES_EXPANDED_BY_DEFAULT = 4;
@@ -162,16 +161,18 @@ function LineDelta({ added, removed }: { added: number; removed: number }) {
   );
 }
 
+// Labels come from the workspace path: a runtime's file label is usually the
+// bare name already, which would leave two index.ts chips looking the same.
 function resolveChipLabels(entries: ResolvedChatFileChange[]): Map<string, string> {
   const baseNameCounts = new Map<string, number>();
   for (const entry of entries) {
-    const baseName = entry.displayLabel.split("/").pop() || entry.displayLabel;
+    const baseName = entry.workspacePath.split("/").pop() || entry.workspacePath;
     baseNameCounts.set(baseName, (baseNameCounts.get(baseName) ?? 0) + 1);
   }
   const labels = new Map<string, string>();
   for (const entry of entries) {
-    const segments = entry.displayLabel.split("/");
-    const baseName = segments.pop() || entry.displayLabel;
+    const segments = entry.workspacePath.split("/");
+    const baseName = segments.pop() || entry.workspacePath;
     const needsContext = (baseNameCounts.get(baseName) ?? 0) > 1 && segments.length > 0;
     labels.set(entry.workspacePath, needsContext ? `${segments.pop()}/${baseName}` : baseName);
   }
@@ -202,11 +203,7 @@ export function resolveUniqueChatFileChanges(files: ChatMessageFileChange[]): Re
       continue;
     }
     seen.add(workspacePath);
-    entries.push({
-      file,
-      workspacePath,
-      displayLabel: (file.label || file.path).trim(),
-    });
+    entries.push({ file, workspacePath });
   }
   return entries;
 }
@@ -493,10 +490,15 @@ export function ChatFileChangeList({
   const showSummaryToggle = totalCount > 1;
   const visibleChipEntries = railExpanded || !showSummaryToggle ? resolvedFiles : [];
   const chipLabels = resolveChipLabels(resolvedFiles);
-  const statsLoading = pendingPaths.some((path) => {
-    const stat = statsByPath[path];
-    return !stat || stat.kind === "loading";
-  });
+  // Stats load only from a ready runtime. A space whose machine is not running
+  // (it waits until someone writes in the chat) is not loading anything, so
+  // it shows no placeholder rather than one that never resolves.
+  const statsLoading =
+    runtimeReady &&
+    pendingPaths.some((path) => {
+      const stat = statsByPath[path];
+      return !stat || stat.kind === "loading";
+    });
 
   useEffect(() => {
     if (!projectId || !runtimeReady || uniquePaths.length === 0) {
@@ -1296,6 +1298,7 @@ export function ChatFileChangeList({
                 title={isReverted ? `${workspacePath} (reverted)` : workspacePath}
                 aria-expanded={cardOpen}
                 aria-controls={`${cardIdBase}-${index}`}
+                aria-describedby={`${cardIdBase}-path-${index}`}
                 data-testid="chat-file-change-file-chip"
               >
                 {isReverted ? <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" /> : null}
@@ -1342,6 +1345,14 @@ export function ChatFileChangeList({
             );
           })}
           </span>
+          {/* The chip shows the name; its description gives the full path. A
+              description, not a label, so the line counts and "(reverted)"
+              stay in the chip's name. */}
+          {visibleChipEntries.map(({ workspacePath }, index) => (
+            <span key={workspacePath} id={`${cardIdBase}-path-${index}`} hidden>
+              {workspacePath}
+            </span>
+          ))}
 
         {unsavedNote ? (
           <button
@@ -1449,11 +1460,12 @@ export function ChatFileChangeList({
         );
       })}
 
-      {resolvedFiles.map(({ file, workspacePath, displayLabel }, index) => {
+      {resolvedFiles.map(({ file, workspacePath }, index) => {
         if (!railExpanded || !expandedDiffByPath[workspacePath]) {
           return null;
         }
         const meta = resolveChangeMeta(file.changeType);
+        const fileNameStart = workspacePath.lastIndexOf("/") + 1;
         const stat = statsByPath[workspacePath];
         const primaryRange = file.lineRanges[0] ?? null;
         const openDiff = () => handleOpenDiff(workspacePath);
@@ -1495,14 +1507,19 @@ export function ChatFileChangeList({
                 <button
                   type="button"
                   className={[
-                    "min-w-0 truncate text-left font-mono text-xs text-slate-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:text-slate-300 dark:focus-visible:ring-primary-300/80",
+                    "flex min-w-0 text-left font-mono text-xs text-slate-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 dark:text-slate-300 dark:focus-visible:ring-primary-300/80",
                     isReverted ? "line-through text-slate-500 dark:text-slate-400" : "",
                   ].join(" ")}
                   title={`Open ${workspacePath}`}
                   onClick={() => openFile()}
                   aria-label={`Open ${workspacePath}`}
+                  data-testid="chat-file-change-row-path"
                 >
-                  {displayLabel}
+                  {/* The folder gives way first, so a long path keeps the file name visible. */}
+                  {fileNameStart > 0 ? (
+                    <span className="min-w-0 truncate">{workspacePath.slice(0, fileNameStart)}</span>
+                  ) : null}
+                  <span className="min-w-0 max-w-full flex-none truncate">{workspacePath.slice(fileNameStart)}</span>
                 </button>
                 {undoStatus ? (
                   <span

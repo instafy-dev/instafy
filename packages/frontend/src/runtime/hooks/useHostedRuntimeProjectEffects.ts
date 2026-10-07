@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, type Dispatch, type MutableRefObject } from "react";
 import type { HostedRuntimeLimitErrorDetails } from "../hostedRuntimeLimitError";
+import { markRestoredAwaitingIntent } from "../idlePauseRegistry";
 import type { RuntimeAction, RuntimeStoreState } from "../runtimeStore";
 
 interface UseHostedRuntimeProjectEffectsArgs {
@@ -29,7 +30,6 @@ interface UseHostedRuntimeProjectEffectsArgs {
   runtimeOfflineAlertRef: MutableRefObject<string | null>;
   autoEnsureHostedRef: MutableRefObject<boolean>;
   previousRuntimeProjectIdRef: MutableRefObject<string | null>;
-  skipAutoEnsureProjectRef: MutableRefObject<string | null>;
   lastPreferredRuntimeIdRef: MutableRefObject<string | null>;
   preferenceClearRequestedRef: MutableRefObject<boolean>;
   latestReadyHostedRuntimeRef: MutableRefObject<{ projectId: string; runtimeId: string } | null>;
@@ -58,7 +58,6 @@ export function useHostedRuntimeProjectEffects({
   runtimeOfflineAlertRef,
   autoEnsureHostedRef,
   previousRuntimeProjectIdRef,
-  skipAutoEnsureProjectRef,
   lastPreferredRuntimeIdRef,
   preferenceClearRequestedRef,
   latestReadyHostedRuntimeRef,
@@ -73,7 +72,13 @@ export function useHostedRuntimeProjectEffects({
       return;
     }
     previousRuntimeProjectIdRef.current = normalizedProjectId;
-    skipAutoEnsureProjectRef.current = normalizedProjectId;
+    // Opening a space is not a request for its machine, however it was
+    // opened: at startup, from the switcher, a link or a Machines deep link.
+    // The machine waits for intent there (the composer, a send, a Start).
+    // This has to be the layout effect: a switch can commit the new space
+    // while access still reads ready from the old one, and the auto-start
+    // effects run in that same commit.
+    markRestoredAwaitingIntent(normalizedProjectId);
     lastPreferredRuntimeIdRef.current = null;
     preferenceClearRequestedRef.current = false;
     dispatch({
@@ -100,7 +105,6 @@ export function useHostedRuntimeProjectEffects({
     setRuntimeEnsureError,
     setRuntimeEnsureLimit,
     setRuntimeStatusesResolved,
-    skipAutoEnsureProjectRef,
   ]);
 
   useEffect(() => {

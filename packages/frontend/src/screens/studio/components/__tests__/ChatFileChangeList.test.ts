@@ -96,6 +96,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   }),
 }));
 
+import { extractFileChangesFromMetadata } from "../../../../conversations/conversationMessageUtils";
 import { ChatFileChangeList, REVERT_WAIT_TIMEOUT_MS, resolveUniqueChatFileChanges } from "../ChatFileChangeList";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "../messageUndoRequest";
 import type { ChatMessageFileChange } from "../../types";
@@ -385,6 +386,33 @@ describe("ChatFileChangeList", () => {
     expect(container.querySelectorAll('[data-testid="chat-file-change-row"]')).toHaveLength(1);
   });
 
+  it("shows no line-count placeholder while the space's machine is not running", async () => {
+    // A space waits for someone to write in the chat before its machine
+    // starts, so nothing loads the counts; a pulsing placeholder would never
+    // resolve.
+    // More than 4 files, so the rail starts tucked behind the summary chip.
+    const files = ["one", "two", "three", "four", "five"].map((name) => fileChange(`src/${name}.ts`));
+    const pulse = () =>
+      container.querySelector('[data-testid="chat-file-change-toggle-files"] .animate-pulse');
+
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: "p1" }));
+    });
+    expect(container.querySelector('[data-testid="chat-file-change-toggle-files"]')).not.toBeNull();
+    expect(pulse()).toBeNull();
+    expect(fetchWorkspaceGitDiff).not.toHaveBeenCalled();
+
+    // Once it is ready the counts load, with the placeholder until they do.
+    fetchWorkspaceGitDiff.mockReturnValue(new Promise(() => {}));
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: "p1" }));
+    });
+    expect(fetchWorkspaceGitDiff).toHaveBeenCalled();
+    expect(pulse()).not.toBeNull();
+  });
+
   it("disambiguates duplicate basenames in the chip rail", async () => {
     const files = [fileChange("src/app/index.ts"), fileChange("src/lib/index.ts")];
 
@@ -394,6 +422,62 @@ describe("ChatFileChangeList", () => {
 
     const chips = container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]');
     expect(Array.from(chips).map((chip) => chip.textContent)).toEqual(["app/index.ts", "lib/index.ts"]);
+  });
+
+  it("tells same-named files apart and gives each chip its full path", async () => {
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    fetchWorkspaceGitDiff.mockResolvedValue({
+      supported: true,
+      diff: "diff --git a/index.ts b/index.ts\n--- a/index.ts\n+++ b/index.ts\n@@ -1 +1 @@\n-old\n+new",
+      truncated: false,
+    });
+    // The runtime's own artifact names no label, so each file's label is
+    // already its bare name; the chips must still read apart.
+    const files = extractFileChangesFromMetadata({
+      artifacts: [
+        {
+          kind: "apply/files",
+          files: [
+            { path: "src/app/index.ts", change: { type: "changed" } },
+            { path: "src/lib/index.ts", change: { type: "changed" } },
+          ],
+        },
+      ],
+    });
+    expect(files.map((file) => file.label)).toEqual(["index.ts", "index.ts"]);
+
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: "p1" }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const chips = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]'),
+    );
+    expect(chips.map((chip) => chip.querySelector("span")?.textContent)).toEqual(["app/index.ts", "lib/index.ts"]);
+    ["src/app/index.ts", "src/lib/index.ts"].forEach((path, index) => {
+      const chip = chips[index];
+      // The path is a description, so the line counts stay in the chip's name.
+      expect(chip?.hasAttribute("aria-label")).toBe(false);
+      expect(chip?.textContent).toMatch(/1 lines? added, 1 lines? removed/);
+      const description = document.getElementById(chip?.getAttribute("aria-describedby") ?? "");
+      expect(description?.textContent).toBe(path);
+      expect(description?.hidden).toBe(true);
+    });
+
+    // The open card names the whole path, and the file name is the part that
+    // never clips.
+    await act(async () => {
+      chips[1]?.click();
+    });
+    const rowPath = container.querySelector('[data-testid="chat-file-change-row-path"]');
+    expect(rowPath?.textContent).toBe("src/lib/index.ts");
+    expect(rowPath?.getAttribute("aria-label")).toBe("Open src/lib/index.ts");
+    expect(rowPath?.lastElementChild?.textContent).toBe("index.ts");
+    expect(rowPath?.lastElementChild?.className.split(" ")).toContain("flex-none");
   });
 
   it("renders a single-file change without the summary toggle chip", async () => {

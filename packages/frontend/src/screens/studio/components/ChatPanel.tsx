@@ -149,6 +149,7 @@ import { useRunFailureRetryActions } from "./useRunFailureRetryActions";
 import {
   buildTimedSyntheticChatRows,
   ChatPostTranscriptAuxiliaryRows,
+  WorkspaceStartStalledRow,
 } from "./ChatSystemRows";
 import { useUnsavedWorkNotice } from "./useUnsavedWorkNotice";
 import {
@@ -238,6 +239,7 @@ import { useChatComposerAttachments } from "./useChatComposerAttachments";
 import { useChatComposerPreviewTab } from "./useChatComposerPreviewTab";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
+import { useStalledWorkspaceStart } from "./useStalledWorkspaceStart";
 import {
   isServerQueuedChatSendItem,
   useChatServerSendQueue,
@@ -503,6 +505,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     hostedRuntimeEnsuring,
     runtimeEnsureError,
     runtimeEnsureLimit,
+    runtimeStatuses,
     runs,
   } = runtimeContext;
   const {
@@ -3052,6 +3055,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     () => ({ workspaceStarting, workspaceStartingSince }),
     [workspaceStarting, workspaceStartingSince],
   );
+  // A hosted launch that has not come up in five minutes turns the
+  // "starting its workspace…" status into a notice with Try again.
+  const workspaceStartStall = useStalledWorkspaceStart({
+    runtimeStatuses,
+    runtimeReady,
+    localRuntime: currentRuntime?.isLikelyLocal === true,
+    conversationId: activeConversationEntry?.controllerId ?? null,
+    runs,
+    messages,
+    runtimeLimitReached: Boolean(runtimeEnsureLimit?.limitReached),
+    outOfCredits,
+    ensureHostedRuntime: projectWriteDisabled ? null : ensureHostedRuntime,
+    showStatus,
+  });
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({
     displayNames: hasMultipleTypingAgents
       ? typingAgents.map((agent) => agent.displayName)
@@ -5804,12 +5821,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               typingIndicatorState={typingIndicatorState}
               typingStatusLabel={typingStatusLabel}
               typingStatusAriaLabel={typingStatusAriaLabel}
-              suppressAssistantStatus={showOutOfCreditsNotice}
+              suppressAssistantStatus={showOutOfCreditsNotice || workspaceStartStall.showNotice}
               isThinkingLabelExpanded={isThinkingLabelExpanded}
               onToggleThinkingLabel={() => setIsThinkingLabelExpanded((current) => !current)}
               latestDisplayedMessageId={displayedMessages[displayedMessages.length - 1]?.id ?? null}
               renderAssistantAvatar={renderAssistantAvatar}
             />
+            {workspaceStartStall.showNotice ? (
+              <WorkspaceStartStalledRow
+                agentDisplayName={hasMultipleTypingAgents ? null : typingAgentDisplayName}
+                onRetry={workspaceStartStall.retry}
+                retryPending={workspaceStartStall.retryPending}
+              />
+            ) : null}
           </ChatColumn>
           </div>
         </OctoScrollMotionScope>
