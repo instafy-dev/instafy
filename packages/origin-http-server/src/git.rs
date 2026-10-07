@@ -353,6 +353,21 @@ fn trusted_git_config_entry(key: &str, value: &str) -> Option<TrustedGitConfigEn
         });
     }
 
+    // The working folder's id (see `crate::working_state`): data only, kept
+    // only as a lower-case UUID, so it can name a recovery ref.
+    if key == crate::working_state::WORKING_SET_CONFIG_KEY.to_ascii_lowercase() {
+        let value = value.trim();
+        if !crate::working_state::is_working_set_id(value) {
+            return None;
+        }
+        return Some(TrustedGitConfigEntry {
+            section: "instafy",
+            subsection: None,
+            name: "workingSet",
+            value: value.to_string(),
+        });
+    }
+
     None
 }
 

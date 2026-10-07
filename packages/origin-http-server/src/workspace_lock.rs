@@ -82,6 +82,24 @@ pub fn try_acquire_workspace_apply_lock(
     }
 }
 
+/// [`try_acquire_workspace_apply_lock`], trying again for up to `wait` while
+/// another holder has it. `None` once `wait` has passed.
+pub fn acquire_workspace_apply_lock_within(
+    workspace_root: &Path,
+    wait: std::time::Duration,
+) -> Result<Option<WorkspaceApplyLock>, OriginError> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Some(lock) = try_acquire_workspace_apply_lock(workspace_root)? {
+            return Ok(Some(lock));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::try_acquire_workspace_apply_lock;

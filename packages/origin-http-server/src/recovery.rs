@@ -563,6 +563,9 @@ pub(crate) struct PushPending {
 /// refused file never keeps the rest of the work local forever. A ref that
 /// cannot be pushed is reported in `failed` and the others are still pushed.
 /// Pushing stops at `deadline`; whatever is left waits for the next call.
+/// Refs named in `held_back` are left alone: a stop holds back the `unsaved`
+/// copy it just made until it knows whether the working folder's own save
+/// holds the same work (see [`crate::working_state`]).
 pub(crate) fn push_pending(
     git: &WorkspaceGit<'_>,
     remote: &str,
@@ -570,9 +573,13 @@ pub(crate) fn push_pending(
     main: Option<&str>,
     published: &[String],
     deadline: Option<Instant>,
+    held_back: &BTreeSet<String>,
 ) -> Result<PushPending> {
     let mut report = PushPending::default();
     for (name, rev) in pending(git)? {
+        if held_back.contains(&name) {
+            continue;
+        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             report
                 .failed

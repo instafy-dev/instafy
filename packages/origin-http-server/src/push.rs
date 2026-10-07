@@ -2,12 +2,15 @@
 //!
 //! Every push is a plain push: a ref moves only when the new commit has the
 //! remote's tip as an ancestor, or, for a ref that must not exist yet,
-//! under `--force-with-lease=<ref>:` (create only). Nothing here can rewrite
-//! a remote ref.
+//! under `--force-with-lease=<ref>:` (create only). The one ref that moves
+//! otherwise is a working folder's rolling save
+//! ([`push_replace_with_lease`]), and only while it still names the exact
+//! commit its saver last confirmed. Nothing here can rewrite any other remote
+//! ref.
 
 use std::process::Output;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::publish_policy::RejectReason;
 use crate::workspace_git::WorkspaceGit;
@@ -97,14 +100,17 @@ fn run_push_hook(refspecs: &[String]) -> PushHookAction {
 }
 
 /// Push `refspecs` (`<id>:<ref>`, never `+`-prefixed) to `remote`.
-/// `create_only` names refs that must not exist on the remote yet.
+/// `create_only` names refs that must not exist on the remote yet. A forced
+/// refspec is refused before anything runs.
 pub(crate) fn push(
     git: &WorkspaceGit<'_>,
     remote: &str,
     refspecs: &[String],
     create_only: &[String],
 ) -> Result<PushResult> {
-    debug_assert!(refspecs.iter().all(|spec| !spec.starts_with('+')));
+    if refspecs.iter().any(|spec| spec.starts_with('+')) {
+        bail!("a forced refspec is never pushed");
+    }
     let leases: Vec<String> = create_only
         .iter()
         .map(|reference| format!("--force-with-lease={reference}:"))
@@ -165,6 +171,53 @@ pub(crate) fn delete_with_lease(
         remote,
         &delete,
     ])?;
+
+    #[cfg(test)]
+    if lose_response {
+        let lost = Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"fatal: the remote end hung up unexpectedly\n".to_vec(),
+        };
+        return Ok(PushResult {
+            class: classify_output(&lost),
+            refs: Vec::new(),
+        });
+    }
+
+    Ok(PushResult {
+        class: classify_output(&output),
+        refs: parse_porcelain(&output.stdout),
+    })
+}
+
+/// Set the working slot `destination` to `commit` while it still names
+/// `expected` (`None`: while it does not exist yet). Each save of a working
+/// folder sits on `main`, not on the save before it, so the update is not a
+/// fast-forward; the lease on the exact tip the saver last confirmed is what
+/// keeps it from replacing anyone else's save. A slot that moved, or exists
+/// when it should not, is refused as a lost race and left alone.
+pub(crate) fn push_replace_with_lease(
+    git: &WorkspaceGit<'_>,
+    remote: &str,
+    commit: &str,
+    destination: &str,
+    expected: Option<&str>,
+) -> Result<PushResult> {
+    if !git_service::policy::is_working_slot_ref(destination) {
+        bail!("only a working slot is replaced under a lease");
+    }
+    let rev = expected.unwrap_or_default();
+    let lease = format!("--force-with-lease={destination}:{rev}");
+    let spec = format!("{commit}:{destination}");
+
+    #[cfg(test)]
+    let lose_response = matches!(
+        run_push_hook(std::slice::from_ref(&spec)),
+        PushHookAction::LoseResponse
+    );
+
+    let output = git.run(&["push", "--porcelain", "--no-verify", &lease, remote, &spec])?;
 
     #[cfg(test)]
     if lose_response {
@@ -532,6 +585,92 @@ mod tests {
         );
         assert!(left.contains(&format!("{moved} {second}")), "{left}");
         assert!(!left.contains(listed), "{left}");
+    }
+
+    #[test]
+    fn a_forced_refspec_is_refused_before_anything_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        crate::test_support::git_in(&root, &["init", "-q", "--bare", "-b", "main", "local.git"]);
+        let local_dir = root.join("local.git");
+        let local = WorkspaceGit::bare(&local_dir, None);
+        let error = push(
+            &local,
+            "file:///nonexistent",
+            &["+abc:refs/heads/main".to_string()],
+            &[],
+        )
+        .err()
+        .expect("a forced refspec is refused");
+        assert!(error.to_string().contains("forced refspec"), "{error}");
+    }
+
+    /// A working slot moves to a commit that is not a fast-forward only
+    /// while it names the exact tip the saver confirmed; a create needs it
+    /// absent. Other refs are never replaced this way.
+    #[test]
+    fn a_working_slot_is_replaced_only_under_its_lease() {
+        use crate::test_support::git_in;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        git_in(&root, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
+        git_in(&root, &["init", "-q", "--bare", "-b", "main", "local.git"]);
+        let remote = root.join("remote.git");
+        let local_dir = root.join("local.git");
+        let local = WorkspaceGit::bare(&local_dir, None);
+        let commit = |message: &str| {
+            let tree = git_in(&local_dir, &["mktree"]);
+            git_in(
+                &local_dir,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@instafy.dev",
+                    "commit-tree",
+                    &tree,
+                    "-m",
+                    message,
+                ],
+            )
+        };
+        let (first, second, third) = (commit("first"), commit("second"), commit("third"));
+        let slot = format!(
+            "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/{}",
+            git_service::policy::WORKING_SLOT_NAME
+        );
+        let url = format!("file://{}", remote.display());
+        let tip = || {
+            let output = crate::test_support::git_output(
+                &remote,
+                &["rev-parse", "--verify", "-q", &slot],
+                None,
+            );
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        };
+
+        let created = push_replace_with_lease(&local, &url, &first, &slot, None).unwrap();
+        assert_eq!(created.class, PushClass::Pushed);
+        assert_eq!(tip().as_deref(), Some(first.as_str()));
+        // Unrelated commits: never a fast-forward.
+        let replaced = push_replace_with_lease(&local, &url, &second, &slot, Some(&first)).unwrap();
+        assert_eq!(replaced.class, PushClass::Pushed);
+        assert_eq!(tip().as_deref(), Some(second.as_str()));
+        for expected in [Some(first.as_str()), None] {
+            let refused = push_replace_with_lease(&local, &url, &third, &slot, expected).unwrap();
+            assert!(
+                matches!(refused.class, PushClass::LostRace(_)),
+                "{expected:?}: {:?}",
+                refused.class
+            );
+            assert_eq!(tip().as_deref(), Some(second.as_str()));
+        }
+        let content = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/x";
+        assert!(push_replace_with_lease(&local, &url, &third, content, None).is_err());
     }
 
     #[test]

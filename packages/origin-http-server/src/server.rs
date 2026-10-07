@@ -25,12 +25,18 @@ use crate::route_auth::RouteAuth;
 use crate::routes::{self, AppState};
 use serde_json::Value as JsonValue;
 
-/// Written into a hosted checkout's repository by a shutdown flush that kept
-/// everything (every local commit and unsaved edit is on `main` or on a
-/// recovery ref), and removed when an origin starts there. The provider's
-/// checkout eviction keeps any checkout without it: the runtime that last
-/// used it crashed, was killed, or could not finish keeping its work.
+/// The durable-stop marker: written into a hosted checkout's repository by a
+/// shutdown whose final [`crate::working_state::local_state`] was durable
+/// (canonical holds everything the folder held, and nothing is local-only),
+/// holding [`crate::working_state::DURABLE_MARKER`], and removed when an
+/// origin starts there. Checkout eviction keeps any checkout without it: the
+/// runtime that last used it crashed, was killed, could not save, or left
+/// work only this node holds. A Desktop folder or a checkout without a
+/// remote never gets it.
 pub const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
+
+/// How long a shutdown waits for a rolling save to let the workspace go.
+const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
     match crate::workspace_fs::WorkspaceDir::open(workspace_root)
@@ -39,6 +45,32 @@ fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => warn!(%error, "could not clear the clean-stop marker"),
+    }
+}
+
+/// Write [`CLEAN_STOP_MARKER`] when the folder's state after a shutdown's
+/// flush is durable; otherwise leave none, so eviction keeps the checkout.
+fn record_durable_stop(
+    ctx: &crate::publish::PublishContext<'_>,
+    memory: &crate::working_state::WorkingMemory,
+) {
+    match crate::working_state::local_state(ctx, memory) {
+        Ok(state) if state.durable => {
+            let mut marker: &[u8] = crate::working_state::DURABLE_MARKER;
+            if let Err(error) = crate::workspace_fs::WorkspaceDir::open(ctx.workspace_root)
+                .and_then(|workspace| workspace.replace_file(CLEAN_STOP_MARKER, &mut marker, false))
+            {
+                warn!(%error, "could not record the durable stop");
+            }
+        }
+        Ok(state) => info!(
+            local_only = state.local_only,
+            unsaved = state.unsaved,
+            "the stop is not durable; the checkout keeps its work for the next start"
+        ),
+        Err(error) => {
+            warn!(error = %format!("{error:#}"), "could not read the working state at shutdown")
+        }
     }
 }
 
@@ -78,6 +110,41 @@ impl CheckoutRefresher {
         &self,
     ) -> Result<crate::publish::PublishReport, crate::error::OriginError> {
         routes::refresh_checkout_read_only(&self.state).await
+    }
+}
+
+/// Lets the process hosting a single-tenant origin ask what its working
+/// folder holds that canonical does not, in process: no network, no
+/// credential, no lock (see [`crate::working_state::local_state`]).
+#[derive(Clone)]
+pub struct WorkingStateReader {
+    state: AppState,
+}
+
+impl WorkingStateReader {
+    pub async fn state(
+        &self,
+    ) -> Result<crate::working_state::WorkingState, crate::error::OriginError> {
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut config = (*state.config).clone();
+            config.workspace_root = state.workspace_root.as_ref().clone();
+            config.git_remote_url = config.git_remote_url_for_project(config.project_id);
+            crate::working_state::local_state(
+                &crate::publish::PublishContext {
+                    config: &config,
+                    workspace_root: state.workspace_root.as_path(),
+                    token: None,
+                    can_write: false,
+                },
+                &state.working_memory,
+            )
+            .map_err(|error| crate::error::OriginError::internal(format!("{error:#}")))
+        })
+        .await
+        .map_err(|error| {
+            crate::error::OriginError::internal(format!("working state task failed: {error}"))
+        })?
     }
 }
 
@@ -135,6 +202,23 @@ impl OriginHttpServer {
             return None;
         }
         self.state.clone().map(|state| CheckoutRefresher { state })
+    }
+
+    /// The in-process [`WorkingStateReader`] of a hosted checkout with a
+    /// canonical remote, once the origin has started. `None` for a Desktop
+    /// folder, a checkout without a remote and the multi-tenant gateway:
+    /// their folders never take rolling saves.
+    pub fn working_state_reader(&self) -> Option<WorkingStateReader> {
+        if self.config.multi_tenant
+            || !self.config.hosted_checkout
+            || self
+                .config
+                .git_remote_url_for_project(self.config.project_id)
+                .is_none()
+        {
+            return None;
+        }
+        self.state.clone().map(|state| WorkingStateReader { state })
     }
 
     pub async fn start(&mut self) -> Result<ServerStart> {
@@ -344,9 +428,12 @@ impl OriginHttpServer {
     /// call. A machine credential cannot mint `git.write`, so those refs are
     /// pushed by the next publish or refresh. The controller calls
     /// `POST /git/flush` with a write credential before it stops a runtime;
-    /// this is the fallback for stops it did not drive. When it succeeds it
-    /// writes [`CLEAN_STOP_MARKER`]. Best-effort and time-boxed, so shutdown
-    /// never outlasts the stop grace period.
+    /// this is the fallback for stops it did not drive. It raises the stop
+    /// flag, so a rolling save in flight gives up, and waits up to
+    /// [`SHUTDOWN_LOCK_WAIT`] for the workspace rather than skipping, so an
+    /// unfinished turn always steps back. It writes [`CLEAN_STOP_MARKER`]
+    /// only when the folder's final state is durable. Best-effort and
+    /// time-boxed, so shutdown never outlasts the stop grace period.
     async fn flush_workspace_before_shutdown(&self, turn_active: bool) {
         if self.config.multi_tenant || !self.config.hosted_checkout {
             return;
@@ -357,34 +444,34 @@ impl OriginHttpServer {
         else {
             return;
         };
+        let (memory, stop) = match self.state.as_ref() {
+            Some(state) => (state.working_memory.clone(), Some(state.stop_flag.clone())),
+            None => (crate::working_state::WorkingMemory::default(), None),
+        };
+        if let Some(stop) = stop.as_ref() {
+            stop.raise();
+        }
         let mut config = (*self.config).clone();
         config.git_remote_url = Some(remote_url);
         let flush = tokio::task::spawn_blocking(move || {
             let workspace_root = config.workspace_root.clone();
-            let Some(_lock) =
-                crate::workspace_lock::try_acquire_workspace_apply_lock(&workspace_root)?
+            let Some(_lock) = crate::workspace_lock::acquire_workspace_apply_lock_within(
+                &workspace_root,
+                SHUTDOWN_LOCK_WAIT,
+            )?
             else {
                 return Err(crate::error::OriginError::conflict(
-                    "the workspace is busy; skipping the shutdown flush",
+                    "the workspace stayed busy; skipping the shutdown flush",
                 ));
             };
-            let report = crate::publish::flush(
-                &crate::publish::PublishContext {
-                    config: &config,
-                    workspace_root: workspace_root.as_path(),
-                    token: None,
-                    can_write: false,
-                },
-                turn_active,
-            )?;
-            // Everything is on `main` or on a recovery ref now; the refs not
-            // pushed yet keep the checkout from eviction on their own.
-            let mut marker: &[u8] = b"stopped\n";
-            if let Err(error) = crate::workspace_fs::WorkspaceDir::open(&workspace_root)
-                .and_then(|workspace| workspace.replace_file(CLEAN_STOP_MARKER, &mut marker, false))
-            {
-                warn!(%error, "could not record the clean stop");
-            }
+            let ctx = crate::publish::PublishContext {
+                config: &config,
+                workspace_root: workspace_root.as_path(),
+                token: None,
+                can_write: false,
+            };
+            let report = crate::publish::flush_at_shutdown(&ctx, turn_active)?;
+            record_durable_stop(&ctx, &memory);
             Ok(report)
         });
         match tokio::time::timeout(std::time::Duration::from_secs(25), flush).await {
@@ -418,6 +505,13 @@ impl OriginHttpServer {
     /// turn: the turn's local commits are parked instead of published later.
     pub async fn stop_flushing_workspace_during_turn(&mut self, turn_active: bool) -> Result<()> {
         self.stop_inner(Some(turn_active)).await
+    }
+
+    /// The working folder's in-process memory and stop flag, for tests that
+    /// drive a save next to a shutdown.
+    #[cfg(test)]
+    pub(crate) fn app_state(&self) -> Option<AppState> {
+        self.state.clone()
     }
 
     async fn stop_inner(&mut self, flush: Option<bool>) -> Result<()> {

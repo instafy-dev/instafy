@@ -34,6 +34,7 @@ mod stale_align;
 mod test_support;
 mod tree_merge;
 pub mod untrusted_git;
+pub mod working_state;
 pub mod workspace_fs;
 pub mod workspace_git;
 mod workspace_lock;

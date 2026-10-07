@@ -1925,6 +1925,7 @@ const PUBLISH_MODULES: &[(&str, &str)] = &[
     ("recovery_view.rs", include_str!("recovery_view.rs")),
     ("stale_align.rs", include_str!("stale_align.rs")),
     ("tree_merge.rs", include_str!("tree_merge.rs")),
+    ("working_state.rs", include_str!("working_state.rs")),
     ("publish_policy.rs", include_str!("publish_policy.rs")),
     ("workspace_git.rs", include_str!("workspace_git.rs")),
 ];
@@ -4376,6 +4377,41 @@ impl StubController {
         .unwrap()
     }
 
+    /// The save-only grant the controller issues to a running write job for
+    /// the working folder's rolling save: scope `workspace.persist`, bound to
+    /// the job's run and runtime generation, for this origin.
+    fn persist_grant(
+        &self,
+        config: &ServerConfig,
+        user: Uuid,
+        runtime_id: Uuid,
+        runtime_lease_id: Uuid,
+    ) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let header = jsonwebtoken::Header {
+            kid: Some("stub-key".to_string()),
+            ..jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA)
+        };
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({
+                "aud": config.origin_id.to_string(),
+                "sub": user.to_string(),
+                "project_id": config.project_id.to_string(),
+                "origin_id": config.origin_id.to_string(),
+                "runtime_id": runtime_id.to_string(),
+                "run_id": Uuid::new_v4().to_string(),
+                "protocol": "http",
+                "scopes": [crate::routes::WORKSPACE_PERSIST_SCOPE],
+                "lease_id": runtime_lease_id.to_string(),
+                "iat": now,
+                "exp": now + 60,
+            }),
+            &self.encoding_key,
+        )
+        .unwrap()
+    }
+
     /// The short-lived fs.write origin token the controller mints for the
     /// workspace lease holder before a stop.
     fn origin_token(
@@ -4737,9 +4773,10 @@ fn flush_without_network_keeps_finished_commits_and_edits_locally() {
 }
 
 /// The process shutdown flush (no write access) keeps a finished commit on a
-/// local ref, so eviction keeps the checkout, and records the clean stop.
+/// local ref. Work only this node holds is not durable, so no durable-stop
+/// marker is written and eviction keeps the checkout.
 #[tokio::test]
-async fn hosted_shutdown_parks_finished_commits_and_records_a_clean_stop() {
+async fn hosted_shutdown_parks_finished_commits_and_writes_no_durable_marker() {
     let sc = Scenario::new(Options::default());
     sc.write("done.rs", b"fn done() {}\n");
     sc.agent_commit(&["done.rs"], "finished work");
@@ -4748,7 +4785,7 @@ async fn hosted_shutdown_parks_finished_commits_and_records_a_clean_stop() {
     let pending = sc.local_refs(LOCAL_RECOVERY_ROOT);
     assert_eq!(pending.len(), 1, "{pending:?}");
     assert!(pending[0].0.contains("-unpublished-"));
-    assert!(sc.ws.join(crate::server::CLEAN_STOP_MARKER).exists());
+    assert!(!sc.ws.join(crate::server::CLEAN_STOP_MARKER).exists());
 }
 
 /// A shutdown that interrupted a turn sets the turn's commits aside: the
@@ -6298,6 +6335,234 @@ async fn a_save_only_permission_opens_the_flush_and_nothing_else() {
     assert_eq!(resumed["resumed"], true, "{resumed}");
     server.abort();
     controller.server.abort();
+}
+
+/// The rolling save's grant opens `/workspace/persist` and nothing else;
+/// other credentials (a stop's save-only permission, another origin's grant)
+/// do not open it. A save that has nothing to push mints no git token.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persist_grant_opens_the_rolling_save_and_nothing_else() {
+    let sc = Scenario::new(Options::default());
+    let user = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let runtime_lease_id = Uuid::new_v4();
+    let controller = StubController::start(
+        sc.config.project_id,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    )
+    .await;
+    let mut config = sc.config.clone();
+    config.skip_auth = false;
+    config.controller_base_url = Url::parse(&controller.base).unwrap();
+    config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
+    config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
+    let grant = controller.persist_grant(&config, user, runtime_id, runtime_lease_id);
+    let save_only = controller.save_grant_token(&config, user, runtime_id, runtime_lease_id);
+    let mut other_origin = config.clone();
+    other_origin.origin_id = Uuid::new_v4();
+    let foreign = controller.persist_grant(&other_origin, user, runtime_id, runtime_lease_id);
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    let client = reqwest::Client::new();
+    sc.write("notes.md", b"in progress\n");
+
+    for (method, path, body) in [
+        (
+            "POST",
+            "/git/sync",
+            serde_json::json!({ "paths": ["notes.md"] }),
+        ),
+        (
+            "POST",
+            "/git/flush",
+            serde_json::json!({ "turnActive": false }),
+        ),
+        ("POST", "/apply-json", serde_json::json!({})),
+        ("GET", "/entries", serde_json::Value::Null),
+    ] {
+        let request = match method {
+            "GET" => client.get(format!("{base}{path}")),
+            _ => client.post(format!("{base}{path}")).json(&body),
+        };
+        let response = request.bearer_auth(&grant).send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "{method} {path} accepted the rolling save's grant"
+        );
+    }
+    for bearer in [&save_only, &foreign] {
+        let response = client
+            .post(format!("{base}/workspace/persist"))
+            .bearer_auth(bearer)
+            .json(&serde_json::json!({ "reason": "tick" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+    let response = client
+        .post(format!("{base}/workspace/persist"))
+        .bearer_auth(&grant)
+        .json(&serde_json::json!({ "reason": "stop" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(sc.remote_refs("refs/instafy/").is_empty());
+
+    let response = client
+        .post(format!("{base}/workspace/persist"))
+        .bearer_auth(&grant)
+        .json(&serde_json::json!({ "reason": "tick" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["durable"], true, "{body}");
+    let slots = sc.remote_refs("refs/instafy/recovery/");
+    assert_eq!(slots.len(), 1, "{slots:?}");
+    assert!(slots[0].0.ends_with("/working"), "{slots:?}");
+    let mints = |calls: &ControllerCalls| {
+        calls
+            .git_tokens
+            .iter()
+            .filter(|(_, scopes)| scopes.iter().any(|scope| scope == "git.write"))
+            .count()
+    };
+    let minted = mints(&controller.calls.lock().unwrap());
+    assert_eq!(minted, 1);
+    {
+        let calls = controller.calls.lock().unwrap();
+        assert!(
+            !calls.lease_checks.contains(&grant),
+            "the grant needs no workspace lease check"
+        );
+    }
+
+    // Nothing changed: answered without a git token.
+    let response = client
+        .post(format!("{base}/workspace/persist"))
+        .bearer_auth(&grant)
+        .json(&serde_json::json!({ "reason": "turn_end" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(mints(&controller.calls.lock().unwrap()), minted);
+    server.abort();
+    controller.server.abort();
+}
+
+/// A rolling save is refused off a hosted checkout, waits for nothing while
+/// another save holds the workspace (409 `busy`), and is refused while a
+/// stop's fence is up (503 `stopping`).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_rolling_save_route_is_hosted_only_and_yields_to_others() {
+    let desktop = Scenario::new(Options {
+        desktop: true,
+        ..Options::default()
+    });
+    let (base, server) = serve(&desktop).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}/workspace/persist"))
+        .json(&serde_json::json!({ "reason": "tick" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    server.abort();
+
+    let sc = Scenario::new(Options::default());
+    sc.write("notes.md", b"in progress\n");
+    let (base, server) = serve(&sc).await;
+    let held = crate::workspace_lock::try_acquire_workspace_apply_lock(&sc.ws)
+        .unwrap()
+        .expect("the workspace lock");
+    let response = client
+        .post(format!("{base}/workspace/persist"))
+        .json(&serde_json::json!({ "reason": "tick" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "busy", "{body}");
+    drop(held);
+    assert!(sc.remote_refs("refs/instafy/").is_empty());
+
+    // A stop's flush, then a tick: the fence answers.
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": false, "workingState": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let flushed: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(flushed["workingState"]["durable"], true, "{flushed}");
+    let response = client
+        .post(format!("{base}/workspace/persist"))
+        .json(&serde_json::json!({ "reason": "tick" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "stopping", "{body}");
+    server.abort();
+}
+
+/// A stop that asks for the working folder's own save waits for a save in
+/// flight to let the workspace go instead of refusing, and answers within
+/// the controller's wait.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_with_a_save_waits_for_the_workspace_and_answers_in_time() {
+    let sc = Scenario::new(Options::default());
+    sc.write("notes.md", b"in progress\n");
+    let client = reqwest::Client::new();
+    let (base, server) = serve(&sc).await;
+    let held = crate::workspace_lock::try_acquire_workspace_apply_lock(&sc.ws)
+        .unwrap()
+        .expect("the workspace lock");
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        drop(held);
+    });
+    let started = Instant::now();
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": true, "workingState": true }))
+        .send()
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    release.join().unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(elapsed >= Duration::from_millis(1400), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(22), "{elapsed:?}");
+    assert_eq!(body["workingState"]["durable"], true, "{body}");
+    let refs = sc.remote_refs("refs/instafy/");
+    assert_eq!(refs.len(), 1, "{refs:?}");
+    assert!(refs[0].0.ends_with("/working"), "{refs:?}");
+
+    // Without the flag a busy workspace is refused as before.
+    let held = crate::workspace_lock::try_acquire_workspace_apply_lock(&sc.ws)
+        .unwrap()
+        .expect("the workspace lock");
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .json(&serde_json::json!({ "turnActive": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    drop(held);
+    server.abort();
 }
 
 /// Whether `commit` is an ancestor of any recovery ref on the remote.

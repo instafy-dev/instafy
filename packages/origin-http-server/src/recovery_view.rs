@@ -31,6 +31,9 @@ use crate::error::OriginError;
 use crate::git::{is_full_object_id, GitHistoryEntry, HistoryFormat};
 use crate::paths::is_reserved_path;
 use crate::recovery::{RecoveryKind, CONFLICT_TRAILER, KIND_TRAILER, PATH_TRAILER};
+
+/// The trailer naming the origin that wrote a recovery commit.
+const ORIGIN_TRAILER: &str = "Instafy-Origin";
 use crate::workspace_git::{RunOpts, WorkspaceGit};
 
 /// Where one [`fetch_refs`] call holds the commits it fetched, under a
@@ -1382,7 +1385,10 @@ pub(crate) struct RecoveryItem {
     pub subject: String,
     /// The committer date, ISO 8601.
     pub date: Option<String>,
-    /// The origin whose namespace the ref is in.
+    /// The origin that kept the work: the one whose namespace the ref is
+    /// in, or for a rolling save the last origin that wrote it (its
+    /// `Instafy-Origin` trailer; without one, the working-set id its name
+    /// carries, which no live origin has).
     pub origin: Uuid,
     /// For a conflict, the conflicted paths only; otherwise the paths the
     /// commit names as kept.
@@ -1394,6 +1400,11 @@ pub(crate) struct RecoveryItem {
     /// stays after a restore, so this is how a restored one is shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_rev: Option<String>,
+    /// A working folder's rolling save
+    /// (`refs/instafy/recovery/<working-set id>/working`): Studio hides it
+    /// while the origin that last wrote it is live.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rolling_save: bool,
     #[serde(skip)]
     timestamp: i64,
 }
@@ -1445,6 +1456,17 @@ pub(crate) fn describe(
             .map(|(_, value)| value.clone())
             .take(MAX_RECOVERY_ITEM_PATHS)
             .collect();
+        let rolling_save = git_service::policy::is_working_slot_ref(reference.as_str());
+        // A slot is named after its working folder, not an origin: its last
+        // writer is in the commit.
+        let origin = if rolling_save {
+            commit
+                .trailer(ORIGIN_TRAILER)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .unwrap_or_else(|| reference.origin())
+        } else {
+            reference.origin()
+        };
         items.push(RecoveryItem {
             reference: reference.as_str().to_string(),
             rev: fetched.tip.clone(),
@@ -1452,10 +1474,11 @@ pub(crate) fn describe(
             kind,
             subject: commit.subject,
             date: commit.date,
-            origin: reference.origin(),
+            origin,
             paths,
             base: None,
             restored_rev: None,
+            rolling_save,
             timestamp: commit.timestamp,
         });
     }
@@ -1817,6 +1840,12 @@ pub(crate) fn mark_restored(
         restored.entry(reference).or_insert(id);
     }
     for item in items.iter_mut() {
+        // A slot's name is reused by every save of its folder: a restore of
+        // an earlier save says nothing about the one listed now, and a
+        // restored slot is gone anyway.
+        if item.rolling_save {
+            continue;
+        }
         item.restored_rev = restored.get(&item.reference).cloned();
     }
     Ok(())
