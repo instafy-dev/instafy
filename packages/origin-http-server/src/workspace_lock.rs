@@ -74,7 +74,14 @@ pub fn try_acquire_workspace_apply_lock(
     }
 
     match FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(Some(WorkspaceApplyLock { file })),
+        Ok(()) => {
+            // Whoever takes the workspace may change it, so a durable-stop
+            // marker an earlier stop on this folder left (a sibling runtime's,
+            // say) no longer holds: only a stop's own durable answer, written
+            // while it holds this lock, leaves one behind.
+            crate::server::clear_clean_stop_marker(workspace_root);
+            Ok(Some(WorkspaceApplyLock { file }))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(OriginError::internal(format!(
             "failed to lock workspace for apply: {error}"

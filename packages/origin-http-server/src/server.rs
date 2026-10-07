@@ -37,7 +37,10 @@ use serde_json::Value as JsonValue;
 /// Every shutdown decides it again: it is removed before the shutdown's
 /// flush and written back only by a durable answer, so a marker another
 /// runtime on the same folder left, or one the workspace wrote itself,
-/// never outlives a shutdown that was not durable or could not run. It sits
+/// never outlives a shutdown that was not durable or could not run. Taking
+/// the workspace lock removes it too, so a sibling runtime that saves,
+/// publishes or refreshes after another's durable stop clears that stop's
+/// verdict, even if it later dies without a shutdown of its own. It sits
 /// in a directory the workspace can write, so it is a hint for eviction to
 /// combine with what it can check itself, never proof on its own.
 pub const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
@@ -45,7 +48,7 @@ pub const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
 /// How long a shutdown waits for a rolling save to let the workspace go.
 const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 
-fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
+pub(crate) fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
     match crate::workspace_fs::WorkspaceDir::open(workspace_root)
         .and_then(|workspace| workspace.remove(CLEAN_STOP_MARKER))
     {

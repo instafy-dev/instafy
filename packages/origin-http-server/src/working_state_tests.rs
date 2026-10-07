@@ -1660,6 +1660,54 @@ async fn every_shutdown_decides_the_durable_stop_marker() {
     assert_eq!(marker(&fx), None, "a skipped flush keeps no marker");
 }
 
+/// A sibling runtime that goes on working after another's durable stop
+/// clears that stop's marker as soon as it takes the workspace, so when it
+/// then dies without a shutdown of its own, eviction finds no marker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sibling_that_keeps_working_clears_a_durable_stop_marker() {
+    let marker = |fx: &Fixture| fs::read(fx.ws.join(crate::server::CLEAN_STOP_MARKER)).ok();
+    let fx = Fixture::new();
+    let mut first = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    first.start().await.unwrap();
+    let mut second_config = fx.config.clone();
+    second_config.origin_id = Uuid::new_v4();
+    let mut second = crate::server::OriginHttpServer::new(second_config).unwrap();
+    let second_address = second.start().await.unwrap().address;
+    let state = first.app_state().unwrap();
+    fx.write("notes.md", b"saved\n");
+    let ctx = fx.ctx();
+    let mut publisher = publisher(&ctx, TICK_BUDGET);
+    let Planned::Network(plan) = plan_route_save(
+        &mut publisher,
+        PersistReason::TurnEnd,
+        &state.working_memory,
+        &state.stop_flag,
+    ) else {
+        panic!("work to save");
+    };
+    publisher.execute_working_save(plan, &state.working_memory, None);
+    first.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+
+    // The sibling keeps working and saves through its own route.
+    fx.write("sibling.md", b"sibling\n");
+    let response = reqwest::Client::new()
+        .post(format!("http://{second_address}/workspace/persist"))
+        .json(&serde_json::json!({ "reason": "tick" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    // Then it dies: no shutdown flush decides the marker again.
+    fx.write("sibling.md", b"sibling, later\n");
+    second.stop().await.unwrap();
+    assert_eq!(
+        marker(&fx),
+        None,
+        "the earlier stop's verdict outlived the sibling"
+    );
+}
+
 /// A route-level save lets the workspace go while it asks for write
 /// access; a plan taken before another save moved the slot is taken again.
 #[test]
