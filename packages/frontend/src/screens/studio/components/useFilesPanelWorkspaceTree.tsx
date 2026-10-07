@@ -476,18 +476,21 @@ export function useFilesPanelWorkspaceTree({
   );
   loadDirectoryRef.current = loadDirectory;
 
-  // List the root and every expanded folder again; the viewer is left alone.
-  // Versioned modes read them all at one commit: `rev`, or whatever the root
-  // listing was served from. Legacy mode lists them together, and only the
-  // root waits on a runtime sync unless `syncMode` is "blocking".
+  // List the root and every expanded folder again (only the root with
+  // `rootOnly`); the viewer is left alone. Versioned modes read them all at
+  // one commit: `rev`, or whatever the root listing was served from. Legacy
+  // mode lists them together, and only the root waits on a runtime sync
+  // unless `syncMode` is "blocking".
   const reloadTree = useCallback(
-    async (options?: { rev?: string | null; syncMode?: "background" | "blocking" }) => {
+    async (options?: { rev?: string | null; syncMode?: "background" | "blocking"; rootOnly?: boolean }) => {
       const pathsToRefresh = new Set<string>([normalizedRootPath]);
-      expandedDirectoriesRef.current.forEach((path) => {
-        if (path) {
-          pathsToRefresh.add(path);
-        }
-      });
+      if (!options?.rootOnly) {
+        expandedDirectoriesRef.current.forEach((path) => {
+          if (path) {
+            pathsToRefresh.add(path);
+          }
+        });
+      }
 
       let servedRev: string | null = null;
       // The listings this reload read. React shows them on its next render,
@@ -534,13 +537,16 @@ export function useFilesPanelWorkspaceTree({
   );
 
   // List the whole tree when a scope change cleared it (loadDirectory changes
-  // with the scope) and when the workspace becomes browse-ready or stops
-  // being so. One effect covers both, so no folder is listed twice.
+  // with the scope) and when the workspace becomes browse-ready. One effect
+  // covers both, so no folder is listed twice. While the workspace is not
+  // browse-ready only the root is listed: the open folders keep their
+  // listings, or wait for the ready edge, rather than each running its
+  // retries against a workspace that can't answer.
   useEffect(() => {
     if (!activeProjectId || !runtimeControllerEnabled) {
       return;
     }
-    void reloadTree().catch((error) => {
+    void reloadTree({ rootOnly: !workspaceBrowseReady }).catch((error) => {
       console.warn("[files-panel] failed to load directory:", error);
     });
   }, [activeProjectId, reloadTree, workspaceBrowseReady]);

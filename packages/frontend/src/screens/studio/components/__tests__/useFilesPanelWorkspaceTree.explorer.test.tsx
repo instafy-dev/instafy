@@ -253,9 +253,16 @@ describe("Files explorer folders and loading copy", () => {
       expect(current.expandedDirectories.size).toBe(0);
     });
 
-    it("is listed once when the workspace becomes browse-ready again", async () => {
+    it("waits while the workspace is not browse-ready and is listed once when it is again", async () => {
       await listSkills();
+      list.mockClear();
+
+      // Unreachable: only the root is listed, as before; the folder keeps its
+      // listing instead of retrying against a workspace that can't answer.
       await render({ workspaceBrowseReady: false });
+      expect(listedFolders()).toEqual([]);
+      expect(list).toHaveBeenCalledOnce();
+      expect(current.directoryEntries.skills).toEqual([file("skills/write.md")]);
       list.mockClear();
 
       await render({ workspaceBrowseReady: true });
