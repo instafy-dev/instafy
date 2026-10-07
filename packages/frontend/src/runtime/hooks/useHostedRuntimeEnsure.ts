@@ -21,7 +21,19 @@ import type { ShowStatusFn } from "./types";
 export interface EnsureHostedRuntimeOptions {
   /** Request a machine even when a hosted runtime row already looks like it is starting. */
   force?: boolean;
+  /**
+   * Let the controller replace a launch that has not come up after five
+   * minutes instead of handing it back. Sent only on the user's own retry.
+   */
+  replaceStalledLaunch?: boolean;
 }
+
+/**
+ * Shown when a retry of a stalled launch fails for a reason the ensure has
+ * no message of its own for.
+ */
+export const STALLED_LAUNCH_RETRY_FAILED_MESSAGE =
+  "Couldn't restart the workspace yet. Try again in a minute.";
 
 interface UseHostedRuntimeEnsureOptions {
   enabled: boolean;
@@ -112,7 +124,10 @@ export function useHostedRuntimeEnsure({
     return null;
   }, [projectId]);
 
-  const performHostedRuntimeEnsure = useCallback(async () => {
+  const performHostedRuntimeEnsure = useCallback(async (
+    options?: Pick<EnsureHostedRuntimeOptions, "replaceStalledLaunch">,
+  ) => {
+    const replaceStalledLaunch = options?.replaceStalledLaunch === true;
     const effectiveProjectId = resolveEffectiveProjectId();
     if (!enabled || !effectiveProjectId) {
       showStatus("Instafy Cloud runtime is unavailable right now.", "warning", 4000);
@@ -176,6 +191,7 @@ export function useHostedRuntimeEnsure({
             originProtocols: ["http"],
             runtimeId: runtimeId ?? undefined,
             signal: controller.signal,
+            ...(replaceStalledLaunch ? { replaceStalledLaunch: true } : {}),
           });
         } finally {
           if (timeoutId !== null) {
@@ -188,6 +204,10 @@ export function useHostedRuntimeEnsure({
       try {
         result = await ensureWithTimeout(null);
       } catch (error) {
+        // One press sends one replacement request; the user can press again.
+        if (replaceStalledLaunch) {
+          throw error;
+        }
         debugLog("hosted-runtime:perform-retry", {
           projectId: effectiveProjectId,
           error: error instanceof Error ? error.message : String(error),
@@ -250,6 +270,10 @@ export function useHostedRuntimeEnsure({
             onAction: showDesktopRuntimeHelp,
           },
         );
+      } else if (replaceStalledLaunch && !limitDetails) {
+        // A retry the user pressed must answer. A runtime limit already
+        // explains itself where the message waits.
+        showStatus(STALLED_LAUNCH_RETRY_FAILED_MESSAGE, "warning", 5000);
       }
       return false;
     } finally {
@@ -271,6 +295,7 @@ export function useHostedRuntimeEnsure({
 
   const requestHostedRuntime = useCallback(async (options?: EnsureHostedRuntimeOptions) => {
     const force = options?.force === true;
+    const launchOptions = { replaceStalledLaunch: options?.replaceStalledLaunch === true };
     const effectiveProjectId = resolveEffectiveProjectId();
     // A new request starts with no recorded limit; only a launch that fails
     // with the limit below writes one.
@@ -323,20 +348,23 @@ export function useHostedRuntimeEnsure({
     const statusesAfterRefresh = getLatestRuntimeStatuses();
 
     // A forced request skips the "already starting / already running" reuse
-    // below. It exists for one caller: the user just stopped the machine that
-    // held the org's slot ("Stop blocker and retry"). At that moment this
-    // project can still carry the runtime row the controller created for the
-    // queued prompt before the slot check refused it: status `requested`,
-    // never seen, never going to start. For three minutes that row reads as
-    // booting, so a plain ensure would report "starting…" and request
-    // nothing, and the queued message would wait until the row aged out.
-    // The launch below still reuses a runtime that is actually ready.
+    // below. It exists for two callers. One: the user just stopped the
+    // machine that held the org's slot ("Stop blocker and retry"). At that
+    // moment this project can still carry the runtime row the controller
+    // created for the queued prompt before the slot check refused it: status
+    // `requested`, never seen, never going to start. For three minutes that
+    // row reads as booting, so a plain ensure would report "starting…" and
+    // request nothing, and the queued message would wait until the row aged
+    // out. Two: the chat's Try again on a launch that has not come up in five
+    // minutes, which still reads as booting and must reach the controller to
+    // be replaced. The launch below still reuses a runtime that is actually
+    // ready.
     if (force) {
       debugLog("hosted-runtime:ensure-forced", {
         projectId: effectiveProjectId,
         runtimeStatuses: statusesAfterRefresh.length,
       });
-      return performHostedRuntimeEnsure();
+      return performHostedRuntimeEnsure(launchOptions);
     }
 
     const pendingHosted = statusesAfterRefresh.find((entry) => {
@@ -380,7 +408,7 @@ export function useHostedRuntimeEnsure({
     debugLog("hosted-runtime:ensure-launch", {
       projectId: effectiveProjectId,
     });
-    return performHostedRuntimeEnsure();
+    return performHostedRuntimeEnsure(launchOptions);
   }, [
     debugLog,
     enabled,

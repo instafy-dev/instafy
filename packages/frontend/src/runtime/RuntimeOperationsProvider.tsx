@@ -30,6 +30,7 @@ import {
   markManualStop,
 } from "./idlePauseRegistry";
 import { stopLeavesNoLiveHostedRuntime } from "./hooks/manualStopDecisions";
+import { resolveStartRuntimeParams } from "./hooks/startRuntimeDecisions";
 import { useRuntimeControllerSync } from "./hooks/useRuntimeControllerSync";
 import { useRuntimeStatusRefresh } from "./hooks/useRuntimeStatusRefresh";
 import { useRuntimeStatusToasts } from "./hooks/useRuntimeStatusToasts";
@@ -552,14 +553,9 @@ export function RuntimeOperationsProvider({
         return false;
       }
       try {
-        await controllerClient.runtimes.start({
-          projectId,
-          runtimeId,
-          displayName: entry.displayName ?? undefined,
-          originMode: entry.origin?.mode ?? undefined,
-          originProtocols: entry.origin?.protocols ?? undefined,
-          originMetadata: entry.origin?.metadata ?? undefined,
-        });
+        await controllerClient.runtimes.start(
+          resolveStartRuntimeParams(projectId, entry, Date.now()),
+        );
         showStatus("Runtime start requested", "info", 2500);
         await refreshRuntimeStatuses();
         // An explicit Start is intent in this space, so it lifts a deliberate
