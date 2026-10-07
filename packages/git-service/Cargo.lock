@@ -413,7 +413,6 @@ dependencies = [
  "futures-util",
  "jsonwebtoken",
  "reqwest",
- "ring",
  "runtime-contracts",
  "serde",
  "serde_json",
