@@ -2556,10 +2556,11 @@ impl Publisher<'_> {
     ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
     ///   and committed by the origin, then published. With nothing left to
     ///   bring back (the branch already holds the work, or the rest was
-    ///   kept or refused) no commit is made. A restore that leaves a kept
-    ///   name another file of `main` takes on a disk ignoring case on the
-    ///   ref (`path_alias`) commits `Restore part of unsaved work`, which
-    ///   names no ref, so the ref is not listed as restored.
+    ///   kept or refused) no commit is made. A restore with a keep that
+    ///   chose no version of the work's file (`path_alias`,
+    ///   `nothing_to_keep`), whose work stays on the ref, commits `Restore
+    ///   part of unsaved work`, which names no ref, so the ref is not listed
+    ///   as restored.
     /// - Once the work is on `main`, a recovery ref is deleted under a
     ///   lease on its tip, so the same work is not restored twice, but only
     ///   when every path left out was kept on request: a path refused here
@@ -2698,8 +2699,9 @@ impl Publisher<'_> {
             self.git
                 .ok(&["read-tree", "-m", "-u", &head, &tree])
                 .map_err(internal)?;
-            // A restore that leaves a kept name `main` holds in another case
-            // on the ref names no ref: the ref is not listed as restored.
+            // A restore whose keep chose no version of the work's file leaves
+            // that work on the ref and names no ref: it is not listed as
+            // restored.
             let message = if plan.marks_restored() {
                 restore_commit_message(reference.as_str())
             } else {

@@ -3815,7 +3815,8 @@ async fn a_restore_keep_list_is_bounded() {
     assert_eq!(sc.remote_refs(&reference).len(), 1);
     assert!(sc.remote_file("docs/a.md").is_none());
 
-    // At the bound it goes ahead; `docs` keeps `docs/a.md`, not `docs2/`.
+    // At the bound it goes ahead; `docs` keeps `docs/a.md`, not `docs2/`
+    // (`main` has no `docs`, so the keep chose no version of it).
     let mut keep: Vec<String> = (1..crate::publish::MAX_RESTORE_KEEP_PATHS)
         .map(|index| format!("kept/{index}.md"))
         .collect();
@@ -3829,7 +3830,7 @@ async fn a_restore_keep_list_is_bounded() {
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(
         body["notRestored"],
-        serde_json::json!([{ "path": "docs/a.md", "reason": "kept" }])
+        serde_json::json!([{ "path": "docs/a.md", "reason": "nothing_to_keep" }])
     );
     assert_eq!(sc.remote_file("docs2/b.md").as_deref(), Some("b\n"));
     assert!(sc.remote_file("docs/a.md").is_none());

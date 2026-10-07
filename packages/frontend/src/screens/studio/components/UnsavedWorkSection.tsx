@@ -26,7 +26,6 @@ import {
   keptOnComputerCopy,
   MAIN_BUSY_COPY,
   NO_UNSAVED_WORK_COPY,
-  PATH_ALIAS_REASON,
   RECOVERY_REF_MOVED_COPY,
   REMOVE_DIALOG,
   REMOVED_COPY,
@@ -34,6 +33,7 @@ import {
   restoreCancelledCopy,
   restoreConflictNoticeCopy,
   restoreDirtyPathsCopy,
+  restoreLeftWorkOnRef,
   restoreSuccessCopy,
   UNSAVED_WORK_ERROR_COPY,
   UNSAVED_WORK_READ_FAILED_COPY,
@@ -264,9 +264,9 @@ export function UnsavedWorkSection({
         clearConflict(entry.ref);
         // A kept ref counts as restored only through the restore commit the server
         // finds on `main`; a restore that made no version leaves the entry pending,
-        // and so does one that left a name `main` holds in another case on the ref
-        // (`path_alias`): that work is on `main` under no name.
-        const heldOnRef = Object.values(result.notRestoredReasons ?? {}).includes(PATH_ALIAS_REASON);
+        // and so does one whose keep chose no version of the work's file
+        // (`path_alias`, `nothing_to_keep`): that work is on `main` under no name.
+        const heldOnRef = restoreLeftWorkOnRef(result.notRestoredReasons);
         if (result.refDeleted) {
           patchUnsavedWorkEntries(projectId, originId, (entries) => entries.filter((item) => item.ref !== entry.ref));
         } else if (result.committed !== false && !heldOnRef) {

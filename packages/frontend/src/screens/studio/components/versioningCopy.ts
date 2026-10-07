@@ -630,6 +630,19 @@ export const NOTHING_TO_RESTORE_COPY = "Nothing to restore. The saved version al
 /** The reason a restore gives a kept path whose name another file of the space has in another case. */
 export const PATH_ALIAS_REASON = "path_alias";
 
+/** The reason a restore gives a kept path where the space had no current version left to keep. */
+export const NOTHING_TO_KEEP_REASON = "nothing_to_keep";
+
+/**
+ * Whether a restore's reasons name a kept path whose keep chose no version of
+ * the work's file: that work is only on the ref, so the entry stays pending.
+ */
+export function restoreLeftWorkOnRef(reasons: Readonly<Record<string, string>> | null | undefined): boolean {
+  return Object.values(reasons ?? {}).some(
+    (reason) => reason === PATH_ALIAS_REASON || reason === NOTHING_TO_KEEP_REASON,
+  );
+}
+
 /**
  * A finished restore. `kept` are the paths the person chose "Keep current"
  * for (the server reports them in `notRestored` too, the gateway with the
@@ -639,7 +652,9 @@ export const PATH_ALIAS_REASON = "path_alias";
  * ignored, as it does without reasons (Desktop lists bare paths). A kept path
  * the server lists as `path_alias` (another file of the space has its name in
  * another case, so keeping chose no version of the work's file) is said to
- * stay in Unsaved work instead of being kept.
+ * stay in Unsaved work instead of being kept, and so is one listed as
+ * `nothing_to_keep` (the space had no current version left to keep, so it can
+ * be restored later).
  * `committed: false` means no version with changes was made: the saved
  * version already held everything that could be restored, so the copy says
  * what was left out first (never that the space has the refused files).
@@ -662,7 +677,8 @@ export function restoreSuccessCopy({
 }): string {
   const keptSet = new Set(kept);
   const held = notRestored.filter((path) => reasons[path] === PATH_ALIAS_REASON);
-  const heldSet = new Set(held);
+  const unchosen = notRestored.filter((path) => reasons[path] === NOTHING_TO_KEEP_REASON);
+  const heldSet = new Set([...held, ...unchosen]);
   const keptPaths = Array.from(keptSet).filter((path) => !heldSet.has(path));
   const refused = notRestored.filter(
     (path) => !keptSet.has(path) && !heldSet.has(path) && reasons[path] !== "kept",
@@ -677,6 +693,13 @@ export function restoreSuccessCopy({
       held.length === 1
         ? `${formatPathList(held)} stays in Unsaved work, because the space has another file with that name in a different case.`
         : `${formatPathList(held)} stay in Unsaved work, because the space has other files with those names in a different case.`,
+    );
+  }
+  if (unchosen.length > 0) {
+    leftOut.push(
+      unchosen.length === 1
+        ? `${formatPathList(unchosen)} stays in Unsaved work to restore later, because the space has no current version of it to keep.`
+        : `${formatPathList(unchosen)} stay in Unsaved work to restore later, because the space has no current versions of them to keep.`,
     );
   }
   if (refused.length > 0) {

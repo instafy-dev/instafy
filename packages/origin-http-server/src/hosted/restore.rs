@@ -43,7 +43,7 @@ pub(crate) struct Restore {
     /// `main` holds all of the work but that ([`restore_plan`]'s rule).
     lets_ref_go: bool,
     /// The last attempt's commit may name the ref, so it is listed as
-    /// restored: no kept name is one `main` holds in another case
+    /// restored: every keep chose `main`'s version over the work's
     /// ([`restore_plan::RestorePlan::marks_restored`]).
     marks_restored: bool,
     /// The last attempt's changes to `main`.
@@ -79,9 +79,9 @@ impl Restore {
     }
 
     /// The message the last attempt commits with: `message` (the restore
-    /// message naming the ref), or one naming no ref when a kept name is
-    /// one `main` holds in another case, so the ref is not listed as
-    /// restored while it holds that work.
+    /// message naming the ref), or one naming no ref when a keep chose no
+    /// version of the work's file (`path_alias`, `nothing_to_keep`), so the
+    /// ref is not listed as restored while it holds that work.
     pub(super) fn message<'m>(&self, message: &'m str) -> Cow<'m, str> {
         if self.marks_restored {
             Cow::Borrowed(message)

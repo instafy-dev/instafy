@@ -279,6 +279,31 @@ describe("versioning copy shared across surfaces", () => {
     );
   });
 
+  it("says a kept path with no current version to keep stays in Unsaved work", () => {
+    // The clash the person kept for left the space before the restore: the keep chose nothing.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["Notes.md"],
+        kept: ["Notes.md"],
+        reasons: { "Notes.md": "nothing_to_keep" },
+      }),
+    ).toBe(
+      "Restored as a new version. Notes.md stays in Unsaved work to restore later, because the space has no current version of it to keep.",
+    );
+    expect(
+      restoreSuccessCopy({
+        committed: false,
+        notRestored: ["docs/readme.md", "todo.md"],
+        kept: ["docs/readme.md", "todo.md"],
+        reasons: { "docs/readme.md": "nothing_to_keep", "todo.md": "nothing_to_keep" },
+        entryPaths: ["docs/readme.md", "todo.md"],
+      }),
+    ).toBe(
+      "docs/readme.md and todo.md stay in Unsaved work to restore later, because the space has no current versions of them to keep.",
+    );
+  });
+
   it("says there was nothing to restore when main already had the work", () => {
     expect(NOTHING_TO_RESTORE_COPY).toBe("Nothing to restore. The saved version already has this work.");
     expect(restoreSuccessCopy({ committed: false, notRestored: [] })).toBe(NOTHING_TO_RESTORE_COPY);

@@ -1486,8 +1486,20 @@ pub(crate) const KEPT: &str = "kept";
 /// restored ([`partial_restore_commit_message`]).
 pub(crate) const PATH_ALIAS: &str = "path_alias";
 
+/// The reason a restore gives instead of [`KEPT`] for any other kept path
+/// of the work where the `main` it is restored onto holds no version to
+/// keep: no file or folder there, no file above it, and no removal of a
+/// file the work changed (the clash the person kept for has left `main`
+/// since, or was with the merge base alone). Keeping chose no version of
+/// the work's file, which stays on the ref only, so the ref stays and is
+/// not listed as restored ([`partial_restore_commit_message`]); restored
+/// again without the keep, the file can come back.
+pub(crate) const NOTHING_TO_KEEP: &str = "nothing_to_keep";
+
 /// A path a restore left as `main` (or the checkout) has it, and why:
-/// [`KEPT`], or the name of the reason it may never be restored here
+/// [`KEPT`] ([`PATH_ALIAS`] or [`NOTHING_TO_KEEP`] for a keep that chose no
+/// version of the work's file), or the name of the reason it may never be
+/// restored here
 /// ([`crate::publish_policy::RejectReason::name`]). Desktop and the hosted
 /// gateway both answer `notRestored` as a list of these, by path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -1528,8 +1540,9 @@ pub(crate) fn restore_commit_message(reference: &str) -> String {
 }
 
 /// The whole message of a restore commit that leaves work of its ref there
-/// for the person to settle ([`PATH_ALIAS`]): it names no ref, so no listing
-/// takes the ref for restored by it ([`mark_restored`]).
+/// for the person to settle ([`PATH_ALIAS`], [`NOTHING_TO_KEEP`]): it names
+/// no ref, so no listing takes the ref for restored by it
+/// ([`mark_restored`]).
 pub(crate) fn partial_restore_commit_message() -> String {
     "Restore part of unsaved work\n".to_string()
 }

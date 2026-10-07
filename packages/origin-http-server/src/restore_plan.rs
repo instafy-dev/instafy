@@ -68,14 +68,16 @@
 //! the path. Keeping `main`'s `TODO.md` chose no version of the work's
 //! `todo.md` ([`kept_aliases`]), and neither does a keep chosen at a clash
 //! that has left `main` since (the person kept `Notes.md` beside `main`'s
-//! `notes.md`, which a later save removed): such work would otherwise be
-//! on neither `main` nor any ref.
+//! `notes.md`, which a later save removed) or at a new path whose clash was
+//! with the merge base alone: such work would otherwise be on neither
+//! `main` nor any ref.
 //!
-//! A kept name such a disk takes for another entry of the restored tree
-//! that does not hold the work is listed [`PATH_ALIAS`], not `kept`, and
-//! the restore commit then names no ref ([`RestorePlan::marks_restored`]):
-//! the ref still holds work `main` lacks under every name, so it is never
-//! listed as restored by that commit.
+//! Such a keep is listed [`PATH_ALIAS`] (a kept name such a disk takes for
+//! another entry of the restored tree that does not hold the work) or
+//! [`NOTHING_TO_KEEP`] (any other), not `kept`, and the restore commit then
+//! names no ref ([`RestorePlan::marks_restored`]): the ref still holds work
+//! `main` lacks under every name, which a later restore can bring back, so
+//! it is never listed as restored by that commit.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -87,7 +89,7 @@ use crate::apply::portable_key;
 use crate::error::OriginError;
 use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
-use crate::recovery_view::{left_out_reason, NotRestored, KEPT, PATH_ALIAS};
+use crate::recovery_view::{left_out_reason, NotRestored, KEPT, NOTHING_TO_KEEP, PATH_ALIAS};
 use crate::tree_merge::{three_way, tree_with_entries_from};
 use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, TreeEntry, WorkspaceGit};
 
@@ -122,9 +124,6 @@ pub(crate) struct RestorePlan {
     /// How many kept paths chose no version of the work's file, so the
     /// work is on the restored tree under no name ([`unsettled_keeps`]).
     unsettled: usize,
-    /// How many of them are names a disk ignoring case takes for another
-    /// entry of the restored tree ([`PATH_ALIAS`]).
-    aliased: usize,
 }
 
 impl RestorePlan {
@@ -141,11 +140,13 @@ impl RestorePlan {
     }
 
     /// Whether the restore commit may name the ref, so the ref is listed as
-    /// restored by it: not while a kept name is one another entry of the
-    /// restored tree takes on a disk ignoring case ([`PATH_ALIAS`]). The
-    /// person settled nothing there; the work stays on the ref, pending.
+    /// restored by it: not while a keep chose no version of the work's file
+    /// ([`PATH_ALIAS`], [`NOTHING_TO_KEEP`]). The person settled nothing
+    /// there; the work stays on the ref, pending, and can still come back.
+    /// Work refused here never can, so a ref kept only for it is listed as
+    /// restored.
     pub(crate) fn marks_restored(&self) -> bool {
-        self.aliased == 0
+        self.unsettled == 0
     }
 }
 
@@ -390,12 +391,8 @@ pub(crate) fn plan(
         })
         .collect();
     let unsettled = unsettled_keeps(git, &onto_tree, &tree, &merged.conflicts, &kept_new)?;
-    let mut aliased = 0;
     for (path, reason) in &unsettled {
-        if *reason == PATH_ALIAS {
-            left_out.insert(path.clone(), PATH_ALIAS);
-            aliased += 1;
-        }
+        left_out.insert(path.clone(), *reason);
     }
 
     Ok(RestorePlan {
@@ -407,17 +404,17 @@ pub(crate) fn plan(
             .collect(),
         refused: refused.len(),
         unsettled: unsettled.len(),
-        aliased,
     })
 }
 
 /// The paths of `kept` (changes the person kept that write a path where
 /// `onto`, a tree id, has no file, link or submodule) whose keep chose no
 /// version of the work's file, so the work is on the restored `tree` under
-/// no name and the ref stays with it, each with the reason the restore
-/// lists it under: [`PATH_ALIAS`] for a name such a disk takes for another
-/// entry of `tree`, [`KEPT`] otherwise. A keep chooses `onto`'s version only
-/// when this `onto` holds a version to choose:
+/// no name and the ref stays with it, pending, each with the reason the
+/// restore lists it under instead of [`KEPT`]: [`PATH_ALIAS`] for a name
+/// such a disk takes for another entry of `tree`, [`NOTHING_TO_KEEP`]
+/// otherwise. A keep chooses `onto`'s version only when this `onto` holds a
+/// version to choose:
 ///
 /// - a folder at the path, or a file, a link or a submodule at a folder
 ///   above it (the file and folder clash such a keep settles);
@@ -476,7 +473,7 @@ fn unsettled_keeps(
                     // remove: its conflict may be with the merge base alone
                     // (a file of the base where the work made a folder).
                     let removed = change.status != 'A' && conflicted.contains(path);
-                    (!(folder_here || file_above || removed)).then_some(KEPT)
+                    (!(folder_here || file_above || removed)).then_some(NOTHING_TO_KEEP)
                 }
             };
             unsettled.map(|reason| (change.path.clone(), reason))

@@ -419,6 +419,48 @@ describe("HistoryDrawer: Unsaved work", () => {
     ).toEqual([KEPT]);
   });
 
+  it("keeps an entry pending, with no Restored badge, when a kept path had no current version left to keep", async () => {
+    // main gained TODO.md, the person kept it, and someone removed TODO.md before Restore the
+    // rest: the keep chose nothing, so the work's todo.md is only on the ref and can come back.
+    mocks.fetchRecovery.mockResolvedValue(
+      list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["other.md", "todo.md"] })]),
+    );
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["todo.md"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: true,
+        notRestored: ["todo.md"],
+        notRestoredReasons: { "todo.md": "nothing_to_keep" },
+        refDeleted: false,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, KEPT), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-path-keep");
+    // Hold the forced reload: only the local patch decides the badge here.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    await press(row(container, KEPT), "unsaved-work-restore-rest");
+    expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ ref: KEPT, keep: ["todo.md"] }));
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Restored as a new version. todo.md stays in Unsaved work to restore later, because the space has no current version of it to keep.",
+    );
+    expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
+    expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
+    expect(
+      pendingUnsavedWorkEntries(getUnsavedWorkSnapshot("project-1", "origin-1").entries).map((entry) => entry.ref),
+    ).toEqual([KEPT]);
+  });
+
   it("does not claim a new version when restoring an already restored entry", async () => {
     mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", restoredRev: NEW_HEAD })]));
     mocks.restoreRecovery.mockResolvedValue({

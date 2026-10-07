@@ -705,7 +705,8 @@ async fn keep_clears_a_file_and_folder_conflict() {
 /// kept paths left out, the ref goes when each keep chose `main`'s version
 /// over the work's (`main`'s file `docs` over the work's folder). Keeping a
 /// folder `main` does not have chose no version of the new files in it:
-/// they are on `main` under no name, and the ref stays with them.
+/// they are on `main` under no name, so they are listed `nothing_to_keep`,
+/// and the ref stays with them, not listed as restored.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kept_folder_never_lets_refused_work_below_it_go() {
     for mode in MODES {
@@ -784,7 +785,7 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
             body["notRestored"],
             reasons(&[
                 ("cfg/.env", "secret"),
-                ("cfg/app.txt", "kept"),
+                ("cfg/app.txt", "nothing_to_keep"),
                 ("cfg/debug.log", "ignored"),
             ]),
             "{mode:?}: {body}"
@@ -793,6 +794,11 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
         assert_eq!(
             space.canonical_ref(&kept).as_deref(),
             Some(kept_commit.as_str())
+        );
+        assert_eq!(
+            space.entry_in(mode, &kept).await["restoredRev"],
+            serde_json::Value::Null,
+            "{mode:?}"
         );
         assert_eq!(space.on_main("more.md").as_deref(), Some(&b"more\n"[..]));
         for path in ["cfg/app.txt", "cfg/.env", "cfg/debug.log"] {
@@ -804,13 +810,18 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
             .await;
         assert_eq!(
             body["notRestored"],
-            reasons(&[("cfg/app.txt", "kept")]),
+            reasons(&[("cfg/app.txt", "nothing_to_keep")]),
             "{mode:?}: {body}"
         );
         assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
         assert_eq!(
             space.canonical_ref(&only_kept).as_deref(),
             Some(only_kept_commit.as_str()),
+            "{mode:?}"
+        );
+        assert_eq!(
+            space.entry_in(mode, &only_kept).await["restoredRev"],
+            serde_json::Value::Null,
             "{mode:?}"
         );
         assert_eq!(space.on_main("most.md").as_deref(), Some(&b"most\n"[..]));
@@ -1376,7 +1387,8 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
 /// person's "Use this version" of `notes.md` saves the work's removal of
 /// it, or someone removes `TODO.md`), the keep settles nothing on the
 /// `main` the work is restored onto: the work's file is on `main` under no
-/// name, so the ref stays with it, whether the restore makes a version (with
+/// name, so it is listed `nothing_to_keep` and the ref stays with it, not
+/// listed as restored, whether the restore makes a version (with
 /// `other.md`) or not. Restored again without the keep, the file comes back
 /// and the ref goes.
 #[tokio::test(flavor = "multi_thread")]
@@ -1432,13 +1444,18 @@ async fn a_keep_whose_clash_left_main_since_keeps_the_ref() {
                 assert_eq!(body["committed"], with_other, "{case}: {body}");
                 assert_eq!(
                     body["notRestored"],
-                    reasons(&[(kept, "kept")]),
+                    reasons(&[(kept, "nothing_to_keep")]),
                     "{case}: {body}"
                 );
                 assert_eq!(body["refDeleted"], false, "{case}: {body}");
                 assert_eq!(
                     space.canonical_ref(&reference).as_deref(),
                     Some(commit.as_str()),
+                    "{case}"
+                );
+                assert_eq!(
+                    space.entry_in(mode, &reference).await["restoredRev"],
+                    serde_json::Value::Null,
                     "{case}"
                 );
                 assert_eq!(space.on_main(kept), None, "{case}");
@@ -1462,7 +1479,8 @@ async fn a_keep_whose_clash_left_main_since_keeps_the_ref() {
 /// or above that path: no file of the work was removed there, so a keep
 /// chosen after the person saw `main`'s `docs` (which then left `main`), or
 /// one chosen at the clash with the merge base alone, leaves the work's
-/// `docs/readme.md` on `main` under no name, and the ref stays with it.
+/// `docs/readme.md` on `main` under no name: it is listed
+/// `nothing_to_keep`, and the ref stays with it, not listed as restored.
 /// Once "Use this version" has put the file on `main`, the ref goes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kept_file_the_work_added_where_main_has_nothing_keeps_the_ref() {
@@ -1511,13 +1529,18 @@ async fn a_kept_file_the_work_added_where_main_has_nothing_keeps_the_ref() {
             assert_eq!(body["committed"], true, "{case}: {body}");
             assert_eq!(
                 body["notRestored"],
-                reasons(&[("docs/readme.md", "kept")]),
+                reasons(&[("docs/readme.md", "nothing_to_keep")]),
                 "{case}: {body}"
             );
             assert_eq!(body["refDeleted"], false, "{case}: {body}");
             assert_eq!(
                 space.canonical_ref(&reference).as_deref(),
                 Some(commit.as_str()),
+                "{case}"
+            );
+            assert_eq!(
+                space.entry_in(mode, &reference).await["restoredRev"],
+                serde_json::Value::Null,
                 "{case}"
             );
             assert_eq!(space.on_main("docs/readme.md"), None, "{case}");
