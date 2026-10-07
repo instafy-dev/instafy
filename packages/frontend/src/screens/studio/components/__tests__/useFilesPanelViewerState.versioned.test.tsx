@@ -284,6 +284,48 @@ describe("useFilesPanelViewerState in the versioned modes", () => {
     expect(workspace.files[0].isNew).toBeUndefined();
   });
 
+  // The panel reads in legacy mode until the origin is probed, so a buffer
+  // made in a versioned mode can be open while the mode is legacy.
+  it("never reads a never-saved buffer when a conversation view reopens it in legacy mode", async () => {
+    workspace = { ...workspace, files: [cached({ isNew: true, generated: "", modified: "draft", blobOid: null, baseRev: null })] };
+    await render({ workspaceFiles: workspace.files, versioning: { mode: "legacy", originId: null } });
+    await act(async () => current.openFileFromEvent({ path: "README.md", preserveDraft: true }));
+    expect(controllerClient.workspace.files.read).not.toHaveBeenCalled();
+    expect(controllerClient.workspace.files.readAt).not.toHaveBeenCalled();
+    expect(options.showStatus).not.toHaveBeenCalled();
+    expect(current.viewerState.mode).toBe("text");
+    expect(workspace.files[0]).toMatchObject({ isNew: true, modified: "draft" });
+  });
+
+  it("on Reload in legacy mode keeps a never-saved buffer that is still not in the space", async () => {
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue({
+      ok: false, notFound: true, originId: "origin-1", originMode: "hosted",
+      error: { status: 404, message: "not found", routeUnavailable: false },
+    });
+    workspace = { ...workspace, files: [cached({ isNew: true, generated: "", modified: "draft", blobOid: null, baseRev: null })] };
+    await render({ workspaceFiles: workspace.files, versioning: { mode: "legacy", originId: null } });
+    await open(entry("README.md"), { forceFetch: true });
+    expect(options.showStatus).not.toHaveBeenCalled();
+    expect(current.viewerState.mode).toBe("text");
+    expect(workspace.files[0]).toMatchObject({ isNew: true, modified: "draft" });
+    expect(controllerClient.workspace.files.readAt).toHaveBeenCalledExactlyOnceWith({
+      projectId: "space-a", path: "README.md", runtimeId: "runtime-a",
+    });
+  });
+
+  it("on Reload in legacy mode still reports a failed read of a never-saved buffer", async () => {
+    vi.mocked(controllerClient.workspace.files.readAt).mockResolvedValue({
+      ok: false, notFound: false, originId: "origin-1", originMode: "hosted",
+      error: { status: 502, code: "canonical_unreachable", message: "down", routeUnavailable: false },
+    });
+    workspace = { ...workspace, files: [cached({ isNew: true, generated: "", modified: "draft", blobOid: null, baseRev: null })] };
+    await render({ workspaceFiles: workspace.files, versioning: { mode: "legacy", originId: null } });
+    await open(entry("README.md"), { forceFetch: true });
+    expect(options.showStatus).toHaveBeenCalledWith("Unable to load file content.", "error");
+    expect(current.viewerState.mode).toBe("error");
+    expect(workspace.files[0]).toMatchObject({ isNew: true, modified: "draft" });
+  });
+
   it("opens a just-created local buffer without fetching it", async () => {
     await render({ workspaceFiles: [] });
     await open(entry("new.md"), { localBuffer: true });

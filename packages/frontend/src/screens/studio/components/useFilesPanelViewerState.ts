@@ -533,25 +533,24 @@ export function useFilesPanelViewerState({
       // A dirty buffer without usable read ids is read once and kept: the
       // read only tells whether its base text is still the space's version.
       let verifyDraft = false;
-      if (versioned && existing && !options?.localBuffer) {
-        if (existing.isNew === true) {
-          // A buffer that was never saved is not in the space: only an
-          // explicit reload (no draft to keep) asks whether it appeared there.
-          shouldForceFetch = options?.forceFetch === true && options?.preserveDraft !== true;
-        } else if (options?.forceFetch === undefined) {
-          const decision = decideCachedOpen({
-            cached: existing,
-            listingBlobOid: entry.blobOid,
-            mode: versioning.mode,
-            originId: pinnedOriginId,
-          });
-          shouldForceFetch = decision === "refetch" || decision === "verify";
-          verifyDraft = decision === "verify";
-          // A save of this file that is still running wrote the listed blob:
-          // the buffer catches up when the save settles.
-          if (decision === "stale" && !ownRevisions?.hasWrite(entry.path, entry.blobOid)) {
-            raiseStaleBuffer(existing, entry);
-          }
+      if (existing?.isNew === true && !options?.localBuffer) {
+        // A buffer that was never saved is not in the space, in any mode (the
+        // panel reads in legacy mode until the origin is probed): only an
+        // explicit reload (no draft to keep) asks whether it appeared there.
+        shouldForceFetch = options?.forceFetch === true && options?.preserveDraft !== true;
+      } else if (versioned && existing && !options?.localBuffer && options?.forceFetch === undefined) {
+        const decision = decideCachedOpen({
+          cached: existing,
+          listingBlobOid: entry.blobOid,
+          mode: versioning.mode,
+          originId: pinnedOriginId,
+        });
+        shouldForceFetch = decision === "refetch" || decision === "verify";
+        verifyDraft = decision === "verify";
+        // A save of this file that is still running wrote the listed blob:
+        // the buffer catches up when the save settles.
+        if (decision === "stale" && !ownRevisions?.hasWrite(entry.path, entry.blobOid)) {
+          raiseStaleBuffer(existing, entry);
         }
       }
 
@@ -614,6 +613,20 @@ export function useFilesPanelViewerState({
             if (read && !read.ok && read.notFound) {
               raiseStaleBuffer(existing, entry);
             }
+            shouldForceFetch = false;
+          }
+        } else if (existing?.isNew === true) {
+          // `read` reports a 404 as null; `readAt` sends the same request and
+          // tells a file that is still not in the space from a failed read.
+          const read = await controllerClient.workspace.files.readAt({
+            projectId: activeProjectId,
+            path: entry.path,
+            runtimeId: effectiveRuntimeId ?? null,
+          });
+          if (!request.isCurrent()) return;
+          result = read?.ok ? read.file : null;
+          if (!result && read && !read.ok && read.notFound) {
+            // Still not in the space: keep showing the new buffer.
             shouldForceFetch = false;
           }
         } else {
