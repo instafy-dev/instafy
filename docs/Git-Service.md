@@ -478,7 +478,7 @@ refused write leaves nothing behind.
 - Refused, with nothing saved: 400 `unsupported_entry` (a link or submodule written over), 409
   `path_type_conflict` (a file where a folder is, or the reverse), 409 `path_alias` (a new path
   `main` holds under another spelling a disk that ignores case or Unicode form takes for it, with
-  case folded fully, so `Straße.md` and `STRASSE.md` are one name), 422
+  case folded fully, so `Straße.md`, `STRAẞE.md` and `STRASSE.md` are one name), 422
   `ignored_path` (a new file the space's `.gitignore` ignores), 422 `excluded_path` with a `reason`
   such as `secret`, `attachment` (a chat upload) or `excluded` (build output, dependencies, Instafy
   files), 422 `policy_rejected` (a file over 20 MiB), and 502 `push_rejected` (canonical refused

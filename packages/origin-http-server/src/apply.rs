@@ -574,14 +574,25 @@ fn validate_portable_component(component: &str) -> Result<(), OriginError> {
 /// The name `path` has on a disk that ignores case and Unicode form (APFS,
 /// HFS+, Windows): two paths with the same key are one file there.
 ///
-/// Case is folded fully, as such a disk folds it: `Straße` and `STRASSE`,
-/// a final sigma and a plain one, a long s and an s, a ligature and its
-/// letters each have one key. Upper case first, then lower case, gives
-/// that without a folding table; it also takes a dotless `ı` for `i`,
-/// which errs toward refusing a name.
+/// Case is folded fully, as such a disk folds it: `Straße`, `STRAẞE` and
+/// `STRASSE`, a final sigma and a plain one, a long s and an s, a ligature
+/// and its letters each have one key. Upper case first, then lower case,
+/// gives that without a folding table, repeated until the name no longer
+/// changes: one round takes a capital sharp s (`ẞ`) only to `ß`, which
+/// the next takes to `ss`. It also takes a dotless `ı` for `i`, which errs
+/// toward refusing a name.
 pub(crate) fn portable_key(path: &str) -> String {
-    let composed: String = path.nfc().collect();
-    composed.to_uppercase().to_lowercase().nfc().collect()
+    let fold = |name: &str| -> String { name.to_uppercase().to_lowercase().nfc().collect() };
+    let mut key = fold(&path.nfc().collect::<String>());
+    // A fixed point within a few rounds; the bound only guards the loop.
+    for _ in 0..8 {
+        let next = fold(&key);
+        if next == key {
+            break;
+        }
+        key = next;
+    }
+    key
 }
 
 /// Why a person's save of a path that another file or folder of the space
@@ -1238,9 +1249,9 @@ mod tests {
         apply_changes_transactional, apply_rollback_dir_capability_limit,
         apply_rollback_dir_capability_limit_for_nofile, install_staged_file_at_parent,
         install_staged_files, install_staged_files_with_hook, normalize_relative_path,
-        stage_archive, validate_apply_paths, validate_install_parent_capability_limit,
-        ApplyManifest, ApplyRollback, ApplySummary, ManifestFileEntry, StagedArchive,
-        MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
+        portable_key, stage_archive, validate_apply_paths,
+        validate_install_parent_capability_limit, ApplyManifest, ApplyRollback, ApplySummary,
+        ManifestFileEntry, StagedArchive, MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
     };
     use crate::config::ServerConfig;
     use crate::error::OriginError;
@@ -1428,6 +1439,8 @@ mod tests {
             manifest(&config, &["Case.txt", "case.txt"], &[]),
             manifest(&config, &["caf\u{e9}.txt", "cafe\u{301}.txt"], &[]),
             manifest(&config, &["Stra\u{df}e.txt", "STRASSE.txt"], &[]),
+            manifest(&config, &["STRA\u{1e9e}E.txt", "Stra\u{df}e.txt"], &[]),
+            manifest(&config, &["STRA\u{1e9e}E.txt", "STRASSE.txt"], &[]),
             manifest(&config, &["\u{fb01}le.txt", "FILE.txt"], &[]),
             manifest(&config, &["a", "a/b"], &[]),
             manifest(&config, &["a", "a/b"], &["unrelated"]),
@@ -1448,6 +1461,32 @@ mod tests {
             assert!(!workspace.path().join("a").exists());
             assert!(!workspace.path().join("same").exists());
             assert!(!workspace.path().join("tree").exists());
+        }
+    }
+
+    /// A disk that ignores case takes `STRASSE`, `Straße` and `STRAẞE` (a
+    /// capital sharp s) for one name.
+    #[test]
+    fn a_capital_sharp_s_has_the_key_of_a_small_one_and_of_ss() {
+        let keys = [
+            "STRASSE.md",
+            "Strasse.md",
+            "Stra\u{df}e.md",
+            "STRA\u{1e9e}E.md",
+            "stra\u{1e9e}e.md",
+        ]
+        .map(portable_key);
+        assert!(keys.iter().all(|key| key == "strasse.md"), "{keys:?}");
+    }
+
+    /// Every key is its own key, so two names have one key exactly when a
+    /// disk that folds case fully takes them for one, whichever form of a
+    /// letter each holds.
+    #[test]
+    fn every_portable_key_is_its_own_key() {
+        for letter in (0..=0x10ffff).filter_map(char::from_u32) {
+            let key = portable_key(&letter.to_string());
+            assert_eq!(portable_key(&key), key, "U+{:04X}", u32::from(letter));
         }
     }
 

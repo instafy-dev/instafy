@@ -891,13 +891,15 @@ mod tests {
         assert_eq!(alias_clashes(tree, &["vendor"]), vec!["vendor"]);
     }
 
-    /// A disk that ignores case folds it fully: `Straße.md` and
-    /// `STRASSE.md`, a final sigma and a plain one, a long s and an s, a
-    /// ligature and its letters each name one file there.
+    /// A disk that ignores case folds it fully: `Straße.md`, `STRAẞE.md`
+    /// and `STRASSE.md`, a final sigma and a plain one, a long s and an s,
+    /// a ligature and its letters each name one file there.
     #[test]
     fn names_full_case_folding_takes_for_one_are_a_clash() {
         for (kept, added) in [
             ("Stra\u{df}e.md", "STRASSE.md"),
+            ("Stra\u{df}e.md", "STRA\u{1e9e}E.md"),
+            ("STRA\u{1e9e}E.md", "strasse.md"),
             (
                 "\u{39f}\u{394}\u{39f}\u{3a3}.md",
                 "\u{3bf}\u{3b4}\u{3bf}\u{3c2}.md",
