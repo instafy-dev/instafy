@@ -325,13 +325,72 @@ describe("rolling saves", () => {
     await microtasks();
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(1);
 
-    // A stop, then a switch before the list is fetched again: dropped.
+    // A stop, then a switch before the list is fetched again: nothing is
+    // fetched while away (coming back lists again, see below).
     setUnsavedWorkLiveOrigins("p", [LIVE]);
     setUnsavedWorkLiveOrigins("p", []);
     setUnsavedWorkLiveOrigins("q", null);
     await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS * 2);
     await microtasks();
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(1);
+  });
+
+  it("lists again when a project's live set first becomes known and a listed save's origin is not live", async () => {
+    vi.useFakeTimers();
+    mocks.fetchRecovery.mockResolvedValueOnce(ok([rollingSave("folder-1", LIVE, "1")]));
+    await refreshUnsavedWork({ projectId: "p", originId: "o" });
+    setUnsavedWorkLiveOrigins("p", [LIVE]);
+    expect(visible()).toEqual([]);
+
+    // LIVE stops and its final save moves the slot; the person switches
+    // away before the list is fetched again.
+    mocks.fetchRecovery.mockResolvedValue(ok([rollingSave("folder-1", LIVE, "2")]));
+    setUnsavedWorkLiveOrigins("p", []);
+    setUnsavedWorkLiveOrigins("q", null);
+    await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS * 2);
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(1);
+
+    // Back in p, the mount reuses the cached list; p's status answers [].
+    setUnsavedWorkLiveOrigins("p", null);
+    setUnsavedWorkLiveOrigins("p", []);
+    // The cached rev is older than the final save: still hidden.
+    expect(visible()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS * 5);
+    await microtasks();
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
+    expect(visible().map((item) => item.rev)).toEqual([rollingSave("folder-1", LIVE, "2").rev]);
+    expect(getRollingSaveScope("p").hidden.size).toBe(0);
+  });
+
+  it("lists again for a save whose origin stopped while another project was open", async () => {
+    vi.useFakeTimers();
+    mocks.fetchRecovery.mockResolvedValueOnce(ok([rollingSave("folder-1", LIVE, "1")]));
+    await refreshUnsavedWork({ projectId: "p", originId: "o" });
+    setUnsavedWorkLiveOrigins("p", [LIVE]);
+    setUnsavedWorkLiveOrigins("q", null);
+    setUnsavedWorkLiveOrigins("q", [OTHER]);
+
+    mocks.fetchRecovery.mockResolvedValue(ok([rollingSave("folder-1", LIVE, "2")]));
+    setUnsavedWorkLiveOrigins("p", []);
+    expect(visible()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS);
+    await microtasks();
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
+    expect(visible().map((item) => item.rev)).toEqual([rollingSave("folder-1", LIVE, "2").rev]);
+  });
+
+  it("lists nothing again when a first known set finds every listed save live, or none listed", async () => {
+    vi.useFakeTimers();
+    mocks.fetchRecovery.mockResolvedValue(ok([rollingSave("folder-1", LIVE), entry("refs/instafy/recovery/x/a")]));
+    await refreshUnsavedWork({ projectId: "p", originId: "o" });
+    setUnsavedWorkLiveOrigins("p", [LIVE]);
+    mocks.fetchRecovery.mockResolvedValue(ok([entry("refs/instafy/recovery/x/a", { origin: OTHER })]));
+    await refreshUnsavedWork({ projectId: "q", originId: "o" });
+    setUnsavedWorkLiveOrigins("q", []);
+    await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS * 5);
+    await microtasks();
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
+    expect(getRollingSaveScope("q").hidden.size).toBe(0);
   });
 });
 
