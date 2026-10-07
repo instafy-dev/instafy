@@ -4218,9 +4218,16 @@ async fn load_live_runtime_lease(
 /// start in progress, so no terminal "Workspace startup failed" message is
 /// written, whatever the error's status or code. The record names that lease
 /// so a later failure of the start can be matched to this prompt. The error
-/// and its code stay in the metadata. A cleanup_pending or failed lease is
-/// not starting anything, and it stays terminal like a runtime with no live
-/// lease.
+/// and its code stay in the metadata. A failed lease is not starting
+/// anything, and it stays terminal like a runtime with no live lease.
+///
+/// A reconnect that arrives while another stop, such as the idle sweep, is
+/// releasing the runtime does not end up here: its stale-generation cleanup
+/// waits for that release and then launches the next lease itself, so it
+/// records "requested". A cleanup_pending lease seen here therefore means the
+/// reconnect's own provider release failed or timed out. Nothing on the
+/// server relaunches the runtime for the queued job after that, so it stays
+/// terminal on purpose.
 ///
 /// The live lease can instead be the reconnect's own: the launch path can
 /// fail after it committed this reconnect's launching lease, for example on

@@ -2294,7 +2294,7 @@ async fn cleanup_stale_runtime_generation_before_ensure(
     }
     drop(connection);
 
-    let stopped = stop_runtime_safely(
+    let stopped = match stop_runtime_safely(
         state,
         &candidate_runtime_id,
         StopOptions {
@@ -2309,7 +2309,31 @@ async fn cleanup_stale_runtime_generation_before_ensure(
             expected_identity: None,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(stopped) => stopped,
+        // Another stop, such as the idle sweep or a person's Stop, was
+        // already releasing this generation. The provider serializes releases
+        // per runtime, so ours returns after theirs, and theirs has finalized
+        // by then. The generation this cleanup was for is gone, which is the
+        // state in which this probe returns early. The allocation re-reads
+        // the runtime under its row lock, so a lease still in cleanup is
+        // refused there and concurrent ensures share one launch.
+        Err(error)
+            if error.0 == StatusCode::CONFLICT
+                && runtime_moved_off_lease(state, &candidate_runtime_id, &active_lease_id)
+                    .await =>
+        {
+            info!(
+                runtime_id = %candidate_runtime_id,
+                lease_id = %active_lease_id,
+                error = %error.1.message,
+                "stale runtime generation was released by a concurrent stop; continuing the ensure"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
 
     if let Some(skip_reason) = stopped.outcome.skip_reason.as_deref() {
         info!(
@@ -2319,6 +2343,33 @@ async fn cleanup_stale_runtime_generation_before_ensure(
         );
     }
     Ok(())
+}
+
+/// Whether the runtime's active generation is no longer `lease_id`, read
+/// after a stale-generation stop was refused. A row or read that cannot be
+/// confirmed counts as not moved, so the refusal stands.
+async fn runtime_moved_off_lease(state: &AppState, runtime_id: &Uuid, lease_id: &Uuid) -> bool {
+    let Ok(connection) = state.pool.get().await else {
+        return false;
+    };
+    match connection
+        .query_opt(
+            "select active_lease_id from runtimes where id = $1",
+            &[runtime_id],
+        )
+        .await
+    {
+        Ok(Some(row)) => row.get::<_, Option<Uuid>>("active_lease_id") != Some(*lease_id),
+        Ok(None) => false,
+        Err(error) => {
+            warn!(
+                %runtime_id,
+                %error,
+                "could not re-read the runtime generation after a refused stale-generation stop"
+            );
+            false
+        }
+    }
 }
 
 /// Stop a launch that never came up so the ensure that follows launches a new

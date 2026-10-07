@@ -310,10 +310,11 @@ controller process; other launches queue for it outside the pool.
 A stop is two-phase. It first commits a quarantine: the lease becomes
 `cleanup_pending`, the runtime returns to `requested` with its endpoint and
 heartbeat cleared, jobs on it are requeued or failed, and a
-`provider_release_cleanup_pending` event is recorded. Only then does it ask the
-provider to release. If the release fails or passes its 180 s deadline, the
-stop answers **502** ("runtime provider cleanup is still pending; retry the
-stop") and the quarantine stays in place:
+`provider_release_cleanup_pending` event is recorded with the stop's `source`
+(for example `idle_stop` or `ensure_stale_generation`) and `reason`. Only then
+does it ask the provider to release. If the release fails or passes its 180 s
+deadline, the stop answers **502** ("runtime provider cleanup is still pending;
+retry the stop") and the quarantine stays in place:
 
 - New ensures for that runtime fail closed with 409 ("runtime cleanup is still
   pending; retry after the provider release completes") and late registrations
@@ -328,7 +329,12 @@ stop") and the quarantine stays in place:
   event is recorded.
 
 The provider serializes ensure and release per runtime, so a retried release
-queues behind any release or late launch still running there.
+queues behind any release or late launch still running there. When an ensure's
+retried release queued behind another stop of the same lease, such as an idle
+stop still waiting on its own release, that stop has finalized by the time the
+ensure's release returns. The ensure then launches the next lease instead of
+failing, so a prompt sent while an idle stop is releasing the machine starts
+it again without a "Workspace startup failed" alert.
 
 ## Caches
 

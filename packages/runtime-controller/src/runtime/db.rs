@@ -877,6 +877,12 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
         "provider_release_acknowledged" => {
             copy_runtime_event_fields(&data, &["provider", "runtimeLeaseId"])
         }
+        // The quarantine before a provider release: which stop fenced the
+        // generation and why, as on `stopped`. The job ids it requeued or
+        // failed stay out.
+        "provider_release_cleanup_pending" => {
+            copy_runtime_event_fields(&data, &["reason", "source", "provider", "runtimeLeaseId"])
+        }
         "personal_browser_disconnected" | "shared_browser_disconnected" => {
             copy_runtime_event_fields(&data, &["transport", "error"])
         }
@@ -1050,6 +1056,28 @@ mod runtime_event_tests {
         assert_eq!(provider_acknowledgement["provider"], "instafy-cloud");
         assert_eq!(provider_acknowledgement["runtimeLeaseId"], "lease-safe");
         assert!(provider_acknowledgement.get("responseBody").is_none());
+
+        let cleanup_pending = sanitize_runtime_event_data(
+            "provider_release_cleanup_pending",
+            json!({
+                "reason": "idle",
+                "source": "idle_stop",
+                "provider": "instafy-cloud",
+                "runtimeLeaseId": "lease-safe",
+                "requeuedJobs": ["private-job-a"],
+                "failedPersonalBrowserJobs": ["private-job-b"],
+                "failedSharedBrowserJobs": ["private-job-c"]
+            }),
+        );
+        assert_eq!(
+            cleanup_pending,
+            json!({
+                "reason": "idle",
+                "source": "idle_stop",
+                "provider": "instafy-cloud",
+                "runtimeLeaseId": "lease-safe"
+            })
+        );
     }
 
     #[test]
