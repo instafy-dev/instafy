@@ -460,9 +460,15 @@ async fn plan_workspace_flush_before_stop(
                 if lease.status != "active" || lease.released_at.is_some() {
                     FlushPlan::NotRunning
                 } else {
-                    super::pre_stop_flush::find_target(&transaction, &runtime, &lease_id, policy)
-                        .await?
-                        .map_or(FlushPlan::NotRunning, FlushPlan::Flush)
+                    super::pre_stop_flush::find_target(
+                        state,
+                        &transaction,
+                        &runtime,
+                        &lease_id,
+                        policy,
+                    )
+                    .await?
+                    .map_or(FlushPlan::NotRunning, FlushPlan::Flush)
                 }
             }
             _ => FlushPlan::NotRunning,

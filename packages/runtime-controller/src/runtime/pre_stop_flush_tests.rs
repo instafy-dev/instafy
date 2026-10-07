@@ -6,7 +6,8 @@
 //! what the rest of the world might do at that moment: a collaborator takes
 //! a workspace lease or pings activity, or a job is leased to the runtime.
 //! It records every `/git/flush/resume` the controller sends after a stop
-//! that did not happen.
+//! that did not happen. The stand-in provider says where the origin is
+//! (`/runtime/origin`), as the node's provider does.
 
 use std::sync::{Arc, Mutex};
 
@@ -241,6 +242,11 @@ struct Fixture {
     collaborator: Arc<Mutex<Option<Uuid>>>,
     during: Arc<Mutex<DuringFlush>>,
     resumes: Arc<Mutex<Vec<String>>>,
+    /// What the stand-in provider answers on `/runtime/origin`: the stand-in
+    /// origin's address, or nothing (404).
+    attested: Arc<Mutex<Option<String>>>,
+    /// The `/runtime/origin` questions the provider got.
+    origin_asks: Arc<Mutex<Vec<JsonValue>>>,
     _provider: AbortingTask<()>,
     _origin: AbortingTask<()>,
 }
@@ -267,19 +273,41 @@ impl Fixture {
         configure: impl FnOnce(&mut crate::config::AppConfig),
     ) -> anyhow::Result<Self> {
         let order = Arc::new(Mutex::new(Vec::new()));
-        let provider_app = axum::Router::new().route(
-            "/runtime/release",
-            axum::routing::post({
-                let order = order.clone();
-                move || {
+        let attested: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let origin_asks = Arc::new(Mutex::new(Vec::new()));
+        let provider_app = axum::Router::new()
+            .route(
+                "/runtime/release",
+                axum::routing::post({
                     let order = order.clone();
-                    async move {
-                        order.lock().unwrap().push("release");
-                        StatusCode::NO_CONTENT
+                    move || {
+                        let order = order.clone();
+                        async move {
+                            order.lock().unwrap().push("release");
+                            StatusCode::NO_CONTENT
+                        }
                     }
-                }
-            }),
-        );
+                }),
+            )
+            .route(
+                "/runtime/origin",
+                axum::routing::post({
+                    let attested = attested.clone();
+                    let origin_asks = origin_asks.clone();
+                    move |Json(body): Json<JsonValue>| {
+                        let attested = attested.clone();
+                        let origin_asks = origin_asks.clone();
+                        async move {
+                            origin_asks.lock().unwrap().push(body);
+                            let endpoint = attested.lock().unwrap().clone();
+                            match endpoint {
+                                Some(endpoint) => Ok(Json(json!({ "endpoint": endpoint }))),
+                                None => Err(StatusCode::NOT_FOUND),
+                            }
+                        }
+                    }
+                }),
+            );
         let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let provider_address = provider_listener.local_addr()?;
         let provider = spawn_aborting(async move {
@@ -355,6 +383,7 @@ impl Fixture {
             });
         let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let origin_endpoint = format!("http://{}", origin_listener.local_addr()?);
+        *attested.lock().unwrap() = Some(origin_endpoint.clone());
         let origin = spawn_aborting(async move {
             axum::serve(origin_listener, origin_app)
                 .await
@@ -431,6 +460,8 @@ impl Fixture {
             collaborator,
             during,
             resumes,
+            attested,
+            origin_asks,
             _provider: provider,
             _origin: origin,
         })
@@ -438,25 +469,6 @@ impl Fixture {
 
     fn resumes(&self) -> Vec<String> {
         self.resumes.lock().unwrap().clone()
-    }
-
-    /// Point the origin's registration (instance and workspace origin) at
-    /// `endpoint`.
-    async fn move_origin_to(&self, endpoint: &str) -> anyhow::Result<()> {
-        let connection = self.pool.get().await?;
-        connection
-            .execute(
-                "update workspace_origins set endpoint = $2 where id = $1",
-                &[&self.origin_id, &endpoint],
-            )
-            .await?;
-        connection
-            .execute(
-                "update origin_instances set endpoint = $2 where origin_id = $1",
-                &[&self.origin_id, &endpoint],
-            )
-            .await?;
-        Ok(())
     }
 
     fn flush_calls(&self) -> Vec<FlushCall> {
@@ -932,18 +944,12 @@ async fn a_failed_flush_does_not_hold_up_the_stop() -> anyhow::Result<()> {
     let result = with_shared_db_fixture(fixture, async {
         let fx = Fixture::new(pool.clone(), project_id, owner_user_id, json!({})).await?;
         let held = fx.hold_owner_lease().await?;
-        // Point the origin at a path without the route.
-        let endpoint: String = fx
-            .pool
-            .get()
-            .await?
-            .query_one(
-                "select endpoint from workspace_origins where id = $1",
-                &[&fx.origin_id],
-            )
-            .await?
-            .get(0);
-        fx.move_origin_to(&format!("{endpoint}/legacy")).await?;
+        // The provider places the origin at a path without the route.
+        {
+            let mut attested = fx.attested.lock().unwrap();
+            let endpoint = attested.clone().expect("the stand-in origin");
+            *attested = Some(format!("{endpoint}/legacy"));
+        }
         let stopped = super::super::stop::stop_runtime_safely(
             &fx.state,
             &fx.runtime_id,
@@ -1651,15 +1657,182 @@ fn idle_reaper_stop() -> super::super::stop::StopOptions {
     }
 }
 
-/// A runtime registers its own origin endpoint with its machine token, so a
-/// leaked machine token could point the origin anywhere. The controller
-/// sends neither flush credential to an endpoint off the runtime's node: an
-/// idle stop (which would use the owner's permission) and a stop under a
-/// lease holder both mint nothing, call nothing and say why.
+/// The runtime re-registers its own origin, with its machine token, at
+/// `endpoint`, as anyone holding that token could.
+async fn register_origin_at(fx: &Fixture, endpoint: &str) -> anyhow::Result<()> {
+    let machine = mint_scoped_token(
+        &fx.state.config,
+        ScopedTokenRequest {
+            audience: fx.project_id.to_string(),
+            subject: fx.owner_user_id.to_string(),
+            project_id: fx.project_id.to_string(),
+            origin_id: None,
+            runtime_id: Some(fx.runtime_id.to_string()),
+            protocol: None,
+            scopes: vec!["origin.register".to_string()],
+            lease_id: Some(fx.runtime_lease_id.to_string()),
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|(_, body)| anyhow::anyhow!("mint machine token: {}", body.0.message))?
+    .token;
+    let (status, body) = send(
+        &fx.state,
+        Request::builder()
+            .method("POST")
+            .uri("/origin/register")
+            .header("authorization", format!("Bearer {machine}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "projectId": fx.project_id,
+                    "originId": fx.origin_id,
+                    "mode": "hosted",
+                    "endpoint": endpoint,
+                })
+                .to_string(),
+            ))?,
+    )
+    .await;
+    anyhow::ensure!(status == StatusCode::OK, "register at {endpoint}: {body}");
+    Ok(())
+}
+
+/// A hosted runtime registers its origin at a public tunnel host. Its
+/// controller stop still ends with the working folder's save: the
+/// credential goes to the address the runtime's provider gives for that
+/// generation on its node, never to the tunnel.
 #[tokio::test]
-async fn a_flush_credential_goes_only_to_an_origin_on_the_runtimes_node() -> anyhow::Result<()> {
-    let pool = crate::tests::require_origin_test_pool("pre-stop flush endpoint test").await?;
+async fn a_hosted_origin_behind_a_public_tunnel_still_gets_its_final_save() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("pre-stop flush tunnel test").await?;
     for case in ["owner_grant", "lease_holder"] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({
+                    "unpushedRefs": 0,
+                    "workingState": {
+                        "unsaved": 1,
+                        "localOnly": 0,
+                        "persistedAt": "2026-10-07T13:11:07Z",
+                        "durable": true,
+                        "changed": false
+                    }
+                }),
+            )
+            .await?;
+            register_origin_at(
+                &fx,
+                "https://0123456789abcdef0123456789abcdef.rt.instafy.dev",
+            )
+            .await?;
+            if case == "lease_holder" {
+                fx.hold_owner_lease().await?;
+            }
+
+            let stopped = super::super::stop::stop_runtime_safely(
+                &fx.state,
+                &fx.runtime_id,
+                idle_reaper_stop(),
+            )
+            .await
+            .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+            assert!(stopped.outcome.status_changed, "{case}");
+            assert_eq!(
+                stopped.flush.status, "flushed",
+                "{case}: {:?}",
+                stopped.flush
+            );
+            assert_eq!(
+                stopped
+                    .flush
+                    .working_state
+                    .as_ref()
+                    .map(|state| state.durable),
+                Some(true),
+                "{case}"
+            );
+            assert_eq!(fx.order(), vec!["flush", "release"], "{case}");
+            let calls = fx.flush_calls();
+            assert_eq!(calls.len(), 1, "{case}: {calls:?}");
+            assert_eq!(
+                calls[0].body,
+                json!({ "turnActive": false, "workingState": true }),
+                "{case}"
+            );
+            assert_eq!(calls[0].git_write, StatusCode::OK, "{case}");
+            // The provider was asked about exactly this generation.
+            assert_eq!(
+                fx.origin_asks.lock().unwrap().clone(),
+                vec![json!({
+                    "project_id": fx.project_id,
+                    "runtime_id": fx.runtime_id,
+                    "lease_id": fx.runtime_lease_id,
+                })],
+                "{case}"
+            );
+            let events = fx.flush_events().await?;
+            assert_eq!(events.len(), 1, "{case}: {events:?}");
+            assert_eq!(events[0]["status"], "saved", "{case}");
+            assert_eq!(events[0]["writer"], case, "{case}");
+            assert_eq!(events[0]["durable"], true, "{case}");
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// A runtime registers its origin at a node-local address of its own
+/// choosing. The controller never sends a credential there: when the
+/// provider places no origin of that generation on the node, the stop mints
+/// nothing, calls nothing and says why; when it does, only that address is
+/// called.
+#[tokio::test]
+async fn a_node_local_address_the_runtime_registers_is_never_called() -> anyhow::Result<()> {
+    let pool =
+        crate::tests::require_origin_test_pool("pre-stop flush forged endpoint test").await?;
+    let claimed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let claimed_app = axum::Router::new().fallback({
+        let claimed = claimed.clone();
+        move |request: Request<Body>| {
+            let claimed = claimed.clone();
+            async move {
+                claimed.lock().unwrap().push(format!(
+                    "{} {} (bearer: {})",
+                    request.method(),
+                    request.uri(),
+                    request.headers().contains_key("authorization")
+                ));
+                Json(json!({ "unpushedRefs": 0 }))
+            }
+        }
+    });
+    let claimed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let claimed_endpoint = format!("http://{}", claimed_listener.local_addr()?);
+    let _claimed_server = spawn_aborting(async move {
+        axum::serve(claimed_listener, claimed_app)
+            .await
+            .expect("serve the claimed endpoint");
+    });
+
+    for (case, attests) in [
+        ("owner_grant", false),
+        ("lease_holder", false),
+        ("owner_grant", true),
+    ] {
         let project_id = Uuid::new_v4();
         let owner_user_id = Uuid::new_v4();
         let fixture = SharedDbFixture {
@@ -1674,45 +1847,10 @@ async fn a_flush_credential_goes_only_to_an_origin_on_the_runtimes_node() -> any
                 json!({ "unpushedRefs": 0 }),
             )
             .await?;
-            // The runtime's machine token re-registers its own origin at a
-            // public host, as anyone holding that token could.
-            let machine_token = mint_scoped_token(
-                &fx.state.config,
-                ScopedTokenRequest {
-                    audience: fx.project_id.to_string(),
-                    subject: fx.owner_user_id.to_string(),
-                    project_id: fx.project_id.to_string(),
-                    origin_id: None,
-                    runtime_id: Some(fx.runtime_id.to_string()),
-                    protocol: None,
-                    scopes: vec!["origin.register".to_string()],
-                    lease_id: Some(fx.runtime_lease_id.to_string()),
-                    run_id: None,
-                    prefer_runtime: None,
-                    ttl_seconds: Some(300),
-                },
-            )
-            .map_err(|(_, body)| anyhow::anyhow!("mint machine token: {}", body.0.message))?
-            .token;
-            let (status, body) = send(
-                &fx.state,
-                Request::builder()
-                    .method("POST")
-                    .uri("/origin/register")
-                    .header("authorization", format!("Bearer {machine_token}"))
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "projectId": fx.project_id,
-                            "originId": fx.origin_id,
-                            "mode": "hosted",
-                            "endpoint": "https://attacker.example",
-                        })
-                        .to_string(),
-                    ))?,
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{case}: {body}");
+            register_origin_at(&fx, &claimed_endpoint).await?;
+            if !attests {
+                *fx.attested.lock().unwrap() = None;
+            }
             if case == "lease_holder" {
                 fx.hold_owner_lease().await?;
             }
@@ -1725,10 +1863,21 @@ async fn a_flush_credential_goes_only_to_an_origin_on_the_runtimes_node() -> any
             .await
             .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
             assert!(stopped.outcome.status_changed, "{case}");
+            assert!(
+                claimed.lock().unwrap().is_empty(),
+                "{case}: the registered endpoint was called: {:?}",
+                claimed.lock().unwrap()
+            );
+            assert_eq!(fx.origin_asks.lock().unwrap().len(), 1, "{case}");
+            if attests {
+                assert_eq!(stopped.flush.status, "flushed", "{case}");
+                assert_eq!(fx.flush_calls().len(), 1, "{case}");
+                return Ok(());
+            }
             assert_eq!(stopped.flush.status, "no_writer", "{case}");
             assert_eq!(
                 stopped.flush.reason,
-                Some(super::UNTRUSTED_ENDPOINT_REASON),
+                Some(super::NOT_ATTESTED_REASON),
                 "{case}"
             );
             assert!(fx.flush_calls().is_empty(), "{case}");
@@ -1737,9 +1886,9 @@ async fn a_flush_credential_goes_only_to_an_origin_on_the_runtimes_node() -> any
                 fx.flush_events().await?,
                 vec![json!({
                     "status": "no_writer",
-                    "writer": "none",
+                    "writer": case,
                     "turnActive": false,
-                    "reason": "origin_endpoint_not_node_local",
+                    "reason": "origin_not_attested",
                 })],
                 "{case}"
             );

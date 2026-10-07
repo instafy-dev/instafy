@@ -301,6 +301,7 @@ already accepted. The bounds are code constants in `runtime/provider.rs` and
 | `POST /runtime/release` | stop, remove, the idle, credit, heartbeat and launch-timeout sweeps, idle-slot reclaim, the dev-only offline endpoint | 180 s | The stop fails with 502 (a sweep logs it and moves on) and the generation stays quarantined (see below). The dev-only offline endpoint only logs it. |
 | `POST /runtime/inspect` | OOM post-mortem in the heartbeat-timeout sweep | 15 s | The attribution is unknown and the stop proceeds as `heartbeat_timeout`. |
 | `POST /runtime/census` | the pool-retirement drain (census, drain stop, flush-checkout) | 30 s | The census marks the provider as not answering (`complete: false`); a drain must then hold the node. |
+| `POST /runtime/origin` | a stop's pre-stop flush, to find the runtime's origin on its node | 10 s | The flush mints nothing and reports `no_writer` (`origin_not_attested`); the stop goes on. |
 
 An idle-slot reclaim (stopping an organization's idle machine so a waiting
 space can launch) runs while that launch holds the controller's single
@@ -479,12 +480,16 @@ loses only work that never reached the remote:
     with write access; the git token never outlives it. Commits stay
     authored by the origin. Each exchange is logged with the project, runtime
     and origin, never a token.
-  Either credential goes only to the runtime's own origin at an endpoint on
-  its node or private network (`localhost`, `host.docker.internal`, a
-  loopback or private address, as the node-local provider assigns them). The
-  runtime registers that endpoint itself, with its machine token, so any
-  other endpoint (a public host or a tunnel) gets nothing: the stop reports
-  `no_writer` with the reason `origin_endpoint_not_node_local`.
+  Either credential goes only to the runtime's own origin, at the address
+  the runtime's provider gives for that exact lease generation on its node
+  (`POST /runtime/origin`; the Docker provider answers the origin's
+  published port on the node's host gateway, `http://host.docker.internal:<port>`),
+  and only when that address is on the node or its private network. The
+  endpoint the runtime registered itself, with its machine token, is never
+  used: a hosted runtime's is a public tunnel host, and any runtime could
+  name any address. When the provider places no origin of that generation
+  on the node, the stop mints nothing and reports `no_writer` with the
+  reason `origin_not_attested`.
   Otherwise (no owner, or a requested stop with no lease holder) the
   controller mints nothing and does not call the origin (`no_writer`), and
   the runtime's own shutdown flush keeps the work locally. The origin's

@@ -32,12 +32,15 @@
 //! recovery refs, the checkout is kept on the node while they exist, and the
 //! next start pushes them.
 //!
-//! A runtime registers its own origin endpoint with its machine credential,
-//! so the controller sends either credential only to an endpoint on the
-//! runtime's node or its private network ([`endpoint_is_node_local`]), as
-//! the node-local provider assigns them. Any other endpoint (a public host,
-//! a tunnel) could be anyone's: the stop mints nothing for it and reports
-//! `no_writer` with the reason `origin_endpoint_not_node_local`.
+//! A runtime registers its own origin endpoint with its machine credential:
+//! a hosted runtime's is a public tunnel host, and any runtime could name
+//! any address. The controller never sends a credential there. It asks the
+//! runtime's provider, which launched the container on its node, where that
+//! generation's origin is (`POST /runtime/origin`), and sends the credential
+//! only to that address, and only when it is on the node or its private
+//! network ([`endpoint_is_node_local`]). When the provider does not vouch
+//! for one, the stop mints nothing and reports `no_writer` with the reason
+//! `origin_not_attested`.
 //!
 //! A successful flush fences the origin's saves until the runtime stops. When
 //! the stop does not happen after all (it is skipped, or someone opened the
@@ -68,6 +71,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::auth::RequestContext;
+use crate::config::RuntimeProviderConfig;
 use crate::origins::{resolve_origin_proxy_upstream_endpoint, WorkspaceLeaseRecord};
 use crate::projects::ensure_scoped_project_match;
 use crate::tokens::{
@@ -79,6 +83,7 @@ use crate::{
 };
 
 use super::db::{record_runtime_event, RuntimeDetails};
+use super::provider::{call_provider_endpoint_json, lock_and_load_authoritative_provider_config};
 
 /// The longest a stop waits for the origin's flush.
 const PRE_STOP_FLUSH_TIMEOUT: Duration = Duration::from_secs(25);
@@ -92,9 +97,11 @@ const PRE_STOP_FLUSH_TOKEN_TTL_SECONDS: i64 = 60;
 const PRE_STOP_SAVE_GRANT_TTL_SECONDS: i64 = 30;
 /// The longest a skipped stop waits for the origin to lift its fence.
 const RESUME_TIMEOUT: Duration = Duration::from_secs(10);
-/// The `reason` of a `no_writer` flush whose origin endpoint the controller
-/// cannot vouch for.
-pub(crate) const UNTRUSTED_ENDPOINT_REASON: &str = "origin_endpoint_not_node_local";
+/// The `reason` of a `no_writer` flush whose origin the runtime's provider
+/// did not place on its node.
+pub(crate) const NOT_ATTESTED_REASON: &str = "origin_not_attested";
+/// The longest a stop waits for the provider to say where the origin is.
+const ORIGIN_ATTEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// The scope of the save-only permission the controller's own stop path
 /// issues in the space owner's name when nobody holds a workspace lease. It
 /// opens the runtime origin's `/git/flush` (the origin's
@@ -102,20 +109,21 @@ pub(crate) const UNTRUSTED_ENDPOINT_REASON: &str = "origin_endpoint_not_node_loc
 /// [`authorize_pre_stop_save_grant`].
 pub(crate) const PRE_STOP_SAVE_SCOPE: &str = "workspace.flush";
 
-/// A hosted origin that should be flushed before its runtime stops.
-#[derive(Debug, Clone)]
+/// A hosted origin that should be flushed before its runtime stops. Not
+/// `Debug`: it holds the provider's route, credential included.
+#[derive(Clone)]
 pub(super) struct PreStopFlushTarget {
     runtime_id: Uuid,
     project_id: Uuid,
     origin_id: Uuid,
-    origin_endpoint: String,
+    /// The runtime generation the stop is for.
+    runtime_lease_id: Uuid,
+    /// The runtime's provider, which says where the origin is.
+    provider: Option<RuntimeProviderConfig>,
     /// A turn is running on the runtime, or was cancelled moments before
     /// this stop: its local commits are unfinished and must not reach `main`.
     turn_active: bool,
     writer: FlushWriter,
-    /// The origin endpoint is not one the controller vouches for: nothing is
-    /// minted or sent.
-    untrusted_endpoint: bool,
 }
 
 /// How a stop path may flush: whether the space owner's save-only
@@ -141,11 +149,12 @@ impl FlushPolicy {
     };
 }
 
-/// Whether the controller may send a flush credential to `endpoint`: an
-/// http(s) URL without credentials whose host is on the runtime's node or
-/// its private network: `localhost`, `host.docker.internal` (what the
-/// node-local provider assigns a hosted origin), a loopback, private,
-/// link-local or shared-address IP. Public hosts and tunnel hosts are not.
+/// Whether the controller may send a flush credential to `endpoint`, the
+/// address the runtime's provider gave: an http(s) URL without credentials
+/// whose host is on the runtime's node or its private network: `localhost`,
+/// `host.docker.internal` (what the node-local provider answers), a
+/// loopback, private, link-local or shared-address IP. Public hosts and
+/// tunnel hosts are not.
 pub(crate) fn endpoint_is_node_local(endpoint: &str) -> bool {
     let Ok(url) = url::Url::parse(endpoint.trim()) else {
         return false;
@@ -312,7 +321,7 @@ pub(super) enum PreStopFlushOutcome {
         working_state: Option<FlushWorkingState>,
     },
     /// Nobody may save this runtime's work (see [`FlushWriter::Nobody`]), or
-    /// its origin endpoint is not one the controller vouches for (the
+    /// its provider did not say where its origin is on the node (the
     /// reason), so no token was minted and the origin was not asked; the
     /// runtime's own shutdown flush keeps the work on local recovery refs.
     NoWriter(Option<&'static str>),
@@ -397,6 +406,7 @@ struct OriginFlushPublish {
 /// owner's save-only permission may be used. `policy.turn_interrupted`: the
 /// stop interrupts a turn whatever the jobs table shows now.
 pub(super) async fn find_target(
+    state: &AppState,
     transaction: &Transaction<'_>,
     runtime: &RuntimeDetails,
     runtime_lease_id: &Uuid,
@@ -404,7 +414,7 @@ pub(super) async fn find_target(
 ) -> Result<Option<PreStopFlushTarget>, (StatusCode, Json<ApiError>)> {
     let Some(origin) = transaction
         .query_opt(
-            "select o.id, o.endpoint, oi.endpoint as instance_endpoint
+            "select o.id
              from origin_instances oi
              join workspace_origins o
                on o.id = oi.origin_id
@@ -424,16 +434,16 @@ pub(super) async fn find_target(
     else {
         return Ok(None);
     };
-    // The generation's own instance endpoint first; both are written by the
-    // same registration.
-    let origin_endpoint: String = origin
-        .get::<_, Option<String>>("instance_endpoint")
-        .filter(|endpoint| !endpoint.trim().is_empty())
-        .unwrap_or_else(|| origin.get("endpoint"));
-    if origin_endpoint.trim().is_empty() {
-        return Ok(None);
-    }
-    let untrusted_endpoint = !endpoint_is_node_local(&origin_endpoint);
+    // The provider's authoritative route, as a release resolves it.
+    let provider = lock_and_load_authoritative_provider_config(
+        transaction,
+        &runtime.provider,
+        state
+            .provider_registry
+            .provider_config(&runtime.provider)
+            .as_ref(),
+    )
+    .await?;
 
     // A turn the stop interrupts: a job still leased by this runtime, or one
     // cancelled in the last minute (a user Stop or a cancel the stop follows).
@@ -471,8 +481,6 @@ pub(super) async fn find_target(
         .map(|row| crate::origins::lease_from_row(&row));
 
     let writer = match WorkspaceLeaseState::of(lease.as_ref(), &runtime.id) {
-        // Nothing is minted for an endpoint the controller cannot vouch for.
-        _ if untrusted_endpoint => FlushWriter::Nobody,
         WorkspaceLeaseState::Held(holder) => FlushWriter::LeaseHolder(holder),
         // A lease bound to another runtime (after a pool cutover, usually the
         // new node's) is not this runtime's writer either.
@@ -486,16 +494,17 @@ pub(super) async fn find_target(
         runtime_id: runtime.id,
         project_id: runtime.project_id,
         origin_id: origin.get("id"),
-        origin_endpoint,
+        runtime_lease_id: *runtime_lease_id,
+        provider,
         turn_active: turn_active || policy.turn_interrupted,
         writer,
-        untrusted_endpoint,
     }))
 }
 
 impl PreStopFlushTarget {
-    /// The flush will ask the origin (a writer was found for a vouched-for
-    /// endpoint), so it may take up to [`PRE_STOP_FLUSH_TIMEOUT`].
+    /// The flush will ask the provider and, where it vouches for the origin,
+    /// the origin (a writer was found), so it may take up to
+    /// [`ORIGIN_ATTEST_TIMEOUT`] plus [`PRE_STOP_FLUSH_TIMEOUT`].
     pub(super) fn calls_origin(&self) -> bool {
         !matches!(self.writer, FlushWriter::Nobody)
     }
@@ -561,10 +570,31 @@ pub(super) struct FlushResume {
 /// Ask the origin to flush, holding no database connection while it works.
 /// Never fails: the outcome is logged and recorded as a runtime event.
 /// Only the writer [`find_target`] chose gets a credential, and it goes to
-/// this runtime's own origin, at an endpoint on its node, and nowhere else.
+/// this runtime's own origin, at the address its provider gives on its
+/// node, and nowhere else.
 pub(super) async fn flush(state: &AppState, target: PreStopFlushTarget) -> PreStopFlush {
+    let (outcome, resume) = flush_at_attested_origin(state, &target).await;
+    log_outcome(&target, &outcome);
+    record_outcome(state, &target, &outcome).await;
+    PreStopFlush { outcome, resume }
+}
+
+async fn flush_at_attested_origin(
+    state: &AppState,
+    target: &PreStopFlushTarget,
+) -> (PreStopFlushOutcome, Option<FlushResume>) {
+    if !target.calls_origin() {
+        return (PreStopFlushOutcome::NoWriter(None), None);
+    }
+    // Nothing is minted for an origin its provider does not place.
+    let Some(origin_endpoint) = attested_origin(state, target).await else {
+        return (
+            PreStopFlushOutcome::NoWriter(Some(NOT_ATTESTED_REASON)),
+            None,
+        );
+    };
     let token = match target.writer {
-        FlushWriter::LeaseHolder(holder) => Some(mint_flush_token(state, &target, &holder)),
+        FlushWriter::LeaseHolder(holder) => mint_flush_token(state, target, &holder),
         FlushWriter::OwnerGrant {
             owner_user_id,
             runtime_lease_id,
@@ -575,43 +605,85 @@ pub(super) async fn flush(state: &AppState, target: PreStopFlushTarget) -> PreSt
                 origin_id = %target.origin_id,
                 "issuing the space owner's save-only permission for a stop nobody holds a workspace lease for"
             );
-            Some(mint_save_grant(
-                state,
-                &target,
-                owner_user_id,
-                runtime_lease_id,
-            ))
+            mint_save_grant(state, target, owner_user_id, runtime_lease_id)
         }
-        FlushWriter::Nobody => None,
+        FlushWriter::Nobody => return (PreStopFlushOutcome::NoWriter(None), None),
     };
-    let (outcome, resume) = match token {
-        Some(Ok(token)) => {
-            let outcome = call_origin_flush(state, &target, &token).await;
-            let resume =
-                matches!(outcome, PreStopFlushOutcome::Flushed { .. }).then(|| FlushResume {
-                    runtime_id: target.runtime_id,
-                    project_id: target.project_id,
-                    origin_endpoint: target.origin_endpoint.clone(),
-                    token,
-                });
-            (outcome, resume)
+    let token = match token {
+        Ok(token) => token,
+        Err((_, body)) => {
+            return (
+                PreStopFlushOutcome::failed("credential_mint_failed", body.0.message),
+                None,
+            )
         }
-        Some(Err((_, body))) => (
-            PreStopFlushOutcome::failed("credential_mint_failed", body.0.message),
-            None,
-        ),
-        None => (
-            PreStopFlushOutcome::NoWriter(
-                target
-                    .untrusted_endpoint
-                    .then_some(UNTRUSTED_ENDPOINT_REASON),
-            ),
-            None,
-        ),
     };
-    log_outcome(&target, &outcome);
-    record_outcome(state, &target, &outcome).await;
-    PreStopFlush { outcome, resume }
+    let outcome = call_origin_flush(state, target, &origin_endpoint, &token).await;
+    let resume = matches!(outcome, PreStopFlushOutcome::Flushed { .. }).then(|| FlushResume {
+        runtime_id: target.runtime_id,
+        project_id: target.project_id,
+        origin_endpoint,
+        token,
+    });
+    (outcome, resume)
+}
+
+/// The provider's `/runtime/origin` question: where is this generation's
+/// origin on your node?
+#[derive(Debug, Serialize)]
+struct ProviderOriginRequest {
+    project_id: Uuid,
+    runtime_id: Uuid,
+    lease_id: Uuid,
+}
+
+/// Where the runtime's origin is, as its provider says for exactly this
+/// runtime generation, when that is on the node. Never the endpoint the
+/// runtime registered: that may be a public tunnel, or any address the
+/// runtime chose.
+async fn attested_origin(state: &AppState, target: &PreStopFlushTarget) -> Option<String> {
+    let provider = target.provider.as_ref()?;
+    let request = ProviderOriginRequest {
+        project_id: target.project_id,
+        runtime_id: target.runtime_id,
+        lease_id: target.runtime_lease_id,
+    };
+    let answer = match call_provider_endpoint_json(
+        state,
+        provider,
+        "/runtime/origin",
+        &request,
+        ORIGIN_ATTEST_TIMEOUT,
+    )
+    .await
+    {
+        Ok(answer) => answer?,
+        Err(error) => {
+            warn!(
+                runtime_id = %target.runtime_id,
+                project_id = %target.project_id,
+                provider = %provider.id,
+                %error,
+                "the runtime's provider did not say where its origin is"
+            );
+            return None;
+        }
+    };
+    let endpoint = answer
+        .get("endpoint")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())?;
+    if !endpoint_is_node_local(endpoint) {
+        warn!(
+            runtime_id = %target.runtime_id,
+            project_id = %target.project_id,
+            provider = %provider.id,
+            "the runtime's provider placed its origin off the node; nothing is sent there"
+        );
+        return None;
+    }
+    Some(endpoint.to_string())
 }
 
 /// The stop that flushed did not happen: let the origin accept saves again.
@@ -835,10 +907,10 @@ fn mint_flush_token(
 async fn call_origin_flush(
     state: &AppState,
     target: &PreStopFlushTarget,
+    origin_endpoint: &str,
     token: &str,
 ) -> PreStopFlushOutcome {
-    let (origin_base, host_override) =
-        resolve_origin_proxy_upstream_endpoint(&target.origin_endpoint);
+    let (origin_base, host_override) = resolve_origin_proxy_upstream_endpoint(origin_endpoint);
     let mut request = state
         .origin_proxy_client
         .post(format!("{}/git/flush", origin_base.trim_end_matches('/')))
@@ -1107,10 +1179,10 @@ mod tests {
             runtime_id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
             origin_id: Uuid::new_v4(),
-            origin_endpoint: "http://127.0.0.1:1".to_string(),
+            runtime_lease_id: Uuid::new_v4(),
+            provider: None,
             turn_active: false,
             writer: super::FlushWriter::Nobody,
-            untrusted_endpoint: false,
         };
         let data = flush_event_data(&target, &outcome);
         assert_eq!(data["durable"], true, "{data}");
