@@ -133,6 +133,158 @@ async function readAll(stream: NodeJS.ReadableStream) {
 }
 
 describe("conversation commands", () => {
+  async function withTranscriptController(
+    getPage: (cursor: string | null, limit: number) => unknown,
+    run: (args: string[], requests: CapturedRequest[]) => Promise<void>,
+  ) {
+    const projectId = randomUUID();
+    const conversationId = randomUUID();
+    const requests: CapturedRequest[] = [];
+    const server = startCreateConversationMockController((req) => {
+      requests.push(req);
+      const url = new URL(req.url, "http://localhost");
+      if (url.pathname === `/projects/${projectId}/conversations`) {
+        return { status: 200, body: [{ id: conversationId, metadata: { title: "Pilot planning" } }] };
+      }
+      if (url.pathname === `/conversations/${conversationId}/messages`) {
+        return { status: 200, body: getPage(url.searchParams.get("cursor"), Number(url.searchParams.get("limit"))) };
+      }
+      return { status: 404, body: { error: "not found" } };
+    });
+    await once(server, "listening");
+    try {
+      const address = server.address() as { port: number };
+      await run([
+        "conversation", "show", conversationId, "--space", projectId,
+        "--server-url", `http://127.0.0.1:${address.port}`, "--access-token", "transcript-test-token", "--json",
+      ], requests);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  const transcriptRow = (role: string, content: string, metadata: Record<string, unknown> = {}) => ({
+    id: randomUUID(), role, content, createdAt: "2026-10-07T10:00:00.000Z", metadata,
+  });
+
+  it("pages beyond event-only rows, counts transcript messages, and resumes within a raw page without skipping facts", async () => {
+    const events = Array.from({ length: 200 }, () => transcriptRow("assistant", "tool output", {
+      source: "agent", kind: "update", messageType: "command_execution", details: { output: "runtime telemetry".repeat(100) },
+    }));
+    const answer = transcriptRow("assistant", "Keep the pilot asynchronous.\n[Source](instafy://conversation/source)", { outcome: "succeeded" });
+    const user = transcriptRow("user", "Harbor is waiting for an FAQ. No meetings or pricing promise.\n" + "Exact source text. ".repeat(300));
+    const older = transcriptRow("user", "Original pilot goal");
+    const all = [...events, answer, user, older];
+    await withTranscriptController((cursor, limit) => {
+      const start = cursor ? all.findIndex((row) => row.id === cursor) + 1 : 0;
+      const messages = all.slice(start, start + limit);
+      const hasMore = start + limit < all.length;
+      return { messages, hasMore, nextCursor: hasMore ? messages.at(-1)?.id : null };
+    }, async (args, requests) => {
+      const first = await execCli([...args, "--transcript", "--limit", "2"]);
+      expect(first.code, first.stderr).toBe(0);
+      const page = JSON.parse(first.stdout);
+      expect(page.messages).toEqual([answer, user].map(({ metadata, ...row }) => row));
+      expect(page).toMatchObject({ hasMore: true, nextCursor: user.id });
+      expect(first.stdout).not.toContain("runtime telemetry");
+      expect(requests.filter((req) => req.url.includes("/messages"))).toHaveLength(2);
+      expect(requests.every((req) => req.auth === "Bearer transcript-test-token")).toBe(true);
+      const next = await execCli([...args, "--transcript", "--cursor", page.nextCursor]);
+      expect(next.code, next.stderr).toBe(0);
+      expect(JSON.parse(next.stdout)).toMatchObject({
+        messages: [{ id: older.id, role: "user", content: older.content, createdAt: older.createdAt }],
+        hasMore: false, nextCursor: null,
+      });
+    });
+  });
+
+  it("recognizes assistant runtime wrappers and hidden rows while preserving user text, final replies and request cards", async () => {
+    const user = transcriptRow("user", "A message mentioning command_execution is still user text.", { messageType: "command_execution" });
+    const final = transcriptRow("assistant", "Final reply", { outcome: "succeeded", artifacts: [{ large: "omitted" }] });
+    const requests = [
+      transcriptRow("assistant", "Please provide the API key.", { kind: "update", messageType: "secret_request" }),
+      transcriptRow("assistant", "Please connect your calendar.", { kind: "update", messageType: "integration_request" }),
+      transcriptRow("assistant", "Please approve the calendar event.", { kind: "update", messageType: "action_request" }),
+    ];
+    const messages = [
+      transcriptRow("assistant", "usage", { message_type: " token_usage " }),
+      transcriptRow("assistant", "reasoning", { details: { runtimeId: "runtime", details: { messageType: "reasoning" } } }),
+      transcriptRow("assistant", "command", { details: { kind: "codex_command_execution" } }),
+      transcriptRow("assistant", "search", { details: { type: "web_search" } }),
+      transcriptRow("assistant", "progress", { source: "agent", kind: "update", outcome: "in_progress" }),
+      transcriptRow("assistant", "commit", { details: { kind: "workspace_commit" } }),
+      transcriptRow("assistant", "hidden", { details: { presentation: { hidden: true } } }),
+      transcriptRow("tool", "tool response"), transcriptRow("system", "system instructions"),
+      user, final, ...requests,
+    ];
+    await withTranscriptController(() => ({ messages, hasMore: false, nextCursor: null }), async (args) => {
+      const compact = await execCli([...args, "--transcript"]);
+      expect(compact.code, compact.stderr).toBe(0);
+      expect(JSON.parse(compact.stdout).messages).toEqual([user, final, ...requests].map(({ metadata, ...row }) => row));
+      const raw = await execCli(args);
+      expect(raw.code, raw.stderr).toBe(0);
+      expect(JSON.parse(raw.stdout).messages).toEqual(messages);
+      expect(JSON.parse(raw.stdout)).not.toHaveProperty("hasMore");
+      expect(JSON.parse(raw.stdout)).not.toHaveProperty("nextCursor");
+    });
+  });
+
+  it("bounds event-only scans and gives the last scanned event cursor for continuation", async () => {
+    const events = Array.from({ length: 2_000 }, () => transcriptRow("assistant", "tool", { kind: "update" }));
+    const fact = transcriptRow("user", "Harbor source fact beyond the event budget");
+    const all = [...events, fact];
+    await withTranscriptController((cursor, limit) => {
+      const start = cursor ? all.findIndex((row) => row.id === cursor) + 1 : 0;
+      const messages = all.slice(start, start + limit);
+      const hasMore = start + limit < all.length;
+      return { messages, hasMore, nextCursor: hasMore ? messages.at(-1)?.id : null };
+    }, async (args, requests) => {
+      const first = await execCli([...args, "--transcript"]);
+      expect(first.code, first.stderr).toBe(0);
+      const page = JSON.parse(first.stdout);
+      expect(page).toMatchObject({ messages: [], hasMore: true, nextCursor: events.at(-1)?.id });
+      expect(requests.filter((req) => req.url.includes("/messages"))).toHaveLength(10);
+      const next = await execCli([...args, "--transcript", "--cursor", page.nextCursor]);
+      expect(next.code, next.stderr).toBe(0);
+      expect(JSON.parse(next.stdout)).toMatchObject({ messages: [{ id: fact.id }], hasMore: false, nextCursor: null });
+    });
+  });
+
+  it("rejects repeated server cursors without looping or printing a partial transcript", async () => {
+    const event = transcriptRow("assistant", "tool", { kind: "update" });
+    await withTranscriptController(() => ({ messages: [event], hasMore: true, nextCursor: event.id }), async (args, requests) => {
+      const result = await execCli([...args, "--transcript"]);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("invalid or repeated transcript cursor");
+      expect(requests.filter((req) => req.url.includes("/messages"))).toHaveLength(2);
+    });
+  });
+
+  it.each([
+    { messages: [] },
+    { messages: [], hasMore: true, nextCursor: randomUUID() },
+    { messages: [transcriptRow("user", "fact")], hasMore: true, nextCursor: "invalid" },
+  ])("rejects missing or invalid transcript pagination instead of claiming a complete read: %j", async (page) => {
+    await withTranscriptController(() => page, async (args) => {
+      const result = await execCli([...args, "--transcript"]);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(/transcript (pagination metadata|cursor)/);
+    });
+  });
+
+  it("validates transcript cursors before making requests", async () => {
+    await withTranscriptController(() => ({}), async (args, requests) => {
+      for (const flags of [["--cursor", randomUUID()], ["--transcript", "--cursor", "not-a-message-id"]]) {
+        const result = await execCli([...args, ...flags]);
+        expect(result.code).toBe(1);
+        expect(result.stderr).toContain("--cursor requires --transcript");
+      }
+      expect(requests).toHaveLength(0);
+    });
+  });
+
   it("creates a linked child thread with title metadata and thread kind", async () => {
     const projectId = randomUUID();
     const parentConversationId = randomUUID();

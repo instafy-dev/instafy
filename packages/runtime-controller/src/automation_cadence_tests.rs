@@ -9,6 +9,9 @@ use axum::http::Request;
 use chrono::{Datelike, Timelike};
 use tower::ServiceExt;
 
+#[path = "automation_review_creation_tests.rs"]
+mod review_creation_tests;
+
 struct Fixture {
     state: AppState,
     app: Router,

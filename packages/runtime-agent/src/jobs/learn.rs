@@ -154,6 +154,7 @@ const LEGACY_SPACE_REVIEW_TEMPLATES: &[&str] = &[
     include_str!("legacy/space-review-v1.md"),
     include_str!("legacy/space-review-v2.md"),
     include_str!("legacy/space-review-v3.md"),
+    include_str!("legacy/space-review-v4.md"),
 ];
 const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -170,6 +171,7 @@ const AUTOMATIONS_TEMPLATE: &str = include_str!(concat!(
 const LEGACY_AUTOMATIONS_TEMPLATES: &[&str] = &[
     include_str!("legacy/automations-v1.md"),
     include_str!("legacy/automations-v2.md"),
+    include_str!("legacy/automations-v3.md"),
 ];
 const PERSISTENT_CONTEXTS_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -1593,6 +1595,9 @@ mod tests {
         )
         .expect("space review memory snapshot");
         assert!(snapshot.text.contains(SPACE_REVIEW_TEMPLATE.trim()));
+        assert!(snapshot.text.contains(
+            "instafy conversation show <conversation-id> --limit 20 --transcript --json"
+        ));
         for previous in LEGACY_SPACE_REVIEW_TEMPLATES {
             fs::write(&skill, previous).expect("previous bundled skill");
             ensure_project_memory_scaffold(workspace.path());
@@ -1652,6 +1657,45 @@ mod tests {
                 "{request}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_space_review_scheduling_loads_the_automation_workflow() {
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        for request in [
+            "Start weekly space reviews on Fridays at 09:00 Europe/Vienna.",
+            "Set up check-ins every Friday at 9 and review this space now.",
+            "Please check this space every Friday at 09:00 Europe/Vienna and open a private chat when there is something useful to pick up. Check once now too.",
+            "Change the space review schedule to Friday, but keep it paused.",
+        ] {
+            let snapshot = super::super::format_project_memory_snapshot(workspace.path(), request)
+                .expect("space review scheduling memory snapshot");
+            assert!(
+                snapshot.text.contains(AUTOMATIONS_TEMPLATE.trim()),
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn starter_question_loads_router_without_preselecting_a_space_review() {
+        let workspace = tempdir().expect("workspace");
+        ensure_project_memory_scaffold(workspace.path());
+        let snapshot = super::super::format_project_memory_snapshot(
+            workspace.path(),
+            "I'm new here. What should I work on first?",
+        )
+        .expect("starter question memory snapshot");
+        assert!(snapshot.text.contains(SKILL_ROUTER_TEMPLATE.trim()));
+        assert!(!snapshot.text.contains(SPACE_REVIEW_TEMPLATE.trim()));
+
+        let review = super::super::format_project_memory_snapshot(
+            workspace.path(),
+            "$instafy-space-review Review the unfinished work in this space.",
+        )
+        .expect("explicit review memory snapshot");
+        assert!(review.text.contains(SPACE_REVIEW_TEMPLATE.trim()));
     }
 
     #[cfg(unix)]

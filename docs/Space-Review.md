@@ -137,6 +137,10 @@ and at most one delivery per active run.
   controller denies schedule/status changes from background space review jobs and denies changes
   to the name, task, mode, provider, metadata or visibility through this scoped capability.
   Concurrent user schedule edits take precedence over finalizing an already-claimed launch.
+- A live user job in an ordinary chat may create a private `space_review` schedule for its own
+  subject and project after an explicit request. Background review and automation jobs cannot
+  opt users in. Creation retains the fixed review prompt, quiet private delivery and one-review
+  constraint; the scoped job gains no access to the private execution anchor.
 
 Apply the ordered additive migrations before the controller rollout, including
 `20261002120000_space_recommendations.sql` and

@@ -23,6 +23,12 @@ quiet runs. The CLI rejects a custom `--prompt` or team visibility in this mode.
 a custom create prompt in favor of the fixed instructions. `mode` is returned in the record and
 cannot change after creation; omitting it creates a normal `prompt` automation as before.
 
+An explicit request in an ordinary chat can create this schedule through its live scoped job.
+The controller binds ownership to that job's user and project, requires current write access and
+valid job and runtime authorization, and keeps the same private managed review behavior.
+Background review or automation jobs, including their child conversations, cannot create review
+schedules. This does not grant the requesting job access to the new private execution anchor.
+
 There can be one review automation per owner and project. It supports the existing once, hourly
 and weekly schedules, pause/resume and manual run. A manual run returns a conflict while a review
 is already pending. Schedule, name and runtime settings can be updated, but the managed prompt,
