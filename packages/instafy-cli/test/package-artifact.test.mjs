@@ -148,6 +148,9 @@ test("npm artifact installs and runs without workspace dependencies", () => {
       run(process.execPath, [installedCli, "support", "--help"], installDirectory),
       /report/,
     );
+    const transcriptHelp = run(process.execPath, [installedCli, "conversation", "show", "--help"], installDirectory);
+    assert.match(transcriptHelp, /--transcript/);
+    assert.match(transcriptHelp, /--cursor <messageId>/);
     for (const command of ["grep", "context"]) {
       assert.match(
         run(process.execPath, [installedCli, "conversation", command, "--help"], installDirectory),

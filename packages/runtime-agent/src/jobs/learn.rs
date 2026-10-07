@@ -1595,6 +1595,9 @@ mod tests {
         )
         .expect("space review memory snapshot");
         assert!(snapshot.text.contains(SPACE_REVIEW_TEMPLATE.trim()));
+        assert!(snapshot.text.contains(
+            "instafy conversation show <conversation-id> --limit 20 --transcript --json"
+        ));
         for previous in LEGACY_SPACE_REVIEW_TEMPLATES {
             fs::write(&skill, previous).expect("previous bundled skill");
             ensure_project_memory_scaffold(workspace.path());

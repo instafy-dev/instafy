@@ -26,6 +26,8 @@ export type ConversationShowOptions = ConversationCommonOptions & {
   target?: string;
   limit?: number;
   includeThreads?: boolean;
+  transcript?: boolean;
+  cursor?: string;
   json?: boolean;
 };
 
@@ -72,6 +74,18 @@ type ControllerConversationMessage = {
 
 type ControllerConversationMessagesPage = {
   messages?: ControllerConversationMessage[];
+  hasMore?: boolean;
+  nextCursor?: string | null;
+};
+
+type TranscriptMessage = Pick<ControllerConversationMessage, "id" | "role" | "content"> & {
+  createdAt: string | null;
+};
+
+type ConversationTranscript = {
+  messages: TranscriptMessage[];
+  hasMore: boolean;
+  nextCursor: string | null;
 };
 
 type SearchMatch = {
@@ -88,6 +102,48 @@ type SearchMatch = {
 const DEFAULT_CONVERSATION_LIMIT = 50;
 const DEFAULT_MESSAGE_LIMIT = 80;
 const MAX_LIMIT = 200;
+const MAX_TRANSCRIPT_PAGES = 10;
+
+// These are the persisted tool/timeline types used by Studio. Some older events
+// put their discriminator inside runtime-selection details wrappers instead.
+const TRANSCRIPT_EVENT_TYPES = new Set([
+  "command_execution", "mcp_tool_call", "runtime_switch", "todo_list", "file_change",
+  "web_search", "token_usage", "reasoning", "status", "learn_router", "browser_decision",
+]);
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown> : null;
+}
+
+function normalizedString(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function isTranscriptMessage(message: ControllerConversationMessage): boolean {
+  if (message.role !== "user" && message.role !== "assistant") return false;
+  let metadata = record(message.metadata);
+  // Inspect the same bounded nested details envelopes as Studio; never classify
+  // a user's own text as telemetry because it happens to contain event words.
+  for (let depth = 0; metadata && depth <= 4; depth += 1) {
+    if (record(metadata.presentation)?.hidden === true) return false;
+    if (message.role === "assistant") {
+      const type = normalizedString(metadata.messageType) || normalizedString(metadata.message_type);
+      const kind = normalizedString(metadata.kind);
+      if (TRANSCRIPT_EVENT_TYPES.has(type) || TRANSCRIPT_EVENT_TYPES.has(normalizedString(metadata.type))) {
+        return false;
+      }
+      if (["workspace_commit", "codex_command_execution", "codex_mcp_tool_call", "codex_web_search", "codex_reasoning"].includes(kind)) {
+        return false;
+      }
+      // Request cards carry the update stamp too, but are real standing requests
+      // to the user. Keep their text without exposing card metadata.
+      if (kind === "update" && !["secret_request", "integration_request", "action_request"].includes(type)) return false;
+    }
+    metadata = record(metadata.details);
+  }
+  return true;
+}
 
 function clampLimit(limit: number | undefined, fallback: number): number {
   if (!Number.isFinite(limit as number)) {
@@ -240,6 +296,60 @@ async function fetchConversationMessages(
     query: [`limit=${options.limit}`],
   });
   return Array.isArray(response.messages) ? response.messages : [];
+}
+
+async function fetchConversationTranscript(
+  options: ConversationCommonOptions & { conversationId: string; limit: number; cursor?: string },
+): Promise<ConversationTranscript> {
+  const messages: TranscriptMessage[] = [];
+  let cursor = options.cursor;
+  const seen = new Set<string>(cursor ? [cursor] : []);
+  for (let pageNumber = 0; pageNumber < MAX_TRANSCRIPT_PAGES; pageNumber += 1) {
+    const page = await requestControllerApiJson<ControllerConversationMessagesPage>({
+      method: "GET",
+      path: `/conversations/${options.conversationId}/messages`,
+      controllerUrl: options.controllerUrl,
+      accessToken: options.accessToken,
+      serviceToken: options.serviceToken,
+      query: [`limit=${MAX_LIMIT}`, ...(cursor ? [`cursor=${encodeURIComponent(cursor)}`] : [])],
+    });
+    // Missing pagination is not evidence that older messages do not exist.
+    if (!Array.isArray(page.messages) || typeof page.hasMore !== "boolean") {
+      throw new Error("Controller did not return transcript pagination metadata. Update the controller or omit --transcript to inspect raw messages.");
+    }
+    if (page.messages.length > MAX_LIMIT || (page.hasMore && (
+      !page.messages.length || typeof page.nextCursor !== "string" || !isUuid(page.nextCursor) ||
+      page.nextCursor !== page.messages[page.messages.length - 1]?.id || seen.has(page.nextCursor)
+    ))) {
+      throw new Error("Controller returned an invalid or repeated transcript cursor.");
+    }
+    for (let index = 0; index < page.messages.length; index += 1) {
+      const message = page.messages[index];
+      if (!message || typeof message.id !== "string" || !isUuid(message.id) || seen.has(message.id) ||
+          typeof message.role !== "string" || typeof message.content !== "string") {
+        throw new Error("Controller returned an invalid or repeated transcript message.");
+      }
+      seen.add(message.id);
+      if (!isTranscriptMessage(message)) continue;
+      messages.push({
+        id: message.id,
+        role: message.role,
+        content: message.content,
+        createdAt: trimOrNull(message.createdAt) ?? trimOrNull(message.created_at),
+      });
+      if (messages.length === options.limit) {
+        const hasMore = index < page.messages.length - 1 || page.hasMore;
+        // A server page can contain more transcript rows than requested. Resume
+        // at the last returned row, not its page's end, to avoid dropping facts.
+        return { messages, hasMore, nextCursor: hasMore ? message.id : null };
+      }
+    }
+    if (!page.hasMore) return { messages, hasMore: false, nextCursor: null };
+    cursor = page.nextCursor!;
+  }
+  // This cursor may name a telemetry row when the scan budget contains no text.
+  // The caller can continue without re-reading those rows or assuming emptiness.
+  return { messages, hasMore: true, nextCursor: cursor! };
 }
 
 function scoreConversationText(
@@ -595,6 +705,9 @@ function resolveShowTarget(rawTarget: string | undefined): string {
 export async function showConversation(options: ConversationShowOptions): Promise<void> {
   const projectId = resolveProjectId(options.project);
   const target = resolveShowTarget(options.target);
+  if (options.cursor !== undefined && (!options.transcript || !isUuid(options.cursor))) {
+    throw new Error("--cursor requires --transcript and a message UUID returned as nextCursor.");
+  }
 
   const limit = clampLimit(options.limit, DEFAULT_MESSAGE_LIMIT);
   const conversations = await fetchProjectConversations({
@@ -652,13 +765,17 @@ export async function showConversation(options: ConversationShowOptions): Promis
     selected = selectConversationForShow(target, matches);
   }
 
-  const messages = await fetchConversationMessages({
+  const messageOptions = {
     conversationId: selected.id,
     controllerUrl: options.controllerUrl,
     accessToken: options.accessToken,
     serviceToken: options.serviceToken,
     limit,
-  });
+  };
+  const transcript = options.transcript
+    ? await fetchConversationTranscript({ ...messageOptions, cursor: options.cursor?.trim() })
+    : null;
+  const messages: ControllerConversationMessage[] = transcript?.messages ?? await fetchConversationMessages(messageOptions);
 
   if (options.json) {
     console.log(
@@ -666,6 +783,7 @@ export async function showConversation(options: ConversationShowOptions): Promis
         {
           conversation: selected,
           messages,
+          ...(transcript ? { hasMore: transcript.hasMore, nextCursor: transcript.nextCursor } : {}),
         },
         null,
         2,
@@ -683,8 +801,13 @@ export async function showConversation(options: ConversationShowOptions): Promis
     console.log(`${kleur.gray("Preview:")} ${summarizeContent(selected.preview, 240)}`);
   }
   console.log("");
+  if (transcript?.hasMore) {
+    console.log(kleur.yellow(`Older rows remain; continue with --transcript --cursor ${transcript.nextCursor}.`));
+  }
   if (messages.length === 0) {
-    console.log(kleur.yellow("No messages found in this conversation."));
+    console.log(kleur.yellow(transcript
+      ? "No transcript messages in the scanned rows."
+      : "No messages found in this conversation."));
     return;
   }
 
@@ -694,8 +817,8 @@ export async function showConversation(options: ConversationShowOptions): Promis
     const header = createdAt
       ? `${role} · ${createdAt}`
       : role;
-    console.log(kleur.cyan(`[${header}]`));
-    console.log(summarizeContent(message.content ?? "", 4_000));
+    console.log(kleur.cyan(`[${header}${transcript ? ` · ${message.id}` : ""}]`));
+    console.log(transcript ? message.content : summarizeContent(message.content ?? "", 4_000));
     console.log("");
   }
 }

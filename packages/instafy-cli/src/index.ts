@@ -2653,6 +2653,8 @@ const conversationShowCommand = conversationCommand
   .option("--space <id>", "Space UUID (defaults to SPACE_ID or .instafy/space.json)")
   .option("--include-threads", "Include child threads in addition to root conversations")
   .option("--limit <n>", "Max messages to return (1-200, default: 80)", Number.parseInt)
+  .option("--transcript", "Read user/assistant text without runtime events or metadata (scans up to 2,000 rows)")
+  .option("--cursor <messageId>", "Continue older transcript rows from nextCursor (requires --transcript)")
   .option("--json", "Output JSON");
 addServerUrlOptions(conversationShowCommand);
 addAccessTokenOptions(conversationShowCommand, "Instafy access token");
@@ -2665,6 +2667,8 @@ conversationShowCommand.action(async (targetParts, opts) => {
       project: opts.space,
       includeThreads: opts.includeThreads,
       limit: opts.limit,
+      transcript: opts.transcript,
+      cursor: opts.cursor,
       controllerUrl: opts.serverUrl,
       accessToken: opts.accessToken,
       json: opts.json,

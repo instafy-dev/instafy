@@ -20,10 +20,12 @@ Use the existing scoped CLI session; do not request credentials or try another a
 1. Read prior decisions first:
    `instafy recommendations list --limit 200 --json`
 2. Read this chat:
-   `instafy conversation show --limit 20 --json`
+   `instafy conversation show --limit 20 --transcript --json`
 3. If the request needs wider context, list at most 12 accessible chats:
    `instafy conversation list --limit 12 --include-threads --json`
-   Inspect at most three relevant chats with `instafy conversation show <conversation-id> --limit 20 --json`. Optional context cards can guide selection with `instafy agents context list --limit 10 --json`; verify their claims in the original chat before recommending work.
+   Inspect at most three relevant chats with `instafy conversation show <conversation-id> --limit 20 --transcript --json`. Optional context cards can guide selection with `instafy agents context list --limit 10 --json`; verify their claims in the original chat before recommending work.
+
+Use the transcript view for source evidence; raw runtime events and tool metadata can hide the actual messages in a truncated response. If an older CLI explicitly rejects `--transcript` as unknown, retry without that flag and treat any truncated output as incomplete evidence.
 
 These commands default to the current space. Keep any explicit `--space` equal to that space. The controller decides which conversations and recommendations this runtime job can access: shared space chats and its own private conversation tree, not unrelated private chats even if the person can open them. Describe the review accordingly; never claim full private-chat coverage. A denied or missing chat is not evidence that no work exists. Do not use user-only `conversation grep` or `context` from a scoped runtime job, inspect other spaces, or scan an entire workspace to compensate for missing access. Read a small relevant local file only when the request or accessible discussion points to it.
 

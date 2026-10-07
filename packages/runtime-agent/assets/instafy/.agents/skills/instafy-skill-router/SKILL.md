@@ -83,7 +83,7 @@ Use these mappings unless a project-specific skill overrides them.
 - **Earlier chat / other conversation / previous discussion / “we talked about this before”**
   - Use `instafy-conversation-history`.
   - Prefer normal-language lookup over teaching special composer syntax.
-  - Search first with `instafy conversation search "<keywords>"`, then inspect with `instafy conversation show <id>`.
+  - Search first with `instafy conversation search "<keywords>"`, then inspect with `instafy conversation show <id> --transcript`.
 
 - **Getting started / “I'm new here; what should I work on first?”**
   - When no goal is stated and the person is not asking to inspect existing work, ask one short question about what they want to build or solve in this chat. Do not require a history review just to ask it, or claim the space is empty without evidence.

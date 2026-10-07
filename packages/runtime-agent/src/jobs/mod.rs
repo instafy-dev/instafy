@@ -8173,7 +8173,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 "\nCross-chat lookup observation requirement:\n\
                 - Routing identified missing prior evidence. Make a bounded read-only Instafy CLI lookup before answering; this requirement is independent of current workspace observation.\n\
                 - Start with `instafy conversation search \"<topic>\" --include-threads --json` using the topic/path terms from the latest request.\n\
-                - If the search result is enough, answer from it. If not, inspect only the clearest match with `instafy conversation show <conversation-id> --json`.\n\
+                - If the search result is enough, answer from it. If not, inspect only the clearest match with `instafy conversation show <conversation-id> --transcript --json`.\n\
                 - Do not substitute shell searches over raw runtime/session artifacts such as `.codex-runtime*`, `.codex-runtime-fallback`, `.codex/sessions`, or runtime logs. Those are debugging traces, not the conversation memory contract.\n\
                 - If no command tool is callable or lookup returns no match, state the concrete blocker or ambiguity in the required final response format. Do not end with reasoning only.\n",
             );
@@ -8346,7 +8346,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 - Compact agent context cards are soft hints/cache for prior context, current work focus, and coordination direction. Use the relevant cards included in this prompt when present; otherwise query them with `instafy agents context list --json --query \"<topic>\"` when the latest request asks for prior project, coordination, audit, host, or hardware context.\n\
                 - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
                 - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you see in the workspace now beats earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
-                - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
+                - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
                 - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
                 - Hardware/IO context card facts are not proof. Verify on the active runtime before claiming serial, BLE, USB, or flashing access.\n\
                 - If the active runtime cannot access host-native IO, say that a Desktop/CLI runtime on the attached machine is needed.\n",
@@ -8508,7 +8508,7 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
               - For `multi_agent_plan.mode = 'read_only'`, include `writeScope.readOnlyPaths` when the worker should inspect specific files/globs, and repeat those exact paths in the worker prompt. For prepared source trees, prefer concrete implementation/test/config subpaths over the top-level checkout root. If exact paths are unknown, make the worker's prompt start with bounded discovery inside a narrow scope and require it to report the actual paths inspected.\n\
               - Agent-to-agent conversations are first-class conversations. For unknown-focus follow-ups, lookup first, answer directly when evidence is sufficient, ask one clear prior thread when durable context matters, and do not poll all agents to discover soft focus.\n\
               - For follow-ups about lanes, workers, files, or evidence, prefer the most recent matching user-visible evidence in this active conversation, but what you observe in the workspace during this turn beats what earlier turns or `instafy conversation show` say, including earlier failure notices. Use older same-topic context cards or prior conversation search results only if current conversation evidence is absent or clearly not the target.\n\
-              - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
+              - For current-conversation evidence-only follow-ups, do not search workspace files, source trees, `.instafy`, `.codex-runtime*`, `.codex-runtime-fallback`, or runtime logs. If restored provider context is insufficient, inspect only the active conversation with `instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment. Only if an older CLI reports a missing conversation argument, add the Conversation ID from Runtime context.\n\
               - Broad or cross-chat coordination should search compact context cards and prior conversations first. Save/update compact cards for durable work focus and open questions; do not invent a separate first-class topic-focus object.\n\
               - Same agent handle does not imply global memory in a new chat. Recover cross-chat context explicitly with context cards and `instafy conversation search/show --include-threads` before relying on old thread knowledge.\n\
               - If you emit `request_integration`, your `summary` must actively close the gap with: (1) what is blocked, (2) the exact next UI step using the action card in this message, and (3) the exact retry phrase the user should send.\n\
@@ -14440,7 +14440,8 @@ fn context_recovery_lookup_section() -> String {
     "\nContext recovery lookup required:\n\
         - The latest request refers to another/earlier chat, previous discussion, or an unknown focused agent/thread.\n\
         - Routing identified required prior evidence that was not supplied. Use relevant context cards as leads and make a focused read-only lookup with the Instafy CLI. Start with `instafy agents context list --json --query \"<topic>\"` for compact cards and `instafy conversation search \"<topic>\" --include-threads --json` for prior chat/thread evidence.\n\
-        - Inspect only the clearest match with `instafy conversation show <conversation-id> --json` when search results are not enough.\n\
+        - Inspect only the clearest match with `instafy conversation show <conversation-id> --transcript --json` when search results are not enough.\n\
+        - If an older CLI explicitly rejects `--transcript` as unknown, retry without that flag; truncated output is incomplete evidence.\n\
         - Do not substitute shell searches over raw runtime/session files such as `.codex-runtime*`, `.codex-runtime-fallback`, `.codex/sessions`, or runtime logs. Those files are debugging traces, not the user-facing conversation memory contract.\n\
         - Runtime jobs provide controller auth and project/conversation IDs through the environment; do not ask the user to sign in unless the CLI returns an auth error.\n\
         - If lookup is empty or ambiguous, say what was searched and ask one short clarification. Always finish in the final response format required for this task.\n"
@@ -19688,7 +19689,7 @@ mod tests {
             if mode != "cross_chat" {
                 assert!(
                     prompt.contains(
-                        "`instafy conversation show --include-threads --json`, which reads this conversation's id from the environment."
+                        "`instafy conversation show --include-threads --transcript --json`, which reads this conversation's id from the environment."
                     ),
                     "{mode}"
                 );
@@ -20634,7 +20635,7 @@ mod tests {
         assert!(!prompt.contains("Failures in earlier turns are over"));
         assert!(!prompt.contains("Machines"));
         assert!(prompt.contains("For current-conversation evidence-only follow-ups"));
-        assert!(prompt.contains("instafy conversation show --include-threads --json"));
+        assert!(prompt.contains("instafy conversation show --include-threads --transcript --json"));
         assert!(!prompt.contains("show <conversation-id> --include-threads"));
         let sections = metrics
             .get("promptSections")
@@ -24159,6 +24160,8 @@ mod tests {
         assert!(
             prompt.contains("instafy conversation search \"<topic>\" --include-threads --json")
         );
+        assert!(prompt.contains("instafy conversation show <conversation-id> --transcript --json"));
+        assert!(!prompt.contains("instafy conversation show <conversation-id> --json"));
         assert!(prompt.contains("Do not substitute shell searches over raw runtime/session"));
         assert!(prompt.contains("Do not answer from raw runtime/session logs"));
         assert!(prompt.contains(

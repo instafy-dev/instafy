@@ -81,7 +81,7 @@ Before starting broad or cross-chat work, do a soft coordination lookup:
 
 - Search compact cards first: `instafy agents context list --json --query "<topic/path/domain>"`.
 - Search conversation/thread history next: `instafy conversation search "<topic/path/domain>" --include-threads --json`.
-- Inspect only the best match with `instafy conversation show <conversationId> --json` when the search result is not enough.
+- Inspect only the best match with `instafy conversation show <conversationId> --transcript --json` when the search result is not enough.
 - If an existing conversation/card is already focused on the same area, either reuse that evidence, ask the prior linked thread one focused question, or deliberately split the new task into an orthogonal direction. Do not duplicate the same investigation just because a new chat is active.
 - Save or update compact context only when it will materially help a future lookup choose the right flow. Do not create cards as routine checkpoints or as a rigid work ledger.
 
@@ -325,7 +325,7 @@ Use this model:
 - **In a new or unrelated chat**, recover context before relying on it:
   1. Search compact cards with `instafy agents context list --json --query "<topic>"`.
   2. Search conversation/thread history with `instafy conversation search "<topic>" --include-threads --json`.
-  3. Use `instafy conversation show <conversationId> --json` only for the best matching thread or message set.
+  3. Use `instafy conversation show <conversationId> --transcript --json` only for the best matching thread or message set.
   4. If the old thread is the right focused lane and should keep thinking, post a focused normal message there with `instafy chat --conversation <threadId> "@agent <question>" --no-wait --json`.
 
 Prefer answering directly from recovered evidence when it is enough. Delegate only when the prior agent's local thread context or fresh reasoning is likely to improve the answer. Save cross-chat durable conclusions as compact context cards; do not copy large transcripts into a new prompt.
@@ -355,7 +355,7 @@ When a linked work thread exists for that agent/task, continue there instead of 
 - Default to thread-local memory.
 - Shared project files are visible to every agent, but sibling thread transcripts are not ambient context.
 - When another conversation matters, pass a compact summary plus explicit inline references. Use `[[conversation:<conversationId>|<label>]]` for an ordinary prior chat, `[[thread:<conversationId>|<label>]]` for a linked agent lane, and `[[message:<conversationId>/<messageId>|<label>]]` when you need to point at a specific message. Do not replay raw transcript history unless the user asks for it.
-- For project-specific questions where another top-level agent may already know the answer, use conversation-native lookup first: `instafy conversation search "<topic>" --include-threads --json`, then `instafy conversation show <conversationId> --json` for focused context. If another agent should answer, create or reuse a linked child thread and post a normal message such as `instafy chat --conversation <threadId> "@octo can you summarize what you know about <topic>?" --no-wait --json`.
+- For project-specific questions where another top-level agent may already know the answer, use conversation-native lookup first: `instafy conversation search "<topic>" --include-threads --json`, then `instafy conversation show <conversationId> --transcript --json` for focused context. If another agent should answer, create or reuse a linked child thread and post a normal message such as `instafy chat --conversation <threadId> "@octo can you summarize what you know about <topic>?" --no-wait --json`.
 - Create linked coordination threads with `instafy conversation create --parent <conversationId> --thread-kind agent --title "<short title>" --json` when peer coordination should stay out of the main chat.
 - When you are inside an active runtime/Codex turn, do not synchronously wait for another top-level agent in the same runtime. Post the peer message with `--no-wait`, reference the linked thread, and let that agent continue there after the current turn releases the runtime.
 - Compact context cards are optional bounded hints/cache, not the primary memory model. Use `instafy agents list --json` to see available agents and `instafy agents context list --json --query "<topic>"` when a compact index would help select a relevant agent/thread or retrieve soft project observations.

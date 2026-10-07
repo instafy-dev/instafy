@@ -75,9 +75,24 @@ Inspect earlier conversations in the linked space:
 instafy conversation search "fruit discussion"
 instafy conversation show "Fruit planning"
 instafy conversation show 123e4567-e89b-12d3-a456-426614174000
+instafy conversation show 123e4567-e89b-12d3-a456-426614174000 --transcript --json
 ```
 
 Use this when you want to reuse context from an earlier chat without manually hunting through the Studio UI.
+
+`show --transcript` reads original user/assistant text while excluding tool events, reasoning,
+status updates and hidden presentation rows. JSON contains `conversation`, `messages` (newest
+first, each with `id`, `role`, `content`, `createdAt`), `hasMore` and `nextCursor`. Text output is
+chronological. Message content and inline source links are preserved; attachment/card metadata
+is omitted. The existing `show --json` output, including raw metadata, is unchanged.
+
+In transcript mode `--limit` counts retained messages (default 80, maximum 200), scanning up to
+10 pages of 200 stored rows to get past dense runtime events. `hasMore: true` means the read is
+incomplete, including when no transcript messages were found within that budget. Continue with
+`show <same-conversation> --transcript --cursor <nextCursor> --json`. The cursor can be a runtime
+event ID when an event-only scan reaches its budget; use returned **message** IDs for evidence
+links. Pagination remains subject to the same controller conversation permissions. A controller
+that omits pagination metadata causes an explicit error instead of a misleading complete read.
 
 With no target, `conversation show` reads the conversation named by `INSTAFY_CONVERSATION_ID`
 (or `CONVERSATION_ID`). Runtime jobs set it, so an agent reads its own conversation with
