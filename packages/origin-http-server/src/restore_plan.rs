@@ -91,9 +91,13 @@ use crate::publish_policy::{restore_refusal, RejectReason};
 use crate::recovery_view::{
     left_out_reason, parse_commit, restore_marker, NotRestored, RecoveryRef, KEPT,
 };
-use crate::salvage::PRIVATE_PATH_TRAILER;
 use crate::tree_merge::{three_way, tree_with_entries_from};
 use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, TreeEntry, WorkspaceGit};
+
+/// A path the salvage kept in its private archive, with why:
+/// `Instafy-Private-Path: <reason> <path>`. Restores list these paths as not
+/// restored.
+const PRIVATE_PATH_TRAILER: &str = "Instafy-Private-Path";
 
 /// What a restore is asked to do.
 pub(crate) struct RestoreInput<'a> {

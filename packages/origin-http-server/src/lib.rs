@@ -28,7 +28,6 @@ mod restore_plan;
 mod route_auth;
 pub mod routes;
 mod safe_fs;
-pub mod salvage;
 pub mod server;
 mod stale_align;
 #[cfg(test)]

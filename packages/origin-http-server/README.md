@@ -4,7 +4,7 @@ Rust implementation of the workspace origin service that now ships inside the ru
 
 ## Key Features
 - Axum-based HTTP server with `/entries`, `/files/:path`, `/raw/:path`, `POST /apply`, `POST /git/sync`, `POST /git/flush` and `POST /git/flush/resume` routes, git history and review routes, and the unsaved-work routes `GET /git/recovery`, `POST /git/recovery/restore` and `POST /git/recovery/dismiss`.
-- The hosted workspace gateway (`ORIGIN_MULTI_TENANT=1`, `src/hosted/`): one process serving every cloud space's read, write, history and unsaved-work routes from its canonical repository, with no working copy and no flush or browser routes. See [Hosted workspace gateway](../../docs/Git-Service.md#hosted-workspace-gateway) and, for the working copies earlier gateway images kept, [Retiring gateway working copies](../../docs/Git-Service.md#retiring-gateway-working-copies) (`origin-http-server salvage`).
+- The hosted workspace gateway (`ORIGIN_MULTI_TENANT=1`, `src/hosted/`): one process serving every cloud space's read, write, history and unsaved-work routes from its canonical repository, with no working copy and no flush or browser routes. See [Hosted workspace gateway](../../docs/Git-Service.md#hosted-workspace-gateway) and, for the disposable working copies earlier gateway images kept, [Retiring gateway working copies](../../docs/Git-Service.md#retiring-gateway-working-copies).
 - EdDSA token validation through the controller JWKS (Ed25519 public keys).
 - Safe path handling + staging writes via temporary files before atomic promotion.
 - Optional commit receipt + presence heartbeat back to the controller when `ORIGIN_INTERNAL_TOKEN` is provided.

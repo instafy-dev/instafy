@@ -1412,8 +1412,8 @@ impl MirrorCache {
         // A disk short of space (the cache shares it with `.legacy/` and
         // anything else): mirrors nobody holds go, least recently used
         // first, however recently used. Deleting one only costs a fetch.
-        // `.legacy/` (working copies of the old gateway, kept for salvage)
-        // is never touched; its size is reported.
+        // `.legacy/` (working copies of the old gateway) is never touched
+        // here; its size is reported.
         if let Some(free) = (self.free_space)(&self.root).filter(|free| *free < self.min_free_bytes)
         {
             let left: Vec<MirrorStat> = stats
