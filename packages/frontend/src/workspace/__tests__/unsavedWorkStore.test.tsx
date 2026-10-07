@@ -32,7 +32,6 @@ function entry(ref: string, extra: Record<string, unknown> = {}) {
     origin: null,
     paths: ["a.txt"],
     base: null,
-    dismissible: true,
     ...extra,
   };
 }
@@ -124,14 +123,12 @@ describe("unsaved work store", () => {
 
   it("patches entries locally and counts only pending work", async () => {
     mocks.fetchRecovery.mockResolvedValue(
-      ok([entry("refs/instafy/recovery/x/a"), entry("refs/instafy/salvage/gateway/b", { restoredRev: "f".repeat(40) })]),
+      ok([entry("refs/instafy/recovery/x/a"), entry("refs/instafy/recovery/x/b", { restoredRev: "f".repeat(40) })]),
     );
     await refreshUnsavedWork({ projectId: "p", originId: "o" });
     expect(pendingUnsavedWorkEntries(getUnsavedWorkSnapshot("p", "o").entries)).toHaveLength(1);
     patchUnsavedWorkEntries("p", "o", (entries) => entries.filter((item) => item.ref !== "refs/instafy/recovery/x/a"));
-    expect(getUnsavedWorkSnapshot("p", "o").entries.map((item) => item.ref)).toEqual([
-      "refs/instafy/salvage/gateway/b",
-    ]);
+    expect(getUnsavedWorkSnapshot("p", "o").entries.map((item) => item.ref)).toEqual(["refs/instafy/recovery/x/b"]);
   });
 
   it("keeps restore choices while the entry still names the same work", async () => {

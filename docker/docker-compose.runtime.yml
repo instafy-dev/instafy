@@ -91,12 +91,6 @@ services:
       # Soft cap of the mirror cache under /workspaces/.git-cache, in bytes;
       # blank means the default (20 GiB).
       ORIGIN_CACHE_MAX_BYTES: ${ORIGIN_CACHE_MAX_BYTES:-}
-      # This gateway's name in the refs `origin-http-server salvage --apply`
-      # pushes (refs/instafy/salvage/gateway/<name>-...), lower case
-      # [0-9a-z._-]. Keep it the same across redeploys: the container's host
-      # name changes when it is recreated, so --apply and --remove refuse to
-      # run without this (or --node).
-      INSTAFY_NODE_NAME: ${INSTAFY_NODE_NAME:-}
     volumes:
       - ${ORIGIN_GATEWAY_WORKSPACE_VOLUME:-../tmp/origin-gateway-workspaces}:/workspaces
     depends_on:

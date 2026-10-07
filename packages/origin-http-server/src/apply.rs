@@ -574,14 +574,37 @@ fn validate_portable_component(component: &str) -> Result<(), OriginError> {
 /// The name `path` has on a disk that ignores case and Unicode form (APFS,
 /// HFS+, Windows): two paths with the same key are one file there.
 ///
-/// Case is folded fully, as such a disk folds it: `Straße` and `STRASSE`,
-/// a final sigma and a plain one, a long s and an s, a ligature and its
-/// letters each have one key. Upper case first, then lower case, gives
-/// that without a folding table; it also takes a dotless `ı` for `i`,
-/// which errs toward refusing a name.
+/// The name is decomposed first, as APFS decomposes a name before it folds
+/// its case: a capital with an iota adscript followed by a perispomeni
+/// (`ᾼ͂`) and its small letter (`ᾷ`) are one name there, while composing
+/// first would leave the perispomeni on the iota the capital folds to.
+/// Case is then folded fully, as such a disk folds it: `Straße`, `STRAẞE`
+/// and `STRASSE`, a final sigma and a plain one, a long s and an s, a
+/// ligature and its letters each have one key. Upper case first, then
+/// lower case, gives that without a folding table, and the result is
+/// composed again; all of it is repeated until the name no longer changes:
+/// one round takes a capital sharp s (`ẞ`) only to `ß`, which the next
+/// takes to `ss`. It also takes a dotless `ı` for `i`, which errs toward
+/// refusing a name.
 pub(crate) fn portable_key(path: &str) -> String {
-    let composed: String = path.nfc().collect();
-    composed.to_uppercase().to_lowercase().nfc().collect()
+    let fold = |name: &str| -> String {
+        name.nfd()
+            .collect::<String>()
+            .to_uppercase()
+            .to_lowercase()
+            .nfc()
+            .collect()
+    };
+    let mut key = fold(path);
+    // A fixed point within a few rounds; the bound only guards the loop.
+    for _ in 0..8 {
+        let next = fold(&key);
+        if next == key {
+            break;
+        }
+        key = next;
+    }
+    key
 }
 
 /// Why a person's save of a path that another file or folder of the space
@@ -1238,9 +1261,9 @@ mod tests {
         apply_changes_transactional, apply_rollback_dir_capability_limit,
         apply_rollback_dir_capability_limit_for_nofile, install_staged_file_at_parent,
         install_staged_files, install_staged_files_with_hook, normalize_relative_path,
-        stage_archive, validate_apply_paths, validate_install_parent_capability_limit,
-        ApplyManifest, ApplyRollback, ApplySummary, ManifestFileEntry, StagedArchive,
-        MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
+        portable_key, stage_archive, validate_apply_paths,
+        validate_install_parent_capability_limit, ApplyManifest, ApplyRollback, ApplySummary,
+        ManifestFileEntry, StagedArchive, MAX_APPLY_ROLLBACK_DIR_CAPABILITIES,
     };
     use crate::config::ServerConfig;
     use crate::error::OriginError;
@@ -1428,7 +1451,10 @@ mod tests {
             manifest(&config, &["Case.txt", "case.txt"], &[]),
             manifest(&config, &["caf\u{e9}.txt", "cafe\u{301}.txt"], &[]),
             manifest(&config, &["Stra\u{df}e.txt", "STRASSE.txt"], &[]),
+            manifest(&config, &["STRA\u{1e9e}E.txt", "Stra\u{df}e.txt"], &[]),
+            manifest(&config, &["STRA\u{1e9e}E.txt", "STRASSE.txt"], &[]),
             manifest(&config, &["\u{fb01}le.txt", "FILE.txt"], &[]),
+            manifest(&config, &["\u{1fb7}.txt", "\u{1fbc}\u{342}.txt"], &[]),
             manifest(&config, &["a", "a/b"], &[]),
             manifest(&config, &["a", "a/b"], &["unrelated"]),
             manifest(&config, &["tree/file"], &["tree"]),
@@ -1448,6 +1474,69 @@ mod tests {
             assert!(!workspace.path().join("a").exists());
             assert!(!workspace.path().join("same").exists());
             assert!(!workspace.path().join("tree").exists());
+        }
+    }
+
+    /// A disk that ignores case takes `STRASSE`, `Straße` and `STRAẞE` (a
+    /// capital sharp s) for one name.
+    #[test]
+    fn a_capital_sharp_s_has_the_key_of_a_small_one_and_of_ss() {
+        let keys = [
+            "STRASSE.md",
+            "Strasse.md",
+            "Stra\u{df}e.md",
+            "STRA\u{1e9e}E.md",
+            "stra\u{1e9e}e.md",
+        ]
+        .map(portable_key);
+        assert!(keys.iter().all(|key| key == "strasse.md"), "{keys:?}");
+    }
+
+    /// A capital with a prosgegrammeni (iota adscript) followed by a
+    /// perispomeni names, on a disk that decomposes names before it folds
+    /// case (APFS), the file its small letter with the iota subscript and
+    /// the perispomeni names: `ᾼ͂` and `ᾷ`, `ῌ͂` and `ῇ`, `ῼ͂` and `ῷ`, and
+    /// `ᾼ͂` and `ᾳ` followed by a perispomeni, which composes to `ᾷ`.
+    /// Composing first would put the perispomeni on the iota the capital
+    /// folds to, and give two keys.
+    #[test]
+    fn a_capital_with_an_iota_adscript_and_a_mark_has_the_key_of_its_small_letter() {
+        for (small, capital) in [
+            ("\u{1fb7}", "\u{1fbc}\u{342}"),
+            ("\u{1fc7}", "\u{1fcc}\u{342}"),
+            ("\u{1ff7}", "\u{1ffc}\u{342}"),
+            ("\u{1fb3}\u{342}", "\u{1fbc}\u{342}"),
+        ] {
+            let small = format!("{small}.md");
+            let capital = format!("{capital}.md");
+            assert_eq!(
+                portable_key(&small),
+                portable_key(&capital),
+                "{small:?} {capital:?}"
+            );
+            // A manifest naming both is refused before anything is staged.
+            let files = Vec::from([&small, &capital].map(|path| ManifestFileEntry {
+                path: path.to_string(),
+                size: Some(1),
+                encoding: None,
+            }));
+            let Err(error) = validate_apply_paths(files, Vec::new(), 0, 1024) else {
+                panic!("{small:?} and {capital:?} were both accepted");
+            };
+            assert!(
+                format!("{error:?}").contains("collide"),
+                "{small:?} {capital:?}: {error:?}"
+            );
+        }
+    }
+
+    /// Every key is its own key: folding a key again never changes it, so
+    /// a key compares the same however often it was taken.
+    #[test]
+    fn every_portable_key_is_its_own_key() {
+        for letter in (0..=0x10ffff).filter_map(char::from_u32) {
+            let key = portable_key(&letter.to_string());
+            assert_eq!(portable_key(&key), key, "U+{:04X}", u32::from(letter));
         }
     }
 

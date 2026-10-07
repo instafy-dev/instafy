@@ -5,8 +5,9 @@
 //! image started again on the same volume (an automatic rollback) would pick
 //! them up and could save drafts from them over newer work. So before the
 //! listener is bound, every such folder is moved to `<root>/.legacy/`, where
-//! no image looks for a checkout; the old image then clones fresh. The
-//! salvage subcommand reads `.legacy/` later.
+//! no image looks for a checkout; the old image then clones fresh. Nothing
+//! reads `.legacy/` afterwards: the copies there are disposable, and an
+//! operator may delete them.
 //!
 //! The root must be the gateway's own. A runtime provider keeps its
 //! runtimes' checkouts the same way (`<repo base>/<space id>`), and those
@@ -127,15 +128,12 @@ const PROVIDER_FOLDERS: [&str; 2] = [".instafy-checkout-stamps", ".instafy-evict
 const CLEAN_STOP_MARKER: &str = "instafy-stopped-clean";
 const LOCAL_RECOVERY_PREFIX: &str = "local-recovery";
 
-/// Why `root`, whose checkouts are `checkouts` (its space folders, and for
-/// the salvage subcommand also the entries parked under `.legacy/`), looks
-/// like a runtime provider's repo base rather than the gateway's own
-/// folder, if it does: the provider's stamp or eviction folder in it, or a
-/// checkout holding what a runtime's origin leaves there. Nothing is
-/// followed through a link, and a folder that cannot be read says nothing.
-/// The gateway's start and the salvage both decide by this one rule, so an
-/// entry the gateway parks never stops the salvage.
-pub(crate) fn provider_checkouts_in(root: &Path, checkouts: &[PathBuf]) -> Option<String> {
+/// Why `root`, whose space folders are `checkouts`, looks like a runtime
+/// provider's repo base rather than the gateway's own folder, if it does:
+/// the provider's stamp or eviction folder in it, or a checkout holding what
+/// a runtime's origin leaves there. Nothing is followed through a link, and
+/// a folder that cannot be read says nothing.
+fn provider_checkouts_in(root: &Path, checkouts: &[PathBuf]) -> Option<String> {
     for name in PROVIDER_FOLDERS {
         let path = root.join(name);
         if std::fs::symlink_metadata(&path).is_ok() {

@@ -1931,8 +1931,8 @@ fn ref_fetches_tell_this_servers_disk_from_canonical() {
     assert_eq!(code(super::routes::ref_error(&mirror, error(away))), 502);
 }
 
-/// The sweeper never touches `.legacy/` (working copies of the old gateway,
-/// kept for salvage); when the disk is short of space it reports its size.
+/// The sweeper never touches `.legacy/` (working copies of the old
+/// gateway); when the disk is short of space it reports its size.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sweeper_reports_and_never_removes_legacy_working_copies() {
     let sc = HostedScenario::new();
@@ -2701,7 +2701,10 @@ async fn reads_at_a_rev_fetch_once_and_never_show_unknown_commits() {
     );
     let answer = get(
         &served,
-        &format!("/files/README.md?rev={first}&ref=refs/instafy/salvage/gateway/x"),
+        &format!(
+            "/files/README.md?rev={first}&ref=refs/instafy/recovery/{}/x",
+            Uuid::new_v4()
+        ),
     )
     .await;
     assert_eq!(
@@ -2725,11 +2728,11 @@ async fn reads_at_a_ref_show_its_tip_and_never_main() {
     let origin = Uuid::new_v4();
     let reference = format!("refs/instafy/recovery/{origin}/unsaved-1");
     sc.push_ref(&unsaved, &reference);
-    // An annotated tag of the same work under a salvage name.
+    // An annotated tag of the same work under another recovery name.
     git_in(&sc.work, &["tag", "-a", "-m", "kept", "kept-tag", &unsaved]);
     let tag = git_in(&sc.work, &["rev-parse", "kept-tag"]);
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    sc.push_ref(&tag, salvage);
+    let tagged = format!("refs/instafy/recovery/{origin}/unsaved-tagged");
+    sc.push_ref(&tag, &tagged);
     let served = serve(&sc).await;
 
     let answer = get(&served, &format!("/files/README.md?ref={reference}")).await;
@@ -2749,7 +2752,7 @@ async fn reads_at_a_ref_show_its_tip_and_never_main() {
     assert_eq!(absent.rev(), Some(unsaved.clone()), "never main's commit");
 
     // The tag's own id is what the listing calls the item's rev.
-    let answer = get(&served, &format!("/raw/README.md?ref={salvage}")).await;
+    let answer = get(&served, &format!("/raw/README.md?ref={tagged}")).await;
     assert_eq!(answer.body, b"unsaved\n");
     assert_eq!(answer.rev(), Some(tag));
 
@@ -3169,20 +3172,20 @@ async fn the_recovery_list_marks_work_the_gateway_restored() {
     );
     let conflict_ref = format!("refs/instafy/recovery/{origin}/conflict-1");
     sc.push_ref(&conflict, &conflict_ref);
-    let salvaged = sc.side_commit(
+    let kept = sc.side_commit(
         &[("draft.md", b"draft\n")],
-        "kept\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: draft.md",
+        "kept\n\nInstafy-Recovery-Kind: unsaved\nInstafy-Path: draft.md",
     );
-    let salvage_ref = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    sc.push_ref(&salvaged, salvage_ref);
-    // The gateway restored the salvage ref; an agent forged a restore of
+    let kept_ref = format!("refs/instafy/recovery/{origin}/unsaved-1");
+    sc.push_ref(&kept, &kept_ref);
+    // The gateway restored the kept ref; an agent forged a restore of
     // the conflict ref under an address of its own (a runtime save keeps
     // its committer when it lands on main). Restores by Desktop count too:
     // `a_restore_recorded_in_one_mode_counts_in_the_other`.
     let restore = sc.push_as(
         &sc.config.git_author_name,
         &sc.config.git_author_email,
-        &format!("Restore unsaved work\n\nInstafy-Restored-From: {salvage_ref}"),
+        &format!("Restore unsaved work\n\nInstafy-Restored-From: {kept_ref}"),
     );
     sc.push_as(
         "instafy-origin",
@@ -3209,14 +3212,12 @@ async fn the_recovery_list_marks_work_the_gateway_restored() {
             .unwrap_or_else(|| panic!("{name} listed"))
             .clone()
     };
-    let salvage = by_ref(salvage_ref);
-    assert_eq!(salvage["kind"], "salvage");
-    assert_eq!(salvage["dismissible"], false);
-    assert_eq!(salvage["restoredRev"], restore.as_str());
-    assert_eq!(salvage["paths"], serde_json::json!(["draft.md"]));
+    let kept_item = by_ref(&kept_ref);
+    assert_eq!(kept_item["kind"], "unsaved");
+    assert_eq!(kept_item["restoredRev"], restore.as_str());
+    assert_eq!(kept_item["paths"], serde_json::json!(["draft.md"]));
     let conflict_item = by_ref(&conflict_ref);
     assert_eq!(conflict_item["kind"], "conflict");
-    assert_eq!(conflict_item["dismissible"], true);
     assert_eq!(conflict_item["paths"], serde_json::json!(["README.md"]));
     assert_eq!(conflict_item["origin"], origin.to_string());
     assert!(

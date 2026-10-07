@@ -3,9 +3,8 @@
 //! hosted gateway (`hosted::restore`). Each mode only applies the plan its
 //! own way (Desktop through its index and a publish, the gateway as a
 //! commit pushed to canonical `main`); what is restored, what is left out
-//! and why, which clashes the person must settle, whether the ref may go
-//! and whether an empty restore commit records the restore are decided
-//! here, so the two cannot drift.
+//! and why, which clashes the person must settle and whether the ref may go
+//! are decided here, so the two cannot drift.
 //!
 //! The work is what the ref's commit (`saved`) changes against its merge
 //! base with the commit it is restored onto (`onto`: Desktop's `HEAD`, the
@@ -61,18 +60,24 @@
 //!
 //! The ref may go once the restore is on `main` only when nothing was left
 //! out but on request: work refused here exists only on the ref, which then
-//! stays. A salvage ref with nothing left to bring back is recorded with an
-//! empty restore commit ([`restore_marker`]).
+//! stays. A kept path the work writes where `onto` has no file, link or
+//! submodule keeps the ref too unless, on the `onto` restored onto, the keep
+//! chose `onto`'s version over the work's ([`unsettled_keeps`]): `onto` has
+//! a folder there or a file above it, removed the file the work changed, or
+//! holds the work as the work has it under a name such a disk takes for
+//! the path. Keeping `main`'s `TODO.md` chose no version of the work's
+//! `todo.md` ([`kept_aliases`]), and neither does a keep chosen at a clash
+//! that has left `main` since (the person kept `Notes.md` beside `main`'s
+//! `notes.md`, which a later save removed) or at a new path whose clash was
+//! with the merge base alone: such work would otherwise be on neither
+//! `main` nor any ref.
 //!
-//! A salvage commit the gateway made (its committer is
-//! [`RestoreInput::salvage_committer`]) also names each file its salvage
-//! kept in the owner-only private archive, never on canonical, as an
-//! `Instafy-Private-Path: <secret|ignored|attachment> <path>` trailer. Those
-//! files are listed in `notRestored` with that reason, unless the path is
-//! listed already, so the person knows the restore lacks them. They change
-//! neither the restored tree nor whether the ref may go (a salvage ref
-//! always stays). The same trailers under any other committer, or on a
-//! recovery ref, list nothing.
+//! Such a keep is listed [`PATH_ALIAS`] (a kept name such a disk takes for
+//! another entry of the restored tree that does not hold the work) or
+//! [`NOTHING_TO_KEEP`] (any other), not `kept`, and the restore commit then
+//! names no ref ([`RestorePlan::marks_restored`]): the ref still holds work
+//! `main` lacks under every name, which a later restore can bring back, so
+//! it is never listed as restored by that commit.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -80,21 +85,16 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use uuid::Uuid;
 
-use crate::apply::{normalize_relative_path, portable_key};
+use crate::apply::portable_key;
 use crate::error::OriginError;
 use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
-use crate::recovery_view::{
-    left_out_reason, parse_commit, restore_marker, NotRestored, RecoveryRef,
-};
-use crate::salvage::PRIVATE_PATH_TRAILER;
+use crate::recovery_view::{left_out_reason, NotRestored, KEPT, NOTHING_TO_KEEP, PATH_ALIAS};
 use crate::tree_merge::{three_way, tree_with_entries_from};
-use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, WorkspaceGit};
+use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, TreeEntry, WorkspaceGit};
 
 /// What a restore is asked to do.
 pub(crate) struct RestoreInput<'a> {
-    /// The recovery or salvage ref restored.
-    pub reference: &'a RecoveryRef,
     /// The commit the work is restored onto; `None` for a space with no
     /// `main` yet.
     pub onto: Option<&'a str>,
@@ -105,17 +105,6 @@ pub(crate) struct RestoreInput<'a> {
     pub keep: &'a PathRoots,
     /// Paths refused before this plan, with why.
     pub refused_before: &'a BTreeMap<String, RejectReason>,
-    /// The committers whose restore commits count
-    /// ([`crate::recovery_view::restore_committers`]).
-    pub restorers: &'a [String],
-    /// Another commit whose restore commits count for the marker decision
-    /// (Desktop: canonical `main` as last fetched, which may be ahead of
-    /// the branch restored onto).
-    pub recorded_on: Option<&'a str>,
-    /// The gateway's address: a salvage ref's commit it made lists the
-    /// files its salvage kept privately (the gateway: its own; Desktop:
-    /// [`crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL`]).
-    pub salvage_committer: &'a str,
     /// A folder the ignore check may make its scratch tree in.
     pub scratch: &'a Path,
 }
@@ -132,11 +121,9 @@ pub(crate) struct RestorePlan {
     /// How many of them were refused (left out for a reason other than
     /// the person's own keep).
     refused: usize,
-    /// Nothing new comes to `onto`, and the restore of this salvage ref is
-    /// recorded with an empty restore commit.
-    pub marker: bool,
-    /// The restore commit of this ref `onto` already has, if any.
-    pub earlier_marker: Option<String>,
+    /// How many kept paths chose no version of the work's file, so the
+    /// work is on the restored tree under no name ([`unsettled_keeps`]).
+    unsettled: usize,
 }
 
 impl RestorePlan {
@@ -146,10 +133,20 @@ impl RestorePlan {
     }
 
     /// Whether the ref may go once the restore is on `main`: nothing was
-    /// left out but what the person chose to keep. Salvage refs stay
-    /// whatever this says.
+    /// left out but what the person chose to keep, and every keep chose
+    /// `onto`'s version over the work's ([`unsettled_keeps`]).
     pub(crate) fn lets_ref_go(&self) -> bool {
-        self.refused == 0
+        self.refused == 0 && self.unsettled == 0
+    }
+
+    /// Whether the restore commit may name the ref, so the ref is listed as
+    /// restored by it: not while a keep chose no version of the work's file
+    /// ([`PATH_ALIAS`], [`NOTHING_TO_KEEP`]). The person settled nothing
+    /// there; the work stays on the ref, pending, and can still come back.
+    /// Work refused here never can, so a ref kept only for it is listed as
+    /// restored.
+    pub(crate) fn marks_restored(&self) -> bool {
+        self.unsettled == 0
     }
 }
 
@@ -381,30 +378,23 @@ pub(crate) fn plan(
         return Err(PlanError::Conflict(conflicts));
     }
 
-    // Files the salvage kept privately are in no commit: they are named so
-    // the person knows the restore lacks them. The tree never changes for
-    // them.
-    if input.reference.is_salvage() {
-        for (path, reason) in privately_kept(git, input.saved, input.salvage_committer)? {
-            left_out.entry(path).or_insert(reason);
-        }
+    // A kept path the work writes where `onto` has no file, a link or a
+    // submodule keeps the ref unless the keep chose `onto`'s version over
+    // the work's on this `onto` ([`unsettled_keeps`]): the person chose at
+    // the clash they were shown, and `onto` may have moved since.
+    let kept_new: Vec<&RawChange> = changes
+        .iter()
+        .filter(|change| {
+            change.status != 'D'
+                && !at_onto.contains_key(&change.path)
+                && left_out.get(&change.path) == Some(&KEPT)
+        })
+        .collect();
+    let unsettled = unsettled_keeps(git, &onto_tree, &tree, &merged.conflicts, &kept_new)?;
+    for (path, reason) in &unsettled {
+        left_out.insert(path.clone(), *reason);
     }
 
-    let made = tree != onto_tree;
-    let (marker, earlier_marker) = match input.onto {
-        Some(onto) => {
-            let tips: Vec<&str> = std::iter::once(onto).chain(input.recorded_on).collect();
-            restore_marker(
-                git,
-                input.reference,
-                made,
-                &tips,
-                input.saved,
-                input.restorers,
-            )?
-        }
-        None => (false, None),
-    };
     Ok(RestorePlan {
         tree,
         onto_tree,
@@ -413,49 +403,80 @@ pub(crate) fn plan(
             .map(|(path, reason)| NotRestored { path, reason })
             .collect(),
         refused: refused.len(),
-        marker,
-        earlier_marker,
+        unsettled: unsettled.len(),
     })
 }
 
-/// The files a salvage commit's `Instafy-Private-Path` trailers name, with
-/// why, when `committer` made the commit; none otherwise.
-fn privately_kept(
+/// The paths of `kept` (changes the person kept that write a path where
+/// `onto`, a tree id, has no file, link or submodule) whose keep chose no
+/// version of the work's file, so the work is on the restored `tree` under
+/// no name and the ref stays with it, pending, each with the reason the
+/// restore lists it under instead of [`KEPT`]: [`PATH_ALIAS`] for a name
+/// such a disk takes for another entry of `tree`, [`NOTHING_TO_KEEP`]
+/// otherwise. A keep chooses `onto`'s version only when this `onto` holds a
+/// version to choose:
+///
+/// - a folder at the path, or a file, a link or a submodule at a folder
+///   above it (the file and folder clash such a keep settles);
+/// - a removal the work's change conflicted with (the merge conflicted at a
+///   path the merge base had a file at, which `onto` removed: keeping that
+///   removal is a choice). A path the work added never qualifies: its
+///   conflict may be with the merge base's file alone (the work made a
+///   folder of a file `onto` has since removed too), and `onto` then holds
+///   nothing to choose;
+/// - the work itself, as the work has it, under a name a disk ignoring
+///   case takes for the path.
+///
+/// A path such a disk takes for another entry of the restored tree that
+/// does not hold the work ([`kept_aliases`]) chose nothing whatever else
+/// holds there: `main`'s `TODO.md` is another file than the work's
+/// `todo.md`. Any other keep settles nothing on this `onto`, as when the
+/// file whose name the work's new one took left `main` after the person
+/// chose to keep it.
+fn unsettled_keeps(
     git: &WorkspaceGit<'_>,
-    commit: &str,
-    committer: &str,
+    onto_tree: &str,
+    tree: &str,
+    conflicts: &[String],
+    kept: &[&RawChange],
 ) -> Result<Vec<(String, &'static str)>> {
-    let object = git
-        .read_objects(&[commit.to_string()])?
-        .pop()
-        .context("the commit to restore is missing")?;
-    let text = String::from_utf8_lossy(&object.data);
-    let made_by_gateway = text
-        .lines()
-        .take_while(|line| !line.is_empty())
-        .filter_map(|line| line.strip_prefix("committer "))
-        .any(|line| {
-            line.split_once('<')
-                .and_then(|(_, rest)| rest.split_once('>'))
-                .is_some_and(|(email, _)| email.trim().eq_ignore_ascii_case(committer.trim()))
-        });
-    if !made_by_gateway {
+    if kept.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(parse_commit(&object.data)
-        .trailers
-        .into_iter()
-        .filter(|(key, _)| key == PRIVATE_PATH_TRAILER)
-        .filter_map(|(_, value)| {
-            let (reason, path) = value.split_once(' ')?;
-            let reason = match reason {
-                "secret" => "secret",
-                "ignored" => "ignored",
-                "attachment" => "attachment",
-                _ => return None,
+    let aliases = kept_aliases(git, tree, kept)?;
+    // `onto`'s entries at each kept path and the folders above it.
+    let around: BTreeSet<String> = kept
+        .iter()
+        .flat_map(|change| {
+            let path = change.path.as_str();
+            path.match_indices('/')
+                .map(|(index, _)| path[..index].to_string())
+                .chain(std::iter::once(path.to_string()))
+        })
+        .collect();
+    let around: Vec<String> = around.into_iter().collect();
+    let at_onto = git.entries_by_path(onto_tree, &around)?;
+    let is_folder = |path: &str| at_onto.get(path).map(|entry| entry.kind == "tree");
+    let conflicted: BTreeSet<&str> = conflicts.iter().map(String::as_str).collect();
+    Ok(kept
+        .iter()
+        .filter_map(|change| {
+            let path = change.path.as_str();
+            let unsettled = match aliases.get(path) {
+                Some(held) => (!held).then_some(PATH_ALIAS),
+                None => {
+                    let folder_here = is_folder(path) == Some(true);
+                    let file_above = path
+                        .match_indices('/')
+                        .any(|(index, _)| is_folder(&path[..index]) == Some(false));
+                    // A path the work added had no file for `onto` to
+                    // remove: its conflict may be with the merge base alone
+                    // (a file of the base where the work made a folder).
+                    let removed = change.status != 'A' && conflicted.contains(path);
+                    (!(folder_here || file_above || removed)).then_some(NOTHING_TO_KEEP)
+                }
             };
-            let path = normalize_relative_path(path)?;
-            Some((path, reason))
+            unsettled.map(|reason| (change.path.clone(), reason))
         })
         .collect())
 }
@@ -522,6 +543,14 @@ pub(crate) fn aliases_in(
     if added.is_empty() {
         return Ok(Vec::new());
     }
+    let entries = every_entry(git, tree)?
+        .into_iter()
+        .map(|entry| (entry.path, entry.kind == "tree"));
+    Ok(alias_clashes(entries, added))
+}
+
+/// Every entry of `tree` (a tree id), folders included.
+fn every_entry(git: &WorkspaceGit<'_>, tree: &str) -> Result<Vec<TreeEntry>> {
     let raw = git.bytes(&[
         "ls-tree",
         "-r",
@@ -531,10 +560,64 @@ pub(crate) fn aliases_in(
         "--end-of-options",
         tree,
     ])?;
-    let entries = parse_ls_tree(&raw)
-        .into_iter()
-        .map(|entry| (entry.path, entry.kind == "tree"));
-    Ok(alias_clashes(entries, added))
+    Ok(parse_ls_tree(&raw))
+}
+
+/// The paths of `kept` (new names of the work the person kept, so absent
+/// from the restored `tree`) that [`alias_clashes`] finds once they are
+/// put back beside `tree`'s entries, each other and the folders they lie
+/// in, each with whether an entry of `tree` that such a disk takes for the
+/// path holds it as the work has it. Unless one does, "Keep current" on
+/// such a path chose no version of the work's file: `onto`'s entry is
+/// another file, and the work is on `main` under no name.
+fn kept_aliases(
+    git: &WorkspaceGit<'_>,
+    tree: &str,
+    kept: &[&RawChange],
+) -> Result<BTreeMap<String, bool>> {
+    if kept.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let listed = every_entry(git, tree)?;
+    // What `tree` holds under each key: a file, a link or a submodule.
+    let held: BTreeSet<(String, &str, &str)> = listed
+        .iter()
+        .filter(|entry| entry.kind != "tree")
+        .map(|entry| {
+            (
+                portable_key(&entry.path),
+                entry.mode.as_str(),
+                entry.oid.as_str(),
+            )
+        })
+        .collect();
+    let mut entries: Vec<(String, bool)> = listed
+        .iter()
+        .map(|entry| (entry.path.clone(), entry.kind == "tree"))
+        .collect();
+    for change in kept {
+        entries.extend(
+            change
+                .path
+                .match_indices('/')
+                .map(|(index, _)| (change.path[..index].to_string(), true)),
+        );
+        entries.push((change.path.clone(), false));
+    }
+    let paths: Vec<&str> = kept.iter().map(|change| change.path.as_str()).collect();
+    let clashes: BTreeSet<String> = alias_clashes(entries, &paths).into_iter().collect();
+    Ok(kept
+        .iter()
+        .filter(|change| clashes.contains(&change.path))
+        .map(|change| {
+            let holds_work = held.contains(&(
+                portable_key(&change.path),
+                change.new_mode.as_str(),
+                change.new_oid.as_str(),
+            ));
+            (change.path.clone(), holds_work)
+        })
+        .collect())
 }
 
 /// The paths of `added` that a tree whose `entries` (path, and whether it is
@@ -809,13 +892,15 @@ mod tests {
         assert_eq!(alias_clashes(tree, &["vendor"]), vec!["vendor"]);
     }
 
-    /// A disk that ignores case folds it fully: `Straße.md` and
-    /// `STRASSE.md`, a final sigma and a plain one, a long s and an s, a
-    /// ligature and its letters each name one file there.
+    /// A disk that ignores case folds it fully: `Straße.md`, `STRAẞE.md`
+    /// and `STRASSE.md`, a final sigma and a plain one, a long s and an s,
+    /// a ligature and its letters each name one file there.
     #[test]
     fn names_full_case_folding_takes_for_one_are_a_clash() {
         for (kept, added) in [
             ("Stra\u{df}e.md", "STRASSE.md"),
+            ("Stra\u{df}e.md", "STRA\u{1e9e}E.md"),
+            ("STRA\u{1e9e}E.md", "strasse.md"),
             (
                 "\u{39f}\u{394}\u{39f}\u{3a3}.md",
                 "\u{3bf}\u{3b4}\u{3bf}\u{3c2}.md",

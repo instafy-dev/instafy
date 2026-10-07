@@ -159,8 +159,6 @@ pub(crate) struct WorkspaceGit<'a> {
     quarantine: Option<&'a Path>,
     /// A work tree for commands that read files (bare repositories only).
     work_tree: Option<&'a Path>,
-    /// Replacement refs are ignored (`GIT_NO_REPLACE_OBJECTS`).
-    no_replace_objects: bool,
 }
 
 impl<'a> WorkspaceGit<'a> {
@@ -177,16 +175,7 @@ impl<'a> WorkspaceGit<'a> {
             network_deadline: None,
             quarantine: None,
             work_tree: None,
-            no_replace_objects: false,
         }
-    }
-
-    /// Read every object as it is stored, whatever replacement refs the
-    /// repository holds and whichever ref storage keeps them, so what a
-    /// command reads is what a push sends.
-    pub(crate) fn without_replace_objects(mut self) -> Self {
-        self.no_replace_objects = true;
-        self
     }
 
     /// Give up on a fetch, push or ls-remote that moves no data for
@@ -369,10 +358,6 @@ impl<'a> WorkspaceGit<'a> {
                     }
                 }
             }
-        }
-        // After the scrub, which removed any inherited value.
-        if self.no_replace_objects {
-            command.env("GIT_NO_REPLACE_OBJECTS", "1");
         }
         if network {
             if let Some(seconds) = self.stall_seconds {

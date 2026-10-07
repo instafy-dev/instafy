@@ -1560,7 +1560,7 @@ async fn caller_messages_never_carry_instafy_trailers() {
     let served = serve(&sc).await;
     // Not a trailer block (a prose line follows): git reads no trailer in
     // it, so it is prose and stays.
-    let prose = "Tidy the notes\n\nInstafy-Apply-Key: imp:planted\n  instafy-restored-from: refs/instafy/salvage/gateway/x\nMore text";
+    let prose = "Tidy the notes\n\nInstafy-Apply-Key: imp:planted\n  instafy-restored-from: refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/x\nMore text";
     let answer = apply(
         &served,
         manifest(
@@ -1603,7 +1603,7 @@ async fn caller_messages_never_carry_instafy_trailers() {
         "\u{1}", "\u{7f}", "\u{80}", "\u{1b}", "\u{b}", " \t\u{1}", "\u{85}",
     ] {
         let text = format!(
-            "Tidy\n\n{hidden}Instafy-Restored-From: refs/instafy/salvage/gateway/n\n{hidden}instafy-apply-key: imp:k"
+            "Tidy\n\n{hidden}Instafy-Restored-From: refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/n\n{hidden}instafy-apply-key: imp:k"
         );
         let saved = caller_message(Some(&text)).expect("a subject is left");
         assert!(saved.starts_with("Tidy"), "{hidden:?}: {saved:?}");
@@ -1624,7 +1624,7 @@ async fn caller_messages_never_carry_instafy_trailers() {
 /// go.
 #[test]
 fn the_gateway_drops_only_the_trailers_git_reads_as_desktop_does() {
-    let reference = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let reference = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/node-1-0123abcd";
     let cases = [
         (
             "Polish header\n\nInstafy-style buttons look better here.".to_string(),
@@ -1685,7 +1685,7 @@ async fn gateway_saves_drop_origin_trailers_at_the_route() {
     let sc = HostedScenario::new();
     let head = sc.push(&[("a.txt", Some(b"a\n"))], "seed");
     let served = serve(&sc).await;
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let reference = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/node-1-0123abcd";
     let answer = apply(
         &served,
         manifest(
@@ -1694,7 +1694,7 @@ async fn gateway_saves_drop_origin_trailers_at_the_route() {
             json!({
                 "baseRev": head,
                 "commitMessage": format!(
-                    "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {salvage}\n\
+                    "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {reference}\n\
                      \u{1}INSTAFY-APPLY-KEY: imp:forged"
                 ),
             }),
@@ -1708,15 +1708,15 @@ async fn gateway_saves_drop_origin_trailers_at_the_route() {
 }
 
 /// A person's save whose message hides gateway trailers behind control
-/// characters: the commit carries none, the salvage ref is not marked
+/// characters: the commit carries none, the recovery ref is not marked
 /// restored and the import's receipt is still the import's commit.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_control_character_never_smuggles_gateway_trailers() {
     let mut sc = HostedScenario::new();
     sc.push(&[("README.md", Some(b"r\n"))], "seed");
-    let salvaged = sc.side_commit(&[("draft.md", b"draft\n")], "kept");
-    let salvage_ref = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    sc.push_ref(&salvaged, salvage_ref);
+    let kept = sc.side_commit(&[("draft.md", b"draft\n")], "kept");
+    let kept_ref = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f60/node-1-0123abcd";
+    sc.push_ref(&kept, kept_ref);
     let controller = StubController::start(sc.project).await;
     controller.configure(&mut sc);
     let served = serve(&sc).await;
@@ -1746,7 +1746,7 @@ async fn a_control_character_never_smuggles_gateway_trailers() {
     let person = controller.bearer(&["fs.read", "fs.write"], json!({}));
     for hidden in ["\u{1}", "\u{7f}", "\u{80}"] {
         let message = format!(
-            "Tidy\n\n{hidden}Instafy-Restored-From: {salvage_ref}\n{hidden}Instafy-Apply-Key: {key}\n{hidden}Instafy-Apply-Fingerprint: sha256:aaaa"
+            "Tidy\n\n{hidden}Instafy-Restored-From: {kept_ref}\n{hidden}Instafy-Apply-Key: {key}\n{hidden}Instafy-Apply-Fingerprint: sha256:aaaa"
         );
         let head = sc.canonical_main().unwrap();
         let saved = apply_as(
@@ -1787,14 +1787,14 @@ async fn a_control_character_never_smuggles_gateway_trailers() {
         .unwrap();
     assert_eq!(listed.status(), 200);
     let listed: serde_json::Value = listed.json().await.unwrap();
-    let salvage = listed["entries"]
+    let entry = listed["entries"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|entry| entry["ref"] == salvage_ref)
+        .find(|entry| entry["ref"] == kept_ref)
         .cloned()
-        .expect("the salvage ref is listed");
-    assert!(salvage.get("restoredRev").is_none(), "{salvage}");
+        .expect("the recovery ref is listed");
+    assert!(entry.get("restoredRev").is_none(), "{entry}");
 
     let status = post_as(
         &served,

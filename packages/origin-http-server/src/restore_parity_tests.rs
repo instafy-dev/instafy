@@ -501,6 +501,17 @@ impl Space {
         body["entries"].as_array().unwrap().clone()
     }
 
+    /// The entry `mode` lists for `reference`, once Desktop's checkout has
+    /// caught up with canonical `main`.
+    async fn entry_in(&self, mode: Mode, reference: &str) -> serde_json::Value {
+        self.catch_up();
+        self.listed_in(mode)
+            .await
+            .into_iter()
+            .find(|entry| entry["ref"] == reference)
+            .unwrap_or_else(|| panic!("{mode:?} lists {reference}"))
+    }
+
     /// A person's save of `bytes` at `path` through `mode`, as a client's
     /// "Use this version" sends it: read at `main`, and on Desktop on
     /// condition that the folder still holds what it reads there now
@@ -691,7 +702,11 @@ async fn keep_clears_a_file_and_folder_conflict() {
 /// come back here (a secret, which the conflict never showed; a file the
 /// restored tree ignores) is still refused, not kept on request: the ref
 /// stays, so that work is not removed on the person's behalf. With only
-/// kept paths left out, the ref goes.
+/// kept paths left out, the ref goes when each keep chose `main`'s version
+/// over the work's (`main`'s file `docs` over the work's folder). Keeping a
+/// folder `main` does not have chose no version of the new files in it:
+/// they are on `main` under no name, so they are listed `nothing_to_keep`,
+/// and the ref stays with them, not listed as restored.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kept_folder_never_lets_refused_work_below_it_go() {
     for mode in MODES {
@@ -722,6 +737,14 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
                 ("most.md", Some(b"most\n")),
             ],
             &only_kept,
+        );
+        let settled = recovery_ref("20261005T124500Z-unsaved-0123456789ae");
+        let settled_commit = space.park(
+            &[
+                ("docs/app.txt", Some(b"app\n")),
+                ("last.md", Some(b"last\n")),
+            ],
+            &settled,
         );
         space.push(&[("docs", Some(b"a file now\n"))], "docs is a file");
         space.push(&[(".gitignore", Some(b"*.log\n"))], "ignore logs");
@@ -762,7 +785,7 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
             body["notRestored"],
             reasons(&[
                 ("cfg/.env", "secret"),
-                ("cfg/app.txt", "kept"),
+                ("cfg/app.txt", "nothing_to_keep"),
                 ("cfg/debug.log", "ignored"),
             ]),
             "{mode:?}: {body}"
@@ -771,6 +794,11 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
         assert_eq!(
             space.canonical_ref(&kept).as_deref(),
             Some(kept_commit.as_str())
+        );
+        assert_eq!(
+            space.entry_in(mode, &kept).await["restoredRev"],
+            serde_json::Value::Null,
+            "{mode:?}"
         );
         assert_eq!(space.on_main("more.md").as_deref(), Some(&b"more\n"[..]));
         for path in ["cfg/app.txt", "cfg/.env", "cfg/debug.log"] {
@@ -782,11 +810,34 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
             .await;
         assert_eq!(
             body["notRestored"],
-            reasons(&[("cfg/app.txt", "kept")]),
+            reasons(&[("cfg/app.txt", "nothing_to_keep")]),
+            "{mode:?}: {body}"
+        );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&only_kept).as_deref(),
+            Some(only_kept_commit.as_str()),
+            "{mode:?}"
+        );
+        assert_eq!(
+            space.entry_in(mode, &only_kept).await["restoredRev"],
+            serde_json::Value::Null,
+            "{mode:?}"
+        );
+        assert_eq!(space.on_main("most.md").as_deref(), Some(&b"most\n"[..]));
+
+        let body = space
+            .restored(json!({ "ref": settled, "rev": settled_commit, "keep": ["docs"] }))
+            .await;
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("docs/app.txt", "kept")]),
             "{mode:?}: {body}"
         );
         assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
-        assert_eq!(space.canonical_ref(&only_kept), None, "{mode:?}");
+        assert_eq!(space.canonical_ref(&settled), None, "{mode:?}");
+        assert_eq!(space.on_main("last.md").as_deref(), Some(&b"last\n"[..]));
+        assert_eq!(space.on_main("docs").as_deref(), Some(&b"a file now\n"[..]));
     }
 }
 
@@ -1191,10 +1242,15 @@ async fn a_rename_by_case_only_is_restored() {
 /// (the gateway) or an unsaved edit that is not there (Desktop on a disk
 /// that ignores case). Work that renames `notes.md` to `Notes.md` after
 /// `main` edited `notes.md`: keeping `main`'s `notes.md` leaves the new
-/// name to settle, and keeping both restores the rest and lets the ref go.
-/// A new `todo.md` beside a `TODO.md` that `main` gained since is the
-/// same, and so is a new `STRASSE.md` beside a `Straße.md`: such a disk
-/// folds case fully.
+/// name to settle, and keeping both restores the rest. A new `todo.md`
+/// beside a `TODO.md` that `main` gained since is the same, and so is a new
+/// `STRASSE.md` beside a `Straße.md`: such a disk folds case fully.
+///
+/// Keeping such a name chose no version of the work's file: `main`'s file
+/// is another one, and the work is on `main` under no name, so the ref
+/// stays with it, the name is listed `path_alias`, and the ref is not
+/// listed as restored, since the restore did not bring that work back. Only
+/// when `main`'s file holds the work as the work has it may the ref go.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
     for mode in MODES {
@@ -1238,10 +1294,20 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
         assert_eq!(body["committed"], true, "{mode:?}: {body}");
         assert_eq!(
             body["notRestored"],
-            reasons(&[("Notes.md", "kept"), ("notes.md", "kept")]),
+            reasons(&[("Notes.md", "path_alias"), ("notes.md", "kept")]),
             "{mode:?}: {body}"
         );
-        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&reference).as_deref(),
+            Some(commit.as_str()),
+            "{mode:?}"
+        );
+        assert_eq!(
+            space.entry_in(mode, &reference).await["restoredRev"],
+            serde_json::Value::Null,
+            "{mode:?}"
+        );
         assert_eq!(
             space.on_main("notes.md").as_deref(),
             Some(&b"main\n2\n3\n"[..]),
@@ -1256,36 +1322,54 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
 
         // A new name beside a file `main` gained since, which the work
         // never touched: in another case, or another case under full case
-        // folding (`ß` and `SS`).
-        for (added, gained) in [("todo.md", "TODO.md"), ("STRASSE.md", "Stra\u{df}e.md")] {
+        // folding (`ß` and `SS`). The ref stays unless `main`'s file holds
+        // the work as it is (`same`).
+        for (added, gained, on_main, same) in [
+            ("todo.md", "TODO.md", &b"main\n"[..], false),
+            ("STRASSE.md", "Stra\u{df}e.md", &b"main\n"[..], false),
+            ("plan.md", "PLAN.md", &b"work\n"[..], true),
+        ] {
             let space = Space::new(mode, &[]).await;
             let reference = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
             let commit = space.park(
                 &[(added, Some(b"work\n")), ("other.md", Some(b"other\n"))],
                 &reference,
             );
-            space.push(&[(gained, Some(b"main\n"))], "a todo list");
+            space.push(&[(gained, Some(on_main))], "a todo list");
             assert_eq!(
                 space
                     .conflict(json!({ "ref": reference, "rev": commit }))
                     .await,
                 json!([added]),
-                "{mode:?}"
+                "{mode:?} {added}"
             );
             let body = space
                 .restored(json!({ "ref": reference, "rev": commit, "keep": [added] }))
                 .await;
+            let reason = if same { "kept" } else { "path_alias" };
             assert_eq!(
                 body["notRestored"],
-                reasons(&[(added, "kept")]),
-                "{mode:?}: {body}"
+                reasons(&[(added, reason)]),
+                "{mode:?} {added}: {body}"
             );
-            assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
-            assert_eq!(space.on_main(added), None, "{mode:?}");
+            assert_eq!(body["refDeleted"], same, "{mode:?} {added}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference),
+                (!same).then(|| commit.clone()),
+                "{mode:?} {added}"
+            );
+            if !same {
+                assert_eq!(
+                    space.entry_in(mode, &reference).await["restoredRev"],
+                    serde_json::Value::Null,
+                    "{mode:?} {added}"
+                );
+            }
+            assert_eq!(space.on_main(added), None, "{mode:?} {added}");
             assert_eq!(
                 space.on_main(gained).as_deref(),
-                Some(&b"main\n"[..]),
-                "{mode:?}"
+                Some(on_main),
+                "{mode:?} {added}"
             );
             assert_eq!(
                 space.on_main("other.md").as_deref(),
@@ -1296,12 +1380,196 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
     }
 }
 
+/// A keep chosen while `main` had a file whose name a disk ignoring case
+/// takes for the work's new one (`notes.md` for the work's `Notes.md`, a
+/// `TODO.md` `main` gained for its `todo.md`) chose no version of the
+/// work's file. When that file leaves `main` before the restore (the
+/// person's "Use this version" of `notes.md` saves the work's removal of
+/// it, or someone removes `TODO.md`), the keep settles nothing on the
+/// `main` the work is restored onto: the work's file is on `main` under no
+/// name, so it is listed `nothing_to_keep` and the ref stays with it, not
+/// listed as restored, whether the restore makes a version (with
+/// `other.md`) or not. Restored again without the keep, the file comes back
+/// and the ref goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keep_whose_clash_left_main_since_keeps_the_ref() {
+    type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
+    // (seed, the work, then on `main` before the restore that asks, its
+    // clash, the person's keep, then on `main` before the kept restore)
+    let routes: Vec<(Files, Files, Files, serde_json::Value, &str, Files)> = vec![
+        (
+            vec![("notes.md", Some(&b"1\n2\n3\n"[..]))],
+            vec![("notes.md", None), ("Notes.md", Some(&b"1\n2\nwork\n"[..]))],
+            vec![("notes.md", Some(&b"main\n2\n3\n"[..]))],
+            json!(["Notes.md", "notes.md"]),
+            "Notes.md",
+            vec![("notes.md", None)],
+        ),
+        (
+            vec![],
+            vec![("todo.md", Some(&b"work\n"[..]))],
+            vec![("TODO.md", Some(&b"main\n"[..]))],
+            json!(["todo.md"]),
+            "todo.md",
+            vec![("TODO.md", None)],
+        ),
+    ];
+    for mode in MODES {
+        for (seed, work, moved, clashes, kept, removed) in &routes {
+            for with_other in [true, false] {
+                let case = format!("{mode:?} {kept} other {with_other}");
+                let space = Space::new(mode, &[]).await;
+                if !seed.is_empty() {
+                    space.push(seed, "seed");
+                }
+                let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+                let mut files = work.clone();
+                if with_other {
+                    files.push(("other.md", Some(b"other\n")));
+                }
+                let commit = space.park(&files, &reference);
+                space.push(moved, "main moved");
+                assert_eq!(
+                    space
+                        .conflict(json!({ "ref": reference, "rev": commit }))
+                        .await,
+                    *clashes,
+                    "{case}"
+                );
+                space.push(removed, "the clash goes");
+
+                let body = space
+                    .restored(json!({ "ref": reference, "rev": commit, "keep": [kept] }))
+                    .await;
+                assert_eq!(body["committed"], with_other, "{case}: {body}");
+                assert_eq!(
+                    body["notRestored"],
+                    reasons(&[(kept, "nothing_to_keep")]),
+                    "{case}: {body}"
+                );
+                assert_eq!(body["refDeleted"], false, "{case}: {body}");
+                assert_eq!(
+                    space.canonical_ref(&reference).as_deref(),
+                    Some(commit.as_str()),
+                    "{case}"
+                );
+                assert_eq!(
+                    space.entry_in(mode, &reference).await["restoredRev"],
+                    serde_json::Value::Null,
+                    "{case}"
+                );
+                assert_eq!(space.on_main(kept), None, "{case}");
+
+                let body = space
+                    .restored(json!({ "ref": reference, "rev": commit }))
+                    .await;
+                assert_eq!(body["notRestored"], json!([]), "{case}: {body}");
+                assert_eq!(body["refDeleted"], true, "{case}: {body}");
+                assert_eq!(space.canonical_ref(&reference), None, "{case}");
+                assert!(space.on_main(kept).is_some(), "{case}");
+            }
+        }
+    }
+}
+
+/// Work that turns the file `docs` into a folder (it removes `docs` and adds
+/// `docs/readme.md`) clashes with `main`'s edit of `docs`, and, once `main`
+/// has removed `docs` as well, still with the merge base's `docs`. Keeping
+/// the work's new file chooses no version of it while `main` has nothing at
+/// or above that path: no file of the work was removed there, so a keep
+/// chosen after the person saw `main`'s `docs` (which then left `main`), or
+/// one chosen at the clash with the merge base alone, leaves the work's
+/// `docs/readme.md` on `main` under no name: it is listed
+/// `nothing_to_keep`, and the ref stays with it, not listed as restored.
+/// Once "Use this version" has put the file on `main`, the ref goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_file_the_work_added_where_main_has_nothing_keeps_the_ref() {
+    type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
+    // (on `main` before the restore that asks, its clash, the person's keep)
+    let routes: Vec<(&str, Files, serde_json::Value)> = vec![
+        (
+            "edited, then removed",
+            vec![("docs", Some(&b"main edit\n"[..]))],
+            json!(["docs", "docs/readme.md"]),
+        ),
+        (
+            "removed first",
+            vec![("docs", None)],
+            json!(["docs/readme.md"]),
+        ),
+    ];
+    for mode in MODES {
+        for (route, moved, clashes) in &routes {
+            let case = format!("{mode:?} {route}");
+            let space = Space::new(mode, &[("docs", b"a file\n")]).await;
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park(
+                &[
+                    ("docs", None),
+                    ("docs/readme.md", Some(b"work\n")),
+                    ("other.md", Some(b"other\n")),
+                ],
+                &reference,
+            );
+            space.push(moved, "main moved");
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                *clashes,
+                "{case}"
+            );
+            if space.on_main("docs").is_some() {
+                space.push(&[("docs", None)], "docs goes");
+            }
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": clashes }))
+                .await;
+            assert_eq!(body["committed"], true, "{case}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[("docs/readme.md", "nothing_to_keep")]),
+                "{case}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{case}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{case}"
+            );
+            assert_eq!(
+                space.entry_in(mode, &reference).await["restoredRev"],
+                serde_json::Value::Null,
+                "{case}"
+            );
+            assert_eq!(space.on_main("docs/readme.md"), None, "{case}");
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{case}"
+            );
+
+            // What "Use this version" leaves on `main`, then the restore of
+            // the rest, as Studio sends it (no keep for a path it used).
+            space.push(&[("docs/readme.md", Some(b"work\n"))], "use this version");
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit }))
+                .await;
+            assert_eq!(body["notRestored"], json!([]), "{case}: {body}");
+            assert_eq!(body["refDeleted"], true, "{case}: {body}");
+            assert_eq!(space.canonical_ref(&reference), None, "{case}");
+        }
+    }
+}
+
 /// A new folder of the work whose name differs only in case from a file
 /// `main` holds (`Docs/guide.md` beside a file `docs`, at any depth) is a
 /// clash in both modes, never an unsaved edit that is not there (Desktop on
 /// a disk that ignores case finds the file where the folder goes) or a
 /// `main` holding both names (the gateway). Keeping the new path restores
-/// the rest and lets the ref go.
+/// the rest, and the ref stays, unmarked as restored, with the path listed
+/// `path_alias`: the work below that folder is on `main` under no name.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
     for mode in MODES {
@@ -1334,11 +1602,20 @@ async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
             assert_eq!(body["committed"], true, "{mode:?} {added}: {body}");
             assert_eq!(
                 body["notRestored"],
-                reasons(&[(added, "kept")]),
+                reasons(&[(added, "path_alias")]),
                 "{mode:?} {added}: {body}"
             );
-            assert_eq!(body["refDeleted"], true, "{mode:?} {added}: {body}");
-            assert_eq!(space.canonical_ref(&reference), None, "{mode:?} {added}");
+            assert_eq!(body["refDeleted"], false, "{mode:?} {added}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {added}"
+            );
+            assert_eq!(
+                space.entry_in(mode, &reference).await["restoredRev"],
+                serde_json::Value::Null,
+                "{mode:?} {added}"
+            );
             assert_eq!(
                 space.paths_on_main(),
                 vec!["README.md", file, "other.md"],
@@ -1358,7 +1635,7 @@ async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
 /// the work's rename of `notes.md` to `Notes.md` after `main` edited
 /// `notes.md`. A new `STRASSE.md` beside a `Straße.md` is the first again,
 /// under full case folding. Keeping the current version restores the
-/// rest, and the unsaved edit stays.
+/// rest, and the unsaved edit stays, and so does the ref.
 #[tokio::test(flavor = "multi_thread")]
 async fn using_the_saved_version_of_a_name_main_holds_in_another_case_is_refused() {
     type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
@@ -1451,6 +1728,20 @@ async fn using_the_saved_version_of_a_name_main_holds_in_another_case_is_refused
                 "{mode:?} {used}"
             );
             assert_eq!(space.on_main(used), None, "{mode:?} {used}");
+            // The saved version of `used` is on `main` under no name.
+            assert!(
+                body["notRestored"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!({ "path": used, "reason": "path_alias" })),
+                "{mode:?} {used}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{mode:?} {used}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {used}"
+            );
             if mode == Mode::Desktop {
                 assert_eq!(std::fs::read(root.join(holder)).unwrap(), unsaved, "{used}");
             }
@@ -1704,7 +1995,8 @@ async fn work_over_a_submodule_entry_is_never_restored() {
 /// `path_alias`): on Desktop the disk shows the submodule's folder, which
 /// may hold a repository of the person's own, as a plain folder, and a
 /// disk that ignores case would write the file into that repository,
-/// where `main` never gets it. Keeping the path restores the rest.
+/// where `main` never gets it. Keeping the path restores the rest, and the
+/// ref, the only copy of `Vendor/x.c`, stays.
 #[tokio::test(flavor = "multi_thread")]
 async fn using_the_saved_version_in_a_folder_a_submodule_entry_names_is_refused() {
     for mode in MODES {
@@ -1755,7 +2047,12 @@ async fn using_the_saved_version_in_a_folder_a_submodule_entry_names_is_refused(
             .restored(json!({ "ref": reference, "rev": commit, "keep": ["Vendor/x.c"] }))
             .await;
         assert_eq!(body["committed"], true, "{mode:?}: {body}");
-        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&reference).as_deref(),
+            Some(commit.as_str()),
+            "{mode:?}"
+        );
         assert_eq!(
             space.on_main("other.md").as_deref(),
             Some(&b"other\n"[..]),
@@ -2161,11 +2458,10 @@ async fn every_conflict_is_listed_and_can_be_kept_at_once() {
     }
 }
 
-/// One canonical history served by both modes: a salvage ref restored in
-/// one mode, with nothing left to bring back, is recorded once, by that
-/// mode's empty restore commit. The other mode lists it as restored too,
-/// and restoring it there records nothing more, even before Desktop's
-/// branch has caught up with the record.
+/// One canonical history served by both modes: a recovery ref that a
+/// restore in one mode keeps (its secret cannot come back) is listed as
+/// restored in both modes, by that mode's restore commit, and restoring it
+/// again in the other mode brings nothing more.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restore_recorded_in_one_mode_counts_in_the_other() {
     for (first, second) in [
@@ -2173,113 +2469,56 @@ async fn a_restore_recorded_in_one_mode_counts_in_the_other() {
         (Mode::Gateway, Mode::Desktop),
     ] {
         let space = Space::served_by(&[first, second], &[]).await;
-        let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-        let commit = space.park(&[("draft.md", Some(b"draft\n"))], salvage);
-        let before = space.push(&[("draft.md", Some(b"draft\n"))], "the same draft");
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let commit = space.park(
+            &[("draft.md", Some(b"draft\n")), (".env", Some(b"TOKEN=1\n"))],
+            &reference,
+        );
 
         let body = space
-            .restored_in(first, json!({ "ref": salvage, "rev": commit }))
+            .restored_in(first, json!({ "ref": reference, "rev": commit }))
             .await;
         assert_eq!(
-            (&body["committed"], &body["marked"]),
-            (&json!(false), &json!(true)),
+            (&body["committed"], &body["refDeleted"]),
+            (&json!(true), &json!(false)),
             "{first:?}: {body}"
         );
-        let marker = space.main();
-        assert_ne!(marker, before, "{first:?}");
         assert_eq!(
-            git_in(&space.remote, &["log", "-1", "--format=%ce", &marker]),
+            body["notRestored"],
+            reasons(&[(".env", "secret")]),
+            "{first:?}: {body}"
+        );
+        let restored = space.main();
+        assert_eq!(
+            git_in(&space.remote, &["log", "-1", "--format=%ce", &restored]),
             space.server(first).config.git_author_email,
             "{first:?}"
         );
 
-        // The other mode records nothing more.
-        let body = space
-            .restored_in(second, json!({ "ref": salvage, "rev": commit }))
-            .await;
-        assert_eq!(
-            (&body["committed"], &body["marked"]),
-            (&json!(false), &json!(false)),
-            "{second:?} after {first:?}: {body}"
-        );
-        assert_eq!(space.main(), marker, "{second:?} after {first:?}");
-
-        for server in &space.servers {
-            server.catch_up();
-        }
+        space.catch_up();
         for mode in [first, second] {
             let entries = space.listed_in(mode).await;
             let entry = entries
                 .iter()
-                .find(|entry| entry["ref"] == salvage)
-                .unwrap_or_else(|| panic!("{mode:?} lists the salvage ref"));
+                .find(|entry| entry["ref"] == reference.as_str())
+                .unwrap_or_else(|| panic!("{mode:?} lists the ref"));
             assert_eq!(
                 entry["restoredRev"],
-                marker.as_str(),
+                restored.as_str(),
                 "{mode:?} after {first:?}"
             );
         }
-    }
-}
 
-/// A salvage commit the gateway made names the files its salvage kept in
-/// the owner-only archive: both modes list them as not restored, with their
-/// reason, and restore the rest. The same trailers under another committer
-/// list nothing, and neither changes what reaches `main`.
-#[tokio::test(flavor = "multi_thread")]
-async fn files_a_salvage_kept_privately_are_listed_in_both_modes() {
-    for mode in MODES {
-        let space = Space::new(mode, &[]).await;
-        space.sync_work();
-        let parent = space.main();
-        commit_files(&space.work, &[("draft.md", Some(b"draft\n"))], "draft");
-        let tree = git_in(&space.work, &["rev-parse", "HEAD^{tree}"]);
-        git_in(&space.work, &["reset", "-q", "--hard", &parent]);
-        let salvage = |committer: &str, reference: &str| {
-            let email = format!("user.email={committer}");
-            let commit = git_in(
-                &space.work,
-                &[
-                    "-c",
-                    "user.name=instafy-origin",
-                    "-c",
-                    &email,
-                    "commit-tree",
-                    &tree,
-                    "-p",
-                    &parent,
-                    "-m",
-                    "Keep unsaved edits from the retired file gateway",
-                    "-m",
-                    "Instafy-Recovery-Kind: salvage\nInstafy-Path: draft.md\n\
-                     Instafy-Private-Path: secret .env\n\
-                     Instafy-Private-Path: attachment chat-upload-1.png\n\
-                     Instafy-Private-Path: unknown other.txt",
-                ],
-            );
-            let spec = format!("{commit}:{reference}");
-            git_in(
-                &space.work,
-                &["push", "-q", space.remote.to_str().unwrap(), &spec],
-            );
-        };
-        let kept = "refs/instafy/salvage/gateway/node-1-aaaaaaaa";
-        let forged = "refs/instafy/salvage/gateway/node-1-bbbbbbbb";
-        salvage(crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL, kept);
-        salvage("agent@instafy.dev", forged);
-
-        let body = space.restored(json!({ "ref": kept })).await;
-        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        // The other mode brings nothing more.
+        let body = space
+            .restored_in(second, json!({ "ref": reference, "rev": commit }))
+            .await;
         assert_eq!(
-            body["notRestored"],
-            reasons(&[(".env", "secret"), ("chat-upload-1.png", "attachment")]),
-            "{mode:?}: {body}"
+            (&body["committed"], &body["refDeleted"]),
+            (&json!(false), &json!(false)),
+            "{second:?} after {first:?}: {body}"
         );
-        assert_eq!(space.on_main("draft.md").as_deref(), Some(&b"draft\n"[..]));
-        assert_eq!(space.on_main(".env"), None, "{mode:?}");
-        assert_eq!(space.on_main("chat-upload-1.png"), None, "{mode:?}");
-
-        let body = space.restored(json!({ "ref": forged })).await;
-        assert_eq!(body["notRestored"], json!([]), "{mode:?}: {body}");
+        assert_eq!(space.main(), restored, "{second:?} after {first:?}");
+        assert!(space.canonical_ref(&reference).is_some());
     }
 }

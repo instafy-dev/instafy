@@ -412,7 +412,6 @@ const UNSAVED_WORK_TITLES: Record<string, string> = {
   unpublished: "Agent work that couldn't be saved",
   unsaved: "Unsaved edits from a stopped workspace",
   stale: "Older copies found in a workspace",
-  salvage: "Archived from the old file server",
 };
 
 export function unsavedWorkTitle(kind: string): string {
@@ -625,21 +624,40 @@ export function unsavedWorkUnconfirmedDeleteCopy(path: string): string {
   return `Couldn't tell whether this unsaved work deletes ${path}, so nothing was saved. Ask the agent instead.`;
 }
 
-/**
- * A restore with nothing to bring back: the saved version already held the
- * work. Also when the origin marked it (an empty version on `main` now
- * records the restore): no files changed either way.
- */
+/** A restore with nothing to bring back: the saved version already held the work. */
 export const NOTHING_TO_RESTORE_COPY = "Nothing to restore. The saved version already has this work.";
+
+/**
+ * The reason a restore gives a kept path that a disk ignoring case or Unicode
+ * form takes for another name, of the space or of the same work.
+ */
+export const PATH_ALIAS_REASON = "path_alias";
+
+/** The reason a restore gives a kept path where the space had no current version left to keep. */
+export const NOTHING_TO_KEEP_REASON = "nothing_to_keep";
+
+/**
+ * Whether a restore's reasons name a kept path whose keep chose no version of
+ * the work's file: that work is only on the ref, so the entry stays pending.
+ */
+export function restoreLeftWorkOnRef(reasons: Readonly<Record<string, string>> | null | undefined): boolean {
+  return Object.values(reasons ?? {}).some(
+    (reason) => reason === PATH_ALIAS_REASON || reason === NOTHING_TO_KEEP_REASON,
+  );
+}
 
 /**
  * A finished restore. `kept` are the paths the person chose "Keep current"
  * for (the server reports them in `notRestored` too, the gateway with the
  * reason `kept`, which also covers files below a kept folder); only the
  * rest of `notRestored` were refused. `reasons` says why, when the origin
- * does: old chat uploads (`attachment`, files a salvage kept privately) get
- * a sentence of their own, and every other refusal reads as secret or
- * ignored, as it does without reasons (Desktop lists bare paths).
+ * does: old chat uploads (`attachment`) get a sentence of their own, and every other refusal reads as secret or
+ * ignored, as it does without reasons (Desktop lists bare paths). A kept path
+ * the server lists as `path_alias` (a disk ignoring case takes it for another
+ * name, of the space or of the work itself, so keeping chose no version of
+ * the work's file) is said to stay in Unsaved work instead of being kept, and
+ * so is one listed as `nothing_to_keep` (the space had no current version left
+ * to keep, so it can be restored later).
  * `committed: false` means no version with changes was made: the saved
  * version already held everything that could be restored, so the copy says
  * what was left out first (never that the space has the refused files).
@@ -661,12 +679,31 @@ export function restoreSuccessCopy({
   reasons?: Readonly<Record<string, string>>;
 }): string {
   const keptSet = new Set(kept);
-  const keptPaths = Array.from(keptSet);
-  const refused = notRestored.filter((path) => !keptSet.has(path) && reasons[path] !== "kept");
+  const held = notRestored.filter((path) => reasons[path] === PATH_ALIAS_REASON);
+  const unchosen = notRestored.filter((path) => reasons[path] === NOTHING_TO_KEEP_REASON);
+  const heldSet = new Set([...held, ...unchosen]);
+  const keptPaths = Array.from(keptSet).filter((path) => !heldSet.has(path));
+  const refused = notRestored.filter(
+    (path) => !keptSet.has(path) && !heldSet.has(path) && reasons[path] !== "kept",
+  );
   const attachments = refused.filter((path) => reasons[path] === "attachment");
   const leftOut: string[] = [];
   if (keptPaths.length > 0) {
     leftOut.push(`Kept the current version of ${formatPathList(keptPaths)}.`);
+  }
+  if (held.length > 0) {
+    leftOut.push(
+      held.length === 1
+        ? `${formatPathList(held)} stays in Unsaved work, because a disk that ignores case or Unicode form takes it for another name in the space or in this work.`
+        : `${formatPathList(held)} stay in Unsaved work, because a disk that ignores case or Unicode form takes them for other names in the space or in this work.`,
+    );
+  }
+  if (unchosen.length > 0) {
+    leftOut.push(
+      unchosen.length === 1
+        ? `${formatPathList(unchosen)} stays in Unsaved work to restore later, because the space has no current version of it to keep.`
+        : `${formatPathList(unchosen)} stay in Unsaved work to restore later, because the space has no current versions of them to keep.`,
+    );
   }
   if (refused.length > 0) {
     leftOut.push(`Not restored: ${formatPathList(refused)}.`);

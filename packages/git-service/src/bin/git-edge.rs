@@ -99,9 +99,6 @@ async fn handle_proxy(
             .validator
             .validate(&token, Some(&state.config.audience))
             .await?;
-        // The two requests of a push also accept the exact salvage
-        // credential; the shard checks it again and limits that push to
-        // creating salvage refs.
         authorize_request_claims(&claims, &parts.method, uri.path(), uri.query(), &repo_name)?;
     }
 

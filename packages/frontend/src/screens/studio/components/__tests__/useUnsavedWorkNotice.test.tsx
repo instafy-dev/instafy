@@ -35,7 +35,6 @@ function recovery(ref: string, extra: Record<string, unknown> = {}) {
     origin: null,
     paths: ["a.txt"],
     base: null,
-    dismissible: true,
     ...extra,
   };
 }
@@ -82,7 +81,7 @@ describe("useUnsavedWorkNotice", () => {
       ok([
         recovery("refs/instafy/recovery/o/a"),
         recovery("refs/instafy/recovery/o/b"),
-        recovery("refs/instafy/salvage/gateway/c", { kind: "salvage", restoredRev: "f".repeat(40) }),
+        recovery("refs/instafy/recovery/o/c", { restoredRev: "f".repeat(40) }),
       ]),
     );
     notice = null;

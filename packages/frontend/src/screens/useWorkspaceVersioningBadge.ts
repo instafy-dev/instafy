@@ -1,7 +1,5 @@
 import { useMemo } from "react";
 import type { VersioningMode } from "../services/runtimeController/workspaceVersioning";
-import type { WorkspaceRecoveryEntry } from "../sdk/instafy";
-import { unsavedWorkSeenKey, useUnsavedWorkSeen } from "../workspace/unsavedWorkSeen";
 import { pendingUnsavedWorkEntries, useUnsavedWork } from "../workspace/unsavedWorkStore";
 import { useStudioGitStatusBadge, type StudioGitStatusBadgeInput } from "./useStudioGitStatusBadge";
 
@@ -16,8 +14,6 @@ export interface WorkspaceVersioningBadgeInput extends StudioGitStatusBadgeInput
   /** A probe answered `stateless` or `desktop`: unsaved work may be listed. */
   historyReady: boolean;
   originId: string | null;
-  /** The viewer: salvage entries they have seen stop counting. */
-  userId?: string | null;
 }
 
 export function uncommittedChangesBadgeLabel(count: number): string {
@@ -26,21 +22,6 @@ export function uncommittedChangesBadgeLabel(count: number): string {
 
 export function unsavedWorkBadgeLabel(count: number): string {
   return `${count} unsaved work ${count === 1 ? "entry" : "entries"}`;
-}
-
-/**
- * Entries the badge counts. Salvage from the old file server is kept for
- * good and cannot be removed, so it counts only until this viewer has seen
- * it (in History or on the chat row); everything else counts until it is
- * restored or removed.
- */
-export function badgeUnsavedWorkEntries(
-  entries: WorkspaceRecoveryEntry[],
-  seen: ReadonlySet<string>,
-): WorkspaceRecoveryEntry[] {
-  return pendingUnsavedWorkEntries(entries).filter(
-    (entry) => entry.kind !== "salvage" || !seen.has(unsavedWorkSeenKey(entry)),
-  );
 }
 
 /**
@@ -53,7 +34,6 @@ export function useWorkspaceVersioningBadge({
   chromeMode,
   historyReady,
   originId,
-  userId = null,
   ...legacyInput
 }: WorkspaceVersioningBadgeInput): { badge: SidebarCountBadge | null } {
   const legacy = chromeMode === "legacy";
@@ -67,8 +47,7 @@ export function useWorkspaceVersioningBadge({
       legacyInput.projectReadyForWorkspace &&
       !legacyInput.controllerProjectMissing,
   });
-  const seen = useUnsavedWorkSeen(legacyInput.activeProjectId, userId);
-  const unsavedCount = historyReady && !legacy ? badgeUnsavedWorkEntries(unsavedWork.entries, seen).length : 0;
+  const unsavedCount = historyReady && !legacy ? pendingUnsavedWorkEntries(unsavedWork.entries).length : 0;
 
   const badge = useMemo<SidebarCountBadge | null>(() => {
     if (legacy) {

@@ -448,9 +448,8 @@ pub(crate) fn cas_commit(
         // An import is committed even when it changes nothing: that commit,
         // carrying its key, is its receipt. Without it a retry after a lost
         // answer would find no receipt and write the import again, over
-        // whatever was saved in between. So is a salvage restore's empty
-        // restore commit, which records it.
-        if tree == main_tree && key.is_none() && !change.commits_unchanged() {
+        // whatever was saved in between.
+        if tree == main_tree && key.is_none() {
             change.settled(&staged, main.as_deref())?;
             return Ok(CasOutcome {
                 rev: main.clone(),
@@ -465,7 +464,7 @@ pub(crate) fn cas_commit(
         let parents: Vec<&str> = main.iter().map(String::as_str).collect();
         // The counts as this attempt leaves them (the shard may have
         // refused a path an earlier attempt kept).
-        let text = full_message(message, key, change.receipt_counts());
+        let text = full_message(&change.message(message), key, change.receipt_counts());
         let commit = staged
             .commit_tree(&tree, &parents, author, &committer, text.as_bytes())
             .map_err(internal)?;

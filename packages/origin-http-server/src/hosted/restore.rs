@@ -1,6 +1,6 @@
-//! Restoring unsaved work: the commit a recovery or salvage ref names
-//! merged onto `main` against their merge base (the empty tree when they
-//! share no history), as one change on canonical `main`.
+//! Restoring unsaved work: the commit a recovery ref names merged onto
+//! `main` against their merge base (the empty tree when they share no
+//! history), as one change on canonical `main`.
 //!
 //! Each attempt decides the restore with [`restore_plan::plan`], the rule
 //! Desktop restores by too: which of the work's changes come back, which
@@ -8,13 +8,12 @@
 //! `excluded`, `secret`, `attachment`, `unsupported`, `too_large`,
 //! `ignored` by the restored tree's own `.gitignore` files, or a shard's
 //! reason from an earlier attempt; then `kept` on request, a path also
-//! covering everything below it; and, for a salvage commit the gateway
-//! made, the files its salvage kept privately), which clashes are 409
-//! `restore_conflict`, whether the ref may go, and whether an empty restore
-//! commit records it. With a `baseRev` other than `main`, every path the
-//! restore changes must be as it was at `baseRev` (409 `head_moved`), as
-//! for an upload.
+//! covering everything below it), which clashes are 409 `restore_conflict`,
+//! and whether the ref may go. With a `baseRev` other than `main`, every
+//! path the restore changes must be as it was at `baseRev` (409
+//! `head_moved`), as for an upload.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -23,15 +22,13 @@ use super::change::moved_since;
 use super::read::readable;
 use crate::error::OriginError;
 use crate::publish_policy::RejectReason;
-use crate::recovery_view::{restore_committers, NotRestored, RecoveryRef};
+use crate::recovery_view::{partial_restore_commit_message, NotRestored};
 use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
 use crate::tree_merge::changed_paths;
 use crate::workspace_git::WorkspaceGit;
 
 /// Unsaved work merged onto `main`.
 pub(crate) struct Restore {
-    /// The recovery or salvage ref restored.
-    reference: RecoveryRef,
     /// The commit the ref names, already in the mirror.
     commit: String,
     /// Paths (and everything below them) that keep `main`'s version.
@@ -42,50 +39,29 @@ pub(crate) struct Restore {
     shard_refused: BTreeMap<String, RejectReason>,
     /// The last attempt's paths left as `main` has them, with why.
     not_restored: Vec<NotRestored>,
-    /// The last attempt left out only what the person chose to keep.
+    /// The last attempt left out only what the person chose to keep, and
+    /// `main` holds all of the work but that ([`restore_plan`]'s rule).
     lets_ref_go: bool,
+    /// The last attempt's commit may name the ref, so it is listed as
+    /// restored: every keep chose `main`'s version over the work's
+    /// ([`restore_plan::RestorePlan::marks_restored`]).
+    marks_restored: bool,
     /// The last attempt's changes to `main`.
     touched: Option<Vec<String>>,
-    /// The committers whose restore commits count: the gateway's own
-    /// address and Desktop's.
-    committers: Vec<String>,
-    /// The gateway's own address: a salvage commit it made lists the files
-    /// its salvage kept privately.
-    salvage_committer: String,
-    /// The last attempt brings nothing new to `main` and records the
-    /// restore with an empty restore commit.
-    marker: bool,
 }
 
 impl Restore {
-    pub(crate) fn new(
-        reference: RecoveryRef,
-        commit: String,
-        keep: Vec<String>,
-        base_rev: Option<String>,
-        committer_email: String,
-    ) -> Self {
+    pub(crate) fn new(commit: String, keep: Vec<String>, base_rev: Option<String>) -> Self {
         Self {
-            reference,
             commit,
             keep: keep.into_iter().collect(),
             base_rev,
             shard_refused: BTreeMap::new(),
             not_restored: Vec::new(),
             lets_ref_go: true,
+            marks_restored: true,
             touched: None,
-            committers: restore_committers(&committer_email),
-            salvage_committer: committer_email,
-            marker: false,
         }
-    }
-
-    /// Whether the last attempt records the restore with an empty restore
-    /// commit (a salvage ref with nothing left to bring back, which `main`
-    /// has no restore commit of yet): such a commit is made even though its
-    /// tree is `main`'s.
-    pub(crate) fn marker(&self) -> bool {
-        self.marker
     }
 
     /// What the last attempt left as `main` has it, by path.
@@ -94,9 +70,24 @@ impl Restore {
     }
 
     /// Whether anything was left out for a reason other than the person's
-    /// own choice: then the work is not all on `main`, and its ref stays.
+    /// own choice, or kept where the keep chose no version of the work's
+    /// file (a new name another file of `main` takes on a disk ignoring
+    /// case, or a clash that has left `main` since): then the work is not
+    /// all on `main`, and its ref stays.
     pub(crate) fn left_out_unsaveable(&self) -> bool {
         !self.lets_ref_go
+    }
+
+    /// The message the last attempt commits with: `message` (the restore
+    /// message naming the ref), or one naming no ref when a keep chose no
+    /// version of the work's file (`path_alias`, `nothing_to_keep`), so the
+    /// ref is not listed as restored while it holds that work.
+    pub(super) fn message<'m>(&self, message: &'m str) -> Cow<'m, str> {
+        if self.marks_restored {
+            Cow::Borrowed(message)
+        } else {
+            Cow::Owned(partial_restore_commit_message())
+        }
     }
 
     pub(super) fn build(
@@ -108,14 +99,10 @@ impl Restore {
         let plan = restore_plan::plan(
             git,
             &RestoreInput {
-                reference: &self.reference,
                 onto: main,
                 saved: &self.commit,
                 keep: &self.keep,
                 refused_before: &self.shard_refused,
-                restorers: &self.committers,
-                recorded_on: None,
-                salvage_committer: &self.salvage_committer,
                 scratch,
             },
         )
@@ -125,7 +112,7 @@ impl Restore {
         })?;
         self.touched = Some(changed_paths(git, &plan.onto_tree, &plan.tree).map_err(internal)?);
         self.lets_ref_go = plan.lets_ref_go();
-        self.marker = plan.marker;
+        self.marks_restored = plan.marks_restored();
         self.not_restored = plan.not_restored;
         Ok(plan.tree)
     }

@@ -42,7 +42,6 @@ function recovery(ref: string, extra: Record<string, unknown> = {}) {
     origin: null,
     paths: ["a.txt"],
     base: null,
-    dismissible: true,
     ...extra,
   };
 }
@@ -87,7 +86,7 @@ describe("useWorkspaceVersioningBadge", () => {
       status: "ok",
       entries: [
         recovery("refs/instafy/recovery/o/a"),
-        recovery("refs/instafy/salvage/gateway/b", { kind: "salvage", restoredRev: "f".repeat(40) }),
+        recovery("refs/instafy/recovery/o/b", { restoredRev: "f".repeat(40) }),
       ],
       originId: "origin-1",
       originMode: "hosted",
@@ -115,7 +114,7 @@ describe("useWorkspaceVersioningBadge", () => {
     await render({ ...base, chromeMode: "stateless", historyReady: true });
     expect(mocks.fetchStatus).not.toHaveBeenCalled();
     expect(mocks.fetchRecovery).toHaveBeenCalledWith({ projectId: "project-1", originId: "origin-1" });
-    // The restored salvage entry no longer counts.
+    // The restored entry no longer counts.
     expect(badge()?.textContent).toBe("1");
     expect(badge()?.getAttribute("data-label")).toBe("1 unsaved work entry");
   });
@@ -134,59 +133,15 @@ describe("useWorkspaceVersioningBadge", () => {
     expect(badge()?.textContent).toBe("0");
   });
 
-  it("stops counting salvage once this viewer has seen it, and only salvage", async () => {
+  it("counts every pending entry, whether this viewer has seen it or not", async () => {
     const unpublished = recovery("refs/instafy/recovery/o/a");
-    const salvage = recovery("refs/instafy/salvage/gateway/b", { kind: "salvage", dismissible: false });
-    mocks.fetchRecovery.mockResolvedValue({ status: "ok", entries: [unpublished, salvage], originId: "origin-1", originMode: "hosted" });
-    await render({ ...base, chromeMode: "stateless", historyReady: true, userId: "user-1" });
-    expect(badge()?.textContent).toBe("2");
-
-    // Seen on the chat row or in History: the salvage entry no longer counts.
-    await act(async () => {
-      markUnsavedWorkSeen("project-1", "user-1", [unsavedWorkSeenKey(salvage), unsavedWorkSeenKey(unpublished)]);
-    });
-    expect(badge()?.textContent).toBe("1");
-    expect(badge()?.getAttribute("data-label")).toBe("1 unsaved work entry");
-
-    // Another viewer has not seen it.
-    await render({ ...base, chromeMode: "stateless", historyReady: true, userId: "user-2" });
-    expect(badge()?.textContent).toBe("2");
-  });
-
-  it("keeps seen salvage off the badge however many newer entries are seen after it", async () => {
-    const salvage = recovery("refs/instafy/salvage/gateway/b", { kind: "salvage", dismissible: false });
-    mocks.fetchRecovery.mockResolvedValue({ status: "ok", entries: [salvage], originId: "origin-1", originMode: "hosted" });
-    await render({ ...base, chromeMode: "stateless", historyReady: true, userId: "user-1" });
+    mocks.fetchRecovery.mockResolvedValue({ status: "ok", entries: [unpublished], originId: "origin-1", originMode: "hosted" });
+    await render({ ...base, chromeMode: "stateless", historyReady: true });
     expect(badge()?.textContent).toBe("1");
     await act(async () => {
-      markUnsavedWorkSeen("project-1", "user-1", [unsavedWorkSeenKey(salvage)]);
+      markUnsavedWorkSeen("project-1", "user-1", [unsavedWorkSeenKey(unpublished)]);
     });
-    expect(badge()?.textContent).toBe("0");
-
-    // Many short-lived recovery refs come and go afterwards, seen one by one.
-    await act(async () => {
-      for (let index = 0; index < 250; index += 1) {
-        markUnsavedWorkSeen("project-1", "user-1", [`refs/instafy/recovery/o/run-${index}@${"a".repeat(40)}`]);
-      }
-    });
-    expect(badge()?.textContent).toBe("0");
-  });
-
-  it("knows salvage by its kind, whatever the ref's letter case", async () => {
-    // The git service treats salvage refs in any letter case.
-    const salvage = recovery("refs/instafy/Salvage/gateway/b", { kind: "salvage", dismissible: false });
-    mocks.fetchRecovery.mockResolvedValue({ status: "ok", entries: [salvage], originId: "origin-1", originMode: "hosted" });
-    await render({ ...base, chromeMode: "stateless", historyReady: true, userId: "user-1" });
-    await act(async () => {
-      markUnsavedWorkSeen("project-1", "user-1", [unsavedWorkSeenKey(salvage)]);
-    });
-    expect(badge()?.textContent).toBe("0");
-    await act(async () => {
-      for (let index = 0; index < 250; index += 1) {
-        markUnsavedWorkSeen("project-1", "user-1", [`refs/instafy/recovery/o/run-${index}@${"a".repeat(40)}`]);
-      }
-    });
-    expect(badge()?.textContent).toBe("0");
+    expect(badge()?.textContent).toBe("1");
   });
 
   it("labels several entries in the plural", () => {

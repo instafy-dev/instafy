@@ -225,7 +225,7 @@ describe("versioning copy shared across surfaces", () => {
     );
   });
 
-  it("names old chat uploads a salvage kept privately in a sentence of their own on Restore", () => {
+  it("names old chat uploads in a sentence of their own on Restore", () => {
     const placement = { unsavedWorkInHistory: true };
     const attachmentRule = describeFileNotSaved({ reason: "attachment", keptSavedVersion: false }, placement);
     expect(attachmentRule).toBe("Old chat upload files aren't saved to the space.");
@@ -265,7 +265,70 @@ describe("versioning copy shared across surfaces", () => {
     ).toBe("Restored as a new version. Kept the current version of src/lib.");
   });
 
-  it("says there was nothing to restore when main already had the work, marked or not", () => {
+  it("says a kept name a disk ignoring case takes for another stays in Unsaved work", () => {
+    // `Docs/guide.md` is below the kept folder `Docs`; both are on the ref only.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["Docs/guide.md", "notes.md", "todo.md"],
+        kept: ["Docs", "notes.md", "todo.md"],
+        reasons: { "Docs/guide.md": "path_alias", "notes.md": "kept", "todo.md": "path_alias" },
+      }),
+    ).toBe(
+      "Restored as a new version. Kept the current version of Docs and notes.md. Docs/guide.md and todo.md stay in Unsaved work, because a disk that ignores case or Unicode form takes them for other names in the space or in this work.",
+    );
+  });
+
+  it("never says the space has the other name when two kept names of the work clash", () => {
+    // The work adds both todo.md and TODO.md and the space has neither: each is the other's alias.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["TODO.md", "todo.md"],
+        kept: ["TODO.md", "todo.md"],
+        reasons: { "TODO.md": "path_alias", "todo.md": "path_alias" },
+      }),
+    ).toBe(
+      "Restored as a new version. TODO.md and todo.md stay in Unsaved work, because a disk that ignores case or Unicode form takes them for other names in the space or in this work.",
+    );
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["todo.md"],
+        kept: ["todo.md"],
+        reasons: { "todo.md": "path_alias" },
+      }),
+    ).toBe(
+      "Restored as a new version. todo.md stays in Unsaved work, because a disk that ignores case or Unicode form takes it for another name in the space or in this work.",
+    );
+  });
+
+  it("says a kept path with no current version to keep stays in Unsaved work", () => {
+    // The clash the person kept for left the space before the restore: the keep chose nothing.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["Notes.md"],
+        kept: ["Notes.md"],
+        reasons: { "Notes.md": "nothing_to_keep" },
+      }),
+    ).toBe(
+      "Restored as a new version. Notes.md stays in Unsaved work to restore later, because the space has no current version of it to keep.",
+    );
+    expect(
+      restoreSuccessCopy({
+        committed: false,
+        notRestored: ["docs/readme.md", "todo.md"],
+        kept: ["docs/readme.md", "todo.md"],
+        reasons: { "docs/readme.md": "nothing_to_keep", "todo.md": "nothing_to_keep" },
+        entryPaths: ["docs/readme.md", "todo.md"],
+      }),
+    ).toBe(
+      "docs/readme.md and todo.md stay in Unsaved work to restore later, because the space has no current versions of them to keep.",
+    );
+  });
+
+  it("says there was nothing to restore when main already had the work", () => {
     expect(NOTHING_TO_RESTORE_COPY).toBe("Nothing to restore. The saved version already has this work.");
     expect(restoreSuccessCopy({ committed: false, notRestored: [] })).toBe(NOTHING_TO_RESTORE_COPY);
   });

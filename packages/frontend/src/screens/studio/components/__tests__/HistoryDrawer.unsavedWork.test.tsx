@@ -64,14 +64,19 @@ vi.mock("../../../../sdk/instafy", () => ({
 }));
 
 import { readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../../workspace/unsavedWorkSeen";
-import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
-import { HISTORY_COMMIT_DEBOUNCE_MS, HistoryDrawer } from "../HistoryDrawer";
+import {
+  getUnsavedWorkSnapshot,
+  pendingUnsavedWorkEntries,
+  resetUnsavedWorkStoreForTests,
+} from "../../../../workspace/unsavedWorkStore";
+import { HistoryDrawer } from "../HistoryDrawer";
 
 const HEAD = "e".repeat(40);
 const NEW_HEAD = "f".repeat(40);
 const RECOVERY = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-1";
 const CONFLICT = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-2";
-const SALVAGE = "refs/instafy/salvage/gateway/legacy-1";
+/** Unsaved edits a restore keeps: part of them can never be saved here. */
+const KEPT = "refs/instafy/recovery/11111111-2222-3333-4444-555555555555/run-3";
 
 function recoveryEntry(ref: string, extra: Record<string, unknown> = {}) {
   return {
@@ -83,7 +88,6 @@ function recoveryEntry(ref: string, extra: Record<string, unknown> = {}) {
     origin: "11111111-2222-3333-4444-555555555555",
     paths: ["src/a.ts", "src/b.ts"],
     base: "b".repeat(40),
-    dismissible: true,
     ...extra,
   };
 }
@@ -204,14 +208,14 @@ describe("HistoryDrawer: Unsaved work", () => {
 
   it("counts the entries it shows as seen by this viewer", async () => {
     const recovery = recoveryEntry(RECOVERY);
-    const salvage = recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false });
-    mocks.fetchRecovery.mockResolvedValue(list([recovery, salvage]));
+    const kept = recoveryEntry(KEPT, { kind: "unsaved" });
+    mocks.fetchRecovery.mockResolvedValue(list([recovery, kept]));
     expect(readUnsavedWorkSeen("project-1", "user-1").size).toBe(0);
     await render();
     const seen = readUnsavedWorkSeen("project-1", "user-1");
     expect(seen.size).toBe(2);
     expect(seen.has(unsavedWorkSeenKey(recovery))).toBe(true);
-    expect(seen.has(unsavedWorkSeenKey(salvage))).toBe(true);
+    expect(seen.has(unsavedWorkSeenKey(kept))).toBe(true);
   });
 
   it("is hidden while empty", async () => {
@@ -246,25 +250,26 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(q(container, "unsaved-work-section")).not.toBeNull();
   });
 
-  it("titles rows by kind, hides Remove for salvage and marks restored salvage", async () => {
+  it("titles rows by kind, offers Remove on every row and marks a restored entry", async () => {
     mocks.fetchRecovery.mockResolvedValue(
       list([
         recoveryEntry(RECOVERY),
         recoveryEntry(CONFLICT, { kind: "conflict", paths: ["src/a.ts"] }),
-        recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false, restoredRev: NEW_HEAD }),
+        recoveryEntry(KEPT, { kind: "unsaved", restoredRev: NEW_HEAD }),
       ]),
     );
     await render();
     const entries = Array.from(container.querySelectorAll<HTMLElement>('[data-testid="unsaved-work-entry"]'));
-    expect(entries.map((entry) => entry.getAttribute("data-kind"))).toEqual(["unpublished", "conflict", "salvage"]);
+    expect(entries.map((entry) => entry.getAttribute("data-kind"))).toEqual(["unpublished", "conflict", "unsaved"]);
     expect(entries[0]?.textContent).toContain("Agent work that couldn't be saved");
     expect(entries[0]?.textContent).toContain("2 files");
     expect(entries[1]?.textContent).toContain("Agent work that conflicted with newer changes");
     expect(entries[1]?.textContent).toContain("1 file");
-    expect(entries[2]?.textContent).toContain("Archived from the old file server");
-    expect(q(entries[2]!, "unsaved-work-remove")).toBeNull();
+    expect(entries[2]?.textContent).toContain("Unsaved edits from a stopped workspace");
     expect(q(entries[2]!, "unsaved-work-restored")?.textContent).toBe("Restored");
-    expect(q(entries[0]!, "unsaved-work-remove")).not.toBeNull();
+    for (const entry of entries) {
+      expect(q(entry, "unsaved-work-remove")).not.toBeNull();
+    }
   });
 
   it("opens a read-only review of the kept work", async () => {
@@ -315,8 +320,8 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(container.querySelector('[data-testid="unsaved-work-entry"]')).toBeNull();
   });
 
-  it("keeps a restored salvage entry with a Restored badge", async () => {
-    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+  it("keeps a restored entry whose ref stays with a Restored badge", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved" })]));
     mocks.restoreRecovery.mockResolvedValue({
       ok: true,
       rev: NEW_HEAD,
@@ -328,18 +333,136 @@ describe("HistoryDrawer: Unsaved work", () => {
       originMode: "hosted",
     });
     // The server does not mark it (no restoredRev yet): the local mark stays until the next list.
-    mocks.fetchRecovery.mockResolvedValueOnce(list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+    mocks.fetchRecovery.mockResolvedValueOnce(list([recoveryEntry(KEPT, { kind: "unsaved" })]));
     await render();
     mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
-    await press(row(container, SALVAGE), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-restore");
     expect(q(container, "history-status")?.textContent).toBe("Restored as a new version.");
-    expect(q(row(container, SALVAGE), "unsaved-work-restored")).not.toBeNull();
+    expect(q(row(container, KEPT), "unsaved-work-restored")).not.toBeNull();
   });
 
-  it("does not claim a new version when restoring an already restored salvage entry", async () => {
+  it("leaves an entry pending, with no Restored badge, when a restore that keeps its ref made no version", async () => {
+    // main gained TODO.md since; the work only adds todo.md, which the person keeps.
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["todo.md"] })]));
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["todo.md"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: false,
+        notRestored: ["todo.md"],
+        notRestoredReasons: { "todo.md": "kept" },
+        refDeleted: false,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, KEPT), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-path-keep");
+    // Hold the forced reload: only the local patch decides the badge here.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    await press(row(container, KEPT), "unsaved-work-restore-rest");
+    expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ ref: KEPT, keep: ["todo.md"] }));
+    expect(q(container, "history-status")?.textContent).toBe("Kept the current version of todo.md.");
+    // No restore commit was made, so the server will not mark it either.
+    expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
+    expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
+  });
+
+  it("keeps an entry pending, with no Restored badge, when a restore leaves a name main holds in another case", async () => {
+    // main gained TODO.md since; the work adds todo.md and other.md. "Use this version" cannot
+    // save todo.md beside TODO.md, so the person keeps the current version and restores the rest.
     mocks.fetchRecovery.mockResolvedValue(
-      list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false, restoredRev: NEW_HEAD })]),
+      list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["other.md", "todo.md"] })]),
     );
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["todo.md"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: true,
+        notRestored: ["todo.md"],
+        notRestoredReasons: { "todo.md": "path_alias" },
+        refDeleted: false,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, KEPT), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-path-keep");
+    // Hold the forced reload: only the local patch decides the badge here.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    await press(row(container, KEPT), "unsaved-work-restore-rest");
+    expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ ref: KEPT, keep: ["todo.md"] }));
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Restored as a new version. todo.md stays in Unsaved work, because a disk that ignores case or Unicode form takes it for another name in the space or in this work.",
+    );
+    // The work's todo.md is only on the ref: the entry still counts as unsaved work.
+    expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
+    expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
+    expect(
+      pendingUnsavedWorkEntries(getUnsavedWorkSnapshot("project-1", "origin-1").entries).map((entry) => entry.ref),
+    ).toEqual([KEPT]);
+  });
+
+  it("keeps an entry pending, with no Restored badge, when a kept path had no current version left to keep", async () => {
+    // main gained TODO.md, the person kept it, and someone removed TODO.md before Restore the
+    // rest: the keep chose nothing, so the work's todo.md is only on the ref and can come back.
+    mocks.fetchRecovery.mockResolvedValue(
+      list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["other.md", "todo.md"] })]),
+    );
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["todo.md"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: true,
+        notRestored: ["todo.md"],
+        notRestoredReasons: { "todo.md": "nothing_to_keep" },
+        refDeleted: false,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, KEPT), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-path-keep");
+    // Hold the forced reload: only the local patch decides the badge here.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    await press(row(container, KEPT), "unsaved-work-restore-rest");
+    expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ ref: KEPT, keep: ["todo.md"] }));
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Restored as a new version. todo.md stays in Unsaved work to restore later, because the space has no current version of it to keep.",
+    );
+    expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
+    expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
+    expect(
+      pendingUnsavedWorkEntries(getUnsavedWorkSnapshot("project-1", "origin-1").entries).map((entry) => entry.ref),
+    ).toEqual([KEPT]);
+  });
+
+  it("does not claim a new version when restoring an already restored entry", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", restoredRev: NEW_HEAD })]));
     mocks.restoreRecovery.mockResolvedValue({
       ok: true,
       rev: NEW_HEAD,
@@ -355,66 +478,22 @@ describe("HistoryDrawer: Unsaved work", () => {
     const onCommit = (event: Event) => commits.push((event as CustomEvent).detail);
     window.addEventListener("instafy:workspace-commit", onCommit);
     try {
-      await press(row(container, SALVAGE), "unsaved-work-restore");
+      await press(row(container, KEPT), "unsaved-work-restore");
     } finally {
       window.removeEventListener("instafy:workspace-commit", onCommit);
     }
     expect(q(container, "history-status")?.textContent).toBe(
       "Nothing to restore. The saved version already has this work.",
     );
-    // No marked: main did not move, so nothing announces a new version.
+    // main did not move, so nothing announces a new version.
     expect(commits).toEqual([]);
   });
 
-  it("reloads History at the empty version a marked restore made and marks the salvage entry restored", async () => {
-    const MARKER = "9".repeat(40);
-    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
-    mocks.restoreRecovery.mockResolvedValue({
-      ok: true,
-      rev: MARKER,
-      baseRev: HEAD,
-      committed: false,
-      marked: true,
-      notRestored: [],
-      notRestoredReasons: {},
-      refDeleted: false,
-      originId: "origin-1",
-      originMode: "desktop",
-    });
-    await render(versioning({ mode: "desktop", firstPaintMode: "desktop", originMode: "desktop", stateless: false, chromeMode: "desktop" }));
-    expect(q(row(container, SALVAGE), "unsaved-work-restored")).toBeNull();
-    // The list after the restore has not answered: the mark comes from the answer.
-    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
-    const loads = mocks.fetchHistory.mock.calls.length;
-    const commits: unknown[] = [];
-    const onCommit = (event: Event) => commits.push((event as CustomEvent).detail);
-    window.addEventListener("instafy:workspace-commit", onCommit);
-    vi.useFakeTimers();
-    try {
-      await press(row(container, SALVAGE), "unsaved-work-restore");
-      expect(q(container, "history-status")?.textContent).toBe(
-        "Nothing to restore. The saved version already has this work.",
-      );
-      // main moved to the empty version that records the restore.
-      expect(commits).toEqual([{ projectId: "project-1", kind: "workspace.commit", data: { rev: MARKER } }]);
-      expect(q(row(container, SALVAGE), "unsaved-work-restored")?.textContent).toBe("Restored");
-      await act(async () => {
-        vi.advanceTimersByTime(HISTORY_COMMIT_DEBOUNCE_MS);
-      });
-      await flush();
-      expect(mocks.fetchHistory.mock.calls.length).toBe(loads + 1);
-    } finally {
-      window.removeEventListener("instafy:workspace-commit", onCommit);
-      vi.useRealTimers();
-    }
-  });
-
-  it("names old chat uploads the salvage kept privately apart from secret files", async () => {
+  it("names old chat uploads apart from secret files", async () => {
     mocks.fetchRecovery.mockResolvedValue(
       list([
-        recoveryEntry(SALVAGE, {
-          kind: "salvage",
-          dismissible: false,
+        recoveryEntry(KEPT, {
+          kind: "unsaved",
           paths: ["src/a.ts", ".env", "chat-upload-1.png"],
         }),
       ]),
@@ -424,7 +503,6 @@ describe("HistoryDrawer: Unsaved work", () => {
       rev: NEW_HEAD,
       baseRev: HEAD,
       committed: true,
-      marked: false,
       notRestored: [".env", "chat-upload-1.png"],
       notRestoredReasons: { ".env": "secret", "chat-upload-1.png": "attachment" },
       refDeleted: false,
@@ -432,7 +510,7 @@ describe("HistoryDrawer: Unsaved work", () => {
       originMode: "hosted",
     });
     await render();
-    await press(row(container, SALVAGE), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-restore");
     expect(q(container, "history-status")?.textContent).toBe(
       "Restored as a new version. Not restored: .env and chat-upload-1.png. Secret and ignored files stay out of the space. Old chat upload files aren't saved to the space.",
     );
@@ -1012,27 +1090,26 @@ describe("HistoryDrawer: Unsaved work", () => {
       });
     }
 
-    it("backs out of a salvage restore, which has no Remove", async () => {
-      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(SALVAGE, { kind: "salvage", dismissible: false })]));
+    it("backs out of a restore without removing the entry", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved" })]));
       conflictOn(["src/a.ts", "src/b.ts"]);
       await render();
-      await press(row(container, SALVAGE), "unsaved-work-restore");
-      const entry = row(container, SALVAGE);
+      await press(row(container, KEPT), "unsaved-work-restore");
+      const entry = row(container, KEPT);
       expect(q(entry, "unsaved-work-restore")).toBeNull();
-      expect(q(entry, "unsaved-work-remove")).toBeNull();
       const cancel = q<HTMLButtonElement>(entry, "unsaved-work-conflict-cancel");
       expect(cancel?.textContent).toBe("Cancel");
       const describedBy = cancel?.getAttribute("aria-describedby")?.split(/\s+/) ?? [];
       expect(describedBy.map((id) => document.getElementById(id)?.textContent).join(" ")).toContain(
-        "Archived from the old file server",
+        "Unsaved edits from a stopped workspace",
       );
 
       await act(async () => cancel!.focus());
       await act(async () => cancel!.click());
       await flush();
-      expect(q(row(container, SALVAGE), "unsaved-work-conflict")).toBeNull();
+      expect(q(row(container, KEPT), "unsaved-work-conflict")).toBeNull();
       // Focus goes back to the row's Restore, and the result is announced.
-      expect(document.activeElement).toBe(q(row(container, SALVAGE), "unsaved-work-restore"));
+      expect(document.activeElement).toBe(q(row(container, KEPT), "unsaved-work-restore"));
       expect(q(container, "history-status")?.textContent).toBe("Restore cancelled. Nothing was changed.");
       expect(mocks.restoreRecovery).toHaveBeenCalledTimes(1);
       expect(mocks.saveChanges).not.toHaveBeenCalled();
@@ -1040,8 +1117,8 @@ describe("HistoryDrawer: Unsaved work", () => {
       // Closing and opening History does not bring the choices back.
       await act(async () => root.render(null));
       await render();
-      expect(q(row(container, SALVAGE), "unsaved-work-conflict")).toBeNull();
-      expect(q(row(container, SALVAGE), "unsaved-work-restore")).not.toBeNull();
+      expect(q(row(container, KEPT), "unsaved-work-conflict")).toBeNull();
+      expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
     });
 
     it("says that a file already saved stays saved", async () => {

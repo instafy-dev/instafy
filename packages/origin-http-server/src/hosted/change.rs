@@ -30,6 +30,7 @@
 //!   `head_moved` when one of its deletes names a path that turned from a
 //!   file into a folder (or back) since the client read it.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -209,11 +210,13 @@ impl Change {
         }
     }
 
-    /// Whether a tree equal to `main`'s is still committed: a restore that
-    /// records itself with an empty restore commit. (An import's receipt is
-    /// committed by its key.)
-    pub(super) fn commits_unchanged(&self) -> bool {
-        matches!(self, Self::Restore(restore) if restore.marker())
+    /// The message this attempt commits with, given the change's
+    /// `message`: a restore may name no ref ([`Restore::message`]).
+    pub(super) fn message<'m>(&self, message: &'m str) -> Cow<'m, str> {
+        match self {
+            Self::Restore(restore) => restore.message(message),
+            Self::Edits(_) | Self::Revert(_) => Cow::Borrowed(message),
+        }
     }
 
     /// What an import's receipt records: the files it keeps and their size

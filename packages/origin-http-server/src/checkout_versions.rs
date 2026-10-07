@@ -5,7 +5,7 @@
 //! Everything here reads objects from the checkout's `.instafy/.git`
 //! through [`WorkspaceGit`] and never the work tree, so a read at a version
 //! shows exactly what that commit holds, whatever the folder has now.
-//! Recovery and salvage refs are fetched by their exact names from the
+//! Recovery refs are fetched by their exact names from the
 //! canonical repository on every call (see [`crate::recovery_view`]).
 //! Restoring unsaved work changes the checkout and goes through the publish
 //! (`publish::restore`); dismissing it is [`recovery_view::dismiss`].
@@ -107,7 +107,7 @@ pub(crate) fn entries_at(
     })
 }
 
-/// Fetch the recovery or salvage ref `name` by its exact name so a review
+/// Fetch the recovery ref `name` by its exact name so a review
 /// or diff of it reads objects that are here; returns its tip.
 pub(crate) fn fetch_ref_for_review(
     git: &WorkspaceGit<'_>,
@@ -119,15 +119,13 @@ pub(crate) fn fetch_ref_for_review(
     Ok(resolve_ref(git, remote, &reference)?.tip)
 }
 
-/// Every recovery and salvage ref on `remote`, newest first (at most
+/// Every recovery ref on `remote`, newest first (at most
 /// [`recovery_view::MAX_RECOVERY_ITEMS`]), each with its merge base with
 /// the checkout's `HEAD` (which a review and a restore compare against)
 /// and, when a restore commit this origin (`service_email`) or the hosted
 /// gateway made names it, `restoredRev` (see
 /// [`recovery_view::mark_restored`] and
-/// [`recovery_view::restore_committers`]). Every restore of a
-/// salvage ref that lands leaves one, so a salvage ref stays marked
-/// whatever `main` holds later.
+/// [`recovery_view::restore_committers`]).
 ///
 /// A restore counts only once canonical `main` has it: restore commits are
 /// looked for on `canonical_main` (the checkout's tracking ref of the

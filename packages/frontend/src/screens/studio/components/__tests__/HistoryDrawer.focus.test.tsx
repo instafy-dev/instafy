@@ -111,7 +111,6 @@ function recoveryEntry(ref: string, extra: Record<string, unknown> = {}) {
     origin: "11111111-2222-3333-4444-555555555555",
     paths: ["src/a.ts", "src/b.ts"],
     base: "b".repeat(40),
-    dismissible: true,
     ...extra,
   };
 }

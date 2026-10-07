@@ -434,7 +434,7 @@ fn cut_diff(mut text: String) -> (String, bool) {
     (text.trim_end().to_string(), true)
 }
 
-/// The recovery and salvage refs on `remote` that a person can review,
+/// The recovery refs on `remote` that a person can review,
 /// newest first: listed, fetched and described against `main`, each marked
 /// with the newest commit on `main` that restored it (`restoredRev`), by
 /// the rule Desktop lists them by ([`mark_restored`]: a restore commit the

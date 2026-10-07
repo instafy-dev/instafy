@@ -38,7 +38,7 @@ export type WorkspaceGitReviewSource =
       originId?: string | null;
     }
   | {
-      /** Work kept on a recovery or salvage ref, reviewed read-only. */
+      /** Work kept on a recovery ref, reviewed read-only. */
       kind: "unsavedWork";
       ref: string;
       rev: string;

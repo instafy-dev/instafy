@@ -39,7 +39,6 @@ describe("parseOriginError: 409 codes", () => {
     "rev_not_on_main",
     "idempotency_conflict",
     "recovery_ref_moved",
-    "salvage_ref_kept",
   ])("%s is carried as the code", async (code) => {
     const error = await parseOriginError(json(409, { error: "refused", code }));
     expect(error).toMatchObject({ status: 409, code, message: "refused", routeUnavailable: false });

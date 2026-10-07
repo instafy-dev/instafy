@@ -81,8 +81,18 @@ pub fn prepare_push_reports_dir(repo_root: &Path) -> Result<PathBuf> {
 /// updates that push made, so overlapping pushes never see each other's. A
 /// created ref has no old revision and a deleted ref has no new one.
 pub fn parse_push_report(report: &[u8]) -> Result<Vec<GitPushRefUpdate>> {
+    let text = std::str::from_utf8(report).context("push report is not utf-8")?;
     let mut updates = BTreeMap::new();
-    for (old_rev, new_rev, ref_name) in push_report_lines(report)? {
+    for line in text.lines() {
+        let mut fields = line.split(' ');
+        let (Some(old_rev), Some(new_rev), Some(ref_name), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            bail!("invalid push report line: {line:?}");
+        };
+        if !is_object_id(old_rev) || !is_object_id(new_rev) || !ref_name.starts_with("refs/") {
+            bail!("invalid push report line: {line:?}");
+        }
         if !ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/") {
             continue;
         }
@@ -99,41 +109,6 @@ pub fn parse_push_report(report: &[u8]) -> Result<Vec<GitPushRefUpdate>> {
         );
     }
     Ok(updates.into_values().collect())
-}
-
-/// The refs one push created (no old revision), in any namespace, in the
-/// order `post-receive` reported them. The shard logs these for salvage
-/// pushes.
-pub fn created_refs_in_push_report(report: &[u8]) -> Result<Vec<String>> {
-    let mut created: Vec<String> = Vec::new();
-    for (old_rev, new_rev, ref_name) in push_report_lines(report)? {
-        if is_zero_object_id(old_rev)
-            && !is_zero_object_id(new_rev)
-            && !created.iter().any(|existing| existing == ref_name)
-        {
-            created.push(ref_name.to_string());
-        }
-    }
-    Ok(created)
-}
-
-/// The `<old> <new> <ref>` lines of a push report, each checked.
-fn push_report_lines(report: &[u8]) -> Result<Vec<(&str, &str, &str)>> {
-    let text = std::str::from_utf8(report).context("push report is not utf-8")?;
-    text.lines()
-        .map(|line| {
-            let mut fields = line.split(' ');
-            let (Some(old_rev), Some(new_rev), Some(ref_name), None) =
-                (fields.next(), fields.next(), fields.next(), fields.next())
-            else {
-                bail!("invalid push report line: {line:?}");
-            };
-            if !is_object_id(old_rev) || !is_object_id(new_rev) || !ref_name.starts_with("refs/") {
-                bail!("invalid push report line: {line:?}");
-            }
-            Ok((old_rev, new_rev, ref_name))
-        })
-        .collect()
 }
 
 /// A SHA-1 or SHA-256 object id in lower-case hex.
@@ -291,29 +266,6 @@ mod tests {
         assert_eq!(payload.repo, "not-a-uuid.git");
         assert!(payload.project_id.is_none());
         assert_eq!(payload.kind, "git.push.received");
-    }
-
-    #[test]
-    fn created_refs_lists_every_namespace_once_in_report_order() {
-        let (zero, a, b) = ("0".repeat(40), "a".repeat(40), "b".repeat(40));
-        let report = format!(
-            "{zero} {a} refs/instafy/salvage/gateway/n-2\n\
-             {a} {b} refs/heads/main\n\
-             {zero} {b} refs/heads/feature\n\
-             {a} {zero} refs/tags/old\n\
-             {zero} {a} refs/instafy/salvage/gateway/n-1\n\
-             {zero} {a} refs/instafy/salvage/gateway/n-2\n"
-        );
-        assert_eq!(
-            super::created_refs_in_push_report(report.as_bytes()).unwrap(),
-            vec![
-                "refs/instafy/salvage/gateway/n-2",
-                "refs/heads/feature",
-                "refs/instafy/salvage/gateway/n-1",
-            ]
-        );
-        assert!(super::created_refs_in_push_report(b"").unwrap().is_empty());
-        assert!(super::created_refs_in_push_report(b"bad line\n").is_err());
     }
 
     #[test]

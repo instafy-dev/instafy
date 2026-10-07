@@ -2,7 +2,7 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { controllerClient, type OriginError, type WorkspaceRecoveryEntry } from "../sdk/instafy";
 
 /**
- * Unsaved work kept on recovery and salvage refs, shared by the History
+ * Unsaved work kept on recovery refs, shared by the History
  * drawer, the sidebar badge and the one-time chat row. Only the `stateless`
  * and `desktop` modes read it; legacy spaces never call the route.
  *
@@ -80,7 +80,7 @@ export function subscribeUnsavedWork(listener: () => void): () => void {
   };
 }
 
-/** Entries that still hold unsaved work (a restored salvage entry does not). */
+/** Entries that still hold unsaved work (a restored entry does not). */
 export function pendingUnsavedWorkEntries(entries: WorkspaceRecoveryEntry[]): WorkspaceRecoveryEntry[] {
   return entries.filter((entry) => !entry.restoredRev);
 }

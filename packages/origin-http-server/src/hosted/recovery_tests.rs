@@ -1,6 +1,6 @@
 //! Restoring and dismissing unsaved work on the gateway, against real git:
-//! recovery and salvage refs on a bare canonical repository, restored onto
-//! `main` and removed through the routes.
+//! recovery refs on a bare canonical repository, restored onto `main` and
+//! removed through the routes.
 
 use serde_json::json;
 
@@ -343,210 +343,6 @@ async fn paths_that_may_never_be_saved_stay_out_and_keep_their_ref() {
     assert_eq!(body["refDeleted"], false);
 }
 
-/// Salvage refs are restored as often as wanted and never removed: not
-/// by a restore, not by a dismiss.
-#[tokio::test(flavor = "multi_thread")]
-async fn salvage_work_is_restored_and_kept_for_good() {
-    let sc = HostedScenario::new();
-    sc.push(&[("README.md", Some(b"r\n"))], "seed");
-    let salvaged = sc.side_commit(
-        &[("draft.md", b"draft\n")],
-        "Keep unsaved edits from the retired file gateway\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: draft.md",
-    );
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    sc.push_ref(&salvaged, salvage);
-    let served = serve(&sc).await;
-    let item = entry(&listed(&served).await, salvage).expect("listed");
-    assert_eq!(item["dismissible"], false);
-    assert!(item.get("restoredRev").is_none());
-
-    let body = ok(&restore(&served, json!({ "ref": salvage, "rev": salvaged })).await);
-    assert_eq!(body["committed"], true);
-    assert_eq!(body["refDeleted"], false);
-    let restored = body["rev"].as_str().unwrap().to_string();
-    assert_eq!(
-        show(&sc, &restored, "draft.md").as_deref(),
-        Some(&b"draft\n"[..])
-    );
-    assert_eq!(
-        canonical_ref(&sc, salvage).as_deref(),
-        Some(salvaged.as_str())
-    );
-    let item = entry(&listed(&served).await, salvage).expect("still listed");
-    assert_eq!(item["restoredRev"], restored.as_str());
-
-    let answer = dismiss(&served, json!({ "ref": salvage, "rev": salvaged })).await;
-    assert_eq!(refused(&answer), (409, "salvage_ref_kept".to_string()));
-    assert_eq!(
-        canonical_ref(&sc, salvage).as_deref(),
-        Some(salvaged.as_str())
-    );
-    let body = ok(&restore(&served, json!({ "ref": salvage })).await);
-    assert_eq!(body["committed"], false);
-    assert_eq!(body["rev"], restored.as_str());
-    assert_eq!(body["refDeleted"], false);
-}
-
-/// A salvage ref whose work `main` already has (saved the same way
-/// another time, or every changed path kept) is still recorded as restored:
-/// an empty restore commit on `main` (`committed: false`, `marked: true`),
-/// so the list shows it restored for good after a reload. Once there is
-/// one, a restore again records nothing more, and a recovery ref with
-/// nothing left gets no such commit (5.5's Desktop rule, on the gateway).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
-    let sc = HostedScenario::new();
-    sc.push(&[("README.md", Some(b"r\n"))], "seed");
-    let salvaged = sc.side_commit(&[("draft.md", b"draft\n")], "kept from the file gateway");
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    sc.push_ref(&salvaged, salvage);
-    let kept = sc.side_commit(&[("other.md", b"other\n")], "kept from the file gateway");
-    let kept_ref = "refs/instafy/salvage/gateway/node-1-0123abce";
-    sc.push_ref(&kept, kept_ref);
-    let unsaved = sc.side_commit(&[("same.md", b"same\n")], "unsaved");
-    let unsaved_ref = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
-    sc.push_ref(&unsaved, &unsaved_ref);
-    // `main` got the same work another way.
-    let head = sc.push(
-        &[("draft.md", Some(b"draft\n")), ("same.md", Some(b"same\n"))],
-        "saved the same",
-    );
-    let served = serve(&sc).await;
-    let tree = |commit: &str| canonical(&sc, &["rev-parse", &format!("{commit}^{{tree}}")]);
-
-    let body = ok(&restore(&served, json!({ "ref": salvage, "rev": salvaged })).await);
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], true, "{body}");
-    assert_eq!(body["refDeleted"], false, "{body}");
-    let marker = body["rev"].as_str().unwrap().to_string();
-    assert_ne!(marker, head);
-    assert_eq!(sc.canonical_main().as_deref(), Some(marker.as_str()));
-    assert_eq!(parents(&sc, &marker), vec![head.clone()]);
-    assert_eq!(tree(&marker), tree(&head));
-    assert_eq!(
-        canonical(&sc, &["log", "-1", "--format=%B", &marker]),
-        format!("Restore unsaved work\n\nInstafy-Restored-From: {salvage}")
-    );
-    assert_eq!(
-        canonical(&sc, &["log", "-1", "--format=%ce", &marker]),
-        "gateway@instafy.dev"
-    );
-    let item = entry(&listed(&served).await, salvage).expect("listed");
-    assert_eq!(item["restoredRev"], marker.as_str());
-
-    // Again: the marker is there, so nothing more is recorded.
-    let body = ok(&restore(&served, json!({ "ref": salvage, "rev": salvaged })).await);
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
-    assert_eq!(body["rev"], marker.as_str());
-    assert_eq!(sc.canonical_main().as_deref(), Some(marker.as_str()));
-
-    // Every changed path kept: recorded too.
-    let body = ok(&restore(
-        &served,
-        json!({ "ref": kept_ref, "rev": kept, "keep": ["other.md"] }),
-    )
-    .await);
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], true, "{body}");
-    assert_eq!(
-        not_restored(&body),
-        vec![("other.md".to_string(), "kept".to_string())]
-    );
-    let kept_marker = body["rev"].as_str().unwrap().to_string();
-    assert_eq!(parents(&sc, &kept_marker), vec![marker.clone()]);
-    let entries = listed(&served).await;
-    assert_eq!(
-        entry(&entries, kept_ref).expect("listed")["restoredRev"],
-        kept_marker.as_str()
-    );
-    assert_eq!(
-        entry(&entries, salvage).expect("listed")["restoredRev"],
-        marker.as_str()
-    );
-
-    // A recovery ref with nothing left: no empty commit; `main` stays and
-    // the ref goes.
-    let body = ok(&restore(&served, json!({ "ref": unsaved_ref, "rev": unsaved })).await);
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
-    assert_eq!(body["rev"], kept_marker.as_str());
-    assert_eq!(body["refDeleted"], true, "{body}");
-    assert_eq!(sc.canonical_main().as_deref(), Some(kept_marker.as_str()));
-}
-
-/// A salvage commit the gateway made names the files its salvage kept in
-/// the private archive; a restore lists them as not restored. The same
-/// trailers from anyone else, or on a recovery ref, list nothing.
-#[tokio::test(flavor = "multi_thread")]
-async fn files_a_salvage_kept_privately_are_listed_as_not_restored() {
-    let sc = HostedScenario::new();
-    let seed = sc.push(&[("README.md", Some(b"r\n"))], "seed");
-    let side = sc.side_commit(&[("draft.md", b"draft\n")], "side");
-    let tree = canonical_tree(&sc, &side);
-    let trailers = "Instafy-Recovery-Kind: salvage\nInstafy-Path: draft.md\n\
-                    Instafy-Private-Path: secret .env\n\
-                    Instafy-Private-Path: ignored notes/local.txt\n\
-                    Instafy-Private-Path: unknown other.txt\n\
-                    Instafy-Private-Path: secret ../escape";
-    let commit_as = |email: &str| {
-        let name = "user.name=instafy-origin".to_string();
-        let email = format!("user.email={email}");
-        git_in(
-            &sc.work,
-            &[
-                "-c",
-                &name,
-                "-c",
-                &email,
-                "commit-tree",
-                &tree,
-                "-p",
-                &seed,
-                "-m",
-                "Keep unsaved edits from the retired file gateway",
-                "-m",
-                trailers,
-            ],
-        )
-    };
-    let by_gateway = commit_as(&sc.config.git_author_email);
-    let by_someone = commit_as("someone@example.com");
-    let kept = "refs/instafy/salvage/gateway/node-1-aaaaaaaa";
-    let forged = "refs/instafy/salvage/gateway/node-1-bbbbbbbb";
-    let recovery = recovery_ref("unsaved-7");
-    sc.push_ref(&by_gateway, kept);
-    sc.push_ref(&by_someone, forged);
-    sc.push_ref(&by_gateway, &recovery);
-    let served = serve(&sc).await;
-
-    let body = ok(&restore(&served, json!({ "ref": kept })).await);
-    assert_eq!(body["committed"], true);
-    assert_eq!(
-        not_restored(&body),
-        vec![
-            (".env".to_string(), "secret".to_string()),
-            ("notes/local.txt".to_string(), "ignored".to_string()),
-        ]
-    );
-    // Nothing of them reached main.
-    let restored = body["rev"].as_str().unwrap().to_string();
-    assert_eq!(show(&sc, &restored, ".env"), None);
-    assert_eq!(
-        show(&sc, &restored, "draft.md").as_deref(),
-        Some(&b"draft\n"[..])
-    );
-
-    let body = ok(&restore(&served, json!({ "ref": forged })).await);
-    assert_eq!(not_restored(&body), Vec::<(String, String)>::new());
-    let body = ok(&restore(&served, json!({ "ref": recovery })).await);
-    assert_eq!(not_restored(&body), Vec::<(String, String)>::new());
-}
-
-fn canonical_tree(sc: &HostedScenario, commit: &str) -> String {
-    git_in(&sc.work, &["rev-parse", &format!("{commit}^{{tree}}")])
-}
-
 /// A dismiss deletes the ref only while it names what the client listed:
 /// a ref that moved stays, one already gone answers `missing`, and a tag
 /// ref is removed by the tag's id (the listed one).
@@ -602,6 +398,37 @@ async fn a_dismiss_removes_only_what_was_listed() {
         assert_eq!(refused(&answer), (400, code.to_string()), "{body}");
     }
     assert_eq!(canonical_ref(&sc, &moved).as_deref(), Some(second.as_str()));
+    assert_eq!(sc.canonical_main(), main, "main is never touched");
+}
+
+/// A ref of the retired gateway salvage namespace is not unsaved work: it is
+/// not listed, read, restored or dismissed, and canonical keeps it as is.
+#[tokio::test(flavor = "multi_thread")]
+async fn salvage_refs_are_neither_listed_nor_served() {
+    let sc = HostedScenario::new();
+    sc.push(&[("README.md", Some(b"r\n"))], "seed");
+    let work = sc.side_commit(&[("README.md", b"kept\n")], "kept");
+    let reference = recovery_ref("unsaved-12");
+    sc.push_ref(&work, &reference);
+    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    sc.push_ref(&work, salvage);
+    let main = sc.canonical_main();
+    let served = serve(&sc).await;
+
+    let entries = listed(&served).await;
+    assert!(entry(&entries, &reference).is_some());
+    assert!(entry(&entries, salvage).is_none(), "{entries:?}");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+
+    let answer = get(&served, &format!("/files/README.md?ref={salvage}")).await;
+    assert_eq!(refused(&answer), (400, "invalid_ref".to_string()));
+    assert_eq!(answer.rev(), None);
+    let answer = restore(&served, json!({ "ref": salvage, "rev": work })).await;
+    assert_eq!(refused(&answer), (400, "invalid_ref".to_string()));
+    let answer = dismiss(&served, json!({ "ref": salvage, "rev": work })).await;
+    assert_eq!(refused(&answer), (400, "invalid_ref".to_string()));
+
+    assert_eq!(canonical_ref(&sc, salvage).as_deref(), Some(work.as_str()));
     assert_eq!(sc.canonical_main(), main, "main is never touched");
 }
 

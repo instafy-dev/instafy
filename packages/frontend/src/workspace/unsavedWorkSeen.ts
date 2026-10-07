@@ -8,23 +8,13 @@ import type { WorkspaceRecoveryEntry } from "../sdk/instafy";
  */
 
 const SEEN_STORAGE_PREFIX = "instafy.unsavedWork.seen.";
-/** Keep the newest recovery keys only; recovery refs are short-lived. */
+/** Keep the newest keys only; recovery refs are short-lived. */
 const SEEN_LIMIT = 200;
-/**
- * Salvage refs are kept for good and cannot be removed, and only being seen
- * stops them counting on the badge: newer recovery keys never push them out.
- * They have a cap of their own (one gateway salvage per space in practice).
- * A salvage key is marked by the entry's kind, never by the ref's spelling
- * (the git service treats salvage refs in any letter case). Git ref names
- * cannot contain ":", so no recovery key starts with this marker.
- */
-const SALVAGE_SEEN_LIMIT = 100;
-const SALVAGE_KEY_MARKER = "salvage:";
 
 const seenListeners = new Set<() => void>();
 let seenVersion = 0;
 
-/** Called whenever this browser marks entries seen (the badge and the row follow). */
+/** Called whenever this browser marks entries seen (the one-time chat row follows). */
 export function subscribeUnsavedWorkSeen(listener: () => void): () => void {
   seenListeners.add(listener);
   return () => {
@@ -52,22 +42,8 @@ function seenStorageKey(projectId: string, userId: string): string {
 }
 
 /** A moved ref (new work kept under the same name) counts as new. */
-export function unsavedWorkSeenKey(entry: Pick<WorkspaceRecoveryEntry, "ref" | "rev" | "kind">): string {
-  const key = `${entry.ref}@${entry.rev}`;
-  return entry.kind === "salvage" ? `${SALVAGE_KEY_MARKER}${key}` : key;
-}
-
-function isSalvageSeenKey(key: string): boolean {
-  return key.startsWith(SALVAGE_KEY_MARKER);
-}
-
-/** The newest keys of each kind, in their original order. */
-function trimSeenKeys(keys: string[]): string[] {
-  const kept = new Set([
-    ...keys.filter(isSalvageSeenKey).slice(-SALVAGE_SEEN_LIMIT),
-    ...keys.filter((key) => !isSalvageSeenKey(key)).slice(-SEEN_LIMIT),
-  ]);
-  return keys.filter((key) => kept.has(key));
+export function unsavedWorkSeenKey(entry: Pick<WorkspaceRecoveryEntry, "ref" | "rev">): string {
+  return `${entry.ref}@${entry.rev}`;
 }
 
 /**
@@ -126,7 +102,7 @@ export function markUnsavedWorkSeen(
     seen.delete(key);
     seen.add(key);
   }
-  const kept = trimSeenKeys(Array.from(seen));
+  const kept = Array.from(seen).slice(-SEEN_LIMIT);
   // In memory first, so the marks hold for this session whatever storage does.
   seenInMemory.set(storageKey, kept);
   try {

@@ -10,11 +10,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine as _;
-use runtime_contracts::{
-    GIT_SALVAGE_SCOPE, GIT_SALVAGE_TOKEN_SUBJECT, GIT_SALVAGE_TOKEN_TTL_SECONDS,
-};
 use serde_json::{json, Value};
 
 const SHARD_BIN: &str = env!("CARGO_BIN_EXE_git-shard");
@@ -171,10 +166,9 @@ impl Shard {
                 .env("GIT_AUTO_INIT", "1")
                 .env("GIT_DEFAULT_BRANCH", "main")
                 .env("GIT_JWKS_URL", "http://127.0.0.1:9/jwks")
-                // Neither may reach a hook: the first would replace the shared
-                // hooks directory, the second would unlock salvage refs.
-                .env("GIT_CONFIG_PARAMETERS", "'core.hookspath'='/nonexistent'")
-                .env("INSTAFY_GIT_SALVAGE_PUSH", "1");
+                // It may not reach a hook: it would replace the shared hooks
+                // directory.
+                .env("GIT_CONFIG_PARAMETERS", "'core.hookspath'='/nonexistent'");
             for (key, value) in extra_env {
                 command.env(key, value);
             }
@@ -264,59 +258,6 @@ impl Shard {
 
     fn clear_spawns(&self) {
         let _ = std::fs::remove_file(&self.spawn_log);
-    }
-
-    /// Wait until the shard's log has a line containing every one of
-    /// `needles`, and return that line.
-    fn wait_for_log_line(&self, needles: &[&str]) -> String {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let log =
-                std::fs::read_to_string(self.root.path().join("shard.log")).unwrap_or_default();
-            if let Some(line) = log
-                .lines()
-                .find(|line| needles.iter().all(|needle| line.contains(needle)))
-            {
-                return line.to_string();
-            }
-            assert!(
-                Instant::now() < deadline,
-                "no shard log line with {needles:?}: {log}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    fn log(&self) -> String {
-        std::fs::read_to_string(self.root.path().join("shard.log")).unwrap_or_default()
-    }
-
-    /// Send one raw HTTP request with an empty body, as Git Edge would
-    /// forward it, and return the status code and body.
-    fn http(&self, method: &str, target: &str, bearer: Option<&str>) -> (u16, Vec<u8>) {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(20)))
-            .unwrap();
-        let mut request = format!("{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
-        if let Some(token) = bearer {
-            request.push_str(&format!("Authorization: Bearer {token}\r\n"));
-        }
-        request.push_str("Content-Length: 0\r\nConnection: close\r\n\r\n");
-        stream.write_all(request.as_bytes()).unwrap();
-        let mut response = Vec::new();
-        let _ = stream.read_to_end(&mut response);
-        let head_end = response
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .expect("an HTTP response head");
-        let head = String::from_utf8_lossy(&response[..head_end]).to_string();
-        let status = head
-            .split(' ')
-            .nth(1)
-            .and_then(|code| code.parse().ok())
-            .unwrap_or_else(|| panic!("no status in {head:?}"));
-        (status, response[head_end + 4..].to_vec())
     }
 }
 
@@ -435,33 +376,6 @@ impl Client {
         assert!(
             !output.status.success(),
             "push {refspec} was accepted: {stderr}"
-        );
-        stderr
-    }
-
-    /// Push with `token` as the bearer credential, as Git Edge forwards it.
-    fn push_as(&self, token: &str, refspecs: &[&str]) -> Output {
-        let header = format!("http.extraHeader=Authorization: Bearer {token}");
-        let mut args = vec!["-c", header.as_str(), "push", "origin"];
-        args.extend_from_slice(refspecs);
-        self.git(&args)
-    }
-
-    fn push_as_ok(&self, token: &str, refspecs: &[&str]) {
-        let output = self.push_as(token, refspecs);
-        assert!(
-            output.status.success(),
-            "push {refspecs:?} was refused: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn push_as_refused(&self, token: &str, refspecs: &[&str]) -> String {
-        let output = self.push_as(token, refspecs);
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        assert!(
-            !output.status.success(),
-            "push {refspecs:?} was accepted: {stderr}"
         );
         stderr
     }
@@ -884,8 +798,7 @@ fn refs_must_point_to_commits() {
 
 #[test]
 fn salvage_refs_cannot_be_changed_by_a_push() {
-    // The salvage check runs before GIT_POLICY_DISABLED, and the shard drops
-    // the INSTAFY_GIT_SALVAGE_PUSH it was started with.
+    // The salvage check runs before GIT_POLICY_DISABLED.
     let shard = Shard::start("salvage", &[("GIT_POLICY_DISABLED", "1")]);
     let client = Client::clone_from(&shard);
     let initial = client.head();
@@ -898,7 +811,7 @@ fn salvage_refs_cannot_be_changed_by_a_push() {
         let stderr = client.push_refused(&format!("{work}:{target}"));
         assert!(
             stderr.contains(&format!(
-                "instafy: '{target}' holds salvaged work and cannot be changed by a push"
+                "instafy: '{target}' is reserved for salvaged work and cannot be changed by a push"
             )),
             "{stderr}"
         );
@@ -913,7 +826,7 @@ fn salvage_refs_cannot_be_changed_by_a_push() {
         let stderr = client.push_refused(&format!("{work}:{target}"));
         assert!(
             stderr.contains(&format!(
-                "instafy: '{target}' holds salvaged work and cannot be changed by a push"
+                "instafy: '{target}' is reserved for salvaged work and cannot be changed by a push"
             )),
             "{stderr}"
         );
@@ -983,387 +896,6 @@ fn refs_instafy_holds_only_recovery_refs_and_main_has_no_aliases() {
     assert_eq!(shard.repo_rev(&recovery).unwrap(), work);
     client.push_ok(&format!(":{recovery}"));
     assert!(shard.repo_rev(&recovery).is_none());
-}
-
-/// Publishes an Ed25519 JWKS on a local port, the way the controller does,
-/// and signs tokens with the matching key.
-struct TokenIssuer {
-    port: u16,
-    pkcs8: Vec<u8>,
-}
-
-const TEST_KEY_ID: &str = "salvage-test-key";
-
-impl TokenIssuer {
-    fn start() -> Self {
-        let pkcs8 = new_ed25519_pkcs8();
-        let x = URL_SAFE_NO_PAD.encode(ed25519_public_key(&pkcs8));
-        let jwks = json!({
-            "keys": [{
-                "kty": "OKP",
-                "crv": "Ed25519",
-                "alg": "EdDSA",
-                "use": "sig",
-                "kid": TEST_KEY_ID,
-                "x": x,
-            }]
-        })
-        .to_string();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { continue };
-                let Ok(reader) = stream.try_clone() else {
-                    continue;
-                };
-                let mut reader = BufReader::new(reader);
-                loop {
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim_end().is_empty() {
-                        break;
-                    }
-                }
-                let _ = stream.write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{jwks}",
-                        jwks.len()
-                    )
-                    .as_bytes(),
-                );
-            }
-        });
-        Self { port, pkcs8 }
-    }
-
-    fn jwks_url(&self) -> String {
-        format!("http://127.0.0.1:{}/.well-known/jwks.json", self.port)
-    }
-
-    fn sign(&self, claims: &Value) -> String {
-        sign_with(&self.pkcs8, claims)
-    }
-}
-
-fn new_ed25519_pkcs8() -> Vec<u8> {
-    let rng = ring::rand::SystemRandom::new();
-    ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-        .expect("generate an Ed25519 key")
-        .as_ref()
-        .to_vec()
-}
-
-fn ed25519_public_key(pkcs8: &[u8]) -> Vec<u8> {
-    use ring::signature::KeyPair as _;
-    ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8)
-        .expect("parse the Ed25519 key")
-        .public_key()
-        .as_ref()
-        .to_vec()
-}
-
-fn sign_with(pkcs8: &[u8], claims: &Value) -> String {
-    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
-    header.kid = Some(TEST_KEY_ID.to_string());
-    jsonwebtoken::encode(
-        &header,
-        claims,
-        &jsonwebtoken::EncodingKey::from_ed_der(pkcs8),
-    )
-    .expect("sign a test token")
-}
-
-fn now_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
-
-/// The exact claims the controller mints for `git.salvage`.
-fn salvage_claims(project_id: &str) -> Value {
-    let issued_at = now_seconds();
-    json!({
-        "aud": "git",
-        "sub": GIT_SALVAGE_TOKEN_SUBJECT,
-        "project_id": project_id,
-        "protocol": "git",
-        "scopes": [GIT_SALVAGE_SCOPE],
-        "iat": issued_at,
-        "exp": issued_at + GIT_SALVAGE_TOKEN_TTL_SECONDS,
-        "jti": uuid::Uuid::new_v4().to_string(),
-    })
-}
-
-fn salvage_ref(commit: &str) -> String {
-    format!("refs/instafy/salvage/gateway/node-1.a_b-{}", &commit[..8])
-}
-
-#[test]
-fn salvage_credential_may_only_create_salvage_refs() {
-    let issuer = TokenIssuer::start();
-    let jwks = issuer.jwks_url();
-    let shard = Shard::start(
-        "salvage-credential",
-        &[
-            ("GIT_JWKS_URL", jwks.as_str()),
-            ("GIT_MAX_BLOB_BYTES", "4096"),
-            ("RUST_LOG", "info"),
-        ],
-    );
-    let client = Client::clone_from(&shard);
-    let initial = client.head();
-    let claims = salvage_claims(&shard.project_id);
-    let token_id = claims["jti"].as_str().unwrap().to_string();
-    let token = issuer.sign(&claims);
-
-    let work = client.commit_file("notes/kept.md", b"kept\n", "kept");
-    let salvage = salvage_ref(&work);
-
-    // Without the credential salvage refs stay closed.
-    let stderr = client.push_refused(&format!("{work}:{salvage}"));
-    assert!(
-        stderr.contains(&format!(
-            "instafy: '{salvage}' holds salvaged work and cannot be changed by a push"
-        )),
-        "{stderr}"
-    );
-    assert!(shard.repo_rev(&salvage).is_none());
-
-    // With it the ref is created, and only created: never moved or deleted.
-    client.push_as_ok(&token, &[&format!("{work}:{salvage}")]);
-    assert_eq!(shard.repo_rev(&salvage).unwrap(), work);
-    // The shard logs the token id and the refs it created, never the token.
-    shard.wait_for_log_line(&["salvage push finished", &token_id, &salvage]);
-    assert!(
-        !shard.log().contains(&token),
-        "the shard logged the salvage token"
-    );
-    let later = client.commit_file("notes/later.md", b"later\n", "later");
-    for refspec in [format!("+{later}:{salvage}"), format!(":{salvage}")] {
-        let stderr = client.push_as_refused(&token, &[&refspec]);
-        assert!(
-            stderr.contains(&format!(
-                "instafy: salvage push refused: '{salvage}' holds salvaged work and may only be created"
-            )),
-            "{refspec}: {stderr}"
-        );
-    }
-    assert_eq!(shard.repo_rev(&salvage).unwrap(), work);
-
-    // Every other ref in a salvage push is refused, even ones a git.write
-    // push may change; the salvage ref next to them is still created.
-    let recovery = format!(
-        "refs/instafy/recovery/{}/20261002T120000Z-unpublished",
-        uuid::Uuid::new_v4()
-    );
-    let next = salvage_ref(&later);
-    let stderr = client.push_as_refused(
-        &token,
-        &[
-            &format!("{later}:refs/heads/main"),
-            &format!("{later}:refs/heads/feature"),
-            &format!("{later}:{recovery}"),
-            &format!("{later}:{next}"),
-        ],
-    );
-    for refname in ["refs/heads/main", "refs/heads/feature", recovery.as_str()] {
-        assert!(
-            stderr.contains(&format!(
-                "instafy: salvage push refused: only refs/instafy/salvage/gateway/<name> refs may be created, not '{refname}'"
-            )),
-            "{refname}: {stderr}"
-        );
-    }
-    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), initial);
-    assert!(shard.repo_rev("refs/heads/feature").is_none());
-    assert!(shard.repo_rev(&recovery).is_none());
-    assert_eq!(shard.repo_rev(&next).unwrap(), later);
-
-    // A name too long for a ref file is refused by the hook with a clear,
-    // permanent message, not by a failure to lock the ref.
-    let too_long = format!(
-        "refs/instafy/salvage/gateway/{}-{}",
-        "n".repeat(300),
-        &later[..8]
-    );
-    let stderr = client.push_as_refused(&token, &[&format!("{later}:{too_long}")]);
-    assert!(
-        stderr.contains(&format!(
-            "instafy: salvage push refused: '{too_long}' is not a valid salvage ref name"
-        )),
-        "{stderr}"
-    );
-    assert!(shard.repo_rev(&too_long).is_none());
-
-    // Path, size and object checks still apply.
-    client.git_ok(&["reset", "-q", "--hard", &initial]);
-    let vendored = client.commit_file("node_modules/pkg/index.js", b"x\n", "vendor");
-    let stderr =
-        client.push_as_refused(&token, &[&format!("{vendored}:{}", salvage_ref(&vendored))]);
-    assert!(
-        stderr.contains("instafy: blocked path 'node_modules/pkg/index.js'"),
-        "{stderr}"
-    );
-    assert!(shard.repo_rev(&salvage_ref(&vendored)).is_none());
-
-    client.git_ok(&["reset", "-q", "--hard", &initial]);
-    let big = client.commit_file("assets/big.bin", &noise(8192), "big");
-    let stderr = client.push_as_refused(&token, &[&format!("{big}:{}", salvage_ref(&big))]);
-    assert!(
-        stderr.contains("instafy: file too large 'assets/big.bin' (8192 bytes > 4096)"),
-        "{stderr}"
-    );
-
-    let blob = client.git_with_stdin(&["hash-object", "-w", "--stdin"], b"payload\n");
-    let tree = literal_tree(&client, &[("100644", b"..", &blob)]);
-    let bad = client.git_ok(&["commit-tree", "-p", &initial, "-m", "entry", &tree]);
-    let stderr = client.push_as_refused(&token, &[&format!("{bad}:{}", salvage_ref(&bad))]);
-    assert!(stderr.contains("fsck error in packed object"), "{stderr}");
-    assert!(!shard.has_object(&bad));
-    assert!(shard.repo_rev(&salvage_ref(&bad)).is_none());
-}
-
-#[test]
-fn salvage_credential_cannot_read() {
-    let issuer = TokenIssuer::start();
-    let jwks = issuer.jwks_url();
-    let shard = Shard::start("salvage-reads", &[("GIT_JWKS_URL", jwks.as_str())]);
-    let client = Client::clone_from(&shard);
-    let head = client.head();
-    let token = issuer.sign(&salvage_claims(&shard.project_id));
-    let repo = format!("/{}.git", shard.project_id);
-    let receive = "service=git-receive-pack";
-
-    // Every read is refused, including the shapes git http-backend serves as
-    // reads although they mention git-receive-pack.
-    for (method, target) in [
-        ("GET", format!("{repo}/info/refs?service=git-upload-pack")),
-        ("GET", format!("{repo}/info/refs")),
-        (
-            "GET",
-            format!("{repo}/info/refs?{receive}&service=git-upload-pack"),
-        ),
-        ("GET", format!("{repo}/info/refs?x={receive}")),
-        ("POST", format!("{repo}/git-upload-pack?{receive}")),
-        ("GET", format!("{repo}/HEAD?{receive}")),
-        ("GET", format!("{repo}/objects/info/packs?{receive}")),
-        (
-            "GET",
-            format!("{repo}/objects/{}/{}?{receive}", &head[..2], &head[2..]),
-        ),
-    ] {
-        let (status, body) = shard.http(method, &target, Some(&token));
-        assert_eq!(status, 403, "{method} {target}");
-        let body = String::from_utf8_lossy(&body);
-        assert!(!body.contains(&head), "{method} {target} leaked {body}");
-    }
-
-    // The same dumb read without the credential is served, so the refusal
-    // above is the salvage check, not the request shape.
-    let (status, body) = shard.http("GET", &format!("{repo}/HEAD?{receive}"), None);
-    assert_eq!(status, 200);
-    assert_eq!(
-        String::from_utf8_lossy(&body).trim(),
-        "ref: refs/heads/main"
-    );
-
-    // The ref advertisement of a push is served to it.
-    let (status, _) = shard.http("GET", &format!("{repo}/info/refs?{receive}"), Some(&token));
-    assert_eq!(status, 200);
-
-    // A clone with the credential fails.
-    let header = format!("http.extraHeader=Authorization: Bearer {token}");
-    let output = client.git(&["-c", &header, "clone", "-q", &shard.url(), "stolen"]);
-    assert!(!output.status.success(), "a salvage credential cloned");
-}
-
-#[test]
-fn the_shard_checks_the_salvage_credential_itself() {
-    let issuer = TokenIssuer::start();
-    let jwks = issuer.jwks_url();
-    let shard = Shard::start("salvage-claims", &[("GIT_JWKS_URL", jwks.as_str())]);
-    let client = Client::clone_from(&shard);
-    let initial = client.head();
-    let work = client.commit_file("notes/kept.md", b"kept\n", "kept");
-    let salvage = salvage_ref(&work);
-    let exact = salvage_claims(&shard.project_id);
-
-    let reshaped = |change: &dyn Fn(&mut Value)| {
-        let mut claims = exact.clone();
-        change(&mut claims);
-        issuer.sign(&claims)
-    };
-    let other_key = new_ed25519_pkcs8();
-    let refused_tokens = [
-        ("another signing key", sign_with(&other_key, &exact)),
-        (
-            "another project",
-            issuer.sign(&salvage_claims(&uuid::Uuid::new_v4().to_string())),
-        ),
-        (
-            "another audience",
-            reshaped(&|claims| claims["aud"] = json!("runtime")),
-        ),
-        (
-            "another subject",
-            reshaped(&|claims| claims["sub"] = json!(uuid::Uuid::new_v4().to_string())),
-        ),
-        (
-            "an extra scope",
-            reshaped(&|claims| claims["scopes"] = json!([GIT_SALVAGE_SCOPE, "git.write"])),
-        ),
-        (
-            "a longer lifetime",
-            reshaped(&|claims| claims["exp"] = json!(claims["exp"].as_i64().unwrap() + 60)),
-        ),
-        (
-            "a runtime binding",
-            reshaped(&|claims| claims["runtime_id"] = json!(uuid::Uuid::new_v4().to_string())),
-        ),
-        (
-            "an expired token",
-            reshaped(&|claims| {
-                let issued_at = now_seconds() - 600;
-                claims["iat"] = json!(issued_at);
-                claims["exp"] = json!(issued_at + GIT_SALVAGE_TOKEN_TTL_SECONDS);
-            }),
-        ),
-    ];
-    for (label, token) in &refused_tokens {
-        // The shard refuses the whole request (401 or 403), so a token that
-        // names git.salvage never pushes as an ordinary write either: the
-        // fast-forward of main below would otherwise be accepted.
-        for refspec in [
-            format!("{work}:{salvage}"),
-            format!("{work}:refs/heads/main"),
-        ] {
-            let stderr = client.push_as_refused(token, &[&refspec]);
-            assert!(
-                !stderr.contains("instafy:"),
-                "{label} {refspec} reached the hook: {stderr}"
-            );
-        }
-    }
-    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), initial);
-    assert!(shard.repo_rev(&salvage).is_none());
-
-    // An ordinary signed git.write token is left to Git Edge as before: it
-    // pushes main, and salvage refs stay closed to it.
-    let mut write = exact.clone();
-    write["sub"] = json!(uuid::Uuid::new_v4().to_string());
-    write["scopes"] = json!(["git.read", "git.write"]);
-    let write = issuer.sign(&write);
-    let stderr = client.push_as_refused(&write, &[&format!("{work}:{salvage}")]);
-    assert!(
-        stderr.contains(&format!(
-            "instafy: '{salvage}' holds salvaged work and cannot be changed by a push"
-        )),
-        "{stderr}"
-    );
-    client.push_as_ok(&write, &[&format!("{work}:refs/heads/main")]);
-    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), work);
-    assert!(shard.repo_rev(&salvage).is_none());
 }
 
 fn hex_to_bytes(hex: &str) -> Vec<u8> {

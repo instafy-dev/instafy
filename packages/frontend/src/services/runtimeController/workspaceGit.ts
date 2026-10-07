@@ -544,7 +544,7 @@ export async function fetchWorkspaceGitDiffFromController(params: {
   // When set, the origin diffs base→commit (or base→worktree) tree-to-tree,
   // which renders real edit diffs on snapshot-history origins.
   base?: string | null;
-  /** Read objects from this recovery or salvage ref (newer origins). */
+  /** Read objects from this recovery ref (newer origins). */
   ref?: string | null;
   accessToken?: string | null;
   runtimeId?: string | null;
@@ -645,7 +645,7 @@ export async function fetchWorkspaceGitDiffFromController(params: {
 export async function fetchWorkspaceGitHistoryReviewFromController(params: {
   projectId: string;
   commit: string;
-  /** Read objects from this recovery or salvage ref (newer origins). */
+  /** Read objects from this recovery ref (newer origins). */
   ref?: string | null;
   accessToken?: string | null;
   runtimeId?: string | null;
@@ -1441,10 +1441,10 @@ export async function revertWorkspaceGitCommitFromController(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Unsaved work (recovery and salvage refs)
+// Unsaved work (recovery refs)
 // ---------------------------------------------------------------------------
 
-export type WorkspaceRecoveryKind = "conflict" | "unpublished" | "unsaved" | "stale" | "salvage";
+export type WorkspaceRecoveryKind = "conflict" | "unpublished" | "unsaved" | "stale";
 
 export interface WorkspaceRecoveryEntry {
   ref: string;
@@ -1458,9 +1458,10 @@ export interface WorkspaceRecoveryEntry {
   paths: string[];
   /** Merge base with `main`: the base for review and restore diffs. */
   base: string | null;
-  /** Salvage entries are permanent and cannot be removed. */
-  dismissible: boolean;
-  /** Set when `main` already holds a restore of this entry (salvage refs stay). */
+  /**
+   * Set when `main` already holds a restore of this entry (a ref holding
+   * work the restore could not bring back stays).
+   */
   restoredRev?: string | null;
 }
 
@@ -1486,8 +1487,6 @@ export type WorkspaceRecoveryList =
       originMode: string | null;
     };
 
-const SALVAGE_REF_PREFIX = "refs/instafy/salvage/";
-
 function parseRecoveryEntry(value: unknown): WorkspaceRecoveryEntry | null {
   const record =
     value && typeof value === "object" && !Array.isArray(value)
@@ -1498,19 +1497,15 @@ function parseRecoveryEntry(value: unknown): WorkspaceRecoveryEntry | null {
   if (!record || !ref || !rev) {
     return null;
   }
-  // The git service treats salvage refs in any letter case.
-  const isSalvage = ref.toLowerCase().startsWith(SALVAGE_REF_PREFIX);
   const entry: WorkspaceRecoveryEntry = {
     ref,
     rev,
-    kind: readPayloadString(record, "kind") ?? (isSalvage ? "salvage" : "unpublished"),
+    kind: readPayloadString(record, "kind") ?? "unpublished",
     subject: readPayloadString(record, "subject") ?? "",
     date: readPayloadString(record, "date", "committedAt", "committed_at"),
     origin: readPayloadString(record, "origin", "originId", "origin_id"),
     paths: readOriginPathList(record.paths),
     base: readPayloadString(record, "base"),
-    dismissible:
-      typeof record.dismissible === "boolean" ? record.dismissible : !isSalvage,
   };
   const restoredRev = readPayloadString(record, "restoredRev", "restored_rev");
   if (restoredRev) {
@@ -1520,7 +1515,7 @@ function parseRecoveryEntry(value: unknown): WorkspaceRecoveryEntry | null {
 }
 
 /**
- * List unsaved work kept on recovery and salvage refs. A 404 (an older
+ * List unsaved work kept on recovery refs. A 404 (an older
  * controller or origin without the route) is `unsupported`, never an error.
  */
 export async function fetchWorkspaceRecoveryFromController(params: {
@@ -1660,13 +1655,6 @@ export type RestoreWorkspaceRecoveryResult =
       rev: string | null;
       baseRev: string | null;
       committed: boolean | null;
-      /**
-       * With `committed: false`: `main` already had the work, and an empty
-       * version on `main` (`rev`) now records the restore, so `main` moved
-       * and the entry shows restored. Salvage refs only; false when the
-       * answer does not say (older origins).
-       */
-      marked: boolean;
       notRestored: string[];
       /** Why a path in `notRestored` was left out, when the answer says (the gateway does). */
       notRestoredReasons: Record<string, string>;
@@ -1814,7 +1802,6 @@ export async function restoreWorkspaceRecoveryFromController(
     rev: readPayloadString(payload, "rev"),
     baseRev: readPayloadString(payload, "baseRev", "base_rev"),
     committed: typeof payload?.committed === "boolean" ? payload.committed : null,
-    marked: payload?.marked === true,
     notRestored: readOriginPathList(notRestored),
     notRestoredReasons: readNotRestoredReasons(notRestored),
     refDeleted: payload?.refDeleted === true || payload?.ref_deleted === true,
@@ -1823,7 +1810,7 @@ export async function restoreWorkspaceRecoveryFromController(
   };
 }
 
-/** Remove unsaved work for everyone in the space. Salvage refs refuse (409 `salvage_ref_kept`). */
+/** Remove unsaved work for everyone in the space. */
 export async function dismissWorkspaceRecoveryFromController(
   params: DismissWorkspaceRecoveryParams,
 ): Promise<DismissWorkspaceRecoveryResult | null> {
