@@ -2614,8 +2614,8 @@ impl Publisher<'_> {
             .map_err(internal)?
             .ok_or_else(|| OriginError::conflict("the workspace has no saved version yet"))?;
         let saved = fetched.commit.clone();
-        // Canonical `main` as last fetched: a restore recorded there (by the
-        // gateway, say) counts even before the branch has it.
+        // Canonical `main` as last fetched: changes the branch holds that it
+        // lacks are published by this call too (see `committed` below).
         let tracked = self.tracked_main().map_err(internal)?;
 
         // What comes back, what stays out and why, which clashes the person
