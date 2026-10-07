@@ -8,6 +8,7 @@ export type PrivateChatTarget = {
 };
 
 export interface WorkspaceControlsContextValue {
+  userId?: string | null;
   userEmail: string | null;
   homeAttentionCount?: number;
   /** Unread inbox items per project id (cross-org), for switcher badges. */

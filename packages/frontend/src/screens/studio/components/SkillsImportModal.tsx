@@ -6,6 +6,8 @@ import { Spinner } from "../../../components/Spinner";
 import { Toggle } from "../../../components/Toggle";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
 
 type SkillsImportModalProps = {
   isOpen: boolean;
@@ -40,22 +42,14 @@ export function SkillsImportModal({
   onSubmitImport,
 }: SkillsImportModalProps) {
   const fieldId = useId();
-  return (
-    <StudioDialogModal
-      isOpen={isOpen}
-      onOpenChange={onOpenChange}
-      isDismissable={!importPending}
-      data-testid="skills-add-modal"
-    >
-      <StudioDialogHeader
-        title="Add skills"
-        description="Paste a GitHub repo or skill folder link, a SKILL.md link, or a workspace path. Every skill in it installs and its setup starts in chat."
-        onClose={() => onOpenChange(false)}
-        closeLabel="Close"
-        closeButtonDisabled={importPending}
-      />
-
-      <div className="space-y-4 px-5 py-4">
+  const isDesktop = useBreakpoint("sm", { freeze: isOpen });
+  const changeOpen = (open: boolean) => { if (open || !importPending) onOpenChange(open); };
+  const form = (
+      <div className="space-y-4 px-4 py-4 sm:px-5">
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Paste a GitHub repo or skill folder link, a SKILL.md link, or a workspace path.
+          Every skill in it installs and its setup starts in chat.
+        </p>
         <Field label="Source" htmlFor={`${fieldId}-skills-import-source`}>
           <Input autoFocus id={`${fieldId}-skills-import-source`}
             value={importSource}
@@ -86,13 +80,17 @@ export function SkillsImportModal({
           data-testid="skills-import-overwrite"
         />
 
-        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-3 dark:border-slate-800">
+      </div>
+  );
+  const actions = (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 px-4 py-3 dark:border-[color:var(--color-studio-dark-panel-border)] sm:px-5">
           {onBrowseSkills ? (
             <Button
               variant="ghost"
               size="sm"
               radius="xl"
               onPress={onBrowseSkills}
+              isDisabled={importPending}
               data-testid="skills-browse"
             >
               Browse skills
@@ -102,10 +100,10 @@ export function SkillsImportModal({
           )}
           <div className="flex flex-wrap items-center gap-2">
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
               radius="xl"
-              onPress={() => onOpenChange(false)}
+              onPress={() => changeOpen(false)}
               isDisabled={importPending}
             >
               Cancel
@@ -123,7 +121,31 @@ export function SkillsImportModal({
             </Button>
           </div>
         </div>
-      </div>
+  );
+
+  if (!isDesktop) {
+    return <MobileFocusDialog isOpen={isOpen} onOpenChange={changeOpen}
+      dialogAriaLabel="Add skills" closeDisabled={importPending}
+      footer={actions} data-testid="skills-add-modal">
+      {form}
+    </MobileFocusDialog>;
+  }
+
+  return (
+    <StudioDialogModal
+      isOpen={isOpen}
+      onOpenChange={changeOpen}
+      isDismissable={!importPending}
+      isKeyboardDismissDisabled={importPending}
+      dialogAriaLabel="Add skills"
+      modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
+      dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col"
+      data-testid="skills-add-modal"
+    >
+      <StudioDialogHeader title="Add skills" onClose={() => changeOpen(false)}
+        closeLabel="Close" closeButtonDisabled={importPending} className="shrink-0" />
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{form}</div>
+      <div className="shrink-0">{actions}</div>
     </StudioDialogModal>
   );
 }

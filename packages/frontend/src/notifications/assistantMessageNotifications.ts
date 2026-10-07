@@ -80,11 +80,11 @@ function canUseLocalStorage(): boolean {
   }
 }
 
-function readStoredEnabled(): boolean | null {
+function readStoredEnabled(userId?: string): boolean | null {
   if (!canUseLocalStorage()) {
     return null;
   }
-  const raw = window.localStorage.getItem(notificationStorageKey(ENABLED_KEY));
+  const raw = window.localStorage.getItem(notificationStorageKey(ENABLED_KEY, userId));
   if (raw === "1") {
     return true;
   }
@@ -94,8 +94,8 @@ function readStoredEnabled(): boolean | null {
   return null;
 }
 
-export function areMessageNotificationsEnabled(): boolean {
-  const stored = readStoredEnabled();
+export function areMessageNotificationsEnabled(userId?: string): boolean {
+  const stored = readStoredEnabled(userId);
   if (stored !== null) {
     return stored;
   }
@@ -163,13 +163,12 @@ export async function enableBrowserMessageNotifications(): Promise<boolean> {
   }
   const permission = await Notification.requestPermission();
   if (!isNotificationSessionCurrent(session)) return false;
-  const enabled = permission === "granted";
-  logNotificationDebug("browser notification permission result", { permission, enabled });
+  const granted = permission === "granted";
+  logNotificationDebug("browser notification permission result", { permission, enabled: granted });
+  const enabled = granted && await ensureWebPushSubscriptionRegistered();
+  if (!isNotificationSessionCurrent(session)) return false;
+  logNotificationDebug("web push registration after permission", { success: enabled });
   setMessageNotificationsEnabled(enabled);
-  if (enabled) {
-    const ok = await ensureWebPushSubscriptionRegistered();
-    logNotificationDebug("web push registration after permission", { success: ok });
-  }
   return enabled;
 }
 

@@ -1,5 +1,5 @@
 import { NavArrowLeft } from "iconoir-react";
-import { useId, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
+import { useId, useLayoutEffect, useRef, type ReactNode, type Ref, type RefObject } from "react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
@@ -13,6 +13,7 @@ type StudioSidebarMobileDrillInProps = {
   backTestId: string;
   onBack: () => void;
   triggerRef?: RefObject<HTMLButtonElement | null>;
+  headerActionsRef?: Ref<HTMLDivElement>;
   children: ReactNode;
 };
 
@@ -24,6 +25,7 @@ export function StudioSidebarMobileDrillIn({
   backTestId,
   onBack,
   triggerRef,
+  headerActionsRef,
   children,
 }: StudioSidebarMobileDrillInProps) {
   const titleId = useId();
@@ -87,9 +89,10 @@ export function StudioSidebarMobileDrillIn({
         >
           <NavArrowLeft className="text-base" aria-hidden="true" />
         </IconButton>
-        <Text as="h2" id={titleId} variant="bodyStrong" tone="primary">
+        <Text as="h2" id={titleId} variant="bodyStrong" tone="primary" className="min-w-0 flex-1 truncate">
           {title}
         </Text>
+        {headerActionsRef ? <div ref={headerActionsRef} className="flex shrink-0 items-center gap-1" /> : null}
       </div>
       <div
         className="min-h-0 flex-1 overflow-y-auto px-1"

@@ -36,20 +36,22 @@ describe("ComposerInviteRoleToggle", () => {
       );
     });
 
-    const read = document.querySelector<HTMLButtonElement>(
+    const read = document.querySelector<HTMLLabelElement>(
       '[data-testid="composer-invite-access-role-viewer"]',
     );
-    const edit = document.querySelector<HTMLButtonElement>(
+    const edit = document.querySelector<HTMLLabelElement>(
       '[data-testid="composer-invite-access-role-builder"]',
     );
 
     expect(read?.textContent).toBe("Read");
     expect(edit?.textContent).toBe("Edit");
-    expect(read?.type).toBe("button");
-    expect(edit?.type).toBe("button");
-    expect(read?.getAttribute("aria-pressed")).toBe("true");
-    expect(edit?.getAttribute("aria-pressed")).toBe("false");
-    expect(read?.className).toContain("pointer-coarse:min-h-11");
+    expect(document.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe("Invitation access");
+    expect(read?.querySelector("input")?.type).toBe("radio");
+    expect(edit?.querySelector("input")?.type).toBe("radio");
+    expect(read?.querySelector("input")?.checked).toBe(true);
+    expect(edit?.querySelector("input")?.checked).toBe(false);
+    expect(read?.classList.contains("min-h-11")).toBe(true);
+    expect(read?.classList.contains("sm:pointer-fine:min-h-9")).toBe(true);
     expect(read?.className).toContain("bg-[rgba(255,255,255,0.12)]");
 
     await act(async () => edit?.click());

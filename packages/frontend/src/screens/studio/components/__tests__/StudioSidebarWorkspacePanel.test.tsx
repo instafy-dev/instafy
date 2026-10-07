@@ -4,6 +4,7 @@ import { act, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioSidebarWorkspacePanel } from "../StudioSidebarWorkspacePanel";
+import { StudioSidebarWorkspaceSwitcher } from "../StudioSidebarWorkspaceSwitcher";
 
 describe("StudioSidebarWorkspacePanel", () => {
   let container: HTMLDivElement;
@@ -13,8 +14,10 @@ describe("StudioSidebarWorkspacePanel", () => {
   const onClose = vi.fn();
   const onOuterKeyDown = vi.fn();
 
-  function Harness({ desktop = true, initialOpen = true, externalHeader = false }: { desktop?: boolean; initialOpen?: boolean; externalHeader?: boolean }) {
+  function Harness({ desktop = true, initialOpen = true, externalHeader = false, spaces = false }: { desktop?: boolean; initialOpen?: boolean; externalHeader?: boolean; spaces?: boolean }) {
     const [open, setOpen] = useState(initialOpen);
+    const [actionsTarget, setActionsTarget] = useState<HTMLDivElement | null>(null);
+    const [searchOpen, setSearchOpen] = useState(false);
     const triggerRef = useRef<HTMLButtonElement | null>(null);
     const destinationRef = useRef<HTMLButtonElement | null>(null);
     return (
@@ -23,6 +26,8 @@ describe("StudioSidebarWorkspacePanel", () => {
         <button ref={destinationRef} type="button" data-testid="destination">Chat</button>
         <StudioSidebarWorkspacePanel
           open={open}
+          mode={spaces ? "spaces" : "teams-and-spaces"}
+          headerActionsRef={spaces ? setActionsTarget : undefined}
           desktop={desktop}
           portalTarget={portalTarget}
           headerPortalTarget={externalHeader ? headerTarget : null}
@@ -32,6 +37,14 @@ describe("StudioSidebarWorkspacePanel", () => {
             setOpen(false);
           }}
         >
+          {spaces ? <StudioSidebarWorkspaceSwitcher
+            mode="spaces" spaceHeaderExternal spaceHeaderActionsTarget={actionsTarget}
+            orgOptions={[]} workspaceOrgKey="personal" onWorkspaceOrgChange={vi.fn()}
+            canSearchSpaces showProjectSearch={searchOpen} workspaceProjectSearchOpen={searchOpen}
+            workspaceProjectQuery="" onWorkspaceProjectQueryChange={vi.fn()}
+            onToggleProjectSearch={() => setSearchOpen(!searchOpen)} onCreateProject={vi.fn()}
+            currentOrgProject={null} switcherProjects={[]} onProjectMenuAction={vi.fn()}
+          /> : null}
           <button type="button" data-testid="space" onClick={() => {
             setOpen(false);
             destinationRef.current?.focus();
@@ -101,6 +114,24 @@ describe("StudioSidebarWorkspacePanel", () => {
     await click("destination");
     expect(portalTarget.querySelector('[data-testid="space"]')).not.toBeNull();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("keeps the mobile Spaces title and its scoped actions in one row", async () => {
+    await act(async () => root.render(<Harness desktop={false} spaces />));
+    const panel = container.querySelector('[data-testid="sidebar-project-switcher-menu"]')!;
+    const title = panel.querySelector("h2")!;
+    expect(title.textContent).toBe("Spaces");
+    expect(panel.querySelectorAll("h2")).toHaveLength(1);
+    // The switcher's former SPACES section header must not survive below it.
+    expect(panel.querySelector("section")).toBeNull();
+    expect(title.parentElement?.querySelector('[data-testid="sidebar-project-search-toggle"]')).not.toBeNull();
+    expect(title.parentElement?.querySelector('[data-testid="sidebar-project-new"]')).not.toBeNull();
+    await click("sidebar-project-search-toggle");
+    expect(panel.querySelector('input[aria-label="Search spaces"]')).not.toBeNull();
+    expect(title.parentElement?.querySelector("input")).toBeNull();
+    await click("sidebar-project-switcher-back");
+    expect(container.querySelector('[data-testid="sidebar-project-switcher-menu"]')).toBeNull();
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("moves focus into a mobile drill-in before the next animation frame", async () => {

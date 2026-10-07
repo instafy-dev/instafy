@@ -543,7 +543,7 @@ export function StudioTopBar({ mobileNavigation, mobilePageHeader, compactMobile
           </Button> : null}
           {shouldShowNewChat && !showConversationQuickTabs ? <StudioNewChatButton /> : null}
         </div>
-      ) : isGlobalPage ? (
+      ) : isGlobalPage && !mobilePageHeader ? (
         <div className="flex items-center gap-2 px-4 py-2 max-[375px]:gap-1 max-[375px]:px-3" data-testid="topbar-global-navigation">
           <IconButton
             onPress={onOpenHome}

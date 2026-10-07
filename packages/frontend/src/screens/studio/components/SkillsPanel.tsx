@@ -1,4 +1,3 @@
-import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
 import { useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Plus, Refresh } from "iconoir-react";
@@ -765,7 +764,6 @@ export function SkillsPanel() {
     // Only the toast's "Open chat" action leaves Settings; the flow never navigates.
     onOpenChat: () => openPanelTab("chat"),
   });
-  useStudioNavigationProtection(addSkillModalOpen, "skill import", importPending ? undefined : () => setAddSkillModalOpen(false));
 
   const {
     discoveryQuery,
@@ -1124,7 +1122,7 @@ export function SkillsPanel() {
           >
             {loading ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : <Refresh className="h-4 w-4" aria-hidden="true" />}
           </IconButton>
-          <Button
+          {!(activePrimaryTab === "installed" && hasProject && !loading && !error && skills.length === 0) ? <Button
             variant="primary"
             size="sm"
             radius="xl"
@@ -1134,7 +1132,7 @@ export function SkillsPanel() {
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
             Import
-          </Button>
+          </Button> : null}
         </div>
       }
     >

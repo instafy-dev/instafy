@@ -50,8 +50,8 @@ vi.mock("../../../../conversations/useConversation", () => ({
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   useWorkspaceTabs: () => ({ openPanelTab: vi.fn(), requestUrlPush: vi.fn() }),
 }));
-vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
-vi.mock("../InstalledSkillsSection", () => ({ InstalledSkillsSection: () => null }));
+vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children, actions }: { children: ReactNode; actions: ReactNode }) => <div>{actions}{children}</div> }));
+vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
 vi.mock("../SkillsDiscoverySection", () => ({ SkillsDiscoverySection: () => null }));
 vi.mock("../SkillsImportModal", () => ({ SkillsImportModal: () => null }));
 vi.mock("../skillsDiscoveryRequest", () => ({ useSkillsDiscoveryRequest: () => undefined }));
@@ -129,6 +129,20 @@ describe("SkillsPanel reads", () => {
     await act(async () => root.unmount());
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("offers one Import action next to the empty state", async () => {
+    mocks.list.mockResolvedValue([]);
+    await render();
+    expect(container.querySelector('[data-testid="skills-new"]')).toBeNull();
+    expect(container.querySelector('[data-testid="skills-empty-new"]')?.textContent).toContain("Import");
+    expect(Array.from(container.querySelectorAll("button")).filter(button => button.textContent?.trim() === "Import")).toHaveLength(1);
+  });
+
+  it("keeps Import in the toolbar when there are installed skills", async () => {
+    await render();
+    expect(container.querySelector('[data-testid="skills-new"]')?.textContent).toContain("Import");
+    expect(container.querySelector('[data-testid="skills-empty-new"]')).toBeNull();
   });
 
   it("does not send today's requests again in legacy mode when the origin id arrives", async () => {

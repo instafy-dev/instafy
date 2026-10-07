@@ -7,10 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerAutomation } from "../../../../sdk/instafy";
 import type { RunRecord } from "../../../../types";
 import type { FetchControllerRunsResult } from "../../../../services/runtimeController/runs";
+import { StudioDraftsProvider, useStudioDraftStore } from "../../../../workspace/StudioDrafts";
 import { AutomationsPanel } from "../AutomationsPanel";
 
 const mocks = vi.hoisted(() => ({
-  list: vi.fn(), openConversationTab: vi.fn(), requestUrlPush: vi.fn(),
+  list: vi.fn(), create: vi.fn(), openConversationTab: vi.fn(), requestUrlPush: vi.fn(),
   fetchRuns: vi.fn(), projectId: "project-a", userId: "user-a",
   runs: {} as Record<string, RunRecord>,
 }));
@@ -19,9 +20,12 @@ vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activ
 vi.mock("../../../../runtime/RuntimeStateProvider", () => ({ useRuntimeState: () => ({ runs: mocks.runs }) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({ useWorkspaceTabs: () => ({ openConversationTab: mocks.openConversationTab, requestUrlPush: mocks.requestUrlPush }) }));
-vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { automations: { listForProject: mocks.list }, runs: { fetch: mocks.fetchRuns } } }));
+vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { automations: { listForProject: mocks.list, create: mocks.create }, runs: { fetch: mocks.fetchRuns } } }));
 vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children, actions }: { children: ReactNode; actions: ReactNode }) => <div>{actions}{children}</div> }));
 vi.mock("../../../../components/aria/StudioModal", () => ({ StudioDialogModal: ({ isOpen, children }: { isOpen: boolean; children: ReactNode }) => isOpen ? <div role="dialog">{children}</div> : null }));
+
+let draftStore: ReturnType<typeof useStudioDraftStore>;
+function DraftProbe() { draftStore = useStudioDraftStore(); return null; }
 
 const automation: ControllerAutomation = {
   id: "automation-a", projectId: "project-a", userId: "user-a", name: "Check reports",
@@ -81,7 +85,7 @@ describe("automation activity and thread navigation", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
   async function render({ pendingRunHistory = false, expectedStatus }: { pendingRunHistory?: boolean; expectedStatus?: string } = {}) {
-    await act(async () => root.render(<QueryClientProvider client={queryClient}><AutomationsPanel /></QueryClientProvider>));
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><StudioDraftsProvider><DraftProbe /><AutomationsPanel /></StudioDraftsProvider></QueryClientProvider>));
     // The list mounts a second query for history, which can itself reconcile
     // a live run. Wait for that observable cascade, not a fixed render delay.
     await vi.waitFor(() => {
@@ -107,7 +111,7 @@ describe("automation activity and thread navigation", () => {
   it("keeps automation fields visibly labelled as the schedule changes", async () => {
     await render();
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automations-create-button"]')!.click());
-    const once = [...container.querySelectorAll("button")].find(button => button.textContent === "Once")!;
+    const once = container.querySelector<HTMLInputElement>('input[type="radio"][value="once"]')!;
     await act(async () => once.click());
     for (const [testId, label] of [
       ["automation-name-input", "Name"],
@@ -119,10 +123,64 @@ describe("automation activity and thread navigation", () => {
       const control = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-testid="${testId}"]`);
       expect(control?.labels?.[0]?.textContent).toBe(label);
     }
-    const weekly = [...container.querySelectorAll("button")].find(button => button.textContent === "Weekly")!;
+    const weekly = container.querySelector<HTMLInputElement>('input[type="radio"][value="weekly"]')!;
     await act(async () => weekly.click());
     expect(container.querySelector<HTMLInputElement>('[data-testid="automation-byhour-input"]')?.labels?.[0]?.textContent).toBe("Hour (0-23)");
     expect(container.querySelector<HTMLInputElement>('[data-testid="automation-byminute-input"]')?.labels?.[0]?.textContent).toBe("Minute (0-59)");
+  });
+
+  it("keeps checkbox and weekday choices local until Save, then sends their explicit values", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automations-create-button"]')!.click());
+    const enabled = container.querySelector<HTMLInputElement>('[data-testid="automation-enabled-checkbox"]')!;
+    const quiet = container.querySelector<HTMLInputElement>('[data-testid="automation-silent-when-nothing-to-report-toggle"]')!;
+    expect(enabled.type).toBe("checkbox");
+    expect(quiet.type).toBe("checkbox");
+    expect(enabled.checked).toBe(true);
+    expect(quiet.checked).toBe(false);
+    expect(container.textContent).toContain("Changes apply when you save.");
+    await act(async () => { enabled.click(); quiet.click(); });
+    await act(async () => container.querySelector<HTMLInputElement>('input[type="radio"][value="weekly"]')!.click());
+    const day = (name: string) => [...container.querySelectorAll("button")].find(button => button.textContent === name)!;
+    expect(day("Mo").getAttribute("aria-pressed")).toBe("true");
+    expect(day("Sa").getAttribute("aria-pressed")).toBe("false");
+    await act(async () => { day("Mo").click(); day("Sa").click(); });
+    expect(day("Mo").getAttribute("aria-pressed")).toBe("false");
+    expect(day("Sa").getAttribute("aria-pressed")).toBe("true");
+    expect(mocks.create).not.toHaveBeenCalled();
+    await act(async () => {
+      for (const [testId, value, element] of [
+        ["automation-name-input", "Weekly report", HTMLInputElement],
+        ["automation-prompt-input", "Review the latest changes", HTMLTextAreaElement],
+      ] as const) {
+        const field = container.querySelector(`[data-testid="${testId}"]`)!;
+        Object.getOwnPropertyDescriptor(element.prototype, "value")!.set!.call(field, value);
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automation-save-button"]')!.click());
+    expect(mocks.create).toHaveBeenCalledOnce();
+    expect(mocks.create.mock.calls[0][0]).toMatchObject({
+      status: "paused", silentWhenNothingToReport: true, scheduleKind: "weekly", byDay: ["tu", "we", "th", "fr", "sa"],
+    });
+  });
+
+  it("does not protect an untouched automation editor and releases the guard when its edit is reverted", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="automations-create-button"]')!.click());
+    expect(draftStore!.getSnapshot().protections).toHaveLength(0);
+    const name = container.querySelector<HTMLInputElement>('[data-testid="automation-name-input"]')!;
+    const change = async (value: string) => act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(name, value);
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await change("Daily review");
+    expect(draftStore!.getSnapshot().protections).toHaveLength(1);
+    await change("");
+    expect(draftStore!.getSnapshot().protections).toHaveLength(0);
+    const cancel = [...container.querySelectorAll("button")].find(button => button.textContent === "Cancel")!;
+    await act(async () => cancel.click());
+    expect(container.querySelector('[data-testid="automation-name-input"]')).toBeNull();
   });
 
   it("makes the thread directly reachable and requests URL navigation before activation", async () => {

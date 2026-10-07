@@ -91,6 +91,7 @@ beforeEach(() => {
 
 afterEach(() => {
   unmount();
+  vi.unstubAllGlobals();
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
 });
 
@@ -99,15 +100,51 @@ describe("project secrets panel", () => {
     setPendingProjectSecretPrefill({ projectId: "project-1", name: "EXAMPLE_KEY", agentHandles: ["octo"], returnPanelTab: "chat" });
     vi.mocked(controllerClient.secrets.createForProject).mockResolvedValue({ success: true });
     render("project-1");
-    expect(draftStore!.getSnapshot().protections).toHaveLength(1);
+    expect(draftStore!.getSnapshot().protections).toHaveLength(0);
     const input = field("project-secret-value-input")!;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "inert-test-value");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
+    expect(draftStore!.getSnapshot().protections).toHaveLength(1);
     mocks.openPanelTab.mockImplementation(() => expect(draftStore!.getSnapshot().protections).toHaveLength(0));
     await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="project-secret-save"]')!.click());
     expect(mocks.openPanelTab).toHaveBeenCalledExactlyOnceWith("chat", { activate: true });
+  });
+
+  it("keeps the secret draft mounted with separate header and footer when the phone keyboard reduces the viewport", async () => {
+    const viewport = Object.assign(new EventTarget(), {
+      offsetTop: 0, offsetLeft: 0, width: 411, height: 811, scale: 1,
+    });
+    vi.stubGlobal("visualViewport", viewport);
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    setPendingProjectSecretPrefill({ projectId: "project-1", name: "EXAMPLE_KEY" });
+    render("project-1");
+    const input = field("project-secret-value-input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "unsaved-test-value");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    });
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const scrollBody = dialog.querySelector("[data-mobile-dialog-body]")!;
+    const save = document.querySelector('[data-testid="project-secret-save"]')!;
+    const close = document.querySelector('[aria-label="Close"]')!;
+    expect(scrollBody.contains(input)).toBe(true);
+    expect(scrollBody.contains(save)).toBe(false);
+    expect(scrollBody.contains(close)).toBe(false);
+    expect(dialog.parentElement?.style.height).toBe("811px");
+    await act(async () => {
+      viewport.height = 448;
+      viewport.dispatchEvent(new Event("resize"));
+      await new Promise(requestAnimationFrame);
+    });
+    expect(dialog.parentElement?.style.height).toBe("448px");
+    expect(field("project-secret-value-input")).toBe(input);
+    expect(input.value).toBe("unsaved-test-value");
+    expect(document.activeElement).toBe(input);
+    expect(save.isConnected).toBe(true);
+    expect(close.isConnected).toBe(true);
   });
 
   it("opens on the value the chat card named, with the words that came with it", () => {

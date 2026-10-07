@@ -10,7 +10,6 @@ import {
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
-import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import type { ControllerProjectMember } from "../../../sdk/instafy";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 import type { ComposerInviteRole } from "./ComposerInviteAccessControls";
@@ -102,15 +101,6 @@ export function ComposerInviteModal({
     sharingPermissionsLoading,
   });
   const canInviteIntoChat = activeConversationVisibility === "private";
-
-  const handleNativeBack = useCallback(() => {
-    if (qrState) {
-      closeQr();
-      return;
-    }
-    onOpenChange(false);
-  }, [closeQr, onOpenChange, qrState]);
-  useNativeBackButtonAction(isOpen && (isDesktop || qrState !== null), handleNativeBack);
 
   useEffect(() => {
     closeQr();

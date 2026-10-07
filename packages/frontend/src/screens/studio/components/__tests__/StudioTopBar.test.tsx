@@ -369,6 +369,36 @@ describe("StudioTopBar navigation", () => {
     expect(mocks.toggleSidebar).toHaveBeenCalledOnce();
   });
 
+  it.each(["account", "team"] as const)("uses the compact page header for %s settings without losing history or search", async (navigationPage) => {
+    mocks.navigationPage = navigationPage;
+    mocks.conversationWorkspace = true;
+    const search = vi.fn();
+    const history = { canGoBack: true, canGoForward: true, goBack: vi.fn(), goForward: vi.fn() };
+    await act(async () => root.render(<StudioTopBar
+      compactMobileContext={{ onSearch: search, searchTriggerRef: createRef<HTMLButtonElement>() }}
+      mobileNavigation={{ history, visitKey: "settings-profile", onOpenPicker: mocks.toggleSidebar }}
+      mobilePageHeader={{ title: navigationPage === "account" ? "Your settings" : "Team settings", actions: null }}
+    />));
+    expect(container.querySelector('[data-testid="topbar-global-navigation"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid="mobile-studio-navigation-header"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="mobile-header-title"]')?.textContent).toBe(navigationPage === "account" ? "Your settings" : "Team settings");
+    expect(container.querySelector('[data-testid="mobile-header-space"]')?.textContent).toBe("My space");
+    expect(container.querySelector('[data-testid="mobile-header-team"]')?.textContent).toBe("My team");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mobile-header-picker"]')!.click());
+    expect(mocks.toggleSidebar).toHaveBeenCalledOnce();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mobile-header-more"]')!.click());
+    const actions = document.querySelector('[data-testid="mobile-header-actions"]')!;
+    expect(actions.querySelector('[data-testid="mobile-history-controls"]')).not.toBeNull();
+    await act(async () => actions.querySelector<HTMLButtonElement>('[aria-label="Go back"]')!.click());
+    expect(history.goBack).toHaveBeenCalledOnce();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mobile-header-more"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-header-actions"] [aria-label="Go forward"]')!.click());
+    expect(history.goForward).toHaveBeenCalledOnce();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="mobile-header-more"]')!.click());
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="mobile-header-search"]')!.click());
+    expect(search).toHaveBeenCalledOnce();
+  });
+
   it("shows the profile avatar in global navigation with a labeled button", async () => {
     mocks.navigationPage = "account";
     mocks.profile.avatarUrl = "https://example.test/avatar.png";

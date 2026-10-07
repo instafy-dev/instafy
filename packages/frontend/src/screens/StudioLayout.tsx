@@ -1941,7 +1941,10 @@ function StudioLayoutInner() {
   closeSearchForNavigation.current = () => { search.closeSearch(false); searchNavigation.cancelPending(); };
   useNativeBackButtonAction(search.open, () => search.closeSearch(), 200);
   const contextHomeActive = navigationScope.page === "home";
-  const mobilePageTitle = topbarLocationOverride?.title ?? (navigationScope.page === "workspace"
+  const compactMobileSettingsHeader = conversationWorkspace && activePanel === "settings";
+  const mobileSettingsTitle = settingsTab === "profile" ? "Your settings" : settingsTab === "project" ? "Space settings"
+    : navigationScope.orgKey === "personal" ? "Personal settings" : "Team settings";
+  const mobilePageTitle = topbarLocationOverride?.title ?? (compactMobileSettingsHeader ? mobileSettingsTitle : navigationScope.page === "workspace"
     ? activeWorkspaceTab?.title ?? "Space"
     : navigationScope.page === "account" ? "Your settings" : contextHomeActive ? "Home" : activeTeamName);
   const mobileContextHeader = (overlay = false) => <StudioMobileContextHeader
@@ -1999,6 +2002,7 @@ function StudioLayoutInner() {
       >
         <WorkspaceControlsProvider
           value={{
+            userId: currentUserId,
             userEmail: user?.email ?? null,
             homeAttentionCount,
             homeAttentionByProject,
@@ -2165,8 +2169,8 @@ function StudioLayoutInner() {
             aria-hidden={search.open || showMobileLeftDrawerOverlay || undefined}
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
-            {!isLargeScreen && !hideMobileContextWhileTyping && (!conversationWorkspace || navigationScope.page !== "workspace") ? mobileContextHeader() : null}
-            {!isLargeScreen && !homeOverview ? navigationScope.page === "workspace" ? shouldShowFilesWorkspace && filesMobileView === "tree" ? null : renderMobileWorkspaceHeader(!showMobileLeftDrawerOverlay && filesMobileView === "tree" ? mobileDrawerPageHeader : undefined) : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
+            {!isLargeScreen && !hideMobileContextWhileTyping && (!conversationWorkspace || navigationScope.page !== "workspace" && !compactMobileSettingsHeader) ? mobileContextHeader() : null}
+            {!isLargeScreen && !homeOverview ? compactMobileSettingsHeader ? renderMobileWorkspaceHeader({ title: mobilePageTitle, actions: null }) : navigationScope.page === "workspace" ? shouldShowFilesWorkspace && filesMobileView === "tree" ? null : renderMobileWorkspaceHeader(!showMobileLeftDrawerOverlay && filesMobileView === "tree" ? mobileDrawerPageHeader : undefined) : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
               <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{mobilePageTitle}</h1>
@@ -2206,7 +2210,10 @@ function StudioLayoutInner() {
               showCloseFooter={mobileSidebarNavigation.view !== "sidebar"}
               onClose={() => handleMobileSidebarOpenChange(false)}>
               <div className="flex h-full min-h-0 flex-col">
-              <div className="studio-mobile-context-header studio-context-mobile-picker" inert={mobileSidebarNavigation.view !== "sidebar" || undefined} aria-hidden={mobileSidebarNavigation.view !== "sidebar" || undefined}>
+              <div className="studio-mobile-context-header studio-context-mobile-picker"
+                hidden={leftDrawer === "workspaces" || mobileSidebarNavigation.view !== "sidebar"}
+                inert={leftDrawer === "workspaces" || mobileSidebarNavigation.view !== "sidebar" || undefined}
+                aria-hidden={leftDrawer === "workspaces" || mobileSidebarNavigation.view !== "sidebar" || undefined}>
                 {!mobileBottomNavigation && conversationWorkspace ? <IconButton variant="ghost" onPress={() => handleMobileSidebarOpenChange(false)}
                   aria-label="Close navigation" title="Close navigation" aria-expanded="true"
                   data-testid="mobile-navigation-close" className="!min-h-12 !min-w-12 shrink-0">

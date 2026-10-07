@@ -13,12 +13,14 @@ const nativeBackMock = vi.hoisted(() => ({
   handler: null as null | (() => void),
 }));
 
-vi.mock("../../../../native/useNativeBackButtonAction", () => ({
-  useNativeBackButtonAction: (enabled: boolean, onBack: () => void) => {
-    nativeBackMock.enabled = enabled;
-    nativeBackMock.handler = onBack;
+vi.mock("@capacitor/core", () => ({ Capacitor: { getPlatform: () => "android", isNativePlatform: () => false } }));
+vi.mock("@capacitor/app", () => ({ App: {
+  addListener: async (_event: string, handler: () => void) => {
+    nativeBackMock.enabled = true;
+    nativeBackMock.handler = handler;
+    return { remove: async () => { nativeBackMock.enabled = false; } };
   },
-}));
+} }));
 
 function mockDesktopWidth(isDesktop: boolean) {
   vi.stubGlobal("matchMedia", (query: string) => ({

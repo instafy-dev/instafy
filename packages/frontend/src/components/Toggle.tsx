@@ -36,6 +36,7 @@ export type ToggleProps = Omit<SwitchProps, "children" | "className"> & {
   label?: ReactNode;
   description?: ReactNode;
   size?: ToggleSize;
+  layout?: "inline" | "row";
   className?: SwitchProps["className"];
   children?: ReactNode;
 };
@@ -44,6 +45,7 @@ export function Toggle({
   label,
   description,
   size = "sm",
+  layout = "inline",
   className,
   children,
   ...props
@@ -53,7 +55,7 @@ export function Toggle({
     <Switch
       {...props}
       className={composeRenderProps(className, (value) =>
-        [WRAPPER_BASE, value].filter(Boolean).join(" ")
+        [WRAPPER_BASE, layout === "row" && "min-h-11 w-full justify-between", value].filter(Boolean).join(" ")
       )}
     >
       {({ isSelected, isDisabled }) => {
@@ -68,9 +70,9 @@ export function Toggle({
         return (
           <>
             {labelNode || description ? (
-              <span className="min-w-0 flex flex-col gap-0.5">
+              <span className={`min-w-0 flex flex-col gap-0.5 ${layout === "row" ? "flex-1" : ""}`}>
                 {labelNode ? (
-                  <span className={`${LABEL_BASE} ${SIZE_CLASSES[size].label}`}>{labelNode}</span>
+                  <span className={`${LABEL_BASE} ${SIZE_CLASSES[size].label} break-words`}>{labelNode}</span>
                 ) : null}
                 {description ? (
                   <span

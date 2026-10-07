@@ -32,6 +32,7 @@ describe("StudioOrganizationRail", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    localStorage.clear();
     // JSDOM lacks the CSS.escape API React Aria uses for menu keyboard focus.
     vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     container = document.createElement("div");
@@ -191,6 +192,43 @@ describe("StudioOrganizationRail", () => {
     expect(document.querySelector('[data-testid="sidebar-org-context-members"]')).toBeNull();
     await render({ selectedOrgKey: "three" });
     expect(document.querySelector('[data-testid="sidebar-org-context-menu"]')).toBeNull();
+  });
+
+  it("moves teams from their menu without navigating, announces the order and restores it on remount", async () => {
+    await render({ userId: "rail-user" });
+    const order = () => [...container.querySelectorAll('[data-testid="sidebar-team-rail-list"] button')].map(button => button.getAttribute("data-testid"));
+    await openContextMenu("three");
+    await contextAction("move-up");
+    expect(order()).toEqual(["sidebar-team-one", "sidebar-team-three", "sidebar-team-empty"]);
+    expect(onSelectOrganization).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Three moved to position 2 of 3.");
+    expect(container.querySelector('[data-testid="sidebar-team-one"]')?.getAttribute("aria-current")).toBe("page");
+    await act(async () => root.render(null));
+    await render({ userId: "rail-user" });
+    expect(order()).toEqual(["sidebar-team-one", "sidebar-team-three", "sidebar-team-empty"]);
+    await render({ userId: "other-user" });
+    expect(order()).toEqual(["sidebar-team-one", "sidebar-team-empty", "sidebar-team-three"]);
+  });
+
+  it("offers keyboard reorder actions even without team management permissions and disables list boundaries", async () => {
+    await render({ userId: "rail-user", onOpenOrganizationOverview: undefined, onOpenOrganizationSettings: undefined });
+    await openContextMenu("one");
+    expect(document.querySelector('[data-testid="sidebar-org-context-move-up"]')?.getAttribute("aria-disabled")).toBe("true");
+    expect(document.querySelector('[data-testid="sidebar-org-context-move-down"]')?.hasAttribute("aria-disabled")).toBe(false);
+    expect(document.querySelector('[data-testid="sidebar-org-context-settings"]')).toBeNull();
+    await contextAction("move-down");
+    expect(onSelectOrganization).not.toHaveBeenCalled();
+    await openContextMenu("three");
+    expect(document.querySelector('[data-testid="sidebar-org-context-move-down"]')?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("does not offer reorder for a single organization or an unresolved account", async () => {
+    await render({ userId: "rail-user", organizations: [organizations[0]] });
+    await openContextMenu("one");
+    expect(document.querySelector('[data-testid="sidebar-org-context-move-up"]')).toBeNull();
+    await render({ userId: null });
+    await openContextMenu("empty");
+    expect(document.querySelector('[data-testid="sidebar-org-context-move-down"]')).toBeNull();
   });
 
 });

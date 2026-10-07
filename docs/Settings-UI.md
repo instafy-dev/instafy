@@ -13,7 +13,10 @@ including when Studio has another panel open.
   to its trigger on dismissal and follows the selected category when the layout changes.
 - When the compact picker already names the content section, keep the matching heading
   for screen readers without repeating it visually. Descriptions, actions and other section
-  headings remain visible. Wide category lists and compact tabs retain content headings.
+  headings remain visible. Wide category lists and compact tabs retain meaningful section
+  headings, but do not repeat a tab label immediately below it. Skills uses one Installed
+  tab and a short explanation in its content, with a single Import action: in the empty
+  state when empty, otherwise in the page toolbar.
 
 Your settings has Profile, Appearance, Notifications and Advanced categories.
 Appearance owns the device's System/Light/Dark theme. Theme changes apply immediately. Team and
@@ -59,7 +62,19 @@ than wrapping or compressing their titles. New chat stays in the sidebar, and th
 menu stays in the organization rail. The header's left column shares the expanded navigation
 width, including at narrow desktop sizes, so tabs never extend over that sidebar. Keep the
 column when navigation collapses to preserve usable pickers; subtract native window-control
-insets within it rather than shifting the tabs. Mobile retains its context and navigation rows.
+insets within it rather than shifting the tabs. In conversation workspaces, mobile tools and
+Settings use one compact title/context header.
+Navigation stays on the left; More actions retains Back, Forward, Home and Search. Settings
+keeps its category picker below that header.
+On wide browser and Desktop layouts, drag an organization icon up or down in the left
+rail to change its order. Home and the footer remain fixed. A short movement threshold
+keeps normal clicks selecting teams; touch dragging starts after a brief hold so swiping
+can still scroll the rail. Escape cancels a drag. The icon's context menu also offers
+**Move up** and **Move down**, available with Shift+F10 from the keyboard. Reordering
+keeps the current team and workspace active. Order is saved per signed-in account in
+that browser or Desktop installation; it does not sync between devices. Newly joined
+teams appear after the saved order.
+
 The desktop space selector fits its icon, name and chevron with 8px horizontal padding.
 Unused column width stays outside its hover surface; long names truncate within the column.
 The mobile workspace and navigation drawer share header padding and breadcrumb spacing, so
@@ -68,6 +83,9 @@ opening navigation keeps Home, team and space identities at the same leading pos
 The space picker uses the same compact list on desktop, mobile and inline navigation. Each row
 has a small identity icon, a name, an optional unread count and a trailing current-space checkmark.
 Recent spaces stay alphabetically ordered; **Browse all spaces** remains below the list.
+On mobile, browsing all spaces replaces the navigation sheet’s root toolbar with one Spaces
+header: Back, Search spaces, current-space settings and New space. Back restores the root
+toolbar and its chat actions; the two scopes do not show competing search/plus controls.
 
 Search expands into the same header when activated, temporarily hiding the tabs and revealing
 the existing scope chips and full-page results. It starts in the team and accessible space shown
@@ -127,6 +145,18 @@ this pattern. Notification categories use plain groups with quiet separators; in
 AI/voice and provider setup forms use the same field spacing as profile settings. Preserve
 list cards and permission warnings where their boundary carries meaning.
 
+Immediate on/off preferences use `Toggle`; use `layout="row"` for a full-width setting
+with its label and description on the left and its switch aligned on the right. Choices
+inside an explicit-save editor use checkboxes and apply only through Save. Secrets shares
+the `SettingsFormActions` footer with the other editors, including mobile touch targets.
+
+Notifications initially shows the current platform's delivery channel, four category
+switches and the privacy preference. Other account-wide channels remain in a disclosure;
+changing one switch updates only that category/channel. Device permission is displayed
+separately from category preferences and is read without prompting on entry. Android
+currently offers in-app preferences without a push-enrollment action; iPhone and browser
+permission setup stays explicit. A failed setup must clear its pending status.
+
 Use `Field` for persistent labels above controls. Connect `htmlFor` to the control's `id`;
 text that only looks like a label is insufficient. Do not wrap secondary buttons inside a
 label. Keep visible labels in automation, import and provider setup dialogs as well. Default labels are 13px medium-weight
@@ -153,8 +183,12 @@ styles: a quiet group with 12px corners, 8px options and one filled selected opt
 changes text contrast without looking selected. Keyboard focus outlines the label using
 React Aria’s focus-visible state; pointer clicks must not draw a second frame around the
 whole option. Share these styles through `segmentedControlStyles` while preserving each
-control’s meaning: category navigation uses `aria-current`, and value choices use
-`aria-pressed`. Keep category routes and immediate preference updates independent.
+control’s meaning: category navigation uses `aria-current`, while mutually exclusive values
+use a labelled radio group with one tab stop and arrow-key selection. `SegmentedControl` owns
+that radio behavior; Appearance, Credits display options, Automation schedule/runtime and
+Invite access share it. Multi-select weekday chips keep `aria-pressed` instead.
+Use checkboxes for Automation choices that remain drafts until Save, and say when they apply.
+Keep category routes, immediate preference updates and explicit form saves independent.
 
 In the personal profile form, keep the circular photo and Display name beside each other,
 including on narrow screens. The photo is a labelled button with a pencil badge that opens

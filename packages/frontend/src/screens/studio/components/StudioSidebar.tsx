@@ -148,6 +148,7 @@ export function StudioSidebar({
   onNavigationHeaderAction,
 }: StudioSidebarProps) {
   const {
+    userId,
     userEmail,
     homeAttentionCount = 0,
     homeAttentionByProject = {},
@@ -1086,7 +1087,7 @@ export function StudioSidebar({
   const selectedTeamRole = controllerOrgs.find((org) => org.id === activeOrgKey)?.role;
   const canCreateSelectedTeamSpace = activeOrgKey === "personal" || ["owner", "admin", "builder"].includes(selectedTeamRole ?? "");
 
-  const externalSpaceHeader = !!workspaceSwitcherHeaderPortalTarget && workspaceSwitcherMode === "spaces";
+  const externalSpaceHeader = workspaceSwitcherMode === "spaces" && (!isLargeScreen || !!workspaceSwitcherHeaderPortalTarget);
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
       spaceHeaderExternal={externalSpaceHeader}
@@ -1181,7 +1182,7 @@ export function StudioSidebar({
       {navigationHeaderPortalTarget ? createPortal(renderNavigationHeader ? renderNavigationHeader({ team: teamMenu, space: spaceControl, teamName: activeOrgName, accentColor: activeOrgAccentColor, onBrowseTeams: () => { onNavigationHeaderAction?.(); openWorkspaceSwitcher(); } }) : navigationPath, navigationHeaderPortalTarget) : null}
       {mobileSheet && navigationActionsPortalTarget ? createPortal(headerNewChat, navigationActionsPortalTarget) : null}
       {desktopRail ? <StudioOrganizationRail
-        organizations={orgDeckTeams} selectedOrgKey={activeOrgKey}
+        userId={userId} organizations={orgDeckTeams} selectedOrgKey={activeOrgKey}
         pendingOrgKey={mergedProjectsError ? null : pendingOrgSwitchKey}
         homeActive={activePanel === "home"} homeAttentionCount={homeAttentionCount}
         orgAttentionCounts={homeAttentionByOrg} titleBarFree={titleBarFree}
