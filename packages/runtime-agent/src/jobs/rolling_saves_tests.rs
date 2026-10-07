@@ -64,7 +64,7 @@ async fn serve(app: Router) -> SocketAddr {
 /// A controller that grants a rolling save for `origin_id` (or refuses it),
 /// and refuses every workspace lease, as when someone else holds it.
 async fn controller(seen: &Seen, origin_id: Uuid, refusal: Option<(u16, JsonValue)>) -> Url {
-    async fn access_token(
+    async fn mint_grant(
         State(stub): State<ControllerStub>,
         headers: HeaderMap,
         axum::Json(body): axum::Json<JsonValue>,
@@ -96,7 +96,7 @@ async fn controller(seen: &Seen, origin_id: Uuid, refusal: Option<(u16, JsonValu
         (AxumStatusCode::CONFLICT, r#"{"message":"held"}"#)
     }
     let app = Router::new()
-        .route("/access_token", post(access_token))
+        .route("/access_token", post(mint_grant))
         .route("/lease/acquire", post(lease))
         .with_state(ControllerStub {
             seen: seen.clone(),
@@ -483,6 +483,39 @@ async fn a_refusal_stops_the_ticker() {
         assert!(seen.saves().is_empty());
         ticker.stop().await;
     }
+}
+
+/// The job's workspace token expired (the controller answers 401): no later
+/// grant can succeed, so the ticks end, and the job's own save records why
+/// it did not land.
+#[tokio::test]
+async fn an_expired_workspace_token_ends_the_ticks_and_is_recorded() {
+    let seen = Seen::default();
+    let origin_id = Uuid::new_v4();
+    let controller_url = controller(
+        &seen,
+        origin_id,
+        Some((401, json!({ "message": "token expired" }))),
+    )
+    .await;
+    let endpoint = origin(&seen, (200, durable())).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let saves = RollingSaves::from_gate(gate(
+        &controller_url,
+        local_origin(origin_id, &endpoint, Some(probe(true, 0, reads))),
+    ))
+    .unwrap();
+
+    let ticker = saves.start_ticker_every(Duration::from_millis(20));
+    wait_for(|| ticker.is_finished()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(seen.grants.load(Ordering::SeqCst), 1, "one tick, then none");
+    ticker.stop().await;
+
+    let artifact = saves.save_at_turn_end().await.expect("recorded");
+    assert_eq!(artifact["kind"], "working-state");
+    assert_eq!(artifact["error"], "workspace_token_expired");
+    assert!(seen.saves().is_empty());
 }
 
 /// A grant naming any origin but this runtime's own is never used.

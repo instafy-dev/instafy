@@ -15,8 +15,11 @@
 //!   origin only, and posts the save to the local listener.
 //! - A 403 ends the ticks for this job: `rolling_saves_off` when the
 //!   controller's switch is off, or a job the controller will not save for.
-//!   Anything else (a busy workspace, a stop, a network failure) waits for
-//!   the next tick. Ticks never overlap, and a missed one is not queued.
+//!   So does a 401: the job's workspace token expired (the controller mints
+//!   it once, when the job is leased), so no later grant can succeed; the
+//!   job's own save at its end is recorded as not landed. Anything else (a
+//!   busy workspace, a stop, a network failure) waits for the next tick.
+//!   Ticks never overlap, and a missed one is not queued.
 //! - When the job's body returns, whatever it returned, the ticker stops
 //!   and the job's own save runs; a save that did not land is recorded on
 //!   the job as a `working-state` artifact.
@@ -79,6 +82,9 @@ pub(crate) enum SaveOutcome {
     Off,
     /// The controller will not save for this job (a fixed code or status).
     Refused(String),
+    /// The job's workspace token expired: no later grant of this job can
+    /// succeed.
+    Expired,
     /// Not now: the workspace was busy, a stop began, or the grant named
     /// another origin. The next tick tries again.
     Skipped(&'static str),
@@ -89,7 +95,7 @@ pub(crate) enum SaveOutcome {
 impl SaveOutcome {
     /// No later tick of this job can succeed.
     fn ends_ticks(&self) -> bool {
-        matches!(self, Self::Off | Self::Refused(_))
+        matches!(self, Self::Off | Self::Refused(_) | Self::Expired)
     }
 }
 
@@ -256,6 +262,9 @@ impl RollingSaves {
                 .await
                 .map_err(|_| SaveOutcome::Failed("grant_response_invalid".to_string()));
         }
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(SaveOutcome::Expired);
+        }
         if status == StatusCode::FORBIDDEN {
             let code = response
                 .json::<RefusalBody>()
@@ -332,6 +341,10 @@ fn log_tick(saves: &RollingSaves, outcome: &SaveOutcome) {
             %code,
             "the controller will not save this job's folder; no more ticks"
         ),
+        SaveOutcome::Expired => warn!(
+            job_id = %saves.job_id,
+            "the job's workspace token expired; no more rolling saves for this job, and its own save at the end will not land either"
+        ),
         SaveOutcome::Skipped(reason) => {
             debug!(job_id = %saves.job_id, reason, "rolling save skipped")
         }
@@ -351,6 +364,7 @@ pub(crate) fn turn_end_artifact(outcome: &SaveOutcome) -> Option<JsonValue> {
             .clone()
             .unwrap_or_else(|| "not_durable".to_string()),
         SaveOutcome::Unchanged | SaveOutcome::Off | SaveOutcome::Refused(_) => return None,
+        SaveOutcome::Expired => "workspace_token_expired".to_string(),
         SaveOutcome::Skipped(reason) => (*reason).to_string(),
         SaveOutcome::Failed(code) => code.clone(),
     };

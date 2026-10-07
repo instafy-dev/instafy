@@ -607,7 +607,10 @@ node's checkout a cache.
   change.
 - `WORKING_STATE_SAVES=off` on the controller turns rolling saves off: the
   grant answers 403 `rolling_saves_off`, the runtime stops ticking, and
-  stops ask the origin for no save of their own. Between turns nothing ticks;
+  stops ask the origin for no save of their own. A 401 (the job's workspace
+  token, minted once when the job is leased and valid for at least an hour,
+  has expired) also ends the job's ticks, with one warning, and its own save
+  at the end is recorded as `workspace_token_expired`. Between turns nothing ticks;
   a requested stop (a user's or a runtime's) does not save under anyone's
   write access, so the last turn-end save covers the agent's work.
 
