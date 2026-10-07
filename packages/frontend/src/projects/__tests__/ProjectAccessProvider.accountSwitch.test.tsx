@@ -5,7 +5,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { createMemoryRouter, RouterProvider, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerAppRouter } from "../../navigation/appRouterBridge";
-import { clearRestoredAwaitingIntent } from "../../runtime/idlePauseRegistry";
 import { useWorkspaceStore } from "../../store";
 import { ProjectAccessProvider, useProjectAccess } from "../ProjectAccessProvider";
 import { ProjectStateProvider } from "../ProjectStateProvider";
@@ -123,8 +122,6 @@ describe("ProjectAccessProvider when the account changes in place", () => {
     unregisterRouter = null;
     await act(async () => root.unmount());
     container.remove();
-    clearRestoredAwaitingIntent(FIRST_ACCOUNT_PROJECT_ID);
-    clearRestoredAwaitingIntent(SECOND_ACCOUNT_PROJECT_ID);
     useWorkspaceStore.setState({ projects: {}, activeProjectId: "" });
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");

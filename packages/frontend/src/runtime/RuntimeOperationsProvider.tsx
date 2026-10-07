@@ -23,7 +23,12 @@ import { cloneRuntimeState } from "./defaults";
 import { useDesktopRuntimeEnsure } from "./hooks/useDesktopRuntimeEnsure";
 import { useHostedRuntimeEnsure, type EnsureHostedRuntimeOptions } from "./hooks/useHostedRuntimeEnsure";
 import { useHostedRuntimePolicy } from "./hooks/useHostedRuntimePolicy";
-import { clearManualStop, markManualStop } from "./idlePauseRegistry";
+import {
+  clearIdlePaused,
+  clearManualStop,
+  clearRestoredAwaitingIntent,
+  markManualStop,
+} from "./idlePauseRegistry";
 import { stopLeavesNoLiveHostedRuntime } from "./hooks/manualStopDecisions";
 import { useRuntimeControllerSync } from "./hooks/useRuntimeControllerSync";
 import { useRuntimeStatusRefresh } from "./hooks/useRuntimeStatusRefresh";
@@ -546,8 +551,6 @@ export function RuntimeOperationsProvider({
         showStatus("Local/desktop runtimes cannot be started from here.", "warning", 4000);
         return false;
       }
-      // An explicit Start lifts a deliberate Stop.
-      clearManualStop(projectId);
       try {
         await controllerClient.runtimes.start({
           projectId,
@@ -559,6 +562,14 @@ export function RuntimeOperationsProvider({
         });
         showStatus("Runtime start requested", "info", 2500);
         await refreshRuntimeStatuses();
+        // An explicit Start is intent in this space, so it lifts a deliberate
+        // Stop and every other hold. Lifted only once the refresh shows the
+        // machine starting: before that the auto-start would read "no
+        // machine" and ask for a second one. If the start fails, the fallback
+        // below goes through ensureHostedRuntime, which lifts them too.
+        clearManualStop(projectId);
+        clearRestoredAwaitingIntent(projectId);
+        clearIdlePaused(projectId);
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

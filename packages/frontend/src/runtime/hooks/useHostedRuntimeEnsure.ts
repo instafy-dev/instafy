@@ -4,7 +4,7 @@ import {
   type ControllerRuntimeStatusEntry,
 } from "../../sdk/instafy";
 import { isBrowserRuntimeClaimActive } from "../browserRuntimeClaimRegistry";
-import { clearManualStop, clearRestoredAwaitingIntent } from "../idlePauseRegistry";
+import { clearIdlePaused, clearManualStop, clearRestoredAwaitingIntent } from "../idlePauseRegistry";
 import {
   hostedRuntimeLimitDetailsFromError,
   type HostedRuntimeLimitErrorDetails,
@@ -52,6 +52,11 @@ export function useHostedRuntimeEnsure({
   // a caller awaiting `ensureHostedRuntime` can read it before React commits
   // the matching `setRuntimeEnsureLimit` update.
   const lastHostedEnsureLimitRef = useRef<HostedRuntimeLimitErrorDetails | null>(null);
+  // The request already on its way for a space. An explicit request lifts the
+  // holds, which wakes the auto-start effects; they call back in before
+  // `hostedRuntimeEnsuring` is set and wait on this one instead of asking the
+  // controller for a second machine.
+  const inFlightEnsureRef = useRef<{ projectId: string; request: Promise<boolean> } | null>(null);
   const debugLog = useCallback((message: string, data?: unknown) => {
     if (typeof window === "undefined") {
       return;
@@ -264,7 +269,7 @@ export function useHostedRuntimeEnsure({
     showDesktopRuntimeHelp,
   ]);
 
-  const ensureHostedRuntime = useCallback(async (options?: EnsureHostedRuntimeOptions) => {
+  const requestHostedRuntime = useCallback(async (options?: EnsureHostedRuntimeOptions) => {
     const force = options?.force === true;
     const effectiveProjectId = resolveEffectiveProjectId();
     // A new request starts with no recorded limit; only a launch that fails
@@ -280,9 +285,11 @@ export function useHostedRuntimeEnsure({
     }
     // Every explicit request for a machine (Reconnect, Start, sending a
     // prompt) funnels through here; the auto-ensure effects are gated before
-    // they call it. So reaching this point lifts a deliberate Stop.
+    // they call it. So reaching this point lifts a deliberate Stop, the wait
+    // for intent and an idle pause.
     clearManualStop(effectiveProjectId);
     clearRestoredAwaitingIntent(effectiveProjectId);
+    clearIdlePaused(effectiveProjectId);
     if (isBrowserRuntimeClaimActive(effectiveProjectId)) {
       debugLog("hosted-runtime:ensure-skip-browser-claim", {
         projectId: effectiveProjectId,
@@ -386,6 +393,29 @@ export function useHostedRuntimeEnsure({
     performHostedRuntimeEnsure,
     resolveEffectiveProjectId,
   ]);
+
+  const ensureHostedRuntime = useCallback(
+    (options?: EnsureHostedRuntimeOptions): Promise<boolean> => {
+      const projectId = resolveEffectiveProjectId();
+      const inFlight = inFlightEnsureRef.current;
+      // A forced request never waits on a plain one, which may settle for the
+      // very row the force exists to skip.
+      if (options?.force !== true && projectId && inFlight?.projectId === projectId) {
+        debugLog("hosted-runtime:ensure-joined", { projectId });
+        return inFlight.request;
+      }
+      const request: Promise<boolean> = requestHostedRuntime(options).finally(() => {
+        if (inFlightEnsureRef.current?.request === request) {
+          inFlightEnsureRef.current = null;
+        }
+      });
+      if (projectId) {
+        inFlightEnsureRef.current = { projectId, request };
+      }
+      return request;
+    },
+    [debugLog, requestHostedRuntime, resolveEffectiveProjectId],
+  );
 
   const hasHostedRuntimeInProgress = useMemo(() => {
     return runtimeStatuses.some((entry) => {

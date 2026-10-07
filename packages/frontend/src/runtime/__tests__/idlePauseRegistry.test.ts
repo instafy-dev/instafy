@@ -44,11 +44,11 @@ describe("idlePauseRegistry manual stop hold", () => {
     expect(isManualStopHeld(null)).toBe(false);
   });
 
-  it("survives the pointer wake that clears an idle pause", () => {
+  it("survives the composer wake that clears an idle pause", () => {
     markIdlePaused("project-a");
     markManualStop("project-a");
 
-    // StudioLayout calls this on any pointerdown/keydown.
+    // useComposerIntentWake calls this when someone types in the chat.
     clearIdlePaused("project-a");
 
     expect(isIdlePaused("project-a")).toBe(false);

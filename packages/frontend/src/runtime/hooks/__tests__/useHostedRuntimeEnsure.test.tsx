@@ -4,6 +4,17 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
+import {
+  clearIdlePaused,
+  clearManualStop,
+  clearRestoredAwaitingIntent,
+  isIdlePaused,
+  isManualStopHeld,
+  isRestoredAwaitingIntent,
+  markIdlePaused,
+  markManualStop,
+  markRestoredAwaitingIntent,
+} from "../../idlePauseRegistry";
 
 // vi.mock is hoisted above module-level consts, so the spy has to be too.
 const { ensure } = vi.hoisted(() => ({ ensure: vi.fn() }));
@@ -108,5 +119,53 @@ describe("useHostedRuntimeEnsure force", () => {
     expect(ensure).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: PROJECT_ID, provider: "instafy-cloud" }),
     );
+  });
+
+  it("answers a second request for the space with the one already on its way", async () => {
+    // Send in a held space lifts the holds, which wakes the auto-start; it
+    // calls back in before the first request has asked the controller.
+    await act(async () => {
+      root.render(<Harness statuses={[]} />);
+    });
+    let results: boolean[] = [];
+    await act(async () => {
+      results = await Promise.all([ensureHostedRuntime!(), ensureHostedRuntime!()]);
+    });
+    expect(results).toEqual([true, true]);
+    expect(ensure).toHaveBeenCalledTimes(1);
+
+    // Once it has settled, the next request asks again.
+    await act(async () => {
+      await ensureHostedRuntime!();
+    });
+    expect(ensure).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a forced request wait on a plain one", async () => {
+    let results: boolean[] = [];
+    await act(async () => {
+      results = await Promise.all([ensureHostedRuntime!(), ensureHostedRuntime!({ force: true })]);
+    });
+    expect(results).toEqual([true, true]);
+    // The plain one reuses the young requested row; only the forced one asks.
+    expect(ensure).toHaveBeenCalledTimes(1);
+  });
+
+  it("lifts every hold on the space, since only an explicit request gets here", async () => {
+    markManualStop(PROJECT_ID);
+    markRestoredAwaitingIntent(PROJECT_ID);
+    markIdlePaused(PROJECT_ID);
+    try {
+      await act(async () => {
+        await ensureHostedRuntime!();
+      });
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+      expect(isRestoredAwaitingIntent(PROJECT_ID)).toBe(false);
+      expect(isIdlePaused(PROJECT_ID)).toBe(false);
+    } finally {
+      clearManualStop(PROJECT_ID);
+      clearRestoredAwaitingIntent(PROJECT_ID);
+      clearIdlePaused(PROJECT_ID);
+    }
   });
 });

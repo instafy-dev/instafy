@@ -7,6 +7,7 @@ import {
   isManualStopHeld,
   isRestoredAwaitingIntent,
   markIdlePaused,
+  markManualStop,
 } from "../idlePauseRegistry";
 import {
   BROWSER_RUNTIME_CLAIM_CHANGED_EVENT,
@@ -14,6 +15,7 @@ import {
 } from "../browserRuntimeClaimRegistry";
 import {
   isRuntimeLimitReclaimStopReason,
+  resolveRuntimeStopHold,
   shouldAttemptUnexpectedHostedRuntimeRecovery,
   shouldTrackHostedRuntimeLifecycleEvent,
   UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS,
@@ -26,6 +28,7 @@ import {
   shouldAutoEnsurePreferredHostedRuntime,
   shouldPollHostedBootingRuntime,
 } from "./hostedRuntimeRecoveryDecisions";
+import { stopLeavesNoLiveHostedRuntime } from "./manualStopDecisions";
 import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
 
 interface UseHostedRuntimeRecoveryEffectsArgs {
@@ -96,6 +99,10 @@ export function useHostedRuntimeRecoveryEffects({
   useEffect(() => {
     hasPendingProjectWorkRef.current = hasPendingProjectWork;
   }, [hasPendingProjectWork]);
+  const runtimeStatusesRef = useRef(runtimeStatuses);
+  useEffect(() => {
+    runtimeStatusesRef.current = runtimeStatuses;
+  }, [runtimeStatuses]);
   const [browserRuntimeClaimEpoch, setBrowserRuntimeClaimEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -158,10 +165,31 @@ export function useHostedRuntimeRecoveryEffects({
         if (reclaimStop) {
           // The machine was idle and another space in the team needed the
           // slot. Hold every auto-ensure path the way an idle pause does, so
-          // this tab does not take the slot straight back; the user's next
-          // interaction (or send) wakes it as usual.
+          // this tab does not take the slot straight back; writing in the
+          // chat (or Send, or Start) wakes it as usual.
           markIdlePaused(projectId);
           debugLog("hosted-runtime:reclaimed-for-waiting-space", { projectId });
+          return;
+        }
+        // A stop this tab did not make. Without a hold it would see no ready
+        // machine and start it again. The platform stops (credits_exhausted,
+        // oom_killed) arrive here today. A Stop, Remove or takeover made in
+        // another tab or device does not yet: the controller records those
+        // without publishing runtime.stopped, so this branch waits for that
+        // event and such a stop can still be undone elsewhere.
+        const hold = resolveRuntimeStopHold(reason);
+        if (hold === "manual_stop") {
+          // Only the last live hosted machine means "no machine", as in the
+          // tab that pressed Stop.
+          const runtimeId =
+            custom.detail?.data && typeof custom.detail.data.runtimeId === "string"
+              ? custom.detail.data.runtimeId
+              : "";
+          if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, runtimeId)) {
+            markManualStop(projectId);
+          }
+        } else if (hold === "idle_pause") {
+          markIdlePaused(projectId);
         }
         return;
       }
@@ -283,8 +311,8 @@ export function useHostedRuntimeRecoveryEffects({
     runtimeReady,
   ]);
 
-  // Re-evaluate the auto-ensure gate when an idle pause is cleared by user
-  // interaction (the registry is module state, not reactive on its own).
+  // Re-evaluate the auto-ensure gate when an idle pause or the wait for
+  // intent is lifted (the registry is module state, not reactive on its own).
   const [idlePauseEpoch, setIdlePauseEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -295,8 +323,8 @@ export function useHostedRuntimeRecoveryEffects({
     return () => window.removeEventListener(IDLE_PAUSE_CLEARED_EVENT, bump);
   }, []);
 
-  // A deliberate Stop is the same kind of module-level hold, but it survives
-  // pointer and keyboard activity; re-evaluate when it is set or lifted.
+  // A deliberate Stop is the same kind of module-level hold, but writing in
+  // the composer does not lift it; re-evaluate when it is set or lifted.
   const [manualStopEpoch, setManualStopEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -316,7 +344,7 @@ export function useHostedRuntimeRecoveryEffects({
   useEffect(() => {
     // A machine paused for inactivity must stay paused until the user comes
     // back — auto-ensure would otherwise undo every idle stop within seconds.
-    // A space startup reopened from memory waits for intent the same way.
+    // Every space waits for intent the same way each time it is opened.
     if (isIdlePaused(activeProjectId) || isRestoredAwaitingIntent(activeProjectId)) {
       return;
     }
