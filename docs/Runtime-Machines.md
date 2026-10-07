@@ -577,7 +577,10 @@ node's checkout a cache.
 - A tick never adds a path inside a nested repository and leaves out files
   over 2 MiB: both keep the slot's earlier entry (where that earlier save
   changed them; otherwise the current parent's) until the job's end or a
-  stop saves them. A tick that finds the workspace busy answers 409 and waits
+  stop saves them. A tick also sends at most 16 MiB of new content, smallest
+  files first, so a small edit lands within its ten-second budget however
+  much else the turn wrote; the rest keeps its earlier entry and goes out
+  with the next tick, which runs even if nothing changed meanwhile. A tick that finds the workspace busy answers 409 and waits
   for the next one; while a stop's fence is up it answers 503. Ticks never
   overlap and a missed one is not queued.
 - When the job's body returns, whatever it returned (a terminal command and a

@@ -29,8 +29,10 @@
 //!    or a nested repository. Its parent is the merge base with canonical
 //!    `main` (or `main` itself for an unrelated history). A rolling save
 //!    made while the agent works (a tick) leaves out files over
-//!    [`TICK_MAX_BLOB_BYTES`] and anything inside a nested repository: they
-//!    keep the entry the slot (or the parent) has;
+//!    [`TICK_MAX_BLOB_BYTES`], anything inside a nested repository and new
+//!    content past [`TICK_MAX_NEW_BYTES`] (smallest files go first): they
+//!    keep the entry the slot (or the parent) has, and content left out for
+//!    the budget goes with the next tick;
 //! 3. compares it with the local record [`RECORD_REF`], the last slot
 //!    commit canonical confirmed: the same parent, tree and origin push
 //!    nothing;
@@ -103,6 +105,12 @@ const MAX_SLOT_RETRIES: usize = 3;
 /// Files larger than this wait for the turn's end or the stop instead of
 /// going out with a rolling save.
 pub const TICK_MAX_BLOB_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The most new content (files whose version is on neither the slot nor
+/// the parent) one rolling save sends. Smaller files go first; the rest
+/// keep their earlier entry and go out with the next tick, so a small edit
+/// always lands within [`TICK_BUDGET`].
+pub const TICK_MAX_NEW_BYTES: u64 = 16 * 1024 * 1024;
 
 /// How long a rolling save may spend on the network.
 pub const TICK_BUDGET: Duration = Duration::from_secs(10);
@@ -239,6 +247,9 @@ struct Saved {
     fingerprint: Fingerprint,
     /// Nothing was deferred: canonical holds every file of that state.
     complete: bool,
+    /// The save left new content for the next one (see
+    /// [`TICK_MAX_NEW_BYTES`]): it runs even if nothing changes meanwhile.
+    more: bool,
 }
 
 type Fingerprint = [u8; 32];
@@ -254,7 +265,7 @@ impl WorkingMemory {
         let remembered = self.lock();
         let changed = remembered
             .saved
-            .is_none_or(|saved| saved.fingerprint != fingerprint);
+            .is_none_or(|saved| saved.fingerprint != fingerprint || saved.more);
         let complete = remembered.saved.is_some_and(|saved| saved.complete);
         WorkingState {
             unsaved: count(unsaved),
@@ -266,11 +277,12 @@ impl WorkingMemory {
         }
     }
 
-    fn confirm(&self, fingerprint: Fingerprint, complete: bool, durable: bool) {
+    fn confirm(&self, fingerprint: Fingerprint, complete: bool, durable: bool, more: bool) {
         let mut remembered = self.lock();
         remembered.saved = Some(Saved {
             fingerprint,
             complete,
+            more,
         });
         if durable {
             remembered.persisted_at = Some(Utc::now());
@@ -566,6 +578,9 @@ pub(crate) struct Plan {
     /// Paths the tree took from the slot (or the parent) instead of the
     /// folder.
     deferred: Vec<String>,
+    /// Some of them were left for the next tick only because this one had
+    /// sent [`TICK_MAX_NEW_BYTES`] already.
+    more: bool,
     record: Option<Record>,
     /// A push or delete of the slot is waiting for canonical's answer.
     unsettled: bool,
@@ -716,6 +731,13 @@ impl Publisher<'_> {
             _ => tree_with_entries_from(&self.git, &dirty_tree, parent.as_deref(), &frozen)?,
         };
         let record = read_record(&self.git)?;
+        let mut deferred = deferred;
+        let mut more = false;
+        if reason == PersistReason::Tick {
+            let over = self.over_budget(&tree, parent.as_deref(), record.as_ref(), &deferred)?;
+            more = !over.is_empty();
+            deferred.extend(over);
+        }
         if !deferred.is_empty() {
             // A tick never drops what an earlier save held: a deferred path
             // keeps the earlier save's entry where that save changed it, and
@@ -742,7 +764,64 @@ impl Publisher<'_> {
             record,
             unsettled,
             pending,
+            more,
         })
+    }
+
+    /// The paths a tick leaves for the next one so it sends at most
+    /// [`TICK_MAX_NEW_BYTES`] of new content: content whose version is on
+    /// neither the slot nor the parent, smallest first (sizes as the folder
+    /// has them now). Paths `deferred` already are not counted.
+    fn over_budget(
+        &self,
+        tree: &str,
+        parent: Option<&str>,
+        record: Option<&Record>,
+        deferred: &[String],
+    ) -> Result<Vec<String>> {
+        let parent_tree = match parent {
+            Some(parent) => self.git.tree_id(parent)?,
+            None => self.git.empty_tree()?,
+        };
+        let mut fresh = changed_paths(&self.git, &parent_tree, tree)?;
+        if let Some(record) = record {
+            let unsent: BTreeSet<String> = changed_paths(&self.git, &record.tree, tree)?
+                .into_iter()
+                .collect();
+            fresh.retain(|path| unsent.contains(path));
+        }
+        fresh.retain(|path| {
+            !deferred
+                .iter()
+                .any(|kept| path == kept || path.starts_with(&format!("{kept}/")))
+        });
+        let root = self.git.root();
+        let mut sized: Vec<(u64, String)> = fresh
+            .into_iter()
+            .map(|path| {
+                let size = std::fs::symlink_metadata(root.join(&path))
+                    .map(|metadata| {
+                        if metadata.is_file() {
+                            metadata.len()
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
+                (size, path)
+            })
+            .collect();
+        sized.sort();
+        let mut sent = 0u64;
+        let mut over = Vec::new();
+        for (size, path) in sized {
+            if sent.saturating_add(size) > TICK_MAX_NEW_BYTES {
+                over.push(path);
+            } else {
+                sent += size;
+            }
+        }
+        Ok(over)
     }
 
     /// Bring canonical up to date with `plan`: push what waits on local
@@ -756,6 +835,7 @@ impl Publisher<'_> {
     ) -> StopSave {
         let fingerprint = plan.fingerprint;
         let complete = plan.deferred.is_empty();
+        let more = plan.more;
         let unsaved_paths = plan
             .parent_tree(&self.git)
             .and_then(|parent_tree| changed_paths(&self.git, &parent_tree, &plan.tree));
@@ -765,7 +845,7 @@ impl Publisher<'_> {
         match outcome {
             Ok(settled) => {
                 let durable = settled.held.is_some() && complete && local_only == 0;
-                memory.confirm(fingerprint, complete, durable);
+                memory.confirm(fingerprint, complete, durable, more);
                 StopSave {
                     state: WorkingState {
                         unsaved: count(settled.unsaved.unwrap_or(unsaved)),
@@ -1282,7 +1362,7 @@ pub(crate) fn settle_locally(
         .map(|paths| paths.len())
         .unwrap_or_default();
     let durable = complete && plan.pending == 0;
-    memory.confirm(plan.fingerprint, complete, durable);
+    memory.confirm(plan.fingerprint, complete, durable, plan.more);
     WorkingState {
         unsaved: count(unsaved),
         local_only: count(plan.pending),

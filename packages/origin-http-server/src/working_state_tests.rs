@@ -536,6 +536,50 @@ fn a_tick_defers_a_large_file_to_the_turns_end() {
     );
 }
 
+/// A tick sends a bounded amount of new content: small edits go first, and
+/// what does not fit waits for the next tick, which goes on even though
+/// nothing changed in between.
+#[test]
+fn a_tick_sends_small_edits_first_and_the_rest_over_later_ticks() {
+    let fx = Fixture::new();
+    let size = 2 * 1024 * 1024 - 1024;
+    let count = 12usize;
+    for index in 0..count {
+        fx.write(
+            &format!("assets/{index:02}.bin"),
+            &vec![index as u8 + 1; size],
+        );
+    }
+    fx.write("src/small.rs", b"fn small() {}\n");
+    let saved = |fx: &Fixture| {
+        (0..count)
+            .filter(|index| fx.slot_file(&format!("assets/{index:02}.bin")).is_some())
+            .count()
+    };
+
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(!state.durable, "{state:?}");
+    assert_eq!(
+        fx.slot_file("src/small.rs").as_deref(),
+        Some("fn small() {}\n")
+    );
+    let first = saved(&fx);
+    assert!(
+        first > 0 && first < count,
+        "{first} of {count} files in one tick"
+    );
+    let budget = usize::try_from(TICK_MAX_NEW_BYTES).unwrap();
+    assert!(first * size <= budget, "{first} files over the budget");
+    assert!(fx.state().changed, "the next tick goes on");
+
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(saved(&fx), count);
+    assert!(state.durable, "{state:?}");
+    assert!(!fx.state().changed);
+}
+
 /// A deferred file keeps the earlier save's entry only where that save
 /// changed it. Otherwise it keeps the current parent's: a save on a newer
 /// `main` never carries an older `main`'s version of a file (which a
