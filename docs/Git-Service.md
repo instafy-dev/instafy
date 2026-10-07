@@ -789,9 +789,12 @@ Studio picks its versioning UI per space from the project's default origin:
   commit means the entry moved and the list reloads, and a missing header never does. On a
   Desktop space it refuses a file the folder has uncommitted edits to, writes nothing over a
   symlink or nested repository in the folder (`unsupported_entry`), and sends the folder's current
-  blob as `expected` (none when the folder lacks the path, which the origin enforces). Remove
-  deletes a recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs stay and show
-  "Restored" once restored. A restore of work the saved version already has answers
+  blob as `expected` (none when the folder lacks the path, which the origin enforces). A restore
+  removes a recovery ref once `main` holds its work, all of it but what the person kept; a kept
+  new name that a disk ignoring case takes for another file of `main` (`todo.md` beside `TODO.md`,
+  `Docs/guide.md` beside a file `docs`) keeps the ref, because `main` holds that work under neither
+  name. Remove deletes a recovery ref for everyone (`POST /git/recovery/dismiss`); salvage refs
+  stay and show "Restored" once restored. A restore of work the saved version already has answers
   `committed: false` and says there was nothing to restore; with `marked: true` (salvage refs) the
   origin recorded it as an empty version on `main`, so History also reloads at that `rev` and the
   entry shows "Restored". `notRestored` items carry a `reason` on both Desktop and the gateway: a file left out as an old chat

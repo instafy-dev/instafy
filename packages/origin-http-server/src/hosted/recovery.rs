@@ -156,7 +156,8 @@ pub(super) async fn handle_restore(
 
     // A recovery ref goes once `main` has its work (all of it but what the
     // person chose to keep). Salvage refs stay for good, and so does a ref
-    // holding work that could not be saved here.
+    // holding work that could not be saved here, or that a keep left out
+    // under a name `main` holds another file at on a disk ignoring case.
     let ref_deleted = if reference.dismissible() && !restore.left_out_unsaveable() {
         // A credential of its own: the restore's push may have outlived
         // the one it used.

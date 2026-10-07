@@ -1191,10 +1191,14 @@ async fn a_rename_by_case_only_is_restored() {
 /// (the gateway) or an unsaved edit that is not there (Desktop on a disk
 /// that ignores case). Work that renames `notes.md` to `Notes.md` after
 /// `main` edited `notes.md`: keeping `main`'s `notes.md` leaves the new
-/// name to settle, and keeping both restores the rest and lets the ref go.
-/// A new `todo.md` beside a `TODO.md` that `main` gained since is the
-/// same, and so is a new `STRASSE.md` beside a `Straße.md`: such a disk
-/// folds case fully.
+/// name to settle, and keeping both restores the rest. A new `todo.md`
+/// beside a `TODO.md` that `main` gained since is the same, and so is a new
+/// `STRASSE.md` beside a `Straße.md`: such a disk folds case fully.
+///
+/// Keeping such a name chose no version of the work's file: `main`'s file
+/// is another one, and the work is on `main` under no name, so the ref
+/// stays with it. Only when `main`'s file holds the work as the work has it
+/// may the ref go.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
     for mode in MODES {
@@ -1241,7 +1245,12 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
             reasons(&[("Notes.md", "kept"), ("notes.md", "kept")]),
             "{mode:?}: {body}"
         );
-        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&reference).as_deref(),
+            Some(commit.as_str()),
+            "{mode:?}"
+        );
         assert_eq!(
             space.on_main("notes.md").as_deref(),
             Some(&b"main\n2\n3\n"[..]),
@@ -1256,21 +1265,26 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
 
         // A new name beside a file `main` gained since, which the work
         // never touched: in another case, or another case under full case
-        // folding (`ß` and `SS`).
-        for (added, gained) in [("todo.md", "TODO.md"), ("STRASSE.md", "Stra\u{df}e.md")] {
+        // folding (`ß` and `SS`). The ref stays unless `main`'s file holds
+        // the work as it is (`same`).
+        for (added, gained, on_main, same) in [
+            ("todo.md", "TODO.md", &b"main\n"[..], false),
+            ("STRASSE.md", "Stra\u{df}e.md", &b"main\n"[..], false),
+            ("plan.md", "PLAN.md", &b"work\n"[..], true),
+        ] {
             let space = Space::new(mode, &[]).await;
             let reference = recovery_ref("20261005T121500Z-unsaved-0123456789ac");
             let commit = space.park(
                 &[(added, Some(b"work\n")), ("other.md", Some(b"other\n"))],
                 &reference,
             );
-            space.push(&[(gained, Some(b"main\n"))], "a todo list");
+            space.push(&[(gained, Some(on_main))], "a todo list");
             assert_eq!(
                 space
                     .conflict(json!({ "ref": reference, "rev": commit }))
                     .await,
                 json!([added]),
-                "{mode:?}"
+                "{mode:?} {added}"
             );
             let body = space
                 .restored(json!({ "ref": reference, "rev": commit, "keep": [added] }))
@@ -1278,14 +1292,19 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
             assert_eq!(
                 body["notRestored"],
                 reasons(&[(added, "kept")]),
-                "{mode:?}: {body}"
+                "{mode:?} {added}: {body}"
             );
-            assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
-            assert_eq!(space.on_main(added), None, "{mode:?}");
+            assert_eq!(body["refDeleted"], same, "{mode:?} {added}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference),
+                (!same).then(|| commit.clone()),
+                "{mode:?} {added}"
+            );
+            assert_eq!(space.on_main(added), None, "{mode:?} {added}");
             assert_eq!(
                 space.on_main(gained).as_deref(),
-                Some(&b"main\n"[..]),
-                "{mode:?}"
+                Some(on_main),
+                "{mode:?} {added}"
             );
             assert_eq!(
                 space.on_main("other.md").as_deref(),
@@ -1301,7 +1320,8 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
 /// clash in both modes, never an unsaved edit that is not there (Desktop on
 /// a disk that ignores case finds the file where the folder goes) or a
 /// `main` holding both names (the gateway). Keeping the new path restores
-/// the rest and lets the ref go.
+/// the rest, and the ref stays: the work below that folder is on `main`
+/// under no name.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
     for mode in MODES {
@@ -1337,8 +1357,12 @@ async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
                 reasons(&[(added, "kept")]),
                 "{mode:?} {added}: {body}"
             );
-            assert_eq!(body["refDeleted"], true, "{mode:?} {added}: {body}");
-            assert_eq!(space.canonical_ref(&reference), None, "{mode:?} {added}");
+            assert_eq!(body["refDeleted"], false, "{mode:?} {added}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {added}"
+            );
             assert_eq!(
                 space.paths_on_main(),
                 vec!["README.md", file, "other.md"],
@@ -1358,7 +1382,7 @@ async fn a_new_folder_whose_name_a_file_on_main_takes_is_a_clash() {
 /// the work's rename of `notes.md` to `Notes.md` after `main` edited
 /// `notes.md`. A new `STRASSE.md` beside a `Straße.md` is the first again,
 /// under full case folding. Keeping the current version restores the
-/// rest, and the unsaved edit stays.
+/// rest, and the unsaved edit stays, and so does the ref.
 #[tokio::test(flavor = "multi_thread")]
 async fn using_the_saved_version_of_a_name_main_holds_in_another_case_is_refused() {
     type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
@@ -1451,6 +1475,13 @@ async fn using_the_saved_version_of_a_name_main_holds_in_another_case_is_refused
                 "{mode:?} {used}"
             );
             assert_eq!(space.on_main(used), None, "{mode:?} {used}");
+            // The saved version of `used` is on `main` under no name.
+            assert_eq!(body["refDeleted"], false, "{mode:?} {used}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{mode:?} {used}"
+            );
             if mode == Mode::Desktop {
                 assert_eq!(std::fs::read(root.join(holder)).unwrap(), unsaved, "{used}");
             }
@@ -1704,7 +1735,8 @@ async fn work_over_a_submodule_entry_is_never_restored() {
 /// `path_alias`): on Desktop the disk shows the submodule's folder, which
 /// may hold a repository of the person's own, as a plain folder, and a
 /// disk that ignores case would write the file into that repository,
-/// where `main` never gets it. Keeping the path restores the rest.
+/// where `main` never gets it. Keeping the path restores the rest, and the
+/// ref, the only copy of `Vendor/x.c`, stays.
 #[tokio::test(flavor = "multi_thread")]
 async fn using_the_saved_version_in_a_folder_a_submodule_entry_names_is_refused() {
     for mode in MODES {
@@ -1755,7 +1787,12 @@ async fn using_the_saved_version_in_a_folder_a_submodule_entry_names_is_refused(
             .restored(json!({ "ref": reference, "rev": commit, "keep": ["Vendor/x.c"] }))
             .await;
         assert_eq!(body["committed"], true, "{mode:?}: {body}");
-        assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&reference).as_deref(),
+            Some(commit.as_str()),
+            "{mode:?}"
+        );
         assert_eq!(
             space.on_main("other.md").as_deref(),
             Some(&b"other\n"[..]),

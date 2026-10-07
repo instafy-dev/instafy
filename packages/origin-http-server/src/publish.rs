@@ -353,7 +353,9 @@ pub struct RestoreReport {
     /// only when everything it holds was restored or kept on request: work
     /// refused here (ignored, secret, excluded, too large) keeps the ref,
     /// the only copy of that work on canonical, for the person to review
-    /// or remove. Salvage refs are never removed.
+    /// or remove, and so does a kept new name that a disk ignoring case
+    /// takes for another file `main` holds without that work. Salvage refs
+    /// are never removed.
     pub ref_deleted: bool,
 }
 
@@ -2594,7 +2596,9 @@ impl Publisher<'_> {
     ///   lease on its tip, so the same work is not restored twice, but only
     ///   when every path left out was kept on request: a path refused here
     ///   keeps the ref, so work the person did not choose to leave out is
-    ///   never removed. Salvage refs are kept.
+    ///   never removed, and so does a kept new name that another file of
+    ///   `main` takes on a disk ignoring case, whose work `main` lacks.
+    ///   Salvage refs are kept.
     /// - A path the restore changes that the shard refuses when the restore
     ///   is published stays as `main` has it, like one the plan refused: it
     ///   is listed in `notRestored` with the shard's reason, and the ref

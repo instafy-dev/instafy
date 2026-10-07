@@ -42,7 +42,8 @@ pub(crate) struct Restore {
     shard_refused: BTreeMap<String, RejectReason>,
     /// The last attempt's paths left as `main` has them, with why.
     not_restored: Vec<NotRestored>,
-    /// The last attempt left out only what the person chose to keep.
+    /// The last attempt left out only what the person chose to keep, and
+    /// `main` holds all of the work but that ([`restore_plan`]'s rule).
     lets_ref_go: bool,
     /// The last attempt's changes to `main`.
     touched: Option<Vec<String>>,
@@ -94,7 +95,9 @@ impl Restore {
     }
 
     /// Whether anything was left out for a reason other than the person's
-    /// own choice: then the work is not all on `main`, and its ref stays.
+    /// own choice, or kept at a new name another file of `main` takes on a
+    /// disk ignoring case: then the work is not all on `main`, and its ref
+    /// stays.
     pub(crate) fn left_out_unsaveable(&self) -> bool {
         !self.lets_ref_go
     }

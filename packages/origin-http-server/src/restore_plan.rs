@@ -61,8 +61,12 @@
 //!
 //! The ref may go once the restore is on `main` only when nothing was left
 //! out but on request: work refused here exists only on the ref, which then
-//! stays. A salvage ref with nothing left to bring back is recorded with an
-//! empty restore commit ([`restore_marker`]).
+//! stays. A kept new name that such a disk takes for another entry of the
+//! restored tree keeps the ref too, unless that entry holds the work as the
+//! work has it ([`kept_aliases`]): keeping `main`'s `TODO.md` chose no
+//! version of the work's `todo.md`, which would otherwise be on neither
+//! `main` nor any ref. A salvage ref with nothing left to bring back is
+//! recorded with an empty restore commit ([`restore_marker`]).
 //!
 //! A salvage commit the gateway made (its committer is
 //! [`RestoreInput::salvage_committer`]) also names each file its salvage
@@ -85,11 +89,11 @@ use crate::error::OriginError;
 use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
 use crate::recovery_view::{
-    left_out_reason, parse_commit, restore_marker, NotRestored, RecoveryRef,
+    left_out_reason, parse_commit, restore_marker, NotRestored, RecoveryRef, KEPT,
 };
 use crate::salvage::PRIVATE_PATH_TRAILER;
 use crate::tree_merge::{three_way, tree_with_entries_from};
-use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, WorkspaceGit};
+use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, TreeEntry, WorkspaceGit};
 
 /// What a restore is asked to do.
 pub(crate) struct RestoreInput<'a> {
@@ -132,6 +136,10 @@ pub(crate) struct RestorePlan {
     /// How many of them were refused (left out for a reason other than
     /// the person's own keep).
     refused: usize,
+    /// How many kept paths are new names of the work whose work `onto`
+    /// holds under no name a disk ignoring case takes for it
+    /// ([`kept_aliases`]).
+    kept_aliases: usize,
     /// Nothing new comes to `onto`, and the restore of this salvage ref is
     /// recorded with an empty restore commit.
     pub marker: bool,
@@ -146,10 +154,11 @@ impl RestorePlan {
     }
 
     /// Whether the ref may go once the restore is on `main`: nothing was
-    /// left out but what the person chose to keep. Salvage refs stay
-    /// whatever this says.
+    /// left out but what the person chose to keep, and nothing kept is
+    /// work `onto` lacks under every name ([`kept_aliases`]). Salvage refs
+    /// stay whatever this says.
     pub(crate) fn lets_ref_go(&self) -> bool {
-        self.refused == 0
+        self.refused == 0 && self.kept_aliases == 0
     }
 }
 
@@ -381,6 +390,20 @@ pub(crate) fn plan(
         return Err(PlanError::Conflict(conflicts));
     }
 
+    // A kept new name that a disk ignoring case takes for another entry of
+    // the restored tree settled its clash by leaving the work's file out,
+    // not by choosing between two versions of one file: unless that entry
+    // holds the work as the work has it, the ref stays with it.
+    let kept_new: Vec<&RawChange> = changes
+        .iter()
+        .filter(|change| {
+            change.status != 'D'
+                && !at_onto.contains_key(&change.path)
+                && left_out.get(&change.path) == Some(&KEPT)
+        })
+        .collect();
+    let kept_aliases = kept_aliases(git, &tree, &kept_new)?.len();
+
     // Files the salvage kept privately are in no commit: they are named so
     // the person knows the restore lacks them. The tree never changes for
     // them.
@@ -413,6 +436,7 @@ pub(crate) fn plan(
             .map(|(path, reason)| NotRestored { path, reason })
             .collect(),
         refused: refused.len(),
+        kept_aliases,
         marker,
         earlier_marker,
     })
@@ -522,6 +546,14 @@ pub(crate) fn aliases_in(
     if added.is_empty() {
         return Ok(Vec::new());
     }
+    let entries = every_entry(git, tree)?
+        .into_iter()
+        .map(|entry| (entry.path, entry.kind == "tree"));
+    Ok(alias_clashes(entries, added))
+}
+
+/// Every entry of `tree` (a tree id), folders included.
+fn every_entry(git: &WorkspaceGit<'_>, tree: &str) -> Result<Vec<TreeEntry>> {
     let raw = git.bytes(&[
         "ls-tree",
         "-r",
@@ -531,10 +563,60 @@ pub(crate) fn aliases_in(
         "--end-of-options",
         tree,
     ])?;
-    let entries = parse_ls_tree(&raw)
-        .into_iter()
-        .map(|entry| (entry.path, entry.kind == "tree"));
-    Ok(alias_clashes(entries, added))
+    Ok(parse_ls_tree(&raw))
+}
+
+/// The paths of `kept` (new names of the work the person kept, so absent
+/// from the restored `tree`) that [`alias_clashes`] finds once they are
+/// put back beside `tree`'s entries, each other and the folders they lie
+/// in, unless an entry of `tree` that such a disk takes for the path holds
+/// it as the work has it. "Keep current" on such a path chose no version of
+/// the work's file: `onto`'s entry is another file, and the work is on
+/// `main` under no name.
+fn kept_aliases(git: &WorkspaceGit<'_>, tree: &str, kept: &[&RawChange]) -> Result<Vec<String>> {
+    if kept.is_empty() {
+        return Ok(Vec::new());
+    }
+    let listed = every_entry(git, tree)?;
+    // What `tree` holds under each key: a file, a link or a submodule.
+    let held: BTreeSet<(String, &str, &str)> = listed
+        .iter()
+        .filter(|entry| entry.kind != "tree")
+        .map(|entry| {
+            (
+                portable_key(&entry.path),
+                entry.mode.as_str(),
+                entry.oid.as_str(),
+            )
+        })
+        .collect();
+    let mut entries: Vec<(String, bool)> = listed
+        .iter()
+        .map(|entry| (entry.path.clone(), entry.kind == "tree"))
+        .collect();
+    for change in kept {
+        entries.extend(
+            change
+                .path
+                .match_indices('/')
+                .map(|(index, _)| (change.path[..index].to_string(), true)),
+        );
+        entries.push((change.path.clone(), false));
+    }
+    let paths: Vec<&str> = kept.iter().map(|change| change.path.as_str()).collect();
+    let clashes: BTreeSet<String> = alias_clashes(entries, &paths).into_iter().collect();
+    Ok(kept
+        .iter()
+        .filter(|change| clashes.contains(&change.path))
+        .filter(|change| {
+            !held.contains(&(
+                portable_key(&change.path),
+                change.new_mode.as_str(),
+                change.new_oid.as_str(),
+            ))
+        })
+        .map(|change| change.path.clone())
+        .collect())
 }
 
 /// The paths of `added` that a tree whose `entries` (path, and whether it is
