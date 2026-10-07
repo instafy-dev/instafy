@@ -255,6 +255,17 @@ impl Fixture {
         owner_user_id: Uuid,
         response: JsonValue,
     ) -> anyhow::Result<Self> {
+        Self::new_with(pool, project_id, owner_user_id, response, |_| {}).await
+    }
+
+    /// [`Self::new`] with `configure` applied to the controller's config.
+    async fn new_with(
+        pool: PgPool,
+        project_id: Uuid,
+        owner_user_id: Uuid,
+        response: JsonValue,
+        configure: impl FnOnce(&mut crate::config::AppConfig),
+    ) -> anyhow::Result<Self> {
         let order = Arc::new(Mutex::new(Vec::new()));
         let provider_app = axum::Router::new().route(
             "/runtime/release",
@@ -293,6 +304,7 @@ impl Fixture {
             auth_token: None,
             metadata: None,
         }];
+        configure(&mut config);
         let state = build_test_state(pool.clone(), config);
 
         let runtime_id = Uuid::new_v4();
@@ -641,7 +653,10 @@ async fn safe_stop_flushes_the_workspace_before_the_quarantine() -> anyhow::Resu
         let calls = fx.flush_calls();
         assert_eq!(calls.len(), 1, "{calls:?}");
         let call = &calls[0];
-        assert_eq!(call.body, json!({ "turnActive": true }));
+        assert_eq!(
+            call.body,
+            json!({ "turnActive": true, "workingState": true })
+        );
         // Before the quarantine: nothing is fenced yet and the turn's job is
         // still leased.
         assert_eq!(call.runtime_status, "ready");
@@ -779,7 +794,10 @@ async fn user_stop_flushes_under_the_existing_workspace_lease() -> anyhow::Resul
         let calls = fx.flush_calls();
         assert_eq!(calls.len(), 1, "{calls:?}");
         let call = &calls[0];
-        assert_eq!(call.body, json!({ "turnActive": false }));
+        assert_eq!(
+            call.body,
+            json!({ "turnActive": false, "workingState": true })
+        );
         assert_eq!(call.runtime_status, "ready");
         let claims = decode_scoped_token(&fx.state.config, &call.bearer, "flush token")
             .map_err(|(_, body)| anyhow::anyhow!("decode flush token: {}", body.0.message))?;
@@ -1535,7 +1553,7 @@ async fn a_turn_cancelled_just_before_the_stop_is_still_active() -> anyhow::Resu
             assert_eq!(calls.len(), 1, "{status} {seconds_ago}s: {calls:?}");
             assert_eq!(
                 calls[0].body,
-                json!({ "turnActive": expected }),
+                json!({ "turnActive": expected, "workingState": true }),
                 "{status} {seconds_ago}s ago"
             );
             assert_eq!(fx.order(), vec!["flush", "release"]);
@@ -1962,7 +1980,10 @@ async fn an_idle_release_flushes_its_requeued_turn_as_interrupted() -> anyhow::R
             match released_by {
                 super::super::status::IdleRelease::Sweep => {
                     assert_eq!(calls.len(), 1, "{calls:?}");
-                    assert_eq!(calls[0].body, json!({ "turnActive": true }));
+                    assert_eq!(
+                        calls[0].body,
+                        json!({ "turnActive": true, "workingState": true })
+                    );
                     assert_eq!(
                         calls[0].job_statuses,
                         vec!["queued".to_string()],
@@ -1987,4 +2008,336 @@ async fn an_idle_release_flushes_its_requeued_turn_as_interrupted() -> anyhow::R
         result?;
     }
     Ok(())
+}
+
+/// With rolling saves on, a stop asks the origin to end with the working
+/// folder's own save and records what that save left (`durable`,
+/// `persistedAt`) on the event and the stop's answer. Switched off, the
+/// flush body is exactly what it always was.
+#[tokio::test]
+async fn the_switch_decides_whether_a_stop_asks_for_the_working_folders_save() -> anyhow::Result<()>
+{
+    let pool = crate::tests::require_origin_test_pool("pre-stop working save test").await?;
+    for saves in [true, false] {
+        let project_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let fixture = SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        let result = with_shared_db_fixture(fixture, async {
+            let fx = Fixture::new_with(
+                pool.clone(),
+                project_id,
+                owner_user_id,
+                json!({
+                    "recoveryRefs": [],
+                    "unpushedRefs": 0,
+                    "unpushedRefNames": [],
+                    "parkedCommits": 0,
+                    "workingState": {
+                        "unsaved": 1,
+                        "localOnly": 0,
+                        "persistedAt": "2026-10-07T12:00:00Z",
+                        "durable": true,
+                        "changed": false
+                    },
+                }),
+                |config| config.working_state_saves = saves,
+            )
+            .await?;
+            fx.insert_leased_job().await?;
+            fx.hold_owner_lease().await?;
+            let stopped = super::super::stop::stop_runtime_safely(
+                &fx.state,
+                &fx.runtime_id,
+                super::super::stop::StopOptions {
+                    source: "pre_stop_flush_test",
+                    reason: Some("credits_exhausted".to_string()),
+                    skip_if_active_jobs: false,
+                    require_idle_timeout: false,
+                    allow_cleanup_pending_release: false,
+                    expected_identity: None,
+                },
+            )
+            .await
+            .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+            let calls = fx.flush_calls();
+            assert_eq!(calls.len(), 1, "{calls:?}");
+            let events = fx.flush_events().await?;
+            assert_eq!(events.len(), 1, "{events:?}");
+            if saves {
+                assert_eq!(
+                    calls[0].body,
+                    json!({ "turnActive": true, "workingState": true })
+                );
+                assert_eq!(events[0]["durable"], true, "{events:?}");
+                assert_eq!(events[0]["persistedAt"], "2026-10-07T12:00:00Z");
+                let working = stopped.flush.working_state.clone().expect("workingState");
+                assert!(working.durable);
+                let answer = serde_json::to_value(&stopped.flush)?;
+                assert_eq!(answer["workingState"]["durable"], true, "{answer}");
+            } else {
+                assert_eq!(calls[0].body, json!({ "turnActive": true }));
+            }
+            Ok(())
+        })
+        .await;
+        delete_users(&[owner_user_id]).await?;
+        result?;
+    }
+    Ok(())
+}
+
+/// The internal workspace bearer of a job leased by `fx`'s runtime.
+fn job_workspace_bearer(fx: &Fixture, run_id: Uuid, runtime_lease_id: Uuid) -> String {
+    mint_scoped_token(
+        &fx.state.config,
+        ScopedTokenRequest {
+            audience: fx.runtime_id.to_string(),
+            subject: fx.owner_user_id.to_string(),
+            project_id: fx.project_id.to_string(),
+            origin_id: None,
+            runtime_id: Some(fx.runtime_id.to_string()),
+            protocol: None,
+            scopes: vec![
+                crate::origins::JOB_WORKSPACE_LEASE_WRITE_SCOPE.to_string(),
+                crate::origins::JOB_ORIGIN_TOKEN_MINT_SCOPE.to_string(),
+            ],
+            lease_id: Some(runtime_lease_id.to_string()),
+            run_id: Some(run_id.to_string()),
+            prefer_runtime: None,
+            ttl_seconds: Some(600),
+        },
+    )
+    .expect("job workspace token")
+    .token
+}
+
+fn persist_grant_request(project_id: Uuid, bearer: &str, job_id: Option<Uuid>) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/access_token")
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "projectId": project_id,
+                "protocol": "http",
+                "scopes": ["workspace.persist"],
+                "jobId": job_id,
+            })
+            .to_string(),
+        ))
+        .expect("persist grant request")
+}
+
+/// A running write job's rolling save gets a grant for its runtime's own
+/// online origin, which mints git.write only while the job and its runtime
+/// generation hold. A read-only job, a job long finished, another
+/// generation, a user who may no longer write and the switch turned off are
+/// refused.
+#[tokio::test]
+async fn a_rolling_save_grant_holds_only_while_its_write_job_does() -> anyhow::Result<()> {
+    let pool = crate::tests::require_origin_test_pool("rolling save grant test").await?;
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    let stranger = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..Default::default()
+    };
+    let result = with_shared_db_fixture(fixture, async {
+        let fx = Fixture::new(pool.clone(), project_id, owner_user_id, json!({})).await?;
+        ensure_test_user(&fx.pool, &stranger).await?;
+        let insert_job = |payload: JsonValue, status: &'static str, seconds_ago: f64| {
+            let pool = fx.pool.clone();
+            let project_id = fx.project_id;
+            let runtime_id = fx.runtime_id;
+            async move {
+                let (job_id, run_id) = (Uuid::new_v4(), Uuid::new_v4());
+                let connection = pool.get().await?;
+                connection
+                    .execute(
+                        "insert into runs (id, project_id, run_type, status)
+                         values ($1, $2, 'prompt', 'in_progress')",
+                        &[&run_id, &project_id],
+                    )
+                    .await?;
+                connection
+                    .execute(
+                        "insert into agent_jobs
+                            (id, project_id, run_id, status, payload, leased_by_runtime_id,
+                             leased_at, lease_expires_at, completed_at)
+                         values ($1, $2, $3, $4, $5, $6, now() - interval '5 minutes',
+                                 now() + interval '5 minutes',
+                                 case when $4 = 'leased' then null
+                                      else now() - make_interval(secs => $7::double precision)
+                                 end)",
+                        &[
+                            &job_id,
+                            &project_id,
+                            &run_id,
+                            &status,
+                            &payload,
+                            &runtime_id,
+                            &seconds_ago,
+                        ],
+                    )
+                    .await?;
+                Ok::<_, anyhow::Error>((job_id, run_id))
+            }
+        };
+        let write = json!({ "user_id": owner_user_id, "writeIntent": true, "metadata": {} });
+        let (job_id, run_id) = insert_job(write.clone(), "leased", 0.0).await?;
+        let bearer = job_workspace_bearer(&fx, run_id, fx.runtime_lease_id);
+
+        let (status, body) = send(
+            &fx.state,
+            persist_grant_request(fx.project_id, &bearer, Some(job_id)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["originId"], json!(fx.origin_id));
+        let grant = body["token"].as_str().expect("a grant").to_string();
+        let claims = decode_scoped_token(&fx.state.config, &grant, "rolling save grant")
+            .map_err(|(_, body)| anyhow::anyhow!("decode grant: {}", body.0.message))?;
+        assert_eq!(claims.aud, fx.origin_id.to_string());
+        assert_eq!(claims.scopes, vec!["workspace.persist".to_string()]);
+        assert_eq!(claims.origin_id, Some(fx.origin_id.to_string()));
+        assert_eq!(claims.runtime_id, Some(fx.runtime_id.to_string()));
+        assert_eq!(claims.lease_id, Some(fx.runtime_lease_id.to_string()));
+        assert_eq!(claims.run_id, Some(run_id.to_string()));
+        assert!(claims.exp - claims.iat <= 60, "{claims:?}");
+        let exchange = |bearer: String| {
+            let state = fx.state.clone();
+            let project_id = fx.project_id;
+            async move { send(&state, git_token_request(project_id, &bearer)).await }
+        };
+        assert_eq!(exchange(grant.clone()).await.0, StatusCode::OK);
+        // It reads no workspace lease and opens nothing else here.
+        let (lease_status, _) = send(
+            &fx.state,
+            Request::builder()
+                .method("GET")
+                .uri(format!("/projects/{}/lease", fx.project_id))
+                .header("authorization", format!("Bearer {grant}"))
+                .body(Body::empty())?,
+        )
+        .await;
+        assert_ne!(lease_status, StatusCode::OK);
+        // The grant itself mints no other grant.
+        let (status, _) = send(&fx.state, persist_grant_request(fx.project_id, &grant, None)).await;
+        assert_ne!(status, StatusCode::OK);
+
+        // Another runtime generation's token.
+        let stale = job_workspace_bearer(&fx, run_id, Uuid::new_v4());
+        let (status, _) = send(&fx.state, persist_grant_request(fx.project_id, &stale, None)).await;
+        assert_ne!(status, StatusCode::OK);
+
+        // A read-only job.
+        let read_only = json!({
+            "user_id": owner_user_id,
+            "writeIntent": true,
+            "metadata": { "writeScope": "read_only" },
+        });
+        let (_, read_only_run) = insert_job(read_only, "leased", 0.0).await?;
+        let read_only_bearer = job_workspace_bearer(&fx, read_only_run, fx.runtime_lease_id);
+        let (status, _) = send(
+            &fx.state,
+            persist_grant_request(fx.project_id, &read_only_bearer, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Cancelled a moment ago (the turn-end save of a stopped turn):
+        // granted. Cancelled long ago, or completed: refused.
+        let (_, cancelled_run) = insert_job(write.clone(), "canceled", 10.0).await?;
+        let cancelled = job_workspace_bearer(&fx, cancelled_run, fx.runtime_lease_id);
+        let (status, body) = send(
+            &fx.state,
+            persist_grant_request(fx.project_id, &cancelled, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for (status_name, seconds_ago) in [("canceled", 120.0), ("completed", 1.0)] {
+            let (_, run) = insert_job(write.clone(), status_name, seconds_ago).await?;
+            let bearer = job_workspace_bearer(&fx, run, fx.runtime_lease_id);
+            let (status, _) =
+                send(&fx.state, persist_grant_request(fx.project_id, &bearer, None)).await;
+            assert_ne!(status, StatusCode::OK, "{status_name} {seconds_ago}s ago");
+        }
+
+        // The exchange checks the job again: once it is done, the grant is
+        // dead.
+        let connection = fx.pool.get().await?;
+        connection
+            .execute(
+                "update agent_jobs set status = 'completed', completed_at = now() - interval '5 minutes' where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        assert_ne!(exchange(grant.clone()).await.0, StatusCode::OK);
+        connection
+            .execute(
+                "update agent_jobs set status = 'leased', completed_at = null where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        assert_eq!(exchange(grant.clone()).await.0, StatusCode::OK);
+
+        // The user may no longer write.
+        connection
+            .execute(
+                "update projects set owner_user_id = $2 where id = $1",
+                &[&fx.project_id, &stranger],
+            )
+            .await?;
+        let (status, _) = send(&fx.state, persist_grant_request(fx.project_id, &bearer, None)).await;
+        assert_ne!(status, StatusCode::OK);
+        assert_ne!(exchange(grant.clone()).await.0, StatusCode::OK);
+        connection
+            .execute(
+                "update projects set owner_user_id = $2 where id = $1",
+                &[&fx.project_id, &fx.owner_user_id],
+            )
+            .await?;
+
+        // The generation was quarantined by its stop.
+        connection
+            .execute(
+                "update runtime_leases set status = 'cleanup_pending' where id = $1",
+                &[&fx.runtime_lease_id],
+            )
+            .await?;
+        assert_ne!(exchange(grant.clone()).await.0, StatusCode::OK);
+        connection
+            .execute(
+                "update runtime_leases set status = 'active' where id = $1",
+                &[&fx.runtime_lease_id],
+            )
+            .await?;
+        drop(connection);
+
+        // Switched off: refused with a fixed code, minting and exchanging.
+        let mut off = fx.state.config.clone();
+        off.working_state_saves = false;
+        let off_state = build_test_state(fx.pool.clone(), off);
+        let (status, body) =
+            send(&off_state, persist_grant_request(fx.project_id, &bearer, None)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "rolling_saves_off", "{body}");
+        let (status, body) = send(&off_state, git_token_request(fx.project_id, &grant)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["code"], "rolling_saves_off", "{body}");
+        fx.pool
+            .get()
+            .await?
+            .execute("delete from runs where project_id = $1", &[&fx.project_id])
+            .await?;
+        Ok(())
+    })
+    .await;
+    delete_users(&[owner_user_id, stranger]).await?;
+    result
 }

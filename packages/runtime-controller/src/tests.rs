@@ -242,6 +242,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         hosted_runtime_credit_burn_amount: 0,
         hosted_runtime_credit_burn_interval_seconds: 600,
         managed_ai_enabled: true,
+        working_state_saves: true,
         managed_ai_label: "Instafy AI".to_string(),
         managed_ai_credit_burn_amount: 1,
         managed_ai_daily_prompt_limit: 20,
@@ -17182,6 +17183,7 @@ fn origin_token_request(
         prefer_runtime: None,
         lease_id: lease_id.map(|lease| lease.to_string()),
         browser_session_id: None,
+        job_id: None,
     }
 }
 
@@ -17753,6 +17755,7 @@ async fn post_access_token_mints_signed_token_and_publishes_event() -> anyhow::R
         prefer_runtime: None,
         lease_id: Some(lease_id.to_string()),
         browser_session_id: None,
+        job_id: None,
     };
 
     let response = post_access_token(
@@ -18041,6 +18044,7 @@ async fn post_access_token_recovers_stale_service_runtime_user_id() -> anyhow::R
             prefer_runtime: None,
             lease_id: None,
             browser_session_id: None,
+            job_id: None,
         }),
     )
     .await
@@ -18218,6 +18222,7 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
             prefer_runtime: Some(runtime_id.to_string()),
             lease_id: None,
             browser_session_id: Some("browser-test-session".to_string()),
+            job_id: None,
         }),
     )
     .await
@@ -18258,6 +18263,7 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
             prefer_runtime: Some(runtime_id.to_string()),
             lease_id: None,
             browser_session_id: Some("browser-test-session".to_string()),
+            job_id: None,
         }),
     )
     .await
@@ -18289,6 +18295,7 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
             prefer_runtime: Some(runtime_id.to_string()),
             lease_id: None,
             browser_session_id: Some("browser-test-session".to_string()),
+            job_id: None,
         }),
     )
     .await
@@ -18331,6 +18338,7 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
             prefer_runtime: Some(runtime_id.to_string()),
             lease_id: None,
             browser_session_id: Some("browser-test-session".to_string()),
+            job_id: None,
         }),
     )
     .await
@@ -18359,6 +18367,7 @@ async fn post_access_token_requires_managed_cloud_for_browser_runtime_origin() -
             prefer_runtime: Some(runtime_id.to_string()),
             lease_id: None,
             browser_session_id: Some("browser-test-session".to_string()),
+            job_id: None,
         }),
     )
     .await
@@ -18520,6 +18529,7 @@ async fn post_access_token_prefers_hosted_origin_when_prefer_hosted_is_set() -> 
             prefer_runtime: Some(runtime_id.to_string()),
             lease_id: None,
             browser_session_id: None,
+            job_id: None,
         }),
     )
     .await
@@ -18556,6 +18566,7 @@ async fn post_access_token_prefers_hosted_origin_when_prefer_hosted_is_set() -> 
             prefer_runtime: Some(foreign_runtime_id.to_string()),
             lease_id: None,
             browser_session_id: None,
+            job_id: None,
         }),
     )
     .await

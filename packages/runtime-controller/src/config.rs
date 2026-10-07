@@ -546,6 +546,12 @@ pub struct AppConfig {
     pub hosted_runtime_credit_burn_amount: i32,
     pub hosted_runtime_credit_burn_interval_seconds: i64,
     pub managed_ai_enabled: bool,
+    /// A running write job may save its working folder every two minutes
+    /// through a `workspace.persist` grant, and a stop ends with the
+    /// folder's own save (`WORKING_STATE_SAVES`, default `on`; `off`
+    /// refuses the grant with `rolling_saves_off` and asks no stop for a
+    /// save).
+    pub working_state_saves: bool,
     pub managed_ai_label: String,
     pub managed_ai_credit_burn_amount: i32,
     pub managed_ai_daily_prompt_limit: i32,
@@ -677,6 +683,15 @@ fn normalize_public_app_url(configured: Option<&str>, dev_mode: bool) -> anyhow:
     }
 
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// `WORKING_STATE_SAVES`: on unless set to `off` (or `0`, `false`, `no`).
+pub(crate) fn working_state_saves_enabled(raw: Option<&str>) -> bool {
+    !matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("off" | "0" | "false" | "no")
+    )
 }
 
 impl AppConfig {
@@ -1103,6 +1118,8 @@ impl AppConfig {
             .map(|value| value.to_lowercase())
             .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(true);
+        let working_state_saves =
+            working_state_saves_enabled(std::env::var("WORKING_STATE_SAVES").ok().as_deref());
         let managed_ai_label =
             read_first_env(&["MANAGED_AI_LABEL"]).unwrap_or_else(|| "Instafy AI".to_string());
         let managed_ai_credit_burn_amount = std::env::var("MANAGED_AI_CREDIT_BURN_AMOUNT")
@@ -1377,6 +1394,7 @@ impl AppConfig {
             hosted_runtime_credit_burn_amount,
             hosted_runtime_credit_burn_interval_seconds,
             managed_ai_enabled,
+            working_state_saves,
             managed_ai_label,
             managed_ai_credit_burn_amount,
             managed_ai_daily_prompt_limit,
@@ -1540,7 +1558,7 @@ mod tests {
         managed_ai_decline_waiver_units, normalize_public_app_url,
         parse_browser_profile_persist_project_ids, published_development_key_warning,
         resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
-        CredentialEncryptionKey, DEV_USER_TOKEN_SECRET,
+        working_state_saves_enabled, CredentialEncryptionKey, DEV_USER_TOKEN_SECRET,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -1550,6 +1568,30 @@ mod tests {
     use uuid::Uuid;
 
     const STRONG_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn rolling_saves_are_on_unless_switched_off() {
+        for on in [
+            None,
+            Some(""),
+            Some("on"),
+            Some("1"),
+            Some("true"),
+            Some("anything"),
+        ] {
+            assert!(working_state_saves_enabled(on), "{on:?}");
+        }
+        for off in [
+            Some("off"),
+            Some("OFF"),
+            Some(" off "),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+        ] {
+            assert!(!working_state_saves_enabled(off), "{off:?}");
+        }
+    }
 
     #[test]
     fn user_token_secret_is_refused_outside_dev_mode_when_unset_published_or_short() {

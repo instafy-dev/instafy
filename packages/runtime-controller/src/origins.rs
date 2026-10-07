@@ -54,6 +54,7 @@ use runtime_contracts::{
 };
 
 mod browser_relay_telemetry;
+pub(crate) mod workspace_persist;
 
 use browser_relay_telemetry::{
     BrowserRelayContext, BrowserRelayDirection, BrowserRelayOutcome, BrowserRelayTelemetry,
@@ -6857,6 +6858,9 @@ pub(crate) struct AccessTokenRequest {
     pub prefer_runtime: Option<String>,
     pub lease_id: Option<String>,
     pub browser_session_id: Option<String>,
+    /// The job a rolling save's grant is for (`workspace.persist` only).
+    #[serde(default)]
+    pub job_id: Option<String>,
 }
 
 const BROWSER_SESSION_ID_MAX_BYTES: usize = 128;
@@ -7156,7 +7160,16 @@ async fn post_git_access_token(
             .scopes
             .iter()
             .any(|scope| scope == crate::runtime::PRE_STOP_SAVE_SCOPE);
-        if pre_stop_save_grant {
+        let rolling_save_grant = claims
+            .scopes
+            .iter()
+            .any(|scope| scope == workspace_persist::WORKSPACE_PERSIST_SCOPE);
+        if rolling_save_grant {
+            // A running write job's rolling save, through its own origin.
+            // Valid only while that job and its runtime generation still
+            // hold; the git token never outlives the grant.
+            Some(workspace_persist::authorize_persist_grant(&state, &context, &project_id).await?)
+        } else if pre_stop_save_grant {
             // The space owner's save-only permission, which only the
             // controller's own stop path issues, to the stopping runtime's
             // origin. Valid only while that exact runtime generation is
@@ -7442,6 +7455,15 @@ pub(crate) async fn post_access_token(
     Json(body): Json<AccessTokenRequest>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
+
+    if workspace_persist::requests_persist_grant(&body.scopes) {
+        return workspace_persist::mint_persist_grant(&state, &headers, &context, &body).await;
+    }
+    if body.job_id.is_some() {
+        return Err(bad_request(
+            "jobId is only valid for a rolling save's grant",
+        ));
+    }
 
     let project_id = parse_optional_uuid_param(Some(body.project_id), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;

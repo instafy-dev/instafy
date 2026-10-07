@@ -892,7 +892,8 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
         // The pre-stop flush outcome: counts, status, whose name it saved
         // under (`lease_holder`, `owner_grant` or `none`) and a fixed reason
         // code only, never ref names, paths, tokens or the origin's error
-        // text.
+        // text. With the working folder's own save: whether canonical holds
+        // all of it, since when, and the origin's fixed code when it did not.
         "workspace_flush" => copy_runtime_event_fields(
             &data,
             &[
@@ -904,6 +905,9 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
                 "parkedCommits",
                 "gitSyncStatus",
                 "reason",
+                "durable",
+                "persistedAt",
+                "workingStateError",
             ],
         ),
         // A pool-retirement drain's own actions and the generation it woke
@@ -1092,6 +1096,9 @@ mod runtime_event_tests {
                 "recoveryRefs": 2,
                 "parkedCommits": 3,
                 "gitSyncStatus": "published",
+                "durable": false,
+                "persistedAt": "2026-10-07T12:00:00Z",
+                "workingStateError": "push_ambiguous",
                 "token": "never-recorded",
                 "unpushedRefNames": ["20261002T120000Z-unsaved-0123456789ab"],
                 "error": "origin flush answered 500: private detail",
@@ -1107,7 +1114,10 @@ mod runtime_event_tests {
                 "unpushedRefs": 1,
                 "recoveryRefs": 2,
                 "parkedCommits": 3,
-                "gitSyncStatus": "published"
+                "gitSyncStatus": "published",
+                "durable": false,
+                "persistedAt": "2026-10-07T12:00:00Z",
+                "workingStateError": "push_ambiguous"
             })
         );
     }

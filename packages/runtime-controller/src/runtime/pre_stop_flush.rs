@@ -47,6 +47,14 @@
 //! Best effort and bounded by [`PRE_STOP_FLUSH_TIMEOUT`]: a failure is logged,
 //! recorded as a `workspace_flush` runtime event, and the stop goes on. Work
 //! the flush could not push stays on the runtime's local recovery refs.
+//!
+//! With rolling saves on (`WORKING_STATE_SAVES`), the flush also asks the
+//! origin to end with the working folder's own save (`workingState: true`):
+//! the folder's unfinished work then lands on its one rolling save instead of
+//! a new `unsaved` ref, and the origin answers whether canonical holds it
+//! all (`durable`) and since when (`persistedAt`). The stop response's
+//! `flush` and the `workspace_flush` event carry both. Without the switch the
+//! flush body is exactly what it was.
 
 use std::time::Duration;
 
@@ -242,6 +250,23 @@ pub(crate) struct FlushSummary {
     pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<&'static str>,
+    /// The working folder's own save at the end of the stop, when the
+    /// controller asked for one and the origin answered it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) working_state: Option<FlushWorkingState>,
+}
+
+/// What the origin's own save at the end of a stop left: whether canonical
+/// holds everything the working folder held, and since when it last did.
+/// `error` is the origin's fixed code when the save did not land.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FlushWorkingState {
+    pub(crate) durable: bool,
+    #[serde(default)]
+    pub(crate) persisted_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
 }
 
 impl FlushSummary {
@@ -252,6 +277,7 @@ impl FlushSummary {
             unpushed_ref_names: Vec::new(),
             error: None,
             reason: None,
+            working_state: None,
         }
     }
 
@@ -283,6 +309,7 @@ pub(super) enum PreStopFlushOutcome {
         recovery_refs: usize,
         parked_commits: usize,
         git_sync_status: Option<String>,
+        working_state: Option<FlushWorkingState>,
     },
     /// Nobody may save this runtime's work (see [`FlushWriter::Nobody`]), or
     /// its origin endpoint is not one the controller vouches for (the
@@ -300,6 +327,7 @@ impl PreStopFlushOutcome {
             Self::Flushed {
                 unpushed_refs,
                 unpushed_ref_names,
+                working_state,
                 ..
             } => FlushSummary {
                 status: "flushed",
@@ -307,6 +335,7 @@ impl PreStopFlushOutcome {
                 unpushed_ref_names: unpushed_ref_names.clone(),
                 error: None,
                 reason: None,
+                working_state: working_state.clone(),
             },
             Self::NoWriter(reason) => FlushSummary {
                 reason: *reason,
@@ -348,6 +377,8 @@ struct OriginFlushReport {
     publish: Option<OriginFlushPublish>,
     #[serde(default)]
     parked_commits: usize,
+    #[serde(default)]
+    working_state: Option<FlushWorkingState>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -813,7 +844,10 @@ async fn call_origin_flush(
         .post(format!("{}/git/flush", origin_base.trim_end_matches('/')))
         .bearer_auth(token)
         .timeout(PRE_STOP_FLUSH_TIMEOUT)
-        .json(&json!({ "turnActive": target.turn_active }));
+        .json(&flush_body(
+            target.turn_active,
+            state.config.working_state_saves,
+        ));
     if let Some(host) = host_override.filter(|host| !host.trim().is_empty()) {
         request = request.header("host", host);
     }
@@ -858,11 +892,22 @@ async fn call_origin_flush(
             recovery_refs: report.recovery_refs.len(),
             parked_commits: report.parked_commits,
             git_sync_status: report.publish.and_then(|publish| publish.git_sync_status),
+            working_state: report.working_state,
         },
         Err(error) => PreStopFlushOutcome::failed(
             "origin_response_invalid",
             format!("origin flush response is invalid: {error}"),
         ),
+    }
+}
+
+/// The body of `POST /git/flush`: with rolling saves on, it asks the origin
+/// to end the stop with the working folder's own save.
+fn flush_body(turn_active: bool, working_state_saves: bool) -> JsonValue {
+    if working_state_saves {
+        json!({ "turnActive": turn_active, "workingState": true })
+    } else {
+        json!({ "turnActive": turn_active })
     }
 }
 
@@ -925,26 +970,27 @@ fn log_outcome(target: &PreStopFlushTarget, outcome: &PreStopFlushOutcome) {
     }
 }
 
-async fn record_outcome(
-    state: &AppState,
-    target: &PreStopFlushTarget,
-    outcome: &PreStopFlushOutcome,
-) {
-    let (unpushed_refs, recovery_refs, parked_commits, git_sync_status) = match outcome {
-        PreStopFlushOutcome::Flushed {
-            unpushed_refs,
-            recovery_refs,
-            parked_commits,
-            git_sync_status,
-            ..
-        } => (
-            Some(*unpushed_refs),
-            Some(*recovery_refs),
-            Some(*parked_commits),
-            git_sync_status.clone(),
-        ),
-        _ => (None, None, None, None),
-    };
+/// The `workspace_flush` runtime event's data. With the working folder's
+/// own save it also carries `durable` and `persistedAt`.
+fn flush_event_data(target: &PreStopFlushTarget, outcome: &PreStopFlushOutcome) -> JsonValue {
+    let (unpushed_refs, recovery_refs, parked_commits, git_sync_status, working_state) =
+        match outcome {
+            PreStopFlushOutcome::Flushed {
+                unpushed_refs,
+                recovery_refs,
+                parked_commits,
+                git_sync_status,
+                working_state,
+                ..
+            } => (
+                Some(*unpushed_refs),
+                Some(*recovery_refs),
+                Some(*parked_commits),
+                git_sync_status.clone(),
+                working_state.clone(),
+            ),
+            _ => (None, None, None, None, None),
+        };
     let mut data = json!({
         "status": outcome.status(),
         "writer": target.writer.label(),
@@ -957,6 +1003,22 @@ async fn record_outcome(
     if let PreStopFlushOutcome::NoWriter(Some(reason)) = outcome {
         data["reason"] = json!(reason);
     }
+    if let Some(working_state) = working_state {
+        data["durable"] = json!(working_state.durable);
+        data["persistedAt"] = json!(working_state.persisted_at);
+        if let Some(error) = working_state.error {
+            data["workingStateError"] = json!(error);
+        }
+    }
+    data
+}
+
+async fn record_outcome(
+    state: &AppState,
+    target: &PreStopFlushTarget,
+    outcome: &PreStopFlushOutcome,
+) {
+    let data = flush_event_data(target, outcome);
     let result =
         async {
             let mut connection =
@@ -995,9 +1057,106 @@ mod db_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_is_node_local, WorkspaceLeaseHolder, WorkspaceLeaseState};
+    use super::{
+        endpoint_is_node_local, flush_body, flush_event_data, FlushWorkingState, OriginFlushReport,
+        PreStopFlushOutcome, PreStopFlushTarget, WorkspaceLeaseHolder, WorkspaceLeaseState,
+    };
     use crate::origins::WorkspaceLeaseRecord;
     use uuid::Uuid;
+
+    #[test]
+    fn the_flush_asks_for_the_working_folders_save_only_when_rolling_saves_are_on() {
+        assert_eq!(
+            flush_body(true, true),
+            serde_json::json!({ "turnActive": true, "workingState": true })
+        );
+        // Off: exactly the body a flush always sent.
+        assert_eq!(
+            flush_body(false, false),
+            serde_json::json!({ "turnActive": false })
+        );
+    }
+
+    #[test]
+    fn the_stop_event_and_response_carry_the_working_folders_save() {
+        let report: OriginFlushReport = serde_json::from_value(serde_json::json!({
+            "recoveryRefs": [],
+            "unpushedRefs": 0,
+            "unpushedRefNames": [],
+            "parkedCommits": 0,
+            "workingState": {
+                "unsaved": 2,
+                "localOnly": 0,
+                "persistedAt": "2026-10-07T12:00:00Z",
+                "durable": true,
+                "changed": false
+            }
+        }))
+        .unwrap();
+        let working_state = report.working_state.clone().expect("workingState");
+        assert!(working_state.durable);
+        let outcome = PreStopFlushOutcome::Flushed {
+            unpushed_refs: 0,
+            unpushed_ref_names: Vec::new(),
+            recovery_refs: 0,
+            parked_commits: 0,
+            git_sync_status: None,
+            working_state: Some(working_state),
+        };
+        let target = PreStopFlushTarget {
+            runtime_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            origin_id: Uuid::new_v4(),
+            origin_endpoint: "http://127.0.0.1:1".to_string(),
+            turn_active: false,
+            writer: super::FlushWriter::Nobody,
+            untrusted_endpoint: false,
+        };
+        let data = flush_event_data(&target, &outcome);
+        assert_eq!(data["durable"], true, "{data}");
+        assert_eq!(data["persistedAt"], "2026-10-07T12:00:00Z", "{data}");
+        let summary = serde_json::to_value(outcome.summary()).unwrap();
+        assert_eq!(summary["workingState"]["durable"], true, "{summary}");
+        assert_eq!(
+            summary["workingState"]["persistedAt"], "2026-10-07T12:00:00Z",
+            "{summary}"
+        );
+
+        // A save that did not land: not durable, with the origin's code.
+        let failed = FlushWorkingState {
+            durable: false,
+            persisted_at: None,
+            error: Some("push_ambiguous".to_string()),
+        };
+        let outcome = PreStopFlushOutcome::Flushed {
+            unpushed_refs: 1,
+            unpushed_ref_names: vec!["x".to_string()],
+            recovery_refs: 1,
+            parked_commits: 0,
+            git_sync_status: None,
+            working_state: Some(failed),
+        };
+        let data = flush_event_data(&target, &outcome);
+        assert_eq!(data["durable"], false, "{data}");
+        assert_eq!(data["workingStateError"], "push_ambiguous", "{data}");
+
+        // An origin that predates the flag answers without it.
+        let older: OriginFlushReport =
+            serde_json::from_value(serde_json::json!({ "unpushedRefs": 0 })).unwrap();
+        assert!(older.working_state.is_none());
+        let outcome = PreStopFlushOutcome::Flushed {
+            unpushed_refs: 0,
+            unpushed_ref_names: Vec::new(),
+            recovery_refs: 0,
+            parked_commits: 0,
+            git_sync_status: None,
+            working_state: older.working_state,
+        };
+        let data = flush_event_data(&target, &outcome);
+        assert!(data.get("durable").is_none(), "{data}");
+        let summary = serde_json::to_value(outcome.summary()).unwrap();
+        assert!(summary.get("workingState").is_none(), "{summary}");
+    }
 
     fn lease(user_id: Option<Uuid>, runtime_id: Option<Uuid>) -> WorkspaceLeaseRecord {
         let now = chrono::Utc::now();
