@@ -1600,3 +1600,47 @@ fn a_plan_older_than_the_last_save_is_not_executed() {
     assert_eq!(fx.save(PersistReason::Tick).error, None);
     assert!(!waiting.plan_still_current(&plan).unwrap());
 }
+
+/// What one save costs in git processes, the same for 20 dirty files as for
+/// 200: the config of the checkout is checked before every git command but
+/// parsed only when it changed, and each save reads what it needs once.
+#[test]
+fn a_save_runs_a_bounded_number_of_git_processes() {
+    let fx = Fixture::new();
+    let log = fx.root.join("git.log");
+    let _wrapper = GitWrapper::install(&fx.root, &format!("echo \"$*\" >> '{}'", log.display()));
+    let counted = || {
+        let text = fs::read_to_string(&log).unwrap_or_default();
+        let _ = fs::remove_file(&log);
+        let parses = text
+            .lines()
+            .filter(|line| line.contains("config --file .instafy/.git/config"))
+            .count();
+        (text.lines().count(), parses)
+    };
+    for index in 0..20 {
+        fx.write(&format!("f{index}.md"), b"x\n");
+    }
+    let _ = fx.state();
+    let (state, _) = counted();
+    fx.save(PersistReason::Tick);
+    let (first, first_parses) = counted();
+    fx.write("f0.md", b"y\n");
+    fx.save(PersistReason::Tick);
+    let (replacing, replacing_parses) = counted();
+    fx.save(PersistReason::TurnEnd);
+    let (turn_end, turn_end_parses) = counted();
+    let costs = format!(
+        "state {state}, first tick {first} ({first_parses} config parses), replacing tick \
+         {replacing} ({replacing_parses}), turn end with nothing new {turn_end} \
+         ({turn_end_parses})"
+    );
+    assert!(state <= 6, "{costs}");
+    assert!(first <= 40 && replacing <= 40, "{costs}");
+    assert!(turn_end <= 25, "{costs}");
+    // Only the first save writes the config (its working-set seed).
+    assert!(
+        first_parses <= 1 && replacing_parses == 0 && turn_end_parses == 0,
+        "{costs}"
+    );
+}

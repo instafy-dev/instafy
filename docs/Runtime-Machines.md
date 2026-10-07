@@ -590,6 +590,14 @@ node's checkout a cache.
   with the next tick, which runs even if nothing changed meanwhile. A tick that finds the workspace busy answers 409 and waits
   for the next one; while a stop's fence is up it answers 503. Ticks never
   overlap and a missed one is not queued.
+- Cost, measured with 20 or 200 changed files alike: an unchanged folder
+  costs 5 git processes and no controller call; a changed tick about 37 git
+  processes, a grant and a `git.write` token from the controller, one leased
+  push and one `ls-remote`; a turn-end save with nothing new about 23 git
+  processes and no network. About 1,100 git processes per runtime-hour of
+  continuous edits. Every git command in a checkout first checks that the
+  repository config holds only data; that config is parsed again only when
+  it changed.
 - When the job's body returns, whatever it returned (a terminal command and a
   turn that changed no file included), the ticker stops and the job's own
   save runs. A save that did not land is recorded on the job as a

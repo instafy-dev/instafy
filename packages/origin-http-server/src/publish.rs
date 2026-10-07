@@ -461,6 +461,8 @@ pub(crate) struct Publisher<'a> {
     /// A stop stores no `unsaved` copy of work the working folder's last
     /// confirmed save holds.
     skip_saved_copies: bool,
+    /// The working folder's id, once a save read it.
+    pub(crate) working_set: std::cell::OnceCell<String>,
 }
 
 pub(crate) struct HistoryScan {
@@ -515,6 +517,7 @@ impl<'a> Publisher<'a> {
             held_back: BTreeSet::new(),
             saves: None,
             skip_saved_copies: false,
+            working_set: std::cell::OnceCell::new(),
         }
     }
 

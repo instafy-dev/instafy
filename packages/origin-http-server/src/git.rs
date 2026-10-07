@@ -430,6 +430,34 @@ fn render_trusted_git_config(mut entries: Vec<TrustedGitConfigEntry>) -> String 
     output
 }
 
+/// The data-only config each checkout's `.instafy/.git/config` was last
+/// reduced to, by path. A file that still holds exactly those bytes is
+/// data-only already, so it is not parsed again: before every git command
+/// that would otherwise cost one more `git config` process.
+static REDUCED_CONFIGS: Lazy<Mutex<HashMap<PathBuf, Vec<u8>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Checkouts whose reduced config is remembered at once; more start over.
+const MAX_REDUCED_CONFIGS: usize = 256;
+
+fn already_reduced(config_path: &Path, existing: &[u8]) -> bool {
+    REDUCED_CONFIGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(config_path)
+        .is_some_and(|reduced| reduced.as_slice() == existing)
+}
+
+fn remember_reduced(config_path: &Path, reduced: &[u8]) {
+    let mut reduced_configs = REDUCED_CONFIGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if reduced_configs.len() >= MAX_REDUCED_CONFIGS && !reduced_configs.contains_key(config_path) {
+        reduced_configs.clear();
+    }
+    reduced_configs.insert(config_path.to_path_buf(), reduced.to_vec());
+}
+
 pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Result<()> {
     let config_path = instafy_git_dir(workspace_root).join("config");
     let workspace = WorkspaceDir::open(workspace_root)
@@ -446,6 +474,11 @@ pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Resu
         config_file
             .read_to_end(&mut existing)
             .with_context(|| format!("failed to read git config {:?}", config_path))?;
+    }
+    // Byte for byte what this function wrote (or found) last time: only
+    // data-only settings, and the same work tree.
+    if already_reduced(&config_path, &existing) {
+        return Ok(());
     }
 
     // `.instafy/.git` is a reserved, service-owned boundary. Before any Git
@@ -503,6 +536,7 @@ pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Resu
 
     let sanitized = render_trusted_git_config(entries);
     if existing == sanitized.as_bytes() {
+        remember_reduced(&config_path, sanitized.as_bytes());
         return Ok(());
     }
 
@@ -521,6 +555,7 @@ pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Resu
         .map_err(|error| error.error)
         .with_context(|| format!("failed to replace git config {:?}", config_path))?;
     sync_directory(git_dir)?;
+    remember_reduced(&config_path, sanitized.as_bytes());
 
     Ok(())
 }
@@ -2966,6 +3001,50 @@ mod tests {
             git_config_get(&config_path, "core.worktree")?,
             workspace_dir.to_string_lossy()
         );
+        Ok(())
+    }
+
+    /// A config this server already reduced to data-only settings is not
+    /// parsed again before the next command. Once the workspace changes it,
+    /// it is, and loses what was added.
+    #[test]
+    fn a_reduced_config_is_parsed_again_only_once_it_changes() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = sandbox.path().join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        init_repo(&workspace_dir, "main")?;
+        fs::create_dir_all(workspace_dir.join(".instafy"))?;
+        fs::rename(
+            workspace_dir.join(".git"),
+            workspace_dir.join(".instafy").join(".git"),
+        )?;
+        let config_path = workspace_dir.join(".instafy").join(".git").join("config");
+        let log = sandbox.path().join("git.log");
+        let _wrapper = crate::test_support::GitWrapper::install(
+            sandbox.path(),
+            &format!("echo \"$*\" >> '{}'", log.display()),
+        );
+        let parses = || {
+            fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("config --file .instafy/.git/config"))
+                .count()
+        };
+
+        for _ in 0..3 {
+            run_git_ok(&workspace_dir, &["rev-parse", "--git-dir"], None)?;
+        }
+        assert_eq!(parses(), 1);
+
+        let mut text = fs::read_to_string(&config_path)?;
+        text.push_str("[alias]\n\tpwn = !touch pwned\n");
+        fs::write(&config_path, text)?;
+        run_git_ok(&workspace_dir, &["rev-parse", "--git-dir"], None)?;
+        assert_eq!(parses(), 2);
+        assert!(!fs::read_to_string(&config_path)?.contains("alias"));
+        run_git_ok(&workspace_dir, &["rev-parse", "--git-dir"], None)?;
+        assert_eq!(parses(), 2);
         Ok(())
     }
 

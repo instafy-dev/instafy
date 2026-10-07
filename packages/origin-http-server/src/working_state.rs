@@ -435,11 +435,14 @@ fn read_commit(git: &WorkspaceGit<'_>, reference: &str) -> Result<Option<Record>
 /// for this folder's working set. A record naming anything else (another
 /// folder's save, which a fetch mirrors into this repository and a turn can
 /// point the record at) is dropped, so it never becomes a lease.
-fn read_record(git: &WorkspaceGit<'_>) -> Result<Option<Record>> {
+fn read_record(
+    git: &WorkspaceGit<'_>,
+    working_set: impl FnOnce() -> Result<String>,
+) -> Result<Option<Record>> {
     let Some(record) = read_commit(git, RECORD_REF)? else {
         return Ok(None);
     };
-    if record.working_set.as_deref() == Some(working_set_id(git)?.as_str()) {
+    if record.working_set.as_deref() == Some(working_set()?.as_str()) {
         return Ok(Some(record));
     }
     warn!("the working folder's record names a commit made for another working set; dropped it");
@@ -474,7 +477,7 @@ pub(crate) fn record_holds(
     if unsettled(git)? {
         return Ok(false);
     }
-    Ok(read_record(git)?
+    Ok(read_record(git, || working_set_id(git))?
         .is_some_and(|record| record.parent.as_deref() == parent && record.tree == tree))
 }
 
@@ -482,13 +485,25 @@ pub(crate) fn record_holds(
 /// (see [`ATTEMPT_REF`]): until a save has looked at the slot again, the
 /// record may be behind it and says nothing about what canonical holds.
 pub(crate) fn unsettled(git: &WorkspaceGit<'_>) -> Result<bool> {
+    let (attempt, deleting) = markers(git)?;
+    Ok(attempt.is_some() || deleting.is_some())
+}
+
+/// The commits [`ATTEMPT_REF`] and [`DELETING_REF`] name, in one call.
+fn markers(git: &WorkspaceGit<'_>) -> Result<(Option<String>, Option<String>)> {
     let listed = git.stdout(&[
         "for-each-ref",
-        "--format=%(refname)",
+        "--format=%(refname)%00%(objectname)",
         ATTEMPT_REF,
         DELETING_REF,
     ])?;
-    Ok(!listed.trim().is_empty())
+    let named = |reference: &str| {
+        listed.lines().find_map(|line| {
+            let (name, rev) = line.split_once('\0')?;
+            (name == reference).then(|| rev.to_string())
+        })
+    };
+    Ok((named(ATTEMPT_REF), named(DELETING_REF)))
 }
 
 /// Local recovery refs not pushed yet, except the ones `held_back`.
@@ -584,16 +599,15 @@ pub(crate) struct Plan {
     record: Option<Record>,
     /// A push or delete of the slot is waiting for canonical's answer.
     unsettled: bool,
+    /// The parent's tree (the empty tree without a parent).
+    parent_tree: String,
     /// Local recovery refs waiting for a push.
     pending: usize,
 }
 
 impl Plan {
-    fn parent_tree(&self, git: &WorkspaceGit<'_>) -> Result<String> {
-        match self.parent.as_deref() {
-            Some(parent) => git.tree_id(parent),
-            None => git.empty_tree(),
-        }
+    fn parent_tree(&self, _git: &WorkspaceGit<'_>) -> Result<String> {
+        Ok(self.parent_tree.clone())
     }
 
     /// The slot already holds this snapshot as this origin saved it, and no
@@ -705,6 +719,10 @@ impl Publisher<'_> {
             _ => None,
         };
         let parent = base.clone().or_else(|| main.clone());
+        let parent_tree = match parent.as_deref() {
+            Some(parent) => self.git.tree_id(parent)?,
+            None => self.git.empty_tree()?,
+        };
         // The agent may be running git in the folder during a tick; at a
         // turn's end or a stop it is idle.
         let status = if reason == PersistReason::Tick {
@@ -730,11 +748,11 @@ impl Publisher<'_> {
             (None, _, Some(main)) => overlay(&self.git, main, &dirty_tree, &frozen)?,
             _ => tree_with_entries_from(&self.git, &dirty_tree, parent.as_deref(), &frozen)?,
         };
-        let record = read_record(&self.git)?;
+        let record = read_record(&self.git, || self.working_set())?;
         let mut deferred = deferred;
         let mut more = false;
         if reason == PersistReason::Tick {
-            let over = self.over_budget(&tree, parent.as_deref(), record.as_ref(), &deferred)?;
+            let over = self.over_budget(&tree, &parent_tree, record.as_ref(), &deferred)?;
             more = !over.is_empty();
             deferred.extend(over);
         }
@@ -763,6 +781,7 @@ impl Publisher<'_> {
             deferred,
             record,
             unsettled,
+            parent_tree,
             pending,
             more,
         })
@@ -775,15 +794,11 @@ impl Publisher<'_> {
     fn over_budget(
         &self,
         tree: &str,
-        parent: Option<&str>,
+        parent_tree: &str,
         record: Option<&Record>,
         deferred: &[String],
     ) -> Result<Vec<String>> {
-        let parent_tree = match parent {
-            Some(parent) => self.git.tree_id(parent)?,
-            None => self.git.empty_tree()?,
-        };
-        let mut fresh = changed_paths(&self.git, &parent_tree, tree)?;
+        let mut fresh = changed_paths(&self.git, parent_tree, tree)?;
         if let Some(record) = record {
             let unsent: BTreeSet<String> = changed_paths(&self.git, &record.tree, tree)?
                 .into_iter()
@@ -948,7 +963,7 @@ impl Publisher<'_> {
             if seen == Seen::Moved {
                 return Err(SaveError::SlotMoved);
             }
-            record = read_record(&self.git).map_err(local)?;
+            record = read_record(&self.git, || self.working_set()).map_err(local)?;
             if seen == Seen::Removed {
                 tree =
                     without_dismissed(&self.git, &tree, plan.parent.as_deref()).map_err(local)?;
@@ -1056,7 +1071,7 @@ impl Publisher<'_> {
                         // try again on what the slot holds.
                         Seen::Adopted | Seen::Deleted | Seen::Recorded => {}
                     }
-                    record = read_record(&self.git).map_err(local)?;
+                    record = read_record(&self.git, || self.working_set()).map_err(local)?;
                     if tree != parent_tree
                         && holds(record.as_ref(), plan.parent.as_deref(), &tree, origin)
                     {
@@ -1171,7 +1186,7 @@ impl Publisher<'_> {
 
     /// This folder's slot ref.
     fn slot(&self) -> Result<String> {
-        Ok(slot_ref(&working_set_id(&self.git)?))
+        Ok(slot_ref(&self.working_set()?))
     }
 
     /// Look at the slot on canonical and bring the record in line with it
@@ -1194,10 +1209,9 @@ impl Publisher<'_> {
     /// folder knows it holds, and drop the markers of the push or delete
     /// whose answer this was.
     fn settle_markers(&self, tip: Option<&str>) -> Result<Seen> {
-        let record = read_record(&self.git)?;
+        let record = read_record(&self.git, || self.working_set())?;
         let recorded = record.as_ref().map(|record| record.commit.as_str());
-        let attempt = self.git.commit_id(ATTEMPT_REF)?;
-        let deleting = self.git.commit_id(DELETING_REF)?;
+        let (attempt, deleting) = markers(&self.git)?;
         let seen = match (tip, record.as_ref()) {
             (None, None) => Seen::Recorded,
             (None, Some(gone)) if deleting.as_deref() == Some(gone.commit.as_str()) => {
@@ -1220,7 +1234,7 @@ impl Publisher<'_> {
             }
             (Some(_), _) => return Ok(Seen::Moved),
         };
-        self.clear_markers()?;
+        self.drop_markers(attempt.as_deref(), deleting.as_deref())?;
         Ok(seen)
     }
 
@@ -1239,18 +1253,33 @@ impl Publisher<'_> {
             parsed.trailer(KIND_TRAILER) == Some(recovery::RecoveryKind::Unsaved.as_str())
                 && parsed
                     .trailer(WORKING_SET_TRAILER)
-                    .is_some_and(|id| Some(id) == working_set_id(&self.git).ok().as_deref()),
+                    .is_some_and(|id| Some(id) == self.working_set().ok().as_deref()),
         )
     }
 
     /// Forget the push or delete whose answer is now known.
     fn clear_markers(&self) -> Result<()> {
-        for marker in [ATTEMPT_REF, DELETING_REF] {
-            if let Some(rev) = self.git.commit_id(marker)? {
-                self.git.delete_ref(marker, &rev)?;
+        let (attempt, deleting) = markers(&self.git)?;
+        self.drop_markers(attempt.as_deref(), deleting.as_deref())
+    }
+
+    fn drop_markers(&self, attempt: Option<&str>, deleting: Option<&str>) -> Result<()> {
+        for (marker, rev) in [(ATTEMPT_REF, attempt), (DELETING_REF, deleting)] {
+            if let Some(rev) = rev {
+                self.git.delete_ref(marker, rev)?;
             }
         }
         Ok(())
+    }
+
+    /// This folder's working-set id, read once per save.
+    fn working_set(&self) -> Result<String> {
+        if let Some(id) = self.working_set.get() {
+            return Ok(id.clone());
+        }
+        let id = working_set_id(&self.git)?;
+        let _ = self.working_set.set(id.clone());
+        Ok(id)
     }
 
     /// The slot commit: `tree` on `parent`, by this origin, naming the
@@ -1263,7 +1292,7 @@ impl Publisher<'_> {
              {KIND_TRAILER}: {}\n{ORIGIN_TRAILER}: {}\n{WORKING_SET_TRAILER}: {}\n",
             recovery::RecoveryKind::Unsaved.as_str(),
             self.config.origin_id.as_hyphenated(),
-            working_set_id(&self.git)?
+            self.working_set()?
         );
         for path in paths.iter().take(MAX_TRAILER_PATHS) {
             message.push_str(&format!(
