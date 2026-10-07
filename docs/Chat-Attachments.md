@@ -288,5 +288,5 @@ wherever that file exists.
 - `cargo test --test proxy_integration native_images` runs two turns through the real proxy
   against a local provider stub with inert credentials. The first request carries the
   attached image as an inline `input_image` after the prompt; the follow-up, which resumes the
-  thread, carries it once, adds none and does not ask the agent to open it again. CI only
-  compiles this test, so run it locally after a change to image input or a Codex bump.
+  thread, carries it once, adds none and does not ask the agent to open it again. CI runs
+  it in the Rust test runtime agent job.

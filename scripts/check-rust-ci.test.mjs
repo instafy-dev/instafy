@@ -196,7 +196,7 @@ test('the full reviewed seven check and ten test commands and working directorie
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
   for (const [list, stepName, hash, expectedCount] of [
     [checks, 'Check public Rust package', '7ab805f6d9f99e7d6cae9fd5ab924ebb4cc3612d07690f954330bbc0f6381608', 7],
-    [suites, 'Run database-free Rust test suite', '089e10dfb5ffb9f4f7081fbdf25b35ae82162d6bf654684faff6f015d88cd96b', 10],
+    [suites, 'Run database-free Rust test suite', 'efa4f77121bf47700befffc23a65eb0d864b5d5680e1da144b6a47d29aa99ced', 11],
   ]) {
     const inventory = list.flatMap(item => {
       const part = step(item.key, stepName);
@@ -215,11 +215,12 @@ test('the full reviewed seven check and ten test commands and working directorie
     assert.equal(inventory.length, expectedCount);
     assert.equal(createHash('sha256').update(JSON.stringify(inventory)).digest('hex'), hash);
   }
-  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 15);
+  assert.equal(children.reduce((sum, item) => sum + (job(item.key).match(/^          cargo (?:check|test) /gmu) ?? []).length, 0), 16);
   const agent = step('rust-test-agent', 'Run database-free Rust test suite');
   assert.match(agent, /--no-run\n          cargo test .* --lib --test controller_client --test proxy_retry_budget -- --test-threads=1/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration codex_read_reference_ -- --test-threads=1\n/u);
   assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration native_compaction:: -- --test-threads=1\n/u);
+  assert.match(agent, /cargo test --manifest-path packages\/runtime-agent\/Cargo.toml --test proxy_integration native_images:: -- --test-threads=1\n/u);
 });
 
 test('test children preserve unfiltered frozen Node20 installation and host-only disk cleanup', () => {
@@ -260,6 +261,7 @@ test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux a
     ['gpt-5.5', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_retry_budget', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'codex_read_reference_', '--', '--test-threads=1'],
     ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'native_compaction::', '--', '--test-threads=1'],
+    ['', 'test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--test', 'proxy_integration', 'native_images::', '--', '--test-threads=1'],
   ];
   const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}" "\${INSTAFY_TEST_CODEX_MODEL-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
   for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) for (const os of ['Linux', 'macOS', 'Windows', '']) {
@@ -357,7 +359,7 @@ test('the restore-only mitigation preserves every other byte of the reviewed Bui
   // compaction selector: retains all functional commands, aggregate guards, routing,
   // permissions and other jobs.
   assert.equal(createHash('sha256').update(normalized).digest('hex'),
-    '15e43af6630365e8d029a66223b1e1db9139372fe7aa30e41a4b82755a48598d');
+    '7cfeae80bb4f93219576b7cef560e2281618dd00899548e94db4bf78fa705d7f');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {
