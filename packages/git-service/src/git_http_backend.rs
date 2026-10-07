@@ -54,6 +54,11 @@ fn backend_config(options: &GitHttpBackendOptions<'_>) -> Vec<(&'static str, Str
         ("receive.fsckObjects", "true".to_string()),
         ("transfer.fsckObjects", "true".to_string()),
         ("receive.maxInputSize", options.max_push_bytes.to_string()),
+        // A working slot (`git_service::policy::WORKING_SLOT_NAME`) is
+        // replaced by a commit on `main`, not on its old tip, so its updates
+        // are not fast-forwards. A repository's own setting must not refuse
+        // them; the update hook keeps `main` fast-forward only.
+        ("receive.denyNonFastForwards", "false".to_string()),
     ]
 }
 
@@ -330,10 +335,11 @@ mod tests {
                 ("receive.fsckObjects", "true".to_string()),
                 ("transfer.fsckObjects", "true".to_string()),
                 ("receive.maxInputSize", "4096".to_string()),
+                ("receive.denyNonFastForwards", "false".to_string()),
             ]
         );
         let env = backend_config_env(&options);
-        assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "5".to_string()));
+        assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "6".to_string()));
         assert_eq!(
             env[1..3],
             [
@@ -344,7 +350,7 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(env.len(), 11);
+        assert_eq!(env.len(), 13);
     }
 
     #[test]
@@ -367,6 +373,64 @@ mod tests {
             push_report: None,
         };
         verify_backend_config(&options).expect("git applies GIT_CONFIG_COUNT");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repository that refuses non-fast-forward updates in its own config
+    /// still accepts a working slot's replacement: the command-scope setting
+    /// wins.
+    #[test]
+    fn a_repositorys_own_fast_forward_setting_is_overridden() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "instafy-git-backend-ff-{}-{nanos}",
+            std::process::id()
+        ));
+        let hooks_dir = root.join(".instafy-hooks");
+        let repo = root.join("project.git");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q", "--bare", repo.to_str().unwrap()])
+            .status
+            .success());
+        let repo_arg = format!("--git-dir={}", repo.display());
+        assert!(
+            git(&[&repo_arg, "config", "receive.denyNonFastForwards", "true"])
+                .status
+                .success()
+        );
+        let (root_str, hooks_str) = (root.to_str().unwrap(), hooks_dir.to_str().unwrap());
+        let options = GitHttpBackendOptions {
+            repo_root: root_str,
+            hooks_dir: hooks_str,
+            max_push_bytes: 4096,
+            push_report: None,
+        };
+        let output = std::process::Command::new("git")
+            .args([
+                &repo_arg,
+                "config",
+                "--bool",
+                "--get",
+                "receive.denyNonFastForwards",
+            ])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .envs(backend_config_env(&options))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "false");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

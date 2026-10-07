@@ -48,8 +48,38 @@ pub const INSTAFY_REF_ROOT: &str = "refs/instafy";
 
 /// Recovery refs are `<root>/<origin id>/<name>`, where the origin id is a
 /// lower-case UUID and the name uses only `[0-9A-Za-z._-]`. Any holder of
-/// `git.write` may push or delete them.
+/// `git.write` may create or delete them. A recovery ref is named after its
+/// content, so a push never moves one, except a working slot (see
+/// [`WORKING_SLOT_NAME`]).
 pub const RECOVERY_REF_ROOT: &str = "refs/instafy/recovery";
+
+/// The name of a working folder's rolling save:
+/// `<RECOVERY_REF_ROOT>/<working-set id>/working`, where the working-set id
+/// is a lower-case UUID that names one working folder. It is the only
+/// recovery ref a push may move: each save replaces it under a lease on the
+/// exact tip the saver last confirmed. Its updates are checked against its
+/// own parent as well as its old tip.
+pub const WORKING_SLOT_NAME: &str = "working";
+
+/// Whether `refname` is a working slot: `<RECOVERY_REF_ROOT>/<lower-case
+/// uuid>/working`. The rendered hook applies the same rule.
+pub fn is_working_slot_ref(refname: &str) -> bool {
+    let Some(rest) = refname
+        .strip_prefix(RECOVERY_REF_ROOT)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some((id, name)) = rest.split_once('/') else {
+        return false;
+    };
+    name == WORKING_SLOT_NAME
+        && id.len() == 36
+        && id.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+        })
+}
 
 /// Refs at or under this name are reserved for work salvaged from retired
 /// workspaces. No push may create, move or delete one, in any letter case.
@@ -88,8 +118,15 @@ pub fn render_update_hook(default_branch: &str) -> Result<String> {
             bail!("ref root {root:?} is not a plain lower-case ref name");
         }
     }
+    if !WORKING_SLOT_NAME
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase())
+    {
+        bail!("working slot name {WORKING_SLOT_NAME:?} is not a plain lower-case name");
+    }
     let instafy_ref_root = INSTAFY_REF_ROOT;
     let recovery_ref_root = RECOVERY_REF_ROOT;
+    let working_slot_name = WORKING_SLOT_NAME;
     let salvage_ref_root = SALVAGE_REF_ROOT;
 
     Ok(format!(
@@ -106,8 +143,10 @@ newrev="$3"
 
 main_ref="refs/heads/{default_branch}"
 instafy_root="{instafy_ref_root}"
+recovery_root="{recovery_ref_root}"
 salvage_root="{salvage_ref_root}"
 recovery_ref_pattern='^{recovery_ref_root}/[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}/[0-9A-Za-z._-]+$'
+working_slot_name="{working_slot_name}"
 ascii_ref_pattern='^[!-~]+$'
 
 is_zero() {{
@@ -139,6 +178,24 @@ fi
 # ---------------------------------------------------------------------------
 if [[ "$folded_ref" == "$salvage_root" || "$folded_ref" == "$salvage_root/"* ]]; then
   echo "instafy: '$refname' is reserved for salvaged work and cannot be changed by a push" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# A recovery ref is named after the work it holds, so a push may create or
+# delete one but never move it. The one exception is a working folder's
+# rolling save, {recovery_ref_root}/<working-set id>/{working_slot_name}, which every save
+# replaces under a lease on the tip it last confirmed. This keeps saved work
+# from being swapped for other content under the same name, so
+# GIT_POLICY_DISABLED does not skip it.
+# ---------------------------------------------------------------------------
+working_slot=0
+if [[ "$refname" =~ $recovery_ref_pattern && "${{refname##*/}}" == "$working_slot_name" ]]; then
+  working_slot=1
+fi
+if [[ "$folded_ref" == "$recovery_root/"* && "$working_slot" != "1" ]] \
+  && ! is_zero "$oldrev" && ! is_zero "$newrev"; then
+  echo "instafy: '$refname' is a recovery ref; it may be created or deleted, not moved" >&2
   exit 1
 fi
 
@@ -247,65 +304,81 @@ else
   base="$(git hash-object -t tree /dev/null)"
 fi
 
+# Check every path and blob that differs between `$1` and the new commit.
 # With -z, diff-tree prints ":<old mode> <new mode> <old oid> <new oid>
 # <status>" and the path as separate NUL-terminated fields, so every path is
 # checked exactly as stored. The marker after the listing is printed only
 # when diff-tree succeeded; without it the push is refused.
-blob_paths=()
-blob_oids=()
-listed=0
-while IFS= read -r -d '' meta; do
-  if [[ "$meta" == "end" ]]; then
-    listed=1
-    break
-  fi
-  IFS= read -r -d '' path || break
-  read -r _old_mode new_mode _old_oid new_oid status <<< "${{meta#:}}"
-
-  if is_denied_path "$path"; then
-    echo "instafy: blocked path '$path' (repo hygiene policy)" >&2
-    exit 1
-  fi
-
-  [[ "$status" == "D" ]] && continue
-
-  if [[ "$new_mode" == "160000" ]]; then
-    echo "instafy: blocked non-blob object for '$path' (type=commit)" >&2
-    exit 1
-  fi
-  blob_paths+=("$path")
-  blob_oids+=("$new_oid")
-done < <(git diff-tree -r -z --no-renames --raw "$base" "$newcommit" && printf 'end\0')
-
-if [[ "$listed" != "1" ]]; then
-  echo "instafy: could not list the changes in '$refname'" >&2
-  exit 1
-fi
-
-# Enforce the object type and per-blob size limit for new and changed paths
-# with one cat-file process.
-if [[ "${{#blob_oids[@]}}" -gt 0 ]]; then
-  checked=0
-  while read -r obj_type obj_size; do
-    path="${{blob_paths[$checked]}}"
-    checked=$((checked + 1))
-    if [[ "$obj_size" == "missing" ]]; then
-      obj_type="missing"
+check_changes() {{
+  local against="$1"
+  blob_paths=()
+  blob_oids=()
+  listed=0
+  while IFS= read -r -d '' meta; do
+    if [[ "$meta" == "end" ]]; then
+      listed=1
+      break
     fi
-    if [[ "$obj_type" != "blob" ]]; then
-      echo "instafy: blocked non-blob object for '$path' (type=$obj_type)" >&2
+    IFS= read -r -d '' path || break
+    read -r _old_mode new_mode _old_oid new_oid status <<< "${{meta#:}}"
+
+    if is_denied_path "$path"; then
+      echo "instafy: blocked path '$path' (repo hygiene policy)" >&2
       exit 1
     fi
-    if (( 10#$obj_size > 10#$max_blob_bytes )); then
-      echo "instafy: file too large '$path' ($obj_size bytes > $max_blob_bytes)" >&2
+
+    [[ "$status" == "D" ]] && continue
+
+    if [[ "$new_mode" == "160000" ]]; then
+      echo "instafy: blocked non-blob object for '$path' (type=commit)" >&2
       exit 1
     fi
-  done < <(printf '%s\n' "${{blob_oids[@]}}" | git cat-file --batch-check='%(objecttype) %(objectsize)')
+    blob_paths+=("$path")
+    blob_oids+=("$new_oid")
+  done < <(git diff-tree -r -z --no-renames --raw "$against" "$newcommit" && printf 'end\0')
 
-  if [[ "$checked" != "${{#blob_oids[@]}}" ]]; then
-    echo "instafy: could not check the objects in '$refname'" >&2
+  if [[ "$listed" != "1" ]]; then
+    echo "instafy: could not list the changes in '$refname'" >&2
     exit 1
   fi
+
+  # Enforce the object type and per-blob size limit for new and changed paths
+  # with one cat-file process.
+  if [[ "${{#blob_oids[@]}}" -gt 0 ]]; then
+    checked=0
+    while read -r obj_type obj_size; do
+      path="${{blob_paths[$checked]}}"
+      checked=$((checked + 1))
+      if [[ "$obj_size" == "missing" ]]; then
+        obj_type="missing"
+      fi
+      if [[ "$obj_type" != "blob" ]]; then
+        echo "instafy: blocked non-blob object for '$path' (type=$obj_type)" >&2
+        exit 1
+      fi
+      if (( 10#$obj_size > 10#$max_blob_bytes )); then
+        echo "instafy: file too large '$path' ($obj_size bytes > $max_blob_bytes)" >&2
+        exit 1
+      fi
+    done < <(printf '%s\n' "${{blob_oids[@]}}" | git cat-file --batch-check='%(objecttype) %(objectsize)')
+
+    if [[ "$checked" != "${{#blob_oids[@]}}" ]]; then
+      echo "instafy: could not check the objects in '$refname'" >&2
+      exit 1
+    fi
+  fi
+}}
+
+check_changes "$base"
+
+# A working slot is also checked against its own parent. Its old tip passed
+# the policy that applied then; against the parent every path the slot holds
+# is checked again, so a path denied since then (GIT_DENY_PATHS) is refused
+# even when this save did not change it.
+if [[ "$working_slot" == "1" ]] \
+  && slot_parent="$(git rev-parse --verify --quiet "$newcommit^1")" \
+  && [[ "$slot_parent" != "$base" ]]; then
+  check_changes "$slot_parent"
 fi
 
 exit 0
@@ -523,10 +596,19 @@ mod tests {
             salvage_check < policy_switch,
             "the salvage ref check must not be skippable by GIT_POLICY_DISABLED"
         );
+        // A recovery ref is never moved, whatever the policy switch says.
+        let move_rule = hook.find("may be created or deleted, not moved").unwrap();
+        assert!(
+            move_rule < policy_switch,
+            "the recovery ref move rule must not be skippable by GIT_POLICY_DISABLED"
+        );
+        assert!(hook.contains(&format!("working_slot_name=\"{WORKING_SLOT_NAME}\"")));
         // A single-commit diff-tree prints nothing for a merge, which would
         // skip every path check.
         assert!(!hook.contains("--root"));
-        assert!(hook.contains("git diff-tree -r -z --no-renames --raw \"$base\" \"$newcommit\""));
+        assert!(hook.contains("git diff-tree -r -z --no-renames --raw \"$against\" \"$newcommit\""));
+        assert!(hook.contains("check_changes \"$base\"\n"));
+        assert!(hook.contains("check_changes \"$slot_parent\"\n"));
     }
 
     #[test]
@@ -744,6 +826,45 @@ mod tests {
             self.run(refname, old, new, env)
                 .unwrap_or_else(|| panic!("{refname} {old}..{new} was accepted"))
         }
+
+        fn accepts_with(&self, refname: &str, old: &str, new: &str, env: &[(&str, &str)]) {
+            if let Some(stderr) = self.run(refname, old, new, env) {
+                panic!("{refname} {old}..{new} was refused: {stderr}");
+            }
+        }
+
+        /// A commit on top of main whose tree holds exactly `files`.
+        fn commit_with(&self, files: &[(&str, &[u8])]) -> String {
+            let index = self.root.join("index");
+            let _ = std::fs::remove_file(&index);
+            for (path, contents) in files {
+                let file = self.root.join("blob");
+                std::fs::write(&file, contents).unwrap();
+                let blob = self.git(&["hash-object", "-w", file.to_str().unwrap()]);
+                let output = std::process::Command::new("git")
+                    .args(["update-index", "--add", "--cacheinfo"])
+                    .arg(format!("100644,{blob},{path}"))
+                    .env("GIT_DIR", &self.git_dir)
+                    .env("GIT_INDEX_FILE", &index)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "update-index {path}");
+            }
+            let path = files.first().map(|(path, _)| *path).unwrap_or("empty");
+            let tree = std::process::Command::new("git")
+                .arg("write-tree")
+                .env("GIT_DIR", &self.git_dir)
+                .env("GIT_INDEX_FILE", &index)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(tree.status.success(), "write-tree {path}");
+            let tree = String::from_utf8(tree.stdout).unwrap().trim().to_string();
+            self.git(&["commit-tree", "-p", &self.main, "-m", path, &tree])
+        }
     }
 
     impl Drop for HookRepo {
@@ -809,7 +930,6 @@ mod tests {
         let recovery = format!("refs/instafy/recovery/{origin}/20261002T120000Z-unpublished.a_b-1");
 
         repo.accepts(&recovery, ZERO, child);
-        repo.accepts(&recovery, repo.main.as_str(), child);
         repo.accepts(&recovery, child, ZERO);
 
         for refname in [
@@ -860,5 +980,115 @@ mod tests {
         repo.set_ignorecase(false);
         repo.accepts("refs/heads/caf\u{e9}", ZERO, child);
         repo.accepts("refs/heads/ma\u{212a}e", ZERO, child);
+    }
+
+    const POLICY_DISABLED: (&str, &str) = ("GIT_POLICY_DISABLED", "1");
+
+    #[test]
+    fn working_slot_names_match_the_hook() {
+        let repo = HookRepo::new("slot-names");
+        repo.set_ignorecase(false);
+        let (main, child) = (repo.main.as_str(), repo.child.as_str());
+        let id = "5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a";
+        for (refname, slot) in [
+            (
+                format!("{RECOVERY_REF_ROOT}/{id}/{WORKING_SLOT_NAME}"),
+                true,
+            ),
+            (format!("{RECOVERY_REF_ROOT}/{id}/Working"), false),
+            (format!("{RECOVERY_REF_ROOT}/{id}/working-1"), false),
+            (
+                format!("{RECOVERY_REF_ROOT}/{id}/20261002T120000Z-unsaved-0123"),
+                false,
+            ),
+            (
+                format!("{RECOVERY_REF_ROOT}/{}/working", id.to_uppercase()),
+                false,
+            ),
+            (format!("{RECOVERY_REF_ROOT}/not-a-uuid/working"), false),
+            (format!("{RECOVERY_REF_ROOT}/{id}/a/working"), false),
+            ("refs/heads/working".to_string(), false),
+        ] {
+            assert_eq!(is_working_slot_ref(&refname), slot, "{refname}");
+            // Only a slot may move; anything else under the recovery root is
+            // refused before the policy switch is read.
+            let moved = repo
+                .run(&refname, main, child, &[POLICY_DISABLED])
+                .is_none();
+            if refname.starts_with(RECOVERY_REF_ROOT) {
+                assert_eq!(moved, slot, "{refname}");
+            }
+        }
+    }
+
+    /// A recovery ref names its own content: a push may create and delete
+    /// one, never move it, even with the policy switched off. A working
+    /// slot is the one recovery ref that moves.
+    #[test]
+    fn recovery_refs_are_created_or_deleted_and_only_a_working_slot_moves() {
+        let repo = HookRepo::new("recovery-moves");
+        repo.set_ignorecase(false);
+        let (main, child) = (repo.main.as_str(), repo.child.as_str());
+        let origin = "5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a";
+        let content = format!("{RECOVERY_REF_ROOT}/{origin}/20261002T120000Z-unsaved-0123456789ab");
+        let slot = format!("{RECOVERY_REF_ROOT}/{origin}/{WORKING_SLOT_NAME}");
+
+        for env in [&[][..], &[POLICY_DISABLED][..]] {
+            for (old, new) in [(main, child), (child, main)] {
+                let stderr = repo.refuses(&content, old, new, env);
+                assert!(
+                    stderr.contains(&format!(
+                        "instafy: '{content}' is a recovery ref; it may be created or deleted, not moved"
+                    )),
+                    "{env:?} {old}..{new}: {stderr}"
+                );
+            }
+            // Letter-case variants of the root are refused by the same rule.
+            let folded = content.replace("refs/instafy/recovery", "refs/INSTAFY/Recovery");
+            let stderr = repo.refuses(&folded, main, child, env);
+            assert!(
+                stderr.contains("may be created or deleted, not moved"),
+                "{stderr}"
+            );
+
+            repo.accepts_with(&content, ZERO, child, env);
+            repo.accepts_with(&content, child, ZERO, env);
+            repo.accepts_with(&slot, ZERO, child, env);
+            repo.accepts_with(&slot, child, main, env);
+            repo.accepts_with(&slot, main, ZERO, env);
+        }
+    }
+
+    /// A slot update is checked against its own parent as well as its old
+    /// tip: a path its old tip already held, denied since, is refused.
+    #[test]
+    fn a_working_slot_is_checked_against_its_parent() {
+        let repo = HookRepo::new("slot-parent");
+        repo.set_ignorecase(false);
+        let slot =
+            format!("{RECOVERY_REF_ROOT}/5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a/{WORKING_SLOT_NAME}");
+        let earlier = repo.commit_with(&[("assets/archive.zip", b"zip\n")]);
+        let later = repo.commit_with(&[("assets/archive.zip", b"zip\n"), ("notes.md", b"notes\n")]);
+        let deny_zip = [("GIT_DENY_PATHS", "*.zip")];
+
+        // Accepted while the policy allows it.
+        repo.accepts(&slot, ZERO, &earlier);
+        repo.accepts(&slot, &earlier, &later);
+
+        // The old tip already held the archive; its parent did not.
+        let stderr = repo.refuses(&slot, &earlier, &later, &deny_zip);
+        assert!(
+            stderr.contains("instafy: blocked path 'assets/archive.zip'"),
+            "{stderr}"
+        );
+        // A ref whose update is compared with its old tip alone lets the
+        // same change through.
+        repo.accepts_with("refs/heads/feature", &earlier, &later, &deny_zip[..]);
+        // A new slot is compared with main, which lacks the archive.
+        let stderr = repo.refuses(&slot, ZERO, &earlier, &deny_zip);
+        assert!(
+            stderr.contains("blocked path 'assets/archive.zip'"),
+            "{stderr}"
+        );
     }
 }

@@ -898,6 +898,109 @@ fn refs_instafy_holds_only_recovery_refs_and_main_has_no_aliases() {
     assert!(shard.repo_rev(&recovery).is_none());
 }
 
+/// A working slot is replaced under a lease on the tip its saver last
+/// confirmed: a correct lease moves it (a non-fast-forward update, which a
+/// repository's own `receive.denyNonFastForwards` cannot refuse), a stale
+/// one is refused, and creating and deleting still work. Every other
+/// recovery ref may only be created or deleted.
+#[test]
+fn a_working_slot_moves_only_under_a_current_lease() {
+    let shard = Shard::start("working-slot", &[]);
+    let client = Client::clone_from(&shard);
+    let initial = client.head();
+    // The repository's own config would refuse every non-fast-forward
+    // update; the shard's command-scope setting wins.
+    assert!(shard
+        .repo_git(&["config", "receive.denyNonFastForwards", "true"])
+        .status
+        .success());
+    let slot = format!(
+        "refs/instafy/recovery/{}/{}",
+        uuid::Uuid::new_v4(),
+        git_service::policy::WORKING_SLOT_NAME
+    );
+    let save = |path: &str, contents: &[u8]| {
+        client.git_ok(&["checkout", "-q", "--detach", &initial]);
+        client.commit_file(path, contents, "Keep a workspace's unsaved changes")
+    };
+    let push_leased = |commit: &str, expected: &str| {
+        client.git(&[
+            "push",
+            "--porcelain",
+            &format!("--force-with-lease={slot}:{expected}"),
+            "origin",
+            &format!("{commit}:{slot}"),
+        ])
+    };
+
+    let first = save("draft.md", b"first\n");
+    let created = push_leased(&first, "");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_eq!(shard.repo_rev(&slot).unwrap(), first);
+
+    // A second save on the same parent, not on the first save.
+    let second = save("draft.md", b"second\n");
+    let replaced = push_leased(&second, &first);
+    assert!(
+        replaced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+
+    // A saver whose lease names the replaced tip is refused.
+    let third = save("draft.md", b"third\n");
+    let stale = push_leased(&third, &first);
+    assert!(!stale.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale.stdout).contains("stale info"),
+        "{}",
+        String::from_utf8_lossy(&stale.stdout)
+    );
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+    // So is a create of a slot that exists.
+    assert!(!push_leased(&third, "").status.success());
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+
+    let deleted = client.git(&[
+        "push",
+        "--porcelain",
+        &format!("--force-with-lease={slot}:{second}"),
+        "origin",
+        &format!(":{slot}"),
+    ]);
+    assert!(deleted.status.success());
+    assert!(shard.repo_rev(&slot).is_none());
+
+    // A recovery ref named after its content is never moved, not even with
+    // a lease that names its tip.
+    let content = format!(
+        "refs/instafy/recovery/{}/20261002T120000Z-unsaved-0123456789ab",
+        uuid::Uuid::new_v4()
+    );
+    client.push_ok(&format!("{first}:{content}"));
+    let moved = client.git(&[
+        "push",
+        &format!("--force-with-lease={content}:{first}"),
+        "origin",
+        &format!("{second}:{content}"),
+    ]);
+    assert!(!moved.status.success());
+    assert!(
+        String::from_utf8_lossy(&moved.stderr)
+            .contains("is a recovery ref; it may be created or deleted, not moved"),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert_eq!(shard.repo_rev(&content).unwrap(), first);
+    client.push_ok(&format!(":{content}"));
+    assert!(shard.repo_rev(&content).is_none());
+}
+
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)
