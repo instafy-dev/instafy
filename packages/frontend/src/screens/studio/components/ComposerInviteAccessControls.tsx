@@ -20,6 +20,7 @@ export function ComposerInviteRoleToggle({
 }) {
   return (
     <SegmentedControl<ComposerInviteRole>
+      aria-label="Invitation access"
       value={value}
       onChange={onChange}
       options={[

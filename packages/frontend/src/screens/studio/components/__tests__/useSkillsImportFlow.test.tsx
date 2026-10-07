@@ -3,10 +3,13 @@
 import { act, type MutableRefObject } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { StudioDraftsProvider, useStudioDraftStore } from "../../../../workspace/StudioDrafts";
 import { useSkillsImportFlow } from "../useSkillsImportFlow";
 
 type HookOptions = Parameters<typeof useSkillsImportFlow>[0];
 type HookResult = ReturnType<typeof useSkillsImportFlow>;
+
+let draftStore: ReturnType<typeof useStudioDraftStore>;
 
 const SOURCE = "https://github.com/acme/skills-pack";
 
@@ -17,6 +20,7 @@ function Harness({
   options: HookOptions;
   resultRef: MutableRefObject<HookResult | null>;
 }) {
+  draftStore = useStudioDraftStore();
   resultRef.current = useSkillsImportFlow(options);
   return null;
 }
@@ -52,14 +56,30 @@ describe("useSkillsImportFlow", () => {
   async function renderHook(options: HookOptions) {
     const resultRef: MutableRefObject<HookResult | null> = { current: null };
     await act(async () => {
-      root.render(<Harness options={options} resultRef={resultRef} />);
+      root.render(<StudioDraftsProvider><Harness options={options} resultRef={resultRef} /></StudioDraftsProvider>);
     });
     return { resultRef, rerender: async (next: HookOptions) => {
       await act(async () => {
-        root.render(<Harness options={next} resultRef={resultRef} />);
+        root.render(<StudioDraftsProvider><Harness options={next} resultRef={resultRef} /></StudioDraftsProvider>);
       });
     } };
   }
+
+  it("protects only edited import forms, releases reverted edits, and clears a discarded import", async () => {
+    const { resultRef } = await renderHook(baseOptions());
+    await act(async () => resultRef.current!.handleOpenAddSkillModal());
+    expect(draftStore!.getSnapshot().protections).toHaveLength(0);
+    await act(async () => resultRef.current!.setImportSource(SOURCE));
+    expect(draftStore!.getSnapshot().protections).toHaveLength(1);
+    await act(async () => resultRef.current!.setImportSource(""));
+    expect(draftStore!.getSnapshot().protections).toHaveLength(0);
+    await act(async () => resultRef.current!.setImportOverwrite(true));
+    expect(draftStore!.getSnapshot().protections).toHaveLength(1);
+    await act(async () => draftStore!.getSnapshot().protections[0].discard!());
+    expect(resultRef.current!.addSkillModalOpen).toBe(false);
+    expect(resultRef.current!.importOverwrite).toBe(false);
+    expect(draftStore!.getSnapshot().protections).toHaveLength(0);
+  });
 
   it("takes no tab, conversation or navigation callbacks", () => {
     // The hook's param type carries none of the old navigation plumbing;

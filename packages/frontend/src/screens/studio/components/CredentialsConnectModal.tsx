@@ -11,7 +11,6 @@ import { NavArrowLeft } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
-import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import {
@@ -276,7 +275,6 @@ export function CredentialsConnectModal({
     }
     onBack();
   }, [connectModalStep, modalBusy, onBack, onClose]);
-  useNativeBackButtonAction(connectModalOpen && isDesktop, handleNativeBack);
 
   const body = (
     <StudioDialogBody className={isDesktop
@@ -794,12 +792,14 @@ export function CredentialsConnectModal({
   return (
     <StudioDialogModal
       isOpen={connectModalOpen}
+      onNativeBack={handleNativeBack}
       onOpenChange={(open) => {
         if (!open && !modalBusy) {
           onClose();
         }
       }}
       isDismissable={!modalBusy}
+      isKeyboardDismissDisabled={modalBusy}
       dialogAriaLabel="Add AI connection"
       data-testid="credentials-connect-modal"
       modalClassName="flex max-h-full flex-col overflow-hidden"

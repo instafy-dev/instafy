@@ -1,4 +1,6 @@
 import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
+import { useStudioEditorDismissal } from "../../../navigation/useStudioEditorDismissal";
+import { useStudioGuardedNavigation } from "../../../navigation/StudioDraftNavigationGuard";
 import { AgentAvatar } from "../../../components/AgentAvatar";
 import { uploadIdentityImage } from "../../../lib/identityImages";
 import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
@@ -677,9 +679,6 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
     setAgentModelDirty(false);
   }, []);
 
-  useStudioNavigationProtection(Boolean(agentProfileModal) || Boolean(agentActionPendingId), "agent editor",
-    agentActionPendingId ? undefined : closeAgentProfileModal);
-
   const defaultCodexCredential = useMemo(() => {
     return codexCredentials.find((credential) => credential.isDefault) ?? null;
   }, [codexCredentials]);
@@ -1054,12 +1053,25 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
 
   const editingAgent = agents.find(agent => agent.id === agentProfileModal?.agentId);
   const agentProfileDirty = agentProfileModal?.mode === "create" || Boolean(agentAvatarFileDraft) ||
-    agentNameDraft.trim() !== (editingAgent?.displayName ?? "") ||
+    agentNameDraft.trim() !== (editingAgent?.displayName ?? (agentProfileModal?.mode === "octo" ? "Octo" : "")) ||
     agentAvatarUrlDraft.trim() !== resolveAgentAvatarUrlDraftFromSeed(editingAgent?.avatarSeed ?? "") ||
     agentBioDraft.trim() !== (editingAgent?.bio ?? "") ||
     agentDescriptionDraft.trim() !== (editingAgent?.description ?? "") ||
     (agentProfileModal?.mode === "edit" && normalizeAgentHandle(agentHandleDraft) !== editingAgent?.handle) ||
     agentCredentialDirty || agentModelDirty;
+
+  const agentEditorDirty = agentProfileModal?.mode === "create"
+    ? Boolean(agentNameDraft || agentHandleDraft || agentAvatarUrlDraft || agentAvatarFileDraft ||
+        agentBioDraft || agentDescriptionDraft || agentCredentialDirty || agentModelDirty)
+    : agentProfileDirty;
+  const dismissAgentProfileModal = useStudioEditorDismissal({
+    isOpen: Boolean(agentProfileModal),
+    isDirty: agentEditorDirty,
+    isPending: Boolean(agentActionPendingId),
+    label: "agent editor",
+    onDiscard: closeAgentProfileModal,
+  });
+  const guardAgentNavigation = useStudioGuardedNavigation();
 
   const agentProfileModalMode: AgentProfileModalMode = agentProfileModal?.mode ?? "create";
   const creatingWithoutConnection = agentProfileModalMode === "create" && codexCredentials.length === 0;
@@ -1165,9 +1177,13 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
           : agentProviderDraft === "gemini"
             ? "gemini"
             : "codex";
-    closeAgentProfileModal();
-    openConnectModalAtStep(step);
-  }, [agentProviderDraft, closeAgentProfileModal, openConnectModalAtStep]);
+    // The entire handoff waits for discard confirmation. Dismissal by itself
+    // may defer, so opening setup immediately afterwards would lose the draft.
+    guardAgentNavigation(() => {
+      dismissAgentProfileModal();
+      openConnectModalAtStep(step);
+    });
+  }, [agentProviderDraft, dismissAgentProfileModal, guardAgentNavigation, openConnectModalAtStep]);
 
   return (
     <>
@@ -1221,7 +1237,7 @@ function UserCredentialsSettingsCard({ section = "connections", onOpenAgentProfi
         onBioChange={setAgentBioDraft}
         description={agentDescriptionDraft}
         onDescriptionChange={setAgentDescriptionDraft}
-        onClose={closeAgentProfileModal}
+        onClose={dismissAgentProfileModal}
         onSave={() => void handleSaveAgentProfile()}
         saveLabel={agentProfileModalMode === "create" ? "Create agent" : "Save profile"}
       />

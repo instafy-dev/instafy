@@ -151,6 +151,17 @@ another account's presentation and pending navigation. Offline sign-out cannot
 guarantee immediate server cleanup; generic lock-screen content and account
 checks limit exposure until cleanup succeeds.
 
+### Device alert switch
+
+Settings → Notifications offers **Notifications on this device** separately from
+account-wide category and channel preferences. Turning it on requests permission
+when needed and completes device registration before showing it as enabled.
+Turning it off disables local alerts and unregisters this account's push endpoint;
+it does not revoke operating-system permission or change another device's setting.
+Failed push cleanup stays visible with a retry action. Blocked permission shows an
+off, disabled switch with instructions and a read-only permission recheck. Android
+push remains unavailable; its in-app category preferences are still editable.
+
 ## Home and navigation
 
 Home is the single catch-up surface on browser, mobile and Desktop. Unread updates

@@ -1190,13 +1190,19 @@ attempt per test: skips, expected failures, retries, filtered subsets, and zero
 tests fail the lane. Failure traces and a machine-readable result are retained
 under `packages/frontend/test-results/browser-ci/<lane>`.
 
-The 39-case serial `browser-ui` lane has a six-minute total budget for hosted
+The serial `browser-ui` lane has a six-minute total budget for hosted
 runners; each test still has a 30-second limit, with no retries or skips allowed.
+
+The settings component cases mount production Notifications and segmented controls.
+They cover phone and desktop switch alignment, disclosure, single-channel preference
+updates, and 44px targets for narrow screens or touch pointers. Radio choices also
+exercise real keyboard focus, arrow-key selection and touch activation. Their HTTP
+responses are disposable fixtures; they do not prove operating-system push delivery.
 
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, renderer ownership revocation, and native form-owner/type descriptors (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
-| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area/keyboard geometry, focused-editable reveal, phone session/resume/save-status controls, retained-editor Unicode input isolation, mobile drawer safe-area/focused-search geometry and Escape drill-in dismissal, Studio history/scroll navigation, and focused-chat header/overview dock/picker navigation with simulated keyboard geometry and a synthetic retained input (at least 39 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area/keyboard geometry, focused-editable reveal, phone session/resume/save-status controls, retained-editor Unicode input isolation, mobile drawer safe-area/focused-search geometry and Escape drill-in dismissal, Studio history/scroll navigation, and focused-chat header/overview dock/picker navigation with simulated keyboard geometry and a synthetic retained input (with an explicit required test inventory) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
 | Shared co-browsing tool fixture | Production browser tools in real Chromium: one routine grant across two sites, highlighted manual fields, fresh continuation observation, and local action timings | Installed workspace dependencies and locked Playwright Chromium; no Docker, database, controller, model or real accounts |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
 | Shared Studio fixture | Real signed-in application, authorized project creation, Shared launch, CDP pixels/input, periodic snapshot, acknowledged provider stop, replacement login restoration, and UI clear | Disposable Linux, Xvfb, Chromium, Go, Rust, `x11-utils`, `sqlite3`, `psql`, and fresh local Supabase including GoTrue |
@@ -1256,6 +1262,15 @@ and checks centered focus, retained text, restoration and unchanged backdrop
 safe areas. Native iOS accessory controls are not part of Chromium's viewport:
 physical verification must compare the field with both the keyboard and any
 separate accessory toolbar, then verify normal clear/Back/close cleanup.
+
+The mobile editor cases mount the production Skills import and agent profile dialogs.
+They verify that the title, dismissal and action controls fit the visual viewport while the form
+scrolls, and that drafts and input nodes survive simulated keyboard resize and rotation. At
+152px of visible landscape height, they check that the focused field stays visible, actions
+remain reachable by scrolling, and returning to portrait restores fixed actions.
+Native Back/dirty-editor tests separately verify modal dismissal, discard confirmation,
+pending-save protection and unchanged page history. These fixtures do not open a real software
+keyboard or save an agent/import a skill; replay those flows on a native candidate.
 
 Studio navigation cases combine the production tab provider, routing hook, destination API,
 chat scroll orchestration and mobile sidebar history with real Router/browser entries. They

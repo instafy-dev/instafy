@@ -34,14 +34,18 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-live-proof.spec.ts",
   "conversation-surfaces.spec.ts",
   "mobile-sidebar-keyboard.spec.ts",
+  "mobile-editor-dialogs.spec.ts",
   "mobile-sidebar-safe-area.spec.ts",
   "mobile-thumb-navigation.spec.ts",
+  "notification-preferences.spec.ts",
+  "organization-rail-reorder.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
   "shared-browser-focused-editable.spec.ts",
   "shared-browser-sessions-responsive.spec.ts",
   "studio-history-navigation.spec.ts",
   "settings-history-scroll.spec.ts",
+  "segmented-control-responsive.spec.ts",
   "studio-history-controls.spec.ts",
 ];
 
@@ -53,7 +57,7 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  // The 40-case required inventory runs serially on hosted runners. Bound the
+  // The required inventory runs serially on hosted runners. Bound the
   // complete lane to six minutes without extending any individual test.
   globalTimeout: 360_000,
   outputDir: "test-results/browser-ci/browser-ui",

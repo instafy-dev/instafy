@@ -3,6 +3,9 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createMemoryRouter, RouterProvider } from "react-router-dom";
+import { StudioDraftsProvider } from "../../../../workspace/StudioDrafts";
+import { StudioDraftNavigationGuard } from "../../../../navigation/StudioDraftNavigationGuard";
 import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
 import { AiPanel } from "../AiPanel";
 import { clearPendingAgentProfileTarget, setPendingAgentProfileTarget } from "../agentProfileDeepLink";
@@ -489,6 +492,70 @@ describe("CredentialsSettingsCard", () => {
     const model = mocks.agentProfileProps!.modelId;
     await saveProfile();
     expect(mocks.updateAgent.mock.lastCall?.[1]).toMatchObject({ credentialId: "cred-deepseek", model });
+  });
+
+  it("protects an agent name draft on dismissal and returns to the same agent list after discard", async () => {
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [inheritedAgent] });
+    const router = createMemoryRouter([{ path: "*", element: <StudioDraftsProvider><StudioDraftNavigationGuard>
+      <CredentialsSettingsCard section="agents" />
+    </StudioDraftNavigationGuard></StudioDraftsProvider> }], { initialEntries: ["/studio?panel=ai"] });
+    await act(async () => { root.render(<RouterProvider router={router} />); await flush(); });
+    await openAgent();
+    await act(async () => mocks.agentProfileProps!.onClose());
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
+    expect(document.querySelector('[aria-label="Unfinished work"]')).toBeNull();
+    await openAgent();
+    await act(async () => mocks.agentProfileProps!.onDisplayNameChange("Unsent name draft"));
+    await act(async () => mocks.agentProfileProps!.onClose());
+    expect(mocks.agentProfileProps?.isOpen).toBe(true);
+    const confirm = document.querySelector('[role="dialog"][aria-label="Unfinished work"]');
+    expect(confirm).not.toBeNull();
+    const click = async (label: string) => {
+      const button = [...document.querySelectorAll("button")].find(item => item.textContent === label)!;
+      await act(async () => button.click());
+    };
+    await click("Keep editing");
+    expect(mocks.agentProfileProps?.displayName).toBe("Unsent name draft");
+    await act(async () => mocks.agentProfileProps!.onClose());
+    await click("Discard and leave");
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
+    expect(router.state.location.search).toBe("?panel=ai");
+    await openAgent();
+    expect(mocks.agentProfileProps?.displayName).toBe(inheritedAgent.displayName);
+    expect(mocks.updateAgent).not.toHaveBeenCalled();
+    router.dispose();
+  });
+
+  it("waits for a dirty agent to be discarded before opening AI connection setup", async () => {
+    mocks.listAgents.mockResolvedValue({ success: true, agents: [inheritedAgent] });
+    const router = createMemoryRouter([{ path: "*", element: <StudioDraftsProvider><StudioDraftNavigationGuard>
+      <CredentialsSettingsCard section="agents" />
+    </StudioDraftNavigationGuard></StudioDraftsProvider> }], { initialEntries: ["/studio?panel=ai"] });
+    await act(async () => { root.render(<RouterProvider router={router} />); await flush(); });
+    await openAgent();
+    await act(async () => mocks.agentProfileProps!.onDisplayNameChange("Keep this profile draft"));
+    await act(async () => mocks.agentProfileProps!.onConnectCredential!());
+    expect(mocks.openConnectModalAtStep).not.toHaveBeenCalled();
+    expect(mocks.agentProfileProps?.isOpen).toBe(true);
+    const click = async (label: string) => {
+      const button = [...document.querySelectorAll("button")].find(item => item.textContent === label)!;
+      await act(async () => button.click());
+    };
+    await click("Keep editing");
+    expect(mocks.agentProfileProps?.displayName).toBe("Keep this profile draft");
+    expect(mocks.openConnectModalAtStep).not.toHaveBeenCalled();
+    await act(async () => mocks.agentProfileProps!.onConnectCredential!());
+    await click("Discard and leave");
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
+    expect(mocks.openConnectModalAtStep).toHaveBeenCalledExactlyOnceWith("codex");
+    expect(router.state.location.search).toBe("?panel=ai");
+    mocks.openConnectModalAtStep.mockClear();
+    await openAgent();
+    await act(async () => mocks.agentProfileProps!.onConnectCredential!());
+    expect(mocks.agentProfileProps?.isOpen).toBe(false);
+    expect(mocks.openConnectModalAtStep).toHaveBeenCalledExactlyOnceWith("codex");
+    expect(document.querySelector('[aria-label="Unfinished work"]')).toBeNull();
+    router.dispose();
   });
 
   it("resets model and credential edits when the modal closes and reopens", async () => {

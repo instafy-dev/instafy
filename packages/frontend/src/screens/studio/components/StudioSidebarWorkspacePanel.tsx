@@ -69,6 +69,7 @@ export function StudioSidebarWorkspacePanel({
         backLabel="Back"
         backTestId="sidebar-project-switcher-back"
         triggerRef={triggerRef}
+        headerActionsRef={headerActionsRef}
         onBack={onClose}
       >
         {children}

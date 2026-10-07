@@ -1,4 +1,4 @@
-import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
+import { useStudioEditorDismissal } from "../../../navigation/useStudioEditorDismissal";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock, EditPencil, MoreHoriz, Pause, Play, Trash } from "iconoir-react";
@@ -9,13 +9,15 @@ import { Input } from "../../../components/Input";
 import { SegmentedControl } from "../../../components/SegmentedControl";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
 import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Textarea } from "../../../components/Textarea";
-import { Toggle } from "../../../components/Toggle";
+import { Checkbox } from "../../../components/Checkbox";
 import { SettingsShell } from "./SettingsShell";
 import {
   controllerClient,
@@ -56,14 +58,14 @@ type AutomationDraft = {
   enabled: boolean;
 };
 
-const WEEK_DAYS: Array<{ code: string; label: string }> = [
-  { code: "mo", label: "Mo" },
-  { code: "tu", label: "Tu" },
-  { code: "we", label: "We" },
-  { code: "th", label: "Th" },
-  { code: "fr", label: "Fr" },
-  { code: "sa", label: "Sa" },
-  { code: "su", label: "Su" },
+const WEEK_DAYS: Array<{ code: string; label: string; name: string }> = [
+  { code: "mo", label: "Mo", name: "Monday" },
+  { code: "tu", label: "Tu", name: "Tuesday" },
+  { code: "we", label: "We", name: "Wednesday" },
+  { code: "th", label: "Th", name: "Thursday" },
+  { code: "fr", label: "Fr", name: "Friday" },
+  { code: "sa", label: "Sa", name: "Saturday" },
+  { code: "su", label: "Su", name: "Sunday" },
 ];
 
 function localTimezone(): string {
@@ -238,9 +240,19 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
     [automationsQuery.data],
   );
   const [editorOpen, setEditorOpen] = useState(false);
+  const desktopEditor = useBreakpoint("sm", { freeze: editorOpen });
   const [draft, setDraft] = useState<AutomationDraft>(() => emptyDraft());
   const [saving, setSaving] = useState(false);
-  useStudioNavigationProtection(editorOpen, "automation editor", saving ? undefined : () => setEditorOpen(false));
+  const initialDraft = useRef(draft);
+  const closeEditor = useCallback(() => setEditorOpen(false), []);
+  const dismissEditor = useStudioEditorDismissal({
+    isOpen: editorOpen,
+    isDirty: JSON.stringify({ ...draft, byDay: [...draft.byDay].sort() }) !==
+      JSON.stringify({ ...initialDraft.current, byDay: [...initialDraft.current.byDay].sort() }),
+    isPending: saving,
+    label: "automation editor",
+    onDiscard: closeEditor,
+  });
 
   const { refetch } = automationsQuery;
   const refresh = useCallback(async () => {
@@ -254,12 +266,16 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
   }, [automations]);
 
   const openCreate = () => {
-    setDraft(emptyDraft());
+    const next = emptyDraft();
+    initialDraft.current = next;
+    setDraft(next);
     setEditorOpen(true);
   };
 
   const openEdit = (automation: ControllerAutomation) => {
-    setDraft(draftFromAutomation(automation));
+    const next = draftFromAutomation(automation);
+    initialDraft.current = next;
+    setDraft(next);
     setEditorOpen(true);
   };
 
@@ -387,6 +403,210 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
       showStatus(message || "Unable to delete automation.", "error", 6000);
     }
   };
+
+  const editorTitle = draft.id ? "Edit automation" : "Create automation";
+  const editorBody = (
+    <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+      <div className="space-y-4">
+        <div className="grid gap-3 md:grid-cols-2">
+          <Field label="Name" htmlFor={`${fieldId}-name`}>
+            <Input
+              id={`${fieldId}-name`}
+              value={draft.name}
+              onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
+              placeholder="Daily bug scan"
+              data-testid="automation-name-input"
+            />
+          </Field>
+          <Field label="Timezone" htmlFor={`${fieldId}-timezone`}>
+            <Input
+              id={`${fieldId}-timezone`}
+              value={draft.timezone}
+              onChange={(e) => setDraft((prev) => ({ ...prev, timezone: e.target.value }))}
+              placeholder="America/New_York"
+              data-testid="automation-timezone-input"
+            />
+          </Field>
+        </div>
+
+        <Field label="Prompt" htmlFor={`${fieldId}-prompt`}>
+          <Textarea
+            id={`${fieldId}-prompt`}
+            value={draft.promptText}
+            onChange={(e) => setDraft((prev) => ({ ...prev, promptText: e.target.value }))}
+            rows={8}
+            placeholder="What should Instafy do on schedule?"
+            data-testid="automation-prompt-input"
+          />
+        </Field>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <SegmentedControl<ControllerAutomationScheduleKind>
+            label="Schedule"
+            isDisabled={saving}
+            value={draft.scheduleKind}
+            onChange={(value) =>
+              setDraft((prev) => ({
+                ...prev,
+                scheduleKind: value,
+              }))
+            }
+            options={[
+              { value: "once", label: "Once" },
+              { value: "weekly", label: "Weekly" },
+              { value: "hourly", label: "Interval" },
+            ]}
+          />
+
+          <SegmentedControl<ControllerAutomationRuntimeMode>
+            label="Runtime"
+            isDisabled={saving}
+            value={draft.runtimeMode}
+            onChange={(value) => setDraft((prev) => ({ ...prev, runtimeMode: value }))}
+            options={[
+              { value: "auto", label: "Auto" },
+              { value: "hosted", label: "Cloud" },
+              { value: "existing", label: "Existing" },
+            ]}
+          />
+        </div>
+
+        {draft.scheduleKind === "once" ? (
+          <Field label="Run at" htmlFor={`${fieldId}-run-at`}>
+            <Input
+              id={`${fieldId}-run-at`}
+              type="datetime-local"
+              value={draft.runAtLocal}
+              step={1}
+              onChange={(e) => setDraft((prev) => ({ ...prev, runAtLocal: e.target.value }))}
+              data-testid="automation-runat-input"
+            />
+          </Field>
+        ) : draft.scheduleKind === "weekly" ? (
+          <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-950">
+            <div className="flex flex-wrap items-center gap-2">
+              {WEEK_DAYS.map((day) => {
+                const active = draft.byDay.includes(day.code);
+                return (
+                  <Button
+                    key={day.code}
+                    aria-pressed={active}
+                    aria-label={day.name}
+                    isDisabled={saving}
+                    variant={active ? "secondary" : "ghost"}
+                    size="xs"
+                    radius="full"
+                    onPress={() => {
+                      setDraft((prev) => {
+                        const next = new Set(prev.byDay);
+                        if (next.has(day.code)) {
+                          next.delete(day.code);
+                        } else {
+                          next.add(day.code);
+                        }
+                        return { ...prev, byDay: Array.from(next) };
+                      });
+                    }}
+                  >
+                    {day.label}
+                  </Button>
+                );
+              })}
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Hour (0-23)" htmlFor={`${fieldId}-hour`}>
+                <Input
+                  id={`${fieldId}-hour`}
+                  type="number"
+                  min={0}
+                  max={23}
+                  value={draft.byHour}
+                  onChange={(e) =>
+                    setDraft((prev) => ({ ...prev, byHour: Number(e.target.value) }))
+                  }
+                  data-testid="automation-byhour-input"
+                />
+              </Field>
+              <Field label="Minute (0-59)" htmlFor={`${fieldId}-minute`}>
+                <Input
+                  id={`${fieldId}-minute`}
+                  type="number"
+                  min={0}
+                  max={59}
+                  value={draft.byMinute}
+                  onChange={(e) =>
+                    setDraft((prev) => ({ ...prev, byMinute: Number(e.target.value) }))
+                  }
+                  data-testid="automation-byminute-input"
+                />
+              </Field>
+            </div>
+          </div>
+        ) : (
+          <Field label="Interval hours" htmlFor={`${fieldId}-interval`}>
+            <Input
+              id={`${fieldId}-interval`}
+              type="number"
+              min={1}
+              value={draft.intervalHours}
+              onChange={(e) => setDraft((prev) => ({ ...prev, intervalHours: Number(e.target.value) }))}
+              data-testid="automation-interval-input"
+            />
+          </Field>
+        )}
+
+        <div className="grid gap-3 md:grid-cols-2">
+          <Field label="Runtime provider (optional)" htmlFor={`${fieldId}-provider`}>
+            <Input
+              id={`${fieldId}-provider`}
+              value={draft.runtimeProvider}
+              onChange={(e) => setDraft((prev) => ({ ...prev, runtimeProvider: e.target.value }))}
+              placeholder="instafy_cloud"
+              data-testid="automation-runtime-provider-input"
+            />
+          </Field>
+          <div className="flex items-end">
+            <Checkbox
+              isSelected={draft.enabled}
+              onChange={(value) => setDraft((prev) => ({ ...prev, enabled: value }))}
+              label="Enable scheduled runs"
+              data-testid="automation-enabled-checkbox"
+              description="Changes apply when you save. Clear this to pause scheduled runs."
+              isDisabled={saving}
+            />
+          </div>
+        </div>
+
+        <Checkbox
+          isSelected={draft.silentWhenNothingToReport}
+          onChange={(value) =>
+            setDraft((prev) => ({ ...prev, silentWhenNothingToReport: value }))
+          }
+          label="Only notify me when there’s something to report"
+          description="Changes apply when you save. Successful runs with no findings stay quiet; errors and real results still appear."
+          isDisabled={saving}
+          data-testid="automation-silent-when-nothing-to-report-toggle"
+        />
+      </div>
+    </div>
+  );
+  const editorFooter = (
+    <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3 dark:border-slate-800">
+      <Button variant="ghost" size="sm" radius="xl" onPress={dismissEditor} isDisabled={saving}>
+        Cancel
+      </Button>
+      <Button
+        variant="primary"
+        size="sm"
+        radius="xl"
+        onPress={persistDraft}
+        isDisabled={saving || !activeProjectId}
+        data-testid="automation-save-button"
+      >
+        {saving ? "Saving…" : "Save"}
+      </Button>
+    </div>
+  );
 
   return (
     <SettingsShell
@@ -564,217 +784,30 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
         )}
       </div>
 
-      <StudioDialogModal
-        isOpen={editorOpen}
-        onOpenChange={setEditorOpen}
-        dialogAriaLabel="Automation editor"
-        className="items-end p-0 sm:items-center sm:p-4"
-        modalClassName="max-w-2xl overflow-hidden max-sm:h-[100dvh] max-sm:max-h-[100dvh] max-sm:max-w-none max-sm:rounded-none max-sm:border-x-0 max-sm:border-y-0 sm:max-h-[min(90dvh,48rem)]"
-        dialogClassName="max-h-[inherit]"
-      >
-        <div className="flex h-full max-h-[inherit] flex-col">
-          <StudioDialogHeader
-            title={draft.id ? "Edit automation" : "Create automation"}
-            description="Runs in a private thread."
-            onClose={() => setEditorOpen(false)}
-            closeButtonDisabled={saving}
-            closeLabel="Close automation editor"
-            className="px-4 py-3"
-          />
-
-          <div className="flex-1 overflow-y-auto overscroll-contain px-4 py-4">
-            <div className="space-y-4">
-              <div className="grid gap-3 md:grid-cols-2">
-                <Field label="Name" htmlFor={`${fieldId}-name`}>
-                  <Input
-                    id={`${fieldId}-name`}
-                    value={draft.name}
-                    onChange={(e) => setDraft((prev) => ({ ...prev, name: e.target.value }))}
-                    placeholder="Daily bug scan"
-                    data-testid="automation-name-input"
-                  />
-                </Field>
-                <Field label="Timezone" htmlFor={`${fieldId}-timezone`}>
-                  <Input
-                    id={`${fieldId}-timezone`}
-                    value={draft.timezone}
-                    onChange={(e) => setDraft((prev) => ({ ...prev, timezone: e.target.value }))}
-                    placeholder="America/New_York"
-                    data-testid="automation-timezone-input"
-                  />
-                </Field>
-              </div>
-
-              <Field label="Prompt" htmlFor={`${fieldId}-prompt`}>
-                <Textarea
-                  id={`${fieldId}-prompt`}
-                  value={draft.promptText}
-                  onChange={(e) => setDraft((prev) => ({ ...prev, promptText: e.target.value }))}
-                  rows={8}
-                  placeholder="What should Instafy do on schedule?"
-                  data-testid="automation-prompt-input"
-                />
-              </Field>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <SegmentedControl<ControllerAutomationScheduleKind>
-                  label="Schedule"
-                  value={draft.scheduleKind}
-                  onChange={(value) =>
-                    setDraft((prev) => ({
-                      ...prev,
-                      scheduleKind: value,
-                    }))
-                  }
-                  options={[
-                    { value: "once", label: "Once" },
-                    { value: "weekly", label: "Weekly" },
-                    { value: "hourly", label: "Interval" },
-                  ]}
-                />
-
-                <SegmentedControl<ControllerAutomationRuntimeMode>
-                  label="Runtime"
-                  value={draft.runtimeMode}
-                  onChange={(value) => setDraft((prev) => ({ ...prev, runtimeMode: value }))}
-                  options={[
-                    { value: "auto", label: "Auto" },
-                    { value: "hosted", label: "Cloud" },
-                    { value: "existing", label: "Existing" },
-                  ]}
-                />
-              </div>
-
-              {draft.scheduleKind === "once" ? (
-                <Field label="Run at" htmlFor={`${fieldId}-run-at`}>
-                  <Input
-                    id={`${fieldId}-run-at`}
-                    type="datetime-local"
-                    value={draft.runAtLocal}
-                    step={1}
-                    onChange={(e) => setDraft((prev) => ({ ...prev, runAtLocal: e.target.value }))}
-                    data-testid="automation-runat-input"
-                  />
-                </Field>
-              ) : draft.scheduleKind === "weekly" ? (
-                <div className="space-y-3 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-950">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {WEEK_DAYS.map((day) => {
-                      const active = draft.byDay.includes(day.code);
-                      return (
-                        <Button
-                          key={day.code}
-                          variant={active ? "secondary" : "ghost"}
-                          size="xs"
-                          radius="full"
-                          onPress={() => {
-                            setDraft((prev) => {
-                              const next = new Set(prev.byDay);
-                              if (next.has(day.code)) {
-                                next.delete(day.code);
-                              } else {
-                                next.add(day.code);
-                              }
-                              return { ...prev, byDay: Array.from(next) };
-                            });
-                          }}
-                        >
-                          {day.label}
-                        </Button>
-                      );
-                    })}
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <Field label="Hour (0-23)" htmlFor={`${fieldId}-hour`}>
-                      <Input
-                        id={`${fieldId}-hour`}
-                        type="number"
-                        min={0}
-                        max={23}
-                        value={draft.byHour}
-                        onChange={(e) =>
-                          setDraft((prev) => ({ ...prev, byHour: Number(e.target.value) }))
-                        }
-                        data-testid="automation-byhour-input"
-                      />
-                    </Field>
-                    <Field label="Minute (0-59)" htmlFor={`${fieldId}-minute`}>
-                      <Input
-                        id={`${fieldId}-minute`}
-                        type="number"
-                        min={0}
-                        max={59}
-                        value={draft.byMinute}
-                        onChange={(e) =>
-                          setDraft((prev) => ({ ...prev, byMinute: Number(e.target.value) }))
-                        }
-                        data-testid="automation-byminute-input"
-                      />
-                    </Field>
-                  </div>
-                </div>
-              ) : (
-                <Field label="Interval hours" htmlFor={`${fieldId}-interval`}>
-                  <Input
-                    id={`${fieldId}-interval`}
-                    type="number"
-                    min={1}
-                    value={draft.intervalHours}
-                    onChange={(e) => setDraft((prev) => ({ ...prev, intervalHours: Number(e.target.value) }))}
-                    data-testid="automation-interval-input"
-                  />
-                </Field>
-              )}
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <Field label="Runtime provider (optional)" htmlFor={`${fieldId}-provider`}>
-                  <Input
-                    id={`${fieldId}-provider`}
-                    value={draft.runtimeProvider}
-                    onChange={(e) => setDraft((prev) => ({ ...prev, runtimeProvider: e.target.value }))}
-                    placeholder="instafy_cloud"
-                    data-testid="automation-runtime-provider-input"
-                  />
-                </Field>
-                <div className="flex items-end">
-                  <Toggle
-                    isSelected={draft.enabled}
-                    onChange={(value) => setDraft((prev) => ({ ...prev, enabled: value }))}
-                    label="Enabled"
-                    description={draft.enabled ? "Runs on schedule." : "Paused."}
-                  />
-                </div>
-              </div>
-
-              <Toggle
-                isSelected={draft.silentWhenNothingToReport}
-                onChange={(value) =>
-                  setDraft((prev) => ({ ...prev, silentWhenNothingToReport: value }))
-                }
-                label="Only notify me when there’s something to report"
-                description="Successful runs with no findings add no completion message or result notification. Errors and real results still appear."
-                data-testid="automation-silent-when-nothing-to-report-toggle"
-              />
-            </div>
-          </div>
-
-          <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3 dark:border-slate-800">
-            <Button variant="ghost" size="sm" radius="xl" onPress={() => setEditorOpen(false)} isDisabled={saving}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              radius="xl"
-              onPress={persistDraft}
-              isDisabled={saving || !activeProjectId}
-              data-testid="automation-save-button"
-            >
-              {saving ? "Saving…" : "Save"}
-            </Button>
-          </div>
-        </div>
-      </StudioDialogModal>
+      {desktopEditor ? (
+        <StudioDialogModal
+          isOpen={editorOpen}
+          onOpenChange={(open) => { if (!open) dismissEditor(); }}
+          isKeyboardDismissDisabled={saving}
+          dialogAriaLabel="Automation editor"
+          modalClassName="max-w-2xl overflow-hidden max-h-[min(90dvh,48rem)]"
+          dialogClassName="flex max-h-[inherit] flex-col"
+        >
+          <StudioDialogHeader title={editorTitle} description="Runs in a private thread."
+            onClose={dismissEditor} closeButtonDisabled={saving} closeLabel="Close automation editor"
+            className="px-4 py-3" />
+          {editorBody}
+          {editorFooter}
+        </StudioDialogModal>
+      ) : (
+        <MobileFocusDialog isOpen={editorOpen} onOpenChange={(open) => { if (!open) dismissEditor(); }}
+          dialogAriaLabel="Automation editor" dismissLabel="Close automation editor" closeDisabled={saving}
+          header={<div><h2 className="truncate text-base font-semibold">{editorTitle}</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">Runs in a private thread.</p></div>}
+          footer={editorFooter}>
+          {editorBody}
+        </MobileFocusDialog>
+      )}
     </SettingsShell>
   );
 }

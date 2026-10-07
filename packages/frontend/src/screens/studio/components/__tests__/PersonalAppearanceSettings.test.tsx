@@ -43,16 +43,16 @@ describe("Personal appearance", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  const themeButton = (mode: string) => container.querySelector<HTMLButtonElement>(`[data-testid="profile-preference-theme-${mode}"]`)!;
+  const themeOption = (mode: string) => container.querySelector<HTMLLabelElement>(`[data-testid="profile-preference-theme-${mode}"]`)!;
 
   it("applies and persists theme changes immediately through the existing ThemeProvider", async () => {
     await act(async () => root.render(<Harness />));
-    expect(themeButton("system").getAttribute("aria-pressed")).toBe("true");
-    await act(async () => themeButton("dark").click());
+    expect(themeOption("system").querySelector("input")?.checked).toBe(true);
+    await act(async () => themeOption("dark").click());
     expect(document.documentElement.classList.contains("dark")).toBe(true);
     expect(window.localStorage.getItem("instafy.themeMode")).toBe("dark");
-    expect(themeButton("dark").getAttribute("aria-pressed")).toBe("true");
-    await act(async () => themeButton("light").click());
+    expect(themeOption("dark").querySelector("input")?.checked).toBe(true);
+    await act(async () => themeOption("light").click());
     expect(document.documentElement.classList.contains("dark")).toBe(false);
     expect(window.localStorage.getItem("instafy.themeMode")).toBe("light");
   });
@@ -60,8 +60,8 @@ describe("Personal appearance", () => {
   it("shows an existing saved preference and returns to following System without another save action", async () => {
     window.localStorage.setItem("instafy.themeMode", "dark");
     await act(async () => root.render(<Harness />));
-    expect(themeButton("dark").getAttribute("aria-pressed")).toBe("true");
-    await act(async () => themeButton("system").click());
+    expect(themeOption("dark").querySelector("input")?.checked).toBe(true);
+    await act(async () => themeOption("system").click());
     expect(window.localStorage.getItem("instafy.themeMode")).toBeNull();
     expect(document.documentElement.classList.contains("dark")).toBe(false);
     await act(async () => {
@@ -69,7 +69,7 @@ describe("Personal appearance", () => {
       systemListeners.forEach(listener => listener());
     });
     expect(document.documentElement.classList.contains("dark")).toBe(true);
-    expect(themeButton("system").getAttribute("aria-pressed")).toBe("true");
+    expect(themeOption("system").querySelector("input")?.checked).toBe(true);
   });
 
   it("holds only the theme choice, with no checkbox", async () => {

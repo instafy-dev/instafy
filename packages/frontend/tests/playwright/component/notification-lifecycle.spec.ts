@@ -264,10 +264,10 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await page.getByRole("button", { name: "Preferences", exact: true }).click();
     // Preferences are server-confirmed controlled inputs; await the HTTP result
     // rather than requiring an optimistic checkbox state during the click.
-    await page.getByRole("checkbox", { name: "Hide lock-screen previews", exact: true }).click();
-    await expect(page.getByRole("checkbox", { name: "Hide lock-screen previews", exact: true })).not.toBeChecked();
-    await page.getByRole("checkbox", { name: "Support Browser push", exact: true }).click();
-    await expect(page.getByRole("checkbox", { name: "Support Browser push", exact: true })).not.toBeChecked();
+    await page.getByRole("switch", { name: "Hide lock-screen previews", exact: true }).click();
+    await expect(page.getByRole("switch", { name: "Hide lock-screen previews", exact: true })).not.toBeChecked();
+    await page.getByRole("switch", { name: "Support Browser push", exact: true }).click();
+    await expect(page.getByRole("switch", { name: "Support Browser push", exact: true })).not.toBeChecked();
     expect(controller.preferences.hidePreviews).toBe(false);
     expect(controller.preferences.preferences.find((item) => item.category === "support" && item.channel === "web_push")?.enabled).toBe(false);
     await centerFits(page);
@@ -277,8 +277,8 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await page.getByRole("button", { name: "Close dialog", exact: true }).click();
     await page.getByTestId("notification-center-bell").click();
     await page.getByRole("button", { name: "Preferences", exact: true }).click();
-    await expect(page.getByRole("checkbox", { name: "Hide lock-screen previews", exact: true })).not.toBeChecked();
-    await expect(page.getByRole("checkbox", { name: "Support Browser push", exact: true })).not.toBeChecked();
+    await expect(page.getByRole("switch", { name: "Hide lock-screen previews", exact: true })).not.toBeChecked();
+    await expect(page.getByRole("switch", { name: "Support Browser push", exact: true })).not.toBeChecked();
     expect(controller.items.filter((item) => item.eventName === "support.resolved")).toHaveLength(2);
     expect(errors).toEqual([]);
     expect(deviceErrors).toEqual([]);

@@ -1,4 +1,4 @@
-import { useStudioNavigationProtection } from "../../../workspace/StudioDrafts";
+import { useStudioEditorDismissal } from "../../../navigation/useStudioEditorDismissal";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Eye, EyeClosed, Plus } from "iconoir-react";
@@ -6,6 +6,7 @@ import { Badge } from "../../../components/Badge";
 import { Heading } from "../../../components/Heading";
 import { usePageTitleInNavigation } from "../../../components/PageTitleContext";
 import { Button } from "../../../components/Button";
+import { SettingsFormActions } from "../../../components/SettingsFormActions";
 import { Checkbox } from "../../../components/Checkbox";
 import { ToggleIconButton } from "../../../components/ToggleIconButton";
 import { Field } from "../../../components/Field";
@@ -15,6 +16,8 @@ import { LoadingStatus } from "../../../components/LoadingStatus";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
+import { useBreakpoint } from "../../../hooks/useBreakpoint";
 import {
   controllerClient,
   type ControllerAgentProfile,
@@ -87,6 +90,7 @@ function SecretModal({
   onClose: () => void;
   onSave: () => void;
 }) {
+  const isDesktop = useBreakpoint("sm", { freeze: isOpen });
   const saveLabel = mode === "create" ? "Create" : "Save";
   const valuePlaceholder = mode === "edit" ? "Leave blank to keep current value" : "";
   const valueInputRef = useRef<HTMLInputElement | null>(null);
@@ -144,27 +148,12 @@ function SecretModal({
     return () => window.clearTimeout(handle);
   }, [autoFocusValue, isOpen, pending]);
 
-  return (
-    <StudioDialogModal
-      isOpen={isOpen}
-      onOpenChange={(open) => {
-        if (!open) {
-          onClose();
-        }
-      }}
-      isDismissable
-      dialogAriaLabel={title}
-      data-testid="project-secret-modal"
-    >
-      <StudioDialogHeader
-        title={title}
-        description="Secrets are injected into the runtime as environment variables."
-        onClose={onClose}
-        closeButtonDisabled={pending}
-        closeLabel="Close"
-      />
-
-      <div className="space-y-3 px-5 py-4">
+  const changeOpen = (open: boolean) => { if (!open && !pending) onClose(); };
+  const form = (
+    <div className="space-y-3 px-5 py-4">
+        {!isDesktop ? <Text as="p" variant="caption" tone="muted">
+          Secrets are injected into the runtime as environment variables.
+        </Text> : null}
         <Field
           label="Name (env var)"
           htmlFor="project-secret-name"
@@ -304,22 +293,39 @@ function SecretModal({
           </div>
         </div>
       </div>
+  );
+  const actions = (
+    <div className={isDesktop ? "px-5 pb-4" : "px-4 pb-3"}>
+      <SettingsFormActions
+        onCancel={onClose}
+        onSave={onSave}
+        saveLabel={saveLabel}
+        saving={pending}
+        disabled={agentsLoading || Boolean(agentsError)}
+        saveTestId="project-secret-save"
+      />
+    </div>
+  );
 
-      <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-5 py-4 dark:border-slate-800">
-        <Button onPress={onClose} variant="ghost" size="sm" radius="full" isDisabled={pending}>
-          Cancel
-        </Button>
-        <Button
-          onPress={onSave}
-          variant="primary"
-          size="sm"
-          radius="full"
-          isDisabled={pending || agentsLoading || Boolean(agentsError)}
-          data-testid="project-secret-save"
-        >
-          {pending ? "Working…" : saveLabel}
-        </Button>
-      </div>
+  if (!isDesktop) {
+    return <MobileFocusDialog isOpen={isOpen} onOpenChange={changeOpen}
+      dialogAriaLabel={title} closeDisabled={pending} dismissLabel="Close"
+      data-testid="project-secret-modal" footer={actions}>
+      {form}
+    </MobileFocusDialog>;
+  }
+
+  return (
+    <StudioDialogModal isOpen={isOpen} onOpenChange={changeOpen}
+      isDismissable={!pending} isKeyboardDismissDisabled={pending}
+      dialogAriaLabel={title} data-testid="project-secret-modal"
+      modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
+      dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col">
+      <StudioDialogHeader title={title}
+        description="Secrets are injected into the runtime as environment variables."
+        onClose={onClose} closeButtonDisabled={pending} closeLabel="Close" className="shrink-0" />
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{form}</div>
+      <div className="shrink-0">{actions}</div>
     </StudioDialogModal>
   );
 }
@@ -375,6 +381,7 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
   const [selectedAgentHandles, setSelectedAgentHandles] = useState<Set<string>>(() => new Set());
   const [saving, setSaving] = useState(false);
   const [returnToChatPending, setReturnToChatPending] = useState(false);
+  const initialDraft = useRef({ name: "", description: "", handles: ["octo"] });
 
   const pendingPrefillRef = useRef<PendingProjectSecretPrefill | null>(null);
   const activeCreatePrefillRef = useRef<PendingProjectSecretPrefill | null>(null);
@@ -426,6 +433,7 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
         .map(normalizeAgentHandle)
         .filter((handle) => handle.length > 0);
       const defaults = handles.length > 0 ? handles : ["octo"];
+      initialDraft.current = { name: prefill?.name ?? "", description: prefill?.description ?? "", handles: [...new Set(defaults)].sort() };
       setSelectedAgentHandles(new Set(defaults));
       setModalOpen(true);
     },
@@ -467,6 +475,7 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
         .map(normalizeAgentHandle)
         .filter((handle) => handle.length > 0);
       const defaults = handles.length > 0 ? handles : ["octo"];
+      initialDraft.current = { name: secret.name, description: secret.description ?? "", handles: [...new Set(defaults)].sort() };
       setSelectedAgentHandles(new Set(defaults));
       setModalOpen(true);
     },
@@ -482,7 +491,15 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
     setAutoFocusValue(false);
   }, [saving]);
 
-  useStudioNavigationProtection(modalOpen, "secret editor", saving ? undefined : closeModal);
+  const dismissModal = useStudioEditorDismissal({
+    isOpen: modalOpen,
+    isDirty: Boolean(valueDraft) || nameDraft !== initialDraft.current.name ||
+      descriptionDraft !== initialDraft.current.description ||
+      JSON.stringify([...selectedAgentHandles].sort()) !== JSON.stringify(initialDraft.current.handles),
+    isPending: saving,
+    label: "secret editor",
+    onDiscard: closeModal,
+  });
   useEffect(() => {
     if (!returnToChatPending || saving || modalOpen) return;
     // Finish saving and release the editor guard before returning to its chat.
@@ -768,7 +785,7 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
         selectedAgentHandles={selectedAgentHandles}
         onToggleAgentHandle={toggleAgentHandle}
         autoFocusValue={autoFocusValue}
-        onClose={closeModal}
+        onClose={dismissModal}
         onSave={() => void saveModal()}
       />
     </>

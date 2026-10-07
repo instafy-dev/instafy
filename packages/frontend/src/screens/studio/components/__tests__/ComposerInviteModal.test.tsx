@@ -35,12 +35,14 @@ const mocks = vi.hoisted(() => ({
   nativeBackHandler: null as (() => void) | null,
 }));
 
-vi.mock("../../../../native/useNativeBackButtonAction", () => ({
-  useNativeBackButtonAction: (enabled: boolean, onBack: () => void) => {
-    mocks.nativeBackEnabled = enabled;
-    mocks.nativeBackHandler = onBack;
+vi.mock("@capacitor/core", () => ({ Capacitor: { getPlatform: () => "android", isNativePlatform: () => false } }));
+vi.mock("@capacitor/app", () => ({ App: {
+  addListener: async (_event: string, handler: () => void) => {
+    mocks.nativeBackEnabled = true;
+    mocks.nativeBackHandler = handler;
+    return { remove: async () => { mocks.nativeBackEnabled = false; } };
   },
-}));
+} }));
 
 vi.mock("../../../../org/useOrgInviteLinks", () => ({
   useOrgInviteLinks: (

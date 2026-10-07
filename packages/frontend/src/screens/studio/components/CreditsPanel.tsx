@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Badge } from "../../../components/Badge";
+import { SegmentedControl } from "../../../components/SegmentedControl";
 import { Button } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { Heading } from "../../../components/Heading";
@@ -934,32 +935,11 @@ export function CreditsPanel() {
               )}
             </div>
             <div className="flex items-start gap-2 md:flex-col md:items-end">
-              <div
-                className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 p-1 dark:border-slate-800 dark:bg-slate-900/70"
-                role="group"
-                aria-label="Credit display units"
-              >
-                {(["units", "usd"] as const).map((mode) => {
-                  const active = amountView === mode;
-                  return (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => setAmountView(mode)}
-                      aria-pressed={active}
-                      data-testid={`credits-amount-view-${mode}`}
-                      className={[
-                        "rounded-full px-3 py-1 text-xs font-semibold transition pointer-coarse:min-h-11 pointer-coarse:min-w-11",
-                        active
-                          ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
-                          : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200",
-                      ].join(" ")}
-                    >
-                      {mode === "units" ? unitLabel : displayCurrency}
-                    </button>
-                  );
-                })}
-              </div>
+              <SegmentedControl aria-label="Credit display units" value={amountView} onChange={setAmountView} width="fit"
+                options={[
+                  { value: "units", label: unitLabel, testId: "credits-amount-view-units" },
+                  { value: "usd", label: displayCurrency, testId: "credits-amount-view-usd" },
+                ]} />
               {hasPaidPlan ? (
                 <Button
                   onPress={handleManageSubscription}
@@ -1242,59 +1222,17 @@ export function CreditsPanel() {
             </div>
             <div className="flex items-center gap-2">
               {activityView === "graph" ? (
-                <div
-                  className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 p-1 dark:border-slate-800 dark:bg-slate-900/70"
-                  role="group"
-                  aria-label="Activity graph range"
-                >
-                  {(["7d", "30d"] as const).map((range) => {
-                    const active = graphRange === range;
-                    return (
-                      <button
-                        key={range}
-                        type="button"
-                        onClick={() => setGraphRange(range)}
-                        aria-pressed={active}
-                        data-testid={`credits-graph-range-${range}`}
-                        className={[
-                          "rounded-full px-3 py-1 text-xs font-semibold transition pointer-coarse:min-h-11 pointer-coarse:min-w-11",
-                          active
-                            ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
-                            : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200",
-                        ].join(" ")}
-                      >
-                        {range === "7d" ? "7D" : "30D"}
-                      </button>
-                    );
-                  })}
-                </div>
+                <SegmentedControl<CreditActivityRange> aria-label="Activity graph range" value={graphRange} onChange={setGraphRange} width="fit"
+                  options={[
+                    { value: "7d", label: "7D", testId: "credits-graph-range-7d" },
+                    { value: "30d", label: "30D", testId: "credits-graph-range-30d" },
+                  ]} />
               ) : null}
-              <div
-                className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 p-1 dark:border-slate-800 dark:bg-slate-900/70"
-                role="group"
-                aria-label="Activity view"
-              >
-                {(["log", "graph"] as const).map((mode) => {
-                  const active = activityView === mode;
-                  return (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => setActivityView(mode)}
-                      aria-pressed={active}
-                      data-testid={`credits-activity-view-${mode}`}
-                      className={[
-                        "rounded-full px-3 py-1 text-xs font-semibold transition pointer-coarse:min-h-11 pointer-coarse:min-w-11",
-                        active
-                          ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
-                          : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200",
-                      ].join(" ")}
-                    >
-                      {mode === "log" ? "Log" : "Graph"}
-                    </button>
-                  );
-                })}
-              </div>
+              <SegmentedControl aria-label="Activity view" value={activityView} onChange={setActivityView} width="fit"
+                options={[
+                  { value: "log", label: "Log", testId: "credits-activity-view-log" },
+                  { value: "graph", label: "Graph", testId: "credits-activity-view-graph" },
+                ]} />
             </div>
           </div>
 

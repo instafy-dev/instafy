@@ -62,14 +62,9 @@ export function InstalledSkillsSection({
   const isLargeScreen = useStudioDesktopLayout();
   return (
     <Card tone="default" radius="2xl" className="space-y-4">
-      <div className="space-y-1">
-        <Text variant="bodyStrong" tone="primary">
-          Installed
-        </Text>
-        <Text variant="caption" tone="muted">
-          Enable or disable skills used by this space.
-        </Text>
-      </div>
+      <Text variant="caption" tone="muted">
+        Enable or disable skills used by this space.
+      </Text>
 
       {!hasProject ? (
         <Text variant="caption" tone="muted">

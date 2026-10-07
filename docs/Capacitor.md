@@ -244,7 +244,18 @@ resize and scroll events while the backdrop still covers the screen; input nodes
 stay mounted as the software keyboard changes the available space. The navigation picker
 shares the viewport observer without changing its sheet layout. The dialog uses the existing
 native Back coordinator and React Aria focus restoration; a pending save can block dismissal
-without letting Back navigate the underlying screen. This does not change native keyboard policy.
+without letting Back navigate the underlying screen. Shared Studio dialogs consume Android Back
+before the page beneath them, including when opened on a wider phone. Agent, skill import,
+automation and secret editors warn before discarding changed fields; untouched forms close in
+place without an unfinished-work warning. Close, Cancel, Escape and Android Back use the same
+editor dismissal path. The native keyboard still handles the first Back while it is visible.
+This does not change native keyboard policy.
+Agent, skill import, automation and secret editors keep actions outside the scrolling form on
+phones. Below 240px of visible height (for example, a landscape software keyboard), the header
+compacts to one 44px row and the form and actions share a scroll area so the focused field has
+room. An already-focused field is revealed only if viewport changes clip it; ordinary form
+scrolling does not reset its position. Returning to a taller viewport restores fixed actions
+without remounting inputs or changing their drafts.
 Address, agent profile, Invite and AI connection editors keep their chosen presentation
 through rotation while open, preserving drafts and focus. Closing and reopening chooses
 the presentation for the current viewport.

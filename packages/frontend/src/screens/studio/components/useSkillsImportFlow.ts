@@ -5,6 +5,7 @@ import {
   deriveSkillSourceLabel,
 } from "../../../conversations/skillCommands";
 import type { StatusToastOptions } from "../../../status/StatusProvider";
+import { useStudioEditorDismissal } from "../../../navigation/useStudioEditorDismissal";
 
 type ImportTaskParams = {
   source: string;
@@ -52,6 +53,23 @@ export function useSkillsImportFlow({
   const [importOverwrite, setImportOverwrite] = useState(false);
   const [importPending, setImportPending] = useState(false);
   const [addSkillModalOpen, setAddSkillModalOpen] = useState(false);
+  const discardImport = useCallback(() => {
+    setAddSkillModalOpen(false);
+    setImportSource("");
+    setImportName("");
+    setImportOverwrite(false);
+  }, []);
+  const dismissImport = useStudioEditorDismissal({
+    isOpen: addSkillModalOpen,
+    isDirty: Boolean(importSource || importName || importOverwrite),
+    isPending: importPending,
+    label: "skill import",
+    onDiscard: discardImport,
+  });
+  const changeAddSkillModalOpen = useCallback((open: boolean) => {
+    if (open) setAddSkillModalOpen(true);
+    else dismissImport();
+  }, [dismissImport]);
 
   const refreshTimeoutRef = useRef<number[]>([]);
   const activeConversationIdRef = useRef(activeConversationId);
@@ -197,7 +215,7 @@ export function useSkillsImportFlow({
     setImportOverwrite,
     importPending,
     addSkillModalOpen,
-    setAddSkillModalOpen,
+    setAddSkillModalOpen: changeAddSkillModalOpen,
     queueSkillImportTask,
     handleSubmitImport,
     handleOpenAddSkillModal,

@@ -1,4 +1,5 @@
 import { type CSSProperties, type ReactNode, type Ref } from "react";
+import { useNativeBackButtonAction } from "../../native/useNativeBackButtonAction";
 import {
   Dialog,
   Modal,
@@ -30,6 +31,8 @@ const MODAL_APPEARANCE_CLASSES: Record<StudioDialogAppearance, string> = {
 
 interface StudioDialogModalProps extends ModalOverlayProps {
   children: ReactNode;
+  /** A modal with drill-in steps can consume Back without dismissing its surface. */
+  onNativeBack?: () => void;
   appearance?: StudioDialogAppearance;
   backdrop?: StudioDialogBackdrop;
   modalClassName?: ModalOverlayProps["className"];
@@ -42,6 +45,7 @@ interface StudioDialogModalProps extends ModalOverlayProps {
 
 export function StudioDialogModal({
   children,
+  onNativeBack,
   appearance = "default",
   backdrop = "standard",
   className,
@@ -53,6 +57,13 @@ export function StudioDialogModal({
   dialogAriaLabelledBy,
   ...props
 }: StudioDialogModalProps) {
+  // Native Back closes the top modal before drawers/routes, including on wider
+  // phones. A busy modal consumes Back without dismissing its underlying page.
+  useNativeBackButtonAction(Boolean(props.isOpen), () => {
+    if (props.isKeyboardDismissDisabled) return;
+    if (onNativeBack) onNativeBack();
+    else props.onOpenChange?.(false);
+  });
   const normalizedDialogLabelledBy = dialogAriaLabelledBy?.trim() || undefined;
   const normalizedDialogLabel = normalizedDialogLabelledBy
     ? undefined

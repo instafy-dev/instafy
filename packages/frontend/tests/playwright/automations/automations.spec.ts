@@ -65,7 +65,7 @@ test.describe("Automations", () => {
     await page.getByTestId("automation-name-input").fill("One time check");
     await page.getByTestId("automation-prompt-input").fill("Say hello once.");
 
-    await page.getByRole("button", { name: "Once" }).click();
+    await page.getByRole("radio", { name: "Once" }).click();
     await expect(page.getByTestId("automation-runat-input")).toBeVisible();
     await page.getByTestId("automation-runat-input").fill("2030-01-01T09:00");
 
