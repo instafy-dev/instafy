@@ -64,11 +64,11 @@ describe("origin hydration fetches", () => {
   });
 
   it("tells a space without a local workspace from a request that got no answer", async () => {
-    const workspace = { deviceId: "device-1", path: "/Users/me/space", status: "online", presenceStatus: "online" };
+    const workspace = { deviceId: "device-1", path: "/workspace/me/space", status: "online", presenceStatus: "online" };
     vi.mocked(fetch).mockResolvedValueOnce(json({ workspace }));
     await expect(fetchLocalWorkspacePresenceResult({ projectId: "space-a" })).resolves.toMatchObject({
       ok: true,
-      workspace: { deviceId: "device-1", path: "/Users/me/space" },
+      workspace: { deviceId: "device-1", path: "/workspace/me/space" },
     });
     vi.mocked(fetch).mockResolvedValueOnce(json({ workspace: null }));
     await expect(fetchLocalWorkspacePresenceResult({ projectId: "space-a" })).resolves.toEqual({ ok: true, workspace: null });

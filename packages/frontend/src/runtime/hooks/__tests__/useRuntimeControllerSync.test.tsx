@@ -552,7 +552,7 @@ describe("useRuntimeControllerSync controller access results", () => {
       // only a 404 means the space has none.
       const folder: LocalWorkspacePresence = {
         deviceId: "device-1",
-        path: "/Users/me/space",
+        path: "/workspace/me/space",
         runtimeId: "runtime-desk",
         status: "online",
       };
@@ -565,7 +565,7 @@ describe("useRuntimeControllerSync controller access results", () => {
       const { emit, latest } = await renderStore();
       const before = latest();
       expect(before.desktopOrigin).toEqual(desktopOrigin);
-      expect(before.localWorkspace?.path).toBe("/Users/me/space");
+      expect(before.localWorkspace?.path).toBe("/workspace/me/space");
 
       await emit(originEvent("origin.heartbeat", { originId: "runtime-origin", mode: "hosted" }));
 

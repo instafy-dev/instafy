@@ -33,7 +33,7 @@ describe("runtime store origin events and hydration", () => {
   };
   const workspace = {
     deviceId: "device-1",
-    path: "/Users/me/space",
+    path: "/workspace/me/space",
     runtimeId: "runtime-desk",
     status: "online" as const,
     lastHeartbeat: "2026-10-07T10:00:00Z",
@@ -88,7 +88,7 @@ describe("runtime store origin events and hydration", () => {
     expect(next.desktopOriginProjectId).toBe("desk-project");
     expect(next.localWorkspace).toMatchObject({
       deviceId: "device-1",
-      path: "/Users/me/space",
+      path: "/workspace/me/space",
       runtimeId: "runtime-desk",
       status: "offline",
       lastHeartbeat: "2026-10-07T10:00:20Z",
