@@ -1478,6 +1478,14 @@ pub(crate) fn describe(
 /// saved version has it.
 pub(crate) const KEPT: &str = "kept";
 
+/// The reason a restore gives instead of [`KEPT`] for a kept new name of
+/// the work that a disk ignoring case or Unicode form takes for another
+/// entry of the restored tree, which does not hold the work (`todo.md`
+/// beside `main`'s `TODO.md`): keeping chose no version of the work's file,
+/// which stays on the ref only, so the ref stays and is not listed as
+/// restored ([`partial_restore_commit_message`]).
+pub(crate) const PATH_ALIAS: &str = "path_alias";
+
 /// A path a restore left as `main` (or the checkout) has it, and why:
 /// [`KEPT`], or the name of the reason it may never be restored here
 /// ([`crate::publish_policy::RejectReason::name`]). Desktop and the hosted
@@ -1517,6 +1525,13 @@ const RESTORE_COMMIT_SUBJECT: &str = "Restore unsaved work";
 /// The whole message of the commit that restores `reference`.
 pub(crate) fn restore_commit_message(reference: &str) -> String {
     format!("{RESTORE_COMMIT_SUBJECT}\n\n{RESTORED_FROM_TRAILER}: {reference}\n")
+}
+
+/// The whole message of a restore commit that leaves work of its ref there
+/// for the person to settle ([`PATH_ALIAS`]): it names no ref, so no listing
+/// takes the ref for restored by it ([`mark_restored`]).
+pub(crate) fn partial_restore_commit_message() -> String {
+    "Restore part of unsaved work\n".to_string()
 }
 
 /// The ref a restore commit's message names, when the message is exactly
@@ -4111,6 +4126,7 @@ mod tests {
             format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: {reference}"),
             format!("Restore unsaved work\n\n{RESTORED_FROM_TRAILER}: refs/heads/main\n"),
             format!("Restore unsaved work\nmore\n\n{RESTORED_FROM_TRAILER}: {reference}\n"),
+            partial_restore_commit_message(),
         ] {
             assert_eq!(restored_from(&other), None, "{other:?}");
         }

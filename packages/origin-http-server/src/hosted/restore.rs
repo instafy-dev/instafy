@@ -13,6 +13,7 @@
 //! path the restore changes must be as it was at `baseRev` (409
 //! `head_moved`), as for an upload.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -21,7 +22,7 @@ use super::change::moved_since;
 use super::read::readable;
 use crate::error::OriginError;
 use crate::publish_policy::RejectReason;
-use crate::recovery_view::NotRestored;
+use crate::recovery_view::{partial_restore_commit_message, NotRestored};
 use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
 use crate::tree_merge::changed_paths;
 use crate::workspace_git::WorkspaceGit;
@@ -41,6 +42,10 @@ pub(crate) struct Restore {
     /// The last attempt left out only what the person chose to keep, and
     /// `main` holds all of the work but that ([`restore_plan`]'s rule).
     lets_ref_go: bool,
+    /// The last attempt's commit may name the ref, so it is listed as
+    /// restored: no kept name is one `main` holds in another case
+    /// ([`restore_plan::RestorePlan::marks_restored`]).
+    marks_restored: bool,
     /// The last attempt's changes to `main`.
     touched: Option<Vec<String>>,
 }
@@ -54,6 +59,7 @@ impl Restore {
             shard_refused: BTreeMap::new(),
             not_restored: Vec::new(),
             lets_ref_go: true,
+            marks_restored: true,
             touched: None,
         }
     }
@@ -70,6 +76,18 @@ impl Restore {
     /// all on `main`, and its ref stays.
     pub(crate) fn left_out_unsaveable(&self) -> bool {
         !self.lets_ref_go
+    }
+
+    /// The message the last attempt commits with: `message` (the restore
+    /// message naming the ref), or one naming no ref when a kept name is
+    /// one `main` holds in another case, so the ref is not listed as
+    /// restored while it holds that work.
+    pub(super) fn message<'m>(&self, message: &'m str) -> Cow<'m, str> {
+        if self.marks_restored {
+            Cow::Borrowed(message)
+        } else {
+            Cow::Owned(partial_restore_commit_message())
+        }
     }
 
     pub(super) fn build(
@@ -94,6 +112,7 @@ impl Restore {
         })?;
         self.touched = Some(changed_paths(git, &plan.onto_tree, &plan.tree).map_err(internal)?);
         self.lets_ref_go = plan.lets_ref_go();
+        self.marks_restored = plan.marks_restored();
         self.not_restored = plan.not_restored;
         Ok(plan.tree)
     }

@@ -64,7 +64,11 @@ vi.mock("../../../../sdk/instafy", () => ({
 }));
 
 import { readUnsavedWorkSeen, unsavedWorkSeenKey } from "../../../../workspace/unsavedWorkSeen";
-import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
+import {
+  getUnsavedWorkSnapshot,
+  pendingUnsavedWorkEntries,
+  resetUnsavedWorkStoreForTests,
+} from "../../../../workspace/unsavedWorkStore";
 import { HistoryDrawer } from "../HistoryDrawer";
 
 const HEAD = "e".repeat(40);
@@ -370,6 +374,49 @@ describe("HistoryDrawer: Unsaved work", () => {
     // No restore commit was made, so the server will not mark it either.
     expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
     expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
+  });
+
+  it("keeps an entry pending, with no Restored badge, when a restore leaves a name main holds in another case", async () => {
+    // main gained TODO.md since; the work adds todo.md and other.md. "Use this version" cannot
+    // save todo.md beside TODO.md, so the person keeps the current version and restores the rest.
+    mocks.fetchRecovery.mockResolvedValue(
+      list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["other.md", "todo.md"] })]),
+    );
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["todo.md"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: true,
+        notRestored: ["todo.md"],
+        notRestoredReasons: { "todo.md": "path_alias" },
+        refDeleted: false,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, KEPT), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-path-keep");
+    // Hold the forced reload: only the local patch decides the badge here.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    await press(row(container, KEPT), "unsaved-work-restore-rest");
+    expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ ref: KEPT, keep: ["todo.md"] }));
+    expect(q(container, "history-status")?.textContent).toBe(
+      "Restored as a new version. todo.md stays in Unsaved work, because the space has another file with that name in a different case.",
+    );
+    // The work's todo.md is only on the ref: the entry still counts as unsaved work.
+    expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
+    expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
+    expect(
+      pendingUnsavedWorkEntries(getUnsavedWorkSnapshot("project-1", "origin-1").entries).map((entry) => entry.ref),
+    ).toEqual([KEPT]);
   });
 
   it("does not claim a new version when restoring an already restored entry", async () => {

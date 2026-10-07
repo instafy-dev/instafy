@@ -526,9 +526,12 @@ Studio picks its versioning UI per space from the project's default origin:
   `Docs/guide.md` beside a file `docs`) keeps the ref, because `main` holds that work under neither
   name, and so does any keep that chose no version on the `main` it is restored onto (`main` has
   no folder there, no file above it and no removal the work's change conflicted with, as when the
-  clash the person kept for has left `main` since). A ref a restore keeps shows "Restored" only once `main` holds a restore commit for it; a
-  restore that kept or refused all it held makes none (`committed: false`), so the entry stays
-  pending until it is removed. Remove deletes a recovery ref for everyone
+  clash the person kept for has left `main` since). A kept name of the first kind is listed in
+  `notRestored` with the reason `path_alias`, and that restore commits `Restore part of unsaved
+  work`, which names no ref, so the entry stays pending (Studio says the file stays in Unsaved work
+  and shows no "Restored" badge). A ref a restore keeps shows "Restored" only once `main` holds a
+  restore commit for it; a restore that kept or refused all it held makes none (`committed:
+  false`), so the entry stays pending until it is removed. Remove deletes a recovery ref for everyone
   (`POST /git/recovery/dismiss`). A restore of work the saved version already has answers
   `committed: false` and says there was nothing to restore. `notRestored` items carry a `reason`
   on both Desktop and the gateway: a file left out as an old chat upload (`attachment`) is named

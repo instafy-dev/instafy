@@ -265,6 +265,20 @@ describe("versioning copy shared across surfaces", () => {
     ).toBe("Restored as a new version. Kept the current version of src/lib.");
   });
 
+  it("says a kept name the space holds in another case stays in Unsaved work", () => {
+    // `Docs/guide.md` is below the kept folder `Docs`; both are on the ref only.
+    expect(
+      restoreSuccessCopy({
+        committed: true,
+        notRestored: ["Docs/guide.md", "notes.md", "todo.md"],
+        kept: ["Docs", "notes.md", "todo.md"],
+        reasons: { "Docs/guide.md": "path_alias", "notes.md": "kept", "todo.md": "path_alias" },
+      }),
+    ).toBe(
+      "Restored as a new version. Kept the current version of Docs and notes.md. Docs/guide.md and todo.md stay in Unsaved work, because the space has other files with those names in a different case.",
+    );
+  });
+
   it("says there was nothing to restore when main already had the work", () => {
     expect(NOTHING_TO_RESTORE_COPY).toBe("Nothing to restore. The saved version already has this work.");
     expect(restoreSuccessCopy({ committed: false, notRestored: [] })).toBe(NOTHING_TO_RESTORE_COPY);

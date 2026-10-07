@@ -30,6 +30,7 @@
 //!   `head_moved` when one of its deletes names a path that turned from a
 //!   file into a folder (or back) since the client read it.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -206,6 +207,15 @@ impl Change {
         match self {
             Self::Edits(edits) => edits.settled(git, main),
             Self::Revert(_) | Self::Restore(_) => Ok(()),
+        }
+    }
+
+    /// The message this attempt commits with, given the change's
+    /// `message`: a restore may name no ref ([`Restore::message`]).
+    pub(super) fn message<'m>(&self, message: &'m str) -> Cow<'m, str> {
+        match self {
+            Self::Restore(restore) => restore.message(message),
+            Self::Edits(_) | Self::Revert(_) => Cow::Borrowed(message),
         }
     }
 

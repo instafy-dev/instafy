@@ -70,6 +70,12 @@
 //! that has left `main` since (the person kept `Notes.md` beside `main`'s
 //! `notes.md`, which a later save removed): such work would otherwise be
 //! on neither `main` nor any ref.
+//!
+//! A kept name such a disk takes for another entry of the restored tree
+//! that does not hold the work is listed [`PATH_ALIAS`], not `kept`, and
+//! the restore commit then names no ref ([`RestorePlan::marks_restored`]):
+//! the ref still holds work `main` lacks under every name, so it is never
+//! listed as restored by that commit.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -81,7 +87,7 @@ use crate::apply::portable_key;
 use crate::error::OriginError;
 use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
-use crate::recovery_view::{left_out_reason, NotRestored, KEPT};
+use crate::recovery_view::{left_out_reason, NotRestored, KEPT, PATH_ALIAS};
 use crate::tree_merge::{three_way, tree_with_entries_from};
 use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, TreeEntry, WorkspaceGit};
 
@@ -116,6 +122,9 @@ pub(crate) struct RestorePlan {
     /// How many kept paths chose no version of the work's file, so the
     /// work is on the restored tree under no name ([`unsettled_keeps`]).
     unsettled: usize,
+    /// How many of them are names a disk ignoring case takes for another
+    /// entry of the restored tree ([`PATH_ALIAS`]).
+    aliased: usize,
 }
 
 impl RestorePlan {
@@ -129,6 +138,14 @@ impl RestorePlan {
     /// `onto`'s version over the work's ([`unsettled_keeps`]).
     pub(crate) fn lets_ref_go(&self) -> bool {
         self.refused == 0 && self.unsettled == 0
+    }
+
+    /// Whether the restore commit may name the ref, so the ref is listed as
+    /// restored by it: not while a kept name is one another entry of the
+    /// restored tree takes on a disk ignoring case ([`PATH_ALIAS`]). The
+    /// person settled nothing there; the work stays on the ref, pending.
+    pub(crate) fn marks_restored(&self) -> bool {
+        self.aliased == 0
     }
 }
 
@@ -372,7 +389,14 @@ pub(crate) fn plan(
                 && left_out.get(&change.path) == Some(&KEPT)
         })
         .collect();
-    let unsettled = unsettled_keeps(git, &onto_tree, &tree, &merged.conflicts, &kept_new)?.len();
+    let unsettled = unsettled_keeps(git, &onto_tree, &tree, &merged.conflicts, &kept_new)?;
+    let mut aliased = 0;
+    for (path, reason) in &unsettled {
+        if *reason == PATH_ALIAS {
+            left_out.insert(path.clone(), PATH_ALIAS);
+            aliased += 1;
+        }
+    }
 
     Ok(RestorePlan {
         tree,
@@ -382,14 +406,17 @@ pub(crate) fn plan(
             .map(|(path, reason)| NotRestored { path, reason })
             .collect(),
         refused: refused.len(),
-        unsettled,
+        unsettled: unsettled.len(),
+        aliased,
     })
 }
 
 /// The paths of `kept` (changes the person kept that write a path where
 /// `onto`, a tree id, has no file, link or submodule) whose keep chose no
 /// version of the work's file, so the work is on the restored `tree` under
-/// no name and the ref stays with it. A keep chooses `onto`'s version only
+/// no name and the ref stays with it, each with the reason the restore
+/// lists it under: [`PATH_ALIAS`] for a name such a disk takes for another
+/// entry of `tree`, [`KEPT`] otherwise. A keep chooses `onto`'s version only
 /// when this `onto` holds a version to choose:
 ///
 /// - a folder at the path, or a file, a link or a submodule at a folder
@@ -411,7 +438,7 @@ fn unsettled_keeps(
     tree: &str,
     conflicts: &[String],
     kept: &[&RawChange],
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, &'static str)>> {
     if kept.is_empty() {
         return Ok(Vec::new());
     }
@@ -435,16 +462,16 @@ fn unsettled_keeps(
         .filter_map(|change| {
             let path = change.path.as_str();
             let unsettled = match aliases.get(path) {
-                Some(held) => !held,
+                Some(held) => (!held).then_some(PATH_ALIAS),
                 None => {
                     let folder_here = is_folder(path) == Some(true);
                     let file_above = path
                         .match_indices('/')
                         .any(|(index, _)| is_folder(&path[..index]) == Some(false));
-                    !(folder_here || file_above || conflicted.contains(path))
+                    (!(folder_here || file_above || conflicted.contains(path))).then_some(KEPT)
                 }
             };
-            unsettled.then(|| change.path.clone())
+            unsettled.map(|reason| (change.path.clone(), reason))
         })
         .collect())
 }

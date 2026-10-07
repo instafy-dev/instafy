@@ -627,13 +627,19 @@ export function unsavedWorkUnconfirmedDeleteCopy(path: string): string {
 /** A restore with nothing to bring back: the saved version already held the work. */
 export const NOTHING_TO_RESTORE_COPY = "Nothing to restore. The saved version already has this work.";
 
+/** The reason a restore gives a kept path whose name another file of the space has in another case. */
+export const PATH_ALIAS_REASON = "path_alias";
+
 /**
  * A finished restore. `kept` are the paths the person chose "Keep current"
  * for (the server reports them in `notRestored` too, the gateway with the
  * reason `kept`, which also covers files below a kept folder); only the
  * rest of `notRestored` were refused. `reasons` says why, when the origin
  * does: old chat uploads (`attachment`) get a sentence of their own, and every other refusal reads as secret or
- * ignored, as it does without reasons (Desktop lists bare paths).
+ * ignored, as it does without reasons (Desktop lists bare paths). A kept path
+ * the server lists as `path_alias` (another file of the space has its name in
+ * another case, so keeping chose no version of the work's file) is said to
+ * stay in Unsaved work instead of being kept.
  * `committed: false` means no version with changes was made: the saved
  * version already held everything that could be restored, so the copy says
  * what was left out first (never that the space has the refused files).
@@ -655,12 +661,23 @@ export function restoreSuccessCopy({
   reasons?: Readonly<Record<string, string>>;
 }): string {
   const keptSet = new Set(kept);
-  const keptPaths = Array.from(keptSet);
-  const refused = notRestored.filter((path) => !keptSet.has(path) && reasons[path] !== "kept");
+  const held = notRestored.filter((path) => reasons[path] === PATH_ALIAS_REASON);
+  const heldSet = new Set(held);
+  const keptPaths = Array.from(keptSet).filter((path) => !heldSet.has(path));
+  const refused = notRestored.filter(
+    (path) => !keptSet.has(path) && !heldSet.has(path) && reasons[path] !== "kept",
+  );
   const attachments = refused.filter((path) => reasons[path] === "attachment");
   const leftOut: string[] = [];
   if (keptPaths.length > 0) {
     leftOut.push(`Kept the current version of ${formatPathList(keptPaths)}.`);
+  }
+  if (held.length > 0) {
+    leftOut.push(
+      held.length === 1
+        ? `${formatPathList(held)} stays in Unsaved work, because the space has another file with that name in a different case.`
+        : `${formatPathList(held)} stay in Unsaved work, because the space has other files with those names in a different case.`,
+    );
   }
   if (refused.length > 0) {
     leftOut.push(`Not restored: ${formatPathList(refused)}.`);
