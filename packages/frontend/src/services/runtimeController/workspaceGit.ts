@@ -1452,7 +1452,10 @@ export interface WorkspaceRecoveryEntry {
   kind: WorkspaceRecoveryKind | (string & Record<never, never>);
   subject: string;
   date: string | null;
-  /** The origin that kept the work, when the ref names one. */
+  /**
+   * The origin that kept the work, when the server names one. For a rolling
+   * save it is the origin that last wrote it.
+   */
   origin: string | null;
   /** For `conflict` entries only the conflicted paths; otherwise every path. */
   paths: string[];
@@ -1463,6 +1466,11 @@ export interface WorkspaceRecoveryEntry {
    * work the restore could not bring back stays).
    */
   restoredRev?: string | null;
+  /**
+   * A working folder's rolling save, which its runtime keeps rewriting while
+   * it works. Set only when the server says so; older servers never do.
+   */
+  rollingSave?: boolean;
 }
 
 export type WorkspaceRecoveryList =
@@ -1510,6 +1518,9 @@ function parseRecoveryEntry(value: unknown): WorkspaceRecoveryEntry | null {
   const restoredRev = readPayloadString(record, "restoredRev", "restored_rev");
   if (restoredRev) {
     entry.restoredRev = restoredRev;
+  }
+  if (record.rollingSave === true || record.rolling_save === true) {
+    entry.rollingSave = true;
   }
   return entry;
 }

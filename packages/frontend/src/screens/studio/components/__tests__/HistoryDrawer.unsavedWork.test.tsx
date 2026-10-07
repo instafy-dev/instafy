@@ -68,8 +68,10 @@ import {
   getUnsavedWorkSnapshot,
   pendingUnsavedWorkEntries,
   resetUnsavedWorkStoreForTests,
+  setUnsavedWorkLiveOrigins,
 } from "../../../../workspace/unsavedWorkStore";
 import { HistoryDrawer } from "../HistoryDrawer";
+import { NO_UNSAVED_WORK_COPY } from "../versioningCopy";
 
 const HEAD = "e".repeat(40);
 const NEW_HEAD = "f".repeat(40);
@@ -216,6 +218,58 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(seen.size).toBe(2);
     expect(seen.has(unsavedWorkSeenKey(recovery))).toBe(true);
     expect(seen.has(unsavedWorkSeenKey(kept))).toBe(true);
+  });
+
+  it("hides a running workspace's rolling save and keeps that origin's other entries", async () => {
+    const running = "11111111-2222-3333-4444-555555555555";
+    const stopped = "66666666-7777-4888-8999-000000000000";
+    const live = recoveryEntry("refs/instafy/recovery/aaaaaaaa-0000-4000-8000-000000000001/working", {
+      kind: "unsaved",
+      origin: running,
+      rollingSave: true,
+    });
+    const kept = recoveryEntry("refs/instafy/recovery/aaaaaaaa-0000-4000-8000-000000000002/working", {
+      kind: "unsaved",
+      origin: stopped,
+      rollingSave: true,
+    });
+    mocks.fetchRecovery.mockResolvedValue(
+      list([
+        recoveryEntry(RECOVERY),
+        recoveryEntry(CONFLICT, { kind: "conflict", paths: ["src/a.ts"] }),
+        live,
+        kept,
+      ]),
+    );
+    setUnsavedWorkLiveOrigins("project-1", [running]);
+    await render();
+    const refs = Array.from(container.querySelectorAll<HTMLElement>('[data-testid="unsaved-work-entry"]')).map(
+      (element) => element.getAttribute("data-ref"),
+    );
+    expect(refs).toEqual([RECOVERY, CONFLICT, kept.ref]);
+    // What is hidden is never counted as seen.
+    const seen = readUnsavedWorkSeen("project-1", "user-1");
+    expect(seen.has(unsavedWorkSeenKey(kept))).toBe(true);
+    expect(seen.has(unsavedWorkSeenKey(live))).toBe(false);
+  });
+
+  it("says there is no unsaved work when Retry finds only a running workspace's rolling save", async () => {
+    const running = "11111111-2222-3333-4444-555555555555";
+    mocks.fetchRecovery.mockResolvedValueOnce({
+      status: "error",
+      entries: [],
+      error: originError(502, "canonical_unreachable"),
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    setUnsavedWorkLiveOrigins("project-1", [running]);
+    await render();
+    mocks.fetchRecovery.mockResolvedValue(
+      list([recoveryEntry(`refs/instafy/recovery/${running}/working`, { kind: "unsaved", rollingSave: true })]),
+    );
+    await press(container, "unsaved-work-retry");
+    expect(q(container, "unsaved-work-section")).toBeNull();
+    expect(container.textContent).toContain(NO_UNSAVED_WORK_COPY);
   });
 
   it("is hidden while empty", async () => {

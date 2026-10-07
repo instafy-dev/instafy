@@ -75,6 +75,8 @@ const GATED_FILES = [
   resolve(src, "workspace/unsavedWorkSignals.ts"),
   resolve(src, "workspace/unsavedWorkStore.ts"),
   resolve(src, "workspace/useActiveWorkspaceVersioning.ts"),
+  // The live origins that hide a running workspace's rolling save.
+  resolve(src, "runtime/RuntimeOperationsProvider.tsx"),
   // Tests that spell out the copy.
   resolve(components, "__tests__/ChatFileChangeList.test.ts"),
   resolve(components, "__tests__/ChatFileChangeUnsavedEntry.test.tsx"),

@@ -20,7 +20,7 @@ vi.mock("../../sdk/instafy", () => ({
 }));
 
 import { markUnsavedWorkSeen, unsavedWorkSeenKey } from "../../workspace/unsavedWorkSeen";
-import { resetUnsavedWorkStoreForTests } from "../../workspace/unsavedWorkStore";
+import { resetUnsavedWorkStoreForTests, setUnsavedWorkLiveOrigins } from "../../workspace/unsavedWorkStore";
 import {
   unsavedWorkBadgeLabel,
   useWorkspaceVersioningBadge,
@@ -142,6 +142,28 @@ describe("useWorkspaceVersioningBadge", () => {
       markUnsavedWorkSeen("project-1", "user-1", [unsavedWorkSeenKey(unpublished)]);
     });
     expect(badge()?.textContent).toBe("1");
+  });
+
+  it("leaves a running workspace's rolling save off the badge", async () => {
+    const running = "11111111-1111-4111-8111-111111111111";
+    const stopped = "22222222-2222-4222-8222-222222222222";
+    mocks.fetchRecovery.mockResolvedValue({
+      status: "ok",
+      entries: [
+        recovery("refs/instafy/recovery/o/a", { origin: running }),
+        recovery("refs/instafy/recovery/w1/working", { kind: "unsaved", origin: running, rollingSave: true }),
+        recovery("refs/instafy/recovery/w2/working", { kind: "unsaved", origin: stopped, rollingSave: true }),
+      ],
+      originId: "origin-1",
+      originMode: "hosted",
+    });
+    // Until the runtime status answers, no rolling save counts.
+    await render({ ...base, chromeMode: "stateless", historyReady: true });
+    expect(badge()?.textContent).toBe("1");
+
+    await act(async () => setUnsavedWorkLiveOrigins("project-1", [running]));
+    expect(badge()?.textContent).toBe("2");
+    expect(badge()?.getAttribute("data-label")).toBe("2 unsaved work entries");
   });
 
   it("labels several entries in the plural", () => {

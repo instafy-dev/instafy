@@ -564,6 +564,7 @@ describe("unsaved work (recovery)", () => {
     expect(result?.status).toBe("ok");
     expect(result?.entries[0]).toEqual({ ...listed[0] });
     expect(result?.entries[0]).not.toHaveProperty("restoredRev");
+    expect(result?.entries[0]).not.toHaveProperty("rollingSave");
     expect(result?.entries[1]).toMatchObject({ kind: "unsaved", paths: ["x", "y"], restoredRev: "m9" });
     expect(mocks.signal).toHaveBeenCalledWith("gateway", "recovery_supported");
   });
@@ -574,6 +575,22 @@ describe("unsaved work (recovery)", () => {
     expect(result?.entries).toEqual([
       { ref: "refs/instafy/recovery/o/x", rev: "r", kind: "unpublished", subject: "", date: null, origin: null, paths: [], base: null },
     ]);
+  });
+
+  it("keeps the rolling-save flag only when the server sets it", async () => {
+    fetchMock().mockResolvedValue(
+      json(200, [
+        { ...listed[0], ref: "refs/instafy/recovery/w/working", kind: "unsaved", rollingSave: true },
+        { ...listed[0], ref: "refs/instafy/recovery/w2/working", kind: "unsaved", rolling_save: true },
+        { ...listed[0], ref: "refs/instafy/recovery/w3/working", kind: "unsaved", rollingSave: false },
+        { ...listed[0], ref: "refs/instafy/recovery/w4/working", kind: "unsaved", rollingSave: "true" },
+      ]),
+    );
+    const result = await fetchWorkspaceRecoveryFromController({ projectId: "p" });
+    expect(result?.entries.map((entry) => entry.rollingSave)).toEqual([true, true, undefined, undefined]);
+    expect(result?.entries[0]).toMatchObject({ origin: listed[0].origin, kind: "unsaved" });
+    expect(result?.entries[2]).not.toHaveProperty("rollingSave");
+    expect(result?.entries[3]).not.toHaveProperty("rollingSave");
   });
 
   it("treats 404 as unsupported, never as an error", async () => {
