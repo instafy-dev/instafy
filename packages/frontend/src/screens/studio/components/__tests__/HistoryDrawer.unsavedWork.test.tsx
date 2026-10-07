@@ -337,6 +337,41 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(q(row(container, KEPT), "unsaved-work-restored")).not.toBeNull();
   });
 
+  it("leaves an entry pending, with no Restored badge, when a restore that keeps its ref made no version", async () => {
+    // main gained TODO.md since; the work only adds todo.md, which the person keeps.
+    mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["todo.md"] })]));
+    mocks.restoreRecovery
+      .mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths: ["todo.md"] }),
+        originId: "origin-1",
+        originMode: "hosted",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        rev: NEW_HEAD,
+        baseRev: NEW_HEAD,
+        committed: false,
+        notRestored: ["todo.md"],
+        notRestoredReasons: { "todo.md": "kept" },
+        refDeleted: false,
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    await render();
+    await press(row(container, KEPT), "unsaved-work-restore");
+    await press(row(container, KEPT), "unsaved-work-path-keep");
+    // Hold the forced reload: only the local patch decides the badge here.
+    mocks.fetchRecovery.mockReturnValue(new Promise(() => undefined));
+    await press(row(container, KEPT), "unsaved-work-restore-rest");
+    expect(mocks.restoreRecovery).toHaveBeenLastCalledWith(expect.objectContaining({ ref: KEPT, keep: ["todo.md"] }));
+    expect(q(container, "history-status")?.textContent).toBe("Kept the current version of todo.md.");
+    // No restore commit was made, so the server will not mark it either.
+    expect(q(row(container, KEPT), "unsaved-work-restored")).toBeNull();
+    expect(q(row(container, KEPT), "unsaved-work-restore")).not.toBeNull();
+  });
+
   it("does not claim a new version when restoring an already restored entry", async () => {
     mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", restoredRev: NEW_HEAD })]));
     mocks.restoreRecovery.mockResolvedValue({

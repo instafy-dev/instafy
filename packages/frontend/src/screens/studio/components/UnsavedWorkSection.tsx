@@ -261,11 +261,15 @@ export function UnsavedWorkSection({
           }),
         });
         clearConflict(entry.ref);
-        patchUnsavedWorkEntries(projectId, originId, (entries) =>
-          result.refDeleted
-            ? entries.filter((item) => item.ref !== entry.ref)
-            : entries.map((item) => (item.ref === entry.ref ? { ...item, restoredRev: result.rev ?? item.rev } : item)),
-        );
+        // A kept ref counts as restored only through the restore commit the server
+        // finds on `main`; a restore that made no version leaves the entry pending.
+        if (result.refDeleted) {
+          patchUnsavedWorkEntries(projectId, originId, (entries) => entries.filter((item) => item.ref !== entry.ref));
+        } else if (result.committed !== false) {
+          patchUnsavedWorkEntries(projectId, originId, (entries) =>
+            entries.map((item) => (item.ref === entry.ref ? { ...item, restoredRev: result.rev ?? item.rev } : item)),
+          );
+        }
         if (result.committed !== false) {
           onCommitted(result.rev);
         }

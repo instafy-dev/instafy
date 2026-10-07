@@ -524,7 +524,9 @@ Studio picks its versioning UI per space from the project's default origin:
   removes a recovery ref once `main` holds its work, all of it but what the person kept; a kept
   new name that a disk ignoring case takes for another file of `main` (`todo.md` beside `TODO.md`,
   `Docs/guide.md` beside a file `docs`) keeps the ref, because `main` holds that work under neither
-  name, and a ref a restore keeps shows "Restored". Remove deletes a recovery ref for everyone
+  name. A ref a restore keeps shows "Restored" only once `main` holds a restore commit for it; a
+  restore that kept or refused all it held makes none (`committed: false`), so the entry stays
+  pending until it is removed. Remove deletes a recovery ref for everyone
   (`POST /git/recovery/dismiss`). A restore of work the saved version already has answers
   `committed: false` and says there was nothing to restore. `notRestored` items carry a `reason`
   on both Desktop and the gateway: a file left out as an old chat upload (`attachment`) is named
