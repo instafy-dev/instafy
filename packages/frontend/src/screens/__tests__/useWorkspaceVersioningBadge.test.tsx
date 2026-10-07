@@ -20,7 +20,11 @@ vi.mock("../../sdk/instafy", () => ({
 }));
 
 import { markUnsavedWorkSeen, unsavedWorkSeenKey } from "../../workspace/unsavedWorkSeen";
-import { resetUnsavedWorkStoreForTests, setUnsavedWorkLiveOrigins } from "../../workspace/unsavedWorkStore";
+import {
+  resetUnsavedWorkStoreForTests,
+  setUnsavedWorkLiveOrigins,
+  UNSAVED_WORK_STOP_REFETCH_DELAY_MS,
+} from "../../workspace/unsavedWorkStore";
 import {
   unsavedWorkBadgeLabel,
   useWorkspaceVersioningBadge,
@@ -99,6 +103,8 @@ describe("useWorkspaceVersioningBadge", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    resetUnsavedWorkStoreForTests();
+    vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -157,11 +163,20 @@ describe("useWorkspaceVersioningBadge", () => {
       originId: "origin-1",
       originMode: "hosted",
     });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     // Until the runtime status answers, no rolling save counts.
     await render({ ...base, chromeMode: "stateless", historyReady: true });
     expect(badge()?.textContent).toBe("1");
 
+    // The stopped origin's save waits for the list to be read again: it may
+    // have stopped, and saved once more, after the list in hand was read.
     await act(async () => setUnsavedWorkLiveOrigins("project-1", [running]));
+    expect(badge()?.textContent).toBe("1");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS);
+    });
+    await flush();
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
     expect(badge()?.textContent).toBe("2");
     expect(badge()?.getAttribute("data-label")).toBe("2 unsaved work entries");
   });

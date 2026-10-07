@@ -197,16 +197,21 @@ export function liveOriginIds(statuses: readonly ControllerRuntimeStatusEntry[])
 /**
  * Record the live origins of `projectId`, or `null` while they are not
  * known (before the project's first status answer, or while a refresh
- * loads, fails or is skipped). An unknown moment keeps the last known set. An origin that leaves the set
- * keeps its rolling saves hidden until the project's lists are fetched
- * again, so the final save appears once, with its final rev.
+ * loads, fails or is skipped). An unknown moment keeps the last known set.
+ *
+ * A loaded list can hold a stopped origin's rolling save at a rev older
+ * than its final save. That origin's saves stay hidden until the project's
+ * lists are fetched again, so the final save appears once, with its final
+ * rev. This covers an origin that leaves the live set, and, when the set
+ * first becomes known, a listed origin that is not live: it may have
+ * stopped while another project was open, or before the status answered.
  */
 export function setUnsavedWorkLiveOrigins(
   projectId: string | null | undefined,
   originIds: Iterable<string> | null,
 ): void {
   const project = projectId?.trim() || null;
-  const current = liveOrigins && liveOrigins.projectId === project ? liveOrigins : null;
+  let current = liveOrigins && liveOrigins.projectId === project ? liveOrigins : null;
   if (!current) {
     // Another project, or none: nothing carries over.
     cancelSettle();
@@ -217,9 +222,12 @@ export function setUnsavedWorkLiveOrigins(
       }
       return;
     }
-    liveOrigins = liveOriginsRecord(project, originIds === null ? null : new Set(originIds), EMPTY_ORIGINS);
-    notify();
-    return;
+    current = liveOriginsRecord(project, null, EMPTY_ORIGINS);
+    liveOrigins = current;
+    if (originIds === null) {
+      notify();
+      return;
+    }
   }
   if (originIds === null) {
     return;
@@ -227,7 +235,10 @@ export function setUnsavedWorkLiveOrigins(
   const live = new Set(originIds);
   // Any stop counts, listed or not: the slot a turn wrote since the list
   // loaded may be the only copy of that work, and no list carries it yet.
-  const departed = current.live ? [...current.live].filter((id) => !live.has(id)) : [];
+  // A first known set can only judge what the loaded lists show.
+  const departed = current.live
+    ? [...current.live].filter((id) => !live.has(id))
+    : listedRollingSaveOrigins(current.projectId).filter((id) => !live.has(id));
   if (current.live && departed.length === 0 && sameOrigins(current.live, live)) {
     return;
   }
@@ -244,6 +255,31 @@ export function setUnsavedWorkLiveOrigins(
   notify();
 }
 
+/** The lists of `projectId` that have loaded, by the origin they were read from. */
+function loadedLists(projectId: string): Array<[string, UnsavedWorkSnapshot]> {
+  const prefix = `${projectId}:`;
+  const lists: Array<[string, UnsavedWorkSnapshot]> = [];
+  for (const [key, snapshot] of snapshots) {
+    if (key.startsWith(prefix) && (snapshot.status === "ok" || snapshot.status === "error")) {
+      lists.push([key.slice(prefix.length), snapshot]);
+    }
+  }
+  return lists;
+}
+
+/** The origins that last wrote a rolling save in one of `projectId`'s loaded lists. */
+function listedRollingSaveOrigins(projectId: string): string[] {
+  const origins = new Set<string>();
+  for (const [, snapshot] of loadedLists(projectId)) {
+    for (const entry of snapshot.entries) {
+      if (entry.rollingSave === true && entry.origin) {
+        origins.add(entry.origin);
+      }
+    }
+  }
+  return [...origins];
+}
+
 /**
  * Fetch every list of `projectId` that has loaded again, then show the
  * stopped origins' saves. Legacy spaces never loaded one, so they fetch
@@ -254,13 +290,7 @@ async function settleStoppedOrigins(projectId: string): Promise<void> {
   if (batch.size === 0) {
     return;
   }
-  const prefix = `${projectId}:`;
-  const originIds: string[] = [];
-  for (const [key, snapshot] of snapshots) {
-    if (key.startsWith(prefix) && (snapshot.status === "ok" || snapshot.status === "error")) {
-      originIds.push(key.slice(prefix.length));
-    }
-  }
+  const originIds = loadedLists(projectId).map(([originId]) => originId);
   await Promise.allSettled(
     originIds.map((originId) => refreshUnsavedWork({ projectId, originId, force: true })),
   );
