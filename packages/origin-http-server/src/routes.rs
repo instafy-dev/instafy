@@ -169,8 +169,7 @@ pub struct EntriesQuery {
     pub sync: Option<String>,
     /// List this commit instead of the work tree (single-tenant origins).
     pub rev: Option<String>,
-    /// List the commit a recovery or salvage ref names (single-tenant
-    /// origins).
+    /// List the commit a recovery ref names (single-tenant origins).
     #[serde(rename = "ref")]
     pub reference: Option<String>,
 }
@@ -700,7 +699,7 @@ fn requested_version(
 
 /// Run `read` on the commit a single-tenant read at a version names: a
 /// `rev` the checkout holds (or canonical `main` holds), or the tip of a
-/// recovery or salvage ref fetched by its exact name. The checkout is
+/// recovery ref fetched by its exact name. The checkout is
 /// locked like other git work, objects are read from `.instafy/.git`, and
 /// the work tree is never touched. Returns the id for `X-Instafy-Rev` and
 /// what `read` found.
@@ -893,7 +892,7 @@ fn object_entry_response(entry: &recovery_view::ObjectEntry) -> FileEntryRespons
     }
 }
 
-/// Fetch the recovery or salvage ref a single-tenant review or diff names
+/// Fetch the recovery ref a single-tenant review or diff names
 /// (`ref=`), so the commits it compares are here. The caller holds the
 /// project's apply lock.
 async fn fetch_ref_for_review(
@@ -956,8 +955,8 @@ struct GitDiffQuery {
     path: Option<String>,
     commit: Option<String>,
     base: Option<String>,
-    /// A recovery or salvage ref to fetch first, so its commits can be
-    /// compared (single-tenant origins).
+    /// A recovery ref to fetch first, so its commits can be compared
+    /// (single-tenant origins).
     #[serde(rename = "ref")]
     reference: Option<String>,
 }
@@ -972,7 +971,7 @@ struct GitHistoryQuery {
 #[derive(Debug, Deserialize)]
 struct GitHistoryReviewQuery {
     commit: Option<String>,
-    /// A recovery or salvage ref to fetch first (single-tenant origins).
+    /// A recovery ref to fetch first (single-tenant origins).
     #[serde(rename = "ref")]
     reference: Option<String>,
 }
@@ -2721,8 +2720,8 @@ async fn handle_git_sync(
     })))
 }
 
-/// `GET /git/recovery`: unsaved work kept on recovery and salvage refs of
-/// canonical, newest first (see [`checkout_versions::list_unsaved_work`]),
+/// `GET /git/recovery`: unsaved work kept on recovery refs of canonical,
+/// newest first (see [`checkout_versions::list_unsaved_work`]),
 /// as `{entries: [...]}`. 502 `canonical_unreachable` when canonical cannot
 /// be listed: the list is never answered from stale data. Without a
 /// canonical repository there is nothing to list: 404 `not_supported`,
@@ -2885,7 +2884,6 @@ async fn handle_git_recovery_restore(
     .map_err(|error| OriginError::internal(format!("git restore task failed: {error}")))??;
     let extra = serde_json::json!({
         "committed": report.committed,
-        "marked": report.marked,
         "notRestored": report.not_restored,
         "refDeleted": report.ref_deleted,
     });

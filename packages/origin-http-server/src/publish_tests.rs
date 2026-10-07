@@ -2763,8 +2763,8 @@ async fn a_reserved_path_a_version_holds_is_an_unsupported_entry() {
     server.abort();
 }
 
-/// `?ref=` reads serve exactly what the recovery or salvage ref's commit
-/// holds (never the folder), report the ref's tip in `X-Instafy-Rev` (also
+/// `?ref=` reads serve exactly what the recovery ref's commit holds
+/// (never the folder), report the ref's tip in `X-Instafy-Rev` (also
 /// on a 404) and the blob in `X-Instafy-Blob`; `?rev=` reads serve a commit
 /// the checkout or canonical `main` holds, never one only a recovery ref
 /// reaches.
@@ -2799,14 +2799,6 @@ async fn reads_at_a_ref_or_rev_serve_the_commit_not_the_folder() {
         ],
     );
     let tag = git_in(&sc.other, &["rev-parse", "kept-tag"]);
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    push_to_ref(
-        &sc,
-        &[("salvaged.md", Some(b"salvaged\n"))],
-        &[],
-        "salvage",
-        salvage,
-    );
     // The folder has its own edit; reads at a version never show it.
     sc.write("README.md", b"edited in the folder\n");
 
@@ -2922,12 +2914,9 @@ async fn reads_at_a_ref_or_rev_serve_the_commit_not_the_folder() {
         header(&response, "x-instafy-rev").as_deref(),
         Some(tag.as_str())
     );
-    // Salvage refs read the same way.
-    let response = get("/files/salvaged.md", vec![("ref", salvage.to_string())]).await;
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-    // A ref that does not resolve, or that is not a recovery or salvage
-    // ref, or a read naming both: no version was read.
+    // A ref that does not resolve, or that is not a recovery ref, or a read
+    // naming both: no version was read.
     for (query, status, code) in [
         (
             vec![(
@@ -2981,10 +2970,9 @@ async fn reads_at_a_ref_or_rev_serve_the_commit_not_the_folder() {
         Some("edited in the folder\n")
     );
     // No fetch ref is left behind, and no local ref is named after a
-    // recovery or salvage ref.
+    // recovery ref.
     assert!(sc.local_refs("refs/instafy/fetched").is_empty());
     assert!(sc.local_refs("refs/instafy/recovery").is_empty());
-    assert!(sc.local_refs("refs/instafy/salvage").is_empty());
 
     // Without `rev` or `ref`, reads show the folder as before.
     let body: serde_json::Value = get("/files/README.md", vec![]).await.json().await.unwrap();
@@ -3072,12 +3060,11 @@ async fn post_json(
     )
 }
 
-/// The unsaved-work list on a Desktop checkout: every recovery and salvage
-/// ref of canonical, with its kind, paths, merge base with the folder's
-/// branch and whether it may be removed; a restored salvage ref names the
-/// restore commit.
+/// The unsaved-work list on a Desktop checkout: every recovery ref of
+/// canonical, with its kind, paths, origin and merge base with the folder's
+/// branch; a restored ref that stays names the restore commit.
 #[tokio::test(flavor = "multi_thread")]
-async fn recovery_list_describes_unsaved_work_and_restored_salvage() {
+async fn recovery_list_describes_unsaved_work() {
     let sc = Scenario::new(Options {
         desktop: true,
         ..Options::default()
@@ -3091,13 +3078,17 @@ async fn recovery_list_describes_unsaved_work_and_restored_salvage() {
         "Unsaved edits\n\nInstafy-Recovery-Kind: unsaved\nInstafy-Path: notes.md",
         &unsaved,
     );
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    let salvage_commit = push_to_ref(
+    // Work a restore cannot all bring back: its ref stays.
+    let stays = recovery_ref_name(&sc, "20261005T121500Z-unsaved-0123456789ac");
+    let stays_commit = push_to_ref(
         &sc,
-        &[("salvaged.md", Some(b"salvaged\n"))],
+        &[
+            ("restored.md", Some(b"restored\n")),
+            (".env", Some(b"TOKEN=1\n")),
+        ],
         &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: salvaged.md",
-        salvage,
+        "Unsaved edits\n\nInstafy-Recovery-Kind: unsaved\nInstafy-Path: restored.md",
+        &stays,
     );
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
@@ -3127,40 +3118,37 @@ async fn recovery_list_describes_unsaved_work_and_restored_salvage() {
     assert_eq!(item["kind"], "unsaved");
     assert_eq!(item["paths"], serde_json::json!(["notes.md"]));
     assert_eq!(item["base"], seed.as_str());
-    assert_eq!(item["dismissible"], true);
     assert_eq!(item["origin"], sc.config.origin_id.to_string());
+    assert!(item.get("dismissible").is_none(), "{item}");
     assert!(item.get("restoredRev").is_none(), "{item}");
-    let item = by_ref(&entries, salvage);
-    assert_eq!(item["kind"], "salvage");
-    assert_eq!(item["dismissible"], false);
-    assert!(item["origin"].is_null());
 
-    // Restoring the salvage ref keeps it, and the list now says it was
-    // restored; a second restore has nothing left to do.
+    // Restoring work whose secret cannot come back keeps its ref, and the
+    // list now says it was restored; a second restore has nothing left to
+    // do.
     let (status, body) = post_json(
         &client,
         format!("{base}/git/recovery/restore"),
-        serde_json::json!({ "ref": salvage, "rev": salvage_commit }),
+        serde_json::json!({ "ref": stays, "rev": stays_commit }),
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true, "{body}");
     assert_eq!(body["refDeleted"], false, "{body}");
+    assert!(body.get("marked").is_none(), "{body}");
     let restored = body["rev"].as_str().unwrap().to_string();
     assert_eq!(restored, sc.main());
-    assert_eq!(sc.remote_file("salvaged.md").as_deref(), Some("salvaged\n"));
-    assert_eq!(sc.remote_refs(salvage).len(), 1);
-    let item = by_ref(&list().await, salvage);
+    assert_eq!(sc.remote_file("restored.md").as_deref(), Some("restored\n"));
+    assert_eq!(sc.remote_refs(&stays).len(), 1);
+    let item = by_ref(&list().await, &stays);
     assert_eq!(item["restoredRev"], restored.as_str(), "{item}");
     let (status, body) = post_json(
         &client,
         format!("{base}/git/recovery/restore"),
-        serde_json::json!({ "ref": salvage }),
+        serde_json::json!({ "ref": stays }),
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(body["rev"], restored.as_str());
 
     // A trailer naming the ref in a commit the origin did not make is not
@@ -3184,13 +3172,18 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
         desktop: true,
         ..Options::default()
     });
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    let salvage_commit = push_to_ref(
+    // A ref a restore keeps (its secret cannot come back), so the list
+    // still names it after a real restore.
+    let stays = recovery_ref_name(&sc, "20261005T114500Z-unsaved-0123456789aa");
+    let stays_commit = push_to_ref(
         &sc,
-        &[("salvaged.md", Some(b"salvaged\n"))],
+        &[
+            ("restored.md", Some(b"restored\n")),
+            (".env", Some(b"TOKEN=1\n")),
+        ],
         &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: salvaged.md",
-        salvage,
+        "Unsaved edits with a secret",
+        &stays,
     );
     let unsaved = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
     push_to_ref(
@@ -3239,7 +3232,7 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
         serde_json::json!({
             "paths": ["unrelated.md"],
             "message": format!(
-                "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {salvage}"
+                "Tidy\n\nInstafy-Resolved-By: assistant\nInstafy-Restored-From: {stays}"
             ),
         }),
     )
@@ -3286,7 +3279,7 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
     // characters or in another letter case, through a save and an apply.
     sc.write("unrelated.md", b"tidy a third time\n");
     let hidden = format!(
-        "Tidy\n\n\u{1}Instafy-Restored-From: {salvage}\n\
+        "Tidy\n\n\u{1}Instafy-Restored-From: {stays}\n\
          \t\u{1b}INSTAFY-APPLY-KEY: imp:forged\nInstafy-Apply-Fingerprint: abc\n\
          Instafy-Resolved-By: assistant\n"
     );
@@ -3348,24 +3341,25 @@ async fn a_save_message_never_marks_unsaved_work_restored() {
     sc.publish(Selection::None);
 
     let entries = list().await;
-    for reference in [salvage, unsaved.as_str(), other.as_str()] {
+    for reference in [stays.as_str(), unsaved.as_str(), other.as_str()] {
         assert_eq!(restored_rev(&entries, reference), None, "{reference}");
     }
-    assert!(sc.remote_file("salvaged.md").is_none());
+    assert!(sc.remote_file("restored.md").is_none());
     assert!(sc.remote_file("notes.md").is_none());
 
     // A real restore still counts.
     let (status, body) = post_json(
         &client,
         format!("{base}/git/recovery/restore"),
-        serde_json::json!({ "ref": salvage, "rev": salvage_commit }),
+        serde_json::json!({ "ref": stays, "rev": stays_commit }),
     )
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true, "{body}");
+    assert_eq!(body["refDeleted"], false, "{body}");
     let entries = list().await;
     assert_eq!(
-        restored_rev(&entries, salvage),
+        restored_rev(&entries, &stays),
         Some(serde_json::Value::String(sc.main()))
     );
     server.abort();
@@ -3379,13 +3373,13 @@ fn a_publish_drops_origin_trailers_from_its_message() {
         desktop: true,
         ..Options::default()
     });
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
+    let reference = recovery_ref_name(&sc, "20261005T120000Z-unsaved-0123456789ab");
     sc.write("notes.md", b"notes\n");
     let report = publish(
         &sc.ctx(true),
         PublishRequest {
             selection: Selection::Paths(vec!["notes.md".to_string()]),
-            message: format!("Restore unsaved work\n\nInstafy-Restored-From: {salvage}\n"),
+            message: format!("Restore unsaved work\n\nInstafy-Restored-From: {reference}\n"),
             author: None,
             budget: Duration::from_secs(30),
         },
@@ -3448,7 +3442,6 @@ async fn restore_route_restores_unsaved_work_once() {
         restore(serde_json::json!({ "ref": refused, "rev": refused_commit })).await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], true, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(body["refDeleted"], false, "{body}");
     assert_eq!(body["gitSyncStatus"], "published");
     assert_eq!(
@@ -3470,7 +3463,6 @@ async fn restore_route_restores_unsaved_work_once() {
         restore(serde_json::json!({ "ref": refused, "rev": refused_commit })).await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(body["refDeleted"], false, "{body}");
     assert_eq!(sc.main(), main);
     assert_eq!(sc.remote_refs(&refused).len(), 1);
@@ -3577,361 +3569,6 @@ async fn restore_route_restores_unsaved_work_once() {
     server.abort();
 }
 
-/// Every restore that lands leaves a restore commit naming its ref. With
-/// nothing left to bring back (after "Use this version" saved the
-/// conflicted file, after "Keep current" for everything, or when all that
-/// is left is a secret or a file `main` now ignores), it is an empty one,
-/// the answer is `marked` (not `committed`), and the list shows the entry
-/// restored for good: later saves of the same files do not bring it back
-/// as pending. A second restore adds nothing.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_restore_with_nothing_left_to_bring_back_is_recorded_for_good() {
-    let sc = Scenario::new(Options {
-        desktop: true,
-        ..Options::default()
-    });
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    let salvage_commit = push_to_ref(
-        &sc,
-        &[("salvaged.md", Some(b"salvaged\n"))],
-        &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: salvaged.md",
-        salvage,
-    );
-    let kept = "refs/instafy/salvage/gateway/node-1-0123abce";
-    let kept_commit = push_to_ref(
-        &sc,
-        &[("other.md", Some(b"salvaged other\n"))],
-        &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: other.md",
-        kept,
-    );
-    // Holds a `.env` file, which a restore always refuses.
-    let refused = "refs/instafy/salvage/gateway/node-1-0123abcf";
-    push_to_ref(
-        &sc,
-        &[("held.md", Some(b"held\n")), (".env", Some(b"TOKEN=1\n"))],
-        &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage",
-        refused,
-    );
-    let ignored = "refs/instafy/salvage/gateway/node-1-0123abd0";
-    push_to_ref(
-        &sc,
-        &[
-            ("held.md", Some(b"held\n")),
-            ("notes/plan.md", Some(b"the plan\n")),
-        ],
-        &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage",
-        ignored,
-    );
-    sc.push_other(
-        &[
-            ("salvaged.md", Some(b"saved since\n")),
-            ("other.md", Some(b"other saved since\n")),
-            ("held.md", Some(b"held\n")),
-            (".gitignore", Some(b"notes/\n")),
-        ],
-        "saved since",
-    );
-    sc.publish(Selection::None);
-    let (base, server) = serve(&sc).await;
-    let client = reqwest::Client::new();
-    let list = || {
-        let client = client.clone();
-        let url = format!("{base}/git/recovery");
-        async move {
-            let response = client.get(url).send().await.unwrap();
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            response.json::<serde_json::Value>().await.unwrap()["entries"]
-                .as_array()
-                .unwrap()
-                .clone()
-        }
-    };
-    let restored_rev = |entries: &[serde_json::Value], reference: &str| {
-        entries
-            .iter()
-            .find(|entry| entry["ref"] == reference)
-            .unwrap_or_else(|| panic!("{reference} not listed in {entries:?}"))
-            .get("restoredRev")
-            .and_then(|rev| rev.as_str().map(str::to_string))
-    };
-    let restore =
-        |body: serde_json::Value| post_json(&client, format!("{base}/git/recovery/restore"), body);
-    // A marker: the restore message, committed by the origin, with its
-    // parent's tree.
-    let is_marker = |commit: &str, reference: &str| {
-        let message = git_in(&sc.remote, &["log", "-1", "--format=%ce%n%B", commit]);
-        let tree = git_in(&sc.remote, &["rev-parse", &format!("{commit}^{{tree}}")]);
-        let parent = git_in(&sc.remote, &["rev-parse", &format!("{commit}^^{{tree}}")]);
-        message.trim_end()
-            == format!(
-                "origin@instafy.dev\nRestore unsaved work\n\nInstafy-Restored-From: {reference}"
-            )
-            && tree == parent
-    };
-
-    let entries = list().await;
-    for reference in [salvage, kept, refused, ignored] {
-        assert_eq!(restored_rev(&entries, reference), None, "{reference}");
-    }
-
-    // "Use this version", then the restore of the rest.
-    let (status, body) = restore(serde_json::json!({ "ref": salvage })).await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["paths"], serde_json::json!(["salvaged.md"]));
-    sc.write("salvaged.md", b"salvaged\n");
-    let (status, body) = post_json(
-        &client,
-        format!("{base}/git/sync"),
-        serde_json::json!({ "paths": ["salvaged.md"] }),
-    )
-    .await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    let (status, body) =
-        restore(serde_json::json!({ "ref": salvage, "rev": salvage_commit })).await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["refDeleted"], false, "{body}");
-    let marker = sc.main();
-    assert_eq!(body["rev"], marker.as_str(), "{body}");
-    assert!(is_marker(&marker, salvage), "{marker}");
-    assert_eq!(body["marked"], true, "{body}");
-    assert_eq!(restored_rev(&list().await, salvage), Some(marker.clone()));
-    // Saving the same file again does not bring the entry back.
-    sc.write("salvaged.md", b"edited after the restore\n");
-    let (status, body) = post_json(
-        &client,
-        format!("{base}/git/sync"),
-        serde_json::json!({ "paths": ["salvaged.md"] }),
-    )
-    .await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_ne!(sc.main(), marker);
-    assert_eq!(restored_rev(&list().await, salvage), Some(marker.clone()));
-    assert_eq!(sc.remote_refs(salvage).len(), 1);
-
-    // "Keep current" for everything, after `main` moved while an unsaved
-    // file in the folder keeps the branch where it was: the marker is
-    // merged in as a second parent, and found there.
-    sc.push_other(&[("unrelated.md", Some(b"unrelated\n"))], "unrelated");
-    sc.write("unrelated.md", b"typed in the folder\n");
-    let (status, body) = restore(serde_json::json!({
-        "ref": kept,
-        "rev": kept_commit,
-        "keep": ["other.md"],
-    }))
-    .await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], true, "{body}");
-    let kept_marker = body["localRev"].as_str().unwrap().to_string();
-    assert_ne!(kept_marker, sc.main());
-    assert!(on_main(&sc, &kept_marker));
-    assert!(is_marker(&kept_marker, kept), "{kept_marker}");
-    assert_eq!(restored_rev(&list().await, kept), Some(kept_marker));
-    fs::remove_file(sc.ws.join("unrelated.md")).unwrap();
-
-    // What is left is a secret, or a file `main` now ignores.
-    for (reference, left_out, reason) in [
-        (refused, ".env", "secret"),
-        (ignored, "notes/plan.md", "ignored"),
-    ] {
-        let (status, body) = restore(serde_json::json!({ "ref": reference })).await;
-        assert_eq!(status, reqwest::StatusCode::OK, "{reference}: {body}");
-        assert_eq!(body["committed"], false, "{reference}: {body}");
-        assert_eq!(body["marked"], true, "{reference}: {body}");
-        assert_eq!(
-            body["notRestored"],
-            serde_json::json!([{ "path": left_out, "reason": reason }])
-        );
-        let marker = body["localRev"].as_str().unwrap().to_string();
-        assert!(on_main(&sc, &marker), "{reference}");
-        assert!(is_marker(&marker, reference), "{reference}");
-        assert_eq!(restored_rev(&list().await, reference), Some(marker.clone()));
-        // A second restore adds nothing.
-        let main = sc.main();
-        let (status, body) = restore(serde_json::json!({ "ref": reference })).await;
-        assert_eq!(status, reqwest::StatusCode::OK, "{reference}: {body}");
-        assert_eq!(body["committed"], false, "{reference}: {body}");
-        assert_eq!(body["marked"], false, "{reference}: {body}");
-        assert_eq!(body["rev"], main.as_str(), "{reference}: {body}");
-        assert_eq!(sc.main(), main);
-    }
-    let (status, body) =
-        restore(serde_json::json!({ "ref": salvage, "rev": salvage_commit })).await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-    assert_eq!(restored_rev(&list().await, salvage), Some(marker));
-    server.abort();
-}
-
-/// A marker whose publish failed is not a restore yet; the retry that
-/// publishes it is `marked`.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_marker_that_did_not_reach_main_goes_out_with_the_retry() {
-    let sc = Scenario::new(Options {
-        desktop: true,
-        ..Options::default()
-    });
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    push_to_ref(
-        &sc,
-        &[("held.md", Some(b"held\n"))],
-        &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage",
-        salvage,
-    );
-    sc.push_other(&[("held.md", Some(b"held\n"))], "saved the same");
-    sc.publish(Selection::None);
-    let (base, server) = serve(&sc).await;
-    let client = reqwest::Client::new();
-    let restore = || {
-        post_json(
-            &client,
-            format!("{base}/git/recovery/restore"),
-            serde_json::json!({ "ref": salvage }),
-        )
-    };
-    let restored_rev = || {
-        let client = client.clone();
-        let url = format!("{base}/git/recovery");
-        async move {
-            let listed: serde_json::Value =
-                client.get(url).send().await.unwrap().json().await.unwrap();
-            listed["entries"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|entry| entry["ref"] == salvage)
-                .unwrap_or_else(|| panic!("{salvage} not listed in {listed}"))
-                .get("restoredRev")
-                .cloned()
-        }
-    };
-
-    let hook = close_main(&sc);
-    let main_before = sc.main();
-    let (status, body) = restore().await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["code"], "not_saved", "{body}");
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], true, "{body}");
-    assert_eq!(sc.main(), main_before);
-    assert_eq!(restored_rev().await, None);
-
-    fs::remove_file(hook).unwrap();
-    let (status, body) = restore().await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], true, "{body}");
-    assert_ne!(sc.main(), main_before);
-    assert_eq!(body["rev"], sc.main().as_str());
-    assert_eq!(
-        git_in(
-            &sc.remote,
-            &["rev-list", "--count", &format!("{main_before}..main")]
-        ),
-        "1"
-    );
-    assert_eq!(
-        restored_rev().await,
-        Some(serde_json::Value::String(sc.main()))
-    );
-    server.abort();
-}
-
-/// The first publish of a checkout whose history is unrelated to `main`
-/// replays its commits onto `main`, leaving out those that change nothing
-/// there. A salvage restore's empty marker is replayed all the same, so
-/// the first restore is recorded on `main`, and a second one adds nothing.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_salvage_marker_survives_the_first_publish_of_an_unrelated_history() {
-    let sc = Scenario::new(Options {
-        desktop: true,
-        empty: true,
-        ..Options::default()
-    });
-    sc.write("LICENSE", b"license\n");
-    sc.agent_commit(&["LICENSE"], "agent bootstrap");
-    write(&sc.other, "LICENSE", b"license\n");
-    git_in(&sc.other, &["add", "-A"]);
-    git_in(&sc.other, &["commit", "-q", "-m", "first"]);
-    git_in(&sc.other, &["push", "-q", "origin", "main"]);
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    push_to_ref(
-        &sc,
-        &[(".env", Some(b"TOKEN=1\n"))],
-        &[],
-        "Keep unsaved edits\n\nInstafy-Recovery-Kind: salvage",
-        salvage,
-    );
-    let (base, server) = serve(&sc).await;
-    let client = reqwest::Client::new();
-    let restore = || {
-        post_json(
-            &client,
-            format!("{base}/git/recovery/restore"),
-            serde_json::json!({ "ref": salvage }),
-        )
-    };
-    let main_before = sc.main();
-
-    let (status, body) = restore().await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(
-        body["notRestored"],
-        serde_json::json!([{ "path": ".env", "reason": "secret" }]),
-        "{body}"
-    );
-    assert_eq!(body["refDeleted"], false, "{body}");
-    let marker = sc.main();
-    assert_ne!(marker, main_before, "{body}");
-    assert_eq!(body["rev"], marker.as_str(), "{body}");
-    assert_eq!(
-        git_in(
-            &sc.remote,
-            &["rev-list", "--count", &format!("{main_before}..main")]
-        ),
-        "1"
-    );
-    assert_eq!(
-        git_in(&sc.remote, &["log", "-1", "--format=%ce%n%B", "main"]),
-        format!("origin@instafy.dev\nRestore unsaved work\n\nInstafy-Restored-From: {salvage}")
-    );
-    assert_eq!(
-        git_in(&sc.remote, &["rev-parse", "main^{tree}"]),
-        git_in(
-            &sc.remote,
-            &["rev-parse", &format!("{main_before}^{{tree}}")]
-        )
-    );
-    let listed: serde_json::Value = client
-        .get(format!("{base}/git/recovery"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let entry = listed["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["ref"] == salvage)
-        .cloned()
-        .unwrap_or_else(|| panic!("{salvage} not listed in {listed}"));
-    assert_eq!(entry["restoredRev"], marker.as_str(), "{entry}");
-
-    let (status, body) = restore().await;
-    assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
-    assert_eq!(sc.main(), marker);
-    server.abort();
-}
-
 /// A restore that reaches `main` only in part (the repository policy
 /// refused one of its files) keeps the recovery ref: what was refused is
 /// still only there. (A restore that does not reach `main` at all keeps it
@@ -4020,7 +3657,6 @@ async fn a_restore_counts_only_once_main_has_it() {
     assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "not_saved", "{body}");
     assert_eq!(body["committed"], true, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(body["refDeleted"], false, "{body}");
     assert_eq!(sc.main(), main_before);
     assert_eq!(sc.remote_refs(&reference).len(), 1);
@@ -4048,7 +3684,6 @@ async fn a_restore_counts_only_once_main_has_it() {
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["gitSyncStatus"], "published", "{body}");
     assert_eq!(body["committed"], true, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(body["refDeleted"], true, "{body}");
     assert_eq!(body["rev"], sc.main().as_str());
     assert_eq!(sc.remote_file("notes.md").as_deref(), Some("notes\n"));
@@ -4115,7 +3750,6 @@ async fn restoring_this_checkouts_own_unpublished_save_reports_the_new_version()
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["gitSyncStatus"], "published", "{body}");
     assert_eq!(body["committed"], true, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(body["refDeleted"], true, "{body}");
     assert_eq!(body["rev"], sc.main().as_str(), "{body}");
     assert_ne!(sc.main(), main_before);
@@ -4304,9 +3938,9 @@ async fn a_restore_never_replaces_files_head_does_not_track() {
 
 /// Work that `main` started to ignore after it was kept cannot be restored
 /// here. The restore says so and keeps the ref, the only copy of that work
-/// on canonical, so the person can still review or remove it. A recovery
-/// ref gets no empty restore commit (only a salvage ref, which can never be
-/// removed, does): `main` stays where it was and the entry stays pending.
+/// on canonical, so the person can still review or remove it. No empty
+/// restore commit is made: `main` stays where it was and the entry stays
+/// pending.
 #[tokio::test(flavor = "multi_thread")]
 async fn restoring_work_main_now_ignores_keeps_its_ref() {
     let sc = Scenario::new(Options {
@@ -4337,7 +3971,6 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
     .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     assert_eq!(body["committed"], false, "{body}");
-    assert_eq!(body["marked"], false, "{body}");
     assert_eq!(
         body["notRestored"],
         serde_json::json!([{ "path": "notes/plan.md", "reason": "ignored" }])
@@ -4348,8 +3981,7 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
     assert_eq!(sc.remote_refs(&reference).len(), 1);
     assert!(sc.remote_file("notes/plan.md").is_none());
 
-    // Still listed (pending, and dismissible), and still readable at the
-    // ref.
+    // Still listed (pending), and still readable at the ref.
     let listed: serde_json::Value = client
         .get(format!("{base}/git/recovery"))
         .send()
@@ -4366,7 +3998,6 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
         .cloned()
         .unwrap_or_else(|| panic!("{reference} not listed in {listed}"));
     assert!(entry.get("restoredRev").is_none(), "{entry}");
-    assert_eq!(entry["dismissible"], true, "{entry}");
     let response = client
         .get(format!("{base}/files/notes/plan.md"))
         .query(&[("ref", reference.as_str())])
@@ -4378,7 +4009,7 @@ async fn restoring_work_main_now_ignores_keeps_its_ref() {
 }
 
 /// Dismiss removes a recovery ref for everyone only while it still names
-/// what the person saw; salvage refs stay.
+/// what the person saw.
 #[tokio::test(flavor = "multi_thread")]
 async fn dismiss_route_removes_unsaved_work_under_a_lease() {
     let sc = Scenario::new(Options {
@@ -4393,8 +4024,6 @@ async fn dismiss_route_removes_unsaved_work_under_a_lease() {
         "edits",
         &reference,
     );
-    let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-    let salvage_commit = push_to_ref(&sc, &[("s.md", Some(b"s\n"))], &[], "salvage", salvage);
     let (base, server) = serve(&sc).await;
     let client = reqwest::Client::new();
     let dismiss =
@@ -4419,12 +4048,6 @@ async fn dismiss_route_removes_unsaved_work_under_a_lease() {
         body,
         serde_json::json!({ "dismissed": false, "missing": true })
     );
-
-    let (status, body) =
-        dismiss(serde_json::json!({ "ref": salvage, "rev": salvage_commit })).await;
-    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
-    assert_eq!(body["code"], "salvage_ref_kept");
-    assert_eq!(sc.remote_refs(salvage).len(), 1);
 
     for (body, code) in [
         (

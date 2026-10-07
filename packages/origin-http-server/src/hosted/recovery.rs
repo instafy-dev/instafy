@@ -1,6 +1,6 @@
-//! Unsaved work on the gateway: restoring what a recovery or salvage ref
-//! holds onto `main` (`POST /git/recovery/restore`) and dismissing a
-//! recovery ref (`POST /git/recovery/dismiss`). Listing is a read
+//! Unsaved work on the gateway: restoring what a recovery ref holds onto
+//! `main` (`POST /git/recovery/restore`) and dismissing a recovery ref
+//! (`POST /git/recovery/dismiss`). Listing is a read
 //! (`GET /git/recovery`, [`super::read::recovery_list`]).
 //!
 //! A ref is read on canonical by exactly its name. A request that names
@@ -8,11 +8,6 @@
 //! commit) gets 409 `recovery_ref_moved` when the ref names something else
 //! now or is gone. Removing a recovery ref is a delete under a lease on
 //! that id, so newer work pushed to the same name is never removed.
-//!
-//! Salvage refs (work kept from retired gateway working copies) are kept
-//! for good: they can be restored as often as wanted and never dismissed
-//! (409 `salvage_ref_kept`). The recovery list marks one restored through
-//! the `Instafy-Restored-From` trailer of the gateway's restore commit.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -23,7 +18,7 @@ use axum::Extension;
 use serde::Deserialize;
 use tracing::{info, warn};
 
-use super::answers::{internal, push_rejected, recovery_ref_moved, salvage_ref_kept};
+use super::answers::{internal, push_rejected, recovery_ref_moved};
 use super::cache::{canonical_unreachable, MirrorLease};
 use super::cas::save_author;
 use super::change::Change;
@@ -86,13 +81,9 @@ pub(super) struct RestoreRequest {
 }
 
 /// Restore unsaved work: the ref's commit merged onto `main` and saved as
-/// one commit, then (for a recovery ref whose work is now all on `main`)
-/// the ref removed. Answers `{rev, baseRev, committed, marked,
-/// notRestored, refDeleted}`; `committed: false` when `main` already has
-/// the work. A salvage ref with nothing left to bring back is recorded with
-/// an empty restore commit (`marked: true`, `rev` the new commit) unless
-/// `main` has one of it already, by Desktop's rule
-/// ([`crate::recovery_view::restore_marker`]).
+/// one commit, then (when the work is now all on `main`) the ref removed.
+/// Answers `{rev, baseRev, committed, notRestored, refDeleted}`;
+/// `committed: false` when `main` already has the work.
 pub(super) async fn handle_restore(
     State(state): State<HostedState>,
     Extension(claims): Extension<OriginClaims>,
@@ -128,13 +119,7 @@ pub(super) async fn handle_restore(
 
     let gateway = gateway_identity(&state);
     let author = save_author(&claims, &gateway);
-    let restore = Restore::new(
-        reference.clone(),
-        fetched.commit.clone(),
-        keep,
-        base_rev,
-        gateway.email.clone(),
-    );
+    let restore = Restore::new(fetched.commit.clone(), keep, base_rev);
     // The gateway writes the trailer that marks the ref restored (callers
     // never can: their messages lose every `Instafy-` trailer git reads).
     let (outcome, change) = commit_change(
@@ -155,10 +140,10 @@ pub(super) async fn handle_restore(
     };
 
     // A recovery ref goes once `main` has its work (all of it but what the
-    // person chose to keep). Salvage refs stay for good, and so does a ref
-    // holding work that could not be saved here, or that a keep left out
-    // under a name `main` holds another file at on a disk ignoring case.
-    let ref_deleted = if reference.dismissible() && !restore.left_out_unsaveable() {
+    // person chose to keep). A ref holding work that could not be saved
+    // here stays, and so does one whose work a keep left out under a name
+    // `main` holds another file at on a disk ignoring case.
+    let ref_deleted = if !restore.left_out_unsaveable() {
         // A credential of its own: the restore's push may have outlived
         // the one it used.
         let removal = match write_token(&state, project, &token).await {
@@ -181,20 +166,13 @@ pub(super) async fn handle_restore(
     } else {
         false
     };
-    // The commit that landed is the empty restore commit when the last
-    // attempt recorded one.
-    let marked = outcome.committed && restore.marker();
-    let committed = outcome.committed && !marked;
-    if committed {
+    if outcome.committed {
         info!(%project, reference = reference.as_str(), "restored unsaved work on main");
-    } else if marked {
-        info!(%project, reference = reference.as_str(), "recorded a restore that brought nothing new");
     }
     Ok(Json(serde_json::json!({
         "rev": outcome.rev,
         "baseRev": outcome.base_rev,
-        "committed": committed,
-        "marked": marked,
+        "committed": outcome.committed,
         "notRestored": restore.not_restored(),
         "refDeleted": ref_deleted,
     })))
@@ -219,9 +197,6 @@ pub(super) async fn handle_dismiss(
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let project = project_of(&state, &claims)?;
     let reference = RecoveryRef::parse(request.reference.trim())?;
-    if !reference.dismissible() {
-        return Err(salvage_ref_kept());
-    }
     let rev = optional_rev(request.rev.as_deref())?.ok_or(ViewError::InvalidRev)?;
     let write_token = write_token(&state, project, &token).await?;
     let lease = state.cache.lease(project);

@@ -3,9 +3,8 @@
 //! hosted gateway (`hosted::restore`). Each mode only applies the plan its
 //! own way (Desktop through its index and a publish, the gateway as a
 //! commit pushed to canonical `main`); what is restored, what is left out
-//! and why, which clashes the person must settle, whether the ref may go
-//! and whether an empty restore commit records the restore are decided
-//! here, so the two cannot drift.
+//! and why, which clashes the person must settle and whether the ref may go
+//! are decided here, so the two cannot drift.
 //!
 //! The work is what the ref's commit (`saved`) changes against its merge
 //! base with the commit it is restored onto (`onto`: Desktop's `HEAD`, the
@@ -65,18 +64,7 @@
 //! restored tree keeps the ref too, unless that entry holds the work as the
 //! work has it ([`kept_aliases`]): keeping `main`'s `TODO.md` chose no
 //! version of the work's `todo.md`, which would otherwise be on neither
-//! `main` nor any ref. A salvage ref with nothing left to bring back is
-//! recorded with an empty restore commit ([`restore_marker`]).
-//!
-//! A salvage commit the gateway made (its committer is
-//! [`RestoreInput::salvage_committer`]) also names each file its salvage
-//! kept in the owner-only private archive, never on canonical, as an
-//! `Instafy-Private-Path: <secret|ignored|attachment> <path>` trailer. Those
-//! files are listed in `notRestored` with that reason, unless the path is
-//! listed already, so the person knows the restore lacks them. They change
-//! neither the restored tree nor whether the ref may go (a salvage ref
-//! always stays). The same trailers under any other committer, or on a
-//! recovery ref, list nothing.
+//! `main` nor any ref.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -84,25 +72,16 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use uuid::Uuid;
 
-use crate::apply::{normalize_relative_path, portable_key};
+use crate::apply::portable_key;
 use crate::error::OriginError;
 use crate::publish::{parse_raw_changes, RawChange};
 use crate::publish_policy::{restore_refusal, RejectReason};
-use crate::recovery_view::{
-    left_out_reason, parse_commit, restore_marker, NotRestored, RecoveryRef, KEPT,
-};
+use crate::recovery_view::{left_out_reason, NotRestored, KEPT};
 use crate::tree_merge::{three_way, tree_with_entries_from};
 use crate::workspace_git::{nul_list, parse_ls_tree, RunOpts, TreeEntry, WorkspaceGit};
 
-/// A path the salvage kept in its private archive, with why:
-/// `Instafy-Private-Path: <reason> <path>`. Restores list these paths as not
-/// restored.
-const PRIVATE_PATH_TRAILER: &str = "Instafy-Private-Path";
-
 /// What a restore is asked to do.
 pub(crate) struct RestoreInput<'a> {
-    /// The recovery or salvage ref restored.
-    pub reference: &'a RecoveryRef,
     /// The commit the work is restored onto; `None` for a space with no
     /// `main` yet.
     pub onto: Option<&'a str>,
@@ -113,17 +92,6 @@ pub(crate) struct RestoreInput<'a> {
     pub keep: &'a PathRoots,
     /// Paths refused before this plan, with why.
     pub refused_before: &'a BTreeMap<String, RejectReason>,
-    /// The committers whose restore commits count
-    /// ([`crate::recovery_view::restore_committers`]).
-    pub restorers: &'a [String],
-    /// Another commit whose restore commits count for the marker decision
-    /// (Desktop: canonical `main` as last fetched, which may be ahead of
-    /// the branch restored onto).
-    pub recorded_on: Option<&'a str>,
-    /// The gateway's address: a salvage ref's commit it made lists the
-    /// files its salvage kept privately (the gateway: its own; Desktop:
-    /// [`crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL`]).
-    pub salvage_committer: &'a str,
     /// A folder the ignore check may make its scratch tree in.
     pub scratch: &'a Path,
 }
@@ -144,11 +112,6 @@ pub(crate) struct RestorePlan {
     /// holds under no name a disk ignoring case takes for it
     /// ([`kept_aliases`]).
     kept_aliases: usize,
-    /// Nothing new comes to `onto`, and the restore of this salvage ref is
-    /// recorded with an empty restore commit.
-    pub marker: bool,
-    /// The restore commit of this ref `onto` already has, if any.
-    pub earlier_marker: Option<String>,
 }
 
 impl RestorePlan {
@@ -159,8 +122,7 @@ impl RestorePlan {
 
     /// Whether the ref may go once the restore is on `main`: nothing was
     /// left out but what the person chose to keep, and nothing kept is
-    /// work `onto` lacks under every name ([`kept_aliases`]). Salvage refs
-    /// stay whatever this says.
+    /// work `onto` lacks under every name ([`kept_aliases`]).
     pub(crate) fn lets_ref_go(&self) -> bool {
         self.refused == 0 && self.kept_aliases == 0
     }
@@ -408,30 +370,6 @@ pub(crate) fn plan(
         .collect();
     let kept_aliases = kept_aliases(git, &tree, &kept_new)?.len();
 
-    // Files the salvage kept privately are in no commit: they are named so
-    // the person knows the restore lacks them. The tree never changes for
-    // them.
-    if input.reference.is_salvage() {
-        for (path, reason) in privately_kept(git, input.saved, input.salvage_committer)? {
-            left_out.entry(path).or_insert(reason);
-        }
-    }
-
-    let made = tree != onto_tree;
-    let (marker, earlier_marker) = match input.onto {
-        Some(onto) => {
-            let tips: Vec<&str> = std::iter::once(onto).chain(input.recorded_on).collect();
-            restore_marker(
-                git,
-                input.reference,
-                made,
-                &tips,
-                input.saved,
-                input.restorers,
-            )?
-        }
-        None => (false, None),
-    };
     Ok(RestorePlan {
         tree,
         onto_tree,
@@ -441,51 +379,7 @@ pub(crate) fn plan(
             .collect(),
         refused: refused.len(),
         kept_aliases,
-        marker,
-        earlier_marker,
     })
-}
-
-/// The files a salvage commit's `Instafy-Private-Path` trailers name, with
-/// why, when `committer` made the commit; none otherwise.
-fn privately_kept(
-    git: &WorkspaceGit<'_>,
-    commit: &str,
-    committer: &str,
-) -> Result<Vec<(String, &'static str)>> {
-    let object = git
-        .read_objects(&[commit.to_string()])?
-        .pop()
-        .context("the commit to restore is missing")?;
-    let text = String::from_utf8_lossy(&object.data);
-    let made_by_gateway = text
-        .lines()
-        .take_while(|line| !line.is_empty())
-        .filter_map(|line| line.strip_prefix("committer "))
-        .any(|line| {
-            line.split_once('<')
-                .and_then(|(_, rest)| rest.split_once('>'))
-                .is_some_and(|(email, _)| email.trim().eq_ignore_ascii_case(committer.trim()))
-        });
-    if !made_by_gateway {
-        return Ok(Vec::new());
-    }
-    Ok(parse_commit(&object.data)
-        .trailers
-        .into_iter()
-        .filter(|(key, _)| key == PRIVATE_PATH_TRAILER)
-        .filter_map(|(_, value)| {
-            let (reason, path) = value.split_once(' ')?;
-            let reason = match reason {
-                "secret" => "secret",
-                "ignored" => "ignored",
-                "attachment" => "attachment",
-                _ => return None,
-            };
-            let path = normalize_relative_path(path)?;
-            Some((path, reason))
-        })
-        .collect())
 }
 
 /// The paths of `pending` (changes neither left out nor already on `onto`)

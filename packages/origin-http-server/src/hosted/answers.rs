@@ -247,15 +247,6 @@ pub(super) fn recovery_ref_moved(rev: Option<&str>) -> OriginError {
     )
 }
 
-pub(super) fn salvage_ref_kept() -> OriginError {
-    report(
-        StatusCode::CONFLICT,
-        "salvage_ref_kept",
-        "work kept from a retired workspace stays available and cannot be removed",
-        serde_json::json!({}),
-    )
-}
-
 /// What the shard refused about one path, as an answer.
 pub(super) fn hook_refusal(path: String, reason: RejectReason) -> OriginError {
     match reason {

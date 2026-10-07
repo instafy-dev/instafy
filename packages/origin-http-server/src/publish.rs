@@ -34,8 +34,7 @@ use crate::push::{delete_with_lease, push, PushClass};
 use crate::recovery::{self, CommitSummary, RecoveryKind, RecoveryRefReport, RecoverySpec};
 use crate::recovery_view::{
     parse_rev, recovery_ref_moved, remote_tip, resolve_ref, restore_commit_message,
-    restore_commits, restore_committers, without_origin_trailers, NotRestored, RecoveryRef,
-    ViewError,
+    without_origin_trailers, NotRestored, RecoveryRef, ViewError,
 };
 use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
 use crate::stale_align;
@@ -309,8 +308,7 @@ pub const MAX_RESTORE_KEEP_PATHS: usize = 10_000;
 /// What a restore of unsaved work asks for.
 #[derive(Clone, Debug, Default)]
 pub struct RestoreRequest {
-    /// A recovery ref (`refs/instafy/recovery/<origin id>/<name>`) or a
-    /// salvage ref (`refs/instafy/salvage/gateway/<name>`).
+    /// A recovery ref (`refs/instafy/recovery/<origin id>/<name>`).
     pub reference: String,
     /// The tip the person saw; a ref that names something else now is
     /// refused (409 `recovery_ref_moved`).
@@ -335,12 +333,6 @@ pub struct RestoreReport {
     /// restored). False when the saved version already held the work, or
     /// the rest of it was kept or refused.
     pub committed: bool,
-    /// Nothing needed restoring, and this call put the empty restore commit
-    /// that records the restore on `main` (or published one an earlier call
-    /// made): `rev` is a new version with no changes, and the list now
-    /// shows the entry restored. Only with `committed: false`; false too
-    /// when the branch already had a restore commit of this ref on `main`.
-    pub marked: bool,
     /// Paths the work changes that kept the saved version, each with why:
     /// `kept` on request, or the reason it is never restorable here
     /// (`ignored`, `excluded`, `secret`, `attachment`, `too_large`,
@@ -354,13 +346,12 @@ pub struct RestoreReport {
     /// refused here (ignored, secret, excluded, too large) keeps the ref,
     /// the only copy of that work on canonical, for the person to review
     /// or remove, and so does a kept new name that a disk ignoring case
-    /// takes for another file `main` holds without that work. Salvage refs
-    /// are never removed.
+    /// takes for another file `main` holds without that work.
     pub ref_deleted: bool,
 }
 
-/// Restore unsaved work kept on a recovery or salvage ref onto the
-/// checkout's branch and publish it (see `Publisher::restore`).
+/// Restore unsaved work kept on a recovery ref onto the checkout's branch
+/// and publish it (see `Publisher::restore`).
 pub fn restore(
     ctx: &PublishContext<'_>,
     request: RestoreRequest,
@@ -370,7 +361,6 @@ pub fn restore(
     Ok(RestoreReport {
         publish: publisher.report,
         committed: restored.committed,
-        marked: restored.marked,
         not_restored: restored.not_restored,
         ref_deleted: restored.ref_deleted,
     })
@@ -379,7 +369,6 @@ pub fn restore(
 /// What `Publisher::restore` did with the work (see [`RestoreReport`]).
 struct Restored {
     committed: bool,
-    marked: bool,
     not_restored: Vec<NotRestored>,
     ref_deleted: bool,
 }
@@ -1496,31 +1485,14 @@ impl<'a> Publisher<'a> {
                 Vec::new(),
             ));
         }
-        // A commit that changes nothing on `main` is left out, except the
-        // record of a salvage ref's restore (`restore`): its empty marker is
-        // what tells the list the salvage ref was restored.
-        let records: BTreeSet<String> = if commits.is_empty() {
-            BTreeSet::new()
-        } else {
-            restore_commits(
-                &self.git,
-                &commits,
-                &restore_committers(&self.config.git_author_email),
-            )?
-            .into_iter()
-            .filter(|(_, reference)| {
-                RecoveryRef::parse(reference).is_ok_and(|reference| reference.is_salvage())
-            })
-            .map(|(id, _)| id)
-            .collect()
-        };
+        // A commit that changes nothing on `main` is left out.
         let mut current = main.to_string();
         let mut conflicts = Vec::new();
         for commit in &commits {
             let parent = self.git.commit_id(&format!("{commit}^"))?;
             let merged = three_way(&self.git, parent.as_deref(), &current, commit)?;
             conflicts.extend(merged.conflicts);
-            if merged.tree == self.git.tree_id(&current)? && !records.contains(commit) {
+            if merged.tree == self.git.tree_id(&current)? {
                 continue;
             }
             let parsed = self.parse_commit(commit)?;
@@ -2568,7 +2540,7 @@ impl<'a> Publisher<'a> {
 }
 
 impl Publisher<'_> {
-    /// Restore the work a recovery or salvage ref keeps (Q) onto `HEAD`,
+    /// Restore the work a recovery ref keeps (Q) onto `HEAD`,
     /// the way a revert applies its inverse: everything checked first, then
     /// the index and only the files the restore changes, one commit, one
     /// publish.
@@ -2576,29 +2548,21 @@ impl Publisher<'_> {
     /// - The ref is read from the remote by exactly its name; `rev`, when
     ///   given, must still be its tip.
     /// - What comes back onto `HEAD`, what stays out and why, which clashes
-    ///   are 409 `restore_conflict {head, paths}`, whether the ref may go
-    ///   and whether an empty restore commit records it are decided by
-    ///   [`restore_plan::plan`], the rule the hosted gateway restores by
-    ///   too. An unsaved edit of a path the restore changes is 409
-    ///   `dirty_paths`.
+    ///   are 409 `restore_conflict {head, paths}` and whether the ref may go
+    ///   are decided by [`restore_plan::plan`], the rule the hosted gateway
+    ///   restores by too. An unsaved edit of a path the restore changes is
+    ///   409 `dirty_paths`.
     /// - The commit (`Restore unsaved work`, with an
     ///   `Instafy-Restored-From: <ref>` trailer) is authored by `author`
-    ///   and committed by the origin, then published.
-    /// - With nothing left to bring back (the branch already holds the
-    ///   work, or the rest was kept or refused) from a salvage ref, the
-    ///   same commit is still made, empty, unless one of this ref is on the
-    ///   branch already: the marker records the restore on `main` for good,
-    ///   so the list shows the entry restored whatever `main` holds later
-    ///   (salvage refs are never removed). Such a restore is `marked`, not
-    ///   `committed`. A recovery ref gets no marker: it is removed once its
-    ///   work is on `main`, so the marker would only add an empty commit.
+    ///   and committed by the origin, then published. With nothing left to
+    ///   bring back (the branch already holds the work, or the rest was
+    ///   kept or refused) no commit is made.
     /// - Once the work is on `main`, a recovery ref is deleted under a
     ///   lease on its tip, so the same work is not restored twice, but only
     ///   when every path left out was kept on request: a path refused here
     ///   keeps the ref, so work the person did not choose to leave out is
     ///   never removed, and so does a kept new name that another file of
     ///   `main` takes on a disk ignoring case, whose work `main` lacks.
-    ///   Salvage refs are kept.
     /// - A path the restore changes that the shard refuses when the restore
     ///   is published stays as `main` has it, like one the plan refused: it
     ///   is listed in `notRestored` with the shard's reason, and the ref
@@ -2653,7 +2617,6 @@ impl Publisher<'_> {
         // Canonical `main` as last fetched: a restore recorded there (by the
         // gateway, say) counts even before the branch has it.
         let tracked = self.tracked_main().map_err(internal)?;
-        let restorers = restore_committers(&self.config.git_author_email);
 
         // What comes back, what stays out and why, which clashes the person
         // must settle, and whether the ref may go: decided by the one rule
@@ -2662,14 +2625,10 @@ impl Publisher<'_> {
         let plan = match restore_plan::plan(
             &self.git,
             &RestoreInput {
-                reference: &reference,
                 onto: Some(&head),
                 saved: &saved,
                 keep: &keep,
                 refused_before: &self.filtered,
-                restorers: &restorers,
-                recorded_on: tracked.as_deref(),
-                salvage_committer: crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL,
                 scratch: scratch.path(),
             },
         ) {
@@ -2699,21 +2658,6 @@ impl Publisher<'_> {
             || self
                 .unpublished_changes(&head, tracked.as_deref())
                 .map_err(internal)?;
-        // With nothing new to commit, a salvage ref's restore is still
-        // recorded once: an empty restore commit, unless the branch has one
-        // of this ref. A salvage ref is never removed, so only that record
-        // tells the list it was restored. A recovery ref needs none: it goes
-        // once its work is on `main`, so an empty commit would only be noise
-        // in history.
-        let (marker, earlier) = (plan.marker, plan.earlier_marker.clone());
-        // An earlier marker whose publish failed goes out with this call.
-        let earlier_pending = match earlier.as_deref() {
-            Some(earlier) => !self
-                .is_published(earlier, tracked.as_deref())
-                .map_err(internal)?,
-            None => false,
-        };
-        let marked = !committed && (marker || earlier_pending);
         // The paths this restore changes.
         let touched = if made {
             changed_paths(&self.git, &head_tree, &tree).map_err(internal)?
@@ -2749,9 +2693,6 @@ impl Publisher<'_> {
             self.git
                 .ok(&["read-tree", "-m", "-u", &head, &tree])
                 .map_err(internal)?;
-        }
-        if made || marker {
-            // The marker has `HEAD`'s tree: index and files stay as they are.
             let message = restore_commit_message(reference.as_str());
             let author = request.author.unwrap_or_else(|| self.identity.clone());
             let restored = self
@@ -2799,13 +2740,13 @@ impl Publisher<'_> {
         not_restored.sort_by(|left, right| left.path.cmp(&right.path));
         let lets_ref_go = planned_ref_go && !refused_on_save;
         let mut ref_deleted = false;
-        if landed && !lets_ref_go && !reference.is_salvage() {
+        if landed && !lets_ref_go {
             info!(
                 reference = reference.as_str(),
                 "kept the restored work's ref: part of it cannot be restored here"
             );
         }
-        if landed && lets_ref_go && !reference.is_salvage() && self.can_write {
+        if landed && lets_ref_go && self.can_write {
             match delete_with_lease(&self.git, &remote, reference.as_str(), &fetched.tip) {
                 Ok(result) if result.class == PushClass::Pushed => ref_deleted = true,
                 // Gone already: the publish retired it (its commits reached
@@ -2826,7 +2767,6 @@ impl Publisher<'_> {
         }
         Ok(Restored {
             committed,
-            marked,
             not_restored,
             ref_deleted,
         })

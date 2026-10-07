@@ -209,13 +209,6 @@ impl Change {
         }
     }
 
-    /// Whether a tree equal to `main`'s is still committed: a restore that
-    /// records itself with an empty restore commit. (An import's receipt is
-    /// committed by its key.)
-    pub(super) fn commits_unchanged(&self) -> bool {
-        matches!(self, Self::Restore(restore) if restore.marker())
-    }
-
     /// What an import's receipt records: the files it keeps and their size
     /// (`None` for anything but an import).
     pub(super) fn receipt_counts(&self) -> Option<(usize, u64)> {

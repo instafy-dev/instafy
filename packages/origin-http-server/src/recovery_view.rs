@@ -1,6 +1,6 @@
 //! Reads of committed objects, with no work tree: the entries and files of a
-//! commit, first-parent history, the recovery and salvage refs a person can
-//! review, and the checks on the `rev` and `ref` values a client sends.
+//! commit, first-parent history, the recovery refs a person can review, and
+//! the checks on the `rev` and `ref` values a client sends.
 //!
 //! Everything here runs through [`WorkspaceGit`], so it works the same on the
 //! hosted gateway's bare mirrors and on a Desktop checkout's `.instafy/.git`,
@@ -9,13 +9,12 @@
 //! ref; callers decide when to fetch `main`.
 //!
 //! A ref a client may name (`?ref=`, restore, dismiss) is
-//! `refs/instafy/recovery/<lower-case uuid>/<[0-9A-Za-z._-]+>` or a salvage
-//! ref the shard's own rule accepts, and `git check-ref-format` must accept
-//! it. Refs reach git only after `--end-of-options` (or, for
-//! `check-ref-format`, which has no such option, only once they are known to
-//! start with `refs/`). Recovery and salvage refs are always read from the
-//! remote by their exact names; locally they are never refs of their own
-//! names, which a case-insensitive disk could merge.
+//! `refs/instafy/recovery/<lower-case uuid>/<[0-9A-Za-z._-]+>`, and
+//! `git check-ref-format` must accept it. Refs reach git only after
+//! `--end-of-options` (or, for `check-ref-format`, which has no such option,
+//! only once they are known to start with `refs/`). Recovery refs are always
+//! read from the remote by their exact names; locally they are never refs of
+//! their own names, which a case-insensitive disk could merge.
 
 // The hosted gateway's reads and the recovery routes call these as they land;
 // until then only the tests do.
@@ -23,9 +22,7 @@
 
 use axum::http::StatusCode;
 use chrono::{FixedOffset, SecondsFormat, TimeZone as _};
-use git_service::policy::{
-    is_salvage_ref_name, RECOVERY_REF_ROOT, SALVAGE_GATEWAY_REF_ROOT, SALVAGE_REF_ROOT,
-};
+use git_service::policy::RECOVERY_REF_ROOT;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -37,8 +34,8 @@ use crate::recovery::{RecoveryKind, CONFLICT_TRAILER, KIND_TRAILER, PATH_TRAILER
 use crate::workspace_git::{RunOpts, WorkspaceGit};
 
 /// Where one [`fetch_refs`] call holds the commits it fetched, under a
-/// namespace of its own that it removes before it returns. Recovery and
-/// salvage refs are never fetched into local refs named after them.
+/// namespace of its own that it removes before it returns. Recovery refs
+/// are never fetched into local refs named after them.
 pub(crate) const FETCHED_REF_ROOT: &str = "refs/instafy/fetched";
 
 /// The branch every read without `rev` or `ref` shows.
@@ -62,10 +59,7 @@ const MAX_HISTORY_SKIP: usize = i32::MAX as usize;
 /// Why a read could not name what it asked for.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ViewError {
-    #[error(
-        "ref must be refs/instafy/recovery/<origin id>/<name> or \
-         refs/instafy/salvage/gateway/<name>"
-    )]
+    #[error("ref must be refs/instafy/recovery/<origin id>/<name>")]
     InvalidRef,
     #[error("send either rev or ref, not both")]
     RevAndRef,
@@ -126,61 +120,37 @@ impl From<ViewError> for OriginError {
     }
 }
 
-/// Which namespace a [`RecoveryRef`] is in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RefSource {
-    /// `refs/instafy/recovery/<origin id>/<name>`: work an origin could not
-    /// save. A person may restore or dismiss it.
-    Recovery { origin: Uuid },
-    /// `refs/instafy/salvage/gateway/<name>`: work kept from a retired
-    /// gateway working copy. It is kept for good: the shard refuses every
-    /// change to it, so it can be restored but never dismissed.
-    Salvage,
-}
-
-/// A recovery or salvage ref name that passed the rule.
+/// A recovery ref name that passed the rule:
+/// `refs/instafy/recovery/<origin id>/<name>`, work an origin could not
+/// save. A person may restore or dismiss it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecoveryRef {
     name: String,
-    source: RefSource,
+    /// The origin whose namespace the ref is in.
+    origin: Uuid,
 }
 
 impl RecoveryRef {
-    /// Check `name` against the rule without running git:
-    ///
-    /// - a recovery ref is `refs/instafy/recovery/<lower-case hyphenated
-    ///   origin id>/<name>`, where `<name>` is up to 255 bytes of
-    ///   `[0-9A-Za-z._-]` that `git check-ref-format` would also accept (no
-    ///   leading `.`, no `..`, no trailing `.` or `.lock`, the latter in any
-    ///   letter case so it cannot alias a lock file on a case-insensitive
-    ///   disk);
-    /// - a salvage ref is `refs/instafy/salvage/gateway/<name>` under the
-    ///   rule the shard holds salvage refs to: up to 100 bytes of
-    ///   `[0-9a-z._-]` starting with `[0-9a-z]`, with no `..` and no trailing
-    ///   `.` or `.lock`.
+    /// Check `name` against the rule without running git: a recovery ref
+    /// is `refs/instafy/recovery/<lower-case hyphenated origin id>/<name>`,
+    /// where `<name>` is up to 255 bytes of `[0-9A-Za-z._-]` that
+    /// `git check-ref-format` would also accept (no leading `.`, no `..`, no
+    /// trailing `.` or `.lock`, the latter in any letter case so it cannot
+    /// alias a lock file on a case-insensitive disk).
     pub(crate) fn parse(name: &str) -> Result<Self, ViewError> {
         let recovery_prefix = format!("{RECOVERY_REF_ROOT}/");
-        let salvage_prefix = format!("{SALVAGE_GATEWAY_REF_ROOT}/");
-        let source = if let Some(rest) = name.strip_prefix(&recovery_prefix) {
-            let (origin, last) = rest.split_once('/').ok_or(ViewError::InvalidRef)?;
-            if !is_lower_case_uuid(origin) || !is_valid_recovery_name(last) {
-                return Err(ViewError::InvalidRef);
-            }
-            let origin = Uuid::parse_str(origin).map_err(|_| ViewError::InvalidRef)?;
-            RefSource::Recovery { origin }
-        } else if name.starts_with(&salvage_prefix) {
-            // The shard's own rule for salvage ref names.
-            if !is_salvage_ref_name(name) {
-                return Err(ViewError::InvalidRef);
-            }
-            RefSource::Salvage
-        } else {
+        let rest = name
+            .strip_prefix(&recovery_prefix)
+            .ok_or(ViewError::InvalidRef)?;
+        let (origin, last) = rest.split_once('/').ok_or(ViewError::InvalidRef)?;
+        if !is_lower_case_uuid(origin) || !is_valid_recovery_name(last) {
             return Err(ViewError::InvalidRef);
-        };
+        }
+        let origin = Uuid::parse_str(origin).map_err(|_| ViewError::InvalidRef)?;
         // Every byte passed the rule above; git is given a copy built from
         // the bytes the rule allows, never the caller's own string.
         let name = copy_from_alphabet(name, REF_NAME_BYTES).ok_or(ViewError::InvalidRef)?;
-        Ok(Self { name, source })
+        Ok(Self { name, origin })
     }
 
     /// [`Self::parse`], and `git check-ref-format` agrees.
@@ -199,18 +169,9 @@ impl RecoveryRef {
         &self.name
     }
 
-    pub(crate) fn source(&self) -> &RefSource {
-        &self.source
-    }
-
-    pub(crate) fn is_salvage(&self) -> bool {
-        self.source == RefSource::Salvage
-    }
-
-    /// Whether a person may dismiss it (delete it under a lease on the
-    /// listed commit). Salvage refs never are.
-    pub(crate) fn dismissible(&self) -> bool {
-        !self.is_salvage()
+    /// The origin whose namespace the ref is in.
+    pub(crate) fn origin(&self) -> Uuid {
+        self.origin
     }
 }
 
@@ -246,8 +207,7 @@ pub(crate) fn parse_rev(value: &str) -> Result<String, ViewError> {
     }
 }
 
-/// Every byte a recovery or salvage ref name may hold (see
-/// [`RecoveryRef::parse`]).
+/// Every byte a recovery ref name may hold (see [`RecoveryRef::parse`]).
 const REF_NAME_BYTES: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-/";
 
 /// The digits of a commit id in lower case.
@@ -283,7 +243,7 @@ pub(crate) enum ReadAt {
     Main,
     /// One commit (`?rev=`).
     Rev(String),
-    /// The tip of a recovery or salvage ref (`?ref=`).
+    /// The tip of a recovery ref (`?ref=`).
     Ref(RecoveryRef),
 }
 
@@ -311,8 +271,8 @@ impl ReadAt {
 /// [`readable_commit`]; [`ViewError::RevNotFound`] otherwise: a commit that
 /// only `HEAD`, the reflog or another kind of ref reaches counts as not
 /// here); neither makes a network call, so the caller fetches `main` first
-/// where it needs to. A recovery or
-/// salvage ref is resolved on `remote` by exactly its name and fetched
+/// where it needs to. A recovery
+/// ref is resolved on `remote` by exactly its name and fetched
 /// ([`ViewError::RefNotFound`] when the remote has no such ref): it is never
 /// read from a local ref, which on a case-insensitive disk could stand for
 /// another name.
@@ -964,8 +924,8 @@ fn walk_history(
     Ok(entries)
 }
 
-/// `(ref, rev)` for every recovery and salvage ref on `remote` that passes
-/// the rule; any other name there is left out. Names that differ only in
+/// `(ref, rev)` for every recovery ref on `remote` that passes the rule;
+/// any other name there is left out. Names that differ only in
 /// letter case are separate entries, each with its own commit.
 pub(crate) fn list_remote_refs(
     git: &WorkspaceGit<'_>,
@@ -996,19 +956,11 @@ pub(crate) fn remote_tip(
         .and_then(|(_, rev)| parse_rev(&rev).ok()))
 }
 
-/// Every `(name, rev)` under the recovery and salvage namespaces on
-/// `remote`, whether or not it passes the rule.
+/// Every `(name, rev)` under the recovery namespace on `remote`, whether
+/// or not it passes the rule.
 fn remote_names(git: &WorkspaceGit<'_>, remote: &str) -> Result<Vec<(String, String)>, ViewError> {
     let recovery = format!("{RECOVERY_REF_ROOT}/*");
-    let salvage = format!("{SALVAGE_REF_ROOT}/*");
-    let raw = git.stdout(&[
-        "ls-remote",
-        "--refs",
-        "--end-of-options",
-        remote,
-        &recovery,
-        &salvage,
-    ])?;
+    let raw = git.stdout(&["ls-remote", "--refs", "--end-of-options", remote, &recovery])?;
     Ok(parse_ls_remote(&raw))
 }
 
@@ -1021,7 +973,7 @@ fn parse_ls_remote(raw: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// One fetched recovery or salvage ref.
+/// One fetched recovery ref.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FetchedRef {
     pub reference: RecoveryRef,
@@ -1394,7 +1346,7 @@ fn fetch_into(
     Ok(())
 }
 
-/// What a person sees about one recovery or salvage ref.
+/// What a person sees about one recovery ref.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ItemKind {
@@ -1402,7 +1354,6 @@ pub(crate) enum ItemKind {
     Unpublished,
     Unsaved,
     Stale,
-    Salvage,
     Unknown,
 }
 
@@ -1431,17 +1382,16 @@ pub(crate) struct RecoveryItem {
     pub subject: String,
     /// The committer date, ISO 8601.
     pub date: Option<String>,
-    /// The origin whose namespace a recovery ref is in (none for salvage).
-    pub origin: Option<Uuid>,
+    /// The origin whose namespace the ref is in.
+    pub origin: Uuid,
     /// For a conflict, the conflicted paths only; otherwise the paths the
     /// commit names as kept.
     pub paths: Vec<String>,
     /// Where the work left `main`: review and restore compare against it.
     pub base: Option<String>,
-    pub dismissible: bool,
     /// The newest commit on `main` that restored this ref (see
-    /// [`mark_restored`]); salvage refs stay after a restore, so this is
-    /// how a restored one is shown.
+    /// [`mark_restored`]); a ref holding work that could not be restored
+    /// stays after a restore, so this is how a restored one is shown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_rev: Option<String>,
     #[serde(skip)]
@@ -1474,18 +1424,15 @@ pub(crate) fn describe(
     for (fetched, object) in present.into_iter().zip(objects) {
         let reference = &fetched.reference;
         let commit = parse_commit(&object.data);
-        let kind = match reference.source() {
-            RefSource::Salvage => ItemKind::Salvage,
-            RefSource::Recovery { .. } => commit
-                .trailer(KIND_TRAILER)
-                .and_then(recovery_kind)
-                .or_else(|| {
-                    let name = reference.as_str().rsplit('/').next().unwrap_or_default();
-                    crate::recovery::kind_of_name(name)
-                })
-                .map(ItemKind::from)
-                .unwrap_or(ItemKind::Unknown),
-        };
+        let kind = commit
+            .trailer(KIND_TRAILER)
+            .and_then(recovery_kind)
+            .or_else(|| {
+                let name = reference.as_str().rsplit('/').next().unwrap_or_default();
+                crate::recovery::kind_of_name(name)
+            })
+            .map(ItemKind::from)
+            .unwrap_or(ItemKind::Unknown);
         let path_trailer = if kind == ItemKind::Conflict {
             CONFLICT_TRAILER
         } else {
@@ -1505,13 +1452,9 @@ pub(crate) fn describe(
             kind,
             subject: commit.subject,
             date: commit.date,
-            origin: match reference.source() {
-                RefSource::Recovery { origin } => Some(*origin),
-                RefSource::Salvage => None,
-            },
+            origin: reference.origin(),
             paths,
             base: None,
-            dismissible: reference.dismissible(),
             restored_rev: None,
             timestamp: commit.timestamp,
         });
@@ -1577,7 +1520,7 @@ pub(crate) fn restore_commit_message(reference: &str) -> String {
 }
 
 /// The ref a restore commit's message names, when the message is exactly
-/// [`restore_commit_message`] of a recovery or salvage ref; any other text
+/// [`restore_commit_message`] of a recovery ref; any other text
 /// (another subject, more lines, a second trailer) is not a restore.
 fn restored_from(message: &str) -> Option<&str> {
     let reference = message
@@ -1821,10 +1764,8 @@ pub(crate) fn restore_committers(own: &str) -> Vec<String> {
 /// Give every item a commit `main` reaches restored its `restored_rev`: the
 /// newest commit whose whole message is [`restore_commit_message`] of the
 /// item's ref and whose committer is one of `committers`
-/// ([`restore_committers`]). Every restore of a salvage ref that lands leaves one, an
-/// empty one when the saved version already held the work (see
-/// `publish::restore`), so a salvage ref, which is never removed, shows as
-/// restored for good. The
+/// ([`restore_committers`]). A ref a restore keeps (it holds work that may
+/// never be saved here) so shows as restored. The
 /// origin commits saves as itself too, but drops the trailer from their
 /// text ([`without_origin_trailers`]), so no save message is the restore
 /// message. The walk covers all of `main`'s history since the oldest item
@@ -1841,7 +1782,7 @@ pub(crate) fn mark_restored(
         return Ok(());
     };
     let main = parse_rev(main)?;
-    let ids = restore_candidates(git, &main, "", oldest)?;
+    let ids = restore_candidates(git, &main, oldest)?;
     let mut restored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (id, reference) in restore_commits(git, &ids, committers)? {
         // Newest first: the first commit seen for a ref wins.
@@ -1853,72 +1794,15 @@ pub(crate) fn mark_restored(
     Ok(())
 }
 
-/// Whether a restore of `reference` onto `tips[0]` that brings nothing new
-/// there (`made` is false: the saved version already holds the work, or
-/// the rest was kept or refused) records itself with an empty restore
-/// commit ([`restore_commit_message`], that tip's tree), and the earlier
-/// restore commit of it the first of `tips` reaches, if any. Only a salvage
-/// ref is recorded: it is never removed, so only that commit tells the list
-/// it was restored ([`mark_restored`]); a recovery ref goes once its work is
-/// on `main`, so the commit would only be noise in history. And only once:
-/// not when one of `tips` (the commit restored onto, and for Desktop also
-/// canonical `main` as it last fetched it) already has a restore commit of
-/// it made since its work (`saved`) was ([`restore_of`]) by one of
-/// `committers` ([`restore_committers`]). Desktop and the hosted gateway
-/// decide by this.
-pub(crate) fn restore_marker(
-    git: &WorkspaceGit<'_>,
-    reference: &RecoveryRef,
-    made: bool,
-    tips: &[&str],
-    saved: &str,
-    committers: &[String],
-) -> Result<(bool, Option<String>), ViewError> {
-    if made || !reference.is_salvage() {
-        return Ok((false, None));
-    }
-    let made_at = git
-        .read_objects(std::slice::from_ref(&saved.to_string()))?
-        .first()
-        .map(|object| parse_commit(&object.data).timestamp)
-        .unwrap_or_default();
-    for tip in tips {
-        if let Some(earlier) = restore_of(git, tip, reference.as_str(), made_at, committers)? {
-            return Ok((false, Some(earlier)));
-        }
-    }
-    Ok((true, None))
-}
-
-/// The newest restore commit of `reference` (see [`mark_restored`]) that
-/// `tip` reaches, made since `made_at` (the time of the work's own commit,
-/// less the clock slack) by one of `committers`, when there is one.
-pub(crate) fn restore_of(
-    git: &WorkspaceGit<'_>,
-    tip: &str,
-    reference: &str,
-    made_at: i64,
-    committers: &[String],
-) -> Result<Option<String>, ViewError> {
-    let tip = parse_rev(tip)?;
-    let ids = restore_candidates(git, &tip, reference, made_at)?;
-    Ok(restore_commits(git, &ids, committers)?
-        .into_iter()
-        .find(|(_, restored)| restored == reference)
-        .map(|(id, _)| id))
-}
-
 /// Ids of the commits `tip` reaches since `made_at` (less the clock slack)
-/// with a line holding `Instafy-Restored-From: <reference>`, newest first,
-/// at most [`MAX_RESTORE_COMMITS`]; [`restore_commits`] decides which are
-/// restores.
+/// with a line holding `Instafy-Restored-From: `, newest first, at most
+/// [`MAX_RESTORE_COMMITS`]; [`restore_commits`] decides which are restores.
 fn restore_candidates(
     git: &WorkspaceGit<'_>,
     tip: &str,
-    reference: &str,
     made_at: i64,
 ) -> Result<Vec<String>, ViewError> {
-    let grep = format!("--grep={RESTORED_FROM_TRAILER}: {reference}");
+    let grep = format!("--grep={RESTORED_FROM_TRAILER}: ");
     let max_count = format!("--max-count={MAX_RESTORE_COMMITS}");
     let since = format!(
         "--max-age={}",
@@ -1946,7 +1830,7 @@ fn restore_candidates(
 /// ([`restore_commit_message`] of `ref`) committed by one of `committers`
 /// (lower case, as [`restore_committers`] gives them), in the order given,
 /// with one `cat-file --batch`.
-pub(crate) fn restore_commits(
+fn restore_commits(
     git: &WorkspaceGit<'_>,
     ids: &[String],
     committers: &[String],
@@ -1992,9 +1876,8 @@ pub(crate) struct Dismissed {
 
 /// Dismiss unsaved work for everyone: delete `reference` on `remote` while
 /// it still names `rev` (the tip the person saw), with a lease, so work
-/// that changed since is never removed. Salvage refs are kept for good
-/// (409 `salvage_ref_kept`); a ref that names something else now is 409
-/// `recovery_ref_moved`; a ref already gone is `{dismissed: false,
+/// that changed since is never removed. A ref that names something else
+/// now is 409 `recovery_ref_moved`; a ref already gone is `{dismissed: false,
 /// missing: true}`. The handle needs write access to `remote`.
 pub(crate) fn dismiss(
     git: &WorkspaceGit<'_>,
@@ -2002,14 +1885,6 @@ pub(crate) fn dismiss(
     reference: &RecoveryRef,
     rev: &str,
 ) -> Result<Dismissed, OriginError> {
-    if reference.is_salvage() {
-        return Err(OriginError::with_report(
-            StatusCode::CONFLICT,
-            "salvage_ref_kept",
-            "work kept from the retired file server stays; it can be restored, not removed",
-            serde_json::json!({}),
-        ));
-    }
     let rev = parse_rev(rev)?;
     let mut pushed = false;
     for _ in 0..2 {
@@ -2071,8 +1946,7 @@ pub(crate) fn recovery_ref_moved(rev: Option<&str>) -> OriginError {
     )
 }
 
-/// A recovery ref's own kind; `salvage` (or anything else) on a recovery ref
-/// is not one, so a recovery ref can never pass for salvaged work.
+/// A recovery ref's own kind; any other value is not one.
 fn recovery_kind(value: &str) -> Option<RecoveryKind> {
     [
         RecoveryKind::Conflict,
@@ -2262,76 +2136,58 @@ mod tests {
     }
 
     #[test]
-    fn the_ref_rule_accepts_only_recovery_and_salvage_names() {
+    fn the_ref_rule_accepts_only_recovery_names() {
         let recovery =
             format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-conflict-0123456789ab");
         let parsed = RecoveryRef::parse(&recovery).unwrap();
         assert_eq!(parsed.as_str(), recovery);
-        assert_eq!(
-            parsed.source(),
-            &RefSource::Recovery {
-                origin: Uuid::parse_str(ORIGIN).unwrap()
-            }
-        );
-        assert!(parsed.dismissible());
-        let longest_salvage = format!("refs/instafy/salvage/gateway/{}", "a".repeat(100));
-        for salvage in [
-            "refs/instafy/salvage/gateway/node-1.local-0123abcd",
-            "refs/instafy/salvage/gateway/0-leading-digit",
-            "refs/instafy/salvage/gateway/a_b.c",
-            &longest_salvage,
-        ] {
-            let parsed = RecoveryRef::parse(salvage).unwrap();
-            assert!(parsed.is_salvage() && !parsed.dismissible(), "{salvage}");
-        }
+        assert_eq!(parsed.origin(), Uuid::parse_str(ORIGIN).unwrap());
 
         let long = format!("refs/instafy/recovery/{ORIGIN}/{}", "a".repeat(256));
-        let long_salvage = format!("refs/instafy/salvage/gateway/{}", "a".repeat(101));
         let upper = format!("refs/instafy/recovery/{}/name", ORIGIN.to_ascii_uppercase());
-        for rejected in [
+        let mut rejected: Vec<String> = [
             "",
             "refs/heads/main",
             "--upload-pack=x",
             "refs/instafy/recovery",
             "refs/instafy/recovery/",
-            &format!("refs/instafy/recovery/{ORIGIN}"),
-            &format!("refs/instafy/recovery/{ORIGIN}/"),
-            &format!("refs/instafy/recovery/{ORIGIN}/a/b"),
-            &upper,
             "refs/instafy/recovery/0b7c2f1058a44e6b9f0e2d1c3b4a5f60/name",
             "refs/instafy/recovery/not-a-uuid/name",
-            "refs/instafy/salvage/gateway",
-            "refs/instafy/salvage/gateway/",
-            "refs/instafy/salvage/other/name",
-            "refs/instafy/salvage/name",
-            "refs/INSTAFY/salvage/gateway/name",
-            "refs/instafy/SALVAGE/gateway/name",
             "refs/instafy/local-recovery/name",
-            "refs/instafy/salvage/gateway/.hidden",
-            "refs/instafy/salvage/gateway/trailing.",
-            "refs/instafy/salvage/gateway/a..b",
-            "refs/instafy/salvage/gateway/name.lock",
-            "refs/instafy/salvage/gateway/name.LOCK",
-            "refs/instafy/salvage/gateway/sp ace",
-            "refs/instafy/salvage/gateway/a~1",
-            "refs/instafy/salvage/gateway/a^",
-            "refs/instafy/salvage/gateway/a:b",
-            "refs/instafy/salvage/gateway/a?",
-            "refs/instafy/salvage/gateway/a*",
-            "refs/instafy/salvage/gateway/a[",
-            "refs/instafy/salvage/gateway/a\\b",
-            "refs/instafy/salvage/gateway/a@{1}",
-            "refs/instafy/salvage/gateway/caf\u{e9}",
-            "refs/instafy/salvage/gateway/a\nb",
-            " refs/instafy/salvage/gateway/name",
-            &long,
-            // Salvage names follow the shard's stricter rule.
-            &long_salvage,
-            "refs/instafy/salvage/gateway/-leading-dash",
-            "refs/instafy/salvage/gateway/_leading-underscore",
-            "refs/instafy/salvage/gateway/NODE-1-0123ABCD",
-            "refs/instafy/salvage/gateway/node-1-0123ABCD",
+            "refs/instafy/other/name",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        rejected.extend([
+            format!("refs/instafy/recovery/{ORIGIN}"),
+            format!("refs/instafy/recovery/{ORIGIN}/"),
+            format!("refs/instafy/recovery/{ORIGIN}/a/b"),
+            format!("refs/INSTAFY/recovery/{ORIGIN}/name"),
+            format!(" refs/instafy/recovery/{ORIGIN}/name"),
+            upper,
+            long,
+        ]);
+        for name in [
+            ".hidden",
+            "trailing.",
+            "a..b",
+            "name.lock",
+            "name.LOCK",
+            "sp ace",
+            "a~1",
+            "a^",
+            "a:b",
+            "a?",
+            "a*",
+            "a[",
+            "a\\b",
+            "a@{1}",
+            "caf\u{e9}",
+            "a\nb",
         ] {
+            rejected.push(format!("refs/instafy/recovery/{ORIGIN}/{name}"));
+        }
+        for rejected in &rejected {
             assert!(
                 matches!(RecoveryRef::parse(rejected), Err(ViewError::InvalidRef)),
                 "{rejected:?}"
@@ -2346,15 +2202,14 @@ mod tests {
         let git = WorkspaceGit::bare(&mirror, None);
         for name in [
             format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab"),
-            "refs/instafy/salvage/gateway/node-1.local-0123abcd".to_string(),
+            format!("refs/instafy/recovery/{ORIGIN}/node-1.local-0123abcd"),
             format!("refs/instafy/recovery/{ORIGIN}/-x"),
             format!("refs/instafy/recovery/{ORIGIN}/{}", "a".repeat(255)),
-            format!("refs/instafy/salvage/gateway/{}", "a".repeat(100)),
         ] {
             assert_eq!(RecoveryRef::validate(&git, &name).unwrap().as_str(), name);
         }
         assert!(matches!(
-            RecoveryRef::validate(&git, "refs/instafy/salvage/gateway/a..b"),
+            RecoveryRef::validate(&git, &format!("refs/instafy/recovery/{ORIGIN}/a..b")),
             Err(ViewError::InvalidRef)
         ));
     }
@@ -2391,8 +2246,6 @@ mod tests {
             Some(name.as_str())
         );
         assert_eq!(RecoveryRef::parse(&name).unwrap().as_str(), name);
-        let salvage = "refs/instafy/salvage/gateway/node-1.local-0123abcd";
-        assert_eq!(RecoveryRef::parse(salvage).unwrap().as_str(), salvage);
         assert_eq!(
             copy_from_alphabet("0123456789abcdef", LOWER_HEX_BYTES).as_deref(),
             Some("0123456789abcdef")
@@ -3008,18 +2861,8 @@ mod tests {
                  Instafy-Path: other.md\n"
             ),
         );
-        let salvage_ref = "refs/instafy/salvage/gateway/node-1-0123abcd".to_string();
-        let salvage = commit(
-            &remote,
-            &tree(&remote, &[("README.md", "base\n"), ("a.md", "a\n")]),
-            &[&main],
-            1_700_000_100,
-            "Keep unsaved edits from the retired file gateway\n\n\
-             Instafy-Recovery-Kind: salvage\n\
-             Instafy-Path: a.md\n\
-             Instafy-Path: b.md\n",
-        );
-        // A recovery commit that claims to be salvage is still a recovery ref.
+        // A kind trailer that names no recovery kind counts for nothing: the
+        // kind comes from the ref's name.
         let posing_ref =
             format!("refs/instafy/recovery/{ORIGIN}/20261004T130000Z-unsaved-abcdef012345");
         let posing = commit(
@@ -3027,11 +2870,10 @@ mod tests {
             &base_tree,
             &[&main],
             1_700_000_300,
-            "Pretend\n\nInstafy-Recovery-Kind: salvage\nInstafy-Path: z.md\n",
+            "Pretend\n\nInstafy-Recovery-Kind: archived\nInstafy-Path: z.md\n",
         );
         for (reference, rev) in [
             (conflict_ref.as_str(), conflict.as_str()),
-            (salvage_ref.as_str(), salvage.as_str()),
             (posing_ref.as_str(), posing.as_str()),
             (
                 // Another origin, so a case-insensitive disk keeps its own
@@ -3039,8 +2881,7 @@ mod tests {
                 "refs/instafy/recovery/0B7C2F10-58A4-4E6B-9F0E-2D1C3B4A5F61/x",
                 conflict.as_str(),
             ),
-            ("refs/instafy/salvage/elsewhere/x", salvage.as_str()),
-            ("refs/instafy/other/x", salvage.as_str()),
+            ("refs/instafy/other/x", conflict.as_str()),
         ] {
             remote.update_ref(reference, rev, None, "test").unwrap();
         }
@@ -3058,7 +2899,6 @@ mod tests {
             vec![
                 (conflict_ref.as_str(), conflict.as_str()),
                 (posing_ref.as_str(), posing.as_str()),
-                (salvage_ref.as_str(), salvage.as_str()),
             ]
         );
         let conflict_name = RecoveryRef::parse(&conflict_ref).unwrap();
@@ -3094,13 +2934,12 @@ mod tests {
         assert_eq!(entries.len(), 2);
 
         let items = describe(&git, &fetched.fetched, Some(&main)).unwrap();
-        let summary: Vec<(&str, ItemKind, bool, Vec<&str>)> = items
+        let summary: Vec<(&str, ItemKind, Vec<&str>)> = items
             .iter()
             .map(|item| {
                 (
                     item.reference.as_str(),
                     item.kind,
-                    item.dismissible,
                     item.paths.iter().map(String::as_str).collect(),
                 )
             })
@@ -3108,19 +2947,8 @@ mod tests {
         assert_eq!(
             summary,
             vec![
-                (posing_ref.as_str(), ItemKind::Unsaved, true, vec!["z.md"]),
-                (
-                    conflict_ref.as_str(),
-                    ItemKind::Conflict,
-                    true,
-                    vec!["README.md"]
-                ),
-                (
-                    salvage_ref.as_str(),
-                    ItemKind::Salvage,
-                    false,
-                    vec!["a.md", "b.md"]
-                ),
+                (posing_ref.as_str(), ItemKind::Unsaved, vec!["z.md"]),
+                (conflict_ref.as_str(), ItemKind::Conflict, vec!["README.md"]),
             ]
         );
         let conflict_item = &items[1];
@@ -3129,15 +2957,14 @@ mod tests {
             "Keep changes that conflicted with the saved version"
         );
         assert_eq!(conflict_item.base.as_deref(), Some(main.as_str()));
-        assert_eq!(conflict_item.origin, Some(Uuid::parse_str(ORIGIN).unwrap()));
-        assert_eq!(items[2].origin, None);
+        assert_eq!(conflict_item.origin, Uuid::parse_str(ORIGIN).unwrap());
         let committed_at = git_in(&canonical, &["log", "-1", "--format=%cI", &conflict]);
         assert_eq!(conflict_item.date.as_deref(), Some(committed_at.as_str()));
 
         let json = serde_json::to_value(conflict_item).unwrap();
         assert_eq!(json["ref"], conflict_ref.as_str());
         assert_eq!(json["kind"], "conflict");
-        assert_eq!(json["dismissible"], true);
+        assert_eq!(json["origin"], ORIGIN);
         assert_eq!(json["base"], main.as_str());
         assert!(json.get("timestamp").is_none(), "{json}");
 
@@ -3174,7 +3001,8 @@ mod tests {
         let files = tree(&remote, &[("a.txt", "a\n")]);
         let main = commit(&remote, &files, &[], 1_700_000_000, "main\n");
         remote.update_ref(MAIN_REF, &main, None, "test").unwrap();
-        let real = RecoveryRef::parse("refs/instafy/salvage/gateway/node-1-0123abcd").unwrap();
+        let real =
+            RecoveryRef::parse(&format!("refs/instafy/recovery/{ORIGIN}/node-1-0123abcd")).unwrap();
         remote
             .update_ref(real.as_str(), &main, None, "test")
             .unwrap();
@@ -3185,7 +3013,7 @@ mod tests {
         fetch(&git, &canonical, "+refs/heads/main:refs/heads/main");
         for name in [
             format!(
-                "refs/instafy/salvage/gateway/nothing-here-1-g{}",
+                "refs/instafy/recovery/{ORIGIN}/nothing-here-1-g{}",
                 &main[..7]
             ),
             format!("refs/instafy/recovery/{ORIGIN}/x-0-g{}", &main[..4]),
@@ -3240,14 +3068,14 @@ mod tests {
         let upper = format!("{base}/20261002T120000Z-unsaved-x");
         let lower = format!("{base}/20261002t120000z-unsaved-x");
         let plain = format!("{base}/20261002T130000Z-stale-y");
-        let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd".to_string();
+        let other = "refs/instafy/recovery/0b7c2f10-58a4-4e6b-9f0e-2d1c3b4a5f61/node-1".to_string();
         let canonical = canonical_with_packed_refs(
             &root,
             &[
                 (&upper, &two),
                 (&lower, &one),
                 (&plain, &one),
-                (&salvage, &three),
+                (&other, &three),
             ],
             &main,
         );
@@ -3273,7 +3101,7 @@ mod tests {
                 (upper.as_str(), two.as_str()),
                 (lower.as_str(), one.as_str()),
                 (plain.as_str(), one.as_str()),
-                (salvage.as_str(), three.as_str()),
+                (other.as_str(), three.as_str()),
             ];
             expected.sort();
             assert_eq!(entries, expected);
@@ -3877,7 +3705,6 @@ mod tests {
             (tag.as_str(), revs[0].as_str())
         );
         assert_eq!(item.base.as_deref(), Some(main.as_str()));
-        assert!(item.dismissible);
     }
 
     /// Calls that start together while a stale namespace is here all
@@ -4301,7 +4128,7 @@ mod tests {
              \r\u{7f} instafy-restored-from: {reference}\n\
              \t\u{1b}INSTAFY-APPLY-KEY: imp:forged\n\
              Instafy-Apply-Fingerprint: abc\n\
-             \u{0}Instafy-Recovery-Kind: salvage\n\
+             \u{0}Instafy-Recovery-Kind: unsaved\n\
              Instafy-Origin: {ORIGIN}\n\
              Signed-off-by: A <a@x>\n"
         );
@@ -4422,7 +4249,8 @@ mod tests {
     /// so no save message is the restore message or carries a receipt.
     #[test]
     fn saves_keep_prose_and_drop_only_the_trailers_git_reads() {
-        let reference = "refs/instafy/salvage/gateway/node-1-0123abcd";
+        let reference =
+            format!("refs/instafy/recovery/{ORIGIN}/20261004T120000Z-unsaved-0123456789ab");
         let reads_origin_trailer = |message: &str| {
             git_trailer_keys(message)
                 .iter()

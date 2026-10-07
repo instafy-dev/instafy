@@ -1,7 +1,7 @@
 //! The gateway's HTTP routes. Browser and flush routes are never mounted:
 //! the gateway has no browser and no working copy to flush.
 //!
-//! Reads take `?rev=<commit>` or `?ref=<recovery or salvage ref>` (not
+//! Reads take `?rev=<commit>` or `?ref=<recovery ref>` (not
 //! both) and otherwise show canonical `main`. Every read that looked at a
 //! commit answers with `X-Instafy-Rev` naming it (for `?ref=`, the ref's
 //! own id), errors included, and without the header when the space has no
@@ -416,8 +416,8 @@ struct Target {
     served: Option<String>,
 }
 
-/// `main`, a commit (`rev`) or the tip of a recovery or salvage ref
-/// (`ref`), fetching what is needed. Empty values count as absent.
+/// `main`, a commit (`rev`) or the tip of a recovery ref (`ref`),
+/// fetching what is needed. Empty values count as absent.
 async fn read_target(
     state: &HostedState,
     lease: &MirrorLease,
@@ -526,7 +526,7 @@ async fn readable_here(
     .await
 }
 
-/// A recovery or salvage ref, read on canonical by exactly its name and
+/// A recovery ref, read on canonical by exactly its name and
 /// fetched: its own id (`tip`) and its commit. A ref canonical does not
 /// have is 404 `rev_not_found`.
 async fn resolve_ref(

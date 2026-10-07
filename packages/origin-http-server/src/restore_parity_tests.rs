@@ -2198,11 +2198,10 @@ async fn every_conflict_is_listed_and_can_be_kept_at_once() {
     }
 }
 
-/// One canonical history served by both modes: a salvage ref restored in
-/// one mode, with nothing left to bring back, is recorded once, by that
-/// mode's empty restore commit. The other mode lists it as restored too,
-/// and restoring it there records nothing more, even before Desktop's
-/// branch has caught up with the record.
+/// One canonical history served by both modes: a recovery ref that a
+/// restore in one mode keeps (its secret cannot come back) is listed as
+/// restored in both modes, by that mode's restore commit, and restoring it
+/// again in the other mode brings nothing more.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restore_recorded_in_one_mode_counts_in_the_other() {
     for (first, second) in [
@@ -2210,113 +2209,56 @@ async fn a_restore_recorded_in_one_mode_counts_in_the_other() {
         (Mode::Gateway, Mode::Desktop),
     ] {
         let space = Space::served_by(&[first, second], &[]).await;
-        let salvage = "refs/instafy/salvage/gateway/node-1-0123abcd";
-        let commit = space.park(&[("draft.md", Some(b"draft\n"))], salvage);
-        let before = space.push(&[("draft.md", Some(b"draft\n"))], "the same draft");
+        let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+        let commit = space.park(
+            &[("draft.md", Some(b"draft\n")), (".env", Some(b"TOKEN=1\n"))],
+            &reference,
+        );
 
         let body = space
-            .restored_in(first, json!({ "ref": salvage, "rev": commit }))
+            .restored_in(first, json!({ "ref": reference, "rev": commit }))
             .await;
         assert_eq!(
-            (&body["committed"], &body["marked"]),
-            (&json!(false), &json!(true)),
+            (&body["committed"], &body["refDeleted"]),
+            (&json!(true), &json!(false)),
             "{first:?}: {body}"
         );
-        let marker = space.main();
-        assert_ne!(marker, before, "{first:?}");
         assert_eq!(
-            git_in(&space.remote, &["log", "-1", "--format=%ce", &marker]),
+            body["notRestored"],
+            reasons(&[(".env", "secret")]),
+            "{first:?}: {body}"
+        );
+        let restored = space.main();
+        assert_eq!(
+            git_in(&space.remote, &["log", "-1", "--format=%ce", &restored]),
             space.server(first).config.git_author_email,
             "{first:?}"
         );
 
-        // The other mode records nothing more.
-        let body = space
-            .restored_in(second, json!({ "ref": salvage, "rev": commit }))
-            .await;
-        assert_eq!(
-            (&body["committed"], &body["marked"]),
-            (&json!(false), &json!(false)),
-            "{second:?} after {first:?}: {body}"
-        );
-        assert_eq!(space.main(), marker, "{second:?} after {first:?}");
-
-        for server in &space.servers {
-            server.catch_up();
-        }
+        space.catch_up();
         for mode in [first, second] {
             let entries = space.listed_in(mode).await;
             let entry = entries
                 .iter()
-                .find(|entry| entry["ref"] == salvage)
-                .unwrap_or_else(|| panic!("{mode:?} lists the salvage ref"));
+                .find(|entry| entry["ref"] == reference.as_str())
+                .unwrap_or_else(|| panic!("{mode:?} lists the ref"));
             assert_eq!(
                 entry["restoredRev"],
-                marker.as_str(),
+                restored.as_str(),
                 "{mode:?} after {first:?}"
             );
         }
-    }
-}
 
-/// A salvage commit the gateway made names the files its salvage kept in
-/// the owner-only archive: both modes list them as not restored, with their
-/// reason, and restore the rest. The same trailers under another committer
-/// list nothing, and neither changes what reaches `main`.
-#[tokio::test(flavor = "multi_thread")]
-async fn files_a_salvage_kept_privately_are_listed_in_both_modes() {
-    for mode in MODES {
-        let space = Space::new(mode, &[]).await;
-        space.sync_work();
-        let parent = space.main();
-        commit_files(&space.work, &[("draft.md", Some(b"draft\n"))], "draft");
-        let tree = git_in(&space.work, &["rev-parse", "HEAD^{tree}"]);
-        git_in(&space.work, &["reset", "-q", "--hard", &parent]);
-        let salvage = |committer: &str, reference: &str| {
-            let email = format!("user.email={committer}");
-            let commit = git_in(
-                &space.work,
-                &[
-                    "-c",
-                    "user.name=instafy-origin",
-                    "-c",
-                    &email,
-                    "commit-tree",
-                    &tree,
-                    "-p",
-                    &parent,
-                    "-m",
-                    "Keep unsaved edits from the retired file gateway",
-                    "-m",
-                    "Instafy-Recovery-Kind: salvage\nInstafy-Path: draft.md\n\
-                     Instafy-Private-Path: secret .env\n\
-                     Instafy-Private-Path: attachment chat-upload-1.png\n\
-                     Instafy-Private-Path: unknown other.txt",
-                ],
-            );
-            let spec = format!("{commit}:{reference}");
-            git_in(
-                &space.work,
-                &["push", "-q", space.remote.to_str().unwrap(), &spec],
-            );
-        };
-        let kept = "refs/instafy/salvage/gateway/node-1-aaaaaaaa";
-        let forged = "refs/instafy/salvage/gateway/node-1-bbbbbbbb";
-        salvage(crate::config::DEFAULT_GATEWAY_AUTHOR_EMAIL, kept);
-        salvage("agent@instafy.dev", forged);
-
-        let body = space.restored(json!({ "ref": kept })).await;
-        assert_eq!(body["committed"], true, "{mode:?}: {body}");
+        // The other mode brings nothing more.
+        let body = space
+            .restored_in(second, json!({ "ref": reference, "rev": commit }))
+            .await;
         assert_eq!(
-            body["notRestored"],
-            reasons(&[(".env", "secret"), ("chat-upload-1.png", "attachment")]),
-            "{mode:?}: {body}"
+            (&body["committed"], &body["refDeleted"]),
+            (&json!(false), &json!(false)),
+            "{second:?} after {first:?}: {body}"
         );
-        assert_eq!(space.on_main("draft.md").as_deref(), Some(&b"draft\n"[..]));
-        assert_eq!(space.on_main(".env"), None, "{mode:?}");
-        assert_eq!(space.on_main("chat-upload-1.png"), None, "{mode:?}");
-
-        let body = space.restored(json!({ "ref": forged })).await;
-        assert_eq!(body["notRestored"], json!([]), "{mode:?}: {body}");
+        assert_eq!(space.main(), restored, "{second:?} after {first:?}");
+        assert!(space.canonical_ref(&reference).is_some());
     }
 }
