@@ -11,7 +11,6 @@ import {
   type ControllerConversationCreated,
   type ControllerConversationUpdated,
   type ControllerOriginSummary,
-  type LocalWorkspacePresence,
 } from "../../sdk/instafy";
 import {
   fetchRuns,
@@ -38,8 +37,10 @@ import {
 } from "../../credits/creditsEvents";
 
 const { fetch: fetchRunsFromController, subscribe: subscribeToRunsFromController } = controllerClient.runs;
-const { fetchLocalPresence: fetchLocalWorkspacePresence, fetchSummary: fetchOriginSummary } =
-  controllerClient.workspace.origin;
+const {
+  fetchLocalPresenceResult: fetchLocalWorkspacePresenceResult,
+  fetchSummaryResult: fetchOriginSummaryResult,
+} = controllerClient.workspace.origin;
 
 interface Options {
   activeProjectId: string | null;
@@ -191,40 +192,39 @@ export function useRuntimeControllerSync({
     const projectId = resolvedProjectId as string;
 
     const hydrateWorkspaceOriginState = async () => {
-      const localWorkspacePresence = await fetchLocalWorkspacePresence({
+      const workspace = await fetchLocalWorkspacePresenceResult({
         projectId,
       });
       if (cancelled) {
         return;
       }
 
-      let origin: {
-        summary: ControllerOriginSummary | null;
-        derivedPresence: LocalWorkspacePresence | null;
-      } | null = null;
-      try {
-        const originSummary = await fetchOriginSummary({
-          projectId,
-          protocol: "http",
-        });
-        origin = {
-          summary: originSummary,
-          derivedPresence: mapOriginSummaryToLocalWorkspacePresence(originSummary),
-        };
-      } catch (originError) {
+      const origin = await fetchOriginSummaryResult({
+        projectId,
+        protocol: "http",
+      }).catch((originError: unknown) => {
         if (import.meta.env.DEV) {
           console.warn("fetch origin summary failed", originError);
         }
-      }
+        return { ok: false } as const;
+      });
       if (cancelled || controllerSyncTerminated) {
+        return;
+      }
+      // A fetch that got no answer (a 5xx, a timeout, no session) says
+      // nothing about the space: keep what is shown until the next pass.
+      // Taken as "none", it would change the workspace owner and reset the
+      // Files panel.
+      if (!workspace.ok || !origin.ok) {
         return;
       }
       // One action: a render between the workspace and the origin would see
       // a different workspace owner and reset the Files panel.
       dispatch({
         type: "applyOriginHydration",
-        workspace: localWorkspacePresence,
-        origin,
+        workspace: workspace.workspace,
+        summary: origin.summary,
+        derivedPresence: mapOriginSummaryToLocalWorkspacePresence(origin.summary),
         projectId,
       });
     };

@@ -41,7 +41,8 @@ describe("runtime store origin events and hydration", () => {
   const hydrated = runtimeReducer(createInitialRuntimeStoreState(), {
     type: "applyOriginHydration",
     workspace,
-    origin: { summary: resolved, derivedPresence: null },
+    summary: resolved,
+    derivedPresence: null,
     projectId: "desk-project",
   });
 
@@ -50,14 +51,17 @@ describe("runtime store origin events and hydration", () => {
     expect(hydrated.desktopOrigin).toEqual(resolved);
     expect(hydrated.desktopOriginProjectId).toBe("desk-project");
 
-    const originFetchFailed = runtimeReducer(hydrated, {
+    // The controller answered that the space has neither any more.
+    const gone = runtimeReducer(hydrated, {
       type: "applyOriginHydration",
       workspace: null,
-      origin: null,
+      summary: null,
+      derivedPresence: null,
       projectId: "desk-project",
     });
-    expect(originFetchFailed.localWorkspace).toBeNull();
-    expect(originFetchFailed.desktopOrigin).toBe(hydrated.desktopOrigin);
+    expect(gone.localWorkspace).toBeNull();
+    expect(gone.desktopOrigin).toBeNull();
+    expect(gone.desktopOriginProjectId).toBeNull();
   });
 
   it("takes only presence from an event for the default origin", () => {

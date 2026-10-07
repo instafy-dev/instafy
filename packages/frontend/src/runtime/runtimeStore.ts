@@ -90,16 +90,13 @@ export type RuntimeAction =
     }
   | {
       /**
-       * One hydration pass: the local workspace and, when its fetch succeeded,
-       * the default origin, applied together so no render sees one without
-       * the other.
+       * One hydration pass: the local workspace and the default origin,
+       * applied together so no render sees one without the other.
        */
       type: "applyOriginHydration";
       workspace: LocalWorkspacePresence | null;
-      origin: {
-        summary: ControllerOriginSummary | null;
-        derivedPresence: LocalWorkspacePresence | null;
-      } | null;
+      summary: ControllerOriginSummary | null;
+      derivedPresence: LocalWorkspacePresence | null;
       projectId: string;
     }
   | { type: "setSessionRuntime"; runtimeId: string | null }
@@ -532,13 +529,10 @@ export function runtimeReducer(
         type: "setLocalWorkspace",
         workspace: action.workspace,
       });
-      if (!action.origin) {
-        return withWorkspace;
-      }
       return runtimeReducer(withWorkspace, {
         type: "applyOriginSummary",
-        summary: action.origin.summary,
-        derivedPresence: action.origin.derivedPresence,
+        summary: action.summary,
+        derivedPresence: action.derivedPresence,
         projectId: action.projectId,
       });
     }

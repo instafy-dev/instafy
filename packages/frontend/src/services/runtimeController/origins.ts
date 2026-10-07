@@ -27,15 +27,32 @@ export interface FetchLocalWorkspacePresenceParams {
 export async function fetchLocalWorkspacePresence(
   params: FetchLocalWorkspacePresenceParams,
 ): Promise<LocalWorkspacePresence | null> {
+  const result = await fetchLocalWorkspacePresenceResult(params);
+  return result.ok ? result.workspace : null;
+}
+
+/**
+ * `workspace: null` when the space has no local workspace (a 404 or an empty
+ * answer); `ok: false` when the controller could not be asked or gave no
+ * usable answer (no session, 401, 403, another error status, a network
+ * error), which says nothing about the workspace.
+ */
+export type LocalWorkspacePresenceFetchResult =
+  | { ok: true; workspace: LocalWorkspacePresence | null }
+  | { ok: false };
+
+export async function fetchLocalWorkspacePresenceResult(
+  params: FetchLocalWorkspacePresenceParams,
+): Promise<LocalWorkspacePresenceFetchResult> {
   if (!runtimeControllerEnabled) {
-    return null;
+    return { ok: true, workspace: null };
   }
 
   if (!params.projectId) {
     console.warn(
       "[runtime-controller] fetchLocalWorkspacePresence requires projectId",
     );
-    return null;
+    return { ok: false };
   }
 
   const requestContext = await resolveControllerRequestContext(
@@ -43,7 +60,7 @@ export async function fetchLocalWorkspacePresence(
   );
   const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
-    return null;
+    return { ok: false };
   }
   const url = `${requestContext.baseUrl}/projects/${encodeURIComponent(params.projectId)}/workspaces/local`;
 
@@ -53,7 +70,7 @@ export async function fetchLocalWorkspacePresence(
     });
 
     if (response.status === 404) {
-      return null;
+      return { ok: true, workspace: null };
     }
     if (response.status === 401) {
       await readControllerError(
@@ -61,10 +78,10 @@ export async function fetchLocalWorkspacePresence(
         "fetch local workspace failed",
         requestContext,
       );
-      return null;
+      return { ok: false };
     }
     if (response.status === 403) {
-      return null;
+      return { ok: false };
     }
 
     if (!response.ok) {
@@ -85,7 +102,7 @@ export async function fetchLocalWorkspacePresence(
       // If the workspace supplies an explicit presenceStatus, treat it as source of truth
       // for the local device view and skip origin augmentation.
       if (workspace.presenceStatus) {
-        return workspace;
+        return { ok: true, workspace };
       }
       // Otherwise, augment with origin presence to surface degraded/offline promptly.
       try {
@@ -106,14 +123,14 @@ export async function fetchLocalWorkspacePresence(
       } catch (_mergeError) {
         // Non-fatal: fall back to controller workspace-only signal.
       }
-      return workspace;
+      return { ok: true, workspace };
     }
-    return null;
+    return { ok: true, workspace: null };
   } catch (error) {
     logControllerRequestError("[runtime-controller] fetchLocalWorkspacePresence error:", error, {
       suppressLikelyConnectionNoise: true,
     });
-    return null;
+    return { ok: false };
   }
 }
 
@@ -236,8 +253,25 @@ function buildOriginAccessTokenCacheKey(params: {
 export async function fetchOriginSummary(
   params: FetchOriginParams,
 ): Promise<ControllerOriginSummary | null> {
+  const result = await fetchOriginSummaryResult(params);
+  return result.ok ? result.summary : null;
+}
+
+/**
+ * `summary: null` when the project has no default origin (a 404); `ok:
+ * false` when the controller could not be asked or gave no usable answer (no
+ * session, 401, 403, another error status, a network error, a malformed
+ * body), which says nothing about the default origin.
+ */
+export type OriginSummaryFetchResult =
+  | { ok: true; summary: ControllerOriginSummary | null }
+  | { ok: false };
+
+export async function fetchOriginSummaryResult(
+  params: FetchOriginParams,
+): Promise<OriginSummaryFetchResult> {
   if (!runtimeControllerEnabled) {
-    return null;
+    return { ok: true, summary: null };
   }
 
   const { projectId } = params;
@@ -256,7 +290,7 @@ export async function fetchOriginSummary(
   );
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
-    return null;
+    return { ok: false };
   }
   const headers: Record<string, string> = {
     authorization: `Bearer ${accessToken}`,
@@ -269,14 +303,14 @@ export async function fetchOriginSummary(
   try {
     const response = await fetch(url, { headers });
     if (response.status === 404) {
-      return null;
+      return { ok: true, summary: null };
     }
     if (response.status === 401) {
       await readControllerError(response, "fetch origin failed", requestContext);
-      return null;
+      return { ok: false };
     }
     if (response.status === 403) {
-      return null;
+      return { ok: false };
     }
     if (!response.ok) {
       const text = await response.text();
@@ -377,21 +411,24 @@ export async function fetchOriginSummary(
     }
 
     return {
-      originId,
-      runtimeId,
-      endpoint,
-      mode,
-      protocols,
-      region: region ?? null,
-      deviceId: deviceId ?? null,
-      metadata: metadata ?? null,
-      presence,
+      ok: true,
+      summary: {
+        originId,
+        runtimeId,
+        endpoint,
+        mode,
+        protocols,
+        region: region ?? null,
+        deviceId: deviceId ?? null,
+        metadata: metadata ?? null,
+        presence,
+      },
     };
   } catch (error) {
     logControllerRequestError("[runtime-controller] fetchOriginSummary error:", error, {
       suppressLikelyConnectionNoise: true,
     });
-    return null;
+    return { ok: false };
   }
 }
 
