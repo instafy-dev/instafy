@@ -622,9 +622,11 @@ enum Seen {
 /// The result of a stop's own save.
 pub(crate) struct StopSave {
     pub(crate) state: WorkingState,
-    /// The slot holds the folder's unsaved work, or nothing is unsaved: the
-    /// stop's held-back `unsaved` copies are not needed.
-    pub(crate) settled: bool,
+    /// The tree canonical now holds for the folder (the slot's, or the
+    /// parent's when nothing is unsaved), once the save settled. A held-back
+    /// `unsaved` copy is needed only when this does not hold all of it (see
+    /// [`holds_copy`]).
+    pub(crate) held: Option<String>,
 }
 
 fn stopping(stop: Option<&StopFlag>) -> Result<()> {
@@ -741,7 +743,7 @@ impl Publisher<'_> {
         let local_only = local_only(&self.git, &self.held_back).unwrap_or(usize::MAX);
         match outcome {
             Ok(settled) => {
-                let durable = settled.holds && complete && local_only == 0;
+                let durable = settled.held.is_some() && complete && local_only == 0;
                 memory.confirm(fingerprint, complete, durable);
                 StopSave {
                     state: WorkingState {
@@ -752,7 +754,7 @@ impl Publisher<'_> {
                         changed: false,
                         error: None,
                     },
-                    settled: true,
+                    held: settled.held,
                 }
             }
             Err(error) => {
@@ -769,7 +771,7 @@ impl Publisher<'_> {
                         changed: true,
                         error: Some(error.code().to_string()),
                     },
-                    settled: false,
+                    held: None,
                 }
             }
         }
@@ -840,7 +842,7 @@ impl Publisher<'_> {
             }
         }
         if tree != parent_tree && holds(record.as_ref(), plan.parent.as_deref(), &tree, origin) {
-            return Ok(Settled::holding(None));
+            return Ok(Settled::holding(&tree, None));
         }
         let mut retries = 0usize;
         let mut refusals = 0usize;
@@ -851,16 +853,18 @@ impl Publisher<'_> {
                 // what a local-only ref holds, so it stays until that is
                 // pushed.
                 let Some(current) = record.as_ref() else {
-                    return Ok(Settled::holding(Some(0)));
+                    return Ok(Settled::holding(&parent_tree, Some(0)));
                 };
-                if local_only > 0 {
+                // Nor while a copy this stop held back has work the parent
+                // does not hold: that copy is pushed instead.
+                if local_only > 0 || !self.held_back_within(&parent_tree).map_err(local)? {
                     return Ok(Settled {
-                        holds: false,
+                        held: None,
                         unsaved: Some(0),
                     });
                 }
                 self.delete_slot(current)?;
-                return Ok(Settled::holding(Some(0)));
+                return Ok(Settled::holding(&parent_tree, Some(0)));
             }
             if !self.can_write {
                 return Err(SaveError::NoCredential);
@@ -891,16 +895,16 @@ impl Publisher<'_> {
                 Ok(pushed) => pushed.class,
                 Err(error) => {
                     warn!(error = %format!("{error:#}"), "a working save could not push");
-                    return self.after_push(&slot, &commit, SaveError::Unreachable);
+                    return self.after_push(&slot, &commit, &tree, SaveError::Unreachable);
                 }
             };
             match pushed {
                 // Confirmed only once `ls-remote` shows it.
                 PushClass::Pushed => {
-                    return self.after_push(&slot, &commit, SaveError::Unconfirmed)
+                    return self.after_push(&slot, &commit, &tree, SaveError::Unconfirmed)
                 }
                 PushClass::Ambiguous(_) => {
-                    return self.after_push(&slot, &commit, SaveError::PushAmbiguous)
+                    return self.after_push(&slot, &commit, &tree, SaveError::PushAmbiguous)
                 }
                 PushClass::PathRejected { path, .. } => {
                     self.clear_markers().map_err(local)?;
@@ -943,7 +947,7 @@ impl Publisher<'_> {
                     if tree != parent_tree
                         && holds(record.as_ref(), plan.parent.as_deref(), &tree, origin)
                     {
-                        return Ok(Settled::holding(None));
+                        return Ok(Settled::holding(&tree, None));
                     }
                 }
                 PushClass::Rejected(_) => {
@@ -957,9 +961,15 @@ impl Publisher<'_> {
     /// A push of `commit` to `slot` whose answer was `error` (or an `ok`
     /// still to confirm): look at the slot. It holds `commit` only when the
     /// push landed, and then the record names it.
-    fn after_push(&self, slot: &str, commit: &str, error: SaveError) -> Result<Settled, SaveError> {
+    fn after_push(
+        &self,
+        slot: &str,
+        commit: &str,
+        tree: &str,
+        error: SaveError,
+    ) -> Result<Settled, SaveError> {
         match self.see_slot(slot) {
-            Ok((_, Some(tip))) if tip == commit => Ok(Settled::holding(None)),
+            Ok((_, Some(tip))) if tip == commit => Ok(Settled::holding(tree, None)),
             Ok((Seen::Moved, _)) => Err(SaveError::SlotMoved),
             Ok(_) => Err(error),
             // The marker stays, so the next save looks again.
@@ -1031,6 +1041,19 @@ impl Publisher<'_> {
             Ok((Seen::Moved, _)) => Err(SaveError::SlotMoved),
             _ => Err(error),
         }
+    }
+
+    /// Whether `tree` holds every `unsaved` copy this stop holds back.
+    pub(crate) fn held_back_within(&self, tree: &str) -> Result<bool> {
+        for name in &self.held_back {
+            let local = format!("{}/{name}", recovery::LOCAL_RECOVERY_ROOT);
+            if let Some(rev) = self.git.commit_id(&local)? {
+                if !holds_copy(&self.git, tree, &rev)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// This folder's slot ref.
@@ -1148,19 +1171,68 @@ impl Publisher<'_> {
 
 /// What a slot step left.
 struct Settled {
-    /// The slot holds the snapshot, or there is nothing to hold.
-    holds: bool,
+    /// The tree canonical holds for the folder now (the slot's, or the
+    /// parent's when nothing is unsaved); `None` when it does not hold the
+    /// snapshot.
+    held: Option<String>,
     /// Unsaved paths, when the step decided it.
     unsaved: Option<usize>,
 }
 
 impl Settled {
-    fn holding(unsaved: Option<usize>) -> Self {
+    fn holding(tree: &str, unsaved: Option<usize>) -> Self {
         Self {
-            holds: true,
+            held: Some(tree.to_string()),
             unsaved,
         }
     }
+}
+
+/// Whether `tree` holds every change the recovery commit `copy` makes to its
+/// own parent, except paths a person removed from the slot that still hold
+/// what they held then (they are left out of saves on purpose, see
+/// [`DISMISSED_REF`]). A stop's `unsaved` copy that `tree` holds this way is
+/// not needed once canonical holds `tree`.
+pub(crate) fn holds_copy(git: &WorkspaceGit<'_>, tree: &str, copy: &str) -> Result<bool> {
+    let Some(copy) = read_commit(git, copy)? else {
+        return Ok(false);
+    };
+    let base = match copy.parent.as_deref() {
+        Some(parent) => git.tree_id(parent)?,
+        None => git.empty_tree()?,
+    };
+    let paths = changed_paths(git, &base, &copy.tree)?;
+    if paths.is_empty() {
+        return Ok(true);
+    }
+    let wanted = git.tree_entries(&copy.tree, &paths)?;
+    let held = git.tree_entries(tree, &paths)?;
+    // What a removed slot changed, at the paths this copy changes.
+    let (removed_paths, removed) = match read_commit(git, DISMISSED_REF)? {
+        Some(dismissed) => {
+            let base = match dismissed.parent.as_deref() {
+                Some(parent) => git.tree_id(parent)?,
+                None => git.empty_tree()?,
+            };
+            let changed: BTreeSet<String> = changed_paths(git, &base, &dismissed.tree)?
+                .into_iter()
+                .filter(|path| paths.contains(path))
+                .collect();
+            let entries = git.tree_entries(&dismissed.tree, &paths)?;
+            (changed, entries)
+        }
+        None => Default::default(),
+    };
+    let same = |a: Option<&crate::workspace_git::TreeEntry>,
+                b: Option<&crate::workspace_git::TreeEntry>| match (a, b) {
+        (Some(a), Some(b)) => a.mode == b.mode && a.oid == b.oid,
+        (None, None) => true,
+        _ => false,
+    };
+    Ok(paths.iter().all(|path| {
+        same(wanted.get(path), held.get(path))
+            || (removed_paths.contains(path) && same(wanted.get(path), removed.get(path)))
+    }))
 }
 
 fn not_saved(memory: &WorkingMemory, error: SaveError) -> StopSave {
@@ -1171,7 +1243,7 @@ fn not_saved(memory: &WorkingMemory, error: SaveError) -> StopSave {
             error: Some(error.code().to_string()),
             ..WorkingState::default()
         },
-        settled: false,
+        held: None,
     }
 }
 

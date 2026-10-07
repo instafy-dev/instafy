@@ -641,6 +641,92 @@ fn an_unrelated_history_saves_on_main() {
     assert_eq!(fx.slot_file("README.md").as_deref(), Some(README));
 }
 
+/// A checkout whose history is unrelated to `main` (`own.md` committed on
+/// an orphan branch), in the middle of a turn.
+fn unrelated_turn(fx: &Fixture) {
+    ig(&fx.ws, &["checkout", "-q", "--orphan", "side"]);
+    ig(&fx.ws, &["rm", "-q", "-r", "--cached", "."]);
+    fx.write("own.md", b"own history\n");
+    ig(&fx.ws, &["add", "own.md"]);
+    ig(
+        &fx.ws,
+        &[
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "own",
+        ],
+    );
+}
+
+impl Fixture {
+    /// Whether any ref on canonical holds `path` with `content`.
+    fn canonical_holds(&self, path: &str, content: &str) -> bool {
+        git_in(&self.remote, &["for-each-ref", "--format=%(refname)"])
+            .lines()
+            .any(|reference| {
+                let output = git_output(
+                    &self.remote,
+                    &["show", &format!("{reference}:{path}")],
+                    None,
+                );
+                output.status.success() && String::from_utf8_lossy(&output.stdout) == content
+            })
+    }
+}
+
+/// A stop during a turn on a history unrelated to `main` marks the turn's
+/// commits as handled, so later saves of the folder leave them out: the
+/// stop keeps them on a recovery ref of their own, never only in the slot,
+/// with or without an earlier rolling save, and with or without the
+/// controller's flag.
+#[test]
+fn a_stop_during_a_turn_on_an_unrelated_history_keeps_its_commits() {
+    for (ticked, flagged) in [(true, true), (false, true), (true, false)] {
+        let case = format!("ticked {ticked}, flagged {flagged}");
+        let mut fx = Fixture::new();
+        unrelated_turn(&fx);
+        if ticked {
+            assert_eq!(fx.save(PersistReason::Tick).error, None, "{case}");
+            assert!(fx.canonical_holds("own.md", "own history\n"), "{case}");
+        }
+        if flagged {
+            let report =
+                flush_saving(&fx.ctx(), true, Duration::from_secs(18), Some(&fx.memory)).unwrap();
+            let working = report.working_state.clone().expect("workingState");
+            assert_eq!(report.unpushed_refs, 0, "{case}: {report:?}");
+            assert!(working.durable, "{case}: {working:?}");
+        } else {
+            // A shutdown: no credential, nothing pushed.
+            let ctx = PublishContext {
+                can_write: false,
+                ..fx.ctx()
+            };
+            crate::publish::flush_at_shutdown(&ctx, true).unwrap();
+        }
+        assert!(
+            fx.canonical_holds("own.md", "own history\n")
+                || !fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty(),
+            "{case}: the turn's commits are kept"
+        );
+
+        // The next runtime on this folder saves again.
+        fx.config.origin_id = Uuid::new_v4();
+        fx.memory = WorkingMemory::default();
+        fx.write("later.md", b"later\n");
+        let state = fx.save(PersistReason::Tick);
+        assert_eq!(state.error, None, "{case}: {state:?}");
+        assert!(
+            fx.canonical_holds("own.md", "own history\n"),
+            "{case}: canonical lost the turn's commits"
+        );
+    }
+}
+
 /// A push whose answer was lost is checked against the slot right away:
 /// one that landed is confirmed and recorded, one that never reached
 /// canonical records nothing.

@@ -2392,30 +2392,38 @@ impl<'a> Publisher<'a> {
         }
     }
 
-    /// The working folder's own save, last in a stop that asked for it:
-    /// when it holds everything (or nothing is unsaved), the `unsaved`
-    /// copies this stop held back are removed; otherwise they are released
-    /// and pushed as any stop pushes them.
+    /// The working folder's own save, last in a stop that asked for it: an
+    /// `unsaved` copy this stop held back is removed when canonical now holds
+    /// every change it carries (the slot, or the parent when nothing is
+    /// unsaved); otherwise it is released and pushed as any stop pushes it.
     fn settle_working_state(
         &mut self,
         memory: &crate::working_state::WorkingMemory,
         flush: &mut FlushReport,
     ) -> Result<()> {
         let saved = self.persist_for_stop(memory);
-        let held: Vec<RecoveryRefReport> = flush
+        let mut covered = Vec::new();
+        let mut released = false;
+        for entry in flush
             .recovery_refs
             .iter()
             .filter(|entry| self.held_back.contains(&entry.name))
-            .cloned()
-            .collect();
-        if saved.settled {
-            self.unpark(&held, flush)?;
-            self.held_back.clear();
-        } else {
-            self.held_back.clear();
-            if self.can_write && self.fetched {
-                self.push_parked_into(flush);
+        {
+            // Removed only when canonical now holds every change it carries.
+            let held = match saved.held.as_deref() {
+                Some(tree) => crate::working_state::holds_copy(&self.git, tree, &entry.rev)?,
+                None => false,
+            };
+            if held {
+                covered.push(entry.clone());
+            } else {
+                released = true;
             }
+        }
+        self.unpark(&covered, flush)?;
+        self.held_back.clear();
+        if released && self.can_write && self.fetched {
+            self.push_parked_into(flush);
         }
         flush.working_state = Some(saved.state);
         Ok(())
@@ -2475,7 +2483,12 @@ impl<'a> Publisher<'a> {
                 Some(parent) => changed_paths(&self.git, parent, &tree)?,
                 None => changed_paths(&self.git, &self.git.empty_tree()?, &tree)?,
             };
-            if !self.working_save_holds(parent.as_deref(), &tree)? {
+            // On a history unrelated to `main` the commits are marked as
+            // handled below (the published frontier), so no later save of
+            // the folder holds them again: their copy is always stored and
+            // pushed, never left to the slot.
+            let unrelated = base.is_none() && main.is_some();
+            if unrelated || !self.working_save_holds(parent.as_deref(), &tree)? {
                 let stored = recovery::store(
                     &self.git,
                     RecoverySpec {
@@ -2490,7 +2503,9 @@ impl<'a> Publisher<'a> {
                         origin_id: self.config.origin_id,
                     },
                 )?;
-                self.hold_back(stored.as_ref());
+                if !unrelated {
+                    self.hold_back(stored.as_ref());
+                }
                 keep(stored, flush);
             }
             match (base, main.as_deref()) {

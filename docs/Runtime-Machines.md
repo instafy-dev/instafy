@@ -502,8 +502,9 @@ loses only work that never reached the remote:
   carries `workingState: true`: the stop ends with the working folder's own
   save. The origin then stores no `unsaved` copy of work that save already
   holds, holds back the copy it does store from every push until that save
-  settles (removed when the save landed or nothing is unsaved, pushed as
-  before otherwise), raises a stop flag so a rolling save in flight gives up,
+  settles (removed when canonical then holds every change the copy carries,
+  pushed as before otherwise; the copy of a turn on a history unrelated to
+  `main` is never held back), raises a stop flag so a rolling save in flight gives up,
   waits for the workspace instead of refusing, and keeps the whole stop
   under 22 seconds. The answer, the stop's `flush` and the `workspace_flush`
   event add `workingState: {durable, persistedAt, error?}`: whether
