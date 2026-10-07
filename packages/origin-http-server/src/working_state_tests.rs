@@ -1338,6 +1338,69 @@ fn a_turn_cannot_make_a_save_replace_another_folders_slot() {
     );
 }
 
+/// A turn plants a local recovery ref named like a slot, whose commit builds
+/// on another folder's slot tip and names that folder in its trailers. No
+/// save or stop pushes it: it is not a name a recovery store makes, so it is
+/// not this folder's work, and the other folder's slot stays where it was.
+#[test]
+fn a_planted_local_ref_never_reaches_another_folders_slot() {
+    let fx = Fixture::new();
+    let (slot, tip) = another_folders_save(&fx);
+    ig(
+        &fx.ws,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/instafy/recovery/*:refs/instafy/recovery/*",
+        ],
+    );
+    let other = slot.split('/').nth(3).expect("the slot's working-set id");
+    let message = format!(
+        "x\n\nInstafy-Recovery-Kind: unsaved\nInstafy-Origin: {other}\nInstafy-Working-Set: {other}\n"
+    );
+    let planted = ig(
+        &fx.ws,
+        &[
+            "-c",
+            "user.name=Turn",
+            "-c",
+            "user.email=turn@example.com",
+            "commit-tree",
+            &format!("{}^{{tree}}", fx.main()),
+            "-p",
+            &tip,
+            "-m",
+            &message,
+        ],
+    );
+    ig(
+        &fx.ws,
+        &[
+            "update-ref",
+            &format!(
+                "{LOCAL_RECOVERY_ROOT}/{}",
+                git_service::policy::WORKING_SLOT_NAME
+            ),
+            &planted,
+        ],
+    );
+
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(state.local_only, 0, "{state:?}");
+    assert_eq!(remote_rev(&fx, &slot).as_deref(), Some(tip.as_str()));
+    // Nor does a stop's flush, which pushes every pending ref it has.
+    flush_saving(&fx.ctx(), false, Duration::from_secs(18), Some(&fx.memory)).unwrap();
+    assert_eq!(remote_rev(&fx, &slot).as_deref(), Some(tip.as_str()));
+    assert!(
+        !git_output(&fx.remote, &["cat-file", "-e", &planted], None)
+            .status
+            .success(),
+        "the planted commit reached canonical"
+    );
+}
+
 /// The list marks a slot as a rolling save, names its last writer as its
 /// origin, and never shows it restored.
 #[test]

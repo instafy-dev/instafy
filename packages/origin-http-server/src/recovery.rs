@@ -529,15 +529,52 @@ fn one_line(value: &str) -> String {
 }
 
 /// Every local recovery ref not yet confirmed on canonical, as `(name, rev)`.
+///
+/// Only names this module gives a recovery commit count (see
+/// [`is_recovery_name`]). A local ref under any other name, such as one a
+/// turn planted, is not the folder's work: it is never pushed, so no push
+/// from here can name a working slot
+/// ([`git_service::policy::WORKING_SLOT_NAME`]). Only
+/// [`crate::working_state`] writes a slot, at the name the folder's own seed
+/// gives it.
 pub(crate) fn pending(git: &WorkspaceGit<'_>) -> Result<Vec<(String, String)>> {
     Ok(git
         .refs_under(LOCAL_RECOVERY_ROOT)?
         .into_iter()
         .filter_map(|(reference, rev)| {
             let name = reference.strip_prefix(&format!("{LOCAL_RECOVERY_ROOT}/"))?;
-            Some((name.to_string(), rev))
+            is_recovery_name(name).then(|| (name.to_string(), rev))
         })
         .collect())
+}
+
+/// Whether `name` has the shape [`store`] gives a recovery commit:
+/// `<YYYYMMDD>T<HHMMSS>Z-<kind>-<12 hex digits>`.
+pub(crate) fn is_recovery_name(name: &str) -> bool {
+    let mut parts = name.splitn(3, '-');
+    let (Some(stamp), Some(kind), Some(hash)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let stamp = stamp.as_bytes();
+    stamp.len() == 16
+        && stamp[8] == b'T'
+        && stamp[15] == b'Z'
+        && stamp[..8]
+            .iter()
+            .chain(&stamp[9..15])
+            .all(u8::is_ascii_digit)
+        && [
+            RecoveryKind::Conflict,
+            RecoveryKind::Unpublished,
+            RecoveryKind::Unsaved,
+            RecoveryKind::Stale,
+        ]
+        .iter()
+        .any(|known| known.as_str() == kind)
+        && hash.len() == 12
+        && hash
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Result of pushing the pending refs.
@@ -1233,6 +1270,19 @@ mod tests {
         ] {
             let name = format!("20261002T120000Z-{}-0123456789ab", kind.as_str());
             assert_eq!(kind_of_name(&name), Some(kind));
+            assert!(is_recovery_name(&name), "{name}");
+        }
+        for other in [
+            git_service::policy::WORKING_SLOT_NAME,
+            "20261002T120000Z-working-0123456789ab",
+            "20261002T120000Z-unsaved-0123456789AB",
+            "20261002T120000Z-unsaved-0123456789a",
+            "20261002T120000Z-unsaved-0123456789ab-x",
+            "x-unsaved-0123456789ab",
+            "20261002X120000Z-unsaved-0123456789ab",
+            "20261002T120000Z-unsaved-0123456789ab/working",
+        ] {
+            assert!(!is_recovery_name(other), "{other}");
         }
     }
 
