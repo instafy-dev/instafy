@@ -4202,6 +4202,8 @@ struct StubController {
     base: String,
     calls: std::sync::Arc<std::sync::Mutex<ControllerCalls>>,
     refuse_git_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Answer the next git.write request only after this long.
+    git_write_delay: std::sync::Arc<std::sync::Mutex<Option<Duration>>>,
     encoding_key: jsonwebtoken::EncodingKey,
     server: tokio::task::JoinHandle<()>,
 }
@@ -4246,6 +4248,7 @@ impl StubController {
             lease: serde_json::Value,
             calls: std::sync::Arc<std::sync::Mutex<ControllerCalls>>,
             refuse_git_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+            git_write_delay: std::sync::Arc<std::sync::Mutex<Option<Duration>>>,
         }
         fn bearer(headers: &HeaderMap) -> String {
             headers
@@ -4258,6 +4261,7 @@ impl StubController {
 
         let calls = std::sync::Arc::new(std::sync::Mutex::new(ControllerCalls::default()));
         let refuse_git_write = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let git_write_delay = std::sync::Arc::new(std::sync::Mutex::new(None));
         let stub = Stub {
             jwks,
             lease: serde_json::json!({
@@ -4271,6 +4275,7 @@ impl StubController {
             }),
             calls: calls.clone(),
             refuse_git_write: refuse_git_write.clone(),
+            git_write_delay: git_write_delay.clone(),
         };
         let app = axum::Router::new()
             .route(
@@ -4313,6 +4318,14 @@ impl StubController {
                         if write && bearer == MACHINE_TOKEN {
                             return Err(StatusCode::FORBIDDEN);
                         }
+                        let delay = if write {
+                            stub.git_write_delay.lock().unwrap().take()
+                        } else {
+                            None
+                        };
+                        if let Some(delay) = delay {
+                            tokio::time::sleep(delay).await;
+                        }
                         if write
                             && stub
                                 .refuse_git_write
@@ -4337,6 +4350,7 @@ impl StubController {
             base,
             calls,
             refuse_git_write,
+            git_write_delay,
             encoding_key,
             server,
         }
@@ -6452,6 +6466,84 @@ async fn a_persist_grant_opens_the_rolling_save_and_nothing_else() {
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     assert_eq!(mints(&controller.calls.lock().unwrap()), minted);
+    server.abort();
+    controller.server.abort();
+}
+
+/// A rolling save asks the controller for write access without holding the
+/// workspace: a stop that comes meanwhile takes the workspace at once and
+/// answers in time, and the save gives up once its own answer comes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_write_credential_for_a_rolling_save_never_holds_up_a_stop() {
+    let sc = Scenario::new(Options::default());
+    let user = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let runtime_lease_id = Uuid::new_v4();
+    let controller = StubController::start(
+        sc.config.project_id,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    )
+    .await;
+    let mut config = sc.config.clone();
+    config.skip_auth = false;
+    config.controller_base_url = Url::parse(&controller.base).unwrap();
+    config.jwks_url = Url::parse(&format!("{}/.well-known/jwks.json", controller.base)).unwrap();
+    config.controller_internal_token = Some(MACHINE_TOKEN.to_string());
+    let grant = controller.persist_grant(&config, user, runtime_id, runtime_lease_id);
+    let save_only = controller.save_grant_token(&config, user, runtime_id, runtime_lease_id);
+    let (base, server) = serve_config(config, sc.ws.clone()).await;
+    let client = reqwest::Client::new();
+    sc.write("notes.md", b"in progress\n");
+    *controller.git_write_delay.lock().unwrap() = Some(Duration::from_secs(15));
+
+    let tick = {
+        let client = client.clone();
+        let base = base.clone();
+        let grant = grant.clone();
+        tokio::spawn(async move {
+            client
+                .post(format!("{base}/workspace/persist"))
+                .bearer_auth(&grant)
+                .json(&serde_json::json!({ "reason": "tick" }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        })
+    };
+    // The tick is waiting for its write credential.
+    let asked = Instant::now();
+    while controller.calls.lock().unwrap().git_tokens.is_empty() {
+        assert!(
+            asked.elapsed() < Duration::from_secs(20),
+            "the tick never asked"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let started = Instant::now();
+    let response = client
+        .post(format!("{base}/git/flush"))
+        .bearer_auth(&save_only)
+        .json(&serde_json::json!({ "turnActive": true, "workingState": true }))
+        .send()
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["workingState"]["durable"], true, "{body}");
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "the stop waited {elapsed:?}"
+    );
+    assert_eq!(
+        tick.await.unwrap(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "the tick gave up"
+    );
     server.abort();
     controller.server.abort();
 }

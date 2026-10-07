@@ -1583,3 +1583,20 @@ async fn every_shutdown_decides_the_durable_stop_marker() {
     drop(holder);
     assert_eq!(marker(&fx), None, "a skipped flush keeps no marker");
 }
+
+/// A route-level save lets the workspace go while it asks for write
+/// access; a plan taken before another save moved the slot is taken again.
+#[test]
+fn a_plan_older_than_the_last_save_is_not_executed() {
+    let fx = Fixture::new();
+    fx.write("notes.md", b"first\n");
+    let ctx = fx.ctx();
+    let mut waiting = publisher(&ctx, TICK_BUDGET);
+    let plan = waiting
+        .plan_working_save(PersistReason::Tick, None)
+        .unwrap();
+    assert!(waiting.plan_still_current(&plan).unwrap());
+    fx.write("notes.md", b"second\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    assert!(!waiting.plan_still_current(&plan).unwrap());
+}

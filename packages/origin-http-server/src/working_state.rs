@@ -824,6 +824,18 @@ impl Publisher<'_> {
         Ok(over)
     }
 
+    /// Whether `plan`'s view of the slot still stands: the record and any
+    /// unanswered push or delete are what they were when it was taken. A
+    /// route-level save lets the workspace go while it asks for write
+    /// access; another save of the folder may have moved the slot meanwhile.
+    pub(crate) fn plan_still_current(&self, plan: &Plan) -> Result<bool> {
+        let recorded = self.git.commit_id(RECORD_REF)?;
+        Ok(
+            recorded.as_deref() == plan.record.as_ref().map(|record| record.commit.as_str())
+                && unsettled(&self.git)? == plan.unsettled,
+        )
+    }
+
     /// Bring canonical up to date with `plan`: push what waits on local
     /// refs first, then replace, keep or delete the slot. Never fails: the
     /// answer carries a fixed error code instead.

@@ -3184,7 +3184,16 @@ async fn flush_checkout(
     saving_since: Option<Instant>,
 ) -> Result<Json<serde_json::Value>, OriginError> {
     let apply_lock = project_apply_lock(state, project_id).await;
-    let apply_guard = apply_lock.lock_owned().await;
+    let apply_guard = match saving_since {
+        // Within the stop's deadline, whoever holds the project.
+        Some(since) => tokio::time::timeout(
+            STOP_FLUSH_DEADLINE.saturating_sub(since.elapsed()),
+            apply_lock.lock_owned(),
+        )
+        .await
+        .map_err(|_| OriginError::conflict("workspace is already mutating"))?,
+        None => apply_lock.lock_owned().await,
+    };
     let config = state.config.clone();
     let workspace_root = checkout_root(state);
     let lock_workspace = workspace_root.clone();
@@ -3329,22 +3338,8 @@ async fn handle_workspace_persist(
     };
 
     let wait = crate::working_state::lock_wait(reason);
-    let apply_lock = project_apply_lock(&state, project_id).await;
-    let apply_guard = match wait {
-        None => apply_lock.try_lock_owned().map_err(|_| busy())?,
-        Some(wait) => tokio::time::timeout(wait, apply_lock.lock_owned())
-            .await
-            .map_err(|_| busy())?,
-    };
     let workspace_root = checkout_root(&state);
-    let lock_workspace = workspace_root.clone();
-    let workspace_guard = tokio::task::spawn_blocking(move || match wait {
-        None => try_acquire_workspace_apply_lock(&lock_workspace),
-        Some(wait) => acquire_workspace_apply_lock_within(&lock_workspace, wait),
-    })
-    .await
-    .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
-    .ok_or_else(busy)?;
+    let guards = save_locks(&state, project_id, &workspace_root, wait).await?;
     // A stop may have raised its fence while this save waited.
     if state.stopping.is_up() || state.stop_flag.is_raised() {
         return Err(stopping_now());
@@ -3357,12 +3352,13 @@ async fn handle_workspace_persist(
     let budget = crate::working_state::budget(reason);
     let stop = state.stop_flag.clone();
 
-    let (planned, guards) = {
+    let planned = {
         let config = config.clone();
         let root = workspace_root.clone();
         let memory = memory.clone();
         let stop = stop.clone();
         tokio::task::spawn_blocking(move || {
+            let _guards = guards;
             let ctx = PublishContext {
                 config: &config,
                 workspace_root: root.as_path(),
@@ -3370,9 +3366,7 @@ async fn handle_workspace_persist(
                 can_write: false,
             };
             let mut publisher = crate::working_state::publisher(&ctx, budget);
-            let planned =
-                crate::working_state::plan_route_save(&mut publisher, reason, &memory, &stop);
-            (planned, (apply_guard, workspace_guard))
+            crate::working_state::plan_route_save(&mut publisher, reason, &memory, &stop)
         })
         .await
         .map_err(|error| OriginError::internal(format!("working save task failed: {error}")))?
@@ -3387,16 +3381,38 @@ async fn handle_workspace_persist(
         }
     };
 
-    let token = match mint_git_write_token(&state, project_id, &access_token).await {
-        Ok(token) => token,
-        Err(error) => {
+    // The controller is asked for write access with the workspace let go,
+    // within the save's own budget: a stop that comes meanwhile takes the
+    // workspace at once, and this save gives up when the answer comes.
+    let token = match tokio::time::timeout(
+        budget,
+        mint_git_write_token(&state, project_id, &access_token),
+    )
+    .await
+    {
+        Ok(Ok(token)) => Some(token),
+        Ok(Err(error)) => {
             warn!(?error, "a working save could not get write access");
-            return Ok(Json(crate::working_state::refused(
-                &memory,
-                crate::working_state::SaveError::NoCredential,
-            )));
+            None
+        }
+        Err(_) => {
+            warn!("a working save got no answer about write access in time");
+            None
         }
     };
+    if state.stopping.is_up() || state.stop_flag.is_raised() {
+        return Err(stopping_now());
+    }
+    let Some(token) = token else {
+        return Ok(Json(crate::working_state::refused(
+            &memory,
+            crate::working_state::SaveError::NoCredential,
+        )));
+    };
+    let guards = save_locks(&state, project_id, &workspace_root, wait).await?;
+    if state.stopping.is_up() || state.stop_flag.is_raised() {
+        return Err(stopping_now());
+    }
     let answer = tokio::task::spawn_blocking(move || {
         let _guards = guards;
         let ctx = PublishContext {
@@ -3406,6 +3422,18 @@ async fn handle_workspace_persist(
             can_write: token.is_some() || config.skip_auth,
         };
         let mut publisher = crate::working_state::publisher(&ctx, budget);
+        // Another save of the folder (a runtime sharing it) may have moved
+        // the slot while the workspace was let go: take the snapshot again.
+        let plan = match publisher.plan_still_current(&plan) {
+            Ok(true) => plan,
+            _ => {
+                match crate::working_state::plan_route_save(&mut publisher, reason, &memory, &stop)
+                {
+                    crate::working_state::Planned::Network(plan) => plan,
+                    crate::working_state::Planned::Answered(answer) => return answer,
+                }
+            }
+        };
         publisher
             .execute_working_save(plan, &memory, Some(&stop))
             .state
@@ -3416,6 +3444,39 @@ async fn handle_workspace_persist(
         return Err(stopping_now());
     }
     Ok(Json(answer))
+}
+
+/// The project apply lock and the workspace lock a working save holds: a
+/// tick (`wait` of `None`) takes them only when free and answers 409 `busy`
+/// otherwise; a turn-end save waits up to `wait` for each.
+async fn save_locks(
+    state: &AppState,
+    project_id: Uuid,
+    workspace_root: &Path,
+    wait: Option<Duration>,
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<()>,
+        crate::workspace_lock::WorkspaceApplyLock,
+    ),
+    OriginError,
+> {
+    let apply_lock = project_apply_lock(state, project_id).await;
+    let apply_guard = match wait {
+        None => apply_lock.try_lock_owned().map_err(|_| busy())?,
+        Some(wait) => tokio::time::timeout(wait, apply_lock.lock_owned())
+            .await
+            .map_err(|_| busy())?,
+    };
+    let lock_workspace = workspace_root.to_path_buf();
+    let workspace_guard = tokio::task::spawn_blocking(move || match wait {
+        None => try_acquire_workspace_apply_lock(&lock_workspace),
+        Some(wait) => acquire_workspace_apply_lock_within(&lock_workspace, wait),
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
+    .ok_or_else(busy)?;
+    Ok((apply_guard, workspace_guard))
 }
 
 /// Bring a single-tenant checkout up to date without write access: fetch

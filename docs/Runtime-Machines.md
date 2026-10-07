@@ -581,7 +581,10 @@ node's checkout a cache.
 - A tick never adds a path inside a nested repository and leaves out files
   over 2 MiB: both keep the slot's earlier entry (where that earlier save
   changed them; otherwise the current parent's) until the job's end or a
-  stop saves them. A tick also sends at most 16 MiB of new content, smallest
+  stop saves them. A tick asks the controller for `git.write` with the
+  workspace let go, within its own ten seconds, so a stop that comes
+  meanwhile takes the workspace at once. A tick also sends at most 16 MiB of
+  new content, smallest
   files first, so a small edit lands within its ten-second budget however
   much else the turn wrote; the rest keeps its earlier entry and goes out
   with the next tick, which runs even if nothing changed meanwhile. A tick that finds the workspace busy answers 409 and waits
