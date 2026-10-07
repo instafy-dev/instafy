@@ -6186,8 +6186,9 @@ impl JobProcessor {
 
         let project_preferences = ProjectPreferencesSnapshot::load(&workspace_dir);
         // The images of the turn's own message go to Codex with the prompt.
-        // A bounded browser turn has no image tools, and a worker may finish
-        // in a direct lane without Codex, so theirs stay on `view_image`.
+        // A bounded browser turn has no image tools, so its prompt says it
+        // cannot open them, and a worker may finish in a direct lane without
+        // Codex, so its images stay on `view_image`.
         let native_image_limit = if crate::codex::native_chat_images_enabled()
             && !explicit_personal_browser_execution
             && !explicit_shared_browser_execution
@@ -6227,13 +6228,6 @@ impl JobProcessor {
                     Some(attachments),
                 )
             };
-        if !codex_run_options.input_images.is_empty() {
-            annotate_prompt_context_native_image_inputs(
-                &mut prompt_context,
-                codex_run_options.input_images.len(),
-            );
-        }
-
         ensure_ambient_participation_prompt_context(job, &mut prompt, &mut prompt_context);
         if provider_thread_not_restorable && let Some(metrics) = prompt_context.as_object_mut() {
             metrics.insert(
@@ -6416,6 +6410,12 @@ impl JobProcessor {
                 return Err(error);
             }
         };
+        if !codex_run_options.input_images.is_empty() {
+            annotate_prompt_context_native_image_inputs(
+                &mut prompt_context,
+                output.native_image_inputs,
+            );
+        }
         let output_provider_conversation_state = provider_conversation_state_to_save(
             &output,
             &prompt,
@@ -6993,27 +6993,19 @@ impl JobProcessor {
                 retry_codex_run_options.provider_conversation_state = None;
             }
 
-            // Ordinary evidence recovery is still task execution, not a
-            // finalization pass: preserve its response/permission contract even
-            // when the first attempt lacked a final answer. Specialized lanes
-            // retain their own retry options above.
             if use_evidence_recovery {
-                retry_codex_run_options =
-                    evidence_recovery_plan.unwrap().options(&codex_run_options);
-                retry_codex_run_options.usage_observer =
-                    Some(task_usage.call(UsagePhase::Recovery));
                 update_prompt_context_require_first_tool_call(&mut retry_prompt_context, true);
                 retry_prompt_context["evidenceRecoveryContract"] =
                     json!(routing_recovery::CONTRACT);
             }
-            // The first attempt's thread already holds the attached images; a
-            // retry on a new or ephemeral thread sends them again.
-            retry_codex_run_options = retry_codex_run_options.for_another_attempt();
-            if !codex_run_options.input_images.is_empty() {
-                annotate_prompt_context_native_image_inputs(
-                    &mut retry_prompt_context,
-                    retry_codex_run_options.input_images.len(),
-                );
+            let mut retry_codex_run_options = recovery_retry_codex_run_options(
+                &codex_run_options,
+                retry_codex_run_options,
+                evidence_recovery_plan.filter(|_| use_evidence_recovery),
+            );
+            if use_evidence_recovery {
+                retry_codex_run_options.usage_observer =
+                    Some(task_usage.call(UsagePhase::Recovery));
             }
 
             // Brief jittered backoff before the recovery retry: re-hitting the
@@ -7072,6 +7064,12 @@ impl JobProcessor {
                     .await?
             };
             drop(codex_guard);
+            if !codex_run_options.input_images.is_empty() {
+                annotate_prompt_context_native_image_inputs(
+                    &mut retry_prompt_context,
+                    retry_output.native_image_inputs,
+                );
+            }
             let retry_provider_conversation_state = provider_conversation_state_to_save(
                 &retry_output,
                 &retry_prompt,
@@ -7339,19 +7337,9 @@ impl JobProcessor {
                     &finalization_preferences,
                     &mut finalization_prompt_context,
                 );
-                let mut finalization_options = codex_run_options.clone();
+                let mut finalization_options = finalization_codex_run_options(&codex_run_options);
                 finalization_options.usage_observer =
                     Some(task_usage.call(UsagePhase::Finalization));
-                finalization_options.require_first_tool_call = false;
-                finalization_options.disable_shell_tool = true;
-                finalization_options.disable_final_output_json_schema = true;
-                finalization_options.allow_plain_text_final_fallback = false;
-                finalization_options.reasoning_effort = Some(ReasoningEffort::Low);
-                finalization_options.suppress_contextual_instructions = true;
-                finalization_options.persist_conversation_thread = false;
-                finalization_options.provider_conversation_state = None;
-                // It only formats the retry's answer, so it needs no images.
-                finalization_options.input_images.clear();
                 annotate_prompt_context_codex_context_strategy(
                     &mut finalization_prompt_context,
                     Some("finalization"),
@@ -8707,6 +8695,10 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
         }
 
         let leased_attachments = chat_attachments::leased_attachment_names(&job.payload);
+        // A Personal or Shared Browser turn selects no execution environment,
+        // so it has no image tools.
+        let image_tools = !crate::personal_browser::payload_requests_personal_browser(&job.payload)
+            && !crate::shared_browser::payload_requests_shared_browser(&job.payload);
         let attachment_section = format_image_attachment_section(
             job.payload.get("metadata"),
             workspace_dir,
@@ -8714,10 +8706,16 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             job.conversation_id.as_ref(),
             &leased_attachments,
             native_image_limit,
+            if image_tools {
+                ListedImages::ViewBeforeAnswering
+            } else {
+                ListedImages::CannotOpen
+            },
         )
         .or_else(|| {
-            // An earlier message's images stay on `view_image`: a restored
-            // thread already holds whatever was sent with that message.
+            // An earlier message's images are never sent again. A restored
+            // thread already holds those that were sent with that message or
+            // opened since, so it opens only one it has not seen.
             let attachments =
                 collect_image_attachments_from_history(job.payload.get("conversation_history"));
             format_image_attachment_section_from_attachments(
@@ -8727,6 +8725,13 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
                 job.conversation_id.as_ref(),
                 &leased_attachments,
                 0,
+                if !image_tools {
+                    ListedImages::CannotOpen
+                } else if stateful_thread_restored {
+                    ListedImages::ViewIfUnseen
+                } else {
+                    ListedImages::ViewBeforeAnswering
+                },
             )
         });
 
@@ -12690,7 +12695,39 @@ fn update_prompt_context_require_first_tool_call(
     );
 }
 
-/// How many attached images a run sends Codex as image input.
+/// The options of a turn's recovery retry. Ordinary evidence recovery is still task
+/// execution, not a finalization pass: it keeps the first attempt's response and permission
+/// contract even when that attempt lacked a final answer, while other lanes keep the retry
+/// options they set. Either way the first attempt's thread already holds the attached images,
+/// so the retry sends them again only to a thread that does not: a new or ephemeral one.
+fn recovery_retry_codex_run_options(
+    first_attempt: &CodexRunOptions,
+    lane_retry: CodexRunOptions,
+    evidence_recovery: Option<routing_recovery::Plan>,
+) -> CodexRunOptions {
+    evidence_recovery
+        .map_or(lane_retry, |plan| plan.options(first_attempt))
+        .for_another_attempt()
+}
+
+/// The options of the finalization pass after a missing-final retry: an ephemeral,
+/// low-effort run without the shell or contextual instructions. It only formats the retry's
+/// answer, so it sends no images.
+fn finalization_codex_run_options(first_attempt: &CodexRunOptions) -> CodexRunOptions {
+    let mut options = first_attempt.clone();
+    options.require_first_tool_call = false;
+    options.disable_shell_tool = true;
+    options.disable_final_output_json_schema = true;
+    options.allow_plain_text_final_fallback = false;
+    options.reasoning_effort = Some(ReasoningEffort::Low);
+    options.suppress_contextual_instructions = true;
+    options.persist_conversation_thread = false;
+    options.provider_conversation_state = None;
+    options.input_images.clear();
+    options
+}
+
+/// How many attached images a run's turn input carried as image input.
 fn annotate_prompt_context_native_image_inputs(prompt_context: &mut JsonValue, count: usize) {
     let JsonValue::Object(map) = prompt_context else {
         return;
@@ -15217,6 +15254,7 @@ fn format_image_attachment_section(
     conversation_id: Option<&Uuid>,
     leased_attachments: &HashSet<String>,
     native_image_limit: usize,
+    listed_images: ListedImages,
 ) -> Option<AttachmentSection> {
     let Some(metadata) = metadata.and_then(JsonValue::as_object) else {
         return None;
@@ -15233,6 +15271,7 @@ fn format_image_attachment_section(
         conversation_id,
         leased_attachments,
         native_image_limit,
+        listed_images,
     )
 }
 
@@ -16028,6 +16067,19 @@ fn format_write_scope_guardrail_section(metadata: Option<&JsonValue>) -> Option<
 /// stay listed for `view_image`.
 const NATIVE_IMAGE_INPUTS_MAX: usize = 4;
 
+/// What the attachments section asks of the agent for an image it lists
+/// without sending it as image input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListedImages {
+    /// Open each one with `view_image` before answering.
+    ViewBeforeAnswering,
+    /// An earlier message's images on a restored thread, which already holds
+    /// those that were sent or opened then: open only one not seen yet.
+    ViewIfUnseen,
+    /// A turn without image tools, such as a Personal or Shared Browser turn.
+    CannotOpen,
+}
+
 /// The prompt's attachments section, and the downloaded images it says are
 /// attached to the message as image input.
 struct AttachmentSection {
@@ -16044,8 +16096,8 @@ struct AttachmentSection {
 /// file there; the others are named as unavailable so the agent neither
 /// guesses a path nor pretends to have read them. The first
 /// `native_image_limit` downloaded Storage images are marked `[Image #N]` and
-/// returned, for the run to send them with the prompt; any other image is left
-/// for `view_image`.
+/// returned, for the run to send them with the prompt; `listed_images` says
+/// what the agent does with any other image.
 fn format_image_attachment_section_from_attachments(
     attachments: &[JsonValue],
     workspace_dir: &Path,
@@ -16053,6 +16105,7 @@ fn format_image_attachment_section_from_attachments(
     conversation_id: Option<&Uuid>,
     leased_attachments: &HashSet<String>,
     native_image_limit: usize,
+    listed_images: ListedImages,
 ) -> Option<AttachmentSection> {
     let mut lines = Vec::new();
     let mut unavailable = Vec::new();
@@ -16176,21 +16229,36 @@ fn format_image_attachment_section_from_attachments(
             workspace_dir.display()
         ));
         if !native_images.is_empty() {
+            // Not "this message": a retry that resumes the thread sends the
+            // request again without the images it already holds.
             section.push_str(
-                "The images marked [Image #N] are attached to this message in the order listed. Look at them directly; call `view_image` on one only to re-inspect it, or if it did not come through.\n",
+                "The images marked [Image #N] were sent to you with this request, in the order listed. Look at them directly; call `view_image` on one only to re-inspect it, or if it did not come through.\n",
             );
         }
         if lists_view_image {
-            section.push_str(if native_images.is_empty() {
-                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n"
-            } else {
-                "Before answering, call the `view_image` tool on each image path not marked [Image #N], then respond to the latest request.\n"
+            section.push_str(match listed_images {
+                ListedImages::ViewBeforeAnswering if native_images.is_empty() => {
+                    "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n"
+                }
+                ListedImages::ViewBeforeAnswering => {
+                    "Before answering, call the `view_image` tool on each image path not marked [Image #N], then respond to the latest request.\n"
+                }
+                ListedImages::ViewIfUnseen => {
+                    "These images were attached to an earlier message. If you already saw one in this conversation, do not open it again; call the `view_image` tool only on one you have not seen and the latest request needs.\n"
+                }
+                ListedImages::CannotOpen => "You cannot open attached images in this turn.\n",
             });
+        }
+        if !native_images.is_empty()
+            || (lists_view_image && listed_images != ListedImages::CannotOpen)
+        {
+            section.push_str(
+                "When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({ path: \"<workspacePath>\" }); image(img);`: the image reaches you only through `image(img)`.\n",
+            );
         }
         if lists_view_image || !native_images.is_empty() {
             section.push_str(
-                "When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({ path: \"<workspacePath>\" }); image(img);`: the image reaches you only through `image(img)`.\n\
-If you could not see an attached image, say so; never describe it from its file name.\n",
+                "If you could not see an attached image, say so; never describe it from its file name.\n",
             );
         }
         if lists_text_file {
@@ -17846,7 +17914,7 @@ mod tests {
             "{prompt}"
         );
         assert!(
-            prompt.contains("The images marked [Image #N] are attached to this message"),
+            prompt.contains("The images marked [Image #N] were sent to you with this request"),
             "{prompt}"
         );
         assert!(
@@ -17863,10 +17931,12 @@ mod tests {
     }
 
     /// An earlier message's image is offered from the conversation history
-    /// and stays on `view_image`: a restored thread already holds what was
-    /// sent with that message.
+    /// and never sent again. Without a restored thread, the agent opens it
+    /// with `view_image` before answering. A restored thread already holds
+    /// the images sent or opened then, so the agent opens only one it has not
+    /// seen. A Personal or Shared Browser turn has no image tools.
     #[tokio::test]
-    async fn an_earlier_messages_images_stay_on_view_image() {
+    async fn listed_images_follow_the_threads_image_tools() {
         let app = axum::Router::new().route(
             "/object/photo",
             axum::routing::get(|| async { "png bytes" }),
@@ -17883,60 +17953,180 @@ mod tests {
         let conversation_id = Uuid::new_v4();
         let name = "6a000000-0000-4000-8000-000000000001.png";
         let prompt_text = "What was in the photo I sent before?";
-        let mut job = test_lease_job(
-            Some("feature"),
-            json!({
-                "prompt_text": prompt_text,
-                "metadata": {},
-                "conversation_history": [{
-                    "role": "user",
-                    "content": "Here is the photo.",
-                    "metadata": { "attachments": [{
-                        "kind": "image",
-                        "storagePath": format!("{project_id}/{conversation_id}/{name}"),
-                        "fileName": "photo.png"
-                    }]}
-                }],
-                "attachment_downloads": [{
-                    "name": name,
-                    "url": format!("{base}/object/photo?token=signed")
-                }]
-            }),
-        );
-        job.project_id = Some(project_id);
-        job.conversation_id = Some(conversation_id);
+        let attachment = json!({
+            "kind": "image",
+            "storagePath": format!("{project_id}/{conversation_id}/{name}"),
+            "fileName": "photo.png"
+        });
+        let history = json!([{
+            "role": "user",
+            "content": "Here is the photo.",
+            "metadata": { "attachments": [attachment] }
+        }]);
+        let restored = json!({
+            "defaultThreadId": "019a0000-0000-7000-8000-000000000001",
+            "historyReplayRequired": false
+        });
         let workspace = processor.prepare_workspace(&project_id).expect("workspace");
 
-        let (prompt, _, _, _attachments, input_images) = processor
-            .build_turn_prompt(
-                &project_id,
-                &job,
-                &workspace,
-                prompt_text,
+        let view_before_answering = "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.";
+        let view_if_unseen = "These images were attached to an earlier message. If you already saw one in this conversation, do not open it again; call the `view_image` tool only on one you have not seen and the latest request needs.";
+        let cannot_open = "You cannot open attached images in this turn.";
+        for (label, metadata, history, state, native_image_limit, expected) in [
+            (
+                "replayed history",
+                json!({}),
+                history.clone(),
                 None,
-                &[],
-                None,
-                None,
-                &ProjectPreferencesSnapshot::load(&workspace),
                 NATIVE_IMAGE_INPUTS_MAX,
-            )
-            .await
-            .expect("turn prompt");
-
-        assert!(input_images.is_empty());
-        assert!(
-            prompt.contains(&format!(
-                "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: photo.png)\n"
-            )),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains(
-                "Before answering, call the `view_image` tool on the image path(s), then respond to the latest request."
+                view_before_answering,
             ),
-            "{prompt}"
+            (
+                "restored thread",
+                json!({}),
+                history.clone(),
+                Some(&restored),
+                NATIVE_IMAGE_INPUTS_MAX,
+                view_if_unseen,
+            ),
+            (
+                "Shared Browser, earlier message",
+                json!({ "browserTransport": "shared" }),
+                history.clone(),
+                Some(&restored),
+                0,
+                cannot_open,
+            ),
+            (
+                "Personal Browser, own message",
+                json!({ "browserTransport": "desktop-personal", "attachments": [attachment] }),
+                json!([]),
+                None,
+                0,
+                cannot_open,
+            ),
+        ] {
+            let mut job = test_lease_job(
+                Some("feature"),
+                json!({
+                    "prompt_text": prompt_text,
+                    "metadata": metadata,
+                    "conversation_history": history,
+                    "attachment_downloads": [{
+                        "name": name,
+                        "url": format!("{base}/object/photo?token=signed")
+                    }]
+                }),
+            );
+            job.project_id = Some(project_id);
+            job.conversation_id = Some(conversation_id);
+
+            let (prompt, _, _, attachments, input_images) = processor
+                .build_turn_prompt(
+                    &project_id,
+                    &job,
+                    &workspace,
+                    prompt_text,
+                    state,
+                    &[],
+                    None,
+                    None,
+                    &ProjectPreferencesSnapshot::load(&workspace),
+                    native_image_limit,
+                )
+                .await
+                .expect("turn prompt");
+
+            assert!(input_images.is_empty(), "{label}");
+            assert!(
+                prompt.contains(&format!(
+                    "- workspacePath: .instafy/attachments/{conversation_id}/{name} (fileName: photo.png)\n"
+                )),
+                "{label}: {prompt}"
+            );
+            assert!(prompt.contains(expected), "{label}: {prompt}");
+            for other in [view_before_answering, view_if_unseen, cannot_open] {
+                assert!(
+                    other == expected || !prompt.contains(other),
+                    "{label}: {prompt}"
+                );
+            }
+            if expected == cannot_open {
+                assert!(!prompt.contains("view_image"), "{label}: {prompt}");
+            }
+            assert!(!prompt.contains("[Image #"), "{label}: {prompt}");
+            drop(attachments);
+        }
+    }
+
+    /// A recovery retry sends the turn's images again only to a thread that
+    /// does not hold them yet, whichever lane set its options, and the
+    /// finalization pass that formats its answer sends none.
+    #[test]
+    fn recovery_retries_resend_images_only_to_a_new_thread() {
+        let images = vec![PathBuf::from("/workspace/.instafy/attachments/c/1.png")];
+        let rollouts = tempdir().expect("rollout dir");
+        let rollout = rollouts.path().join("rollout.jsonl");
+        fs::write(&rollout, "").expect("rollout");
+        let thread_id = "019a0000-0000-7000-8000-000000000001";
+        let resumed = CodexRunOptions {
+            persist_conversation_thread: true,
+            provider_conversation_state: Some(json!({
+                "defaultThreadId": thread_id,
+                "defaultRolloutPath": rollout.display().to_string(),
+            })),
+            input_images: images.clone(),
+            ..Default::default()
+        };
+        let evidence = routing_recovery::Plan {
+            missing: routing_evidence::RoutingEvidenceProgress {
+                context_retrieval: false,
+                command_observation: true,
+            },
+        };
+
+        // Evidence recovery, or a lane retry that keeps the thread, resumes
+        // the thread the first attempt sent the images to.
+        let retry = recovery_retry_codex_run_options(&resumed, resumed.clone(), Some(evidence));
+        assert!(retry.require_first_tool_call);
+        assert!(retry.input_images.is_empty());
+        assert!(
+            recovery_retry_codex_run_options(&resumed, resumed.clone(), None)
+                .input_images
+                .is_empty()
         );
-        assert!(!prompt.contains("[Image #"), "{prompt}");
+
+        // A lane retry on an ephemeral thread sends them again.
+        let mut ephemeral = resumed.clone();
+        ephemeral.persist_conversation_thread = false;
+        ephemeral.provider_conversation_state = None;
+        assert_eq!(
+            recovery_retry_codex_run_options(&resumed, ephemeral, None).input_images,
+            images
+        );
+
+        // So does any retry when this runtime cannot restore the thread, as
+        // after a runtime replacement: each attempt starts a new thread.
+        let unrestorable = CodexRunOptions {
+            provider_conversation_state: Some(json!({
+                "defaultThreadId": thread_id,
+                "defaultRolloutPath": rollouts.path().join("gone.jsonl").display().to_string(),
+                "historyReplayRequired": true,
+            })),
+            ..resumed.clone()
+        };
+        for evidence in [Some(evidence), None] {
+            assert_eq!(
+                recovery_retry_codex_run_options(&unrestorable, unrestorable.clone(), evidence)
+                    .input_images,
+                images
+            );
+        }
+
+        let finalization = finalization_codex_run_options(&resumed);
+        assert!(finalization.input_images.is_empty());
+        assert!(!finalization.persist_conversation_thread);
+        assert!(finalization.provider_conversation_state.is_none());
     }
 
     /// A leased batch is one conversation's jobs, which may run one after
@@ -19533,6 +19723,7 @@ mod tests {
             final_json: json!({}),
             events: Vec::new(),
             provider_conversation_state: Some(state),
+            native_image_inputs: 0,
         }
     }
 
@@ -25160,6 +25351,7 @@ mod tests {
             final_json: json!({}),
             events,
             provider_conversation_state: None,
+            native_image_inputs: 0,
         };
         let outcome = CodexOutcome {
             summary: "ok".to_string(),

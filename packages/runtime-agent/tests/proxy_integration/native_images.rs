@@ -1,7 +1,7 @@
 //! A chat image attached to the turn's message reaches the provider as image
 //! input, through the real proxy with an inert, localhost provider. The next
-//! turn resumes the thread, which already holds the image, and does not send
-//! it again.
+//! turn resumes the thread, which already holds the image, and neither sends
+//! it again nor tells the agent to open it again.
 
 use super::*;
 use axum::extract::Path as AxumPath;
@@ -286,7 +286,18 @@ async fn run_turns() -> Result<()> {
     assert!(!image_url.contains("token=inert"));
 
     // The resumed thread holds the first message's image once; the follow-up
-    // adds none.
+    // adds none, and its prompt does not send the agent to open it again.
+    let follow_up = user_text(&requests[1], SECOND_PROMPT).context("the follow-up prompt")?;
+    assert!(
+        follow_up.contains(
+            "If you already saw one in this conversation, do not open it again; call the `view_image` tool only on one you have not seen"
+        ),
+        "the follow-up offers the earlier image only if it was not seen"
+    );
+    assert!(
+        !follow_up.contains("Before answering, call the `view_image` tool"),
+        "the follow-up does not require opening the earlier image again"
+    );
     let resent = input_images(&requests[1]);
     assert_eq!(resent.len(), 1);
     // `assert!` rather than `assert_eq!`: a failure must not print image bytes.
@@ -358,6 +369,18 @@ fn input_images(request: &Value) -> Vec<Value> {
         .filter(|part| part["type"] == "input_image")
         .cloned()
         .collect()
+}
+
+/// The text of the request's user message that contains `prompt`.
+fn user_text(request: &Value, prompt: &str) -> Option<String> {
+    request["input"].as_array()?.iter().rev().find_map(|item| {
+        let text = item["content"]
+            .as_array()?
+            .iter()
+            .filter_map(|part| part["text"].as_str())
+            .collect::<String>();
+        (item["role"] == "user" && text.contains(prompt)).then_some(text)
+    })
 }
 
 /// The user message that carries an image, and its images.

@@ -286,48 +286,6 @@ mod tests {
     }
 
     #[test]
-    fn recovery_resends_attached_images_only_on_a_new_thread() {
-        let recovery = Plan {
-            missing: RoutingEvidenceProgress {
-                context_retrieval: false,
-                command_observation: true,
-            },
-        };
-        let images = vec![std::path::PathBuf::from(
-            "/workspace/.instafy/attachments/c/1.png",
-        )];
-        let later_turn = CodexRunOptions {
-            persist_conversation_thread: true,
-            provider_conversation_state: Some(json!({
-                "defaultThreadId": "019a0000-0000-7000-8000-000000000001"
-            })),
-            input_images: images.clone(),
-            ..Default::default()
-        };
-        // The recovery resumes the thread the first attempt sent the images to.
-        assert!(
-            recovery
-                .options(&later_turn)
-                .for_another_attempt()
-                .input_images
-                .is_empty()
-        );
-
-        let first_turn = CodexRunOptions {
-            persist_conversation_thread: true,
-            input_images: images.clone(),
-            ..Default::default()
-        };
-        assert_eq!(
-            recovery
-                .options(&first_turn)
-                .for_another_attempt()
-                .input_images,
-            images
-        );
-    }
-
-    #[test]
     fn final_enforcement_blocks_only_missing_context_retrieval() {
         let observation = RoutingEvidenceRequirements {
             context_retrieval: false,

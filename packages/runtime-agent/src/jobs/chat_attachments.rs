@@ -678,6 +678,8 @@ mod tests {
     use axum::routing::get;
     use serde_json::json;
 
+    use super::super::ListedImages;
+
     const STEM: &str = "6a000000-0000-4000-8000-000000000001";
     const PROJECT: &str = "11111111-1111-4111-8111-111111111111";
     const CONVERSATION: &str = "c0c0c0c0-3333-4333-8333-333333333333";
@@ -1329,6 +1331,22 @@ mod tests {
         leased: &[String],
         native_image_limit: usize,
     ) -> Option<(String, Vec<String>)> {
+        listed_prompt_section(
+            attachments,
+            workspace,
+            leased,
+            native_image_limit,
+            ListedImages::ViewBeforeAnswering,
+        )
+    }
+
+    fn listed_prompt_section(
+        attachments: JsonValue,
+        workspace: &Path,
+        leased: &[String],
+        native_image_limit: usize,
+        listed_images: ListedImages,
+    ) -> Option<(String, Vec<String>)> {
         super::super::format_image_attachment_section_from_attachments(
             attachments.as_array().unwrap(),
             workspace,
@@ -1336,6 +1354,7 @@ mod tests {
             Some(&Uuid::parse_str(CONVERSATION).unwrap()),
             &leased.iter().cloned().collect(),
             native_image_limit,
+            listed_images,
         )
         .map(|section| (section.text, section.native_images))
     }
@@ -1392,7 +1411,7 @@ mod tests {
                 "\nUser attached image(s):\n\
                  - [Image #1] workspacePath: {path} (fileName: photo.png, mimeType: image/png)\n\
                  \nPaths above are relative to the workspace root \"{}\".\n\
-                 The images marked [Image #N] are attached to this message in the order listed. Look at them directly; call `view_image` on one only to re-inspect it, or if it did not come through.\n\
+                 The images marked [Image #N] were sent to you with this request, in the order listed. Look at them directly; call `view_image` on one only to re-inspect it, or if it did not come through.\n\
                  When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({{ path: \"<workspacePath>\" }}); image(img);`: the image reaches you only through `image(img)`.\n\
                  If you could not see an attached image, say so; never describe it from its file name.\n",
                 workspace.path().display()
@@ -1415,6 +1434,55 @@ mod tests {
         );
         assert!(!section.contains("[Image #"), "{section}");
         assert!(!section.contains("filename/path context"), "{section}");
+    }
+
+    /// An image the section lists without sending it is opened with
+    /// `view_image` before answering (above), on a restored thread only when
+    /// it was not seen yet, and never in a turn without image tools.
+    #[test]
+    fn listed_images_follow_the_turns_image_tools() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = folder(workspace.path(), &conversation());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
+        let attachments = json!([{ "kind": "image",
+            "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")),
+            "fileName": "photo.png" }]);
+        let path = format!(".instafy/attachments/{CONVERSATION}/{}", name(1, "png"));
+        let section = |listed_images| {
+            let (section, native) = listed_prompt_section(
+                attachments.clone(),
+                workspace.path(),
+                &[name(1, "png")],
+                0,
+                listed_images,
+            )
+            .unwrap();
+            assert!(native.is_empty());
+            section
+        };
+        let expected = |instructions: &str| {
+            format!(
+                "\nUser attached image(s):\n\
+                 - workspacePath: {path} (fileName: photo.png)\n\
+                 \nPaths above are relative to the workspace root \"{}\".\n\
+                 {instructions}\
+                 If you could not see an attached image, say so; never describe it from its file name.\n",
+                workspace.path().display()
+            )
+        };
+
+        assert_eq!(
+            section(ListedImages::ViewIfUnseen),
+            expected(
+                "These images were attached to an earlier message. If you already saw one in this conversation, do not open it again; call the `view_image` tool only on one you have not seen and the latest request needs.\n\
+                 When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({ path: \"<workspacePath>\" }); image(img);`: the image reaches you only through `image(img)`.\n"
+            )
+        );
+        assert_eq!(
+            section(ListedImages::CannotOpen),
+            expected("You cannot open attached images in this turn.\n")
+        );
     }
 
     /// At most the limit of downloaded images are attached, in the order

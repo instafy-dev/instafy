@@ -622,6 +622,9 @@ pub struct CodexRunOutput {
     pub final_json: JsonValue,
     pub events: Vec<JsonValue>,
     pub provider_conversation_state: Option<JsonValue>,
+    /// How many of `CodexRunOptions::input_images` the run's turn input carried: none for a
+    /// model without image input.
+    pub native_image_inputs: usize,
 }
 
 /// A failed turn keeps the protocol classification as well as its diagnostic message.
@@ -668,14 +671,15 @@ pub struct CodexRunOptions {
 
 impl CodexRunOptions {
     /// Whether this run continues the provider thread its state names. That thread already
-    /// holds what an earlier attempt at the same turn sent to it.
+    /// holds what an earlier attempt at the same turn sent to it. Each run resumes a thread
+    /// only from its rollout on this runtime's disk; for a thread it cannot restore, it
+    /// starts a new one, which holds nothing yet.
     pub fn resumes_provider_thread(&self) -> bool {
         self.persist_conversation_thread
-            && extract_thread_id_from_provider_state(
+            && provider_thread_restorable_on_this_runtime(
                 self.provider_conversation_state.as_ref(),
-                thread_mode_key(self.expect_browser_session),
+                self.expect_browser_session,
             )
-            .is_some()
     }
 
     /// The options for another attempt at the same turn. Attached images go again only to a
@@ -705,10 +709,19 @@ fn native_image_inputs_allowed(
     enabled && !bounded_browser_mode && input_modalities.contains(&InputModality::Image)
 }
 
+/// Follows a prompt that marks images `[Image #N]` when the run cannot send them, so the model
+/// is not left looking for them. `view_image` refuses a model without image input too.
+const IMAGES_NOT_ATTACHED_NOTE: &str = "The images marked [Image #N] could not be attached for this model, and you cannot open them. If the answer depends on one, say so; never describe it from its file name.";
+
 /// A runtime turn's input: the prompt first, so its text prefix stays the same, then one local
 /// image per attached image, which Codex labels `[Image #1]`, `[Image #2]`, ... in this order.
-fn runtime_turn_items(prompt: String, input_images: &[PathBuf]) -> Vec<UserInput> {
-    let mut items = Vec::with_capacity(1 + input_images.len());
+/// When the prompt's images cannot be sent, a note that says so follows the prompt instead.
+fn runtime_turn_items(
+    prompt: String,
+    input_images: &[PathBuf],
+    images_withheld: bool,
+) -> Vec<UserInput> {
+    let mut items = Vec::with_capacity(2 + input_images.len());
     items.push(UserInput::Text {
         text: prompt,
         // Runtime prompts are plain text with no rich element ranges.
@@ -718,6 +731,12 @@ fn runtime_turn_items(prompt: String, input_images: &[PathBuf]) -> Vec<UserInput
         path: path.clone(),
         detail: None,
     }));
+    if images_withheld {
+        items.push(UserInput::Text {
+            text: IMAGES_NOT_ATTACHED_NOTE.to_string(),
+            text_elements: Vec::new(),
+        });
+    }
     items
 }
 
@@ -1714,7 +1733,11 @@ impl CodexClient {
 
         let effective_prompt = prompt.to_string();
 
-        let items = runtime_turn_items(effective_prompt, input_images);
+        let items = runtime_turn_items(
+            effective_prompt,
+            input_images,
+            input_images.len() < options.input_images.len(),
+        );
 
         let requires_structured_final = final_output_json_schema.is_some();
 
@@ -2016,6 +2039,7 @@ impl CodexClient {
                 final_json,
                 events,
                 provider_conversation_state,
+                native_image_inputs: input_images.len(),
             })
         }
         .await;
@@ -5759,7 +5783,7 @@ mod tests {
             text_elements: Vec::new(),
         };
         assert_eq!(
-            runtime_turn_items("Describe the attached image.".to_string(), &[]),
+            runtime_turn_items("Describe the attached image.".to_string(), &[], false),
             vec![text.clone()]
         );
 
@@ -5768,9 +5792,9 @@ mod tests {
             PathBuf::from("/workspace/.instafy/attachments/c/2.jpg"),
         ];
         assert_eq!(
-            runtime_turn_items("Describe the attached image.".to_string(), &images),
+            runtime_turn_items("Describe the attached image.".to_string(), &images, false),
             vec![
-                text,
+                text.clone(),
                 UserInput::LocalImage {
                     path: images[0].clone(),
                     detail: None,
@@ -5778,6 +5802,19 @@ mod tests {
                 UserInput::LocalImage {
                     path: images[1].clone(),
                     detail: None,
+                },
+            ]
+        );
+
+        // A prompt that marks images the run cannot send is followed by a
+        // note that says so, for a model without image input.
+        assert_eq!(
+            runtime_turn_items("Describe the attached image.".to_string(), &[], true),
+            vec![
+                text,
+                UserInput::Text {
+                    text: IMAGES_NOT_ATTACHED_NOTE.to_string(),
+                    text_elements: Vec::new(),
                 },
             ]
         );
@@ -5817,10 +5854,17 @@ mod tests {
     #[test]
     fn another_attempt_resends_images_only_to_a_thread_without_them() {
         let images = vec![PathBuf::from("/workspace/.instafy/attachments/c/1.png")];
-        let thread = json!({ "defaultThreadId": ThreadId::new().to_string() });
+        let rollouts = tempfile::tempdir().expect("rollout tempdir");
+        let rollout = rollouts.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "").expect("rollout");
+        let thread_id = ThreadId::new().to_string();
+        let thread = json!({
+            "defaultThreadId": thread_id,
+            "defaultRolloutPath": rollout.display().to_string(),
+        });
 
-        // A later turn resumes its conversation's thread, which the first
-        // attempt already sent the images to.
+        // A later turn resumes its conversation's thread from the rollout on
+        // this runtime, and the first attempt already sent the images to it.
         let resumed = CodexRunOptions {
             persist_conversation_thread: true,
             provider_conversation_state: Some(thread.clone()),
@@ -5838,21 +5882,41 @@ mod tests {
         };
         assert_eq!(first_turn.for_another_attempt().input_images, images);
 
-        // An ephemeral run, or a thread of the other mode, is a new thread too.
-        for options in [
-            CodexRunOptions {
-                provider_conversation_state: Some(thread.clone()),
-                input_images: images.clone(),
-                ..Default::default()
-            },
-            CodexRunOptions {
+        // A thread whose rollout is not on this runtime, as after a runtime
+        // replacement, cannot be restored: each attempt starts a new thread.
+        let missing_rollout = rollouts.path().join("gone.jsonl");
+        let unrestorable = [
+            json!({ "defaultThreadId": thread_id }),
+            json!({
+                "defaultThreadId": thread_id,
+                "defaultRolloutPath": missing_rollout.display().to_string(),
+                "historyReplayRequired": true,
+            }),
+        ];
+        for options in unrestorable
+            .into_iter()
+            .map(|state| CodexRunOptions {
                 persist_conversation_thread: true,
-                expect_browser_session: true,
-                provider_conversation_state: Some(thread.clone()),
+                provider_conversation_state: Some(state),
                 input_images: images.clone(),
                 ..Default::default()
-            },
-        ] {
+            })
+            // An ephemeral run, or a thread of the other mode, is a new thread too.
+            .chain([
+                CodexRunOptions {
+                    provider_conversation_state: Some(thread.clone()),
+                    input_images: images.clone(),
+                    ..Default::default()
+                },
+                CodexRunOptions {
+                    persist_conversation_thread: true,
+                    expect_browser_session: true,
+                    provider_conversation_state: Some(thread.clone()),
+                    input_images: images.clone(),
+                    ..Default::default()
+                },
+            ])
+        {
             assert!(!options.resumes_provider_thread());
             assert_eq!(options.for_another_attempt().input_images, images);
         }
