@@ -1455,6 +1455,91 @@ async fn a_keep_whose_clash_left_main_since_keeps_the_ref() {
     }
 }
 
+/// Work that turns the file `docs` into a folder (it removes `docs` and adds
+/// `docs/readme.md`) clashes with `main`'s edit of `docs`, and, once `main`
+/// has removed `docs` as well, still with the merge base's `docs`. Keeping
+/// the work's new file chooses no version of it while `main` has nothing at
+/// or above that path: no file of the work was removed there, so a keep
+/// chosen after the person saw `main`'s `docs` (which then left `main`), or
+/// one chosen at the clash with the merge base alone, leaves the work's
+/// `docs/readme.md` on `main` under no name, and the ref stays with it.
+/// Once "Use this version" has put the file on `main`, the ref goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_file_the_work_added_where_main_has_nothing_keeps_the_ref() {
+    type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
+    // (on `main` before the restore that asks, its clash, the person's keep)
+    let routes: Vec<(&str, Files, serde_json::Value)> = vec![
+        (
+            "edited, then removed",
+            vec![("docs", Some(&b"main edit\n"[..]))],
+            json!(["docs", "docs/readme.md"]),
+        ),
+        (
+            "removed first",
+            vec![("docs", None)],
+            json!(["docs/readme.md"]),
+        ),
+    ];
+    for mode in MODES {
+        for (route, moved, clashes) in &routes {
+            let case = format!("{mode:?} {route}");
+            let space = Space::new(mode, &[("docs", b"a file\n")]).await;
+            let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+            let commit = space.park(
+                &[
+                    ("docs", None),
+                    ("docs/readme.md", Some(b"work\n")),
+                    ("other.md", Some(b"other\n")),
+                ],
+                &reference,
+            );
+            space.push(moved, "main moved");
+            assert_eq!(
+                space
+                    .conflict(json!({ "ref": reference, "rev": commit }))
+                    .await,
+                *clashes,
+                "{case}"
+            );
+            if space.on_main("docs").is_some() {
+                space.push(&[("docs", None)], "docs goes");
+            }
+
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit, "keep": clashes }))
+                .await;
+            assert_eq!(body["committed"], true, "{case}: {body}");
+            assert_eq!(
+                body["notRestored"],
+                reasons(&[("docs/readme.md", "kept")]),
+                "{case}: {body}"
+            );
+            assert_eq!(body["refDeleted"], false, "{case}: {body}");
+            assert_eq!(
+                space.canonical_ref(&reference).as_deref(),
+                Some(commit.as_str()),
+                "{case}"
+            );
+            assert_eq!(space.on_main("docs/readme.md"), None, "{case}");
+            assert_eq!(
+                space.on_main("other.md").as_deref(),
+                Some(&b"other\n"[..]),
+                "{case}"
+            );
+
+            // What "Use this version" leaves on `main`, then the restore of
+            // the rest, as Studio sends it (no keep for a path it used).
+            space.push(&[("docs/readme.md", Some(b"work\n"))], "use this version");
+            let body = space
+                .restored(json!({ "ref": reference, "rev": commit }))
+                .await;
+            assert_eq!(body["notRestored"], json!([]), "{case}: {body}");
+            assert_eq!(body["refDeleted"], true, "{case}: {body}");
+            assert_eq!(space.canonical_ref(&reference), None, "{case}");
+        }
+    }
+}
+
 /// A new folder of the work whose name differs only in case from a file
 /// `main` holds (`Docs/guide.md` beside a file `docs`, at any depth) is a
 /// clash in both modes, never an unsaved edit that is not there (Desktop on

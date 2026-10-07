@@ -421,8 +421,12 @@ pub(crate) fn plan(
 ///
 /// - a folder at the path, or a file, a link or a submodule at a folder
 ///   above it (the file and folder clash such a keep settles);
-/// - a removal the work's change conflicted with (the merge conflicted at
-///   the path: keeping `onto`'s removal is a choice);
+/// - a removal the work's change conflicted with (the merge conflicted at a
+///   path the merge base had a file at, which `onto` removed: keeping that
+///   removal is a choice). A path the work added never qualifies: its
+///   conflict may be with the merge base's file alone (the work made a
+///   folder of a file `onto` has since removed too), and `onto` then holds
+///   nothing to choose;
 /// - the work itself, as the work has it, under a name a disk ignoring
 ///   case takes for the path.
 ///
@@ -468,7 +472,11 @@ fn unsettled_keeps(
                     let file_above = path
                         .match_indices('/')
                         .any(|(index, _)| is_folder(&path[..index]) == Some(false));
-                    (!(folder_here || file_above || conflicted.contains(path))).then_some(KEPT)
+                    // A path the work added had no file for `onto` to
+                    // remove: its conflict may be with the merge base alone
+                    // (a file of the base where the work made a folder).
+                    let removed = change.status != 'A' && conflicted.contains(path);
+                    (!(folder_here || file_above || removed)).then_some(KEPT)
                 }
             };
             unsettled.map(|reason| (change.path.clone(), reason))
