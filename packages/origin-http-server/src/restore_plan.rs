@@ -60,11 +60,16 @@
 //!
 //! The ref may go once the restore is on `main` only when nothing was left
 //! out but on request: work refused here exists only on the ref, which then
-//! stays. A kept new name that such a disk takes for another entry of the
-//! restored tree keeps the ref too, unless that entry holds the work as the
-//! work has it ([`kept_aliases`]): keeping `main`'s `TODO.md` chose no
-//! version of the work's `todo.md`, which would otherwise be on neither
-//! `main` nor any ref.
+//! stays. A kept path the work writes where `onto` has no file, link or
+//! submodule keeps the ref too unless, on the `onto` restored onto, the keep
+//! chose `onto`'s version over the work's ([`unsettled_keeps`]): `onto` has
+//! a folder there or a file above it, removed the file the work changed, or
+//! holds the work as the work has it under a name such a disk takes for
+//! the path. Keeping `main`'s `TODO.md` chose no version of the work's
+//! `todo.md` ([`kept_aliases`]), and neither does a keep chosen at a clash
+//! that has left `main` since (the person kept `Notes.md` beside `main`'s
+//! `notes.md`, which a later save removed): such work would otherwise be
+//! on neither `main` nor any ref.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -108,10 +113,9 @@ pub(crate) struct RestorePlan {
     /// How many of them were refused (left out for a reason other than
     /// the person's own keep).
     refused: usize,
-    /// How many kept paths are new names of the work whose work `onto`
-    /// holds under no name a disk ignoring case takes for it
-    /// ([`kept_aliases`]).
-    kept_aliases: usize,
+    /// How many kept paths chose no version of the work's file, so the
+    /// work is on the restored tree under no name ([`unsettled_keeps`]).
+    unsettled: usize,
 }
 
 impl RestorePlan {
@@ -121,10 +125,10 @@ impl RestorePlan {
     }
 
     /// Whether the ref may go once the restore is on `main`: nothing was
-    /// left out but what the person chose to keep, and nothing kept is
-    /// work `onto` lacks under every name ([`kept_aliases`]).
+    /// left out but what the person chose to keep, and every keep chose
+    /// `onto`'s version over the work's ([`unsettled_keeps`]).
     pub(crate) fn lets_ref_go(&self) -> bool {
-        self.refused == 0 && self.kept_aliases == 0
+        self.refused == 0 && self.unsettled == 0
     }
 }
 
@@ -356,10 +360,10 @@ pub(crate) fn plan(
         return Err(PlanError::Conflict(conflicts));
     }
 
-    // A kept new name that a disk ignoring case takes for another entry of
-    // the restored tree settled its clash by leaving the work's file out,
-    // not by choosing between two versions of one file: unless that entry
-    // holds the work as the work has it, the ref stays with it.
+    // A kept path the work writes where `onto` has no file, a link or a
+    // submodule keeps the ref unless the keep chose `onto`'s version over
+    // the work's on this `onto` ([`unsettled_keeps`]): the person chose at
+    // the clash they were shown, and `onto` may have moved since.
     let kept_new: Vec<&RawChange> = changes
         .iter()
         .filter(|change| {
@@ -368,7 +372,7 @@ pub(crate) fn plan(
                 && left_out.get(&change.path) == Some(&KEPT)
         })
         .collect();
-    let kept_aliases = kept_aliases(git, &tree, &kept_new)?.len();
+    let unsettled = unsettled_keeps(git, &onto_tree, &tree, &merged.conflicts, &kept_new)?.len();
 
     Ok(RestorePlan {
         tree,
@@ -378,8 +382,71 @@ pub(crate) fn plan(
             .map(|(path, reason)| NotRestored { path, reason })
             .collect(),
         refused: refused.len(),
-        kept_aliases,
+        unsettled,
     })
+}
+
+/// The paths of `kept` (changes the person kept that write a path where
+/// `onto`, a tree id, has no file, link or submodule) whose keep chose no
+/// version of the work's file, so the work is on the restored `tree` under
+/// no name and the ref stays with it. A keep chooses `onto`'s version only
+/// when this `onto` holds a version to choose:
+///
+/// - a folder at the path, or a file, a link or a submodule at a folder
+///   above it (the file and folder clash such a keep settles);
+/// - a removal the work's change conflicted with (the merge conflicted at
+///   the path: keeping `onto`'s removal is a choice);
+/// - the work itself, as the work has it, under a name a disk ignoring
+///   case takes for the path.
+///
+/// A path such a disk takes for another entry of the restored tree that
+/// does not hold the work ([`kept_aliases`]) chose nothing whatever else
+/// holds there: `main`'s `TODO.md` is another file than the work's
+/// `todo.md`. Any other keep settles nothing on this `onto`, as when the
+/// file whose name the work's new one took left `main` after the person
+/// chose to keep it.
+fn unsettled_keeps(
+    git: &WorkspaceGit<'_>,
+    onto_tree: &str,
+    tree: &str,
+    conflicts: &[String],
+    kept: &[&RawChange],
+) -> Result<Vec<String>> {
+    if kept.is_empty() {
+        return Ok(Vec::new());
+    }
+    let aliases = kept_aliases(git, tree, kept)?;
+    // `onto`'s entries at each kept path and the folders above it.
+    let around: BTreeSet<String> = kept
+        .iter()
+        .flat_map(|change| {
+            let path = change.path.as_str();
+            path.match_indices('/')
+                .map(|(index, _)| path[..index].to_string())
+                .chain(std::iter::once(path.to_string()))
+        })
+        .collect();
+    let around: Vec<String> = around.into_iter().collect();
+    let at_onto = git.entries_by_path(onto_tree, &around)?;
+    let is_folder = |path: &str| at_onto.get(path).map(|entry| entry.kind == "tree");
+    let conflicted: BTreeSet<&str> = conflicts.iter().map(String::as_str).collect();
+    Ok(kept
+        .iter()
+        .filter_map(|change| {
+            let path = change.path.as_str();
+            let unsettled = match aliases.get(path) {
+                Some(held) => !held,
+                None => {
+                    let folder_here = is_folder(path) == Some(true);
+                    let file_above = path
+                        .match_indices('/')
+                        .any(|(index, _)| is_folder(&path[..index]) == Some(false));
+                    !(folder_here || file_above || conflicted.contains(path))
+                }
+            };
+            unsettled.then(|| change.path.clone())
+        })
+        .collect())
 }
 
 /// The paths of `pending` (changes neither left out nor already on `onto`)
@@ -467,13 +534,17 @@ fn every_entry(git: &WorkspaceGit<'_>, tree: &str) -> Result<Vec<TreeEntry>> {
 /// The paths of `kept` (new names of the work the person kept, so absent
 /// from the restored `tree`) that [`alias_clashes`] finds once they are
 /// put back beside `tree`'s entries, each other and the folders they lie
-/// in, unless an entry of `tree` that such a disk takes for the path holds
-/// it as the work has it. "Keep current" on such a path chose no version of
-/// the work's file: `onto`'s entry is another file, and the work is on
-/// `main` under no name.
-fn kept_aliases(git: &WorkspaceGit<'_>, tree: &str, kept: &[&RawChange]) -> Result<Vec<String>> {
+/// in, each with whether an entry of `tree` that such a disk takes for the
+/// path holds it as the work has it. Unless one does, "Keep current" on
+/// such a path chose no version of the work's file: `onto`'s entry is
+/// another file, and the work is on `main` under no name.
+fn kept_aliases(
+    git: &WorkspaceGit<'_>,
+    tree: &str,
+    kept: &[&RawChange],
+) -> Result<BTreeMap<String, bool>> {
     if kept.is_empty() {
-        return Ok(Vec::new());
+        return Ok(BTreeMap::new());
     }
     let listed = every_entry(git, tree)?;
     // What `tree` holds under each key: a file, a link or a submodule.
@@ -506,14 +577,14 @@ fn kept_aliases(git: &WorkspaceGit<'_>, tree: &str, kept: &[&RawChange]) -> Resu
     Ok(kept
         .iter()
         .filter(|change| clashes.contains(&change.path))
-        .filter(|change| {
-            !held.contains(&(
+        .map(|change| {
+            let holds_work = held.contains(&(
                 portable_key(&change.path),
                 change.new_mode.as_str(),
                 change.new_oid.as_str(),
-            ))
+            ));
+            (change.path.clone(), holds_work)
         })
-        .map(|change| change.path.clone())
         .collect())
 }
 

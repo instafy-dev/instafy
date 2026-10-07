@@ -524,7 +524,9 @@ Studio picks its versioning UI per space from the project's default origin:
   removes a recovery ref once `main` holds its work, all of it but what the person kept; a kept
   new name that a disk ignoring case takes for another file of `main` (`todo.md` beside `TODO.md`,
   `Docs/guide.md` beside a file `docs`) keeps the ref, because `main` holds that work under neither
-  name. A ref a restore keeps shows "Restored" only once `main` holds a restore commit for it; a
+  name, and so does any keep that chose no version on the `main` it is restored onto (`main` has
+  no folder there, no file above it and no removal the work's change conflicted with, as when the
+  clash the person kept for has left `main` since). A ref a restore keeps shows "Restored" only once `main` holds a restore commit for it; a
   restore that kept or refused all it held makes none (`committed: false`), so the entry stays
   pending until it is removed. Remove deletes a recovery ref for everyone
   (`POST /git/recovery/dismiss`). A restore of work the saved version already has answers

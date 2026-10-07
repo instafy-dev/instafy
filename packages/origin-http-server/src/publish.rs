@@ -2561,8 +2561,10 @@ impl Publisher<'_> {
     ///   lease on its tip, so the same work is not restored twice, but only
     ///   when every path left out was kept on request: a path refused here
     ///   keeps the ref, so work the person did not choose to leave out is
-    ///   never removed, and so does a kept new name that another file of
-    ///   `main` takes on a disk ignoring case, whose work `main` lacks.
+    ///   never removed, and so does a keep that chose no version of the
+    ///   work's file on the `HEAD` restored onto (a new name another file
+    ///   of `main` takes on a disk ignoring case, or a clash that has left
+    ///   `main` since), whose work `main` lacks.
     /// - A path the restore changes that the shard refuses when the restore
     ///   is published stays as `main` has it, like one the plan refused: it
     ///   is listed in `notRestored` with the shard's reason, and the ref

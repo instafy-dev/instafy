@@ -64,9 +64,10 @@ impl Restore {
     }
 
     /// Whether anything was left out for a reason other than the person's
-    /// own choice, or kept at a new name another file of `main` takes on a
-    /// disk ignoring case: then the work is not all on `main`, and its ref
-    /// stays.
+    /// own choice, or kept where the keep chose no version of the work's
+    /// file (a new name another file of `main` takes on a disk ignoring
+    /// case, or a clash that has left `main` since): then the work is not
+    /// all on `main`, and its ref stays.
     pub(crate) fn left_out_unsaveable(&self) -> bool {
         !self.lets_ref_go
     }

@@ -691,7 +691,10 @@ async fn keep_clears_a_file_and_folder_conflict() {
 /// come back here (a secret, which the conflict never showed; a file the
 /// restored tree ignores) is still refused, not kept on request: the ref
 /// stays, so that work is not removed on the person's behalf. With only
-/// kept paths left out, the ref goes.
+/// kept paths left out, the ref goes when each keep chose `main`'s version
+/// over the work's (`main`'s file `docs` over the work's folder). Keeping a
+/// folder `main` does not have chose no version of the new files in it:
+/// they are on `main` under no name, and the ref stays with them.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_kept_folder_never_lets_refused_work_below_it_go() {
     for mode in MODES {
@@ -722,6 +725,14 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
                 ("most.md", Some(b"most\n")),
             ],
             &only_kept,
+        );
+        let settled = recovery_ref("20261005T124500Z-unsaved-0123456789ae");
+        let settled_commit = space.park(
+            &[
+                ("docs/app.txt", Some(b"app\n")),
+                ("last.md", Some(b"last\n")),
+            ],
+            &settled,
         );
         space.push(&[("docs", Some(b"a file now\n"))], "docs is a file");
         space.push(&[(".gitignore", Some(b"*.log\n"))], "ignore logs");
@@ -785,8 +796,26 @@ async fn a_kept_folder_never_lets_refused_work_below_it_go() {
             reasons(&[("cfg/app.txt", "kept")]),
             "{mode:?}: {body}"
         );
+        assert_eq!(body["refDeleted"], false, "{mode:?}: {body}");
+        assert_eq!(
+            space.canonical_ref(&only_kept).as_deref(),
+            Some(only_kept_commit.as_str()),
+            "{mode:?}"
+        );
+        assert_eq!(space.on_main("most.md").as_deref(), Some(&b"most\n"[..]));
+
+        let body = space
+            .restored(json!({ "ref": settled, "rev": settled_commit, "keep": ["docs"] }))
+            .await;
+        assert_eq!(
+            body["notRestored"],
+            reasons(&[("docs/app.txt", "kept")]),
+            "{mode:?}: {body}"
+        );
         assert_eq!(body["refDeleted"], true, "{mode:?}: {body}");
-        assert_eq!(space.canonical_ref(&only_kept), None, "{mode:?}");
+        assert_eq!(space.canonical_ref(&settled), None, "{mode:?}");
+        assert_eq!(space.on_main("last.md").as_deref(), Some(&b"last\n"[..]));
+        assert_eq!(space.on_main("docs").as_deref(), Some(&b"a file now\n"[..]));
     }
 }
 
@@ -1311,6 +1340,92 @@ async fn a_new_name_that_differs_only_in_case_from_one_main_keeps_is_a_clash() {
                 Some(&b"other\n"[..]),
                 "{mode:?}"
             );
+        }
+    }
+}
+
+/// A keep chosen while `main` had a file whose name a disk ignoring case
+/// takes for the work's new one (`notes.md` for the work's `Notes.md`, a
+/// `TODO.md` `main` gained for its `todo.md`) chose no version of the
+/// work's file. When that file leaves `main` before the restore (the
+/// person's "Use this version" of `notes.md` saves the work's removal of
+/// it, or someone removes `TODO.md`), the keep settles nothing on the
+/// `main` the work is restored onto: the work's file is on `main` under no
+/// name, so the ref stays with it, whether the restore makes a version (with
+/// `other.md`) or not. Restored again without the keep, the file comes back
+/// and the ref goes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_keep_whose_clash_left_main_since_keeps_the_ref() {
+    type Files<'a> = Vec<(&'a str, Option<&'a [u8]>)>;
+    // (seed, the work, then on `main` before the restore that asks, its
+    // clash, the person's keep, then on `main` before the kept restore)
+    let routes: Vec<(Files, Files, Files, serde_json::Value, &str, Files)> = vec![
+        (
+            vec![("notes.md", Some(&b"1\n2\n3\n"[..]))],
+            vec![("notes.md", None), ("Notes.md", Some(&b"1\n2\nwork\n"[..]))],
+            vec![("notes.md", Some(&b"main\n2\n3\n"[..]))],
+            json!(["Notes.md", "notes.md"]),
+            "Notes.md",
+            vec![("notes.md", None)],
+        ),
+        (
+            vec![],
+            vec![("todo.md", Some(&b"work\n"[..]))],
+            vec![("TODO.md", Some(&b"main\n"[..]))],
+            json!(["todo.md"]),
+            "todo.md",
+            vec![("TODO.md", None)],
+        ),
+    ];
+    for mode in MODES {
+        for (seed, work, moved, clashes, kept, removed) in &routes {
+            for with_other in [true, false] {
+                let case = format!("{mode:?} {kept} other {with_other}");
+                let space = Space::new(mode, &[]).await;
+                if !seed.is_empty() {
+                    space.push(seed, "seed");
+                }
+                let reference = recovery_ref("20261005T120000Z-unsaved-0123456789ab");
+                let mut files = work.clone();
+                if with_other {
+                    files.push(("other.md", Some(b"other\n")));
+                }
+                let commit = space.park(&files, &reference);
+                space.push(moved, "main moved");
+                assert_eq!(
+                    space
+                        .conflict(json!({ "ref": reference, "rev": commit }))
+                        .await,
+                    *clashes,
+                    "{case}"
+                );
+                space.push(removed, "the clash goes");
+
+                let body = space
+                    .restored(json!({ "ref": reference, "rev": commit, "keep": [kept] }))
+                    .await;
+                assert_eq!(body["committed"], with_other, "{case}: {body}");
+                assert_eq!(
+                    body["notRestored"],
+                    reasons(&[(kept, "kept")]),
+                    "{case}: {body}"
+                );
+                assert_eq!(body["refDeleted"], false, "{case}: {body}");
+                assert_eq!(
+                    space.canonical_ref(&reference).as_deref(),
+                    Some(commit.as_str()),
+                    "{case}"
+                );
+                assert_eq!(space.on_main(kept), None, "{case}");
+
+                let body = space
+                    .restored(json!({ "ref": reference, "rev": commit }))
+                    .await;
+                assert_eq!(body["notRestored"], json!([]), "{case}: {body}");
+                assert_eq!(body["refDeleted"], true, "{case}: {body}");
+                assert_eq!(space.canonical_ref(&reference), None, "{case}");
+                assert!(space.on_main(kept).is_some(), "{case}");
+            }
         }
     }
 }

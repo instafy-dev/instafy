@@ -141,8 +141,9 @@ pub(super) async fn handle_restore(
 
     // A recovery ref goes once `main` has its work (all of it but what the
     // person chose to keep). A ref holding work that could not be saved
-    // here stays, and so does one whose work a keep left out under a name
-    // `main` holds another file at on a disk ignoring case.
+    // here stays, and so does one whose work a keep left out without
+    // choosing `main`'s version over it (a name `main` holds another file
+    // at on a disk ignoring case, or a clash that has left `main` since).
     let ref_deleted = if !restore.left_out_unsaveable() {
         // A credential of its own: the restore's push may have outlived
         // the one it used.
