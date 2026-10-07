@@ -30,6 +30,26 @@ use crate::config::ProviderConfig;
 
 const DOCKER_COMMAND_OUTPUT_LIMIT: usize = 8_000;
 
+/// The port a runtime's origin listens on inside its container; the compose
+/// file publishes it on the node at the runtime's own host port.
+const ORIGIN_CONTAINER_PORT: u16 = 54332;
+
+/// How the node reaches a runtime origin published at `host_port`: through
+/// its host gateway, which every process on the node can reach, in a
+/// container or not.
+fn node_local_origin_endpoint(host_port: u16) -> String {
+    format!("http://host.docker.internal:{host_port}")
+}
+
+/// The host port in `docker port <container> <port>/tcp` output, as
+/// `0.0.0.0:49153` or `[::]:49153`, one binding per line.
+fn published_host_port(output: &str) -> Option<u16> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().rsplit_once(':'))
+        .find_map(|(_, port)| port.parse::<u16>().ok().filter(|port| *port != 0))
+}
+
 pub struct DockerRuntimeAllocator {
     compose_file: PathBuf,
     compose_dir: PathBuf,
@@ -743,7 +763,10 @@ impl DockerRuntimeAllocator {
         ));
         envs.push(("ORIGIN_HOST_PORT".to_string(), host_port.to_string()));
         envs.push(("ORIGIN_BIND_HOST".to_string(), "0.0.0.0".to_string()));
-        envs.push(("ORIGIN_BIND_PORT".to_string(), "54332".to_string()));
+        envs.push((
+            "ORIGIN_BIND_PORT".to_string(),
+            ORIGIN_CONTAINER_PORT.to_string(),
+        ));
         // The runtime compose stack includes a Codex proxy container. We only need it
         // reachable from within the compose network, so bind it to an ephemeral host
         // port to avoid collisions with the shared proxy service (and other runtimes).
@@ -776,7 +799,7 @@ impl DockerRuntimeAllocator {
                     .unwrap_or_else(|| "127.0.0.1".to_string());
                 format!("{scheme}://{host}:{host_port}")
             })
-            .unwrap_or_else(|| format!("http://host.docker.internal:{host_port}"));
+            .unwrap_or_else(|| node_local_origin_endpoint(host_port));
 
         envs.push(("ORIGIN_ENDPOINT".to_string(), endpoint));
 
@@ -1340,6 +1363,39 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
         .await?)
     }
 
+    async fn origin_endpoint(
+        &self,
+        project_id: Uuid,
+        runtime_id: Uuid,
+        lease_id: Uuid,
+    ) -> anyhow::Result<Option<String>> {
+        let project_name = self.sanitize_project_name(project_id, runtime_id);
+        let running = self.running_service_container_ids(&project_name).await?;
+        // One running container, of exactly that generation.
+        let [container_id] = running.as_slice() else {
+            return Ok(None);
+        };
+        if self.container_lease_id(container_id).await? != Some(lease_id) {
+            return Ok(None);
+        }
+        let container_id = container_id.clone();
+        let output = task::spawn_blocking(move || {
+            Command::new("docker")
+                .arg("port")
+                .arg(&container_id)
+                .arg(format!("{ORIGIN_CONTAINER_PORT}/tcp"))
+                .output()
+        })
+        .await??;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(
+            published_host_port(&String::from_utf8_lossy(&output.stdout))
+                .map(node_local_origin_endpoint),
+        )
+    }
+
     async fn runtime_oom_killed(
         &self,
         project_id: Uuid,
@@ -1418,6 +1474,26 @@ mod tests {
             origin_protocols: Vec::new(),
             origin_metadata: None,
         }
+    }
+
+    #[test]
+    fn the_origin_endpoint_is_the_published_port_on_the_host_gateway() {
+        assert_eq!(
+            published_host_port("0.0.0.0:49153\n[::]:49153\n"),
+            Some(49153)
+        );
+        assert_eq!(published_host_port("[::]:40001\n"), Some(40001));
+        assert_eq!(published_host_port(""), None);
+        assert_eq!(published_host_port("0.0.0.0:0\n"), None);
+        assert_eq!(published_host_port("no such port\n"), None);
+        assert_eq!(
+            published_host_port("49153").map(node_local_origin_endpoint),
+            None
+        );
+        assert_eq!(
+            node_local_origin_endpoint(49153),
+            "http://host.docker.internal:49153"
+        );
     }
 
     fn env_value<'a>(envs: &'a [(String, String)], key: &str) -> Option<&'a str> {
