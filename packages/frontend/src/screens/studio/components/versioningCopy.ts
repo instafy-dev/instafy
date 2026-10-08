@@ -1129,12 +1129,14 @@ export function describeChangeRevertOutcome(
 // ---------------------------------------------------------------------------
 
 // The person stopped the space's machine while the agent was mid-turn. The
-// stop keeps what the turn had not saved, but the chat cannot tell whether
-// there was any, so the copy says "any". Without a History that lists
-// Unsaved work it names no place.
+// turn is not over: it waits in the queue, and a machine that starts picks
+// it up again. The stop keeps what the turn had not saved, but the chat
+// cannot tell whether there was any, so the copy says "any". It names
+// History only when the caller knows History lists that work (see
+// useStoppedTurnNotice), and no place otherwise.
 export function describeStoppedTurn(agentDisplayName: string | null, placement: UnsavedWorkPlacement): string {
   const lead = agentDisplayName
-    ? `${agentDisplayName} was stopped before finishing.`
-    : "The agents were stopped before finishing.";
+    ? `${agentDisplayName} was stopped before finishing. It picks up again when the machine starts.`
+    : "The agents were stopped before finishing. They pick up again when the machine starts.";
   return placement.unsavedWorkInHistory ? `${lead} Any unsaved changes are ${KEPT_IN_UNSAVED_WORK}.` : lead;
 }

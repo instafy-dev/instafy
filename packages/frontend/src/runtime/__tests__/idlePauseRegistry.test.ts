@@ -9,8 +9,10 @@ import {
   isAutoEnsureHeld,
   isIdlePaused,
   isManualStopHeld,
+  manualStopHold,
   markIdlePaused,
   markManualStop,
+  recordManualStopFlush,
 } from "../idlePauseRegistry";
 
 describe("idlePauseRegistry manual stop hold", () => {
@@ -79,6 +81,45 @@ describe("idlePauseRegistry manual stop hold", () => {
     } finally {
       window.removeEventListener(MANUAL_STOP_CHANGED_EVENT, changed);
       window.removeEventListener(IDLE_PAUSE_CLEARED_EVENT, idleCleared);
+    }
+  });
+
+  it("records when the latest Stop was made, and its flush once that stop answers", () => {
+    const changed = vi.fn();
+    window.addEventListener(MANUAL_STOP_CHANGED_EVENT, changed);
+    const now = vi.spyOn(Date, "now");
+    try {
+      expect(manualStopHold("project-a")).toBeNull();
+      now.mockReturnValue(1_000);
+      const first = markManualStop("project-a");
+      expect(manualStopHold("project-a")).toEqual({ at: 1_000, flush: null });
+      expect(first).toBe(manualStopHold("project-a"));
+
+      // A later Stop that again leaves no machine is the one that cut off
+      // what runs now; the first stop's answer no longer describes the hold.
+      now.mockReturnValue(5_000);
+      const second = markManualStop("project-a");
+      expect(manualStopHold("project-a")).toEqual({ at: 5_000, flush: null });
+      recordManualStopFlush("project-a", first, { status: "failed", unpushedRefs: null, error: "origin_timeout" });
+      expect(manualStopHold("project-a")?.flush).toBeNull();
+      expect(changed).toHaveBeenCalledTimes(1);
+
+      const saved = { status: "flushed", unpushedRefs: 0, error: null };
+      recordManualStopFlush("project-a", second, saved);
+      expect(manualStopHold("project-a")).toEqual({ at: 5_000, flush: saved });
+      expect(changed).toHaveBeenCalledTimes(2);
+      expect(isManualStopHeld("project-a")).toBe(true);
+
+      // Lifted on Start, a send or a failed stop: an answer arriving later sets nothing.
+      clearManualStop("project-a");
+      recordManualStopFlush("project-a", second, saved);
+      expect(manualStopHold("project-a")).toBeNull();
+      expect(isManualStopHeld("project-a")).toBe(false);
+      expect(changed).toHaveBeenCalledTimes(3);
+      expect(markManualStop(null)).toBeNull();
+    } finally {
+      now.mockRestore();
+      window.removeEventListener(MANUAL_STOP_CHANGED_EVENT, changed);
     }
   });
 });

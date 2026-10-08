@@ -28,6 +28,7 @@ import {
   clearManualStop,
   clearRestoredAwaitingIntent,
   markManualStop,
+  recordManualStopFlush,
 } from "./idlePauseRegistry";
 import { stopLeavesNoLiveHostedRuntime } from "./hooks/manualStopDecisions";
 import { resolveStartRuntimeParams } from "./hooks/startRuntimeDecisions";
@@ -438,11 +439,12 @@ export function RuntimeOperationsProvider({
       // idle-pause wake for a machine the user never stopped.
       const projectId = resolveProjectId() ?? activeProjectId;
       const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
-      if (holdManualStop) {
-        markManualStop(projectId);
-      }
+      const hold = holdManualStop ? markManualStop(projectId) : null;
       try {
-        await controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" });
+        const stopped = await controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" });
+        // Whether the stop's flush put the work where History lists it: the
+        // chat names that place only then (useStoppedTurnNotice).
+        recordManualStopFlush(projectId, hold, stopped?.flush ?? null);
         showStatus("Runtime termination requested", "info", 2500);
         await refreshRuntimeStatuses();
         return true;

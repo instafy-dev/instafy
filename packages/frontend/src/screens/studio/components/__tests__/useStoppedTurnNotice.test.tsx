@@ -22,6 +22,7 @@ import {
   clearManualStop,
   markIdlePaused,
   markManualStop,
+  recordManualStopFlush,
 } from "../../../../runtime/idlePauseRegistry";
 import { StoppedTurnRow } from "../ChatSystemRows";
 import { ChatTypingRows } from "../ChatTypingRows";
@@ -29,8 +30,10 @@ import { hasStoppedTurn, useStoppedTurnNotice, type StoppedTurnInput } from "../
 
 const PROJECT_ID = "project-stopped-turn";
 const NOW = Date.parse("2026-10-07T12:00:00.000Z");
-const STOPPED_COPY =
-  "Octo was stopped before finishing. Any unsaved changes are kept under History, in Unsaved work.";
+const STOPPED_COPY = "Octo was stopped before finishing. It picks up again when the machine starts.";
+const KEPT_IN_HISTORY = "Any unsaved changes are kept under History, in Unsaved work.";
+/** The stop's flush pushed everything it kept, so History lists it. */
+const SAVED_FLUSH = { status: "flushed", unpushedRefs: 0, error: null };
 const THINKING_LABEL = "Running sleep 120";
 
 const userMessage: ChatMessage = { id: "user-1", role: "user", content: "Make a todo list", timestamp: NOW };
@@ -57,7 +60,7 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
 
 function input(overrides: Partial<StoppedTurnInput> = {}): StoppedTurnInput {
   return {
-    manualStopHeld: true,
+    manualStopAt: NOW + 60_000,
     runtimeReady: false,
     activeRuns: [run()],
     messages: [userMessage],
@@ -73,11 +76,22 @@ describe("hasStoppedTurn", () => {
 
   it("is nothing without a Stop, while a machine is ready, or for a run that had not started", () => {
     // No Stop in this tab: an idle pause between turns holds differently.
-    expect(hasStoppedTurn(input({ manualStopHeld: false }))).toBe(false);
+    expect(hasStoppedTurn(input({ manualStopAt: null }))).toBe(false);
     // Stop is still on its way, or another machine runs the turn.
     expect(hasStoppedTurn(input({ runtimeReady: true }))).toBe(false);
     expect(hasStoppedTurn(input({ activeRuns: [run({ status: "queued" })] }))).toBe(false);
     expect(hasStoppedTurn(input({ activeRuns: [] }))).toBe(false);
+  });
+
+  it("is nothing for a turn that began after the Stop, or one with no known start", () => {
+    // The hold outlives the Stop while a machine that came back without asking
+    // through this tab (a Desktop runtime, another tab) runs later turns.
+    expect(hasStoppedTurn(input({ activeRuns: [run({ createdAt: new Date(NOW + 120_000).toISOString() })] }))).toBe(
+      false,
+    );
+    expect(hasStoppedTurn(input({ activeRuns: [run({ createdAt: null })] }))).toBe(false);
+    expect(hasStoppedTurn(input({ activeRuns: [run({ createdAt: "soon" })] }))).toBe(false);
+    expect(hasStoppedTurn(input({ manualStopAt: NOW }))).toBe(true);
   });
 
   it("is nothing for a finished run", () => {
@@ -169,10 +183,15 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     expect(line()).toBeNull();
     expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
 
-    await act(async () => markManualStop(PROJECT_ID));
+    const hold = markManualStop(PROJECT_ID);
+    await render(<Harness />);
     expect(line()?.textContent).toBe(STOPPED_COPY);
     expect(line()?.getAttribute("role")).toBe("status");
     expect(typingStatus()).toBeNull();
+
+    // History lists the turn's unsaved work once the stop's flush pushed it.
+    await act(async () => recordManualStopFlush(PROJECT_ID, hold, SAVED_FLUSH));
+    expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
 
     // Start or a send lifts the hold, and a machine that comes back picks the turn up again.
     await act(async () => clearManualStop(PROJECT_ID));
@@ -194,16 +213,68 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     expect(line()).toBeNull();
   });
 
+  it("says nothing about a later turn after a machine came back without lifting the hold", async () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      // Machines > Stop on the last hosted machine while the Desktop runtime
+      // keeps the space working; its sends never lift the hold.
+      now.mockReturnValueOnce(NOW + 1_000);
+      markManualStop(PROJECT_ID);
+      const later = run({ id: "run-2", createdAt: new Date(NOW + 60_000).toISOString() });
+      await render(<Harness runtimeReady activeRuns={[later]} />);
+      expect(line()).toBeNull();
+
+      // Mid-turn the Desktop app restarts: the job is requeued, and the run
+      // still reads as in progress. Nobody stopped this turn.
+      await render(<Harness activeRuns={[later]} />);
+      expect(line()).toBeNull();
+      expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
+
+      // A turn the Stop did cut off still says so.
+      await render(<Harness activeRuns={[run(), later]} />);
+      expect(line()?.textContent).toBe(STOPPED_COPY);
+
+      // A later Stop that again leaves no machine is the one that cut it off.
+      now.mockReturnValueOnce(NOW + 120_000);
+      markManualStop(PROJECT_ID);
+      await render(<Harness activeRuns={[later]} />);
+      expect(line()?.textContent).toBe(STOPPED_COPY);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("names History only once the stop's flush pushed all of the turn's work", async () => {
+    const hold = markManualStop(PROJECT_ID);
+    await render(<Harness />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    // Otherwise the work waits on the machine's disk until the next start pushes it.
+    for (const flush of [
+      { status: "flushed", unpushedRefs: 1, error: null },
+      { status: "flushed", unpushedRefs: null, error: null },
+      { status: "failed", unpushedRefs: null, error: "origin_timeout" },
+      { status: "no_writer", unpushedRefs: null, error: null },
+      { status: "not_running", unpushedRefs: null, error: null },
+    ]) {
+      await act(async () => recordManualStopFlush(PROJECT_ID, hold, flush));
+      expect(line()?.textContent).toBe(STOPPED_COPY);
+    }
+
+    await act(async () => recordManualStopFlush(PROJECT_ID, hold, SAVED_FLUSH));
+    expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
+  });
+
   it("names no place where History lists no Unsaved work, and no agent when several work", async () => {
-    markManualStop(PROJECT_ID);
+    recordManualStopFlush(PROJECT_ID, markManualStop(PROJECT_ID), SAVED_FLUSH);
     mocks.versioning = { mode: "legacy", recovery: "unknown" };
     await render(<Harness />);
-    expect(line()?.textContent).toBe("Octo was stopped before finishing.");
+    expect(line()?.textContent).toBe(STOPPED_COPY);
 
     mocks.versioning = { mode: "desktop", recovery: "supported" };
     await render(<Harness agentDisplayName={null} />);
     expect(line()?.textContent).toBe(
-      "The agents were stopped before finishing. Any unsaved changes are kept under History, in Unsaved work.",
+      `The agents were stopped before finishing. They pick up again when the machine starts. ${KEPT_IN_HISTORY}`,
     );
   });
 
@@ -223,5 +294,10 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     expect(typingRows).toBeGreaterThan(-1);
     expect(stoppedRow).toBeGreaterThan(typingRows);
     expect(chatPanel.slice(typingRows, stoppedRow)).not.toContain("</ChatColumn>");
+
+    // Machines > Stop keeps what the stop answered next to the hold it set.
+    const provider = fs.readFileSync(path.resolve(componentsDir, "../../../runtime/RuntimeOperationsProvider.tsx"), "utf8");
+    expect(provider).toContain("const hold = holdManualStop ? markManualStop(projectId) : null;");
+    expect(provider).toContain("recordManualStopFlush(projectId, hold, stopped?.flush ?? null);");
   });
 });
