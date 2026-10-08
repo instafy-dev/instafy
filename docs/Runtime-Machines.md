@@ -556,8 +556,14 @@ loses only work that never reached the remote:
   every shutdown before its flush and anything that takes the workspace
   lock (a save, a publish, a refresh), so a marker another runtime on the
   same folder (or the workspace itself) left never outlives a shutdown that
-  was not durable or could not run, nor a sibling that kept working and
-  then died without one. The marker sits in a directory the workspace
+  was not durable or could not run. A sibling runtime that keeps working
+  after another's durable stop clears that marker with its next save, so
+  while its rolling saves run its edits sit under that marker for about one
+  save interval at most. With rolling saves off,
+  or once its ticks have ended (a refused grant, an expired workspace
+  token), a sibling that is then killed without a shutdown can leave its
+  edits since its last save under the other runtime's marker until the
+  checkout is evicted. The marker sits in a directory the workspace
   can write, so it is a hint for eviction, never proof on its own. The next publish
   or pre-turn refresh with `git.write` pushes the refs. Work parked only
   locally is lost if the node is replaced before that push. Desktop folders
