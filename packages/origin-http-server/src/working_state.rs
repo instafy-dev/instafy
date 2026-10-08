@@ -539,17 +539,22 @@ fn local_only(git: &WorkspaceGit<'_>, held_back: &BTreeSet<String>) -> Result<us
         .count())
 }
 
-/// HEAD plus `(path, mtime, size, mode)` of every path the publish filter
-/// lets through, and how many there are. Never takes `index.lock`.
+/// HEAD and the tracked `main` (a publish may move only `main`, onto the
+/// folder's own commits) plus `(path, mtime, size, mode)` of every path the
+/// publish filter lets through, and how many there are. Never takes
+/// `index.lock`.
 fn fingerprint(
     publisher: &Publisher<'_>,
     status: &[(String, bool)],
 ) -> Result<(Fingerprint, usize)> {
     let head = publisher.git.commit_id("HEAD")?;
+    let main = publisher.tracked_main()?;
     let root = publisher.git.root();
     let mut hasher = Sha256::new();
     hasher.update(b"instafy-working-state-v1\0");
     hasher.update(head.unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(main.unwrap_or_default().as_bytes());
     hasher.update(b"\0");
     let mut listed = 0usize;
     for (path, deleted) in status {

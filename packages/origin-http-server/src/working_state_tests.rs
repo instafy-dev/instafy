@@ -369,6 +369,44 @@ fn an_unchanged_folder_pushes_nothing_and_needs_no_write_access() {
     assert_eq!(fx.slot().unwrap().1, before);
 }
 
+/// A publish that moves only `main` (it fast-forwards to the folder's own
+/// commits, as Studio's save of an agent's commits does) is a change: HEAD
+/// and the files are the same, but the slot holds work `main` now has, and
+/// the next save deletes it.
+#[test]
+fn a_publish_that_moves_only_main_is_a_change() {
+    let fx = Fixture::new();
+    fx.write("notes.md", b"agent work\n");
+    ig(&fx.ws, &["add", "-A"]);
+    ig(
+        &fx.ws,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@instafy.dev",
+            "commit",
+            "-q",
+            "-m",
+            "agent work",
+        ],
+    );
+    let state = fx.save(PersistReason::Tick);
+    assert!(state.durable && state.error.is_none(), "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("agent work\n"));
+    assert!(!fx.state().changed);
+
+    ig(&fx.ws, &["push", "-q", "origin", "HEAD:main"]);
+    ig(&fx.ws, &["fetch", "-q", "origin"]);
+    let state = fx.state();
+    assert!(state.changed, "{state:?}");
+    let state = fx.save(PersistReason::Tick);
+    assert!(state.durable && state.error.is_none(), "{state:?}");
+    assert_eq!(state.unsaved, 0);
+    assert_eq!(fx.slot(), None);
+    assert!(!fx.state().changed);
+}
+
 #[test]
 fn nothing_unsaved_deletes_the_slot() {
     let fx = Fixture::new();

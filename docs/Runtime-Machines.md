@@ -583,8 +583,11 @@ node's checkout a cache.
   for an unrelated history), names its last writer in `Instafy-Origin`, and
   passes the same publish filter as every save.
 - A tick first asks the origin in process whether the folder changed since
-  its last confirmed save (`git status` without taking `index.lock`, then
-  each candidate's size, mode and mtime). Unchanged, it ends with no
+  its last confirmed save (HEAD, the tracked `main`, `git status` without
+  taking `index.lock`, then each candidate's size, mode and mtime). A
+  publish that moved only `main` onto the folder's own commits counts as a
+  change, so the next save drops the slot's copy of that work. Unchanged, it
+  ends with no
   controller call. Otherwise the runtime asks the controller for a one-minute
   `workspace.persist` grant with the job's workspace token. The controller
   grants it only for a write job leased by this runtime (or cancelled in the
@@ -605,9 +608,9 @@ node's checkout a cache.
   for the next one; while a stop's fence is up it answers 503. Ticks never
   overlap and a missed one is not queued.
 - Cost, measured with 20 or 200 changed files alike: an unchanged folder
-  costs 5 git processes and no controller call; a changed tick about 37 git
+  costs 6 git processes and no controller call; a changed tick about 38 git
   processes, a grant and a `git.write` token from the controller, one leased
-  push and one `ls-remote`; a turn-end save with nothing new about 23 git
+  push and one `ls-remote`; a turn-end save with nothing new about 24 git
   processes and no network. About 1,100 git processes per runtime-hour of
   continuous edits. Every git command in a checkout first checks that the
   repository config holds only data; that config is parsed again only when
