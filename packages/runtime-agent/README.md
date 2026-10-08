@@ -126,6 +126,25 @@ receipts. The existing bounded recovery attempt preserves permissions and output
 retaining evidence from the first attempt. See [Execution Evidence and Recovery](../../docs/Multi-Agent-Evaluation.md#execution-evidence-and-recovery)
 for receipt limitations and compatibility behavior.
 
+## Code-mode cell diagnostics
+
+The run log's `tool.activity` events never carry tool text, ids, names or paths. For function
+and custom tool items they add `phase` (`call` or `output`) and, on an output, `success` (`true`,
+`false`, or `null` for an interrupted call). An output of the code-mode `exec` tool, or of the
+`wait` tool that resumes a cell `exec` left `running`, also carries `status`, read from the
+cell's status line: `completed`, `script_failed`, `terminated` or `running`. When no cell result
+came back, `status` is `harness_error` with an `error_class` of `host_spawn_failed`,
+`host_handshake_failed`, `host_startup_timeout`, `host_exited`, `host_timeout`,
+`session_shutdown` or `other`, and the runtime log gets a warning naming the job, the tool and
+the class.
+
+The code-mode host's stderr (V8 fatal errors, panics) stays out of the runtime log by default:
+Codex logs it at debug. To debug a host that will not start, turn it on for that target only,
+for example `RUST_LOG=info,codex_code_mode::remote_session=debug`. It is usually a few lines per
+host spawn, but a host panic can print the running cell's output as one long line, including
+file contents or environment values the script read and image data URLs, so turn it off again
+once the cause is known.
+
 ## Structured file results
 
 Structured responses may include workspace files as read references using `change: "read"`,

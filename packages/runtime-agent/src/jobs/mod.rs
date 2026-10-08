@@ -6017,6 +6017,7 @@ impl JobProcessor {
             tracing::info!(job_id = %job.id, context = %primary_context, "routing preflight history projection");
             let preflight_options = CodexRunOptions {
                 usage_observer: Some(task_usage.call(UsagePhase::Routing)),
+                job_id: Some(job.id),
                 disable_shell_tool: true,
                 disable_final_output_json_schema: false,
                 final_output_schema: CodexFinalOutputSchema::RoutingPreflight,
@@ -6129,6 +6130,7 @@ impl JobProcessor {
         let mut codex_run_options = CodexRunOptions {
             usage_observer: Some(task_usage.call(UsagePhase::Main)),
             project_id: Some(project_id),
+            job_id: Some(job.id),
             disable_shell_tool: explicit_personal_browser_execution
                 || explicit_shared_browser_execution,
             disable_final_output_json_schema: final_output_mode.disable_final_output_json_schema(),
