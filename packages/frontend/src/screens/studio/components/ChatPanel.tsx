@@ -151,6 +151,7 @@ import { useRunFailureRetryActions } from "./useRunFailureRetryActions";
 import {
   buildTimedSyntheticChatRows,
   ChatPostTranscriptAuxiliaryRows,
+  StoppedTurnRow,
   WorkspaceStartStalledRow,
 } from "./ChatSystemRows";
 import { useUnsavedWorkNotice } from "./useUnsavedWorkNotice";
@@ -242,6 +243,7 @@ import { useChatComposerPreviewTab } from "./useChatComposerPreviewTab";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
 import { useStalledWorkspaceStart } from "./useStalledWorkspaceStart";
+import { useStoppedTurnNotice } from "./useStoppedTurnNotice";
 import {
   isServerQueuedChatSendItem,
   useChatServerSendQueue,
@@ -3072,6 +3074,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ensureHostedRuntime: projectWriteDisabled ? null : ensureHostedRuntime,
     showStatus,
   });
+  // A turn the person's Machines > Stop cut off says so in place of the
+  // typing status, which would otherwise read as still working.
+  const stoppedTurnNotice = useStoppedTurnNotice({
+    projectId: activeProjectId ?? null,
+    runtimeReady,
+    activeRuns: activeConversationRuns,
+    messages,
+    agentDisplayName: hasMultipleTypingAgents ? null : typingAgentDisplayName,
+  });
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({
     displayNames: hasMultipleTypingAgents
       ? typingAgents.map((agent) => agent.displayName)
@@ -5824,12 +5835,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               typingIndicatorState={typingIndicatorState}
               typingStatusLabel={typingStatusLabel}
               typingStatusAriaLabel={typingStatusAriaLabel}
-              suppressAssistantStatus={showOutOfCreditsNotice || workspaceStartStall.showNotice}
+              suppressAssistantStatus={
+                showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null
+              }
               isThinkingLabelExpanded={isThinkingLabelExpanded}
               onToggleThinkingLabel={() => setIsThinkingLabelExpanded((current) => !current)}
               latestDisplayedMessageId={displayedMessages[displayedMessages.length - 1]?.id ?? null}
               renderAssistantAvatar={renderAssistantAvatar}
             />
+            {stoppedTurnNotice ? <StoppedTurnRow text={stoppedTurnNotice} /> : null}
             {workspaceStartStall.showNotice ? (
               <WorkspaceStartStalledRow
                 agentDisplayName={hasMultipleTypingAgents ? null : typingAgentDisplayName}

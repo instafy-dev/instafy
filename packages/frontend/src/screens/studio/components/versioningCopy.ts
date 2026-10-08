@@ -807,6 +807,17 @@ export interface UnsavedWorkPlacement {
   saveVersionInChanges?: boolean;
 }
 
+// Only a History drawer with an Unsaved work section can be pointed at: the
+// stateless gateway has one, a Desktop origin once it lists recovery. A
+// space that keeps versions the old way still saves from Changes.
+export function unsavedWorkPlacementFor(versioning: { mode: VersioningMode; recovery: string }): UnsavedWorkPlacement {
+  return {
+    unsavedWorkInHistory:
+      versioning.mode === "stateless" || (versioning.mode === "desktop" && versioning.recovery === "supported"),
+    saveVersionInChanges: versioning.mode === "legacy",
+  };
+}
+
 function keptAs({ unsavedWorkInHistory }: UnsavedWorkPlacement): string {
   return unsavedWorkInHistory ? KEPT_IN_UNSAVED_WORK : "kept as unsaved work";
 }
@@ -1106,4 +1117,19 @@ export function describeChangeRevertOutcome(
     return outcome("error", STATELESS_UNREACHABLE_COPY);
   }
   return outcome("error", CHANGE_REVERT_FALLBACK_MESSAGE, { offerAgentUndo: true });
+}
+
+// ---------------------------------------------------------------------------
+// Chat: a turn the person's Stop cut off
+// ---------------------------------------------------------------------------
+
+// The person stopped the space's machine while the agent was mid-turn. The
+// stop keeps what the turn had not saved, but the chat cannot tell whether
+// there was any, so the copy says "any". Without a History that lists
+// Unsaved work it names no place.
+export function describeStoppedTurn(agentDisplayName: string | null, placement: UnsavedWorkPlacement): string {
+  const lead = agentDisplayName
+    ? `${agentDisplayName} was stopped before finishing.`
+    : "The agents were stopped before finishing.";
+  return placement.unsavedWorkInHistory ? `${lead} Any unsaved changes are ${KEPT_IN_UNSAVED_WORK}.` : lead;
 }

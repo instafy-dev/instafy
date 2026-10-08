@@ -35,6 +35,7 @@ import {
   revertAnswerCode,
   revertCheckFailedCopy,
   revertRetryDelayMs,
+  unsavedWorkPlacementFor,
 } from "./versioningCopy";
 import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 
@@ -357,14 +358,7 @@ export function ChatFileChangeList({
   // How the space keeps versions. Instances share one probe and cache, and
   // the store's origin counts only when it belongs to this card's project.
   const versioning = useWorkspaceVersioningForProject({ projectId });
-  // Only a History drawer with an Unsaved work section can be pointed at:
-  // the stateless gateway has one, a Desktop origin once it lists recovery.
-  // A space that keeps versions the old way still saves from Changes.
-  const unsavedWorkPlacement = {
-    unsavedWorkInHistory:
-      versioning.mode === "stateless" || (versioning.mode === "desktop" && versioning.recovery === "supported"),
-    saveVersionInChanges: versioning.mode === "legacy",
-  };
+  const unsavedWorkPlacement = unsavedWorkPlacementFor(versioning);
   // Every save is a version on the stateless gateway and on a Desktop origin.
   // There the change is undone by reverting the version its save published
   // (the canonical range's head) as a new version, never by discarding

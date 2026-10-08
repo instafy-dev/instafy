@@ -50,6 +50,7 @@ const GATED_FILES = [
   resolve(components, "unsavedWorkPathChecks.ts"),
   resolve(components, "historyFocus.ts"),
   resolve(components, "useUnsavedWorkNotice.ts"),
+  resolve(components, "useStoppedTurnNotice.ts"),
   resolve(src, "components/DrawerHeader.tsx"),
   // Diff and review panels.
   resolve(components, "GitReviewView.tsx"),
@@ -85,6 +86,7 @@ const GATED_FILES = [
   resolve(components, "__tests__/FilesPanel.save.test.tsx"),
   resolve(components, "__tests__/HistoryDrawer.test.tsx"),
   resolve(components, "__tests__/HistoryDrawer.unsavedWork.test.tsx"),
+  resolve(components, "__tests__/useStoppedTurnNotice.test.tsx"),
   // Docs.
   // Settings categories and the chat runtime-switch notes this work touched.
   resolve(components, "SettingsPanel.tsx"),

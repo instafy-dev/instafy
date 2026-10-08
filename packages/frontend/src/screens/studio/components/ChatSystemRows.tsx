@@ -167,6 +167,21 @@ export function WorkspaceStartStalledRow({
   );
 }
 
+/**
+ * Stands in for the typing status while a turn the person's Stop cut off
+ * waits for a machine (see useStoppedTurnNotice). A calm line rather than a
+ * warning: the person stopped it on purpose.
+ */
+export function StoppedTurnRow({ text }: { text: string }) {
+  return (
+    <ChatBubbleRow align="left" avatar={ASSISTANT_AVATAR_GUTTER_PLACEHOLDER}>
+      <Text as="div" variant="body" tone="muted" role="status" className="px-1" data-testid="chat-stopped-turn">
+        {text}
+      </Text>
+    </ChatBubbleRow>
+  );
+}
+
 export function unsavedWorkNoticeDescription(count: number): string {
   return count > 1
     ? `${count} entries are kept in History, under Unsaved work, until someone restores or removes them.`

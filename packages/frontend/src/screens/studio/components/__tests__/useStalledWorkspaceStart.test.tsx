@@ -398,7 +398,7 @@ describe("stalled workspace start in the chat", () => {
     expect(chatPanel).toContain("runtimeLimitReached: Boolean(runtimeEnsureLimit?.limitReached),");
     expect(chatPanel).toContain("ensureHostedRuntime: projectWriteDisabled ? null : ensureHostedRuntime,");
     expect(chatPanel).toContain(
-      "suppressAssistantStatus={showOutOfCreditsNotice || workspaceStartStall.showNotice}",
+      "showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null",
     );
     expect(chatPanel).toContain("onRetry={workspaceStartStall.retry}");
     // The notice takes the typing status's place, right after it.
