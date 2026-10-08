@@ -1161,6 +1161,51 @@ fn list_runtime_containers(prefix: &str) -> anyhow::Result<(Vec<ContainerFacts>,
     Ok((facts, truncated))
 }
 
+/// The running containers of compose service `service` in compose project
+/// `project`, from one read-only `docker ps` that takes no compose permit:
+/// a stop's origin lookup never waits behind other runtimes' compose up or
+/// down. The arguments are fixed; the names are matched here.
+fn running_compose_service_containers(project: &str, service: &str) -> anyhow::Result<Vec<String>> {
+    let output = Command::new("docker")
+        .arg("ps")
+        .arg("--filter")
+        .arg("label=com.docker.compose.project")
+        .arg("--filter")
+        .arg("status=running")
+        .arg("--format")
+        .arg("{{.ID}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}")
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "docker ps failed: {}",
+        summarize_command_output(&output)
+    );
+    Ok(service_containers(
+        &String::from_utf8_lossy(&output.stdout),
+        project,
+        service,
+    ))
+}
+
+/// The container ids in `docker ps` lines of `<id>\t<project>\t<service>`
+/// that belong to `service` in `project`.
+fn service_containers(listing: &str, project: &str, service: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let (Some(id), Some(listed_project), Some(listed_service)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return None;
+            };
+            let id = id.trim();
+            (!id.is_empty() && listed_project.trim() == project && listed_service.trim() == service)
+                .then(|| id.to_string())
+        })
+        .collect()
+}
+
 fn summarize_command_output(output: &Output) -> String {
     let code = output
         .status
@@ -1400,7 +1445,11 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
             return Ok(None);
         }
         let project_name = self.sanitize_project_name(project_id, runtime_id);
-        let running = self.running_service_container_ids(&project_name).await?;
+        let service = self.service_name.clone();
+        let running = task::spawn_blocking(move || {
+            running_compose_service_containers(&project_name, &service)
+        })
+        .await??;
         // One running container, of exactly that generation.
         let [container_id] = running.as_slice() else {
             return Ok(None);
@@ -1559,7 +1608,20 @@ mod tests {
     async fn a_remote_controller_is_told_no_origin() {
         let mut allocator = DockerRuntimeAllocator::new(&ProviderConfig::default_docker()).unwrap();
         allocator.controller_base_url = Some("https://controller.example.com".to_string());
-        // Every compose operation slot is taken: any container lookup would wait.
+        let answer = allocator
+            .origin_endpoint(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4())
+            .await
+            .expect("answered without looking at containers");
+        assert_eq!(answer, None);
+    }
+
+    /// A stop's origin lookup reads containers without a compose permit, so
+    /// it answers while other runtimes' compose up or down hold every one.
+    #[tokio::test]
+    async fn the_origin_lookup_never_waits_for_compose_operations() {
+        let mut allocator = DockerRuntimeAllocator::new(&ProviderConfig::default_docker()).unwrap();
+        allocator.controller_base_url = None;
+        allocator.project_prefix = "origin-lookup-test-".to_string();
         let permits = allocator.compose_semaphore.available_permits() as u32;
         let _held = allocator
             .compose_semaphore
@@ -1567,14 +1629,31 @@ mod tests {
             .acquire_many_owned(permits)
             .await
             .unwrap();
+        // Without Docker here the lookup fails; either way it answers.
         let answer = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(20),
             allocator.origin_endpoint(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()),
         )
         .await
-        .expect("answered without looking at containers")
-        .unwrap();
-        assert_eq!(answer, None);
+        .expect("the lookup waited for a compose permit");
+        if let Ok(endpoint) = answer {
+            assert_eq!(endpoint, None, "no such runtime here");
+        }
+    }
+
+    #[test]
+    fn the_origin_lookup_keeps_only_that_projects_service() {
+        let listing = "aaa\tinstafy-runtime-p-1\truntime\n\
+                       bbb\tinstafy-runtime-p-1\tproxy\n\
+                       ccc\tinstafy-runtime-p-10\truntime\n\
+                       \tinstafy-runtime-p-1\truntime\n\
+                       ddd\tinstafy-runtime-p-1\n\
+                       eee\tinstafy-runtime-p-1\truntime\n";
+        assert_eq!(
+            service_containers(listing, "instafy-runtime-p-1", "runtime"),
+            vec!["aaa".to_string(), "eee".to_string()]
+        );
+        assert!(service_containers("", "instafy-runtime-p-1", "runtime").is_empty());
     }
 
     fn env_value<'a>(envs: &'a [(String, String)], key: &str) -> Option<&'a str> {
