@@ -1,4 +1,5 @@
 import type { RunRecord } from "../types";
+import { readRunInterruption } from "./runInterruption";
 
 export const ACTIVE_CONVERSATION_RUN_STATUSES: ReadonlySet<RunRecord["status"]> = new Set([
   "queued",
@@ -45,6 +46,21 @@ export function isAwaitingLeaseRunStale(
   return nowMs > expiresAt;
 }
 
+/**
+ * A turn a stop put back in the queue keeps waiting for a machine until the
+ * controller may give up on it (`resumeBy`, 15 minutes after the stop), not
+ * the five minutes a queued run gets, and never longer than an in-progress
+ * run stays live. Without a readable `resumeBy` the five minutes apply.
+ */
+function resolveQueuedRunStaleAfter(run: RunRecord, activityTimestamp: number): number {
+  const staleAfter = activityTimestamp + STALE_QUEUED_RUN_TIMEOUT_MS;
+  const resumeByMs = readRunInterruption(run)?.resumeByMs ?? null;
+  if (resumeByMs === null) {
+    return staleAfter;
+  }
+  return Math.max(staleAfter, Math.min(resumeByMs, activityTimestamp + STALE_IN_PROGRESS_RUN_TIMEOUT_MS));
+}
+
 export function isQueuedRunStale(run: RunRecord, nowMs = Date.now()): boolean {
   if (run.status !== "queued") {
     return false;
@@ -53,7 +69,7 @@ export function isQueuedRunStale(run: RunRecord, nowMs = Date.now()): boolean {
   if (activityTimestamp <= 0) {
     return false;
   }
-  return nowMs - activityTimestamp > STALE_QUEUED_RUN_TIMEOUT_MS;
+  return nowMs > resolveQueuedRunStaleAfter(run, activityTimestamp);
 }
 
 export function isInProgressRunStale(run: RunRecord, nowMs = Date.now()): boolean {

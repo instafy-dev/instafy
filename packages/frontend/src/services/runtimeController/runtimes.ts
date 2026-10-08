@@ -357,6 +357,17 @@ export async function stopRuntime(
     });
 
     if (!response.ok) {
+      const releasePending =
+        response.status === 502 ? await readReleasePendingStop(response.clone()) : null;
+      if (releasePending) {
+        throw new ControllerApiError({
+          status: response.status,
+          message: "runtime provider cleanup is still pending",
+          code: RUNTIME_STOP_RELEASE_PENDING,
+          details: releasePending,
+          url: response.url,
+        });
+      }
       // Keep status and code on the error so callers can tell a controller
       // refusal (409: nothing left to release) apart from a transport failure.
       throw new ControllerApiError(
@@ -371,6 +382,68 @@ export async function stopRuntime(
     console.warn("[runtime-controller] stopRuntime error:", message);
     throw error;
   }
+}
+
+/** The controller's `skip_reason` for a stop whose provider release is still pending. */
+const RUNTIME_STOP_RELEASE_PENDING = "provider_cleanup_pending";
+/** The controller's 502 when a removal's provider release is still pending. */
+const RUNTIME_REMOVE_RELEASE_PENDING_MESSAGE = "runtime provider cleanup is still pending; retry removal";
+/** The controller's 409 when the machine's lease generation was already released. */
+const RUNTIME_LEASE_NO_LONGER_CURRENT = "runtime lease generation is no longer current";
+
+/** What a 502 stop answer kept, when it is the controller's release-pending answer. */
+async function readReleasePendingStop(response: Response): Promise<StopRuntimeResult | null> {
+  const body = (await response.json().catch(() => null)) as {
+    skip_reason?: unknown;
+    flush?: unknown;
+  } | null;
+  return body?.skip_reason === RUNTIME_STOP_RELEASE_PENDING
+    ? { flush: parseRuntimeStopFlush(body.flush) }
+    : null;
+}
+
+/**
+ * What a stop or removal that answered `error` still did, or null when it may
+ * have changed nothing. The controller commits a stop's quarantine (the
+ * machine fenced off, its running turn put back in the queue) before it asks
+ * the provider to release the machine, so two error answers follow a stop
+ * that took effect: a 502 `provider_cleanup_pending`, when that release
+ * failed or ran out of time and the next ensure or a sweep retries it, and a
+ * 409 "runtime lease generation is no longer current", when another stop
+ * released the same machine first. After any other failure the machine may
+ * still be running.
+ */
+export function committedRuntimeStop(error: unknown): StopRuntimeResult | null {
+  if (!(error instanceof ControllerApiError)) {
+    return null;
+  }
+  if (error.code === RUNTIME_STOP_RELEASE_PENDING) {
+    const details = error.details as Partial<StopRuntimeResult> | null;
+    return { flush: details?.flush ?? null };
+  }
+  if (error.status === 409 && error.message.trim().toLowerCase() === RUNTIME_LEASE_NO_LONGER_CURRENT) {
+    return { flush: null };
+  }
+  return null;
+}
+
+/**
+ * Whether a stop or removal that answered `error` was refused before it
+ * changed anything, so the machine is as it was: a 4xx answer other than the
+ * committed stop's 409 (committedRuntimeStop), such as a 409 for a machine
+ * missing its active lease generation, a 403 or a 404. A 5xx answer or none
+ * at all (a network failure or a timeout) is no such refusal: the controller
+ * commits a stop before it finishes and answers, and a proxy or the browser
+ * can give up while the provider releases the machine, which takes up to
+ * three minutes.
+ */
+export function runtimeStopRefused(error: unknown): boolean {
+  return (
+    error instanceof ControllerApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    committedRuntimeStop(error) === null
+  );
 }
 
 export interface StopRuntimeIfIdleResult {
@@ -454,18 +527,23 @@ export interface RemoveRuntimeParams {
   accessToken?: string | null;
 }
 
+/**
+ * Null when nothing was asked (no controller, or signed out). A removal stops
+ * the machine first, so it answers what that stop kept, and its error answers
+ * read like a stop's (committedRuntimeStop).
+ */
 export async function removeRuntime(
   params: RemoveRuntimeParams,
-): Promise<boolean> {
+): Promise<StopRuntimeResult | null> {
   if (!runtimeControllerEnabled) {
-    return false;
+    return null;
   }
   const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
-    return false;
+    return null;
   }
 
   try {
@@ -482,12 +560,18 @@ export async function removeRuntime(
     });
 
     if (!response.ok) {
-      throw new Error(
-        await readControllerError(response, "remove runtime failed", requestContext),
+      const failure = await readControllerApiError(response, "remove runtime failed", requestContext);
+      // The controller names a removal whose release is still pending only in
+      // its message; give it the code a stop's answer carries.
+      throw new ControllerApiError(
+        response.status === 502 && failure.message === RUNTIME_REMOVE_RELEASE_PENDING_MESSAGE
+          ? { ...failure, code: RUNTIME_STOP_RELEASE_PENDING, details: { flush: null } }
+          : failure,
       );
     }
 
-    return true;
+    const body = (await response.json().catch(() => null)) as { flush?: unknown } | null;
+    return { flush: parseRuntimeStopFlush(body?.flush) };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] removeRuntime error:", message);

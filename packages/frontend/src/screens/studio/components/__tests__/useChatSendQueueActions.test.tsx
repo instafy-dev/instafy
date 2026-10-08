@@ -273,6 +273,30 @@ describe("useChatSendQueueActions", () => {
     expect(options.dispatchServerSendQueueEntryNow).not.toHaveBeenCalled();
   });
 
+  it("sends a message a stop left unsent only when its sender asks, through the controller", async () => {
+    // The controller fails what was queued behind a turn a person stopped
+    // once it gives that turn up; send now takes a failed entry.
+    const unsent = createServerItem({
+      status: "failed",
+      errorMessage: "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.",
+    });
+    const options = createOptions({ runtimeReady: true, serverSendQueueItems: [unsent] });
+    // A machine that is ready, or comes back, does not send it.
+    await renderHook(options);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(options.dispatchServerSendQueueEntryNow).not.toHaveBeenCalled();
+
+    // Nor does a stopped machine keep its sender from sending it now.
+    const resultRef = await renderHook({ ...options, runtimeReady: false });
+    await act(async () => {
+      await resultRef.current?.handleSendQueuedMessageNow("entry-1");
+    });
+    expect(options.dispatchServerSendQueueEntryNow).toHaveBeenCalledWith("entry-1");
+    expect(options.submitMessage).not.toHaveBeenCalled();
+  });
+
   it("still auto-drains localStorage fallback entries once the runtime is free", async () => {
     const options = createOptions({
       chatSendQueue: [createLocalItem()],

@@ -32,6 +32,8 @@ vi.mock("../../../sdk/instafy", async () => {
   };
 });
 
+import { ControllerApiError } from "../../../services/runtimeController/core";
+import { stopUnderManualHold } from "../manualStopDecisions";
 import {
   STALLED_LAUNCH_RETRY_FAILED_MESSAGE,
   useHostedRuntimeEnsure,
@@ -169,6 +171,25 @@ describe("useHostedRuntimeEnsure force", () => {
       clearManualStop(PROJECT_ID);
       clearRestoredAwaitingIntent(PROJECT_ID);
       clearIdlePaused(PROJECT_ID);
+    }
+  });
+
+  it("lifts the hold a Stop kept after an error answer", async () => {
+    const hold = markManualStop(PROJECT_ID);
+    try {
+      await expect(
+        stopUnderManualHold(PROJECT_ID, hold, async () => {
+          throw new ControllerApiError({ status: 500, message: "failed to finalize runtime stop", code: null, details: null });
+        }),
+      ).rejects.toThrow("failed to finalize runtime stop");
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+
+      await act(async () => {
+        await ensureHostedRuntime!();
+      });
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+    } finally {
+      clearManualStop(PROJECT_ID);
     }
   });
 

@@ -1,12 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ensureRuntime, fetchRuntimeStatus, startRuntime, stopRuntime } from "../runtimes";
+import {
+  committedRuntimeStop,
+  ensureRuntime,
+  fetchRuntimeStatus,
+  removeRuntime,
+  runtimeStopRefused,
+  startRuntime,
+  stopRuntime,
+} from "../runtimes";
+import { ControllerApiError } from "../core";
 import { CONTROLLER_READ_BUDGET_MS } from "../readBudget";
 
 const { resolveContext, readError } = vi.hoisted(() => ({
   resolveContext: vi.fn(),
   readError: vi.fn(),
 }));
-vi.mock("../core", () => ({
+vi.mock("../core", async () => ({
+  // The error type and the reading of an error answer are the real ones.
+  ...(await vi.importActual<typeof import("../core")>("../core")),
   runtimeControllerEnabled: true,
   resolveControllerRequestContext: resolveContext,
   readControllerError: readError,
@@ -225,5 +236,181 @@ describe("stopRuntime", () => {
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
     await expect(stopRuntime({ runtimeId: "runtime-1" })).resolves.toEqual({ flush: null });
+  });
+});
+
+describe("a stop that answers an error", () => {
+  beforeEach(() => {
+    resolveContext.mockResolvedValue(context);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function answer(status: number, body: string) {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status })));
+  }
+
+  async function stopError(): Promise<unknown> {
+    return stopRuntime({ runtimeId: "runtime-1", reason: "user_stop" }).then(
+      () => {
+        throw new Error("the stop resolved");
+      },
+      (error: unknown) => error,
+    );
+  }
+
+  it("took effect when only the machine's release is still pending", async () => {
+    // The controller had committed the quarantine: the machine is fenced off
+    // and its running turn is back in the queue. The next ensure or a sweep
+    // retries the release.
+    answer(
+      502,
+      JSON.stringify({
+        ok: false,
+        status_changed: false,
+        provider_release_attempted: true,
+        provider_release_succeeded: false,
+        skip_reason: "provider_cleanup_pending",
+        flush: { status: "flushed", unpushedRefs: 0, unpushedRefNames: [] },
+      }),
+    );
+    const error = await stopError();
+
+    expect(error).toBeInstanceOf(ControllerApiError);
+    expect(error).toMatchObject({
+      status: 502,
+      code: "provider_cleanup_pending",
+      message: "runtime provider cleanup is still pending",
+    });
+    expect(committedRuntimeStop(error)).toEqual({ flush: { status: "flushed", unpushedRefs: 0, error: null } });
+    expect(runtimeStopRefused(error)).toBe(false);
+
+    answer(502, JSON.stringify({ ok: false, status_changed: false, skip_reason: "provider_cleanup_pending" }));
+    expect(committedRuntimeStop(await stopError())).toEqual({ flush: null });
+  });
+
+  it("took effect when another stop released the same machine first", async () => {
+    answer(409, JSON.stringify({ message: "runtime lease generation is no longer current" }));
+    const error = await stopError();
+    expect(committedRuntimeStop(error)).toEqual({ flush: null });
+    expect(runtimeStopRefused(error)).toBe(false);
+  });
+
+  it("may have taken effect after a 5xx answer or none", async () => {
+    for (const [status, body] of [
+      // A proxy in front of the controller, not the controller's answer.
+      [502, "<html>Bad Gateway</html>"],
+      [502, JSON.stringify({ ok: false, status_changed: false })],
+      [504, "<html>Gateway Timeout</html>"],
+      [500, JSON.stringify({ message: "failed to finalize runtime stop" })],
+    ] as const) {
+      answer(status, body);
+      const error = await stopError();
+      expect(error, `${status} ${body}`).toBeInstanceOf(ControllerApiError);
+      expect(committedRuntimeStop(error), `${status} ${body}`).toBeNull();
+      expect(runtimeStopRefused(error), `${status} ${body}`).toBe(false);
+    }
+
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
+    const unanswered = await stopError();
+    expect(committedRuntimeStop(unanswered)).toBeNull();
+    expect(runtimeStopRefused(unanswered)).toBe(false);
+    expect(committedRuntimeStop(null)).toBeNull();
+  });
+
+  it("was refused, leaving the machine as it was, after any other 4xx answer", async () => {
+    for (const [status, body] of [
+      [409, JSON.stringify({ message: "provider-managed runtime is missing its active lease generation" })],
+      [403, JSON.stringify({ message: "forbidden" })],
+      [404, JSON.stringify({ message: "runtime not found" })],
+    ] as const) {
+      answer(status, body);
+      const error = await stopError();
+      expect(committedRuntimeStop(error), `${status} ${body}`).toBeNull();
+      expect(runtimeStopRefused(error), `${status} ${body}`).toBe(true);
+    }
+  });
+});
+
+describe("removeRuntime", () => {
+  beforeEach(() => {
+    resolveContext.mockResolvedValue(context);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function answer(status: number, body: string) {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status })));
+  }
+
+  async function removeError(): Promise<unknown> {
+    return removeRuntime({ runtimeId: "runtime-1", reason: "user_remove" }).then(
+      () => {
+        throw new Error("the removal resolved");
+      },
+      (error: unknown) => error,
+    );
+  }
+
+  it("returns what the removal's flush did to keep the workspace's work", async () => {
+    answer(200, JSON.stringify({ ok: true, flush: { status: "flushed", unpushedRefs: 0, unpushedRefNames: [] } }));
+    await expect(removeRuntime({ runtimeId: "runtime-1", reason: "user_remove" })).resolves.toEqual({
+      flush: { status: "flushed", unpushedRefs: 0, error: null },
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      "https://controller.test/runtime/remove",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ runtimeId: "runtime-1", reason: "user_remove" }) }),
+    );
+
+    answer(200, JSON.stringify({ ok: true }));
+    await expect(removeRuntime({ runtimeId: "runtime-1" })).resolves.toEqual({ flush: null });
+  });
+
+  it("took effect when only the machine's release is still pending", async () => {
+    // The removal had fenced the machine off and put its turn back in the
+    // queue; the runtime stays listed until a removal finishes.
+    answer(502, JSON.stringify({ message: "runtime provider cleanup is still pending; retry removal" }));
+    const error = await removeError();
+
+    expect(error).toBeInstanceOf(ControllerApiError);
+    expect(error).toMatchObject({
+      status: 502,
+      code: "provider_cleanup_pending",
+      message: "runtime provider cleanup is still pending; retry removal",
+    });
+    expect(committedRuntimeStop(error)).toEqual({ flush: null });
+  });
+
+  it("took effect when another stop released the same machine first", async () => {
+    answer(409, JSON.stringify({ message: "runtime lease generation is no longer current" }));
+    expect(committedRuntimeStop(await removeError())).toEqual({ flush: null });
+  });
+
+  it("may have taken effect after a 5xx answer, and was refused after any other 4xx", async () => {
+    for (const [status, body, refused] of [
+      [409, JSON.stringify({ message: "provider-managed runtime is missing its active lease generation" }), true],
+      [403, JSON.stringify({ message: "forbidden" }), true],
+      [502, "<html>Bad Gateway</html>", false],
+      [500, JSON.stringify({ message: "failed to commit runtime removal" }), false],
+    ] as const) {
+      answer(status, body);
+      const error = await removeError();
+      expect(error, `${status} ${body}`).toBeInstanceOf(ControllerApiError);
+      expect(committedRuntimeStop(error), `${status} ${body}`).toBeNull();
+      expect(runtimeStopRefused(error), `${status} ${body}`).toBe(refused);
+    }
+    // The person still reads the controller's own words.
+    answer(500, JSON.stringify({ message: "failed to commit runtime removal" }));
+    expect(await removeError()).toMatchObject({ message: "failed to commit runtime removal" });
   });
 });

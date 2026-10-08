@@ -110,6 +110,16 @@ Start or Reconnect. Focus reaching the composer on its own does not count.
 The Machines panel only reads status. One exception remains: the shared
 browser dock still asks for a machine itself when it connects without one.
 
+The tab that makes a Stop or Remove holds the space the same way when that
+leaves it no live hosted machine, and a Machines-panel takeover holds the
+blocker's space, the one whose machine it stops. Unlike the hold on opening a
+space, this one survives writing in the composer: it lifts only when someone
+in that tab asks for a machine there with Send, Start or Reconnect. It also
+stays when the stop answered a 5xx or nothing at all, either of which can
+follow a stop the controller committed, and a failed stop lifts it only when
+the controller refused the request with a 4xx (see "Cleanup after a failed
+release (502)" below).
+
 A platform stop holds every open tab: `credits_exhausted` and `oom_killed`
 arrive as `runtime.stopped` and hold like an idle pause. A Stop, Remove or
 takeover made in another tab or device does not reach this tab yet. The
@@ -332,8 +342,7 @@ The provider serializes ensure and release per runtime, so a retried release
 queues behind any release or late launch still running there. Two stops of the
 same lease can therefore both be acknowledged, and they race to finalize it:
 whichever locks the runtime first finalizes the lease, and the other gets a
-409 ("runtime lease generation is no longer current"). For a person's Stop
-that 409 is an error even though the machine was released. When the 409 goes
+409 ("runtime lease generation is no longer current"). When the 409 goes
 to an ensure's stale-generation cleanup, for example one queued behind an idle
 stop still waiting on its own release, the ensure takes it to mean the
 generation is gone and launches the next lease, unless the other stop removed
@@ -342,6 +351,22 @@ therefore starts it again without a "Workspace startup failed" alert, at the
 standard size as after any idle stop. The cleanup stops only the lease its
 probe found, so a lease that another ensure launched meanwhile is reused, not
 released.
+
+The Studio reads both of these answers to a person's Stop, the 502
+`provider_cleanup_pending` and the 409 "runtime lease generation is no longer
+current", as a stop that took effect: the quarantine was committed, so the
+machine is fenced off and its running turn is back in the queue. Machines >
+Stop reports the stop as requested, a Machines-panel takeover goes on to ask
+for the waiting space's machine, and both keep the stopped space held (see
+"Starting a machine on intent"). Remove still shows the error, because the
+runtime stays listed until a removal finishes, but keeps the hold as well. Any
+other 5xx answer, or none at all (a network failure, or a proxy or browser
+timeout during the release), shows the error and keeps the hold too: the
+controller may have committed the stop first, and the run record then shows
+the requeued turn (the live announcement goes out only if the request ran to
+the end). Only a 4xx refusal, such as 409 "provider-managed runtime is
+missing its active lease generation", 403 or 404, lifts the hold, since the
+machine is as it was.
 
 ## Caches
 

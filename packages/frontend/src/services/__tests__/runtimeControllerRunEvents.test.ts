@@ -494,6 +494,221 @@ describe("runtime controller run event streaming", () => {
     unsubscribe();
   });
 
+  describe("a stop that put a running turn back in the queue", () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const conversationId = "44444444-4444-4444-8444-444444444444";
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const jobId = "33333333-3333-4333-8333-333333333333";
+    // The controller's timestamps carry microseconds.
+    const interruptedAt = "2026-10-08T12:00:00.123456+00:00";
+    const resumeBy = "2026-10-08T12:15:00.123456+00:00";
+    // The run as GET /runs returns it and run.progress carries it.
+    const requeuedSnapshot = {
+      id: runId,
+      project_id: projectId,
+      session_id: null,
+      conversation_id: conversationId,
+      prompt_id: null,
+      run_type: "prompt",
+      status: "queued",
+      progress: 40,
+      progress_stage: "requeued",
+      preview_url: null,
+      last_message: "Running sleep 120",
+      metadata: {
+        agentIdentity: { handle: "octo" },
+        interruption: { reason: "user_stop", jobId, interruptedAt, resumeBy },
+      },
+      created_at: "2026-10-08T11:58:00.000000+00:00",
+      updated_at: interruptedAt,
+    };
+
+    it("is read from the announcement, and left behind once a machine picks the turn up", async () => {
+      const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+      const { readRunInterruption } = await import("../../conversations/runInterruption");
+      let state = createInitialRuntimeStoreState();
+      const onRun = vi.fn((run: RunRecord) => {
+        state = runtimeReducer(state, { type: "upsertRun", run });
+      });
+      const unsubscribe = subscribeToRunsFromController({
+        projectId, quietErrors: true, onRun, onRunPatch: vi.fn(),
+      });
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+
+      // Stamped with the requeue instant, so a repeat never restarts a clock.
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, session_id: null,
+        conversation_id: conversationId, run_id: runId, job_id: jobId,
+        channels: [`conversation:${conversationId}`], timestamp: interruptedAt,
+        data: { status: "queued", stage: "requeued", jobId, run: requeuedSnapshot },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      expect(state.runs[runId]).toMatchObject({
+        status: "queued",
+        progressStage: "requeued",
+        progress: 40,
+        conversationId,
+        updatedAt: interruptedAt,
+        metadata: { interruption: { reason: "user_stop", jobId, interruptedAt, resumeBy }, jobId },
+      });
+      expect(readRunInterruption(state.runs[runId])).toEqual({
+        reason: "user_stop",
+        resumeByMs: Date.parse("2026-10-08T12:15:00.123Z"),
+      });
+
+      // The lease's own run.progress moves the run on and keeps the record as history.
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, conversation_id: conversationId,
+        run_id: runId, job_id: jobId, timestamp: "2026-10-08T12:05:00.000Z",
+        data: {
+          status: "in_progress", stage: "agent:leased", percent: 1, jobId,
+          run: { ...requeuedSnapshot, status: "in_progress", progress_stage: "agent:leased" },
+        },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
+      expect(state.runs[runId]).toMatchObject({ status: "in_progress", progressStage: "agent:leased" });
+      expect(state.runs[runId].metadata?.interruption).toBeDefined();
+      expect(readRunInterruption(state.runs[runId])).toBeNull();
+      unsubscribe();
+    });
+
+    it("keeps the turn running when the announcement lands after the lease that picked it up", async () => {
+      const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+      let state = createInitialRuntimeStoreState();
+      const onRun = vi.fn((run: RunRecord) => {
+        state = runtimeReducer(state, { type: "upsertRun", run });
+      });
+      const unsubscribe = subscribeToRunsFromController({
+        projectId, quietErrors: true, onRun, onRunPatch: vi.fn(),
+      });
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+
+      // The stop answers only after the provider releases the machine, so a
+      // machine that leases the turn first is announced first.
+      const leasedAt = "2026-10-08T12:00:03.000Z";
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, conversation_id: conversationId,
+        run_id: runId, job_id: jobId, timestamp: leasedAt,
+        data: {
+          status: "in_progress", stage: "agent:leased", percent: 1, jobId,
+          run: { ...requeuedSnapshot, status: "in_progress", progress_stage: "agent:leased", updated_at: leasedAt },
+        },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, session_id: null,
+        conversation_id: conversationId, run_id: runId, job_id: jobId,
+        channels: [`conversation:${conversationId}`], timestamp: interruptedAt,
+        data: { status: "queued", stage: "requeued", jobId, run: requeuedSnapshot },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
+
+      expect(state.runs[runId]).toMatchObject({
+        status: "in_progress",
+        progressStage: "agent:leased",
+        updatedAt: leasedAt,
+      });
+      unsubscribe();
+    });
+
+    it("takes the announcement though the turn's last progress carries a later time", async () => {
+      const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+      let state = createInitialRuntimeStoreState();
+      const onRun = vi.fn((run: RunRecord) => {
+        state = runtimeReducer(state, { type: "upsertRun", run });
+      });
+      const unsubscribe = subscribeToRunsFromController({
+        projectId, quietErrors: true, onRun, onRunPatch: vi.fn(),
+      });
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+
+      // The database stamps a run with the start of the transaction that
+      // writes it, so the update that committed just before the stop's
+      // requeue can carry the later time.
+      const progressedAt = "2026-10-08T12:00:00.500000+00:00";
+      // Before the stop, the run records none.
+      const metadata = { agentIdentity: requeuedSnapshot.metadata.agentIdentity };
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, conversation_id: conversationId,
+        run_id: runId, job_id: jobId, timestamp: progressedAt,
+        data: {
+          status: "in_progress", stage: "agent:running", percent: 40, jobId,
+          run: {
+            ...requeuedSnapshot, status: "in_progress", progress_stage: "agent:running",
+            metadata, updated_at: progressedAt,
+          },
+        },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, session_id: null,
+        conversation_id: conversationId, run_id: runId, job_id: jobId,
+        channels: [`conversation:${conversationId}`], timestamp: interruptedAt,
+        data: { status: "queued", stage: "requeued", jobId, run: requeuedSnapshot },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
+
+      expect(state.runs[runId]).toMatchObject({
+        status: "queued",
+        progressStage: "requeued",
+        updatedAt: interruptedAt,
+        metadata: { interruption: { reason: "user_stop", jobId, interruptedAt, resumeBy } },
+      });
+      unsubscribe();
+    });
+
+    it("is read the same way after a reload", async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify([requeuedSnapshot]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const { fetchRunsFromController } = await import("../runtimeController/runs");
+      const { readRunInterruption } = await import("../../conversations/runInterruption");
+
+      const { runs } = await fetchRunsFromController({ projectId });
+      expect(runs).toHaveLength(1);
+      expect(runs[0]).toMatchObject({ status: "queued", progressStage: "requeued", updatedAt: interruptedAt });
+      expect(readRunInterruption(runs[0])).toEqual({
+        reason: "user_stop",
+        resumeByMs: Date.parse("2026-10-08T12:15:00.123Z"),
+      });
+    });
+  });
+
+  it("finishes a turn whose completion is stamped a moment before its last progress", async () => {
+    const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    let state = createInitialRuntimeStoreState();
+    const onRun = vi.fn((run: RunRecord) => {
+      state = runtimeReducer(state, { type: "upsertRun", run });
+    });
+    const onRunPatch = vi.fn((patch: RunRecordPatch) => {
+      state = runtimeReducer(state, { type: "patchRun", patch });
+    });
+    const unsubscribe = subscribeToRunsFromController({ projectId, quietErrors: true, onRun, onRunPatch });
+    await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+
+    // The tick carries the controller's clock, the completion the database's.
+    streamingRequests[0].write(`data: ${JSON.stringify({
+      kind: "run.progress", project_id: projectId, run_id: runId,
+      timestamp: "2026-10-08T12:03:00.004Z",
+      data: { status: "in_progress", percent: 90, message: "Writing the summary" },
+    })}\n\n`);
+    await vi.waitFor(() => expect(state.runs[runId]?.status).toBe("in_progress"));
+    streamingRequests[0].write(`data: ${JSON.stringify({
+      kind: "run.completed", project_id: projectId, run_id: runId,
+      timestamp: "2026-10-08T12:03:00.001+00:00",
+      data: { status: "success", percent: 100 },
+    })}\n\n`);
+    await vi.waitFor(() => expect(onRunPatch).toHaveBeenCalledTimes(2));
+
+    expect(state.runs[runId]).toMatchObject({ status: "success", progress: 100 });
+    unsubscribe();
+  });
+
   it.each(["build", "editor"] as const)(
     "applies sparse lifecycle events without erasing a hydrated %s run",
     async (runType) => {

@@ -28,9 +28,12 @@ import {
   clearManualStop,
   clearRestoredAwaitingIntent,
   markManualStop,
-  recordManualStopFlush,
 } from "./idlePauseRegistry";
-import { stopLeavesNoLiveHostedRuntime } from "./hooks/manualStopDecisions";
+import {
+  removeUnderManualHold,
+  stopLeavesNoLiveHostedRuntime,
+  stopUnderManualHold,
+} from "./hooks/manualStopDecisions";
 import { resolveStartRuntimeParams } from "./hooks/startRuntimeDecisions";
 import { useRuntimeControllerSync } from "./hooks/useRuntimeControllerSync";
 import { useRuntimeStatusRefresh } from "./hooks/useRuntimeStatusRefresh";
@@ -441,17 +444,16 @@ export function RuntimeOperationsProvider({
       const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
       const hold = holdManualStop ? markManualStop(projectId) : null;
       try {
-        const stopped = await controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" });
-        // Whether the stop's flush put the work where History lists it: the
-        // chat names that place only then (useStoppedTurnNotice).
-        recordManualStopFlush(projectId, hold, stopped?.flush ?? null);
+        // Keeps the hold unless the controller refused the stop: also after
+        // an error answer that follows a stop it committed, or a 5xx or no
+        // answer at all, when the stop may have taken effect.
+        await stopUnderManualHold(projectId, hold, () =>
+          controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" }),
+        );
         showStatus("Runtime termination requested", "info", 2500);
         await refreshRuntimeStatuses();
         return true;
       } catch (error) {
-        if (holdManualStop) {
-          clearManualStop(projectId);
-        }
         const message = error instanceof Error ? error.message : String(error);
         showStatus(`Unable to terminate runtime: ${message}`, "error", 4000);
         return false;
@@ -492,11 +494,19 @@ export function RuntimeOperationsProvider({
         );
         return false;
       }
+      // A removal stops the machine first and then takes the runtime off the
+      // space's list, so the next status refresh would find no machine and
+      // start a new one. It holds the space the way Stop does, by the same
+      // rule: only when no other hosted machine stays live.
+      const projectId = resolveProjectId() ?? activeProjectId;
+      const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
+      const hold = holdManualStop ? markManualStop(projectId) : null;
       try {
-        await controllerClient.runtimes.remove({
-          runtimeId,
-          reason: "user_remove",
-        });
+        // Keeps the hold unless the controller refused the removal, also
+        // when it answered an error and the runtime is still listed.
+        await removeUnderManualHold(projectId, hold, () =>
+          controllerClient.runtimes.remove({ runtimeId, reason: "user_remove" }),
+        );
         showStatus("Runtime removed", "info", 2500);
         if (state.sessionRuntimeId === runtimeId) {
           clearSessionRuntimeOverride();
@@ -513,8 +523,10 @@ export function RuntimeOperationsProvider({
       }
     },
     [
+      activeProjectId,
       clearSessionRuntimeOverride,
       refreshRuntimeStatuses,
+      resolveProjectId,
       runtimeMutationEnabled,
       setPreferredRuntime,
       showStatus,
