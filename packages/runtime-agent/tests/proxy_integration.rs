@@ -35,6 +35,8 @@ static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[path = "proxy_integration/native_compaction.rs"]
 mod native_compaction;
+#[path = "proxy_integration/native_images.rs"]
+mod native_images;
 
 async fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
     ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().await
@@ -571,6 +573,53 @@ fn locate_codex_home() -> Result<PathBuf> {
     }
 
     Ok(source_dir)
+}
+
+/// Runs this binary's `test_name` again in a child process that sets
+/// `child_flag=1`, so the child runs the fixture itself. As in
+/// proxy_retry_budget, the whole model-capable run has an owned HOME and an
+/// empty inherited environment: it never consults host auth.
+fn run_isolated_fixture(child_flag: &str, test_name: &str, label: &str) -> Result<()> {
+    let isolated = TempDir::new()?;
+    let home = isolated.path().join("home");
+    let scratch = isolated.path().join("tmp");
+    fs::create_dir_all(&home)?;
+    fs::create_dir_all(&scratch)?;
+    let output_path = isolated.path().join("fixture-output.txt");
+    let output = fs::File::create(&output_path)?;
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env_clear()
+        .env(child_flag, "1")
+        .env("HOME", &home)
+        .env("TMPDIR", &scratch)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("SHELL", "/bin/sh")
+        .env("LANG", "C.UTF-8")
+        .env("RUST_MIN_STACK", "33554432")
+        .current_dir(&home)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(output.try_clone()?))
+        .stderr(std::process::Stdio::from(output))
+        .spawn()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            anyhow::bail!("isolated {label} fixture timed out");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    anyhow::ensure!(
+        status.success(),
+        "isolated {label} fixture failed:\n{}",
+        fs::read_to_string(output_path)?
+    );
+    Ok(())
 }
 
 fn reserve_port() -> Result<u16> {

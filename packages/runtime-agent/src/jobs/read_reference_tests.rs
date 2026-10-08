@@ -45,6 +45,7 @@ fn read_references_preserve_original_bytes_and_display_metadata() {
         final_json: json!({}),
         events: Vec::new(),
         provider_conversation_state: None,
+        native_image_inputs: 0,
     };
     let artifacts = build_codex_artifacts(&output, &outcome);
     let files = &artifacts

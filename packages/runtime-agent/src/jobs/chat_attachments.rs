@@ -43,6 +43,7 @@ use uuid::Uuid;
 const ATTACHMENTS_DIR: &str = ".instafy/attachments";
 const DOWNLOADS_PAYLOAD_KEY: &str = "attachment_downloads";
 const EXTENSIONS: [&str; 6] = ["png", "jpg", "webp", "gif", "txt", "md"];
+const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "webp", "gif"];
 /// The bucket's own limit.
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -85,6 +86,15 @@ pub(super) fn file_name_is_valid(name: &str) -> bool {
         return false;
     };
     is_canonical_uuid(stem) && EXTENSIONS.contains(&extension)
+}
+
+/// Whether `name` is a valid attachment name of one of the bucket's image
+/// types, which a turn may send the model as image input.
+pub(super) fn is_image_file_name(name: &str) -> bool {
+    file_name_is_valid(name)
+        && name
+            .split_once('.')
+            .is_some_and(|(_, extension)| IMAGE_EXTENSIONS.contains(&extension))
 }
 
 /// The file name of a `storagePath` in this job's own conversation,
@@ -667,6 +677,8 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use axum::routing::get;
     use serde_json::json;
+
+    use super::super::ListedImages;
 
     const STEM: &str = "6a000000-0000-4000-8000-000000000001";
     const PROJECT: &str = "11111111-1111-4111-8111-111111111111";
@@ -1308,25 +1320,59 @@ mod tests {
         workspace: &Path,
         leased: &[String],
     ) -> Option<String> {
+        native_prompt_section(attachments, workspace, leased, 0).map(|(section, _)| section)
+    }
+
+    /// The section and the workspace paths it sends as image input, with at
+    /// most `native_image_limit` of them.
+    fn native_prompt_section(
+        attachments: JsonValue,
+        workspace: &Path,
+        leased: &[String],
+        native_image_limit: usize,
+    ) -> Option<(String, Vec<String>)> {
+        listed_prompt_section(
+            attachments,
+            workspace,
+            leased,
+            native_image_limit,
+            ListedImages::ViewBeforeAnswering,
+        )
+    }
+
+    fn listed_prompt_section(
+        attachments: JsonValue,
+        workspace: &Path,
+        leased: &[String],
+        native_image_limit: usize,
+        listed_images: ListedImages,
+    ) -> Option<(String, Vec<String>)> {
         super::super::format_image_attachment_section_from_attachments(
             attachments.as_array().unwrap(),
             workspace,
             &Uuid::parse_str(PROJECT).unwrap(),
             Some(&Uuid::parse_str(CONVERSATION).unwrap()),
             &leased.iter().cloned().collect(),
+            native_image_limit,
+            listed_images,
         )
+        .map(|section| (section.text, section.native_images))
     }
 
+    /// A legacy image's path comes from the client, so it is never sent as
+    /// image input: the agent opens it with `view_image`.
     #[test]
     fn legacy_workspace_images_keep_their_prompt() {
         let workspace = tempfile::tempdir().unwrap();
-        let section = prompt_section(
+        let (section, native) = native_prompt_section(
             json!([{ "kind": "image", "workspacePath": "chat-upload-1-photo.png",
                 "fileName": "photo.png", "mimeType": "image/png", "sizeBytes": 10 }]),
             workspace.path(),
             &[],
+            4,
         )
         .unwrap();
+        assert!(native.is_empty());
         assert_eq!(
             section,
             format!(
@@ -1334,11 +1380,183 @@ mod tests {
                  - workspacePath: chat-upload-1-photo.png (fileName: photo.png, mimeType: image/png, sizeBytes: 10)\n\
                  \nPaths above are relative to the workspace root \"{}\".\n\
                  Before answering, call the `view_image` tool on the image path(s), then respond to the latest request.\n\
-                 When calling `view_image`, use the `workspacePath` value (not the fileName).\n\
-                 If you cannot view the image for any reason, do your best using the filename/path context.\n",
+                 When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({{ path: \"<workspacePath>\" }}); image(img);`: the image reaches you only through `image(img)`.\n\
+                 If you could not see an attached image, say so; never describe it from its file name.\n",
                 workspace.path().display()
             )
         );
+    }
+
+    /// A downloaded image of the turn's message is attached to the model's
+    /// input: the prompt marks it `[Image #1]` and never sends the agent to
+    /// guess from its name.
+    #[test]
+    fn a_downloaded_image_is_attached_and_needs_no_view_image_call() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = folder(workspace.path(), &conversation());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
+        let attachments = json!([{ "kind": "image",
+            "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")),
+            "fileName": "photo.png", "mimeType": "image/png" }]);
+        let path = format!(".instafy/attachments/{CONVERSATION}/{}", name(1, "png"));
+
+        let (section, native) =
+            native_prompt_section(attachments.clone(), workspace.path(), &[name(1, "png")], 4)
+                .unwrap();
+        assert_eq!(native, vec![path.clone()]);
+        assert_eq!(
+            section,
+            format!(
+                "\nUser attached image(s):\n\
+                 - [Image #1] workspacePath: {path} (fileName: photo.png, mimeType: image/png)\n\
+                 \nPaths above are relative to the workspace root \"{}\".\n\
+                 The images marked [Image #N] were sent to you with this request, in the order listed. Look at them directly; call `view_image` on one only to re-inspect it, or if it did not come through.\n\
+                 When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({{ path: \"<workspacePath>\" }}); image(img);`: the image reaches you only through `image(img)`.\n\
+                 If you could not see an attached image, say so; never describe it from its file name.\n",
+                workspace.path().display()
+            )
+        );
+
+        // Without a native slot, the same image is left for `view_image`.
+        let (section, native) =
+            native_prompt_section(attachments, workspace.path(), &[name(1, "png")], 0).unwrap();
+        assert!(native.is_empty());
+        assert!(
+            section.contains(&format!(
+                "- workspacePath: {path} (fileName: photo.png, mimeType: image/png)\n"
+            )),
+            "{section}"
+        );
+        assert!(
+            section.contains("call the `view_image` tool on the image path(s)"),
+            "{section}"
+        );
+        assert!(!section.contains("[Image #"), "{section}");
+        assert!(!section.contains("filename/path context"), "{section}");
+    }
+
+    /// An image the section lists without sending it is opened with
+    /// `view_image` before answering (above), on a restored thread only when
+    /// it was not seen yet, and never in a turn without image tools.
+    #[test]
+    fn listed_images_follow_the_turns_image_tools() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = folder(workspace.path(), &conversation());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name(1, "png")), b"png").unwrap();
+        let attachments = json!([{ "kind": "image",
+            "storagePath": format!("{PROJECT}/{CONVERSATION}/{}", name(1, "png")),
+            "fileName": "photo.png" }]);
+        let path = format!(".instafy/attachments/{CONVERSATION}/{}", name(1, "png"));
+        let section = |listed_images| {
+            let (section, native) = listed_prompt_section(
+                attachments.clone(),
+                workspace.path(),
+                &[name(1, "png")],
+                0,
+                listed_images,
+            )
+            .unwrap();
+            assert!(native.is_empty());
+            section
+        };
+        let expected = |instructions: &str| {
+            format!(
+                "\nUser attached image(s):\n\
+                 - workspacePath: {path} (fileName: photo.png)\n\
+                 \nPaths above are relative to the workspace root \"{}\".\n\
+                 {instructions}\
+                 If you could not see an attached image, say so; never describe it from its file name.\n",
+                workspace.path().display()
+            )
+        };
+
+        assert_eq!(
+            section(ListedImages::ViewIfUnseen),
+            expected(
+                "These images were attached to an earlier message. If you already saw one in this conversation, do not open it again; call the `view_image` tool only on one you have not seen and the latest request needs.\n\
+                 When calling `view_image`, use the `workspacePath` value (not the fileName). Inside `exec` code, call `const img = await tools.view_image({ path: \"<workspacePath>\" }); image(img);`: the image reaches you only through `image(img)`.\n"
+            )
+        );
+        assert_eq!(
+            section(ListedImages::CannotOpen),
+            expected("You cannot open attached images in this turn.\n")
+        );
+    }
+
+    /// At most the limit of downloaded images are attached, in the order
+    /// listed; a later image, a text file (even one marked as an image), a
+    /// legacy image and a missing download are not.
+    #[test]
+    fn attached_images_stop_at_the_limit() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = folder(workspace.path(), &conversation());
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage_path =
+            |n: u32, extension: &str| format!("{PROJECT}/{CONVERSATION}/{}", name(n, extension));
+        let path = |n: u32, extension: &str| {
+            format!(".instafy/attachments/{CONVERSATION}/{}", name(n, extension))
+        };
+        std::fs::write(dir.join(name(7, "md")), b"# notes").unwrap();
+        std::fs::write(dir.join(name(8, "txt")), b"notes").unwrap();
+        let mut leased = vec![name(7, "md"), name(8, "txt"), name(9, "png")];
+        let mut attachments = vec![
+            json!({ "kind": "file", "storagePath": storage_path(7, "md"), "fileName": "notes.md" }),
+            json!({ "kind": "image", "storagePath": storage_path(8, "txt"), "fileName": "notes.txt" }),
+            json!({ "kind": "image", "workspacePath": "chat-upload-1-photo.png", "fileName": "photo.png" }),
+            // Signed, but its download failed.
+            json!({ "kind": "image", "storagePath": storage_path(9, "png"), "fileName": "missing.png" }),
+        ];
+        for n in 1..=6 {
+            std::fs::write(dir.join(name(n, "png")), b"png").unwrap();
+            leased.push(name(n, "png"));
+            attachments.push(
+                json!({ "kind": "image", "storagePath": storage_path(n, "png"),
+                "fileName": format!("shot-{n}.png") }),
+            );
+        }
+
+        let (section, native) =
+            native_prompt_section(JsonValue::Array(attachments), workspace.path(), &leased, 4)
+                .unwrap();
+        assert_eq!(native, (1..=4).map(|n| path(n, "png")).collect::<Vec<_>>());
+        for n in 1..=4 {
+            assert!(
+                section.contains(&format!(
+                    "- [Image #{n}] workspacePath: {} (fileName: shot-{n}.png)\n",
+                    path(n, "png")
+                )),
+                "{section}"
+            );
+        }
+        for n in 5..=6 {
+            assert!(
+                section.contains(&format!(
+                    "- workspacePath: {} (fileName: shot-{n}.png)\n",
+                    path(n, "png")
+                )),
+                "{section}"
+            );
+        }
+        assert!(section.contains(&format!(
+            "- workspacePath: {} (fileName: notes.md)\n",
+            path(7, "md")
+        )));
+        assert!(section.contains(&format!(
+            "- workspacePath: {} (fileName: notes.txt)\n",
+            path(8, "txt")
+        )));
+        assert!(
+            section.contains("- workspacePath: chat-upload-1-photo.png (fileName: photo.png)\n")
+        );
+        assert!(
+            section.contains("call the `view_image` tool on each image path not marked [Image #N]"),
+            "{section}"
+        );
+        assert!(section.contains("Read the attached text file(s)"));
+        assert!(section.contains("not available in this workspace:\n- missing.png\n"));
+        assert!(!section.contains("filename/path context"), "{section}");
     }
 
     #[test]

@@ -485,7 +485,7 @@ pull requests and manual runs retain always-run, fail-closed aggregation.
 | Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
 | Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
 | Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
-| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `gpt-5.6-sol` and to `gpt-5.5`, plus `proxy_integration codex_read_reference_` and `proxy_integration native_compaction::`, each with `--test-threads=1` | `public-rust-test-agent` |
+| Rust test runtime agent | Codex code-mode host build, then agent `--no-run`, `--lib --test controller_client --test proxy_retry_budget`, `proxy_retry_budget` again with `INSTAFY_TEST_CODEX_MODEL` set to `gpt-5.6-sol` and to `gpt-5.5`, plus `proxy_integration codex_read_reference_`, `proxy_integration native_compaction::` and `proxy_integration native_images::`, each with `--test-threads=1` | `public-rust-test-agent` |
 | Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
 | Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
 | Rust test git service | Complete git-service suite | `public-rust-test-git` |
@@ -496,6 +496,11 @@ They use inert credentials and temporary runtime homes to verify native compacti
 preference correction before the next sampling request, opaque checkpoint
 preservation, and preference removal after cold rollout resume. It does not select
 the live-auth proxy integration tests.
+
+The `native_images::` selector runs one isolated, localhost test with inert credentials. It
+sends a turn with a downloaded chat image through the real proxy and checks that the image
+reaches the provider once, as an `input_image` in the user message, and that a resumed
+turn does not send it again.
 
 All eleven original Cargo commands retain their arguments and repository-root
 working directory. Test children also retain the full frozen Node20/pnpm

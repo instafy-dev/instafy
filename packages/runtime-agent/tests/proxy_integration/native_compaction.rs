@@ -4,7 +4,6 @@
 
 use super::*;
 use sha2::{Digest, Sha256};
-use std::process::{Command, Stdio};
 use std::sync::Mutex as StdMutex;
 
 const CHILD: &str = "INSTAFY_NATIVE_COMPACTION_TEST_CHILD";
@@ -50,53 +49,7 @@ fn native_compaction_refreshes_preferences_and_cold_resumes_via_api_key_proxy() 
 
 fn run_isolated(transport: Transport) -> Result<()> {
     if std::env::var(CHILD).as_deref() != Ok("1") {
-        // As in proxy_retry_budget, the entire model-capable run has an owned
-        // HOME and an empty inherited environment. Never consult host auth.
-        let isolated = TempDir::new()?;
-        let home = isolated.path().join("home");
-        let scratch = isolated.path().join("tmp");
-        fs::create_dir_all(&home)?;
-        fs::create_dir_all(&scratch)?;
-        let output_path = isolated.path().join("fixture-output.txt");
-        let output = fs::File::create(&output_path)?;
-        let mut child = Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                transport.test_name(),
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env_clear()
-            .env(CHILD, "1")
-            .env("HOME", &home)
-            .env("TMPDIR", &scratch)
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-            .env("SHELL", "/bin/sh")
-            .env("LANG", "C.UTF-8")
-            .env("RUST_MIN_STACK", "33554432")
-            .current_dir(&home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(output.try_clone()?))
-            .stderr(Stdio::from(output))
-            .spawn()?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(120);
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if std::time::Instant::now() >= deadline {
-                child.kill()?;
-                child.wait()?;
-                anyhow::bail!("isolated native-compaction fixture timed out");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        anyhow::ensure!(
-            status.success(),
-            "isolated native-compaction fixture failed:\n{}",
-            fs::read_to_string(output_path)?
-        );
-        return Ok(());
+        return run_isolated_fixture(CHILD, transport.test_name(), "native-compaction");
     }
 
     const STACK: usize = 32 * 1024 * 1024;
