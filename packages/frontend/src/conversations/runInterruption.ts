@@ -44,11 +44,14 @@ export interface RunInterruptionIdentity {
 }
 
 /**
- * The stop a run record names in `metadata.interruption`, whatever the run's
- * status: a run that picked up again keeps the record as history. Null
- * without one that names both the job and the time.
+ * The stop a run record, or a sparse patch to one, names in
+ * `metadata.interruption`, whatever the run's status: a run that picked up
+ * again keeps the record as history. Null without one that names both the
+ * job and the time.
  */
-export function readRunInterruptionIdentity(run: RunRecord | null): RunInterruptionIdentity | null {
+export function readRunInterruptionIdentity(
+  run: Pick<Partial<RunRecord>, "metadata"> | null,
+): RunInterruptionIdentity | null {
   const interruption = run?.metadata?.["interruption"];
   if (!isRecord(interruption)) {
     return null;

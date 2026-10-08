@@ -314,8 +314,15 @@ function isRunLifecycleRegression(incoming: RunRecord, stored: RunRecord): boole
 
 /**
  * Whether a stop's announcement must not replace the record the store holds,
- * decided by the stop it records rather than by times; null when `incoming`
- * is no such announcement, or when only times can decide.
+ * decided by the stop it records rather than by times; null when `write` is
+ * no such announcement, or when only times can decide.
+ *
+ * `write` is what the write itself carries: the whole record, or a sparse
+ * patch before it merges over the stored record. A merged patch shows the
+ * stored stop, so a patch that names none, such as a run event projected to
+ * its status and progress for a viewer who cannot see the run's machine,
+ * would read as a late announcement of that stop and be refused whatever its
+ * time.
  *
  * Times cannot decide here: the database stamps `runs.updated_at` with the
  * start of the transaction that writes it, so a stop that put the turn back
@@ -327,10 +334,10 @@ function isRunLifecycleRegression(incoming: RunRecord, stored: RunRecord): boole
  * that came before the one the store holds. A finished run that names no
  * such stop is left to the times.
  */
-function stopAnnouncementIsStale(incoming: RunRecord, stored: RunRecord): boolean | null {
+function stopAnnouncementIsStale(write: RunRecordPatch, stored: RunRecord): boolean | null {
   const stop =
-    incoming.status === "queued" && incoming.progressStage === "requeued"
-      ? readRunInterruptionIdentity(incoming)
+    write.status === "queued" && write.progressStage === "requeued"
+      ? readRunInterruptionIdentity(write)
       : null;
   if (!stop) {
     return null;
@@ -354,7 +361,8 @@ function stopAnnouncementIsStale(incoming: RunRecord, stored: RunRecord): boolea
  * time the stop put the turn back in the queue, and it answers only after the
  * machine is released, so the lease that picked the turn up again (stamped
  * when it is sent) can arrive first. A stop's announcement is decided by the
- * stop it records (stopAnnouncementIsStale).
+ * stop it records (stopAnnouncementIsStale), read from `write`, what the
+ * write carries before a patch merges over the stored record.
  *
  * Otherwise times decide, but not alone: live events carry the controller's
  * clock when it sends them, while hydration, the run events other viewers get
@@ -364,11 +372,15 @@ function stopAnnouncementIsStale(incoming: RunRecord, stored: RunRecord): boolea
  * it, and only a step back that is also older is refused. Equal times apply,
  * and so does a record without a readable time on either side.
  */
-function isStaleRunRecord(incoming: RunRecord, stored: RunRecord | null): boolean {
+function isStaleRunRecord(
+  incoming: RunRecord,
+  stored: RunRecord | null,
+  write: RunRecordPatch = incoming,
+): boolean {
   if (stored === null) {
     return false;
   }
-  const stale = stopAnnouncementIsStale(incoming, stored);
+  const stale = stopAnnouncementIsStale(write, stored);
   if (stale !== null) {
     return stale;
   }
@@ -380,6 +392,36 @@ function isStaleRunRecord(incoming: RunRecord, stored: RunRecord | null): boolea
     incomingAt < storedAt &&
     isRunLifecycleRegression(incoming, stored)
   );
+}
+
+/**
+ * Stores `run` unless it is stale (isStaleRunRecord). `write` is what the
+ * write carried: `run` itself, or the patch `run` merges over the stored
+ * record.
+ */
+function storeRunRecord(
+  state: RuntimeStoreState,
+  run: RunRecord,
+  write: RunRecordPatch = run,
+): RuntimeStoreState {
+  const existing = state.runs[run.id] ?? null;
+  if (isStaleRunRecord(run, existing, write)) {
+    return state;
+  }
+  const nextRuns = { ...state.runs };
+  nextRuns[run.id] = {
+    ...existing,
+    ...run,
+  };
+  return {
+    ...state,
+    runs: nextRuns,
+    latestRunIds: {
+      ...state.latestRunIds,
+      [run.runType]: run.id,
+    },
+    leasedRunIds: { ...state.leasedRunIds },
+  };
 }
 
 export function runtimeReducer(
@@ -435,28 +477,10 @@ export function runtimeReducer(
       if (action.patch.metadata) {
         run.metadata = { ...existing?.metadata, ...action.patch.metadata };
       }
-      return runtimeReducer(state, { type: "upsertRun", run });
+      return storeRunRecord(state, run, action.patch);
     }
-    case "upsertRun": {
-      const existing = state.runs[action.run.id] ?? null;
-      if (isStaleRunRecord(action.run, existing)) {
-        return state;
-      }
-      const nextRuns = { ...state.runs };
-      nextRuns[action.run.id] = {
-        ...existing,
-        ...action.run,
-      };
-      return {
-        ...state,
-        runs: nextRuns,
-        latestRunIds: {
-          ...state.latestRunIds,
-          [action.run.runType]: action.run.id,
-        },
-        leasedRunIds: { ...state.leasedRunIds },
-      };
-    }
+    case "upsertRun":
+      return storeRunRecord(state, action.run);
     case "removeRun": {
       const target = state.runs[action.runId];
       if (!target) {

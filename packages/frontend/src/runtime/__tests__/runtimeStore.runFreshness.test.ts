@@ -247,4 +247,41 @@ describe("runtime store run freshness", () => {
     });
     expect(completed.runs[RUN_ID]).toMatchObject({ status: "success", updatedAt: completedAt });
   });
+
+  describe("a sparse patch over a run that keeps a stop's record", () => {
+    // A viewer who cannot see the run's machine gets each run event projected
+    // to its status and progress, stamped with runs.updated_at. Such a patch
+    // names no stop, though merged over the stored run it shows the stored
+    // one. A projected resume leaves the stored stage at "requeued".
+    const resumedInPlace = () => stateWith(resumed(requeued(), { progressStage: "requeued" }));
+
+    it("applies a later step back to the queue, such as a second stop", () => {
+      const secondStopAt = "2026-10-08T12:00:09.000000+00:00";
+      const next = runtimeReducer(resumedInPlace(), {
+        type: "patchRun",
+        patch: { id: RUN_ID, status: "queued", progress: 0, updatedAt: secondStopAt },
+      });
+
+      expect(next.runs[RUN_ID]).toMatchObject({ status: "queued", updatedAt: secondStopAt });
+    });
+
+    it("leaves an older one to the times, which refuse it", () => {
+      const state = resumedInPlace();
+      const next = runtimeReducer(state, {
+        type: "patchRun",
+        patch: { id: RUN_ID, status: "queued", progress: 0, updatedAt: STOPPED_AT },
+      });
+
+      expect(next).toBe(state);
+    });
+
+    it("still decides by the stop when the patch names one itself", () => {
+      const state = stateWith(resumed());
+      // Later than the lease, so the times alone would apply it.
+      const announcement = requeued({ updatedAt: "2026-10-08T12:00:05.000000+00:00" });
+      const next = runtimeReducer(state, { type: "patchRun", patch: announcement });
+
+      expect(next).toBe(state);
+    });
+  });
 });
