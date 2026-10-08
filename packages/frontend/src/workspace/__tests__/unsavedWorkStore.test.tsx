@@ -421,6 +421,27 @@ describe("rolling saves", () => {
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
   });
 
+  it("shows a stopped origin's save once a newer list answers, even while the stop's own list stalls", async () => {
+    vi.useFakeTimers();
+    const final = rollingSave("folder-1", LIVE, "2");
+    mocks.fetchRecovery.mockResolvedValueOnce(ok([rollingSave("folder-1", LIVE, "1")]));
+    await refreshUnsavedWork({ projectId: "p", originId: "o" });
+    setUnsavedWorkLiveOrigins("p", [LIVE]);
+    // The list after the stop never answers.
+    mocks.fetchRecovery.mockReturnValueOnce(new Promise(() => {}));
+    setUnsavedWorkLiveOrigins("p", []);
+    await vi.advanceTimersByTimeAsync(UNSAVED_WORK_STOP_REFETCH_DELAY_MS * 2);
+    expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
+    expect(visible()).toEqual([]);
+
+    // The drawer opens and lists again.
+    mocks.fetchRecovery.mockResolvedValueOnce(ok([final]));
+    await refreshUnsavedWork({ projectId: "p", originId: "o", force: true });
+    await microtasks();
+    expect(visible().map((item) => item.rev)).toEqual([final.rev]);
+    expect(getRollingSaveScope("p").hidden.size).toBe(0);
+  });
+
   it("lists nothing again when a first known set finds every listed save live, or none listed", async () => {
     vi.useFakeTimers();
     mocks.fetchRecovery.mockResolvedValue(ok([rollingSave("folder-1", LIVE), entry("refs/instafy/recovery/x/a")]));
