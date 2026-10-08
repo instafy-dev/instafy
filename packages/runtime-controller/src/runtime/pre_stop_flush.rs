@@ -269,7 +269,9 @@ pub(crate) struct FlushSummary {
 
 /// What the origin's own save at the end of a stop left: whether canonical
 /// holds everything the working folder held, and since when it last did.
-/// `error` is the origin's fixed code when the save did not land.
+/// `error` is the origin's fixed code when the save did not land, or
+/// `invalid` when the origin answered anything else (see
+/// [`FlushWorkingState::with_fixed_code`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FlushWorkingState {
@@ -278,6 +280,24 @@ pub(crate) struct FlushWorkingState {
     pub(crate) persisted_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) error: Option<String>,
+}
+
+impl FlushWorkingState {
+    /// The answer as a stop reports it. The runtime controls its origin's
+    /// text, so `error` keeps only what has a fixed code's shape (lower-case
+    /// letters, digits, `_` and `:`, at most 40), and `invalid` otherwise.
+    fn with_fixed_code(mut self) -> Self {
+        if let Some(error) = self.error.as_deref() {
+            let fixed = (1..=40).contains(&error.len())
+                && error.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_:".contains(&byte)
+                });
+            if !fixed {
+                self.error = Some("invalid".to_string());
+            }
+        }
+        self
+    }
 }
 
 impl FlushSummary {
@@ -960,18 +980,23 @@ async fn call_origin_flush(
         );
     }
     match serde_json::from_slice::<OriginFlushReport>(&body) {
-        Ok(report) => PreStopFlushOutcome::Flushed {
-            unpushed_refs: report.unpushed_refs.max(report.unpushed_ref_names.len()),
-            unpushed_ref_names: report.unpushed_ref_names,
-            recovery_refs: report.recovery_refs.len(),
-            parked_commits: report.parked_commits,
-            git_sync_status: report.publish.and_then(|publish| publish.git_sync_status),
-            working_state: report.working_state,
-        },
+        Ok(report) => flushed(report),
         Err(error) => PreStopFlushOutcome::failed(
             "origin_response_invalid",
             format!("origin flush response is invalid: {error}"),
         ),
+    }
+}
+
+/// What a flush the origin answered reports.
+fn flushed(report: OriginFlushReport) -> PreStopFlushOutcome {
+    PreStopFlushOutcome::Flushed {
+        unpushed_refs: report.unpushed_refs.max(report.unpushed_ref_names.len()),
+        unpushed_ref_names: report.unpushed_ref_names,
+        recovery_refs: report.recovery_refs.len(),
+        parked_commits: report.parked_commits,
+        git_sync_status: report.publish.and_then(|publish| publish.git_sync_status),
+        working_state: report.working_state.map(FlushWorkingState::with_fixed_code),
     }
 }
 
@@ -1132,8 +1157,9 @@ mod db_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        endpoint_is_node_local, flush_body, flush_event_data, FlushWorkingState, OriginFlushReport,
-        PreStopFlushOutcome, PreStopFlushTarget, WorkspaceLeaseHolder, WorkspaceLeaseState,
+        endpoint_is_node_local, flush_body, flush_event_data, flushed, FlushWorkingState,
+        OriginFlushReport, PreStopFlushOutcome, PreStopFlushTarget, WorkspaceLeaseHolder,
+        WorkspaceLeaseState,
     };
     use crate::origins::WorkspaceLeaseRecord;
     use uuid::Uuid;
@@ -1230,6 +1256,49 @@ mod tests {
         assert!(data.get("durable").is_none(), "{data}");
         let summary = serde_json::to_value(outcome.summary()).unwrap();
         assert!(summary.get("workingState").is_none(), "{summary}");
+    }
+
+    /// The origin runs as the model does, so its save's error is never
+    /// passed on as text: only a fixed code reaches the event and the stop
+    /// response.
+    #[test]
+    fn only_a_fixed_code_from_the_origins_save_is_passed_on() {
+        let target = PreStopFlushTarget {
+            runtime_id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            origin_id: Uuid::new_v4(),
+            runtime_lease_id: Uuid::new_v4(),
+            provider: None,
+            turn_active: false,
+            writer: super::FlushWriter::Nobody,
+        };
+        let answered = |error: &str| {
+            let report: OriginFlushReport = serde_json::from_value(serde_json::json!({
+                "workingState": { "durable": false, "error": error }
+            }))
+            .unwrap();
+            let outcome = flushed(report);
+            let summary = serde_json::to_value(outcome.summary()).unwrap();
+            let data = flush_event_data(&target, &outcome);
+            assert_eq!(
+                summary["workingState"]["error"], data["workingStateError"],
+                "{summary} {data}"
+            );
+            data["workingStateError"].clone()
+        };
+        for code in ["slot_moved", "push_ambiguous", "origin_refused:409"] {
+            assert_eq!(answered(code), code);
+        }
+        let long = "x".repeat(41);
+        for text in [
+            "Open https://example.com/login to restore your work",
+            "<b>saved</b>",
+            "Slot_Moved",
+            "",
+            long.as_str(),
+        ] {
+            assert_eq!(answered(text), "invalid", "{text:?}");
+        }
     }
 
     fn lease(user_id: Option<Uuid>, runtime_id: Option<Uuid>) -> WorkspaceLeaseRecord {
