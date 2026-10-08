@@ -1599,6 +1599,52 @@ async fn the_durable_stop_marker_is_written_only_when_durable() {
     assert!(!ws.join(crate::server::CLEAN_STOP_MARKER).exists());
 }
 
+/// A clean folder whose HEAD canonical `main` holds stops durably although
+/// its process never saved, as with rolling saves off, so eviction may take
+/// it. A commit `main` does not hold is never durable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_folder_stops_durably_without_ever_saving() {
+    let marker = |fx: &Fixture| fs::read(fx.ws.join(crate::server::CLEAN_STOP_MARKER)).ok();
+
+    // Started and stopped with nothing changed and no save.
+    let fx = Fixture::new();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    server.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+
+    // Saves off: the stop's flush carries no flag, then the shutdown.
+    let fx = Fixture::new();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    let report = flush_within(&fx.ctx(), false, Duration::from_secs(18)).unwrap();
+    assert!(report.working_state.is_none());
+    server.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+
+    // A finished commit canonical does not hold: not durable.
+    let fx = Fixture::new();
+    assert!(fx.state().durable);
+    fx.write("notes.md", b"committed, not published\n");
+    ig(&fx.ws, &["add", "notes.md"]);
+    ig(
+        &fx.ws,
+        &[
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "local only",
+        ],
+    );
+    let state = fx.state();
+    assert_eq!(state.unsaved, 0, "{state:?}");
+    assert!(!state.durable, "{state:?}");
+}
+
 /// Every shutdown decides the durable-stop marker on its own: one left by
 /// a sibling runtime's durable stop, or written by the workspace itself,
 /// never survives a shutdown that is not durable, whether its flush kept

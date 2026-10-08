@@ -588,8 +588,24 @@ pub fn local_state(ctx: &PublishContext<'_>, memory: &WorkingMemory) -> Result<W
         // folder, and the next save has to look.
         state.durable = false;
         state.changed = true;
+    } else if !state.durable && unsaved == 0 && local_only == 0 && head_on_main(&publisher)? {
+        // Nothing to save, whatever this process remembers (it may never
+        // have saved, as with rolling saves off): canonical `main` already
+        // holds everything the folder does.
+        state.durable = true;
     }
     Ok(state)
+}
+
+/// Whether canonical `main`, as last fetched, holds the folder's HEAD.
+fn head_on_main(publisher: &Publisher<'_>) -> Result<bool> {
+    let Some(head) = publisher.git.commit_id("HEAD")? else {
+        return Ok(true);
+    };
+    match publisher.tracked_main()? {
+        Some(main) => publisher.git.is_ancestor(&head, &main),
+        None => Ok(false),
+    }
 }
 
 /// One save's snapshot, taken under the workspace locks with no network
