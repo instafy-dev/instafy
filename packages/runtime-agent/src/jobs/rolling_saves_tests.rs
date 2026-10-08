@@ -449,6 +449,55 @@ async fn the_turn_end_save_runs_for_every_write_job_and_records_a_failure() {
     assert_eq!(artifacts[1]["error"], "origin_refused:500");
 }
 
+/// A folder its last confirmed save holds in full, unchanged since.
+fn saved_in_full(reads: Arc<AtomicUsize>) -> WorkingStateProbe {
+    WorkingStateProbe::new(move || {
+        let reads = reads.clone();
+        async move {
+            reads.fetch_add(1, Ordering::SeqCst);
+            Ok(WorkingState {
+                unsaved: 1,
+                durable: true,
+                ..WorkingState::default()
+            })
+        }
+    })
+}
+
+/// A job's end asks the controller for nothing when the folder's last
+/// confirmed save holds all of it and nothing changed since. It saves when
+/// that save left something out (a tick defers large files), as when
+/// anything changed.
+#[tokio::test]
+async fn a_job_end_with_nothing_new_asks_for_nothing() {
+    let seen = Seen::default();
+    let origin_id = Uuid::new_v4();
+    let controller_url = controller(&seen, origin_id, None).await;
+    let endpoint = origin(&seen, (200, durable())).await;
+    let reads = Arc::new(AtomicUsize::new(0));
+    let saves = RollingSaves::from_gate(gate(
+        &controller_url,
+        local_origin(origin_id, &endpoint, Some(saved_in_full(reads.clone()))),
+    ))
+    .unwrap();
+    let mut result = Ok(execution());
+    finish_job(&saves, None, &mut result).await;
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(seen.grants.load(Ordering::SeqCst), 0);
+    assert!(seen.events().is_empty(), "{:?}", seen.events());
+    assert!(result.unwrap().artifacts.is_empty());
+
+    let deferred = RollingSaves::from_gate(gate(
+        &controller_url,
+        local_origin(origin_id, &endpoint, Some(probe(false, 0, reads))),
+    ))
+    .unwrap();
+    let mut result = Ok(execution());
+    finish_job(&deferred, None, &mut result).await;
+    assert_eq!(seen.saves(), vec!["turn_end"]);
+    assert!(result.unwrap().artifacts.is_empty());
+}
+
 /// A 403 `rolling_saves_off` ends the job's ticks; so does any other refusal
 /// for this job. Neither is recorded as a failed save.
 #[tokio::test]

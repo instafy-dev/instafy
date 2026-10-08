@@ -610,15 +610,18 @@ node's checkout a cache.
 - Cost, measured with 20 or 200 changed files alike: an unchanged folder
   costs 6 git processes and no controller call; a changed tick about 38 git
   processes, a grant and a `git.write` token from the controller, one leased
-  push and one `ls-remote`; a turn-end save with nothing new about 24 git
-  processes and no network. About 1,100 git processes per runtime-hour of
+  push and one `ls-remote`; a job's end with nothing new since a save that
+  held all of it costs the same 6 and no controller call. About 1,100 git
+  processes per runtime-hour of
   continuous edits. Every git command in a checkout first checks that the
   repository config holds only data; that config is parsed again only when
   it changed.
 - When the job's body returns, whatever it returned (a terminal command and a
   turn that changed no file included), the ticker stops and the job's own
-  save runs. A save that did not land is recorded on the job as a
-  `working-state` artifact (`durable: false` and a fixed error code).
+  save runs, unless the change check finds the folder exactly as its last
+  confirmed save held it, with nothing deferred and nothing local-only. A
+  save that did not land is recorded on the job as a `working-state`
+  artifact (`durable: false` and a fixed error code).
 - A slot a person removed (or restored) is gone from canonical while the
   folder's record still names it: its paths are not saved again until they
   change.

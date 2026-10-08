@@ -21,8 +21,10 @@
 //!   busy workspace, a stop, a network failure) waits for the next tick.
 //!   Ticks never overlap, and a missed one is not queued.
 //! - When the job's body returns, whatever it returned, the ticker stops
-//!   and the job's own save runs; a save that did not land is recorded on
-//!   the job as a `working-state` artifact.
+//!   and the job's own save runs, unless the change check finds the folder
+//!   as its last confirmed save held it in full (nothing deferred, nothing
+//!   local-only); a save that did not land is recorded on the job as a
+//!   `working-state` artifact.
 
 use std::future::Future;
 use std::time::Duration;
@@ -186,18 +188,26 @@ impl RollingSaves {
 
     /// One tick: the change check, then a save only when something changed.
     pub(crate) async fn tick(&self) -> SaveOutcome {
-        if let Some(probe) = self.origin.working_state.as_ref() {
-            match probe.state().await {
-                Ok(state) if !state.changed && state.local_only == 0 => {
-                    return SaveOutcome::Unchanged;
-                }
-                Ok(_) => {}
-                // Saving reads the folder again; a failed check is no reason
-                // to skip it.
-                Err(error) => debug!(%error, "the working state could not be read"),
-            }
+        if self
+            .check()
+            .await
+            .is_some_and(|state| !state.changed && state.local_only == 0)
+        {
+            return SaveOutcome::Unchanged;
         }
         self.save(Reason::Tick).await
+    }
+
+    /// The change check, in process. `None` when it could not be read:
+    /// saving reads the folder again, so that is no reason to skip a save.
+    async fn check(&self) -> Option<WorkingState> {
+        match self.origin.working_state.as_ref()?.state().await {
+            Ok(state) => Some(state),
+            Err(error) => {
+                debug!(%error, "the working state could not be read");
+                None
+            }
+        }
     }
 
     /// Ask for a grant and post one save to this runtime's own origin.
@@ -302,9 +312,20 @@ impl RollingSaves {
     }
 
     /// The job's own save once its body returned: `Some` artifact when the
-    /// save did not leave canonical holding the folder's work.
+    /// save did not leave canonical holding the folder's work. When the
+    /// folder's last confirmed save holds all of it (nothing deferred,
+    /// nothing local-only) and nothing changed since, there is nothing to
+    /// save and the controller is not asked.
     pub(crate) async fn save_at_turn_end(&self) -> Option<JsonValue> {
-        let outcome = self.save(Reason::TurnEnd).await;
+        let outcome = if self
+            .check()
+            .await
+            .is_some_and(|state| state.durable && !state.changed)
+        {
+            SaveOutcome::Unchanged
+        } else {
+            self.save(Reason::TurnEnd).await
+        };
         let artifact = turn_end_artifact(&outcome);
         match &outcome {
             SaveOutcome::Saved(state) => info!(
@@ -314,6 +335,10 @@ impl RollingSaves {
                 local_only = state.local_only,
                 error = state.error.as_deref().unwrap_or("none"),
                 "saved the working folder at the end of the job"
+            ),
+            SaveOutcome::Unchanged => debug!(
+                job_id = %self.job_id,
+                "the working folder is saved and unchanged at the end of the job"
             ),
             other => warn!(
                 job_id = %self.job_id,
