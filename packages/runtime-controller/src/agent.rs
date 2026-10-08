@@ -2657,6 +2657,15 @@ pub(crate) async fn agent_complete(
 
     let artifacts_value =
         sanitize_json_for_postgres(artifacts.unwrap_or_else(|| JsonValue::Array(Vec::new())));
+    // Keep the small validated receipt even when large diagnostic logs exceed
+    // the generic artifact cap. This is measurement, never billing input.
+    let task_usage_receipt = match crate::task_usage::extract(&artifacts_value) {
+        Ok(receipt) => receipt,
+        Err(reason) => {
+            warn!(job_id = %job_uuid, reason, "ignoring invalid task usage receipt");
+            None
+        }
+    };
     // Cap only what gets STORED. artifacts_value stays intact below for usage/
     // billing and prompt-context extraction; only the persisted copy is replaced
     // with a marker when it exceeds the size cap.
@@ -2948,6 +2957,9 @@ pub(crate) async fn agent_complete(
             summary_ref,
             error_ref,
             artifacts_count,
+            task_usage_receipt
+                .as_ref()
+                .map(|receipt| (&job_uuid, receipt)),
         )
         .await
         {
@@ -4686,6 +4698,7 @@ pub(crate) async fn persist_run_completion_metadata(
     summary: Option<&str>,
     error_message: Option<&str>,
     artifacts_count: Option<usize>,
+    task_usage: Option<(&Uuid, &crate::task_usage::TaskUsageReceipt)>,
 ) -> Result<(), tokio_postgres::Error> {
     let row = transaction
         .query_opt(
@@ -4704,6 +4717,7 @@ pub(crate) async fn persist_run_completion_metadata(
         summary,
         error_message,
         artifacts_count,
+        task_usage,
     );
     let metadata_param = PgJson(&merged_metadata);
     transaction
@@ -4723,6 +4737,7 @@ fn merge_run_completion_metadata(
     summary: Option<&str>,
     error_message: Option<&str>,
     artifacts_count: Option<usize>,
+    task_usage: Option<(&Uuid, &crate::task_usage::TaskUsageReceipt)>,
 ) -> JsonValue {
     let mut root = match existing.cloned() {
         Some(JsonValue::Object(map)) => map,
@@ -4762,6 +4777,11 @@ fn merge_run_completion_metadata(
     }
     if let Some(value) = artifacts_count {
         root.insert("artifactsCount".to_string(), JsonValue::from(value));
+    }
+    if let Some((job_id, receipt)) = task_usage {
+        if !crate::task_usage::merge_into_metadata(&mut root, job_id, receipt) {
+            warn!(job_id = %job_id, "task usage run metadata reached its receipt cap");
+        }
     }
 
     JsonValue::Object(root)
@@ -7342,6 +7362,7 @@ mod tests {
             Some("Done"),
             None,
             Some(3),
+            None,
         );
 
         assert_eq!(merged["provider"]["id"], json!("openai"));
@@ -7369,6 +7390,7 @@ mod tests {
             None,
             Some("Backend said no"),
             None,
+            None,
         );
 
         assert_eq!(merged["provider"]["id"], json!("codex"));
@@ -7377,6 +7399,56 @@ mod tests {
             json!("resp_new")
         );
         assert_eq!(merged["errorMessage"], json!("Backend said no"));
+    }
+
+    #[test]
+    fn task_usage_survives_artifact_cap_for_silent_and_failed_completions() {
+        let receipt = crate::task_usage::tests::receipt_fixture();
+        let artifacts = json!([
+            { "kind": "codex/run-log", "log": "x".repeat(MAX_ARTIFACTS_PAYLOAD_BYTES) },
+            receipt
+        ]);
+        let parsed = crate::task_usage::extract(&artifacts).unwrap().unwrap();
+        let stored = cap_artifacts_payload(&artifacts);
+        assert_eq!(stored[0]["kind"], "instafy/artifacts-truncated");
+        assert!(crate::task_usage::extract(&stored).unwrap().is_none());
+        let job_id = Uuid::new_v4();
+        for (summary, error) in [(Some("NO_RESPONSE"), None), (None, Some("run failed"))] {
+            let merged = merge_run_completion_metadata(
+                None,
+                None,
+                None,
+                None,
+                summary,
+                error,
+                Some(2),
+                Some((&job_id, &parsed)),
+            );
+            assert_eq!(merged["aiTaskUsage"][job_id.to_string()], receipt);
+            assert!(merged.get("managedAiCredit").is_none());
+            let replay = merge_run_completion_metadata(
+                Some(&merged),
+                None,
+                None,
+                None,
+                summary,
+                error,
+                Some(2),
+                Some((&job_id, &parsed)),
+            );
+            assert_eq!(replay, merged);
+        }
+        let legacy = merge_run_completion_metadata(
+            None,
+            None,
+            None,
+            None,
+            Some("NO_RESPONSE"),
+            None,
+            Some(0),
+            None,
+        );
+        assert!(legacy.get("aiTaskUsage").is_none());
     }
 
     // NOTE: Conversation history replay policy is intentionally kept outside unit tests here.

@@ -604,13 +604,24 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
         let _watch = fixture.state.events.watch_project(fixture.project_id);
         let mut credit_events = fixture.state.events.subscribe();
 
+        let mut receipt = crate::task_usage::tests::receipt_fixture();
+        receipt["calls"][0]["outcome"] = json!("error");
+        if case.artifacts.pointer("/0/events/0/usage").is_some() {
+            receipt["calls"][0]["usageStatus"] = json!("partial");
+        } else {
+            receipt["calls"][0]["usageStatus"] = json!("unknown");
+            receipt["calls"][0].as_object_mut().unwrap().remove("usage");
+        }
+        let mut artifacts = case.artifacts;
+        artifacts.as_array_mut().unwrap().push(receipt.clone());
+
         let status = post_agent_complete(
             &fixture,
             json!({
                 "job_id": fixture.job_id,
                 "outcome": "failed",
                 "error_message": case.error_message,
-                "artifacts": case.artifacts,
+                "artifacts": artifacts,
             }),
         )
         .await?;
@@ -660,8 +671,9 @@ async fn managed_ai_prompt_keeps_charge_when_failure_may_have_reached_upstream(
             "{}",
             case.label
         );
-        let (run_status, _) = run_row(&fixture.pool, &fixture.run_id).await?;
+        let (run_status, metadata) = run_row(&fixture.pool, &fixture.run_id).await?;
         assert_eq!(run_status, "failed", "{}", case.label);
+        assert_eq!(metadata["aiTaskUsage"][fixture.job_id.to_string()], receipt);
         fixture.cleanup().await?;
     }
     Ok(())

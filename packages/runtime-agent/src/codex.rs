@@ -77,6 +77,7 @@ use crate::shared_browser::{
     PLAYWRIGHT_MODULE_PATH_ENV as SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
     TRUSTED_NODE_MODULES_ROOT_ENV as SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
 };
+use crate::task_usage::{UsageAttempt, UsageCall, UsageCounts, UsageOutcome};
 
 const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
@@ -634,6 +635,8 @@ pub struct CodexExecutionError {
 
 #[derive(Debug, Clone, Default)]
 pub struct CodexRunOptions {
+    /// Optional content-free diagnostic accounting, independent of event streaming.
+    pub usage_observer: Option<UsageCall>,
     /// Authorized job scope for current shared defaults. Absent on routing preflight and non-project calls.
     /// The workspace root comes from this CodexClient, never from prompt text.
     pub project_id: Option<uuid::Uuid>,
@@ -819,10 +822,17 @@ impl CodexClient {
             resolve_codex_max_run_retries()
         };
         let retry_base_delay = resolve_codex_retry_base_delay();
+        let usage_observer = options
+            .usage_observer
+            .as_ref()
+            .map(UsageCall::new_invocation);
 
         let mut attempt: usize = 0;
         loop {
             let mut attempt_options = options.clone();
+            let usage_attempt = usage_observer
+                .as_ref()
+                .map(|observer| observer.start_attempt(attempt.saturating_add(1)));
             let shared_browser_cancel_signal = if attempt_options.shared_browser {
                 let signal = attempt_options
                     .cancel_signal
@@ -842,6 +852,7 @@ impl CodexClient {
                 let client = Self::new(self.config.clone());
                 let prompt = prompt.to_string();
                 let options = attempt_options;
+                let attempt_observation = usage_attempt.clone();
                 run_on_fresh_task(async move {
                     let mut no_event_callback = None;
                     if let Some(cancel_signal) = shared_browser_cancel_signal {
@@ -849,13 +860,23 @@ impl CodexClient {
                             run_timeout,
                             SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT,
                             cancel_signal,
-                            client.execute_inner(&prompt, &mut no_event_callback, options),
+                            client.execute_inner(
+                                &prompt,
+                                &mut no_event_callback,
+                                options,
+                                attempt_observation,
+                            ),
                         )
                         .await)
                     } else {
                         timeout(
                             run_timeout,
-                            client.execute_inner(&prompt, &mut no_event_callback, options),
+                            client.execute_inner(
+                                &prompt,
+                                &mut no_event_callback,
+                                options,
+                                attempt_observation,
+                            ),
                         )
                         .await
                     }
@@ -867,17 +888,48 @@ impl CodexClient {
                         run_timeout,
                         SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT,
                         cancel_signal,
-                        self.execute_inner(prompt, &mut on_event, attempt_options),
+                        self.execute_inner(
+                            prompt,
+                            &mut on_event,
+                            attempt_options,
+                            usage_attempt.clone(),
+                        ),
                     )
                     .await)
                 } else {
                     timeout(
                         run_timeout,
-                        self.execute_inner(prompt, &mut on_event, attempt_options),
+                        self.execute_inner(
+                            prompt,
+                            &mut on_event,
+                            attempt_options,
+                            usage_attempt.clone(),
+                        ),
                     )
                     .await
                 }
             };
+            if let Some(observation) = usage_attempt.as_ref() {
+                let cancelled = options
+                    .cancel_signal
+                    .as_ref()
+                    .is_some_and(JobCancelSignal::is_canceled);
+                let unconfirmed_shutdown = shared_browser_shutdown_confirmation
+                    .as_ref()
+                    .is_some_and(|signal| !signal.shared_browser_shutdown_is_confirmed());
+                let outcome = if cancelled {
+                    UsageOutcome::Cancelled
+                } else if unconfirmed_shutdown {
+                    UsageOutcome::Error
+                } else {
+                    match &result {
+                        Ok(Ok(_)) => UsageOutcome::Success,
+                        Ok(Err(_)) => UsageOutcome::Error,
+                        Err(_) => UsageOutcome::Timeout,
+                    }
+                };
+                observation.finish(outcome);
+            }
             if shared_browser_shutdown_confirmation
                 .as_ref()
                 .is_some_and(|signal| !signal.shared_browser_shutdown_is_confirmed())
@@ -958,6 +1010,7 @@ impl CodexClient {
         prompt: &str,
         on_event: &mut Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
         options: CodexRunOptions,
+        usage_attempt: Option<UsageAttempt>,
     ) -> Result<CodexRunOutput> {
         let browser_mode = options.expect_browser_session;
         let personal_browser_mode =
@@ -1643,6 +1696,8 @@ impl CodexClient {
                 return Err(anyhow!("Codex declined the runtime prompt: {reason:?}"));
             }
         };
+
+        aggregator = aggregator.with_usage_attempt(usage_attempt, &active_turn_id);
 
         let mut last_agent_message: Option<String> = None;
         let mut last_agent_message_event: Option<String> = None;
@@ -3282,7 +3337,9 @@ struct CommandExecutionState {
 /// - a completed turn whose job then fails without artifacts (a retry that errors out), since
 ///   the failed completion carries no run-log to read.
 ///
-/// A stopped or failed turn is billed only its flat reserve.
+/// A stopped or failed turn is billed only its flat reserve. The separate `ai/task-usage`
+/// diagnostic observer retains known response usage on failed root attempts, but does not change
+/// this legacy settlement or guarantee persistence after lease loss/process termination.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TurnStartTokenUsage(Arc<parking_lot::Mutex<HashMap<String, TokenUsage>>>);
 
@@ -3439,6 +3496,7 @@ pub(crate) struct CodexEventStreamAdapter {
     last_total_token_usage: Option<TokenUsage>,
     /// Turns with a count that moved the thread total off the turn's baseline.
     turns_with_reported_usage: HashSet<String>,
+    usage_attempt: Option<(String, UsageAttempt)>,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -3461,7 +3519,13 @@ impl CodexEventStreamAdapter {
             turn_start_token_usage,
             last_total_token_usage: None,
             turns_with_reported_usage: HashSet::new(),
+            usage_attempt: None,
         }
+    }
+
+    fn with_usage_attempt(mut self, usage_attempt: Option<UsageAttempt>, turn_id: &str) -> Self {
+        self.usage_attempt = usage_attempt.map(|attempt| (turn_id.to_owned(), attempt));
+        self
     }
 
     pub(crate) fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
@@ -3644,7 +3708,30 @@ impl CodexEventStreamAdapter {
                 }
                 Vec::new()
             }
+            EventMsg::RawResponseCompleted(response) => {
+                if let Some((turn_id, observation)) = &self.usage_attempt {
+                    if event.id == *turn_id {
+                        observation.observe_response(
+                            &response.response_id,
+                            response.token_usage.as_ref().map(|usage| UsageCounts {
+                                input_tokens: usage.input_tokens,
+                                cached_input_tokens: usage.cached_input_tokens,
+                                cache_write_input_tokens: usage.cache_write_input_tokens,
+                                output_tokens: usage.output_tokens,
+                                reasoning_output_tokens: usage.reasoning_output_tokens,
+                                total_tokens: usage.total_tokens,
+                            }),
+                        );
+                    }
+                }
+                Vec::new()
+            }
             EventMsg::TurnComplete(turn) => {
+                if let Some((turn_id, observation)) = &self.usage_attempt {
+                    if event.id == *turn_id && turn.turn_id == *turn_id {
+                        observation.completed();
+                    }
+                }
                 let mut events = Vec::new();
                 if let Some(completed_message) = self.completed_agent_message_from_deltas() {
                     events.push(completed_message);
@@ -6890,6 +6977,150 @@ required = true
             completed["threadTotalUsage"],
             json!(usage(150_000, 135_000, 3_000))
         );
+    }
+
+    fn response_usage(turn_id: &str, response_id: &str, usage: Option<TokenUsage>) -> Event {
+        Event {
+            id: turn_id.to_owned(),
+            msg: EventMsg::RawResponseCompleted(
+                codex_protocol::protocol::RawResponseCompletedEvent {
+                    response_id: response_id.to_owned(),
+                    token_usage: usage,
+                    usage_metadata: None,
+                },
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn task_usage_observer_retains_exact_counts_across_restored_and_reset_totals() {
+        use crate::task_usage::{TaskUsage, UsagePhase};
+
+        let task = TaskUsage::default();
+        let restored = usage(100_000, 90_000, 2_000);
+        for (turn_id, outcome, complete) in [
+            ("turn-success", UsageOutcome::Success, true),
+            ("turn-failed", UsageOutcome::Error, false),
+            ("turn-timeout", UsageOutcome::Timeout, false),
+        ] {
+            let start = TurnStartTokenUsage::default();
+            start_turn(&start, turn_id, &restored).await;
+            let observation = task.call(UsagePhase::Main).start_attempt(1);
+            let mut adapter = CodexEventStreamAdapter::with_turn_start_token_usage(start)
+                .with_usage_attempt(Some(observation.clone()), turn_id);
+            adapter.collect(&token_count(
+                turn_id,
+                restored.clone(),
+                usage(50_000, 45_000, 1_000),
+            ));
+            adapter.collect(&response_usage(
+                turn_id,
+                "response",
+                Some(usage(50_000, 45_000, 1_000)),
+            ));
+            // Synthetic context-window totals must not erase exact response usage.
+            adapter.collect(&token_count(
+                turn_id,
+                TokenUsage {
+                    total_tokens: 128_000,
+                    ..TokenUsage::default()
+                },
+                TokenUsage::default(),
+            ));
+            if complete {
+                adapter.collect(&turn_complete(turn_id));
+            }
+            observation.finish(outcome);
+        }
+        let artifact = task.artifact().unwrap();
+        let calls = artifact["calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0]["usageStatus"], "reported");
+        assert_eq!(calls[1]["usageStatus"], "partial");
+        assert_eq!(calls[2]["usageStatus"], "partial");
+        for call in calls {
+            assert_eq!(call["usage"], json!(usage(50_000, 45_000, 1_000)));
+        }
+    }
+
+    #[tokio::test]
+    async fn task_usage_observer_ignores_cumulative_counts_and_other_turns() {
+        use crate::task_usage::{TaskUsage, UsagePhase};
+
+        let task = TaskUsage::default();
+        let observation = task.call(UsagePhase::Routing).start_attempt(1);
+        let mut adapter = CodexEventStreamAdapter::default()
+            .with_usage_attempt(Some(observation.clone()), "turn");
+        adapter.collect(&token_count(
+            "turn",
+            usage(150_000, 135_000, 3_000),
+            usage(50_000, 45_000, 1_000),
+        ));
+        adapter.collect(&response_usage(
+            "old-turn",
+            "old-response",
+            Some(usage(10, 0, 2)),
+        ));
+        adapter.collect(&turn_complete("old-turn"));
+        observation.finish(UsageOutcome::Success);
+        let artifact = task.artifact().unwrap();
+        assert_eq!(artifact["calls"][0]["usageStatus"], "unknown");
+        assert!(artifact["calls"][0].get("usage").is_none());
+
+        adapter.collect(&response_usage("turn", "response", Some(usage(10, 0, 2))));
+        // Completion of another turn must not make this attempt complete.
+        assert_eq!(
+            task.artifact().unwrap()["calls"][0]["usageStatus"],
+            "partial"
+        );
+        adapter.collect(&turn_complete("turn"));
+        assert_eq!(
+            task.artifact().unwrap()["calls"][0]["usageStatus"],
+            "reported"
+        );
+    }
+
+    #[test]
+    fn task_usage_observer_sums_responses_and_preserves_known_counts_when_usage_is_missing() {
+        use crate::task_usage::{TaskUsage, UsagePhase};
+
+        let task = TaskUsage::default();
+        let observation = task.call(UsagePhase::Main).start_attempt(1);
+        let mut adapter = CodexEventStreamAdapter::default()
+            .with_usage_attempt(Some(observation.clone()), "turn");
+        let response = response_usage("turn", "response-1", Some(usage(10, 4, 8)));
+        adapter.collect(&response);
+        adapter.collect(&response);
+        adapter.collect(&response_usage("turn", "response-2", Some(usage(10, 4, 8))));
+        adapter.collect(&response_usage("turn", "response-3", None));
+        adapter.collect(&turn_complete("turn"));
+        observation.finish(UsageOutcome::Success);
+        let artifact = task.artifact().unwrap();
+        assert_eq!(artifact["calls"][0]["usage"], json!(usage(20, 8, 16)));
+        assert_eq!(artifact["calls"][0]["usageStatus"], "partial");
+    }
+
+    #[test]
+    fn task_usage_observer_records_explicit_zero_without_rollout_budget_units() {
+        use crate::task_usage::{TaskUsage, UsagePhase};
+
+        let task = TaskUsage::default();
+        let observation = task.call(UsagePhase::Main).start_attempt(1);
+        let mut adapter = CodexEventStreamAdapter::default()
+            .with_usage_attempt(Some(observation.clone()), "turn");
+        adapter.collect(&response_usage(
+            "turn",
+            "response",
+            Some(TokenUsage {
+                codex_rollout_budget_units: Some(7.into()),
+                ..TokenUsage::default()
+            }),
+        ));
+        adapter.collect(&turn_complete("turn"));
+        observation.finish(UsageOutcome::Success);
+        let artifact = task.artifact().unwrap();
+        assert_eq!(artifact["calls"][0]["usageStatus"], "reported");
+        assert_eq!(artifact["calls"][0]["usage"], json!(TokenUsage::default()));
     }
 
     #[tokio::test]

@@ -412,6 +412,16 @@ async fn assert_ambient_telemetry_for_access_mode(
         );
     }
 
+    let metering_before: Option<serde_json::Value> = pool
+        .get()
+        .await?
+        .query_opt(
+            "select to_jsonb(j) from ai_usage_jobs j where job_id = $1",
+            &[&job_id],
+        )
+        .await?
+        .map(|row| row.get::<_, PgJson<serde_json::Value>>(0).0);
+
     // The default fixture rates make this usage exactly five billing units.
     // Including it proves completion reads the newly persisted managed-use mark
     // before reconciliation, without charging a silent turn for its telemetry.
@@ -424,6 +434,13 @@ async fn assert_ambient_telemetry_for_access_mode(
             }}]
         }],
     });
+    // A separate operator measurement survives silence and must not replace
+    // the established first-attempt credit calculation above.
+    let receipt = crate::task_usage::tests::receipt_fixture();
+    completion["artifacts"]
+        .as_array_mut()
+        .unwrap()
+        .push(receipt.clone());
     if let Some(summary) = completion_answer {
         completion["summary"] = json!(summary);
     }
@@ -490,6 +507,18 @@ async fn assert_ambient_telemetry_for_access_mode(
         .await?
         .get("metadata");
     assert_eq!(run.0["managedAiUsed"], json!(should_bill));
+    assert_eq!(run.0["aiTaskUsage"][job_id.to_string()], receipt);
+    let metering_after = connection
+        .query_opt(
+            "select to_jsonb(j) from ai_usage_jobs j where job_id = $1",
+            &[&job_id],
+        )
+        .await?
+        .map(|row| row.get::<_, PgJson<serde_json::Value>>(0).0);
+    assert_eq!(
+        metering_after, metering_before,
+        "diagnostics must not settle platform usage"
+    );
     if should_bill {
         assert_eq!(run.0["managedAiCredit"]["charge"]["chargedUnits"], json!(5));
     }

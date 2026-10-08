@@ -77,6 +77,7 @@ mod send_queue;
 mod skills_discovery;
 mod speech_proxy;
 mod state;
+mod task_usage;
 mod telemetry;
 #[cfg(test)]
 mod tests;

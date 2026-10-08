@@ -1210,6 +1210,7 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     mut metadata: JsonValue,
     trusted_service_role: bool,
 ) -> JsonValue {
+    crate::task_usage::strip_authoring_claims(&mut metadata);
     if trusted_service_role {
         return metadata;
     }

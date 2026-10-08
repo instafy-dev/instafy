@@ -14,6 +14,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use runtime_agent::codex::{CodexClient, CodexConfig, CodexRunOptions};
 use runtime_agent::job_cancel::JobCancelSignal;
+use runtime_agent::task_usage::{TaskUsage, UsagePhase};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -281,22 +282,24 @@ async fn responses(
                 None => StatusCode::BAD_REQUEST.into_response(),
             };
         }
-        // Four jobs on one thread, 50k input tokens per turn. The second job's first step
+        // Five jobs on one thread, 50k reported input tokens per measured turn. The second job's first step
         // reports no usage, so Codex's first count of that turn repeats the restored total.
-        // The fourth job's only response reports none at all.
+        // The fourth job's only response reports none; the fifth reports usage before an
+        // unmeasured final response. Root receipts must retain known counts in both orders.
         "per_turn_usage" => {
             let usage = json!({"input_tokens":50_000,"output_tokens":1_000,
                 "total_tokens":51_000, "input_tokens_details":{"cached_tokens":45_000},
                 "output_tokens_details":{"reasoning_tokens":250}});
             return match ordinal {
                 2 => sse_with_usage(step_item(STEP_TEXT), Some(false), None),
-                5 => sse_with_usage(answer_item(FINAL_TEXT), None, None),
+                5 | 7 => sse_with_usage(answer_item(FINAL_TEXT), None, None),
+                6 => sse_with_usage(step_item(STEP_TEXT), Some(false), Some(usage)),
                 _ => sse_with_usage(answer_item(FINAL_TEXT), None, Some(usage)),
             };
         }
-        // A routed job whose first attempt ends with no final message, so the runtime retries
-        // it once. Each attempt reports its own usage.
-        "retry_usage" => {
+        // Routed jobs finish directly, recover a missing final, finalize after an empty
+        // recovery, or fail the recovery. Each completed phase reports its own usage.
+        "retry_usage" | "direct_usage" | "finalization_usage" | "failed_recovery_usage" => {
             let usage = |input: u64, cached: u64, output: u64| {
                 json!({"input_tokens":input, "output_tokens":output,
                     "total_tokens":input + output, "input_tokens_details":{"cached_tokens":cached},
@@ -313,7 +316,17 @@ async fn responses(
                     })
                     .to_string(),
                 ),
-                2 => sse_output(None, None, Some(usage(30_000, 27_000, 600))),
+                2 if state.scenario != "direct_usage" => {
+                    sse_output(None, None, Some(usage(30_000, 27_000, 600)))
+                }
+                3 if state.scenario == "finalization_usage" => {
+                    sse_output(None, None, Some(usage(12_000, 10_000, 400)))
+                }
+                3 if state.scenario == "failed_recovery_usage" => (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error":{"message":"local scripted auth failure"}})),
+                )
+                    .into_response(),
                 _ => sse_with_usage(
                     answer_item(&json!({"summary":FINAL_TEXT, "files":[]}).to_string()),
                     None,
@@ -980,11 +993,22 @@ scenario_test!(
 scenario_test!(
     turn_completed_reports_each_turn_of_a_resumed_thread,
     "per_turn_usage",
-    5
+    7
 );
 scenario_test!(
     recovery_retry_usage_rows_carry_their_attempt,
     "retry_usage",
+    3
+);
+scenario_test!(direct_job_reports_routing_and_main_usage, "direct_usage", 2);
+scenario_test!(
+    missing_final_reports_each_phase_without_deduplicating_equal_usage,
+    "finalization_usage",
+    4
+);
+scenario_test!(
+    failed_recovery_preserves_earlier_usage_and_unknown_failed_call,
+    "failed_recovery_usage",
     3
 );
 
@@ -1051,7 +1075,12 @@ async fn isolated_retry_child() -> Result<()> {
     let workspace = std::env::var("INSTAFY_RETRY_TEST_WORKSPACE")?;
     if matches!(
         scenario.as_str(),
-        "routing" | "ambient_decline" | "retry_usage"
+        "routing"
+            | "ambient_decline"
+            | "retry_usage"
+            | "direct_usage"
+            | "finalization_usage"
+            | "failed_recovery_usage"
     ) {
         return run_routing_job(&scenario).await;
     }
@@ -1076,6 +1105,7 @@ async fn isolated_retry_child() -> Result<()> {
         })
     });
     let started = Instant::now();
+    let task_usage = TaskUsage::default();
     let result = client
         .execute_with_options(
             "Run the supplied local diagnostic and finish with its result.",
@@ -1093,12 +1123,41 @@ async fn isolated_retry_child() -> Result<()> {
                 disable_shell_tool: personal_browser,
                 // The first request must require a tool; once the tool runs, the next may not.
                 require_first_tool_call: scenario == "tool_once",
+                usage_observer: Some(task_usage.call(UsagePhase::Main)),
                 ..Default::default()
             },
         )
         .await;
     if let Some(task) = canceller {
         task.abort();
+    }
+    // These are root-turn receipts, not HTTP-attempt bills. The two requests in a
+    // streamed 429 recovery remain one turn; a raw 429 has no reported count.
+    if matches!(
+        scenario.as_str(),
+        "http_429"
+            | "transient_429_sse"
+            | "incomplete_max_output_tokens"
+            | "incomplete_content_filter"
+            | "tool_once"
+    ) {
+        let artifact = task_usage.artifact().context("root usage receipt")?;
+        let calls = usage_calls(std::slice::from_ref(&artifact));
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let (status, outcome) = match scenario.as_str() {
+            "http_429" => ("unknown", "error"),
+            "tool_once" => ("partial", "error"),
+            _ => ("reported", "success"),
+        };
+        assert_eq!(calls[0]["phase"], "main");
+        assert_eq!(calls[0]["usageStatus"], status, "{calls:?}");
+        assert_eq!(calls[0]["outcome"], outcome, "{calls:?}");
+        if status == "unknown" {
+            assert!(calls[0].get("usage").is_none(), "{calls:?}");
+        } else {
+            assert_eq!(calls[0]["usage"]["input_tokens"], 10, "{calls:?}");
+            assert_eq!(calls[0]["usage"]["output_tokens"], 5, "{calls:?}");
+        }
     }
     if let Some(reason) = scenario
         .strip_prefix("incomplete_")
@@ -1196,12 +1255,13 @@ async fn isolated_retry_child() -> Result<()> {
     Ok(())
 }
 
-/// Runs four jobs on one persisted thread. Each job builds a fresh thread manager, so the
+/// Runs five jobs on one persisted thread. Each job builds a fresh thread manager, so the
 /// later ones resume the thread from the rollout, restoring Codex's running total.
 async fn run_per_turn_usage_jobs(client: &CodexClient) -> Result<()> {
     let mut provider_conversation_state = None;
     let mut reported = Vec::new();
-    for _ in 0..4 {
+    for index in 0..5 {
+        let task_usage = TaskUsage::default();
         let output = client
             .execute_with_options(
                 "Run the supplied local diagnostic and finish with its result.",
@@ -1212,11 +1272,37 @@ async fn run_per_turn_usage_jobs(client: &CodexClient) -> Result<()> {
                     suppress_contextual_instructions: true,
                     persist_conversation_thread: true,
                     provider_conversation_state: provider_conversation_state.take(),
+                    usage_observer: Some(task_usage.call(UsagePhase::Main)),
                     ..Default::default()
                 },
             )
             .await?;
         assert_eq!(output.final_json["summary"], FINAL_TEXT);
+        let artifact = task_usage
+            .artifact()
+            .context("resumed turn usage receipt")?;
+        let calls = usage_calls(std::slice::from_ref(&artifact));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["outcome"], "success");
+        if index == 3 {
+            assert_eq!(calls[0]["usageStatus"], "unknown");
+            assert!(calls[0].get("usage").is_none());
+        } else {
+            // A completed but unmeasured response makes this turn partial even when another
+            // response supplied a count. Restored totals must not conceal either omission.
+            assert_eq!(
+                calls[0]["usageStatus"],
+                if matches!(index, 1 | 4) {
+                    "partial"
+                } else {
+                    "reported"
+                }
+            );
+            assert_eq!(calls[0]["usage"]["input_tokens"], 50_000);
+            assert_eq!(calls[0]["usage"]["cached_input_tokens"], 45_000);
+            assert_eq!(calls[0]["usage"]["output_tokens"], 1_000);
+            assert_eq!(calls[0]["usage"]["reasoning_output_tokens"], 250);
+        }
         let state = output
             .provider_conversation_state
             .context("a persisted thread returns its state")?;
@@ -1251,7 +1337,8 @@ async fn run_per_turn_usage_jobs(client: &CodexClient) -> Result<()> {
             turn("new", 50_000),
             turn("rollout", 100_000),
             turn("rollout", 150_000),
-            unreported
+            unreported,
+            turn("rollout", 200_000)
         ]
     );
     Ok(())
@@ -1305,6 +1392,73 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
     let result = processor
         .run_apply_job(&registration, &job, false, progress, None, None)
         .await;
+    // Count from completed artifacts and from failed-job artifacts through the same public
+    // API. A later failure must not discard earlier completed calls or turn absent usage
+    // into a zero. Content and credentials never belong in this diagnostic artifact.
+    let artifacts = match &result {
+        Ok(execution) => execution.artifacts.as_slice(),
+        Err(error) => runtime_agent::jobs::extract_job_failure_artifacts(error)
+            .context("failed job must retain its usage artifact")?,
+    };
+    let calls = usage_calls(artifacts);
+    let phases: Vec<_> = calls.iter().map(|call| call["phase"].as_str()).collect();
+    let expected_phases = match scenario {
+        "routing" => vec![Some("routing")],
+        "retry_usage" | "failed_recovery_usage" => {
+            vec![Some("routing"), Some("main"), Some("recovery")]
+        }
+        "finalization_usage" => vec![
+            Some("routing"),
+            Some("main"),
+            Some("recovery"),
+            Some("finalization"),
+        ],
+        _ => vec![Some("routing"), Some("main")],
+    };
+    assert_eq!(phases, expected_phases, "{calls:?}");
+    for (index, call) in calls.iter().enumerate() {
+        let failed = scenario == "routing" || (scenario == "failed_recovery_usage" && index == 2);
+        assert_eq!(
+            call["usageStatus"],
+            if failed { "unknown" } else { "reported" },
+            "{calls:?}"
+        );
+        assert_eq!(
+            call["outcome"],
+            if failed { "error" } else { "success" },
+            "{calls:?}"
+        );
+        if failed {
+            assert!(call.get("usage").is_none(), "{calls:?}");
+        }
+    }
+    if matches!(
+        scenario,
+        "retry_usage" | "finalization_usage" | "failed_recovery_usage"
+    ) {
+        assert_eq!(calls[0]["usage"]["input_tokens"], 10);
+        assert_eq!(calls[1]["usage"]["input_tokens"], 30_000);
+        assert_eq!(calls[1]["usage"]["cached_input_tokens"], 27_000);
+        assert_eq!(calls[1]["usage"]["output_tokens"], 600);
+        if scenario != "failed_recovery_usage" {
+            for call in &calls[2..] {
+                assert_eq!(call["usage"]["input_tokens"], 12_000);
+                assert_eq!(call["usage"]["cached_input_tokens"], 10_000);
+                assert_eq!(call["usage"]["output_tokens"], 400);
+            }
+        }
+    }
+    if scenario == "ambient_decline" {
+        // Both independent phases reported the same count. Equality is not duplication.
+        for call in calls {
+            assert_eq!(call["usage"]["input_tokens"], 10);
+            assert_eq!(call["usage"]["output_tokens"], 5);
+        }
+    }
+    if matches!(scenario, "direct_usage" | "finalization_usage") {
+        assert_eq!(result?.summary, FINAL_TEXT);
+        return Ok(());
+    }
     if scenario == "retry_usage" {
         let execution = result?;
         assert_eq!(execution.summary, FINAL_TEXT);
@@ -1359,7 +1513,43 @@ async fn run_routing_job(scenario: &str) -> Result<()> {
             "a clean ambient decline must not trigger semantic recovery"
         );
     } else {
-        assert!(result.is_err(), "routing transport failure must propagate");
+        assert!(result.is_err(), "scripted model failure must propagate");
     }
     Ok(())
+}
+
+fn usage_calls(artifacts: &[Value]) -> &[Value] {
+    let receipts: Vec<_> = artifacts
+        .iter()
+        .filter(|artifact| artifact["kind"] == "ai/task-usage")
+        .collect();
+    assert_eq!(receipts.len(), 1, "one diagnostic receipt per job");
+    let receipt = receipts[0];
+    assert_eq!(receipt["version"], 1);
+    assert_eq!(receipt["coverage"], "root_turns_only");
+    assert_eq!(receipt["truncated"], false);
+    let calls = receipt["calls"].as_array().expect("usage calls");
+    let mut identities = std::collections::HashSet::new();
+    for call in calls {
+        assert_eq!(call["usageScope"], "turn");
+        let invocation = call["invocationId"].as_str().expect("invocation identity");
+        Uuid::parse_str(invocation).expect("opaque invocation UUID");
+        let attempt = call["attempt"].as_u64().expect("attempt index");
+        assert!(identities.insert((invocation, attempt)), "{calls:?}");
+        let fields = call.as_object().unwrap();
+        assert!(
+            fields.keys().all(|field| matches!(
+                field.as_str(),
+                "invocationId"
+                    | "attempt"
+                    | "phase"
+                    | "outcome"
+                    | "usageStatus"
+                    | "usageScope"
+                    | "usage"
+            )),
+            "diagnostic fields must not include request or response content: {fields:?}"
+        );
+    }
+    calls
 }
