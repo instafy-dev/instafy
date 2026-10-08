@@ -633,7 +633,10 @@ node's checkout a cache.
   artifact (`durable: false` and a fixed error code).
 - A slot a person removed (or restored) is gone from canonical while the
   folder's record still names it: its paths are not saved again until they
-  change.
+  change, and a stop that saves the folder, like every shutdown, stores no
+  `unsaved` copy of them when the slot already holds everything else the
+  folder changed. A stop's flush without `workingState` (rolling saves off)
+  still pushes the folder's whole copy.
 - `WORKING_STATE_SAVES=off` on the controller turns rolling saves off: the
   grant answers 403 `rolling_saves_off`, the runtime stops ticking, and
   stops ask the origin for no save of their own. A stop's flush then pushes

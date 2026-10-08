@@ -2584,8 +2584,9 @@ impl<'a> Publisher<'a> {
     }
 
     /// In a stop that skips them: whether the working folder's last
-    /// confirmed save already holds `tree` on `parent`, so no `unsaved` copy
-    /// of the same work is stored.
+    /// confirmed save already holds `tree` on `parent`, apart from work a
+    /// person removed from the slot, so no `unsaved` copy of the same work
+    /// is stored (see [`crate::working_state::record_holds`]).
     fn working_save_holds(&self, parent: Option<&str>, tree: &str) -> Result<bool> {
         if !self.skip_saved_copies {
             return Ok(false);

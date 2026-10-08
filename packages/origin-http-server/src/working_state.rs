@@ -522,18 +522,31 @@ fn kept_by_save(
     without_dismissed(git, &tree, parent)
 }
 
-/// Whether the folder's last confirmed save holds `tree` on `parent`: a
-/// stop then stores no `unsaved` copy of the same work.
+/// Whether a stop needs no `unsaved` copy of `tree` on `parent`, once the
+/// paths a person removed from the slot are left out as every save leaves
+/// them out (see [`without_dismissed`]): those paths are all it changes, or
+/// the folder's last confirmed save holds the rest. Without a removed slot
+/// this is only the second.
 pub(crate) fn record_holds(
     git: &WorkspaceGit<'_>,
     parent: Option<&str>,
     tree: &str,
 ) -> Result<bool> {
+    let kept = without_dismissed(git, tree, parent)?;
+    if kept != tree {
+        let parent_tree = match parent {
+            Some(parent) => git.tree_id(parent)?,
+            None => git.empty_tree()?,
+        };
+        if kept == parent_tree {
+            return Ok(true);
+        }
+    }
     if unsettled(git)? {
         return Ok(false);
     }
     Ok(read_record(git, || working_set_id(git))?
-        .is_some_and(|record| record.parent.as_deref() == parent && record.tree == tree))
+        .is_some_and(|record| record.parent.as_deref() == parent && record.tree == kept))
 }
 
 /// Whether a push or delete of the slot is waiting for canonical's answer

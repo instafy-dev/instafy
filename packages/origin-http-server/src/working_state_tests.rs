@@ -1957,6 +1957,94 @@ async fn a_stop_that_pushed_its_unsaved_copy_is_durable_without_a_save() {
     assert!(fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty());
 }
 
+/// Work a person removed from the slot is not stored again by the stop that
+/// finds the removal, nor by the shutdown after it, so the stop is durable
+/// and the next start brings nothing back. With rolling saves off the stop's
+/// flush pushes the folder's copy whole, removed work included, as it did
+/// before rolling saves.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_slot_does_not_come_back_at_the_stop() {
+    let marker = |fx: &Fixture| fs::read(fx.ws.join(crate::server::CLEAN_STOP_MARKER)).ok();
+    let unsaved_on_canonical = |fx: &Fixture| -> Vec<String> {
+        fx.remote_recovery_refs()
+            .into_iter()
+            .filter(|name| name.contains("-unsaved-"))
+            .collect()
+    };
+    let saved_then_removed = |fx: &Fixture| {
+        fx.write("removed.md", b"removed\n");
+        assert_eq!(fx.save(PersistReason::Tick).error, None);
+        let (slot, _) = fx.slot().unwrap();
+        git_in(&fx.remote, &["update-ref", "-d", &slot]);
+    };
+
+    // Nothing else unsaved; the next runtime on the folder stops.
+    let mut fx = Fixture::new();
+    saved_then_removed(&fx);
+    fx.config.origin_id = Uuid::new_v4();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    let memory = server.app_state().unwrap().working_memory;
+    let report = flush_saving(&fx.ctx(), false, Duration::from_secs(18), Some(&memory)).unwrap();
+    let working = report.working_state.clone().expect("workingState");
+    assert!(working.durable, "{working:?}");
+    assert!(!fx.local_refs(DISMISSED_REF).is_empty(), "the stop saw it");
+    server.stop_flushing_workspace().await.unwrap();
+    assert!(
+        fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty(),
+        "the shutdown kept the removed work again"
+    );
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+    fx.config.origin_id = Uuid::new_v4();
+    fx.memory = WorkingMemory::default();
+    assert_eq!(fx.save(PersistReason::TurnEnd).error, None);
+    assert!(unsaved_on_canonical(&fx).is_empty());
+    assert!(fx.slot().is_none());
+
+    // Another edit too: the slot takes only that.
+    let fx = Fixture::new();
+    saved_then_removed(&fx);
+    fx.write("kept.md", b"kept\n");
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    let memory = server.app_state().unwrap().working_memory;
+    let report = flush_saving(&fx.ctx(), false, Duration::from_secs(18), Some(&memory)).unwrap();
+    let working = report.working_state.clone().expect("workingState");
+    assert!(working.durable, "{working:?}");
+    assert_eq!(fx.slot_file("kept.md").as_deref(), Some("kept\n"));
+    assert!(fx.slot_file("removed.md").is_none());
+    server.stop_flushing_workspace().await.unwrap();
+    assert!(
+        fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty(),
+        "the shutdown kept the removed work again"
+    );
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+    assert!(unsaved_on_canonical(&fx).is_empty());
+
+    // Saves off after a save found the removal: the stop's flush carries no
+    // flag and pushes the whole copy.
+    let fx = Fixture::new();
+    saved_then_removed(&fx);
+    fx.write("kept.md", b"kept\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    assert!(!fx.local_refs(DISMISSED_REF).is_empty());
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    let report = flush_within(&fx.ctx(), false, Duration::from_secs(18)).unwrap();
+    assert!(report.working_state.is_none());
+    assert_eq!(report.unpushed_refs, 0, "{report:?}");
+    let copies = unsaved_on_canonical(&fx);
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    for (path, content) in [("removed.md", "removed"), ("kept.md", "kept")] {
+        let held = git_in(&fx.remote, &["show", &format!("{}:{path}", copies[0])]);
+        assert_eq!(held, content);
+    }
+    server.stop_flushing_workspace().await.unwrap();
+    assert!(fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty());
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+    assert_eq!(unsaved_on_canonical(&fx).len(), 1);
+}
+
 /// Every shutdown decides the durable-stop marker on its own: one left by
 /// a sibling runtime's durable stop, or written by the workspace itself,
 /// never survives a shutdown that is not durable, whether its flush kept
