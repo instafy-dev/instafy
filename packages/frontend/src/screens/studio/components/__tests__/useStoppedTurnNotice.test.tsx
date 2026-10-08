@@ -115,12 +115,18 @@ const PERSON_STOP_REASONS = [
   "runtime_limit_takeover",
   "browser_session_runtime_limit_takeover",
 ];
-/** Stops nobody chose, as the controller names them, and an unnamed or unknown one. */
+/**
+ * Stops nobody chose, by the reason the controller records on the run (the
+ * stop's reason, not its source: the idle sweep's source is `idle_stop`, its
+ * reason `idle`), and an unnamed or unknown one.
+ */
 const OTHER_STOP_REASONS = [
-  "idle_stop",
+  "idle",
   "credits_exhausted",
   "heartbeat_timeout",
-  "pool_retirement_drain",
+  "oom_killed",
+  "runtime_limit_reclaim",
+  "pool_retirement",
   "dev_runtime_offline",
   "other",
   "",

@@ -964,7 +964,20 @@ describe("resolveRunFailurePresentation", () => {
     });
 
     it("says it lost its machine when nobody chose the stop, or the reason is unknown", () => {
-      for (const interruptionReason of ["heartbeat_timeout", "credits_exhausted", "idle_stop", "other", "", 7, null]) {
+      // The stop's reason as the controller records it: the idle sweep's is
+      // `idle` (its source is `idle_stop`).
+      for (const interruptionReason of [
+        "idle",
+        "heartbeat_timeout",
+        "oom_killed",
+        "credits_exhausted",
+        "runtime_limit_reclaim",
+        "pool_retirement",
+        "other",
+        "",
+        7,
+        null,
+      ]) {
         const presentation = presentationFor({ interruptionReason });
         expect(presentation?.kind).toBe("interrupted_run_expired");
         expect(presentation?.friendlyText, String(interruptionReason)).toBe(LOST_MACHINE_TEXT);
