@@ -444,8 +444,9 @@ export function RuntimeOperationsProvider({
       const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
       const hold = holdManualStop ? markManualStop(projectId) : null;
       try {
-        // Keeps the hold while the stop holds, also after an error answer
-        // that follows a stop the controller already committed.
+        // Keeps the hold unless the controller refused the stop: also after
+        // an error answer that follows a stop it committed, or a 5xx or no
+        // answer at all, when the stop may have taken effect.
         await stopUnderManualHold(projectId, hold, () =>
           controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" }),
         );
@@ -501,8 +502,8 @@ export function RuntimeOperationsProvider({
       const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
       const hold = holdManualStop ? markManualStop(projectId) : null;
       try {
-        // Keeps the hold after a removal that took effect, also when it then
-        // answered an error and the runtime is still listed.
+        // Keeps the hold unless the controller refused the removal, also
+        // when it answered an error and the runtime is still listed.
         await removeUnderManualHold(projectId, hold, () =>
           controllerClient.runtimes.remove({ runtimeId, reason: "user_remove" }),
         );

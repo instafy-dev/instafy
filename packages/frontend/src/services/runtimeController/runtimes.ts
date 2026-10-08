@@ -427,6 +427,25 @@ export function committedRuntimeStop(error: unknown): StopRuntimeResult | null {
   return null;
 }
 
+/**
+ * Whether a stop or removal that answered `error` was refused before it
+ * changed anything, so the machine is as it was: a 4xx answer other than the
+ * committed stop's 409 (committedRuntimeStop), such as a 409 for a machine
+ * missing its active lease generation, a 403 or a 404. A 5xx answer or none
+ * at all (a network failure or a timeout) is no such refusal: the controller
+ * commits a stop before it finishes and answers, and a proxy or the browser
+ * can give up while the provider releases the machine, which takes up to
+ * three minutes.
+ */
+export function runtimeStopRefused(error: unknown): boolean {
+  return (
+    error instanceof ControllerApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    committedRuntimeStop(error) === null
+  );
+}
+
 export interface StopRuntimeIfIdleResult {
   statusChanged: boolean;
   skipReason: string | null;

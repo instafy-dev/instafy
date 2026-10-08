@@ -122,12 +122,34 @@ describe("stopUnderManualHold", () => {
     expect(manualStopHold(PROJECT_ID)).toBe(raced);
   });
 
-  it("lifts the hold and rethrows when the machine may still be running", async () => {
+  it("keeps the hold but rethrows when the stop may have taken effect", async () => {
+    // The controller can commit the stop and still answer 500, and a proxy
+    // or the browser can give up while the provider releases the machine.
+    for (const failure of [
+      stopError(500, "failed to finalize runtime stop"),
+      stopError(502, "stop runtime failed (502): <html>Bad Gateway</html>"),
+      stopError(503, "stop runtime failed (503)"),
+      stopError(504, "stop runtime failed (504): <html>Gateway Timeout</html>"),
+      new TypeError("Failed to fetch"),
+      new DOMException("signal timed out", "TimeoutError"),
+    ]) {
+      const hold = markManualStop(PROJECT_ID);
+      await expect(
+        stopUnderManualHold(PROJECT_ID, hold, async () => {
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(manualStopHold(PROJECT_ID), failure.message).toBe(hold);
+      // Nothing says where the work went.
+      expect(hold?.flush, failure.message).toBeNull();
+    }
+  });
+
+  it("lifts the hold and rethrows when the controller refused the stop", async () => {
     for (const failure of [
       stopError(409, "provider-managed runtime is missing its active lease generation"),
-      stopError(502, "stop runtime failed (502): <html>Bad Gateway</html>"),
-      stopError(500, "failed to commit runtime stop"),
-      new TypeError("Failed to fetch"),
+      stopError(403, "forbidden"),
+      stopError(404, "runtime not found"),
     ]) {
       const hold = markManualStop(PROJECT_ID);
       await expect(
@@ -144,9 +166,9 @@ describe("stopUnderManualHold", () => {
     const second = markManualStop(PROJECT_ID);
     await expect(
       stopUnderManualHold(PROJECT_ID, first, async () => {
-        throw stopError(500, "failed to commit runtime stop");
+        throw stopError(409, "provider-managed runtime is missing its active lease generation");
       }),
-    ).rejects.toThrow("failed to commit runtime stop");
+    ).rejects.toThrow("missing its active lease generation");
     expect(manualStopHold(PROJECT_ID)).toBe(second);
   });
 
@@ -201,11 +223,28 @@ describe("removeUnderManualHold", () => {
     }
   });
 
-  it("lifts the hold when the machine may still be running, unless a later Stop set its own", async () => {
+  it("keeps the hold when the removal may have taken effect", async () => {
+    for (const failure of [
+      removeError(500, "failed to finalize runtime removal"),
+      removeError(502, "remove runtime failed (502): <html>Bad Gateway</html>"),
+      removeError(504, "remove runtime failed (504)"),
+      new TypeError("Failed to fetch"),
+    ]) {
+      const hold = markManualStop(PROJECT_ID);
+      await expect(
+        removeUnderManualHold(PROJECT_ID, hold, async () => {
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(manualStopHold(PROJECT_ID), failure.message).toBe(hold);
+    }
+  });
+
+  it("lifts the hold when the controller refused the removal, unless a later Stop set its own", async () => {
     for (const failure of [
       removeError(409, "provider-managed runtime is missing its active lease generation"),
-      removeError(500, "failed to commit runtime removal"),
-      new TypeError("Failed to fetch"),
+      removeError(403, "forbidden"),
+      removeError(404, "runtime not found"),
     ]) {
       const hold = markManualStop(PROJECT_ID);
       await expect(
@@ -220,9 +259,9 @@ describe("removeUnderManualHold", () => {
     const second = markManualStop(PROJECT_ID);
     await expect(
       removeUnderManualHold(PROJECT_ID, first, async () => {
-        throw removeError(500, "failed to commit runtime removal");
+        throw removeError(404, "runtime not found");
       }),
-    ).rejects.toThrow("failed to commit runtime removal");
+    ).rejects.toThrow("runtime not found");
     expect(manualStopHold(PROJECT_ID)).toBe(second);
   });
 });

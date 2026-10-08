@@ -388,6 +388,50 @@ describe("useHostedRuntimeSelectionState takeover", () => {
     expect(thrown).not.toBeInstanceOf(HostedRuntimeBlockerSpaceError);
     expect(refreshRuntimeStatuses).not.toHaveBeenCalled();
     expect(ensureHostedRuntime).not.toHaveBeenCalled();
+    // The stop may have fenced the blocker off before that answer, so its
+    // space stays held until someone there asks for a machine.
+    expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(true);
+  });
+
+  it("keeps the blocker's space held when the stop got no answer", async () => {
+    stop.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    let thrown: unknown = null;
+    await act(async () => {
+      try {
+        await takeOver?.();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect((thrown as Error).message).toBe("Failed to fetch");
+    expect(ensureHostedRuntime).not.toHaveBeenCalled();
+    expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(true);
+  });
+
+  it("lifts the blocker's hold when the controller refused the stop", async () => {
+    stop.mockRejectedValue(
+      new ControllerApiError({
+        status: 403,
+        message: "forbidden",
+        code: null,
+        details: null,
+        url: null,
+      }),
+    );
+
+    let thrown: unknown = null;
+    await act(async () => {
+      try {
+        await takeOver?.();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect((thrown as Error).message).toBe("forbidden");
+    expect(ensureHostedRuntime).not.toHaveBeenCalled();
     expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(false);
   });
 });

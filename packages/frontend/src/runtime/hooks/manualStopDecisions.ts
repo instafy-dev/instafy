@@ -1,6 +1,7 @@
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import {
   committedRuntimeStop,
+  runtimeStopRefused,
   type StopRuntimeResult,
 } from "../../services/runtimeController/runtimes";
 import {
@@ -42,9 +43,14 @@ export function stopLeavesNoLiveHostedRuntime(
  * the request answered `error`, and return what it still did. A stop the
  * controller had committed before the error (committedRuntimeStop) keeps the
  * hold and what it kept: lifting it then would let this tab start the machine
- * the person just stopped on its next status read. Any other failure may have
- * left the machine running, so it lifts the hold, unless a later Stop has set
- * its own, and returns null.
+ * the person just stopped on its next status read. Only a refusal
+ * (runtimeStopRefused) lifts the hold, unless a later Stop has set its own:
+ * the machine is as it was. After a 5xx answer or none at all the stop may
+ * have taken effect, and the controller then announces the turn it put back
+ * in the queue, so the hold stays, without a word on where the work went.
+ * Where the stop did not take, the machine is still ready and the chat says
+ * nothing of a stopped turn (useStoppedTurnNotice); Start or a send lifts the
+ * hold as always. Returns null unless the stop was committed.
  */
 function settleManualHoldAfterError(
   projectId: string | null,
@@ -54,7 +60,7 @@ function settleManualHoldAfterError(
   const committed = committedRuntimeStop(error);
   if (committed) {
     recordManualStopFlush(projectId, hold, committed.flush);
-  } else if (hold && manualStopHold(projectId) === hold) {
+  } else if (runtimeStopRefused(error) && hold && manualStopHold(projectId) === hold) {
     clearManualStop(projectId);
   }
   return committed;
@@ -62,9 +68,9 @@ function settleManualHoldAfterError(
 
 /**
  * Make a person's Stop under the hold it set (null when it set none) and keep
- * what the stop answered with that hold. The hold stays as long as the stop
- * took effect, including after an error answer that follows a committed stop
- * (settleManualHoldAfterError). Any other failure lifts it and is thrown.
+ * what the stop answered with that hold. The hold stays unless the controller
+ * refused the stop (settleManualHoldAfterError). An error answer that follows
+ * a committed stop returns what it kept; any other failure is thrown.
  */
 export async function stopUnderManualHold(
   projectId: string | null,
@@ -91,8 +97,8 @@ export async function stopUnderManualHold(
  * Remove a machine under the hold the person's Remove set, as
  * stopUnderManualHold stops one: a removal stops the machine first, and the
  * runtime then leaves the space's list. Unlike a stop, an error answer is
- * always thrown, also when the removal took effect and kept the hold: the
- * runtime is then still listed, and the person removes it again.
+ * always thrown, also when the removal took effect or may have and kept the
+ * hold: the runtime is then still listed, and the person removes it again.
  */
 export async function removeUnderManualHold(
   projectId: string | null,

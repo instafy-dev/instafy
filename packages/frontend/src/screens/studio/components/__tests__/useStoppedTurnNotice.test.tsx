@@ -552,7 +552,35 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
   });
 
-  it("gives way when the Stop failed and the machine may still be running", async () => {
+  it("keeps the hold after a Stop with no clear answer, but says nothing while the machine still runs", async () => {
+    const hold = markManualStop(PROJECT_ID);
+    await act(async () => {
+      await stopUnderManualHold(PROJECT_ID, hold, async () => {
+        throw new ControllerApiError({
+          status: 504,
+          message: "stop runtime failed (504): <html>Gateway Timeout</html>",
+          code: null,
+          details: null,
+        });
+      }).catch(() => undefined);
+    });
+
+    // The stop did not take: the machine is still there, working on the turn.
+    await render(<Harness runtimeReady />);
+    expect(line()).toBeNull();
+    expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
+
+    // It did: no machine is left, and nothing answered where the work went.
+    await render(<Harness />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    // Start or a send still lifts the hold.
+    await act(async () => clearManualStop(PROJECT_ID));
+    expect(line()).toBeNull();
+    expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
+  });
+
+  it("gives way when the controller refused the Stop and the machine still runs", async () => {
     const hold = markManualStop(PROJECT_ID);
     await render(<Harness />);
     expect(line()?.textContent).toBe(STOPPED_COPY);

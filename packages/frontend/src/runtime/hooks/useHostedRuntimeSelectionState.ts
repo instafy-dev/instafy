@@ -238,9 +238,9 @@ export function useHostedRuntimeSelectionState({
     try {
       let stopConflict = false;
       try {
-        // Keeps the hold while the stop holds, also after an error answer
-        // that follows a stop the controller already committed, such as a
-        // release that is still pending.
+        // Keeps the hold unless the controller refused the stop: also after
+        // an error answer that follows a stop it committed, such as a
+        // release that is still pending, or a 5xx or no answer at all.
         await stopUnderManualHold(blockerProjectId, hold, async () => {
           try {
             return await controllerClient.runtimes.stop({

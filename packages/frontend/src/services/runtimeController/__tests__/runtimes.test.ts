@@ -4,6 +4,7 @@ import {
   ensureRuntime,
   fetchRuntimeStatus,
   removeRuntime,
+  runtimeStopRefused,
   startRuntime,
   stopRuntime,
 } from "../runtimes";
@@ -287,6 +288,7 @@ describe("a stop that answers an error", () => {
       message: "runtime provider cleanup is still pending",
     });
     expect(committedRuntimeStop(error)).toEqual({ flush: { status: "flushed", unpushedRefs: 0, error: null } });
+    expect(runtimeStopRefused(error)).toBe(false);
 
     answer(502, JSON.stringify({ ok: false, status_changed: false, skip_reason: "provider_cleanup_pending" }));
     expect(committedRuntimeStop(await stopError())).toEqual({ flush: null });
@@ -294,27 +296,44 @@ describe("a stop that answers an error", () => {
 
   it("took effect when another stop released the same machine first", async () => {
     answer(409, JSON.stringify({ message: "runtime lease generation is no longer current" }));
-    expect(committedRuntimeStop(await stopError())).toEqual({ flush: null });
+    const error = await stopError();
+    expect(committedRuntimeStop(error)).toEqual({ flush: null });
+    expect(runtimeStopRefused(error)).toBe(false);
   });
 
-  it("may have left the machine running after any other failure", async () => {
+  it("may have taken effect after a 5xx answer or none", async () => {
     for (const [status, body] of [
-      [409, JSON.stringify({ message: "provider-managed runtime is missing its active lease generation" })],
       // A proxy in front of the controller, not the controller's answer.
       [502, "<html>Bad Gateway</html>"],
       [502, JSON.stringify({ ok: false, status_changed: false })],
-      [500, JSON.stringify({ message: "failed to commit runtime stop" })],
-      [403, JSON.stringify({ message: "forbidden" })],
+      [504, "<html>Gateway Timeout</html>"],
+      [500, JSON.stringify({ message: "failed to finalize runtime stop" })],
     ] as const) {
       answer(status, body);
       const error = await stopError();
       expect(error, `${status} ${body}`).toBeInstanceOf(ControllerApiError);
       expect(committedRuntimeStop(error), `${status} ${body}`).toBeNull();
+      expect(runtimeStopRefused(error), `${status} ${body}`).toBe(false);
     }
 
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
-    expect(committedRuntimeStop(await stopError())).toBeNull();
+    const unanswered = await stopError();
+    expect(committedRuntimeStop(unanswered)).toBeNull();
+    expect(runtimeStopRefused(unanswered)).toBe(false);
     expect(committedRuntimeStop(null)).toBeNull();
+  });
+
+  it("was refused, leaving the machine as it was, after any other 4xx answer", async () => {
+    for (const [status, body] of [
+      [409, JSON.stringify({ message: "provider-managed runtime is missing its active lease generation" })],
+      [403, JSON.stringify({ message: "forbidden" })],
+      [404, JSON.stringify({ message: "runtime not found" })],
+    ] as const) {
+      answer(status, body);
+      const error = await stopError();
+      expect(committedRuntimeStop(error), `${status} ${body}`).toBeNull();
+      expect(runtimeStopRefused(error), `${status} ${body}`).toBe(true);
+    }
   });
 });
 
@@ -377,17 +396,18 @@ describe("removeRuntime", () => {
     expect(committedRuntimeStop(await removeError())).toEqual({ flush: null });
   });
 
-  it("may have left the machine running after any other failure", async () => {
-    for (const [status, body] of [
-      [409, JSON.stringify({ message: "provider-managed runtime is missing its active lease generation" })],
-      [502, "<html>Bad Gateway</html>"],
-      [500, JSON.stringify({ message: "failed to commit runtime removal" })],
-      [403, JSON.stringify({ message: "forbidden" })],
+  it("may have taken effect after a 5xx answer, and was refused after any other 4xx", async () => {
+    for (const [status, body, refused] of [
+      [409, JSON.stringify({ message: "provider-managed runtime is missing its active lease generation" }), true],
+      [403, JSON.stringify({ message: "forbidden" }), true],
+      [502, "<html>Bad Gateway</html>", false],
+      [500, JSON.stringify({ message: "failed to commit runtime removal" }), false],
     ] as const) {
       answer(status, body);
       const error = await removeError();
       expect(error, `${status} ${body}`).toBeInstanceOf(ControllerApiError);
       expect(committedRuntimeStop(error), `${status} ${body}`).toBeNull();
+      expect(runtimeStopRefused(error), `${status} ${body}`).toBe(refused);
     }
     // The person still reads the controller's own words.
     answer(500, JSON.stringify({ message: "failed to commit runtime removal" }));
