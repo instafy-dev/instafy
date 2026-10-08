@@ -1,3 +1,4 @@
+import { isPersonRuntimeStopReason } from "../runtime/unexpectedHostedRuntimeRecovery";
 import type { ChatMessage } from "../screens/studio/types";
 
 /**
@@ -17,6 +18,7 @@ export type RunFailureKind =
   | "provider_rate_limited"
   | "response_incomplete"
   | "browser_page_missing"
+  | "interrupted_run_expired"
   | "generic";
 
 export type RunFailurePresentation = {
@@ -42,6 +44,9 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
     "The AI provider stopped the answer before it was finished, so this turn stopped. Try again, or ask for less at once.",
   browser_page_missing:
     "This was sent as a browser task without a page to work on, so nothing ran. Try again from Chat, or open a page in the browser first.",
+  // Used when the stop was not a person's; see interruptedRunExpiredFriendlyText.
+  interrupted_run_expired:
+    "This turn lost its machine and didn't pick up again in time. Try again to continue.",
   // Only used as a last-resort fallback now: an unclassified failure surfaces
   // its real reason inline (see inlineGenericFailureText) rather than this
   // uninformative sentence.
@@ -192,6 +197,20 @@ function incompleteResponseFriendlyText(rawText: string): string {
   return INCOMPLETE_RESPONSE_FRIENDLY_TEXT[reason] ?? RUN_FAILURE_FRIENDLY_TEXT.response_incomplete;
 }
 
+// The controller gave up on a turn a stop put back in the queue: no machine
+// picked it up again before its resumeBy. Its message names the stop's reason
+// (`interruptionReason`), so a turn someone stopped on purpose is not told it
+// lost its machine.
+const INTERRUPTED_RUN_EXPIRED_KIND = "interrupted_run_expired";
+const STOPPED_RUN_EXPIRED_FRIENDLY_TEXT =
+  "This turn was stopped and didn't pick up again in time. Try again to continue.";
+
+function interruptedRunExpiredFriendlyText(metadata: Record<string, unknown> | null): string {
+  return isPersonRuntimeStopReason(normalizedStringField(metadata, "interruptionReason"))
+    ? STOPPED_RUN_EXPIRED_FRIENDLY_TEXT
+    : RUN_FAILURE_FRIENDLY_TEXT.interrupted_run_expired;
+}
+
 // A 429 that names an exhausted quota or plan limit will not clear after a
 // short wait, so it keeps its raw reason instead of the rate limit copy.
 const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
@@ -221,6 +240,8 @@ const PROVIDER_QUOTA_EXHAUSTED_PATTERN =
  * resend from Chat first; the manual "Try again" resends through the current
  * routing, which keeps a browser task unsent without a targeted page, and the
  * controller refuses one whose page is not open before anything runs.
+ * `interrupted_run_expired` is excluded because the turn may have been
+ * stopped on purpose, and a resend would ask for a machine again.
  */
 export const AUTO_RETRY_ELIGIBLE_KINDS = [
   "missing_final_message",
@@ -656,7 +677,10 @@ export function resolveRunFailurePresentation(params: {
   if (!failedByMetadata && !params.assumeFailed) {
     return null;
   }
-  const kind = classifyRunFailureText(rawText) ?? (failedByMetadata ? "generic" : null);
+  const kind =
+    normalizedStringField(metadata, "kind") === INTERRUPTED_RUN_EXPIRED_KIND
+      ? INTERRUPTED_RUN_EXPIRED_KIND
+      : classifyRunFailureText(rawText) ?? (failedByMetadata ? "generic" : null);
   if (!kind) {
     return null;
   }
@@ -665,7 +689,9 @@ export function resolveRunFailurePresentation(params: {
       ? inlineGenericFailureText(rawText)
       : kind === "response_incomplete"
         ? incompleteResponseFriendlyText(rawText)
-        : RUN_FAILURE_FRIENDLY_TEXT[kind];
+        : kind === INTERRUPTED_RUN_EXPIRED_KIND
+          ? interruptedRunExpiredFriendlyText(metadata)
+          : RUN_FAILURE_FRIENDLY_TEXT[kind];
   return { kind, friendlyText, rawText };
 }
 

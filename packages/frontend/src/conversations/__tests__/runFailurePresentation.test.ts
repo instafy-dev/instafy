@@ -278,6 +278,8 @@ describe("isAutoRetryEligibleFailureKind", () => {
     expect(isAutoRetryEligibleFailureKind("response_incomplete")).toBe(false);
     // Nothing changes until the person opens a page or resends from Chat.
     expect(isAutoRetryEligibleFailureKind("browser_page_missing")).toBe(false);
+    // The turn may have been stopped on purpose; a resend would ask for a machine again.
+    expect(isAutoRetryEligibleFailureKind("interrupted_run_expired")).toBe(false);
     expect(isAutoRetryEligibleFailureKind("generic")).toBe(false);
     expect(isAutoRetryEligibleFailureKind(null)).toBe(false);
     expect(isAutoRetryEligibleFailureKind(undefined)).toBe(false);
@@ -919,6 +921,70 @@ describe("resolveRunFailurePresentation", () => {
     expect(presentation?.kind).toBe("generic");
     expect(presentation?.friendlyText).toBe(reason);
     expect(isAutoRetryEligibleFailureKind(presentation?.kind)).toBe(false);
+  });
+
+  describe("a turn a stop put back in the queue that no machine picked up in time", () => {
+    // Recorded by the controller's requeue expiry (runtime/sweeps.rs).
+    const reason =
+      "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
+    const STOPPED_TEXT = "This turn was stopped and didn't pick up again in time. Try again to continue.";
+    const LOST_MACHINE_TEXT = "This turn lost its machine and didn't pick up again in time. Try again to continue.";
+    const presentationFor = (extra: Record<string, unknown>) =>
+      resolveRunFailurePresentation({
+        metadata: {
+          source: "controller",
+          kind: "interrupted_run_expired",
+          outcome: "failed",
+          messageType: "error",
+          jobId: "job-1",
+          runId: "run-1",
+          errorMessage: reason,
+          agent: { handle: "octo" },
+          ...extra,
+        },
+        content: reason,
+        assumeFailed: true,
+      });
+
+    it("says someone stopped it, with a manual retry only", () => {
+      for (const interruptionReason of [
+        "user_stop",
+        "user_remove",
+        "runtime_limit_takeover",
+        "browser_session_runtime_limit_takeover",
+      ]) {
+        const presentation = presentationFor({ interruptionReason });
+        expect(presentation, interruptionReason).toEqual({
+          kind: "interrupted_run_expired",
+          friendlyText: STOPPED_TEXT,
+          rawText: reason,
+        });
+        expect(resolveRunFailureAutoRetryDelayMs({ presentation: presentation! })).toBeNull();
+      }
+    });
+
+    it("says it lost its machine when nobody chose the stop, or the reason is unknown", () => {
+      for (const interruptionReason of ["heartbeat_timeout", "credits_exhausted", "idle_stop", "other", "", 7, null]) {
+        const presentation = presentationFor({ interruptionReason });
+        expect(presentation?.kind).toBe("interrupted_run_expired");
+        expect(presentation?.friendlyText, String(interruptionReason)).toBe(LOST_MACHINE_TEXT);
+        expect(presentation?.rawText).toBe(reason);
+      }
+      expect(presentationFor({})?.friendlyText).toBe(LOST_MACHINE_TEXT);
+    });
+
+    it("keeps the controller's text for any other kind, and rewrites no ordinary message", () => {
+      expect(presentationFor({ kind: "runtime_limit_wait_expired" })).toMatchObject({
+        kind: "generic",
+        friendlyText: reason,
+      });
+      expect(
+        resolveRunFailurePresentation({
+          metadata: { source: "controller", kind: "interrupted_run_expired" },
+          content: reason,
+        }),
+      ).toBeNull();
+    });
   });
 
   it("explains a model provider rate limit in plain words instead of the Codex text", () => {
