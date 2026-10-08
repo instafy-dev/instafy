@@ -15,7 +15,7 @@ import {
   parseHostedRuntimeLimitError,
   type HostedRuntimeLimitErrorDetails,
 } from "../hostedRuntimeLimitError";
-import { clearManualStop, markManualStop } from "../idlePauseRegistry";
+import { markManualStop } from "../idlePauseRegistry";
 import {
   resolveEffectiveRuntimeSelection,
   resolveHasLocalRuntime,
@@ -29,6 +29,7 @@ import {
   resolveShouldPromptCloudFallback,
   resolveWaitingForPreferredRuntime,
 } from "./hostedRuntimePolicySelectors";
+import { stopUnderManualHold } from "./manualStopDecisions";
 import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
 
 interface UseHostedRuntimeSelectionStateArgs {
@@ -233,34 +234,46 @@ export function useHostedRuntimeSelectionState({
     // the user) looks at it. The current project is not held: the user is
     // asking for its machine.
     const blockerProjectId = limitDetails.blockerProjectId;
-    markManualStop(blockerProjectId);
+    const hold = markManualStop(blockerProjectId);
     try {
-      let stopRefused = false;
+      let stopConflict = false;
       try {
-        await controllerClient.runtimes.stop({
-          runtimeId: blockerRuntimeId,
-          reason: "runtime_limit_takeover",
+        // Keeps the hold while the stop holds, also after an error answer
+        // that follows a stop the controller already committed, such as a
+        // release that is still pending.
+        await stopUnderManualHold(blockerProjectId, hold, async () => {
+          try {
+            return await controllerClient.runtimes.stop({
+              runtimeId: blockerRuntimeId,
+              reason: "runtime_limit_takeover",
+            });
+          } catch (error) {
+            // 409: this stop released nothing. The controller found nothing
+            // left to release on that runtime (its lease was already
+            // detached), or another stop released it first. The blocker
+            // details we hold may be stale, so refresh and try the ensure
+            // anyway instead of giving up.
+            stopConflict = error instanceof ControllerApiError && error.status === 409;
+            throw error;
+          }
         });
       } catch (error) {
-        clearManualStop(blockerProjectId);
-        // 409: the controller found nothing left to release on that runtime
-        // (its lease was already detached). The blocker details we hold may
-        // be stale, so refresh and try the ensure anyway instead of giving up.
-        if (!(error instanceof ControllerApiError && error.status === 409)) {
+        if (!stopConflict) {
           const message = error instanceof Error ? error.message : String(error);
           throw new Error(message);
         }
-        stopRefused = true;
       }
       await refreshRuntimeStatuses();
       // Forced: the stale `requested` row this project may still hold from
       // the refused prompt must not make the retry report "starting…" and
       // request nothing (instafy-dev/instafy#372).
       const ensured = await ensureHostedRuntime({ force: true });
-      if (!ensured && stopRefused) {
+      if (!ensured && stopConflict) {
         // Only a repeated limit means the blocker is still in the way. Any
         // other failure (credits, capacity, provider) is already reported by
-        // the ensure itself, so a plain false is the right answer for it.
+        // the ensure itself, so a plain false is the right answer for it, as
+        // it is when a stop that took effect still holds the slot while the
+        // provider releases the machine.
         const retriedLimit = lastHostedEnsureLimitRef.current;
         if (retriedLimit?.limitReached) {
           // The retried ensure names the machine that blocks right now; fall

@@ -8,7 +8,7 @@ import {
   HostedRuntimeBlockerSpaceError,
   type HostedRuntimeLimitErrorDetails,
 } from "../../hostedRuntimeLimitError";
-import { clearManualStop, isManualStopHeld } from "../../idlePauseRegistry";
+import { clearManualStop, isManualStopHeld, manualStopHold } from "../../idlePauseRegistry";
 import { createInitialRuntimeStoreState } from "../../runtimeStore";
 
 // vi.mock is hoisted above module-level consts, so the spy has to be too.
@@ -38,6 +38,30 @@ function conflict() {
   return new ControllerApiError({
     status: 409,
     message: "provider-managed runtime is missing its active lease generation",
+    code: null,
+    details: null,
+    url: null,
+  });
+}
+
+const SAVED = { status: "flushed", unpushedRefs: 0, error: null };
+
+/** The stop fenced the blocker off and requeued its turn, then its release failed or ran out of time. */
+function releasePending() {
+  return new ControllerApiError({
+    status: 502,
+    message: "runtime provider cleanup is still pending",
+    code: "provider_cleanup_pending",
+    details: { flush: SAVED },
+    url: null,
+  });
+}
+
+/** The stop fenced the blocker off, then found that another stop had released it first. */
+function releasedByAnotherStop() {
+  return new ControllerApiError({
+    status: 409,
+    message: "runtime lease generation is no longer current",
     code: null,
     details: null,
     url: null,
@@ -248,6 +272,96 @@ describe("useHostedRuntimeSelectionState takeover", () => {
     expect(refreshRuntimeStatuses).toHaveBeenCalledTimes(1);
     expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
     expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(false);
+  });
+
+  it("keeps the blocker's space held when its stop took effect but the release is still pending", async () => {
+    stop.mockRejectedValue(releasePending());
+
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await takeOver?.();
+    });
+
+    // The blocker is fenced off; lifting the hold would let that space start
+    // it again. The current project still asks for its own machine.
+    expect(result).toBe(true);
+    expect(refreshRuntimeStatuses).toHaveBeenCalledTimes(1);
+    expect(ensureHostedRuntime).toHaveBeenCalledWith({ force: true });
+    expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(true);
+    expect(manualStopHold(BLOCKER_PROJECT_ID)?.flush).toEqual(SAVED);
+  });
+
+  it("answers a plain false while the pending release still holds the slot", async () => {
+    stop.mockRejectedValue(releasePending());
+    ensureHostedRuntime.mockImplementation(async () => {
+      lastHostedEnsureLimitRef.current = {
+        limitReached: true,
+        activeCount: 1,
+        maxActiveCount: 1,
+        blockerRuntimeId: BLOCKER_RUNTIME_ID,
+        blockerProjectId: BLOCKER_PROJECT_ID,
+        blockerRuntimeLabel: "Hosted Runtime",
+        blockerProjectLabel: "Acme",
+      };
+      return false;
+    });
+
+    let result: boolean | undefined;
+    let thrown: unknown = null;
+    await act(async () => {
+      try {
+        result = await takeOver?.();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    // The stop worked, so the blocking space is not named as one this tab
+    // cannot stop; the takeover is simply not done yet.
+    expect(thrown).toBeNull();
+    expect(result).toBe(false);
+    expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(true);
+  });
+
+  it("keeps the blocker's space held when another stop released it first", async () => {
+    stop.mockRejectedValue(releasedByAnotherStop());
+
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await takeOver?.();
+    });
+
+    expect(result).toBe(true);
+    expect(ensureHostedRuntime).toHaveBeenCalledWith({ force: true });
+    expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(true);
+  });
+
+  it("still names the blocking space when that 409 is followed by the same limit", async () => {
+    stop.mockRejectedValue(releasedByAnotherStop());
+    ensureHostedRuntime.mockImplementation(async () => {
+      lastHostedEnsureLimitRef.current = {
+        limitReached: true,
+        activeCount: 1,
+        maxActiveCount: 1,
+        blockerRuntimeId: BLOCKER_RUNTIME_ID,
+        blockerProjectId: BLOCKER_PROJECT_ID,
+        blockerRuntimeLabel: "Hosted Runtime",
+        blockerProjectLabel: "Acme",
+      };
+      return false;
+    });
+
+    let thrown: unknown = null;
+    await act(async () => {
+      try {
+        await takeOver?.();
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeInstanceOf(HostedRuntimeBlockerSpaceError);
+    expect(isManualStopHeld(BLOCKER_PROJECT_ID)).toBe(true);
   });
 
   it("gives up on other stop failures without ensuring", async () => {
