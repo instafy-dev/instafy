@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ensureRuntime, fetchRuntimeStatus, startRuntime } from "../runtimes";
+import { ensureRuntime, fetchRuntimeStatus, startRuntime, stopRuntime } from "../runtimes";
 import { CONTROLLER_READ_BUDGET_MS } from "../readBudget";
 
 const { resolveContext, readError } = vi.hoisted(() => ({
@@ -182,5 +182,48 @@ describe("ensureRuntime", () => {
     expect(replace).toMatchObject({ runtime_id: "runtime-1", provider: "instafy-cloud", replaceStalledLaunch: true });
     expect(plain).toMatchObject({ runtime_id: "runtime-1" });
     expect(plain).not.toHaveProperty("replaceStalledLaunch");
+  });
+});
+
+describe("stopRuntime", () => {
+  beforeEach(() => {
+    resolveContext.mockResolvedValue(context);
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function answer(body: unknown) {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body))));
+  }
+
+  it("returns what the stop's flush did to keep the workspace's work", async () => {
+    answer({
+      ok: true,
+      status_changed: true,
+      flush: { status: "flushed", unpushedRefs: 1, unpushedRefNames: ["refs/instafy/local-recovery/unsaved-1"] },
+    });
+    await expect(stopRuntime({ runtimeId: "runtime-1", reason: "user_stop" })).resolves.toEqual({
+      flush: { status: "flushed", unpushedRefs: 1, error: null },
+    });
+    expect(fetch).toHaveBeenCalledWith("https://controller.test/runtime/stop", expect.objectContaining({ method: "POST" }));
+
+    answer({ ok: true, status_changed: true, flush: { status: "failed", unpushedRefs: null, unpushedRefNames: [], error: "origin_timeout" } });
+    await expect(stopRuntime({ runtimeId: "runtime-1" })).resolves.toEqual({
+      flush: { status: "failed", unpushedRefs: null, error: "origin_timeout" },
+    });
+  });
+
+  it("reports no flush from a controller that predates it, or an answer without a body", async () => {
+    answer({ ok: true, status_changed: true });
+    await expect(stopRuntime({ runtimeId: "runtime-1" })).resolves.toEqual({ flush: null });
+
+    answer({ ok: true, flush: { unpushedRefs: 0 } });
+    await expect(stopRuntime({ runtimeId: "runtime-1" })).resolves.toEqual({ flush: null });
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
+    await expect(stopRuntime({ runtimeId: "runtime-1" })).resolves.toEqual({ flush: null });
   });
 });

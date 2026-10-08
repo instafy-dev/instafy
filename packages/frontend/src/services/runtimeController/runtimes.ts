@@ -292,18 +292,55 @@ export interface StopRuntimeParams {
   accessToken?: string | null;
 }
 
+/**
+ * What a stop did to keep the workspace's work (the controller's `flush`,
+ * see docs/Runtime-Machines.md). `status` is `flushed` (the origin
+ * answered), `no_writer`, `failed`, `skipped` or `not_running`;
+ * `unpushedRefs` counts the recovery refs still only on the machine's disk,
+ * null when unknown; `error` is a fixed code such as `origin_timeout`.
+ */
+export interface RuntimeStopFlush {
+  status: string;
+  unpushedRefs: number | null;
+  error: string | null;
+}
+
+export interface StopRuntimeResult {
+  /** Null from a controller that predates the flush, or an answer without one. */
+  flush: RuntimeStopFlush | null;
+}
+
+function parseRuntimeStopFlush(value: unknown): RuntimeStopFlush | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const flush = value as { status?: unknown; unpushedRefs?: unknown; error?: unknown };
+  if (typeof flush.status !== "string" || !flush.status.trim()) {
+    return null;
+  }
+  return {
+    status: flush.status.trim(),
+    unpushedRefs:
+      typeof flush.unpushedRefs === "number" && Number.isInteger(flush.unpushedRefs) && flush.unpushedRefs >= 0
+        ? flush.unpushedRefs
+        : null,
+    error: typeof flush.error === "string" && flush.error.trim() ? flush.error.trim() : null,
+  };
+}
+
+/** Null when nothing was asked (no controller, or signed out). */
 export async function stopRuntime(
   params: StopRuntimeParams,
-): Promise<boolean> {
+): Promise<StopRuntimeResult | null> {
   if (!runtimeControllerEnabled) {
-    return false;
+    return null;
   }
   const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
-    return false;
+    return null;
   }
 
   try {
@@ -327,7 +364,8 @@ export async function stopRuntime(
       );
     }
 
-    return true;
+    const body = (await response.json().catch(() => null)) as { flush?: unknown } | null;
+    return { flush: parseRuntimeStopFlush(body?.flush) };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] stopRuntime error:", message);

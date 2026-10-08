@@ -55,15 +55,23 @@ function stripSentenceEnd(value: string | null | undefined): string {
   return (value ?? "").trim().replace(/[.\s]+$/, "");
 }
 
-/** A server message appended as its own sentence, or nothing. */
-function appendServerMessage(message: string | null | undefined): string {
-  const text = stripSentenceEnd(message);
-  return text ? ` ${text}.` : "";
-}
-
 /** "secret files aren't saved" becomes "Secret files aren't saved." */
 function asSentence(clause: string): string {
   return `${clause.charAt(0).toUpperCase()}${clause.slice(1)}.`;
+}
+
+/**
+ * A server message appended as its own sentence, or nothing. Servers write
+ * theirs in lower case ("another file or folder here has this name ..."),
+ * so one that opens with a plain word gets a capital; one that opens with a
+ * path or a code ("src/a.ts is ...") keeps its spelling.
+ */
+function appendServerMessage(message: string | null | undefined): string {
+  const text = stripSentenceEnd(message);
+  if (!text) {
+    return "";
+  }
+  return /^[a-z]+(?![\w./-])/.test(text) ? ` ${asSentence(text)}` : ` ${text}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +605,27 @@ export const REMOVE_DIALOG = {
 
 export const RESTORE_CONFLICT_INTRO = "These files changed since this work was kept. Choose a version for each:";
 
+// A name the space holds in another spelling (`path_alias`): another case,
+// another Unicode form of the same letters, or a new folder whose name
+// differs only so from a file, a link or a submodule (`Docs/guide.md` beside
+// a file `docs`). None of these is always a file in a different case.
+const PATH_ALIAS_CLASH =
+  "another file or folder in this space has nearly the same name, and a disk that ignores case or Unicode form takes the two for one";
+
+/**
+ * The per-file choices once every file turned out to be such a name: nothing
+ * changed there, so the general intro would be wrong.
+ */
+export const RESTORE_ALIAS_CONFLICT_INTRO = `${asSentence(PATH_ALIAS_CLASH)} Choose what to keep:`;
+
+/** Under one such file, when other files of the conflict changed. */
+export const PATH_ALIAS_NOTE = asSentence(PATH_ALIAS_CLASH);
+
+/** "Use this version" on such a name. */
+export function pathAliasNotSavedCopy(path: string): string {
+  return `Couldn't save ${path}: ${PATH_ALIAS_CLASH}. Choose Keep current, or ask the agent to use another name.`;
+}
+
 /** Announced when a restore stops at a conflict and the per-file choices open. */
 export function restoreConflictNoticeCopy(count: number): string {
   return `Not restored yet: ${formatFileCount(count)} changed since this work was kept.`;
@@ -781,6 +810,17 @@ export interface UnsavedWorkPlacement {
   unsavedWorkInHistory: boolean;
   // The space keeps versions the old way, so Changes still has Save version.
   saveVersionInChanges?: boolean;
+}
+
+// Only a History drawer with an Unsaved work section can be pointed at: the
+// stateless gateway has one, a Desktop origin once it lists recovery. A
+// space that keeps versions the old way still saves from Changes.
+export function unsavedWorkPlacementFor(versioning: { mode: VersioningMode; recovery: string }): UnsavedWorkPlacement {
+  return {
+    unsavedWorkInHistory:
+      versioning.mode === "stateless" || (versioning.mode === "desktop" && versioning.recovery === "supported"),
+    saveVersionInChanges: versioning.mode === "legacy",
+  };
 }
 
 function keptAs({ unsavedWorkInHistory }: UnsavedWorkPlacement): string {
@@ -1082,4 +1122,21 @@ export function describeChangeRevertOutcome(
     return outcome("error", STATELESS_UNREACHABLE_COPY);
   }
   return outcome("error", CHANGE_REVERT_FALLBACK_MESSAGE, { offerAgentUndo: true });
+}
+
+// ---------------------------------------------------------------------------
+// Chat: a turn the person's Stop cut off
+// ---------------------------------------------------------------------------
+
+// The person stopped the space's machine while the agent was mid-turn. The
+// turn is not over: it waits in the queue, and a machine that starts picks
+// it up again. The stop keeps what the turn had not saved, but the chat
+// cannot tell whether there was any, so the copy says "any". It names
+// History only when the caller knows History lists that work (see
+// useStoppedTurnNotice), and no place otherwise.
+export function describeStoppedTurn(agentDisplayName: string | null, placement: UnsavedWorkPlacement): string {
+  const lead = agentDisplayName
+    ? `${agentDisplayName} was stopped before finishing. It picks up again when the machine starts.`
+    : "The agents were stopped before finishing. They pick up again when the machine starts.";
+  return placement.unsavedWorkInHistory ? `${lead} Any unsaved changes are ${KEPT_IN_UNSAVED_WORK}.` : lead;
 }

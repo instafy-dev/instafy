@@ -1,3 +1,5 @@
+import type { RuntimeStopFlush } from "../services/runtimeController/runtimes";
+
 /**
  * Projects whose hosted machine was deliberately paused for inactivity.
  *
@@ -17,8 +19,16 @@ export const IDLE_PAUSE_CLEARED_EVENT = "instafy:idle-pause-cleared";
  */
 export const MANUAL_STOP_CHANGED_EVENT = "instafy:manual-stop-changed";
 
+/** The Stop behind a manual hold. */
+export interface ManualStopHold {
+  /** When the latest Stop that left no machine was made, on this tab's clock. */
+  readonly at: number;
+  /** What that stop did to keep the workspace's work, once it answered. */
+  flush: RuntimeStopFlush | null;
+}
+
 const paused = new Set<string>();
-const manualStops = new Set<string>();
+const manualStops = new Map<string, ManualStopHold>();
 /**
  * Spaces whose machine waits for the person to ask for it. Every time a space
  * becomes the active one (startup, a switch, a link, a Machines deep link) it
@@ -54,11 +64,38 @@ export function isIdlePaused(projectId: string | null | undefined): boolean {
   return Boolean(projectId && paused.has(projectId));
 }
 
-export function markManualStop(projectId: string | null | undefined) {
-  if (!projectId || manualStops.has(projectId)) {
+/**
+ * Holds the space after a Stop and returns the hold. A hold already set is
+ * stamped again without a change event: it may be left over from an earlier
+ * Stop when a machine came back without asking through this tab (a Desktop
+ * runtime, another tab), and this Stop is the one that cut off what runs now.
+ */
+export function markManualStop(projectId: string | null | undefined): ManualStopHold | null {
+  if (!projectId) {
+    return null;
+  }
+  const held = manualStops.has(projectId);
+  const hold: ManualStopHold = { at: Date.now(), flush: null };
+  manualStops.set(projectId, hold);
+  if (!held) {
+    dispatchProjectEvent(MANUAL_STOP_CHANGED_EVENT, projectId);
+  }
+  return hold;
+}
+
+/**
+ * The stop's answer for the hold it set. Nothing once the hold was lifted or
+ * a later Stop stamped it again.
+ */
+export function recordManualStopFlush(
+  projectId: string | null | undefined,
+  hold: ManualStopHold | null,
+  flush: RuntimeStopFlush | null,
+) {
+  if (!projectId || !hold || manualStops.get(projectId) !== hold) {
     return;
   }
-  manualStops.add(projectId);
+  hold.flush = flush;
   dispatchProjectEvent(MANUAL_STOP_CHANGED_EVENT, projectId);
 }
 
@@ -71,6 +108,10 @@ export function clearManualStop(projectId: string | null | undefined) {
 
 export function isManualStopHeld(projectId: string | null | undefined): boolean {
   return Boolean(projectId && manualStops.has(projectId));
+}
+
+export function manualStopHold(projectId: string | null | undefined): ManualStopHold | null {
+  return (projectId && manualStops.get(projectId)) || null;
 }
 
 export function markRestoredAwaitingIntent(projectId: string | null | undefined) {

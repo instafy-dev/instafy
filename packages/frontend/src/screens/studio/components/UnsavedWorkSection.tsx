@@ -26,9 +26,12 @@ import {
   keptOnComputerCopy,
   MAIN_BUSY_COPY,
   NO_UNSAVED_WORK_COPY,
+  PATH_ALIAS_NOTE,
+  pathAliasNotSavedCopy,
   RECOVERY_REF_MOVED_COPY,
   REMOVE_DIALOG,
   REMOVED_COPY,
+  RESTORE_ALIAS_CONFLICT_INTRO,
   RESTORE_CONFLICT_INTRO,
   restoreCancelledCopy,
   restoreConflictNoticeCopy,
@@ -494,6 +497,19 @@ export function UnsavedWorkSection({
           onNotice({ tone: "warning", text: `"${path}" changed again in the space. Choose a version again.` });
           return;
         }
+        if (saved.error.code === "path_alias") {
+          // Nothing changed at this path: the space holds the name in another
+          // case or Unicode form. Remember it, so the choices say so.
+          setConflicts((previous) => {
+            const current = previous[entry.ref];
+            if (!current || current.aliases?.includes(path)) {
+              return previous;
+            }
+            return { ...previous, [entry.ref]: { ...current, aliases: [...(current.aliases ?? []), path] } };
+          });
+          onNotice({ tone: "warning", text: pathAliasNotSavedCopy(path) });
+          return;
+        }
         onNotice({ tone: "error", text: historyFailureCopy(saved.error, originKind, "Couldn't save this file.") });
         return;
       }
@@ -621,6 +637,11 @@ export function UnsavedWorkSection({
         const keptPaths = conflict
           ? conflict.paths.filter((path) => conflict.resolutions[path] === "keep")
           : [];
+        // A name clash says so in the intro when every file is one, and
+        // under the file otherwise.
+        const aliases = conflict?.aliases ?? [];
+        const onlyAliases =
+          conflict !== null && conflict.paths.length > 0 && conflict.paths.every((path) => aliases.includes(path));
         return (
           <div
             key={entry.ref}
@@ -691,13 +712,15 @@ export function UnsavedWorkSection({
                 data-testid="unsaved-work-conflict"
               >
                 <Text variant="body" tone="secondary">
-                  {RESTORE_CONFLICT_INTRO}
+                  {onlyAliases ? RESTORE_ALIAS_CONFLICT_INTRO : RESTORE_CONFLICT_INTRO}
                 </Text>
                 <ul className="mt-1 flex flex-col gap-1">
                   {conflict.paths.map((path, index) => {
                     const pathId = `${rowId}-path-${index}`;
                     const resolution = conflict.resolutions[path];
                     const pathBusy = busyKey === `${entry.ref}:${path}`;
+                    const aliasNoteId = !resolution && !onlyAliases && aliases.includes(path) ? `${pathId}-alias` : null;
+                    const pathDescription = aliasNoteId ? `${pathId} ${aliasNoteId}` : pathId;
                     return (
                       <li
                         key={path}
@@ -723,7 +746,7 @@ export function UnsavedWorkSection({
                               variant="ghost"
                               size="xs"
                               radius="xl"
-                              aria-describedby={pathId}
+                              aria-describedby={pathDescription}
                               isPending={pathBusy}
                               isDisabled={!canWrite || (locked && !pathBusy)}
                               onPress={() =>
@@ -737,7 +760,7 @@ export function UnsavedWorkSection({
                               variant="ghost"
                               size="xs"
                               radius="xl"
-                              aria-describedby={pathId}
+                              aria-describedby={pathDescription}
                               isDisabled={!canWrite || locked}
                               onPress={() => {
                                 requestFocus({ kind: "path", ref: entry.ref, path });
@@ -752,7 +775,7 @@ export function UnsavedWorkSection({
                               variant="ghost"
                               size="xs"
                               radius="xl"
-                              aria-describedby={pathId}
+                              aria-describedby={pathDescription}
                               isDisabled={!canWrite || locked}
                               onPress={() => onAskAgent(unsavedWorkAskAgentPrompt(path, entry.ref), "Unsaved work")}
                               data-testid="unsaved-work-path-ask"
@@ -761,6 +784,15 @@ export function UnsavedWorkSection({
                             </Button>
                           </div>
                         )}
+                        {aliasNoteId ? (
+                          <span
+                            id={aliasNoteId}
+                            className="basis-full text-xs text-slate-500 dark:text-slate-400"
+                            data-testid="unsaved-work-path-alias"
+                          >
+                            {PATH_ALIAS_NOTE}
+                          </span>
+                        ) : null}
                       </li>
                     );
                   })}

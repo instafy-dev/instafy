@@ -14,6 +14,7 @@ export type KnownOriginErrorCode =
   // 409
   | "head_moved"
   | "path_type_conflict"
+  | "path_alias"
   | "main_busy"
   | "revert_conflict"
   | "restore_conflict"

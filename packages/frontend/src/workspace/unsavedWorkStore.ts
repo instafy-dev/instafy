@@ -205,6 +205,13 @@ export interface UnsavedWorkConflict {
   head: string | null;
   paths: string[];
   resolutions: Record<string, UnsavedWorkPathChoice>;
+  /**
+   * Paths whose "Use this version" the space refused as `path_alias`:
+   * another entry has the name in another case or Unicode form. A restore
+   * conflict does not say why each path conflicts, so this is learned only
+   * from such a refusal.
+   */
+  aliases?: string[];
 }
 
 export type UnsavedWorkConflicts = Readonly<Record<string, UnsavedWorkConflict>>;
