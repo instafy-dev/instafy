@@ -933,3 +933,58 @@ async fn a_lease_resumes_the_interrupted_turn() -> anyhow::Result<()> {
     })
     .await
 }
+
+/// An announce that reads the runs after a lease resumed one of the turns
+/// publishes nothing for it: it reads only runs still `queued` at
+/// `requeued`, so it cannot follow the lease's `in_progress` with a stale
+/// `queued`. A turn still waiting in the same space is announced as before.
+#[tokio::test]
+async fn an_announce_after_a_lease_skips_the_resumed_turn() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("announce after a lease test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(project_id), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::NO_CONTENT,
+        )
+        .await?;
+        let (waiting_job, waiting_run) = insert_turn(
+            &pool,
+            project_id,
+            turn.conversation_id,
+            turn.runtime_id,
+            "in_progress",
+            true,
+            json!({}),
+        )
+        .await?;
+        let (status, body) = turn.stop("user_stop").await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        turn.assert_interrupted("user_stop").await?;
+        let waiting = turn
+            .assert_turn_interrupted(waiting_job, waiting_run, "user_stop")
+            .await?;
+        // The lease takes the older of the two jobs, the turn's.
+        turn.assert_resumed_by_a_lease().await?;
+
+        let mut events = turn.state.events.subscribe();
+        super::announce_interrupted_runs(&turn.state, &turn.runtime_id).await;
+
+        let mut announced = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.kind == "run.progress" {
+                announced.push(event);
+            }
+        }
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert_eq!(announced[0].run_id, Some(waiting_run));
+        assert_eq!(announced[0].job_id, Some(waiting_job));
+        assert_eq!(announced[0].timestamp, waiting.updated_at);
+        assert_eq!(announced[0].data["status"], "queued");
+        assert_eq!(turn.run(turn.run_id).await?.status, "in_progress");
+        Ok(())
+    })
+    .await
+}

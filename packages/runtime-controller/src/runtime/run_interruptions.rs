@@ -133,6 +133,12 @@ pub(super) async fn mark_interrupted_runs(
 /// stamped with the time it was interrupted. Viewers see the turn stop
 /// working without a reload, and a repeat tells them nothing new. Best
 /// effort: a failure is logged and the stop's answer stands.
+///
+/// The snapshot is a plain read that locks nothing, and its connection goes
+/// back to the pool before anything is published. A run a lease has already
+/// resumed is not read. A lease that resumes a turn between the read and the
+/// publish sends its own `run.progress`, stamped later than this one, which
+/// viewers keep.
 pub(super) async fn announce_interrupted_runs(state: &AppState, runtime_id: &Uuid) {
     let connection = match state.pool.get().await {
         Ok(connection) => connection,

@@ -60,10 +60,17 @@ pub(super) const INTERRUPTED_RUN_EXPIRED_CODE: &str = "interrupted_run_expired";
 /// requeued-job expiry gave that turn up (see [`expire_stale_requeued_jobs`]).
 const HELD_BEHIND_A_STOPPED_TURN_MESSAGE: &str =
     "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.";
-/// Requeue reasons of a stop a person asked for. The expiry of a turn one of
-/// them interrupted runs no plan checkpoint and holds what was queued behind
-/// the turn (see [`expire_stale_requeued_jobs`]).
-const REQUEUE_REASONS_OF_A_PERSON: [&str; 2] = ["user_stop", "user_remove"];
+/// Requeue reasons of a stop a person asked for: Stop, Remove, and taking
+/// over the organization's hosted slot from the machines panel or a browser
+/// session. Only a person's click sends any of them. The expiry of a turn one
+/// of them interrupted runs no plan checkpoint and holds what was queued
+/// behind the turn (see [`expire_stale_requeued_jobs`]).
+const REQUEUE_REASONS_OF_A_PERSON: [&str; 4] = [
+    "user_stop",
+    "user_remove",
+    "runtime_limit_takeover",
+    "browser_session_runtime_limit_takeover",
+];
 /// How long a queued platform AI job is left alone before
 /// `fail_platform_jobs_stranded_on_private_runtimes` may fail it. Dispatch
 /// queues a platform job for a runtime that is not dispatch-ready unpinned,
@@ -961,14 +968,15 @@ async fn fail_stranded_platform_jobs(
 /// `run.completed` (`failureCode` [`INTERRUPTED_RUN_EXPIRED_CODE`]) and its
 /// conversation gets the reason as a controller error.
 ///
-/// When a person's Stop or Remove requeued it ([`REQUEUE_REASONS_OF_A_PERSON`]),
-/// its failure sends nothing that could start the machine they stopped: it
-/// runs no plan checkpoint, and the messages queued in its conversation by
-/// the time of the Stop fail in the same transaction
-/// ([`HELD_BEHIND_A_STOPPED_TURN_MESSAGE`]). Neither the drain nor the
-/// send-queue recovery sweep (`send_queue::spawn_send_queue_recovery_sweep`)
-/// sends a failed entry; its owner can send it now or remove it. A message
-/// queued after the Stop asks again and goes out as usual.
+/// When a person's Stop, Remove or slot takeover requeued it
+/// ([`REQUEUE_REASONS_OF_A_PERSON`]), its failure sends nothing that could
+/// start the machine they stopped: it runs no plan checkpoint, and the
+/// messages queued in its conversation by the time of the Stop fail in the
+/// same transaction ([`HELD_BEHIND_A_STOPPED_TURN_MESSAGE`]). Neither the
+/// drain nor the send-queue recovery sweep
+/// (`send_queue::spawn_send_queue_recovery_sweep`) sends a failed entry; its
+/// owner can send it now or remove it. A message queued after the Stop asks
+/// again and goes out as usual.
 pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
     let mut connection = state
         .pool
@@ -3495,83 +3503,99 @@ mod tests {
     }
 
     /// The expiry of a turn a person stopped sends nothing they had queued
-    /// behind it, so it cannot start the machine they stopped. In the
-    /// expiry's transaction those messages fail with a reason their owner
-    /// sees, so neither the expiry's drain nor the send-queue recovery sweep
-    /// (run here as production runs it every few seconds) sends them. A
-    /// message queued after the Stop asks again and goes out. A turn another
-    /// stop interrupted holds nothing back, as a limit wait's give-up does.
+    /// behind it, so it cannot start the machine they stopped. A person stops
+    /// a machine with Stop or with a takeover of the organization's hosted
+    /// slot from the machines panel or a browser session. In the expiry's
+    /// transaction those messages fail with a reason their owner sees, so
+    /// neither the expiry's drain nor the send-queue recovery sweep (run here
+    /// as production runs it every few seconds) sends them. A message queued
+    /// after the Stop asks again and goes out. A turn another stop
+    /// interrupted holds nothing back, as a limit wait's give-up does.
     #[tokio::test]
     async fn an_expired_user_stop_holds_what_was_queued_behind_it() -> anyhow::Result<()> {
-        use crate::tests_managed_ai_refund::seed_reserved_managed_ai_prompt;
+        use crate::tests_managed_ai_refund::{
+            seed_reserved_managed_ai_prompt, ReservedManagedAiPrompt,
+        };
         use serde_json::json;
 
-        let Some(stopped) = seed_reserved_managed_ai_prompt("expired-user-stop-queue").await?
-        else {
-            eprintln!("skipping interrupted turn queue hold test: TEST_DATABASE_URL not set");
-            return Ok(());
-        };
-        let idle = match seed_reserved_managed_ai_prompt("expired-idle-queue").await {
-            Ok(Some(idle)) => idle,
-            other => {
-                stopped.cleanup().await?;
-                other?;
-                anyhow::bail!("the second space was not seeded");
+        // A space per stop: its label, the stop's reason, and whether what
+        // was queued behind the turn it interrupted is held.
+        let stops = [
+            ("expired-user-stop-queue", "user_stop", true),
+            ("expired-takeover-queue", "runtime_limit_takeover", true),
+            (
+                "expired-browser-takeover-queue",
+                "browser_session_runtime_limit_takeover",
+                true,
+            ),
+            ("expired-idle-queue", "idle", false),
+        ];
+        let mut spaces: Vec<(ReservedManagedAiPrompt, &str, bool)> = Vec::new();
+        for (label, reason, held) in stops {
+            match seed_reserved_managed_ai_prompt(label).await {
+                Ok(Some(space)) => spaces.push((space, reason, held)),
+                Ok(None) if spaces.is_empty() => {
+                    eprintln!(
+                        "skipping interrupted turn queue hold test: TEST_DATABASE_URL not set"
+                    );
+                    return Ok(());
+                }
+                other => {
+                    for (space, ..) in &spaces {
+                        space.cleanup().await?;
+                    }
+                    other?;
+                    anyhow::bail!("the space stopped for {reason} was not seeded");
+                }
             }
-        };
+        }
         let test_result: anyhow::Result<()> = async {
             let stopped_ago = super::REQUEUED_JOB_EXPIRY_SECONDS + 60;
-            let mut conversations = Vec::new();
-            for (fixture, reason) in [(&stopped, "user_stop"), (&idle, "idle")] {
-                let connection = fixture.pool.get().await?;
+            // Each space with its conversation and the follow-up its owner
+            // queued before the stop.
+            let mut queued_before_the_stop = Vec::new();
+            for (space, reason, held) in &spaces {
+                let connection = space.pool.get().await?;
                 connection
                     .execute(
                         "update runtimes set status = 'stopped' where project_id = $1",
-                        &[&fixture.project_id],
+                        &[&space.project_id],
                     )
                     .await?;
-                requeue_as_a_stop_did(
-                    &connection,
-                    fixture.job_id,
-                    fixture.run_id,
-                    reason,
-                    stopped_ago,
-                )
-                .await?;
+                requeue_as_a_stop_did(&connection, space.job_id, space.run_id, reason, stopped_ago)
+                    .await?;
                 let conversation_id: Uuid = connection
                     .query_one(
                         "select conversation_id from agent_jobs where id = $1",
-                        &[&fixture.job_id],
+                        &[&space.job_id],
                     )
                     .await?
                     .get(0);
-                conversations.push(conversation_id);
+                drop(connection);
+                let entry = queue_a_follow_up(space, conversation_id, stopped_ago + 60).await?;
+                queued_before_the_stop.push((space, *reason, *held, conversation_id, entry));
             }
-            let held = queue_a_follow_up(&stopped, conversations[0], stopped_ago + 60).await?;
-            let asked_again = queue_a_follow_up(&stopped, conversations[0], 60).await?;
-            let behind_idle = queue_a_follow_up(&idle, conversations[1], stopped_ago + 60).await?;
+            let (stopped, _, _, stopped_conversation, _) = queued_before_the_stop[0];
+            let asked_again = queue_a_follow_up(stopped, stopped_conversation, 60).await?;
 
-            let _watch = stopped.state.events.watch_project(stopped.project_id);
             let mut events = stopped.state.events.subscribe();
             super::expire_stale_requeued_jobs(&stopped.state).await?;
-            for fixture in [&stopped, &idle] {
-                let status: String = fixture
+            for (space, reason, ..) in &queued_before_the_stop {
+                let status: String = space
                     .pool
                     .get()
                     .await?
                     .query_one(
                         "select status from agent_jobs where id = $1",
-                        &[&fixture.job_id],
+                        &[&space.job_id],
                     )
                     .await?
                     .get(0);
-                assert_eq!(status, "failed");
+                assert_eq!(status, "failed", "{reason}");
             }
             let mut announcements = Vec::new();
             while let Ok(event) = events.try_recv() {
-                if event.kind == "conversation.sendQueue"
-                    && event.data["entry"]["id"] == json!(held)
-                {
+                if event.kind == "conversation.sendQueue" {
                     announcements.push(event);
                 }
             }
@@ -3587,50 +3611,67 @@ mod tests {
                     break;
                 }
             }
-            let row = stopped
-                .pool
-                .get()
-                .await?
-                .query_one(
-                    "select status, error_message, dispatched_at, dispatched_run_id
-                     from conversation_send_queue where id = $1",
-                    &[&held],
-                )
-                .await?;
-            assert_eq!(row.get::<_, String>("status"), "failed");
-            assert_eq!(
-                row.get::<_, Option<String>>("error_message").as_deref(),
-                Some(super::HELD_BEHIND_A_STOPPED_TURN_MESSAGE)
-            );
-            assert_eq!(
-                row.get::<_, Option<chrono::DateTime<Utc>>>("dispatched_at"),
-                None,
-                "nothing ever claimed it"
-            );
-            assert_eq!(row.get::<_, Option<Uuid>>("dispatched_run_id"), None);
-            // Its owner hears that it was not sent, and why.
-            assert_eq!(announcements.len(), 1);
-            let announcement = &announcements[0];
-            assert_eq!(announcement.data["action"], json!("failed"));
-            assert_eq!(announcement.data["entry"]["status"], json!("failed"));
-            assert_eq!(
-                announcement.data["entry"]["errorMessage"],
-                json!(super::HELD_BEHIND_A_STOPPED_TURN_MESSAGE)
-            );
-            assert_eq!(announcement.target_user_id, Some(stopped.owner_user_id));
-            assert_eq!(announcement.conversation_id, Some(conversations[0]));
-
-            for (fixture, entry) in [(&stopped, asked_again), (&idle, behind_idle)] {
-                assert_eq!(wait_until_sent(fixture, entry).await?, "dispatched");
+            for (space, reason, held, conversation_id, entry) in &queued_before_the_stop {
+                if !held {
+                    assert_eq!(
+                        wait_until_sent(space, *entry).await?,
+                        "dispatched",
+                        "{reason}"
+                    );
+                    continue;
+                }
+                let row = space
+                    .pool
+                    .get()
+                    .await?
+                    .query_one(
+                        "select status, error_message, dispatched_at, dispatched_run_id
+                         from conversation_send_queue where id = $1",
+                        &[entry],
+                    )
+                    .await?;
+                assert_eq!(row.get::<_, String>("status"), "failed", "{reason}");
+                assert_eq!(
+                    row.get::<_, Option<String>>("error_message").as_deref(),
+                    Some(super::HELD_BEHIND_A_STOPPED_TURN_MESSAGE),
+                    "{reason}"
+                );
+                assert_eq!(
+                    row.get::<_, Option<chrono::DateTime<Utc>>>("dispatched_at"),
+                    None,
+                    "nothing ever claimed what was queued before {reason}"
+                );
+                assert_eq!(
+                    row.get::<_, Option<Uuid>>("dispatched_run_id"),
+                    None,
+                    "{reason}"
+                );
+                // Its owner hears that it was not sent, and why.
+                let announced = announcements
+                    .iter()
+                    .filter(|event| event.data["entry"]["id"] == json!(entry))
+                    .collect::<Vec<_>>();
+                assert_eq!(announced.len(), 1, "{reason}: {announced:?}");
+                let announcement = announced[0];
+                assert_eq!(announcement.data["action"], json!("failed"));
+                assert_eq!(announcement.data["entry"]["status"], json!("failed"));
+                assert_eq!(
+                    announcement.data["entry"]["errorMessage"],
+                    json!(super::HELD_BEHIND_A_STOPPED_TURN_MESSAGE)
+                );
+                assert_eq!(announcement.target_user_id, Some(space.owner_user_id));
+                assert_eq!(announcement.conversation_id, Some(*conversation_id));
             }
+            assert_eq!(wait_until_sent(stopped, asked_again).await?, "dispatched");
             Ok(())
         }
         .await;
-        let stopped_cleanup = stopped.cleanup().await;
-        let idle_cleanup = idle.cleanup().await;
+        let mut cleanups = Vec::new();
+        for (space, ..) in &spaces {
+            cleanups.push(space.cleanup().await);
+        }
         test_result?;
-        stopped_cleanup?;
-        idle_cleanup
+        cleanups.into_iter().collect()
     }
 
     /// The idle sweep's stop (`auto_stop_idle_hosted_runtimes`). Its

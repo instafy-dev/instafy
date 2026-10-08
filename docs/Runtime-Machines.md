@@ -185,22 +185,28 @@ waiting on the limit or a stop still waiting on its provider release waits
 longer. `GET /runs` returns that record after a reload. `/runtime/stop` and
 `/runtime/remove` also announce it once they answer, as a `run.progress` of
 the stored run stamped with its `updated_at`; other stops do not, so other
-viewers see it on their next load of the runs. A lease resumes the turn like
-any queued run (`in_progress`, `agent:leased`), and `interruption` stays on
-the run as history.
+viewers see it on their next load of the runs. The announcement reads the run
+without locking it and publishes after the read, and it skips a run a lease
+has already resumed. A lease resumes the turn like any queued run
+(`in_progress`, `agent:leased`) with a `run.progress` of its own, stamped
+later, so a viewer keeps the newer of the two when they cross. `interruption`
+stays on the run as history.
 
 When the expiry gives a turn up, its run fails with `run.completed`
 (`outcome` `expired`, `failureCode` `interrupted_run_expired`) and its
 conversation gets a controller error message (`kind`
 `interrupted_run_expired`, `interruptionReason` the stop's reason). The
-failure of a turn that a person's Stop or Remove (`user_stop`, `user_remove`)
-interrupted sends nothing that could start the machine they stopped. It runs
-no plan checkpoint, and the messages queued in its conversation by the time of
-the Stop become `failed` in the expiry's transaction, with a reason their owner
-sees in the queue. The send queue never sends a failed entry on its own, so
-neither the drain nor its recovery sweep picks them up; the owner can send one
-now or remove it. A message queued after the Stop asks again and goes out as
-usual, which can start the machine.
+failure of a turn that a person stopped sends nothing that could start the
+machine they stopped. A person's stop is a Stop or Remove (`user_stop`,
+`user_remove`) or a takeover of the organization's hosted slot from the
+Machines panel or a browser session (`runtime_limit_takeover`,
+`browser_session_runtime_limit_takeover`); only a person's click sends any of
+them. Such a failure runs no plan checkpoint, and the messages queued in its
+conversation by the time of the stop become `failed` in the expiry's
+transaction, with a reason their owner sees in the queue. The send queue
+never sends a failed entry on its own, so neither the drain nor its recovery
+sweep picks them up; the owner can send one now or remove it. A message queued
+after the stop asks again and goes out as usual, which can start the machine.
 
 ## A launch that does not come up
 
