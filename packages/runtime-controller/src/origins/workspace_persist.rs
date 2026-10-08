@@ -4,8 +4,9 @@
 //! work to canonical every two minutes and once more when the job ends,
 //! through its own origin's `/workspace/persist`. The origin needs
 //! `git.write` to push, and a runtime's machine credential can never mint
-//! it; nor does a rolling save take a workspace lease, so it never contends
-//! with a person saving in Studio or with the turn's own commit.
+//! it; nor does a rolling save take a workspace lease, so it never holds
+//! one against a person saving in Studio or the turn's own commit (an apply
+//! or sync that finds a save holding the workspace waits for it).
 //!
 //! Instead the runtime presents the job's internal workspace token to
 //! `POST /access_token {scopes: ["workspace.persist"], jobId}` and gets a

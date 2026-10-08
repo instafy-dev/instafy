@@ -1754,6 +1754,83 @@ async fn a_sibling_that_keeps_working_clears_a_durable_stop_marker() {
     );
 }
 
+/// Another runtime on the same folder holding the workspace for its save
+/// makes an apply and a sync wait for it instead of failing with 409.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_apply_and_a_sync_wait_for_another_runtimes_save() {
+    use base64::Engine as _;
+    use std::io::Write as _;
+
+    let fx = Fixture::new();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    let address = server.start().await.unwrap().address;
+    let client = reqwest::Client::new();
+    // The other runtime's save: the same workspace lock, from another
+    // open of the lock file, let go after a moment.
+    let hold = |ws: &Path| {
+        let holder = crate::workspace_lock::try_acquire_workspace_apply_lock(ws)
+            .unwrap()
+            .expect("the lock");
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            drop(holder);
+        })
+    };
+
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    archive
+        .start_file("applied.md", zip::write::FileOptions::<()>::default())
+        .unwrap();
+    archive.write_all(b"applied\n").unwrap();
+    let archive = archive.finish().unwrap().into_inner();
+    let released = hold(&fx.ws);
+    let started = Instant::now();
+    let response = client
+        .post(format!("http://{address}/apply-json"))
+        .json(&serde_json::json!({
+            "manifest": {
+                "projectId": fx.config.project_id,
+                "files": [{ "path": "applied.md", "size": 8 }],
+                "deletes": [],
+            },
+            "archiveBase64": base64::engine::general_purpose::STANDARD.encode(archive),
+        }))
+        .send()
+        .await
+        .unwrap();
+    released.join().unwrap();
+    let status = response.status();
+    assert!(
+        status.is_success(),
+        "{status}: {}",
+        response.text().await.unwrap()
+    );
+    assert!(started.elapsed() >= Duration::from_millis(1400));
+    assert_eq!(
+        fs::read_to_string(fx.ws.join("applied.md")).unwrap(),
+        "applied\n"
+    );
+
+    let released = hold(&fx.ws);
+    let started = Instant::now();
+    let response = client
+        .post(format!("http://{address}/git/sync"))
+        .json(&serde_json::json!({ "paths": ["applied.md"] }))
+        .send()
+        .await
+        .unwrap();
+    released.join().unwrap();
+    let status = response.status();
+    assert!(
+        status.is_success(),
+        "{status}: {}",
+        response.text().await.unwrap()
+    );
+    assert!(started.elapsed() >= Duration::from_millis(1400));
+    assert_eq!(git_in(&fx.remote, &["show", "main:applied.md"]), "applied");
+    server.stop().await.unwrap();
+}
+
 /// A route-level save lets the workspace go while it asks for write
 /// access; a plan taken before another save moved the slot is taken again.
 #[test]

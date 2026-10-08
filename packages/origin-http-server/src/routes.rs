@@ -1646,6 +1646,12 @@ async fn handle_apply_status(
     }
 }
 
+/// How long an apply or a sync waits for another holder of the workspace
+/// (a rolling save, maybe a sibling runtime's on the same folder) to let it
+/// go before it answers 409: a background save never fails a turn's
+/// checkpoint or a person's save.
+const FOREGROUND_WORKSPACE_WAIT: Duration = Duration::from_secs(10);
+
 async fn handle_apply_json(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
@@ -1701,7 +1707,7 @@ async fn apply_manifest_archive(
 
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard = tokio::task::spawn_blocking(move || {
-        try_acquire_workspace_apply_lock(lock_workspace.as_path())
+        acquire_workspace_apply_lock_within(lock_workspace.as_path(), FOREGROUND_WORKSPACE_WAIT)
     })
     .await
     .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
@@ -2600,13 +2606,12 @@ async fn handle_git_sync(
     let config = state.config.clone();
     let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
-    let workspace_apply_guard =
-        tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
-            .await
-            .map_err(|error| {
-                OriginError::internal(format!("workspace lock task failed: {error}"))
-            })??
-            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+    let workspace_apply_guard = tokio::task::spawn_blocking(move || {
+        acquire_workspace_apply_lock_within(&lock_workspace, FOREGROUND_WORKSPACE_WAIT)
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
+    .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
 
     let remote_url = config
         .git_remote_url_for_project(project_id)
