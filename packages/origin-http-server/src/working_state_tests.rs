@@ -1077,6 +1077,102 @@ fn a_push_that_landed_unconfirmed_never_stops_later_saves() {
     }
 }
 
+/// A save that finds the slot on a newer save of the folder's own than its
+/// record names (an earlier push's answer never came, or the push landed
+/// only after the folder looked) goes on from that save: a file this tick
+/// leaves for later keeps the version that save holds, so canonical never
+/// loses it, whether the tick replaces the slot, keeps it or would have
+/// deleted it.
+#[test]
+fn a_tick_that_finds_a_newer_save_of_its_folder_keeps_the_files_it_defers() {
+    let big = |fill: u8| vec![fill; 3 * 1024 * 1024];
+    let model = |fx: &Fixture| {
+        fx.slot()
+            .map(|(_, rev)| git_in(&fx.remote, &["rev-parse", &format!("{rev}:model.bin")]))
+    };
+    // Every slot push is reported lost without reaching canonical; the
+    // test lands it afterwards, as a push that arrives late does.
+    let late_slot_push = || {
+        let specs = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let seen = specs.clone();
+        let guard = with_push_hook(move |pushed| {
+            if pushed.iter().any(|spec| spec.ends_with("/working")) {
+                seen.borrow_mut().extend(pushed.iter().cloned());
+                PushHookAction::DropRequest
+            } else {
+                PushHookAction::Proceed
+            }
+        });
+        (guard, specs)
+    };
+    let land =
+        |fx: &Fixture, spec: &str| ig(&fx.ws, &["push", "-q", "origin", &format!("+{spec}")]);
+
+    // The job's end pushes the file; neither the push's answer nor the
+    // look that confirms it comes back. The next job's first tick, with
+    // nothing else unsaved, finds that save on the slot.
+    let fx = Fixture::new();
+    fx.write("model.bin", &big(1));
+    let blind = fx.blind_ls_remote();
+    let lost = lose_slot_pushes();
+    let state = fx.save(PersistReason::TurnEnd);
+    drop(lost);
+    drop(blind);
+    assert!(state.error.is_some(), "{state:?}");
+    let pushed = model(&fx).expect("the push landed");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(!state.durable, "{state:?}");
+    assert_eq!(model(&fx), Some(pushed), "unanswered push, then a tick");
+    assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
+
+    // A newer version lands late, after an earlier save that held the old
+    // one. A tick with another edit replaces the slot, keeping the newer.
+    let fx = Fixture::new();
+    fx.write("model.bin", &big(1));
+    assert_eq!(fx.save(PersistReason::TurnEnd).error, None);
+    fx.write("model.bin", &big(2));
+    let (guard, specs) = late_slot_push();
+    let state = fx.save(PersistReason::TurnEnd);
+    drop(guard);
+    assert_eq!(state.error.as_deref(), Some("push_ambiguous"), "{state:?}");
+    let spec = specs.borrow().first().cloned().expect("a slot push");
+    land(&fx, &spec);
+    let newer = model(&fx).expect("the late push landed");
+    fx.write("notes.md", b"edited\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("edited\n"));
+    assert_eq!(
+        model(&fx),
+        Some(newer),
+        "late push, then a tick that pushes"
+    );
+
+    // The same with nothing else unsaved: the earlier save's other file is
+    // gone, so the tick would delete the slot.
+    let fx = Fixture::new();
+    fx.write("notes.md", b"saved once\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    fs::remove_file(fx.ws.join("notes.md")).unwrap();
+    fx.write("model.bin", &big(3));
+    let (guard, specs) = late_slot_push();
+    let state = fx.save(PersistReason::TurnEnd);
+    drop(guard);
+    assert_eq!(state.error.as_deref(), Some("push_ambiguous"), "{state:?}");
+    let spec = specs.borrow().first().cloned().expect("a slot push");
+    land(&fx, &spec);
+    let newer = model(&fx).expect("the late push landed");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(
+        model(&fx),
+        Some(newer),
+        "late push, then a tick that deletes"
+    );
+    assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
+}
+
 /// A delete of the slot that landed without an answer: until the folder
 /// knows what canonical holds, nothing reads as saved. Bringing the same
 /// files back saves them again, and the gone slot is never taken for a

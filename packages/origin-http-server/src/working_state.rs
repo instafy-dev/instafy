@@ -45,9 +45,11 @@
 //! [`DELETING_REF`]) and unmarked once canonical's answer is known. When
 //! the answer is lost, or the confirming `ls-remote` cannot run, the save
 //! looks at the slot right away or, failing that, the next save does before
-//! anything else: a commit this folder wrote becomes the record, a slot
-//! this folder deleted takes the record with it, and until then nothing
-//! reads as saved. Only a commit this folder never wrote is `slot_moved`.
+//! anything else: a commit this folder wrote becomes the record (and the
+//! save builds its snapshot on it, so a file a tick leaves out keeps that
+//! commit's version), a slot this folder deleted takes the record with it,
+//! and until then nothing reads as saved. Only a commit this folder never
+//! wrote is `slot_moved`.
 //!
 //! A slot gone from canonical while the record still names it, with no
 //! delete of this folder's in flight, was removed or restored by a person:
@@ -492,6 +494,34 @@ fn kept_from_record(
         .collect())
 }
 
+/// `tree` as a save on `parent` sends it, given the slot commit `record`
+/// names. A path the save left out (`deferred`) never drops what an earlier
+/// save held: it keeps `record`'s entry where `record` changed it and
+/// `main` has not changed it since (see [`kept_from_record`]), and the
+/// parent's everywhere else. An earlier save on an older `main` would
+/// otherwise carry an older version of a file onto this parent, as if the
+/// folder had changed it back, and a Restore would apply it over the
+/// published one. Paths a person removed from the slot then take the
+/// parent's entry (see [`without_dismissed`]).
+fn kept_by_save(
+    git: &WorkspaceGit<'_>,
+    tree: &str,
+    parent: Option<&str>,
+    parent_tree: &str,
+    record: Option<&Record>,
+    deferred: &[String],
+) -> Result<String> {
+    let mut tree = tree.to_string();
+    if !deferred.is_empty() {
+        tree = tree_with_entries_from(git, &tree, parent, deferred)?;
+        if let Some(record) = record {
+            let kept = kept_from_record(git, record, deferred, parent_tree)?;
+            tree = tree_with_entries_from(git, &tree, Some(&record.commit), &kept)?;
+        }
+    }
+    without_dismissed(git, &tree, parent)
+}
+
 /// Whether the folder's last confirmed save holds `tree` on `parent`: a
 /// stop then stores no `unsaved` copy of the same work.
 pub(crate) fn record_holds(
@@ -810,21 +840,14 @@ impl Publisher<'_> {
             more = !over.is_empty();
             deferred.extend(over);
         }
-        if !deferred.is_empty() {
-            // A tick never drops what an earlier save held: a deferred path
-            // keeps the earlier save's entry where that save changed it and
-            // `main` has not changed it since, and the parent's everywhere
-            // else. An earlier save on an older `main` would otherwise carry
-            // an older version of a file onto this parent, as if the folder
-            // had changed it back, and a Restore would apply it over the
-            // published one.
-            tree = tree_with_entries_from(&self.git, &tree, parent.as_deref(), &deferred)?;
-            if let Some(record) = record.as_ref() {
-                let kept = kept_from_record(&self.git, record, &deferred, &parent_tree)?;
-                tree = tree_with_entries_from(&self.git, &tree, Some(&record.commit), &kept)?;
-            }
-        }
-        tree = without_dismissed(&self.git, &tree, parent.as_deref())?;
+        tree = kept_by_save(
+            &self.git,
+            &tree,
+            parent.as_deref(),
+            &parent_tree,
+            record.as_ref(),
+            &deferred,
+        )?;
         stopping(stop)?;
         let pending = local_only(&self.git, &self.held_back)?;
         let unsettled = unsettled(&self.git)?;
@@ -1023,11 +1046,7 @@ impl Publisher<'_> {
             if seen == Seen::Moved {
                 return Err(SaveError::SlotMoved);
             }
-            record = read_record(&self.git, || self.working_set()).map_err(local)?;
-            if seen == Seen::Removed {
-                tree =
-                    without_dismissed(&self.git, &tree, plan.parent.as_deref()).map_err(local)?;
-            }
+            (record, tree) = self.follow_record(&plan, record, tree).map_err(local)?;
         }
         if tree != parent_tree && holds(record.as_ref(), plan.parent.as_deref(), &tree, origin) {
             return Ok(Settled::holding(&tree, None));
@@ -1051,99 +1070,122 @@ impl Publisher<'_> {
                         unsaved: Some(0),
                     });
                 }
-                self.delete_slot(current)?;
-                return Ok(Settled::holding(&parent_tree, Some(0)));
-            }
-            if !self.can_write {
-                return Err(SaveError::NoCredential);
-            }
-            let slot = self.slot().map_err(local)?;
-            let commit = self
-                .slot_commit(&tree, plan.parent.as_deref(), &parent_tree)
-                .map_err(local)?;
-            let expected = record.as_ref().map(|record| record.commit.clone());
-            // Kept until canonical's answer is known, so a push that lands
-            // unseen is found by the next save.
-            self.git
-                .ok(&[
-                    "update-ref",
-                    "-m",
-                    "instafy: working state push",
-                    ATTEMPT_REF,
-                    &commit,
-                ])
-                .map_err(local)?;
-            let pushed = match push_replace_with_lease(
-                &self.git,
-                &self.remote,
-                &commit,
-                &slot,
-                expected.as_deref(),
-            ) {
-                Ok(pushed) => pushed.class,
-                Err(error) => {
-                    warn!(error = %format!("{error:#}"), "a working save could not push");
-                    return self.after_push(&slot, &commit, &tree, SaveError::Unreachable);
+                if self.delete_slot(current)? {
+                    return Ok(Settled::holding(&parent_tree, Some(0)));
                 }
-            };
-            match pushed {
-                // Confirmed only once `ls-remote` shows it.
-                PushClass::Pushed => {
-                    return self.after_push(&slot, &commit, &tree, SaveError::Unconfirmed)
+                // The slot holds a newer save of this folder's own: go on
+                // from it (below).
+            } else {
+                if !self.can_write {
+                    return Err(SaveError::NoCredential);
                 }
-                PushClass::Ambiguous(_) => {
-                    return self.after_push(&slot, &commit, &tree, SaveError::PushAmbiguous)
-                }
-                PushClass::PathRejected { path, .. } => {
-                    self.clear_markers().map_err(local)?;
-                    refusals += 1;
-                    if refusals > MAX_PATH_REFUSALS {
-                        return Err(SaveError::PushRejected);
-                    }
-                    let left_out = without_refused_path(
-                        &self.git,
-                        &tree,
-                        plan.parent.as_deref(),
-                        plan.main.as_deref(),
-                        &path,
-                    )
+                let slot = self.slot().map_err(local)?;
+                let commit = self
+                    .slot_commit(&tree, plan.parent.as_deref(), &parent_tree)
                     .map_err(local)?;
-                    if left_out == tree {
+                let expected = record.as_ref().map(|record| record.commit.clone());
+                // Kept until canonical's answer is known, so a push that lands
+                // unseen is found by the next save.
+                self.git
+                    .ok(&[
+                        "update-ref",
+                        "-m",
+                        "instafy: working state push",
+                        ATTEMPT_REF,
+                        &commit,
+                    ])
+                    .map_err(local)?;
+                let pushed = match push_replace_with_lease(
+                    &self.git,
+                    &self.remote,
+                    &commit,
+                    &slot,
+                    expected.as_deref(),
+                ) {
+                    Ok(pushed) => pushed.class,
+                    Err(error) => {
+                        warn!(error = %format!("{error:#}"), "a working save could not push");
+                        return self.after_push(&slot, &commit, &tree, SaveError::Unreachable);
+                    }
+                };
+                match pushed {
+                    // Confirmed only once `ls-remote` shows it.
+                    PushClass::Pushed => {
+                        return self.after_push(&slot, &commit, &tree, SaveError::Unconfirmed)
+                    }
+                    PushClass::Ambiguous(_) => {
+                        return self.after_push(&slot, &commit, &tree, SaveError::PushAmbiguous)
+                    }
+                    PushClass::PathRejected { path, .. } => {
+                        self.clear_markers().map_err(local)?;
+                        refusals += 1;
+                        if refusals > MAX_PATH_REFUSALS {
+                            return Err(SaveError::PushRejected);
+                        }
+                        let left_out = without_refused_path(
+                            &self.git,
+                            &tree,
+                            plan.parent.as_deref(),
+                            plan.main.as_deref(),
+                            &path,
+                        )
+                        .map_err(local)?;
+                        if left_out == tree {
+                            return Err(SaveError::PushRejected);
+                        }
+                        tree = left_out;
+                        continue;
+                    }
+                    PushClass::LostRace(_) => {
+                        if self.see_slot(&slot)?.0 == Seen::Moved {
+                            return Err(SaveError::SlotMoved);
+                        }
+                    }
+                    PushClass::Rejected(_) => {
+                        self.clear_markers().map_err(local)?;
                         return Err(SaveError::PushRejected);
                     }
-                    tree = left_out;
                 }
-                PushClass::LostRace(_) => {
-                    retries += 1;
-                    if retries > MAX_SLOT_RETRIES {
-                        return Err(SaveError::SlotMoved);
-                    }
-                    let (seen, _) = self.see_slot(&slot)?;
-                    match seen {
-                        Seen::Moved => return Err(SaveError::SlotMoved),
-                        // A person removed or restored it: that sticks per
-                        // path, and a new slot holds what is left.
-                        Seen::Removed => {
-                            tree = without_dismissed(&self.git, &tree, plan.parent.as_deref())
-                                .map_err(local)?;
-                        }
-                        // This folder's own newer commit, or no slot at all:
-                        // try again on what the slot holds.
-                        Seen::Adopted | Seen::Deleted | Seen::Recorded => {}
-                    }
-                    record = read_record(&self.git, || self.working_set()).map_err(local)?;
-                    if tree != parent_tree
-                        && holds(record.as_ref(), plan.parent.as_deref(), &tree, origin)
-                    {
-                        return Ok(Settled::holding(&tree, None));
-                    }
-                }
-                PushClass::Rejected(_) => {
-                    self.clear_markers().map_err(local)?;
-                    return Err(SaveError::PushRejected);
-                }
+            }
+            // The slot was not what the record named: a newer save of this
+            // folder's own, which the record names now, no slot at all, or
+            // one a person removed. Go on from what it holds.
+            retries += 1;
+            if retries > MAX_SLOT_RETRIES {
+                return Err(SaveError::SlotMoved);
+            }
+            (record, tree) = self.follow_record(&plan, record, tree).map_err(local)?;
+            if tree != parent_tree && holds(record.as_ref(), plan.parent.as_deref(), &tree, origin)
+            {
+                return Ok(Settled::holding(&tree, None));
             }
         }
+    }
+
+    /// The record after a look at the slot, and `tree` built again for it
+    /// (see [`kept_by_save`]) when it names another commit than `record`:
+    /// a newer save of this folder's own holds what this save left out,
+    /// and a slot a person removed leaves paths that are not saved again.
+    fn follow_record(
+        &self,
+        plan: &Plan,
+        record: Option<Record>,
+        tree: String,
+    ) -> Result<(Option<Record>, String)> {
+        let now = read_record(&self.git, || self.working_set())?;
+        let commit = |record: &Option<Record>| record.as_ref().map(|record| record.commit.clone());
+        if commit(&now) == commit(&record) {
+            return Ok((now, tree));
+        }
+        let tree = kept_by_save(
+            &self.git,
+            &tree,
+            plan.parent.as_deref(),
+            &plan.parent_tree,
+            now.as_ref(),
+            &plan.deferred,
+        )?;
+        Ok((now, tree))
     }
 
     /// A push of `commit` to `slot` whose answer was `error` (or an `ok`
@@ -1168,8 +1210,10 @@ impl Publisher<'_> {
         }
     }
 
-    /// Delete the slot `record` names under a lease on it, then the record.
-    fn delete_slot(&self, record: &Record) -> Result<(), SaveError> {
+    /// Delete the slot `record` names under a lease on it, then the record:
+    /// `true` once the slot is gone, `false` when it holds a newer save of
+    /// this folder's own, which the record names now.
+    fn delete_slot(&self, record: &Record) -> Result<bool, SaveError> {
         if !self.can_write {
             return Err(SaveError::NoCredential);
         }
@@ -1178,54 +1222,50 @@ impl Publisher<'_> {
             local_failure(&error)
         };
         let slot = self.slot().map_err(local)?;
-        let mut current = record.commit.clone();
-        for _ in 0..=MAX_SLOT_RETRIES {
-            // Kept until canonical's answer is known: a slot found gone
-            // after that is this folder's own delete, never a removal.
-            self.git
-                .ok(&[
-                    "update-ref",
-                    "-m",
-                    "instafy: working state delete",
-                    DELETING_REF,
-                    &current,
-                ])
-                .map_err(local)?;
-            let deleted = match delete_with_lease(&self.git, &self.remote, &slot, &current) {
-                Ok(deleted) => deleted.class,
-                Err(error) => {
-                    warn!(error = %format!("{error:#}"), "a working save could not delete its slot");
-                    return self.after_delete(&slot, SaveError::Unreachable);
-                }
-            };
-            match deleted {
-                PushClass::Pushed => {
-                    self.git.delete_ref(RECORD_REF, &current).map_err(local)?;
-                    self.clear_markers().map_err(local)?;
-                    return Ok(());
-                }
-                PushClass::Ambiguous(_) => {
-                    return self.after_delete(&slot, SaveError::PushAmbiguous)
-                }
-                PushClass::LostRace(_) => match self.see_slot(&slot)? {
-                    (Seen::Deleted | Seen::Recorded | Seen::Removed, None) => return Ok(()),
-                    (Seen::Adopted, Some(tip)) => current = tip,
-                    (Seen::Moved, _) => return Err(SaveError::SlotMoved),
-                    _ => return Err(SaveError::PushAmbiguous),
-                },
-                PushClass::Rejected(_) | PushClass::PathRejected { .. } => {
-                    self.clear_markers().map_err(local)?;
-                    return Err(SaveError::PushRejected);
-                }
+        // Kept until canonical's answer is known: a slot found gone after
+        // that is this folder's own delete, never a removal.
+        self.git
+            .ok(&[
+                "update-ref",
+                "-m",
+                "instafy: working state delete",
+                DELETING_REF,
+                &record.commit,
+            ])
+            .map_err(local)?;
+        let deleted = match delete_with_lease(&self.git, &self.remote, &slot, &record.commit) {
+            Ok(deleted) => deleted.class,
+            Err(error) => {
+                warn!(error = %format!("{error:#}"), "a working save could not delete its slot");
+                return self.after_delete(&slot, SaveError::Unreachable);
+            }
+        };
+        match deleted {
+            PushClass::Pushed => {
+                self.git
+                    .delete_ref(RECORD_REF, &record.commit)
+                    .map_err(local)?;
+                self.clear_markers().map_err(local)?;
+                Ok(true)
+            }
+            PushClass::Ambiguous(_) => self.after_delete(&slot, SaveError::PushAmbiguous),
+            PushClass::LostRace(_) => match self.see_slot(&slot)? {
+                (Seen::Deleted | Seen::Recorded | Seen::Removed, None) => Ok(true),
+                (Seen::Adopted, Some(_)) => Ok(false),
+                (Seen::Moved, _) => Err(SaveError::SlotMoved),
+                _ => Err(SaveError::PushAmbiguous),
+            },
+            PushClass::Rejected(_) | PushClass::PathRejected { .. } => {
+                self.clear_markers().map_err(local)?;
+                Err(SaveError::PushRejected)
             }
         }
-        Err(SaveError::SlotMoved)
     }
 
     /// A delete of the slot whose answer was `error`: look at the slot.
-    fn after_delete(&self, slot: &str, error: SaveError) -> Result<(), SaveError> {
+    fn after_delete(&self, slot: &str, error: SaveError) -> Result<bool, SaveError> {
         match self.see_slot(slot) {
-            Ok((Seen::Deleted, _)) => Ok(()),
+            Ok((Seen::Deleted, _)) => Ok(true),
             Ok((Seen::Moved, _)) => Err(SaveError::SlotMoved),
             _ => Err(error),
         }
