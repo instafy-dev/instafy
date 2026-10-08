@@ -13,8 +13,9 @@ import {
  *
  * Fetched on Studio load and project switch, when the drawer opens, on focus
  * when older than five minutes, when a finished turn reports a recovery
- * ref, and when a runtime stops (once per stop, for a project whose list has
- * loaded). There is no interval: no event exists for ref creation.
+ * ref, and when a runtime stops (once per stop, for a project with a list
+ * loaded or on the wire). There is no interval: no event exists for ref
+ * creation.
  */
 
 export type UnsavedWorkStatus = "idle" | "ok" | "unsupported" | "error";
@@ -205,6 +206,9 @@ export function liveOriginIds(statuses: readonly ControllerRuntimeStatusEntry[])
  * rev. This covers an origin that leaves the live set, and, when the set
  * first becomes known, a listed origin that is not live: it may have
  * stopped while another project was open, or before the status answered.
+ * A list still on the wire may predate a stop too, so it is fetched again as
+ * well (at once when the set first becomes known), and its older answer is
+ * never shown.
  */
 export function setUnsavedWorkLiveOrigins(
   projectId: string | null | undefined,
@@ -236,16 +240,23 @@ export function setUnsavedWorkLiveOrigins(
   // Any stop counts, listed or not: the slot a turn wrote since the list
   // loaded may be the only copy of that work, and no list carries it yet.
   // A first known set can only judge what the loaded lists show.
-  const departed = current.live
-    ? [...current.live].filter((id) => !live.has(id))
-    : listedRollingSaveOrigins(current.projectId).filter((id) => !live.has(id));
+  const firstKnown = current.live === null;
+  const departed =
+    current.live === null
+      ? listedRollingSaveOrigins(current.projectId).filter((id) => !live.has(id))
+      : [...current.live].filter((id) => !live.has(id));
   if (current.live && departed.length === 0 && sameOrigins(current.live, live)) {
     return;
   }
   const settling = departed.length === 0 ? current.settling : new Set([...current.settling, ...departed]);
   const sameProject = current.projectId;
   liveOrigins = liveOriginsRecord(sameProject, live, settling);
-  if (departed.length > 0) {
+  if (firstKnown && projectLists(sameProject).some(([, snapshot]) => snapshot.loading)) {
+    // A list sent before the set was known may be older than a stop it shows
+    // as stopped: fetch it again now, before its answer can show.
+    cancelSettle();
+    void settleStoppedOrigins(sameProject);
+  } else if (departed.length > 0) {
     cancelSettle();
     settleTimer = setTimeout(() => {
       settleTimer = null;
@@ -255,22 +266,25 @@ export function setUnsavedWorkLiveOrigins(
   notify();
 }
 
-/** The lists of `projectId` that have loaded, by the origin they were read from. */
-function loadedLists(projectId: string): Array<[string, UnsavedWorkSnapshot]> {
+/**
+ * The lists of `projectId` that have loaded or are on the wire (a first
+ * fetch included), by the origin they are read from.
+ */
+function projectLists(projectId: string): Array<[string, UnsavedWorkSnapshot]> {
   const prefix = `${projectId}:`;
   const lists: Array<[string, UnsavedWorkSnapshot]> = [];
   for (const [key, snapshot] of snapshots) {
-    if (key.startsWith(prefix) && (snapshot.status === "ok" || snapshot.status === "error")) {
+    if (key.startsWith(prefix) && (snapshot.status === "ok" || snapshot.status === "error" || snapshot.loading)) {
       lists.push([key.slice(prefix.length), snapshot]);
     }
   }
   return lists;
 }
 
-/** The origins that last wrote a rolling save in one of `projectId`'s loaded lists. */
+/** The origins that last wrote a rolling save in one of `projectId`'s lists. */
 function listedRollingSaveOrigins(projectId: string): string[] {
   const origins = new Set<string>();
-  for (const [, snapshot] of loadedLists(projectId)) {
+  for (const [, snapshot] of projectLists(projectId)) {
     for (const entry of snapshot.entries) {
       if (entry.rollingSave === true && entry.origin) {
         origins.add(entry.origin);
@@ -281,16 +295,16 @@ function listedRollingSaveOrigins(projectId: string): string[] {
 }
 
 /**
- * Fetch every list of `projectId` that has loaded again, then show the
+ * Fetch every list of `projectId` again (see `projectLists`), then show the
  * stopped origins' saves. Legacy spaces never loaded one, so they fetch
  * nothing.
  */
 async function settleStoppedOrigins(projectId: string): Promise<void> {
-  const batch = liveOrigins?.projectId === projectId ? liveOrigins.settling : EMPTY_ORIGINS;
-  if (batch.size === 0) {
+  if (liveOrigins?.projectId !== projectId) {
     return;
   }
-  const originIds = loadedLists(projectId).map(([originId]) => originId);
+  const batch = liveOrigins.settling;
+  const originIds = projectLists(projectId).map(([originId]) => originId);
   await Promise.allSettled(
     originIds.map((originId) => refreshUnsavedWork({ projectId, originId, force: true })),
   );
