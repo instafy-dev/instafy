@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
 import { ControllerApiError } from "../../../services/runtimeController/core";
 import { clearManualStop, manualStopHold, markManualStop } from "../../idlePauseRegistry";
-import { stopLeavesNoLiveHostedRuntime, stopUnderManualHold } from "../manualStopDecisions";
+import { removeUnderManualHold, stopLeavesNoLiveHostedRuntime, stopUnderManualHold } from "../manualStopDecisions";
 
 function entry(
   overrides: Partial<ControllerRuntimeStatusEntry> & { runtimeId: string },
@@ -160,5 +160,69 @@ describe("stopUnderManualHold", () => {
         throw stopError(500, "failed to commit runtime stop");
       }),
     ).rejects.toThrow("failed to commit runtime stop");
+  });
+});
+
+describe("removeUnderManualHold", () => {
+  const PROJECT_ID = "project-remove";
+  const SAVED = { status: "flushed", unpushedRefs: 0, error: null };
+
+  afterEach(() => clearManualStop(PROJECT_ID));
+
+  function removeError(status: number, message: string, code: string | null = null) {
+    return new ControllerApiError({ status, message, code, details: code ? { flush: null } : null });
+  }
+
+  it("keeps the hold and what the removal kept", async () => {
+    // The runtime leaves the space's list; without the hold the next status
+    // read finds no machine and starts a new one.
+    const hold = markManualStop(PROJECT_ID);
+    await expect(removeUnderManualHold(PROJECT_ID, hold, async () => ({ flush: SAVED }))).resolves.toEqual({
+      flush: SAVED,
+    });
+    expect(manualStopHold(PROJECT_ID)).toBe(hold);
+    expect(hold?.flush).toEqual(SAVED);
+  });
+
+  it("keeps the hold, and still says so, when the removal took effect but did not finish", async () => {
+    // The machine is fenced off and its turn is back in the queue, but the
+    // runtime is still listed, so the person removes it again.
+    for (const failure of [
+      removeError(502, "runtime provider cleanup is still pending; retry removal", "provider_cleanup_pending"),
+      removeError(409, "runtime lease generation is no longer current"),
+    ]) {
+      const hold = markManualStop(PROJECT_ID);
+      await expect(
+        removeUnderManualHold(PROJECT_ID, hold, async () => {
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(manualStopHold(PROJECT_ID), failure.message).toBe(hold);
+    }
+  });
+
+  it("lifts the hold when the machine may still be running, unless a later Stop set its own", async () => {
+    for (const failure of [
+      removeError(409, "provider-managed runtime is missing its active lease generation"),
+      removeError(500, "failed to commit runtime removal"),
+      new TypeError("Failed to fetch"),
+    ]) {
+      const hold = markManualStop(PROJECT_ID);
+      await expect(
+        removeUnderManualHold(PROJECT_ID, hold, async () => {
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(manualStopHold(PROJECT_ID), failure.message).toBeNull();
+    }
+
+    const first = markManualStop(PROJECT_ID);
+    const second = markManualStop(PROJECT_ID);
+    await expect(
+      removeUnderManualHold(PROJECT_ID, first, async () => {
+        throw removeError(500, "failed to commit runtime removal");
+      }),
+    ).rejects.toThrow("failed to commit runtime removal");
+    expect(manualStopHold(PROJECT_ID)).toBe(second);
   });
 });

@@ -595,5 +595,8 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     expect(provider).toContain("const hold = holdManualStop ? markManualStop(projectId) : null;");
     expect(provider).toContain("await stopUnderManualHold(projectId, hold, () =>");
     expect(provider).toContain('controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" }),');
+    // Machines > Remove stops the machine too, and holds the space the same way.
+    expect(provider).toContain("await removeUnderManualHold(projectId, hold, () =>");
+    expect(provider).toContain('controllerClient.runtimes.remove({ runtimeId, reason: "user_remove" }),');
   });
 });

@@ -29,7 +29,11 @@ import {
   clearRestoredAwaitingIntent,
   markManualStop,
 } from "./idlePauseRegistry";
-import { stopLeavesNoLiveHostedRuntime, stopUnderManualHold } from "./hooks/manualStopDecisions";
+import {
+  removeUnderManualHold,
+  stopLeavesNoLiveHostedRuntime,
+  stopUnderManualHold,
+} from "./hooks/manualStopDecisions";
 import { resolveStartRuntimeParams } from "./hooks/startRuntimeDecisions";
 import { useRuntimeControllerSync } from "./hooks/useRuntimeControllerSync";
 import { useRuntimeStatusRefresh } from "./hooks/useRuntimeStatusRefresh";
@@ -489,11 +493,19 @@ export function RuntimeOperationsProvider({
         );
         return false;
       }
+      // A removal stops the machine first and then takes the runtime off the
+      // space's list, so the next status refresh would find no machine and
+      // start a new one. It holds the space the way Stop does, by the same
+      // rule: only when no other hosted machine stays live.
+      const projectId = resolveProjectId() ?? activeProjectId;
+      const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
+      const hold = holdManualStop ? markManualStop(projectId) : null;
       try {
-        await controllerClient.runtimes.remove({
-          runtimeId,
-          reason: "user_remove",
-        });
+        // Keeps the hold after a removal that took effect, also when it then
+        // answered an error and the runtime is still listed.
+        await removeUnderManualHold(projectId, hold, () =>
+          controllerClient.runtimes.remove({ runtimeId, reason: "user_remove" }),
+        );
         showStatus("Runtime removed", "info", 2500);
         if (state.sessionRuntimeId === runtimeId) {
           clearSessionRuntimeOverride();
@@ -510,8 +522,10 @@ export function RuntimeOperationsProvider({
       }
     },
     [
+      activeProjectId,
       clearSessionRuntimeOverride,
       refreshRuntimeStatuses,
+      resolveProjectId,
       runtimeMutationEnabled,
       setPreferredRuntime,
       showStatus,

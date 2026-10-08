@@ -38,13 +38,33 @@ export function stopLeavesNoLiveHostedRuntime(
 }
 
 /**
+ * Settle the hold a person's Stop or Remove set (null when it set none) after
+ * the request answered `error`, and return what it still did. A stop the
+ * controller had committed before the error (committedRuntimeStop) keeps the
+ * hold and what it kept: lifting it then would let this tab start the machine
+ * the person just stopped on its next status read. Any other failure may have
+ * left the machine running, so it lifts the hold, unless a later Stop has set
+ * its own, and returns null.
+ */
+function settleManualHoldAfterError(
+  projectId: string | null,
+  hold: ManualStopHold | null,
+  error: unknown,
+): StopRuntimeResult | null {
+  const committed = committedRuntimeStop(error);
+  if (committed) {
+    recordManualStopFlush(projectId, hold, committed.flush);
+  } else if (hold && manualStopHold(projectId) === hold) {
+    clearManualStop(projectId);
+  }
+  return committed;
+}
+
+/**
  * Make a person's Stop under the hold it set (null when it set none) and keep
  * what the stop answered with that hold. The hold stays as long as the stop
  * took effect, including after an error answer that follows a committed stop
- * (committedRuntimeStop): lifting it then would let this tab start the
- * machine the person just stopped on its next status read. Any other failure
- * may have left the machine running, so it lifts the hold, unless a later
- * Stop has set its own, and is thrown.
+ * (settleManualHoldAfterError). Any other failure lifts it and is thrown.
  */
 export async function stopUnderManualHold(
   projectId: string | null,
@@ -55,16 +75,37 @@ export async function stopUnderManualHold(
   try {
     stopped = await stop();
   } catch (error) {
-    stopped = committedRuntimeStop(error);
-    if (!stopped) {
-      if (hold && manualStopHold(projectId) === hold) {
-        clearManualStop(projectId);
-      }
+    const committed = settleManualHoldAfterError(projectId, hold, error);
+    if (!committed) {
       throw error;
     }
+    return committed;
   }
   // Whether the stop's flush put the work where History lists it: the chat
   // names that place only then (useStoppedTurnNotice).
   recordManualStopFlush(projectId, hold, stopped?.flush ?? null);
   return stopped;
+}
+
+/**
+ * Remove a machine under the hold the person's Remove set, as
+ * stopUnderManualHold stops one: a removal stops the machine first, and the
+ * runtime then leaves the space's list. Unlike a stop, an error answer is
+ * always thrown, also when the removal took effect and kept the hold: the
+ * runtime is then still listed, and the person removes it again.
+ */
+export async function removeUnderManualHold(
+  projectId: string | null,
+  hold: ManualStopHold | null,
+  remove: () => Promise<StopRuntimeResult | null>,
+): Promise<StopRuntimeResult | null> {
+  let removed: StopRuntimeResult | null;
+  try {
+    removed = await remove();
+  } catch (error) {
+    settleManualHoldAfterError(projectId, hold, error);
+    throw error;
+  }
+  recordManualStopFlush(projectId, hold, removed?.flush ?? null);
+  return removed;
 }
