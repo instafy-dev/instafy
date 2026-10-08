@@ -1599,10 +1599,11 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
     // launches with the same image and size as the generation it replaces.
     let live_lease = load_live_lease_metadata(state, &runtime.id).await?;
     let carried_from = live_lease.as_ref().map(|(lease_id, _)| *lease_id);
-    // With no live lease, as after an idle stop, the newest lease still says
-    // which image the runtime was launched with. The reconnect still passes
-    // `CarriedFrom(None)`, so a lease another start creates meanwhile keeps
-    // its own settings and is never refused over a flavor read from this one.
+    // With no live lease, as after an idle stop or while one releases the
+    // machine, the newest lease still says which image the runtime was
+    // launched with. The reconnect still passes `CarriedFrom(None)`, so a
+    // lease another start creates meanwhile keeps its own settings and is
+    // never refused over a flavor read from this one.
     let ended_lease = match live_lease {
         Some(_) => None,
         None => load_newest_lease_metadata(state, runtime).await?,
@@ -1651,7 +1652,15 @@ pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
     .await
 }
 
-/// The runtime's unreleased active lease and the metadata it holds.
+/// The runtime's live active lease and the metadata it holds: unreleased,
+/// and not quarantined for a stop's provider release.
+///
+/// A `cleanup_pending` lease is a generation some stop has ended, such as an
+/// idle stop still waiting on the provider. A reconnect in that window
+/// launches after the release, and the successor must start as it would a
+/// minute later, once the stop has finalized: with the ended lease's image
+/// and browser settings but not its size (see
+/// [`ended_lease_launch_settings`]).
 async fn load_live_lease_metadata(
     state: &AppState,
     runtime_id: &Uuid,
@@ -1667,7 +1676,8 @@ async fn load_live_lease_metadata(
              from runtimes r
              join runtime_leases rl on rl.id = r.active_lease_id
              where r.id = $1
-               and rl.released_at is null",
+               and rl.released_at is null
+               and rl.status <> 'cleanup_pending'",
             &[runtime_id],
         )
         .await
@@ -2294,31 +2304,121 @@ async fn cleanup_stale_runtime_generation_before_ensure(
     }
     drop(connection);
 
-    let stopped = stop_runtime_safely(
+    stop_stale_runtime_generation(
         state,
-        &candidate_runtime_id,
+        project_id,
+        candidate_runtime_id,
+        active_lease_id,
+        terminal || cleanup_pending,
+    )
+    .await
+}
+
+/// Stop the stale generation `lease_id` that the probe found on
+/// `runtime_id`, so the ensure that follows launches a new lease.
+/// `unavailable` (a terminal runtime or a cleanup_pending lease) drops the
+/// idle and active-job guards, because such a generation must complete
+/// cleanup whatever its jobs or heartbeat say.
+///
+/// The stop applies only while `lease_id` is still the runtime's active
+/// generation. After a concurrent stop finalizes `lease_id`, another ensure
+/// can launch the next lease before this stop locks the runtime; that launch
+/// is reused, not released.
+async fn stop_stale_runtime_generation(
+    state: &AppState,
+    project_id: &Uuid,
+    runtime_id: Uuid,
+    lease_id: Uuid,
+    unavailable: bool,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let stopped = match stop_runtime_safely(
+        state,
+        &runtime_id,
         StopOptions {
             source: "ensure_stale_generation",
             reason: Some("stale_generation_before_ensure".to_string()),
             // For a merely stale heartbeat, a live job or a concurrently
             // refreshed heartbeat wins. Terminal and cleanup-pending states
             // are already unavailable and must complete cleanup.
-            skip_if_active_jobs: !terminal && !cleanup_pending,
-            require_idle_timeout: !terminal && !cleanup_pending,
+            skip_if_active_jobs: !unavailable,
+            require_idle_timeout: !unavailable,
             allow_cleanup_pending_release: false,
-            expected_identity: None,
+            expected_identity: Some(RuntimeIdentityExpectation {
+                project_id: Some(*project_id),
+                provider: None,
+                display_name: None,
+                lease_id: Some(lease_id),
+            }),
         },
     )
-    .await?;
+    .await
+    {
+        Ok(stopped) => stopped,
+        // Another stop, such as the idle sweep or a person's Stop, was
+        // already releasing this generation. The provider serializes releases
+        // per runtime, so ours returned after theirs, and whichever stop
+        // locked the runtime first finalized the lease; here that was theirs.
+        // The generation this cleanup was for is gone, which is the state in
+        // which the probe returns early. The allocation re-reads the runtime
+        // under its row lock, so a lease still in cleanup is refused there
+        // and concurrent ensures share one launch. A runtime the other stop
+        // removed is not launched again.
+        Err(error)
+            if error.0 == StatusCode::CONFLICT
+                && runtime_moved_off_lease(state, &runtime_id, &lease_id).await =>
+        {
+            info!(
+                %runtime_id,
+                %lease_id,
+                error = %error.1.message,
+                "stale runtime generation was released by a concurrent stop; continuing the ensure"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
 
     if let Some(skip_reason) = stopped.outcome.skip_reason.as_deref() {
         info!(
-            runtime_id = %candidate_runtime_id,
+            %runtime_id,
+            %lease_id,
             %skip_reason,
             "stale runtime generation cleanup lost a revalidation race; reusing current state"
         );
     }
     Ok(())
+}
+
+/// Whether the runtime's active generation is no longer `lease_id` and the
+/// runtime can still be launched, read after a stale-generation stop was
+/// refused. A removed runtime does not count: an ensure would commit a lease
+/// on it that the launch guard then refuses and nothing ever releases. A row
+/// or read that cannot be confirmed counts as not moved, so the refusal
+/// stands.
+async fn runtime_moved_off_lease(state: &AppState, runtime_id: &Uuid, lease_id: &Uuid) -> bool {
+    let Ok(connection) = state.pool.get().await else {
+        return false;
+    };
+    match connection
+        .query_opt(
+            "select active_lease_id is distinct from $2 and status <> 'removed' as moved
+             from runtimes
+             where id = $1",
+            &[runtime_id, lease_id],
+        )
+        .await
+    {
+        Ok(Some(row)) => row.get::<_, bool>("moved"),
+        Ok(None) => false,
+        Err(error) => {
+            warn!(
+                %runtime_id,
+                %error,
+                "could not re-read the runtime generation after a refused stale-generation stop"
+            );
+            false
+        }
+    }
 }
 
 /// Stop a launch that never came up so the ensure that follows launches a new

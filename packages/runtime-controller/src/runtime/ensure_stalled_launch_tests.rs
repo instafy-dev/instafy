@@ -598,6 +598,74 @@ async fn a_late_retry_keeps_the_launch_that_replaced_the_one_it_saw() -> anyhow:
     .await
 }
 
+/// An ensure's stale-generation cleanup can probe a lease in cleanup that a
+/// concurrent stop then finalizes, and lock the runtime only after another
+/// ensure has launched the next lease. That cleanup drops the idle and
+/// active-job guards, because the lease it saw was already unavailable. It
+/// still names that lease, so it leaves the newer launch alone instead of
+/// releasing a launch seconds old and starting a third.
+#[tokio::test]
+async fn a_late_stale_generation_cleanup_keeps_the_launch_that_replaced_the_lease_it_saw(
+) -> anyhow::Result<()> {
+    let fixture = setup(
+        "stale-generation-late-cleanup",
+        YOUNG_LAUNCH_AGE_SECONDS,
+        None,
+    )
+    .await?;
+    crate::tests::with_shared_db_fixture(fixture.shared_db_fixture(), async {
+        // The generation the late cleanup's probe saw in cleanup, which a
+        // concurrent stop has since released.
+        let seen_lease_id = Uuid::new_v4();
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into runtime_leases
+                    (id, project_id, runtime_id, status, requested_at, released_at)
+                 values ($1, $2, $3, 'released', now() - interval '1 hour', now())",
+                &[&seen_lease_id, &fixture.project_id, &fixture.runtime_id],
+            )
+            .await?;
+
+        stop_stale_runtime_generation(
+            &fixture.state,
+            &fixture.project_id,
+            fixture.runtime_id,
+            seen_lease_id,
+            true,
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+
+        assert!(
+            fixture.provider_events().await.is_empty(),
+            "the newer launch must not be released"
+        );
+        assert_eq!(fixture.stop_event_count().await?, 0);
+        let row = fixture
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select r.status, r.active_lease_id, lease.status as lease_status,
+                        lease.released_at is null as live
+                 from runtimes r
+                 join runtime_leases lease on lease.id = r.active_lease_id
+                 where r.id = $1",
+                &[&fixture.runtime_id],
+            )
+            .await?;
+        assert_eq!(row.get::<_, String>("status"), "requested");
+        assert_eq!(row.get::<_, Uuid>("active_lease_id"), fixture.lease_id);
+        assert_eq!(row.get::<_, String>("lease_status"), "launching");
+        assert!(row.get::<_, bool>("live"));
+        Ok(())
+    })
+    .await
+}
+
 /// The status entry says when the active launch was requested, so a client
 /// can tell how long it has been coming up; without an active lease it says
 /// nothing.

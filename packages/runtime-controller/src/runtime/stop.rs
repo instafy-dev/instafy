@@ -514,6 +514,7 @@ async fn quarantine_runtime_for_provider_release(
     runtime: &RuntimeDetails,
     lease_id: &Uuid,
     reason: &str,
+    source: &str,
 ) -> Result<Vec<crate::send_intents::JobInputStateUpdate>, (StatusCode, Json<ApiError>)> {
     let lease = fetch_runtime_lease_for_update(transaction, lease_id).await?;
     if lease.project_id != runtime.project_id
@@ -593,6 +594,9 @@ async fn quarantine_runtime_for_provider_release(
         "provider_release_cleanup_pending",
         json!({
             "reason": reason,
+            // The stop that quarantined the lease, such as "idle_stop" or
+            // "ensure_stale_generation".
+            "source": source,
             "provider": runtime.provider,
             "runtimeLeaseId": lease_id,
             "requeuedJobs": job_disposition.requeued_jobs,
@@ -783,6 +787,7 @@ async fn stop_after_flush(
             &runtime,
             &lease_id,
             &stop_reason,
+            options.source,
         )
         .await?;
         transaction.commit().await.map_err(|error| {
@@ -1110,6 +1115,7 @@ pub(crate) async fn runtime_stop(
                 &runtime,
                 &lease_id,
                 &stop_reason_label,
+                stop_options.source,
             )
             .await?;
             transaction.commit().await.map_err(|error| {
@@ -1346,6 +1352,7 @@ pub(crate) async fn stop_runtime_for_project(
                 &runtime,
                 &lease_id,
                 &stop_reason_label,
+                stop_options.source,
             )
             .await?;
             transaction.commit().await.map_err(|error| {
@@ -1731,6 +1738,7 @@ pub(crate) async fn runtime_remove(
                     &runtime,
                     &lease_id,
                     &stop_label,
+                    stop_options.source,
                 )
                 .await?;
                 transaction.commit().await.map_err(|error| {
