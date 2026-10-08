@@ -16,6 +16,12 @@ export interface StoppedTurnInput {
    */
   manualStopAt: number | null;
   runtimeReady: boolean;
+  /**
+   * This tab asked for a machine (Start, a send, Reconnect) and none is ready
+   * yet. The typing status then says what that request is doing: starting
+   * the workspace, or waiting on the team's runtime limit.
+   */
+  machineRequested: boolean;
   /** The conversation's live runs (ChatPanel's `activeConversationRuns`). */
   activeRuns: readonly RunRecord[];
   messages: readonly ChatMessage[];
@@ -50,6 +56,9 @@ function isStoppedByPerson(run: RunRecord): boolean {
  * lifts on Start or a send, and a machine that comes back picks the turn up
  * again (for 15 minutes, before the controller gives up on it). Idle stops
  * hold differently, and a queued run without the record had not started.
+ * The record gives way once this tab asks for a machine, as the hold does:
+ * the request's own status, such as a runtime limit that keeps the machine
+ * from starting, says more.
  *
  * The hold also outlives the Stop while a machine that came back without
  * asking through this tab (a Desktop runtime, another tab or a teammate's
@@ -82,7 +91,7 @@ export function resolveStoppedTurn(input: StoppedTurnInput): "held" | "recorded"
     }
     stopped = "recorded";
   }
-  return stopped;
+  return input.machineRequested ? null : stopped;
 }
 
 export function hasStoppedTurn(input: StoppedTurnInput): boolean {
@@ -102,18 +111,22 @@ function stopKeptWorkInHistory(flush: RuntimeStopFlush | null): boolean {
 /**
  * The chat line that stands in for the typing status while a stopped turn
  * waits, or null. Never written into the conversation. Every viewer gets the
- * line from the controller's record, and only the tab whose Stop answered
- * that its flush pushed everything names where the unsaved work went: a
- * reload drops the hold, and that sentence with it.
+ * line from the controller's record until their tab asks for a machine, and
+ * only the tab whose Stop answered that its flush pushed everything names
+ * where the unsaved work went: a reload drops the hold, and that sentence
+ * with it.
  */
 export function useStoppedTurnNotice({
   projectId,
   agentDisplayName,
+  requestingMachine,
   ...input
-}: Omit<StoppedTurnInput, "manualStopAt"> & {
+}: Omit<StoppedTurnInput, "manualStopAt" | "machineRequested"> & {
   projectId: string | null;
   /** The working agent's name; null when several share the conversation. */
   agentDisplayName: string | null;
+  /** This tab's request for a machine is in flight, or the team's runtime limit refused it. */
+  requestingMachine: boolean;
 }): string | null {
   const versioning = useActiveWorkspaceVersioning();
   // The hold is module state: read it again when it is set, answered or lifted.
@@ -132,7 +145,19 @@ export function useStoppedTurnNotice({
   }, [projectId]);
 
   const hold = manualStopHold(projectId);
-  const stopped = resolveStoppedTurn({ ...input, manualStopAt: hold?.at ?? null });
+  // Whether this tab asked for the space's machine, kept until one is ready.
+  // A request ends before the machine it asked for has started, and only
+  // Start, Reconnect or a send lifts the hold. Read in the same render as
+  // the lift, so the line never drops to its lead sentence on the way out.
+  const [seen, setSeen] = useState({ projectId, hold, machineRequested: false });
+  const sameSpace = seen.projectId === projectId;
+  const machineRequested =
+    !input.runtimeReady &&
+    (requestingMachine || (sameSpace && (seen.machineRequested || (seen.hold !== null && hold === null))));
+  if (!sameSpace || seen.hold !== hold || seen.machineRequested !== machineRequested) {
+    setSeen({ projectId, hold, machineRequested });
+  }
+  const stopped = resolveStoppedTurn({ ...input, manualStopAt: hold?.at ?? null, machineRequested });
   if (!stopped) {
     return null;
   }

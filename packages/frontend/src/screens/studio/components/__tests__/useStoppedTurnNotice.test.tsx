@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { HostedRuntimeLimitErrorDetails } from "../../../../runtime/hostedRuntimeLimitError";
 import type { RunRecord } from "../../../../types";
 import type { ChatMessage } from "../../types";
 
@@ -27,6 +28,7 @@ import {
 import { isRunActivelyProgressing } from "../../../../conversations/runLiveness";
 import { StoppedTurnRow } from "../ChatSystemRows";
 import { ChatTypingRows } from "../ChatTypingRows";
+import { resolveAgentWaitingActivityCopy } from "../runtimeAlertPresentation";
 import {
   hasStoppedTurn,
   resolveStoppedTurn,
@@ -41,6 +43,19 @@ const KEPT_IN_HISTORY = "Any unsaved changes are kept under History, in Unsaved 
 /** The stop's flush pushed everything it kept, so History lists it. */
 const SAVED_FLUSH = { status: "flushed", unpushedRefs: 0, error: null };
 const THINKING_LABEL = "Running sleep 120";
+/** What the typing status says while a send waits on the team's one machine. */
+const LIMIT_COPY =
+  'Your cloud runtime is busy in "Space B". Stop it there or let it go idle, and this message sends once a runtime is free. It waits up to 30 minutes.';
+/** The ensure's refusal when another space holds the team's only machine. */
+const LIMIT_REFUSAL: HostedRuntimeLimitErrorDetails = {
+  limitReached: true,
+  activeCount: 1,
+  maxActiveCount: 1,
+  blockerRuntimeId: "runtime-b",
+  blockerProjectId: "project-b",
+  blockerRuntimeLabel: null,
+  blockerProjectLabel: "Space B",
+};
 
 const userMessage: ChatMessage = { id: "user-1", role: "user", content: "Make a todo list", timestamp: NOW };
 
@@ -113,6 +128,7 @@ function input(overrides: Partial<StoppedTurnInput> = {}): StoppedTurnInput {
   return {
     manualStopAt: NOW + 60_000,
     runtimeReady: false,
+    machineRequested: false,
     activeRuns: [run()],
     messages: [userMessage],
     ...overrides,
@@ -187,6 +203,20 @@ describe("resolveStoppedTurn, from the controller's record of the stop", () => {
     }
   });
 
+  it("gives the record up once this tab asked for a machine, but not this tab's own hold", () => {
+    // What that request is doing (starting, or the team's runtime limit) says more.
+    expect(
+      resolveStoppedTurn(input({ manualStopAt: null, machineRequested: true, activeRuns: [requeued()] })),
+    ).toBeNull();
+    expect(
+      resolveStoppedTurn(
+        input({ manualStopAt: NOW - 60_000, machineRequested: true, activeRuns: [requeued("runtime_limit_takeover")] }),
+      ),
+    ).toBeNull();
+    // A hold means this tab has asked for nothing since its Stop.
+    expect(resolveStoppedTurn(input({ machineRequested: true, activeRuns: [requeued()] }))).toBe("held");
+  });
+
   it("is nothing outside that exact shape, or once a machine picked the turn up", () => {
     const noHold = (activeRuns: RunRecord[]) => resolveStoppedTurn(input({ manualStopAt: null, activeRuns }));
     expect(noHold([requeued("user_stop", { progressStage: "agent:queued" })])).toBeNull();
@@ -204,21 +234,43 @@ describe("resolveStoppedTurn, from the controller's record of the stop", () => {
  * chatPanelRunTraceAutoRetry.test.ts), so the last test reads its source.
  */
 function Harness({
+  projectId = PROJECT_ID,
   runtimeReady = false,
   activeRuns = [run()],
   agentDisplayName = "Octo",
+  hostedRuntimeEnsuring = false,
+  runtimeEnsureLimit = null,
 }: {
+  projectId?: string;
   runtimeReady?: boolean;
   activeRuns?: RunRecord[];
   agentDisplayName?: string | null;
+  /** This tab's request for a machine, as RuntimeOperationsProvider reports it. */
+  hostedRuntimeEnsuring?: boolean;
+  runtimeEnsureLimit?: HostedRuntimeLimitErrorDetails | null;
 }) {
   const stoppedTurnNotice = useStoppedTurnNotice({
-    projectId: PROJECT_ID,
+    projectId,
     runtimeReady,
+    requestingMachine: hostedRuntimeEnsuring || Boolean(runtimeEnsureLimit?.limitReached),
     activeRuns,
     messages: [userMessage],
     agentDisplayName,
   });
+  // A queued turn's waiting status, which the runtime limit outranks.
+  const limitWait =
+    !runtimeReady && runtimeEnsureLimit?.limitReached
+      ? resolveAgentWaitingActivityCopy({
+          displayNames: ["Octo"],
+          workspaceStarting: true,
+          queued: true,
+          runtimeLimit: {
+            limitReached: true,
+            blockerProjectLabel: runtimeEnsureLimit.blockerProjectLabel,
+            blockerRuntimeLabel: runtimeEnsureLimit.blockerRuntimeLabel,
+          },
+        })
+      : null;
   return (
     <>
       <ChatTypingRows
@@ -229,9 +281,9 @@ function Harness({
         hasMultipleTypingAgents={false}
         typingAgentHandle="octo"
         typingAgentAvatarSeed="octo"
-        typingIndicatorState={{ phase: "thinking", label: THINKING_LABEL }}
-        typingStatusLabel="Thinking…"
-        typingStatusAriaLabel="Octo is thinking"
+        typingIndicatorState={limitWait ? { phase: "waiting", label: null } : { phase: "thinking", label: THINKING_LABEL }}
+        typingStatusLabel={limitWait?.label ?? "Thinking…"}
+        typingStatusAriaLabel={limitWait?.ariaLabel ?? "Octo is thinking"}
         suppressAssistantStatus={stoppedTurnNotice !== null}
         isThinkingLabelExpanded={false}
         onToggleThinkingLabel={() => undefined}
@@ -392,7 +444,7 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     expect(line()?.textContent).toBe(STOPPED_COPY);
   });
 
-  it("keeps what this tab's stop kept once the controller's record arrives", async () => {
+  it("keeps what this tab's stop kept once the controller's record arrives, until this tab asks for a machine", async () => {
     recordManualStopFlush(PROJECT_ID, markManualStop(PROJECT_ID), SAVED_FLUSH);
     await render(<Harness />);
     expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
@@ -400,8 +452,52 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     await render(<Harness activeRuns={[requeued()]} />);
     expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
 
-    // Start or a send in this tab lifts the hold, and the record still explains the wait.
+    // Start or a send in this tab lifts the hold. The line gives way at once,
+    // not to its lead sentence alone, which would announce the stop again.
     await act(async () => clearManualStop(PROJECT_ID));
+    expect(line()).toBeNull();
+    expect(typingStatus()).not.toBeNull();
+
+    // Nor does it come back once the send's request settles.
+    await render(<Harness hostedRuntimeEnsuring activeRuns={[requeued()]} />);
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()).toBeNull();
+  });
+
+  it("gives way to the runtime limit when the machine this tab asks for cannot start", async () => {
+    // Someone took this space's machine for theirs. Another viewer, or this
+    // tab after a reload, has only the controller's record.
+    const takenOver = [requeued("runtime_limit_takeover")];
+    await render(<Harness activeRuns={takenOver} />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    // A send asks for a machine, and the team's only one is busy in another space.
+    await render(<Harness hostedRuntimeEnsuring activeRuns={takenOver} />);
+    expect(line()).toBeNull();
+    await render(<Harness runtimeEnsureLimit={LIMIT_REFUSAL} activeRuns={takenOver} />);
+    expect(line()).toBeNull();
+    expect(typingStatus()?.textContent).toContain(LIMIT_COPY);
+  });
+
+  it("stays away while the machine this tab asked for starts, and returns for a later stop", async () => {
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    // Start or a send: the launch is accepted and the machine boots.
+    await render(<Harness hostedRuntimeEnsuring activeRuns={[requeued()]} />);
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()).toBeNull();
+    expect(typingStatus()).not.toBeNull();
+
+    // It comes up and picks the turn up again. A later stop says so again.
+    await render(<Harness runtimeReady activeRuns={[resumed()]} />);
+    expect(line()).toBeNull();
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    // Asking for this space's machine asks for no other space's.
+    await render(<Harness hostedRuntimeEnsuring activeRuns={[requeued()]} />);
+    await render(<Harness projectId="project-other" activeRuns={[requeued()]} />);
     expect(line()?.textContent).toBe(STOPPED_COPY);
   });
 
@@ -430,6 +526,7 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
 
     expect(chatPanel).toContain("useStoppedTurnNotice({");
+    expect(chatPanel).toContain("requestingMachine: hostedRuntimeEnsuring || Boolean(runtimeEnsureLimit?.limitReached),");
     expect(chatPanel).toContain("activeRuns: activeConversationRuns,");
     expect(chatPanel).toContain("agentDisplayName: hasMultipleTypingAgents ? null : typingAgentDisplayName,");
     expect(chatPanel).toContain(

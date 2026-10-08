@@ -3079,6 +3079,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const stoppedTurnNotice = useStoppedTurnNotice({
     projectId: activeProjectId ?? null,
     runtimeReady,
+    requestingMachine: hostedRuntimeEnsuring || Boolean(runtimeEnsureLimit?.limitReached),
     activeRuns: activeConversationRuns,
     messages,
     agentDisplayName: hasMultipleTypingAgents ? null : typingAgentDisplayName,
