@@ -41,6 +41,11 @@ function requeued(overrides: Partial<RunRecord> = {}): RunRecord {
   });
 }
 
+/** The run once a machine picked the turn up again: the stop's record stays as history. */
+function resumed(from: RunRecord = requeued(), overrides: Partial<RunRecord> = {}): RunRecord {
+  return { ...from, status: "in_progress", progressStage: "agent:leased", updatedAt: LEASED_AT, ...overrides };
+}
+
 function upsert(state: RuntimeStoreState, record: RunRecord): RuntimeStoreState {
   return runtimeReducer(state, { type: "upsertRun", run: record });
 }
@@ -51,9 +56,10 @@ function stateWith(record: RunRecord): RuntimeStoreState {
 
 describe("runtime store run freshness", () => {
   it("keeps a turn a machine picked up again when the stop's announcement lands after it", () => {
-    // The lease's run.progress is stamped when it is sent; the stop's
-    // announcement carries the earlier time the stop put the turn back.
-    const leased = run({ updatedAt: LEASED_AT });
+    // The stop answers only once the machine is released, so the lease that
+    // picked the turn up again, which keeps the stop's record as history, can
+    // be announced first.
+    const leased = resumed();
     const state = upsert(stateWith(leased), requeued());
 
     expect(state.runs[RUN_ID]).toEqual(leased);
@@ -130,19 +136,92 @@ describe("runtime store run freshness", () => {
   });
 
   it("refuses an older queued record over a turn that had moved past the queue", () => {
+    // A queued record that records no stop, such as a stale snapshot.
+    const queued = run({ status: "queued", progressStage: null, progress: 0, updatedAt: STOPPED_AT });
     for (const status of ["in_progress", "awaiting_approval"] as const) {
       const moved = stateWith(run({ status, updatedAt: LEASED_AT }));
-      expect(upsert(moved, requeued()), status).toBe(moved);
+      expect(upsert(moved, queued), status).toBe(moved);
     }
   });
 
   it("refuses an older step back whole, leaving the latest run untouched", () => {
     const other = run({ id: "run-2", updatedAt: LEASED_AT });
-    const state = upsert(stateWith(run({ updatedAt: LEASED_AT })), other);
+    const state = upsert(stateWith(resumed()), other);
 
     const next = upsert(state, requeued());
     expect(next).toBe(state);
     expect(next.latestRunIds).toEqual({ prompt: "run-2" });
+  });
+
+  describe("a stop's announcement, by the interruption it records", () => {
+    // The controller stamps runs.updated_at with the start of the transaction
+    // that writes it, so a requeue can carry an earlier time than a run update
+    // that committed just before it.
+    const TICKED_AT = "2026-10-08T12:00:00.500000+00:00";
+
+    it("applies a stop the store has not seen, whatever its time", () => {
+      for (const status of ["in_progress", "awaiting_approval"] as const) {
+        const working = run({ status, progress: 30, lastMessage: "Running tests", updatedAt: TICKED_AT });
+        expect(upsert(stateWith(working), requeued()).runs[RUN_ID], status).toEqual(requeued());
+      }
+    });
+
+    it("refuses a late announcement of a stop the turn has already picked up from", () => {
+      const leased = stateWith(resumed());
+      // Also when it carries a later time than the lease.
+      for (const updatedAt of [STOPPED_AT, "2026-10-08T12:00:05.000000+00:00"]) {
+        expect(upsert(leased, requeued({ updatedAt })), updatedAt).toBe(leased);
+      }
+      // The same instant written another way is the same stop.
+      const sameStop = requeued({
+        metadata: {
+          jobId: "job-1",
+          interruption: { reason: "user_stop", jobId: "job-1", interruptedAt: "2026-10-08T12:00:00.123Z" },
+        },
+      });
+      expect(upsert(leased, sameStop)).toBe(leased);
+    });
+
+    it("applies a later stop of a turn that picked up again", () => {
+      const secondStopAt = "2026-10-08T12:00:05.000000+00:00";
+      const second = requeued({
+        metadata: {
+          jobId: "job-1",
+          interruption: { reason: "heartbeat_timeout", jobId: "job-1", interruptedAt: secondStopAt },
+        },
+        // Earlier than the progress the resumed turn reported just before it.
+        updatedAt: secondStopAt,
+      });
+      const working = resumed(requeued(), { progress: 50, updatedAt: "2026-10-08T12:00:05.200000+00:00" });
+
+      expect(upsert(stateWith(working), second).runs[RUN_ID]).toEqual(second);
+    });
+
+    it("refuses the late record of an earlier stop once a later one was recorded", () => {
+      const secondStopAt = "2026-10-08T12:00:05.000000+00:00";
+      const second = requeued({
+        metadata: {
+          jobId: "job-2",
+          interruption: { reason: "user_stop", jobId: "job-2", interruptedAt: secondStopAt },
+        },
+        updatedAt: secondStopAt,
+      });
+      for (const stored of [second, resumed(second, { updatedAt: "2026-10-08T12:00:09.000000+00:00" })]) {
+        const state = stateWith(stored);
+        expect(upsert(state, requeued()), stored.status).toBe(state);
+      }
+    });
+
+    it("keeps a finished turn finished against its stop's announcement", () => {
+      for (const status of ["success", "failed", "canceled", "expired"] as const) {
+        const finished = stateWith(
+          resumed(requeued(), { status: status as RunRecord["status"], progress: 100, updatedAt: LEASED_AT }),
+        );
+        for (const updatedAt of [STOPPED_AT, "2026-10-08T12:03:00.000000+00:00"]) {
+          expect(upsert(finished, requeued({ updatedAt })), `${status} at ${updatedAt}`).toBe(finished);
+        }
+      }
+    });
   });
 
   it("holds a sparse lifecycle patch to the same rule", () => {

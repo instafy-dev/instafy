@@ -611,6 +611,52 @@ describe("runtime controller run event streaming", () => {
       unsubscribe();
     });
 
+    it("takes the announcement though the turn's last progress carries a later time", async () => {
+      const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+      let state = createInitialRuntimeStoreState();
+      const onRun = vi.fn((run: RunRecord) => {
+        state = runtimeReducer(state, { type: "upsertRun", run });
+      });
+      const unsubscribe = subscribeToRunsFromController({
+        projectId, quietErrors: true, onRun, onRunPatch: vi.fn(),
+      });
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+
+      // The database stamps a run with the start of the transaction that
+      // writes it, so the update that committed just before the stop's
+      // requeue can carry the later time.
+      const progressedAt = "2026-10-08T12:00:00.500000+00:00";
+      // Before the stop, the run records none.
+      const metadata = { agentIdentity: requeuedSnapshot.metadata.agentIdentity };
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, conversation_id: conversationId,
+        run_id: runId, job_id: jobId, timestamp: progressedAt,
+        data: {
+          status: "in_progress", stage: "agent:running", percent: 40, jobId,
+          run: {
+            ...requeuedSnapshot, status: "in_progress", progress_stage: "agent:running",
+            metadata, updated_at: progressedAt,
+          },
+        },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, session_id: null,
+        conversation_id: conversationId, run_id: runId, job_id: jobId,
+        channels: [`conversation:${conversationId}`], timestamp: interruptedAt,
+        data: { status: "queued", stage: "requeued", jobId, run: requeuedSnapshot },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
+
+      expect(state.runs[runId]).toMatchObject({
+        status: "queued",
+        progressStage: "requeued",
+        updatedAt: interruptedAt,
+        metadata: { interruption: { reason: "user_stop", jobId, interruptedAt, resumeBy } },
+      });
+      unsubscribe();
+    });
+
     it("is read the same way after a reload", async () => {
       fetchMock.mockResolvedValueOnce(
         new Response(JSON.stringify([requeuedSnapshot]), {

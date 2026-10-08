@@ -1,3 +1,4 @@
+import { compareRunInterruptions, readRunInterruptionIdentity } from "../conversations/runInterruption";
 import { ACTIVE_CONVERSATION_RUN_STATUSES } from "../conversations/runLiveness";
 import type { RunRecord, RunRecordPatch, RuntimeState } from "../types";
 import {
@@ -312,27 +313,68 @@ function isRunLifecycleRegression(incoming: RunRecord, stored: RunRecord): boole
 }
 
 /**
- * Whether `incoming` is an older record that would move the run back, so it
- * must not replace the record the store holds. Every run write lands here:
- * live events, their sparse patches, GET /runs hydration and the reconcile
- * after a reconnect. Run events can arrive out of order: the controller
- * stamps a stop's announcement with the time the stop put the turn back in
- * the queue, and it answers only after the machine is released, so the lease
- * that picked the turn up again (stamped when it is sent) can arrive first.
+ * Whether a stop's announcement must not replace the record the store holds,
+ * decided by the stop it records rather than by times; null when `incoming`
+ * is no such announcement, or when only times can decide.
  *
- * Times alone do not decide: live events carry the controller's clock when it
- * sends them, while hydration, the run events other viewers get and the
- * stop's announcement carry the database's `runs.updated_at`, and the two can
- * be a few milliseconds apart. So an older record still applies when it moves
- * the run forward, keeps its status (a progress tick) or finishes it, and only
- * a step back that is also older is refused. Equal times apply, and so does a
- * record without a readable time on either side.
+ * Times cannot decide here: the database stamps `runs.updated_at` with the
+ * start of the transaction that writes it, so a stop that put the turn back
+ * in the queue can carry an earlier time than a progress update that
+ * committed just before it. A stop the store has not seen therefore applies
+ * to a live run whatever its time. The same stop is refused once the run
+ * moved on from it: a machine picked the turn up again, which keeps the
+ * stop's record as history, or the turn finished. So is the record of a stop
+ * that came before the one the store holds. A finished run that names no
+ * such stop is left to the times.
  */
-function isOlderRunRegression(incoming: RunRecord, stored: RunRecord | null): boolean {
+function stopAnnouncementIsStale(incoming: RunRecord, stored: RunRecord): boolean | null {
+  const stop =
+    incoming.status === "queued" && incoming.progressStage === "requeued"
+      ? readRunInterruptionIdentity(incoming)
+      : null;
+  if (!stop) {
+    return null;
+  }
+  const storedStop = readRunInterruptionIdentity(stored);
+  const order = storedStop ? compareRunInterruptions(stop, storedStop) : null;
+  if (order === 0) {
+    return stored.status !== "queued";
+  }
+  if (order !== null && order < 0) {
+    return true;
+  }
+  return ACTIVE_CONVERSATION_RUN_STATUSES.has(stored.status) ? false : null;
+}
+
+/**
+ * Whether `incoming` is a stale record that must not replace the one the
+ * store holds. Every run write lands here: live events, their sparse patches,
+ * GET /runs hydration and the reconcile after a reconnect. Run events can
+ * arrive out of order: the controller stamps a stop's announcement with the
+ * time the stop put the turn back in the queue, and it answers only after the
+ * machine is released, so the lease that picked the turn up again (stamped
+ * when it is sent) can arrive first. A stop's announcement is decided by the
+ * stop it records (stopAnnouncementIsStale).
+ *
+ * Otherwise times decide, but not alone: live events carry the controller's
+ * clock when it sends them, while hydration, the run events other viewers get
+ * and the stop's announcement carry the database's `runs.updated_at`, and the
+ * two can be a few milliseconds apart. So an older record still applies when
+ * it moves the run forward, keeps its status (a progress tick) or finishes
+ * it, and only a step back that is also older is refused. Equal times apply,
+ * and so does a record without a readable time on either side.
+ */
+function isStaleRunRecord(incoming: RunRecord, stored: RunRecord | null): boolean {
+  if (stored === null) {
+    return false;
+  }
+  const stale = stopAnnouncementIsStale(incoming, stored);
+  if (stale !== null) {
+    return stale;
+  }
   const incomingAt = runRecordTime(incoming);
   const storedAt = runRecordTime(stored);
   return (
-    stored !== null &&
     incomingAt !== null &&
     storedAt !== null &&
     incomingAt < storedAt &&
@@ -397,7 +439,7 @@ export function runtimeReducer(
     }
     case "upsertRun": {
       const existing = state.runs[action.run.id] ?? null;
-      if (isOlderRunRegression(action.run, existing)) {
+      if (isStaleRunRecord(action.run, existing)) {
         return state;
       }
       const nextRuns = { ...state.runs };

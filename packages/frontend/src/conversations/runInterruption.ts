@@ -36,3 +36,40 @@ export function readRunInterruption(run: RunRecord): RunInterruption | null {
   const resumeBy = typeof interruption["resumeBy"] === "string" ? Date.parse(interruption["resumeBy"]) : Number.NaN;
   return { reason, resumeByMs: Number.isFinite(resumeBy) ? resumeBy : null };
 }
+
+/** Which stop a run record names: the job it cut off and when. */
+export interface RunInterruptionIdentity {
+  jobId: string;
+  interruptedAt: string;
+}
+
+/**
+ * The stop a run record names in `metadata.interruption`, whatever the run's
+ * status: a run that picked up again keeps the record as history. Null
+ * without one that names both the job and the time.
+ */
+export function readRunInterruptionIdentity(run: RunRecord | null): RunInterruptionIdentity | null {
+  const interruption = run?.metadata?.["interruption"];
+  if (!isRecord(interruption)) {
+    return null;
+  }
+  const jobId = typeof interruption["jobId"] === "string" ? interruption["jobId"].trim() : "";
+  const interruptedAt = typeof interruption["interruptedAt"] === "string" ? interruption["interruptedAt"].trim() : "";
+  return jobId && interruptedAt ? { jobId, interruptedAt } : null;
+}
+
+/**
+ * How stop `a` relates to stop `b`: 0 for the same stop (the same job at the
+ * same instant, however many digits it is written with), negative when `a`
+ * came first, positive when it came later, and null when their times cannot
+ * tell them apart.
+ */
+export function compareRunInterruptions(a: RunInterruptionIdentity, b: RunInterruptionIdentity): number | null {
+  const aAt = Date.parse(a.interruptedAt);
+  const bAt = Date.parse(b.interruptedAt);
+  if (Number.isFinite(aAt) && Number.isFinite(bAt) && aAt !== bAt) {
+    return aAt - bAt;
+  }
+  const sameInstant = a.interruptedAt === b.interruptedAt || (Number.isFinite(aAt) && aAt === bAt);
+  return a.jobId === b.jobId && sameInstant ? 0 : null;
+}
