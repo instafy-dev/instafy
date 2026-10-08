@@ -24,13 +24,15 @@ use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::AuthManager;
 use codex_login::default_client::set_default_originator;
 use codex_model_provider_info::WireApi;
-use codex_protocol::ThreadId;
 use codex_protocol::config_types::{
     EnvironmentVariablePattern, SandboxMode, ShellEnvironmentPolicy, TrustLevel, WebSearchMode,
 };
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::{AgentMessageContent, AgentMessageDelivery, TurnItem};
-use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
+use codex_protocol::models::{
+    ContentItem, FunctionCallOutputBody, FunctionCallOutputContentItem, FunctionCallOutputPayload,
+    MessagePhase, ResponseItem,
+};
 use codex_protocol::openai_models::{InputModality, ReasoningEffort};
 use codex_protocol::protocol::{
     AskForApproval, CodexErrorInfo, EnvironmentConfigState, Event, EventMsg, Op, SandboxPolicy,
@@ -42,6 +44,7 @@ use codex_protocol::turn_input::{
     TurnStartOptions,
 };
 use codex_protocol::user_input::UserInput;
+use codex_protocol::{ThreadId, ToolName};
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::{LegacyAppPathString, PathUri};
 use serde::Deserialize;
@@ -643,6 +646,8 @@ pub struct CodexRunOptions {
     /// Authorized job scope for current shared defaults. Absent on routing preflight and non-project calls.
     /// The workspace root comes from this CodexClient, never from prompt text.
     pub project_id: Option<uuid::Uuid>,
+    /// The job this run serves; used only to name it in runtime log lines.
+    pub job_id: Option<uuid::Uuid>,
     pub disable_shell_tool: bool,
     pub disable_final_output_json_schema: bool,
     pub final_output_schema: CodexFinalOutputSchema,
@@ -1686,7 +1691,8 @@ impl CodexClient {
 
         let run_result = async {
             let mut aggregator =
-                CodexEventStreamAdapter::with_turn_start_token_usage(turn_start_token_usage);
+                CodexEventStreamAdapter::with_turn_start_token_usage(turn_start_token_usage)
+                    .for_job(options.job_id);
         let mut events = Vec::new();
 
         if let Some(configured) = session_configured_event {
@@ -3598,6 +3604,11 @@ pub(crate) struct CodexEventStreamAdapter {
     /// Turns with a count that moved the thread total off the turn's baseline.
     turns_with_reported_usage: HashSet<String>,
     usage_attempt: Option<(String, UsageAttempt)>,
+    /// Call ids of code-mode `exec` calls still waiting for their output. Kept only to classify
+    /// that output; never projected.
+    pending_code_mode_exec_calls: HashSet<String>,
+    /// The job this run serves, for log lines only.
+    job_id: Option<uuid::Uuid>,
 }
 
 /// For tests that do not look at usage. Nothing feeds this baseline store, so no turn reports
@@ -3621,6 +3632,8 @@ impl CodexEventStreamAdapter {
             last_total_token_usage: None,
             turns_with_reported_usage: HashSet::new(),
             usage_attempt: None,
+            pending_code_mode_exec_calls: HashSet::new(),
+            job_id: None,
         }
     }
 
@@ -3629,12 +3642,22 @@ impl CodexEventStreamAdapter {
         self
     }
 
+    /// Names the job in this adapter's log lines.
+    pub(crate) fn for_job(mut self, job_id: Option<uuid::Uuid>) -> Self {
+        self.job_id = job_id;
+        self
+    }
+
     pub(crate) fn collect(&mut self, event: &Event) -> Vec<JsonValue> {
         if let Some(kind) = unprojected_tool_activity_kind(&event.msg) {
             // Observation only: retain no tool arguments, output, paths or identifiers.
             // Consumers can distinguish a tool-free result from work whose detailed
             // lifecycle does not otherwise have a runtime message projection.
-            return vec![json!({ "type": "tool.activity", "kind": kind })];
+            let mut activity = json!({ "type": "tool.activity", "kind": kind });
+            if let EventMsg::RawResponseItem(raw) = &event.msg {
+                self.annotate_tool_call_activity(&raw.item, &mut activity);
+            }
+            return vec![activity];
         }
         match &event.msg {
             EventMsg::AgentMessage(message) => {
@@ -4029,6 +4052,56 @@ impl CodexEventStreamAdapter {
         })]
     }
 
+    /// Adds enum-only fields to a function or custom tool call's activity: whether it is the
+    /// call or its output, the output's success flag and, for a code-mode `exec` output, how
+    /// its cell ended. Every value is a fixed string; nothing is copied from the item.
+    fn annotate_tool_call_activity(&mut self, item: &ResponseItem, activity: &mut JsonValue) {
+        match item {
+            ResponseItem::FunctionCall { .. } => activity["phase"] = json!("call"),
+            ResponseItem::CustomToolCall {
+                call_id,
+                name,
+                namespace,
+                ..
+            } => {
+                activity["phase"] = json!("call");
+                // Codex's own `exec` test (`is_exec_tool_name`): the plain name in the default
+                // namespace, which may also arrive as "functions" or "".
+                if name == codex_code_mode::PUBLIC_TOOL_NAME
+                    && ToolName::new(namespace.clone(), name.as_str()).is_default_namespace()
+                {
+                    self.pending_code_mode_exec_calls.insert(call_id.clone());
+                }
+            }
+            ResponseItem::FunctionCallOutput { output, .. } => {
+                activity["phase"] = json!("output");
+                activity["success"] = json!(output.success);
+            }
+            ResponseItem::CustomToolCallOutput {
+                call_id, output, ..
+            } => {
+                activity["phase"] = json!("output");
+                activity["success"] = json!(output.success);
+                if !self.pending_code_mode_exec_calls.remove(call_id) {
+                    return;
+                }
+                let Some((status, error_class)) = code_mode_exec_status(output) else {
+                    return;
+                };
+                activity["status"] = json!(status);
+                if let Some(error_class) = error_class {
+                    activity["error_class"] = json!(error_class);
+                    tracing::warn!(
+                        job_id = self.job_id.map(tracing::field::display),
+                        error_class,
+                        "code-mode exec returned a harness error instead of a cell result"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn completed_agent_message_from_deltas(&mut self) -> Option<JsonValue> {
         if self.completed_agent_message_seen {
             return None;
@@ -4050,6 +4123,74 @@ impl CodexEventStreamAdapter {
             }
         }))
     }
+}
+
+/// Fixed messages Codex returns to the model when a code-mode host or session fails instead of
+/// producing a cell result (`codex-rs/code-mode/src/remote_session.rs`, its `connection` module
+/// and `codex-rs/core/src/tools/code_mode/mod.rs`). Only these prefixes are matched; the rest of
+/// the message, such as the host path, an exit status or an OS error, is never read into an event.
+const CODE_MODE_HARNESS_ERROR_PREFIXES: &[(&str, &str)] = &[
+    ("failed to spawn code-mode host", "host_spawn_failed"),
+    (
+        "code-mode host exited during handshake",
+        "host_handshake_failed",
+    ),
+    (
+        "failed to write code-mode host hello",
+        "host_handshake_failed",
+    ),
+    (
+        "failed to read code-mode host hello",
+        "host_handshake_failed",
+    ),
+    (
+        "code-mode host rejected the handshake",
+        "host_handshake_failed",
+    ),
+    (
+        "code-mode host returned an invalid handshake response",
+        "host_handshake_failed",
+    ),
+    (
+        "timed out negotiating with the code-mode host",
+        "host_startup_timeout",
+    ),
+    // The host died after the handshake, for example while running the cell.
+    ("code-mode host closed its stdout", "host_exited"),
+    ("code-mode host exited with status", "host_exited"),
+    ("code mode session is shutting down", "session_shutdown"),
+];
+
+/// A code-mode `exec` output's status and, for a harness error, its class. Every cell result
+/// opens with the status line from Codex's `format_script_status`
+/// (`codex-rs/core/src/tools/code_mode/mod.rs`, placed first by `output.rs`); an unsuccessful
+/// output without one is a harness error that returned no cell result. An interrupted call has
+/// no success flag and gets no status.
+fn code_mode_exec_status(
+    output: &FunctionCallOutputPayload,
+) -> Option<(&'static str, Option<&'static str>)> {
+    let text = match &output.body {
+        FunctionCallOutputBody::Text(text) => text.as_str(),
+        FunctionCallOutputBody::ContentItems(items) => match items.first() {
+            Some(FunctionCallOutputContentItem::InputText { text }) => text.as_str(),
+            _ => "",
+        },
+    };
+    let status = match text.lines().next().unwrap_or_default() {
+        "Script completed" => "completed",
+        "Script failed" => "script_failed",
+        "Script terminated" => "terminated",
+        header if header.starts_with("Script running with cell ID ") => "running",
+        _ if output.success == Some(false) => {
+            let error_class = CODE_MODE_HARNESS_ERROR_PREFIXES
+                .iter()
+                .find(|(prefix, _)| text.starts_with(prefix))
+                .map_or("other", |(_, class)| class);
+            return Some(("harness_error", Some(error_class)));
+        }
+        _ => return None,
+    };
+    Some((status, None))
 }
 
 fn unprojected_tool_activity_kind(event: &EventMsg) -> Option<&'static str> {
@@ -6608,52 +6749,68 @@ required = true
         let cases = [
             (
                 json!({"type": "function_call", "name": "private-tool", "arguments": "private", "call_id": "private-call"}),
-                "function_call",
+                json!({"type": "tool.activity", "kind": "function_call", "phase": "call"}),
             ),
             (
                 json!({"type": "function_call_output", "call_id": "private-call", "output": "private output"}),
-                "function_call",
+                json!({"type": "tool.activity", "kind": "function_call", "phase": "output", "success": null}),
             ),
             (
                 json!({"type": "custom_tool_call", "name": "private-tool", "input": "private", "call_id": "private-call"}),
-                "custom_tool_call",
+                json!({"type": "tool.activity", "kind": "custom_tool_call", "phase": "call"}),
             ),
             (
                 json!({"type": "custom_tool_call_output", "call_id": "private-call", "output": "private output"}),
-                "custom_tool_call",
+                json!({"type": "tool.activity", "kind": "custom_tool_call", "phase": "output", "success": null}),
             ),
             (
                 json!({"type": "tool_search_call", "execution": "client", "arguments": {"private": true}}),
-                "tool_search",
+                json!({"type": "tool.activity", "kind": "tool_search"}),
             ),
             (
                 json!({"type": "tool_search_output", "status": "completed", "execution": "client", "tools": [{"private": true}]}),
-                "tool_search",
+                json!({"type": "tool.activity", "kind": "tool_search"}),
             ),
             (
                 json!({"type": "web_search_call", "status": "completed"}),
-                "web_search",
+                json!({"type": "tool.activity", "kind": "web_search"}),
             ),
             (
                 json!({"type": "image_generation_call", "status": "failed", "result": "private output", "revised_prompt": "private prompt"}),
-                "image_generation",
+                json!({"type": "tool.activity", "kind": "image_generation"}),
             ),
             (
                 json!({"type": "agent_message", "author": "private-author", "recipient": "private-recipient", "content": []}),
-                "collaboration",
+                json!({"type": "tool.activity", "kind": "collaboration"}),
             ),
         ];
         let mut adapter = CodexEventStreamAdapter::default();
-        for (value, kind) in cases {
+        for (value, expected) in cases {
             let event = Event {
                 id: "private-event".into(),
                 msg: EventMsg::RawResponseItem(RawResponseItemEvent {
                     item: serde_json::from_value(value).expect("valid raw tool fixture"),
                 }),
             };
+            assert_eq!(adapter.collect(&event), vec![expected]);
+        }
+        for success in [true, false] {
+            let mut item: ResponseItem = serde_json::from_value(
+                json!({"type": "function_call_output", "call_id": "private-call", "output": "private output"}),
+            )
+            .expect("valid function output fixture");
+            if let ResponseItem::FunctionCallOutput { output, .. } = &mut item {
+                output.success = Some(success);
+            }
             assert_eq!(
-                adapter.collect(&event),
-                vec![json!({"type": "tool.activity", "kind": kind})]
+                adapter.collect(&Event {
+                    id: "private-event".into(),
+                    msg: EventMsg::RawResponseItem(RawResponseItemEvent { item }),
+                }),
+                vec![json!({
+                    "type": "tool.activity", "kind": "function_call",
+                    "phase": "output", "success": success,
+                })]
             );
         }
         for value in [
@@ -6668,6 +6825,228 @@ required = true
                 }),
             };
             assert!(adapter.collect(&event).is_empty());
+        }
+    }
+
+    #[test]
+    fn codex_event_stream_classifies_code_mode_exec_outputs_without_contents() {
+        fn raw(item: JsonValue, success: Option<bool>) -> Event {
+            let mut item: ResponseItem =
+                serde_json::from_value(item).expect("valid raw tool fixture");
+            if let ResponseItem::CustomToolCallOutput { output, .. } = &mut item {
+                output.success = success;
+            }
+            Event {
+                id: "private-event".into(),
+                msg: EventMsg::RawResponseItem(RawResponseItemEvent { item }),
+            }
+        }
+        // Cell results as Codex writes them: the status line opens the first text item.
+        let header = |status: &str| format!("{status}\nWall time 0.4 seconds\nOutput:\n");
+        let cell = |status: &str, body: &str| {
+            json!([
+                {"type": "input_text", "text": header(status)},
+                {"type": "input_text", "text": body},
+            ])
+        };
+        let exec = Some((codex_code_mode::PUBLIC_TOOL_NAME, None));
+        let cases = [
+            (
+                exec,
+                cell("Script completed", "private result /workspace/private.png"),
+                Some(true),
+                Some("completed"),
+                None,
+            ),
+            (
+                exec,
+                cell(
+                    "Script failed",
+                    "Script error:\nReferenceError: privateName is not defined",
+                ),
+                Some(false),
+                Some("script_failed"),
+                None,
+            ),
+            (
+                exec,
+                json!(header("Script running with cell ID 7")),
+                Some(true),
+                Some("running"),
+                None,
+            ),
+            (
+                exec,
+                json!(header("Script terminated")),
+                Some(true),
+                Some("terminated"),
+                None,
+            ),
+            (
+                exec,
+                json!(
+                    "failed to spawn code-mode host /workspace/private/codex-code-mode-host: No such file or directory (os error 2)"
+                ),
+                Some(false),
+                Some("harness_error"),
+                Some("host_spawn_failed"),
+            ),
+            (
+                exec,
+                json!("code-mode host exited during handshake"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_handshake_failed"),
+            ),
+            (
+                exec,
+                json!("failed to write code-mode host hello: Broken pipe (os error 32)"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_handshake_failed"),
+            ),
+            (
+                exec,
+                json!("failed to read code-mode host hello: unexpected end of file"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_handshake_failed"),
+            ),
+            (
+                exec,
+                json!("code-mode host rejected the handshake: PrivateReason"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_handshake_failed"),
+            ),
+            (
+                exec,
+                json!("code-mode host returned an invalid handshake response: PrivateMessage"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_handshake_failed"),
+            ),
+            (
+                exec,
+                json!("timed out negotiating with the code-mode host"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_startup_timeout"),
+            ),
+            (
+                exec,
+                json!("code-mode host closed its stdout"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_exited"),
+            ),
+            (
+                exec,
+                json!("code-mode host exited with status signal: 9 (SIGKILL)"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_exited"),
+            ),
+            (
+                exec,
+                json!("code mode session is shutting down"),
+                Some(false),
+                Some("harness_error"),
+                Some("session_shutdown"),
+            ),
+            (
+                exec,
+                json!("private failure in /workspace/private.js"),
+                Some(false),
+                Some("harness_error"),
+                Some("other"),
+            ),
+            // Codex also treats the "functions" namespace as the default one.
+            (
+                Some((codex_code_mode::PUBLIC_TOOL_NAME, Some("functions"))),
+                json!(header("Script completed")),
+                Some(true),
+                Some("completed"),
+                None,
+            ),
+            // An interrupted call is not a harness error, another custom tool or an MCP tool
+            // has no cell, and an output whose call was never seen cannot be attributed to `exec`.
+            (exec, json!("aborted by user after 1.0s"), None, None, None),
+            (
+                Some(("apply_patch", None)),
+                json!("private patch failure"),
+                Some(false),
+                None,
+                None,
+            ),
+            (
+                Some((codex_code_mode::PUBLIC_TOOL_NAME, Some("mcp__private__"))),
+                json!("private failure"),
+                Some(false),
+                None,
+                None,
+            ),
+            (
+                None,
+                json!("failed to spawn code-mode host /workspace/private/codex-code-mode-host"),
+                Some(false),
+                None,
+                None,
+            ),
+        ];
+        let mut adapter = CodexEventStreamAdapter::default();
+        for (index, (call, body, success, status, error_class)) in cases.into_iter().enumerate() {
+            let call_id = format!("private-call-{index}");
+            let mut projected = Vec::new();
+            if let Some((name, namespace)) = call {
+                let call = adapter.collect(&raw(
+                    json!({
+                        "type": "custom_tool_call", "name": name, "namespace": namespace,
+                        "call_id": call_id, "input": "private source /workspace/private.js",
+                    }),
+                    None,
+                ));
+                assert_eq!(
+                    call,
+                    vec![
+                        json!({"type": "tool.activity", "kind": "custom_tool_call", "phase": "call"})
+                    ]
+                );
+                projected.extend(call);
+            }
+            let output = adapter.collect(&raw(
+                json!({"type": "custom_tool_call_output", "call_id": call_id, "output": body}),
+                success,
+            ));
+            let mut expected = json!({
+                "type": "tool.activity", "kind": "custom_tool_call",
+                "phase": "output", "success": success,
+            });
+            if let Some(status) = status {
+                expected["status"] = json!(status);
+            }
+            if let Some(error_class) = error_class {
+                expected["error_class"] = json!(error_class);
+            }
+            assert_eq!(output, vec![expected], "case {index}");
+            projected.extend(output);
+
+            let serialized = serde_json::to_string(&projected).expect("serialize projection");
+            for private in [
+                call_id.as_str(),
+                "private",
+                "workspace",
+                "Script",
+                "Wall time",
+                "code-mode host",
+                codex_code_mode::PUBLIC_TOOL_NAME,
+                "apply_patch",
+            ] {
+                assert!(
+                    !serialized.contains(private),
+                    "case {index} leaked {private:?}: {serialized}"
+                );
+            }
         }
     }
 
