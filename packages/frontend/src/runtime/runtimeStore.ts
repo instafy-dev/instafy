@@ -1,3 +1,4 @@
+import { ACTIVE_CONVERSATION_RUN_STATUSES } from "../conversations/runLiveness";
 import type { RunRecord, RunRecordPatch, RuntimeState } from "../types";
 import {
   cloneRuntimeState,
@@ -299,19 +300,44 @@ function runRecordTime(run: RunRecord | null): number | null {
 }
 
 /**
- * Whether `incoming` describes the run as it was before the record the store
- * holds, so it must not replace it. Every run write lands here: live events,
- * their sparse patches, GET /runs hydration and the reconcile after a
- * reconnect. Run events can arrive out of order: the controller stamps a
- * stop's announcement with the time the stop put the turn back in the queue,
- * and it answers only after the machine is released, so the lease that
- * picked the turn up again (stamped when it is sent) can arrive first. Equal
- * times apply, and so does a record without a readable time on either side.
+ * Whether `incoming` would move the run back in its lifecycle: a finished run
+ * (any status the chat does not show as working) to a live status, or a run a
+ * machine had picked up back to the queue.
  */
-function isOlderRunRecord(incoming: RunRecord, stored: RunRecord | null): boolean {
+function isRunLifecycleRegression(incoming: RunRecord, stored: RunRecord): boolean {
+  if (!ACTIVE_CONVERSATION_RUN_STATUSES.has(stored.status)) {
+    return ACTIVE_CONVERSATION_RUN_STATUSES.has(incoming.status);
+  }
+  return stored.status !== "queued" && incoming.status === "queued";
+}
+
+/**
+ * Whether `incoming` is an older record that would move the run back, so it
+ * must not replace the record the store holds. Every run write lands here:
+ * live events, their sparse patches, GET /runs hydration and the reconcile
+ * after a reconnect. Run events can arrive out of order: the controller
+ * stamps a stop's announcement with the time the stop put the turn back in
+ * the queue, and it answers only after the machine is released, so the lease
+ * that picked the turn up again (stamped when it is sent) can arrive first.
+ *
+ * Times alone do not decide: live events carry the controller's clock when it
+ * sends them, while hydration, the run events other viewers get and the
+ * stop's announcement carry the database's `runs.updated_at`, and the two can
+ * be a few milliseconds apart. So an older record still applies when it moves
+ * the run forward, keeps its status (a progress tick) or finishes it, and only
+ * a step back that is also older is refused. Equal times apply, and so does a
+ * record without a readable time on either side.
+ */
+function isOlderRunRegression(incoming: RunRecord, stored: RunRecord | null): boolean {
   const incomingAt = runRecordTime(incoming);
   const storedAt = runRecordTime(stored);
-  return incomingAt !== null && storedAt !== null && incomingAt < storedAt;
+  return (
+    stored !== null &&
+    incomingAt !== null &&
+    storedAt !== null &&
+    incomingAt < storedAt &&
+    isRunLifecycleRegression(incoming, stored)
+  );
 }
 
 export function runtimeReducer(
@@ -371,7 +397,7 @@ export function runtimeReducer(
     }
     case "upsertRun": {
       const existing = state.runs[action.run.id] ?? null;
-      if (isOlderRunRecord(action.run, existing)) {
+      if (isOlderRunRegression(action.run, existing)) {
         return state;
       }
       const nextRuns = { ...state.runs };

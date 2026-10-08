@@ -631,6 +631,38 @@ describe("runtime controller run event streaming", () => {
     });
   });
 
+  it("finishes a turn whose completion is stamped a moment before its last progress", async () => {
+    const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    let state = createInitialRuntimeStoreState();
+    const onRun = vi.fn((run: RunRecord) => {
+      state = runtimeReducer(state, { type: "upsertRun", run });
+    });
+    const onRunPatch = vi.fn((patch: RunRecordPatch) => {
+      state = runtimeReducer(state, { type: "patchRun", patch });
+    });
+    const unsubscribe = subscribeToRunsFromController({ projectId, quietErrors: true, onRun, onRunPatch });
+    await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+
+    // The tick carries the controller's clock, the completion the database's.
+    streamingRequests[0].write(`data: ${JSON.stringify({
+      kind: "run.progress", project_id: projectId, run_id: runId,
+      timestamp: "2026-10-08T12:03:00.004Z",
+      data: { status: "in_progress", percent: 90, message: "Writing the summary" },
+    })}\n\n`);
+    await vi.waitFor(() => expect(state.runs[runId]?.status).toBe("in_progress"));
+    streamingRequests[0].write(`data: ${JSON.stringify({
+      kind: "run.completed", project_id: projectId, run_id: runId,
+      timestamp: "2026-10-08T12:03:00.001+00:00",
+      data: { status: "success", percent: 100 },
+    })}\n\n`);
+    await vi.waitFor(() => expect(onRunPatch).toHaveBeenCalledTimes(2));
+
+    expect(state.runs[runId]).toMatchObject({ status: "success", progress: 100 });
+    unsubscribe();
+  });
+
   it.each(["build", "editor"] as const)(
     "applies sparse lifecycle events without erasing a hydrated %s run",
     async (runType) => {

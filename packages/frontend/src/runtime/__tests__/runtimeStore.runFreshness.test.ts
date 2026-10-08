@@ -60,6 +60,7 @@ describe("runtime store run freshness", () => {
   });
 
   it("applies a newer record whatever its status", () => {
+    // A newer queued record after an in-progress one is a real requeue.
     const stopped = upsert(stateWith(run()), requeued());
     expect(stopped.runs[RUN_ID]).toMatchObject({ status: "queued", progressStage: "requeued", updatedAt: STOPPED_AT });
 
@@ -93,7 +94,49 @@ describe("runtime store run freshness", () => {
     }
   });
 
-  it("refuses an older record whole, leaving the latest run untouched", () => {
+  it("applies an older record that finishes the turn, since times from two clocks can disagree", () => {
+    // Live events carry the controller's clock, hydration and the run events
+    // other viewers get carry the database's; a few milliseconds apart.
+    const working = run({ updatedAt: "2026-10-08T12:03:00.004Z" });
+    // "completed" reads as awaiting_approval (normalizeRunStatus).
+    for (const status of ["success", "failed", "canceled", "awaiting_approval"] as const) {
+      const finished = run({ status, progress: 100, updatedAt: "2026-10-08T12:03:00.001+00:00" });
+      expect(upsert(stateWith(working), finished).runs[RUN_ID], status).toEqual(finished);
+    }
+  });
+
+  it("applies an older record that moves the run forward or only reports progress", () => {
+    const waiting = requeued();
+    const leased = run({ updatedAt: "2026-10-08T12:00:00.120Z" });
+    expect(upsert(stateWith(waiting), leased).runs[RUN_ID]).toEqual(leased);
+
+    const tick = run({ progress: 20, lastMessage: "Running tests", updatedAt: "2026-10-08T12:00:03.990Z" });
+    expect(upsert(stateWith(run({ progress: 10, updatedAt: LEASED_AT })), tick).runs[RUN_ID]).toEqual(tick);
+
+    // From one end to another is not a step back either.
+    const canceled = run({ status: "canceled", updatedAt: LEASED_AT });
+    const success = run({ status: "success", updatedAt: STOPPED_AT });
+    expect(upsert(stateWith(canceled), success).runs[RUN_ID]).toEqual(success);
+  });
+
+  it("refuses an older record that would reopen a finished turn", () => {
+    const finishedAt = "2026-10-08T12:03:00.000Z";
+    for (const status of ["success", "failed", "canceled", "merged", "expired"] as const) {
+      const finished = stateWith(run({ status: status as RunRecord["status"], updatedAt: finishedAt }));
+      for (const older of [run({ updatedAt: LEASED_AT }), requeued(), run({ status: "awaiting_approval" })]) {
+        expect(upsert(finished, older), `${status} -> ${older.status}`).toBe(finished);
+      }
+    }
+  });
+
+  it("refuses an older queued record over a turn that had moved past the queue", () => {
+    for (const status of ["in_progress", "awaiting_approval"] as const) {
+      const moved = stateWith(run({ status, updatedAt: LEASED_AT }));
+      expect(upsert(moved, requeued()), status).toBe(moved);
+    }
+  });
+
+  it("refuses an older step back whole, leaving the latest run untouched", () => {
     const other = run({ id: "run-2", updatedAt: LEASED_AT });
     const state = upsert(stateWith(run({ updatedAt: LEASED_AT })), other);
 
