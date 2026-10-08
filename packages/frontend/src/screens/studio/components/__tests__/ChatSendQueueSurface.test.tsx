@@ -3,7 +3,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ControllerSendQueueEntry } from "../../../../services/runtimeController/sendQueue";
+import { resolveChatComposerAffordances } from "../chatComposerAffordances";
 import { ChatSendQueueSurface } from "../ChatSendQueueSurface";
+import { useChatSendQueuePresentation } from "../useChatSendQueuePresentation";
+import { mapServerSendQueueEntryToQueuedItem, type ServerQueuedChatSendItem } from "../useChatServerSendQueue";
 
 type SurfaceProps = Parameters<typeof ChatSendQueueSurface>[0];
 
@@ -221,5 +225,132 @@ describe("ChatSendQueueSurface", () => {
       ?.getAttribute("aria-label");
     expect(name).toBe(`Queued messages (1): ${"a".repeat(119)}…`);
     expect(name).not.toContain(message);
+  });
+});
+
+describe("a message queued behind a turn a person's Stop cut off", () => {
+  // What the controller records when it gives the stopped turn up: the
+  // messages queued behind it are failed, not sent, with this reason.
+  const REASON = "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.";
+  const entry: ControllerSendQueueEntry = {
+    id: "entry-1",
+    conversationId: "controller-conversation-1",
+    status: "failed",
+    queuePosition: 1,
+    targetAgentHandles: ["octo"],
+    message: { promptText: "Now add a due date to each todo" },
+    errorMessage: REASON,
+    createdAt: "2026-10-08T12:01:00.000Z",
+    dispatchedAt: null,
+  };
+
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  /** ChatPanel's path from the controller's queue to the open queue panel, with the machine stopped. */
+  function StoppedSpaceQueue({
+    onSendQueuedMessageNow,
+    onRemoveQueuedItem,
+  }: {
+    onSendQueuedMessageNow: (id: string) => void;
+    onRemoveQueuedItem: (id: string) => void;
+  }) {
+    const chatSendQueue = [entry]
+      .map(mapServerSendQueueEntryToQueuedItem)
+      .filter((item): item is ServerQueuedChatSendItem => Boolean(item));
+    const presentation = useChatSendQueuePresentation({
+      activeConversationControllerId: entry.conversationId,
+      activeConversationRun: null,
+      agentByHandle: new Map(),
+      chatSendQueue,
+      currentRuntime: null,
+      hostedRuntimeEnsuring: false,
+      isAssistantTyping: false,
+      resolvePromptAgentTargets: () => ({ targetHandles: [] }),
+      runtimeControllerEnabled: true,
+      runtimeEnsureError: null,
+      runtimeReady: false,
+      sendingAttachment: false,
+      waitingForPreferredRuntime: false,
+    });
+    const { queueCanSendNow } = resolveChatComposerAffordances({
+      composerGhostSuggestionRemainder: null,
+      credentialsReady: true,
+      activeConversationControllerId: entry.conversationId,
+      imageAttachmentCount: 0,
+      deferAiGatesForAmbientParticipation: false,
+      inputRequiresAi: false,
+      inputValue: "",
+      onboardingInputLocked: false,
+      outOfCredits: false,
+      runtimeControllerEnabled: true,
+      queueStatusLabel: presentation.queueStatusLabel,
+      sendingAttachment: false,
+      submissionPending: false,
+      totalQueuedCount: presentation.totalQueuedCount,
+      voiceHoldActive: false,
+      voiceInputListening: false,
+      voiceInputStarting: false,
+      voiceInputTranscribing: false,
+    });
+    return (
+      <ChatSendQueueSurface
+        {...buildProps({
+          totalQueuedCount: presentation.totalQueuedCount,
+          chatSendQueueExpanded: true,
+          collapsedQueuedMessageSummary: presentation.collapsedQueuedMessageSummary,
+          queueCanSendNow,
+          chatSendQueueDisplay: presentation.chatSendQueueDisplay,
+          onSendQueuedMessageNow,
+          onRemoveQueuedItem,
+        })}
+      />
+    );
+  }
+
+  it("shows the message with the reason, and lets its sender send it now or remove it", async () => {
+    const onSendQueuedMessageNow = vi.fn();
+    const onRemoveQueuedItem = vi.fn();
+    await act(async () => {
+      root.render(
+        <StoppedSpaceQueue onSendQueuedMessageNow={onSendQueuedMessageNow} onRemoveQueuedItem={onRemoveQueuedItem} />,
+      );
+    });
+
+    const row = container.querySelector('[data-testid="chat-send-queue-item"]');
+    expect(row?.textContent).toContain("Now add a due date to each todo");
+    expect(row?.textContent).toContain(REASON);
+    // The reason is cut to one line in the row, so it is the row's tooltip too.
+    expect(row?.querySelector(`[title="${REASON}"]`)).not.toBeNull();
+
+    const sendNow = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-queue-send-now"]');
+    const remove = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-queue-remove"]');
+    expect(sendNow?.getAttribute("aria-label")).toBe("Send queued message 1 now: Now add a due date to each todo");
+    expect(sendNow?.disabled).toBe(false);
+    expect(remove?.disabled).toBe(false);
+
+    await act(async () => {
+      sendNow?.click();
+    });
+    expect(onSendQueuedMessageNow).toHaveBeenCalledWith("entry-1");
+    await act(async () => {
+      remove?.click();
+    });
+    expect(onRemoveQueuedItem).toHaveBeenCalledWith("entry-1");
   });
 });
