@@ -54,6 +54,15 @@ export function isRuntimeLimitReclaimStopReason(reason: string | null | undefine
 }
 
 /**
+ * A stop someone chose: Stop, Remove, or taking over the machine's slot for
+ * another space. Both takeovers are a person's click; the automatic recycle
+ * that reuses the takeover reason stops only an idle machine.
+ */
+export function isPersonRuntimeStopReason(reason: string | null | undefined): boolean {
+  return USER_RUNTIME_STOP_REASONS.has(reason?.trim().toLowerCase() ?? "");
+}
+
+/**
  * The hold a stop puts on its space in a tab that did not make it, so that
  * tab does not start the machine again: a person's stop holds like Stop does
  * in the tab that pressed it, a platform stop like an idle pause. Idle and
@@ -65,10 +74,10 @@ export function isRuntimeLimitReclaimStopReason(reason: string | null | undefine
 export function resolveRuntimeStopHold(
   reason: string | null | undefined,
 ): "manual_stop" | "idle_pause" | null {
-  const normalizedReason = reason?.trim().toLowerCase() ?? "";
-  if (USER_RUNTIME_STOP_REASONS.has(normalizedReason)) {
+  if (isPersonRuntimeStopReason(reason)) {
     return "manual_stop";
   }
+  const normalizedReason = reason?.trim().toLowerCase() ?? "";
   if (PLATFORM_HOLD_STOP_REASONS.has(normalizedReason)) {
     return "idle_pause";
   }

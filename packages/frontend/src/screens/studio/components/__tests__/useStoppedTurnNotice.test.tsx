@@ -24,9 +24,15 @@ import {
   markManualStop,
   recordManualStopFlush,
 } from "../../../../runtime/idlePauseRegistry";
+import { isRunActivelyProgressing } from "../../../../conversations/runLiveness";
 import { StoppedTurnRow } from "../ChatSystemRows";
 import { ChatTypingRows } from "../ChatTypingRows";
-import { hasStoppedTurn, useStoppedTurnNotice, type StoppedTurnInput } from "../useStoppedTurnNotice";
+import {
+  hasStoppedTurn,
+  resolveStoppedTurn,
+  useStoppedTurnNotice,
+  type StoppedTurnInput,
+} from "../useStoppedTurnNotice";
 
 const PROJECT_ID = "project-stopped-turn";
 const NOW = Date.parse("2026-10-07T12:00:00.000Z");
@@ -57,6 +63,51 @@ function run(overrides: Partial<RunRecord> = {}): RunRecord {
     ...overrides,
   };
 }
+
+/**
+ * The run as a controller that records the stop returns it, live and after a
+ * reload: queued again at stage "requeued", with the stop's reason.
+ */
+function requeued(reason = "user_stop", overrides: Partial<RunRecord> = {}): RunRecord {
+  return run({
+    status: "queued",
+    progressStage: "requeued",
+    metadata: {
+      agentIdentity: { handle: "octo" },
+      interruption: {
+        reason,
+        jobId: "job-1",
+        interruptedAt: new Date(NOW + 30_000).toISOString(),
+        resumeBy: new Date(NOW + 30_000 + 15 * 60_000).toISOString(),
+      },
+    },
+    updatedAt: new Date(NOW + 30_000).toISOString(),
+    ...overrides,
+  });
+}
+
+/** The same run once a machine picked it up again: the record stays as history. */
+function resumed(): RunRecord {
+  return { ...requeued(), status: "in_progress", progressStage: "agent:leased" };
+}
+
+/** Every reason a person's stop sends: Stop, Remove, and both takeovers of the machine's slot. */
+const PERSON_STOP_REASONS = [
+  "user_stop",
+  "user_remove",
+  "runtime_limit_takeover",
+  "browser_session_runtime_limit_takeover",
+];
+/** Stops nobody chose, as the controller names them, and an unnamed or unknown one. */
+const OTHER_STOP_REASONS = [
+  "idle_stop",
+  "credits_exhausted",
+  "heartbeat_timeout",
+  "pool_retirement_drain",
+  "dev_runtime_offline",
+  "other",
+  "",
+];
 
 function input(overrides: Partial<StoppedTurnInput> = {}): StoppedTurnInput {
   return {
@@ -103,6 +154,47 @@ describe("hasStoppedTurn", () => {
   it("is nothing for a silent skill-mode evaluation", () => {
     const silent = run({ metadata: { groupParticipation: { decision: "agent_evaluation" } } });
     expect(hasStoppedTurn(input({ activeRuns: [silent] }))).toBe(false);
+    const silentRecord = requeued("user_stop", {
+      metadata: { ...requeued().metadata, groupParticipation: { decision: "agent_evaluation" } },
+    });
+    expect(hasStoppedTurn(input({ manualStopAt: null, activeRuns: [silentRecord] }))).toBe(false);
+  });
+});
+
+describe("resolveStoppedTurn, from the controller's record of the stop", () => {
+  it("is every viewer's when someone's stop put the turn back in the queue", () => {
+    for (const reason of PERSON_STOP_REASONS) {
+      expect(resolveStoppedTurn(input({ manualStopAt: null, activeRuns: [requeued(reason)] }))).toBe("recorded");
+    }
+    expect(resolveStoppedTurn(input({ manualStopAt: null, activeRuns: [requeued(" User_Stop ")] }))).toBe("recorded");
+    // Not while a machine is ready to pick it up.
+    expect(resolveStoppedTurn(input({ manualStopAt: null, runtimeReady: true, activeRuns: [requeued()] }))).toBeNull();
+  });
+
+  it("is this tab's when its own Stop came after the turn started", () => {
+    expect(resolveStoppedTurn(input({ activeRuns: [requeued()] }))).toBe("held");
+    // The old shape before the record arrives, or from an older controller.
+    expect(resolveStoppedTurn(input())).toBe("held");
+    // This tab's hold is older than the turn, so someone else's stop cut it off.
+    expect(resolveStoppedTurn(input({ manualStopAt: NOW - 60_000, activeRuns: [requeued()] }))).toBe("recorded");
+    expect(resolveStoppedTurn(input({ manualStopAt: NOW - 60_000, activeRuns: [run()] }))).toBeNull();
+  });
+
+  it("is nothing for a stop nobody chose, even in the tab that holds a Stop", () => {
+    for (const reason of OTHER_STOP_REASONS) {
+      expect(resolveStoppedTurn(input({ manualStopAt: null, activeRuns: [requeued(reason)] }))).toBeNull();
+      expect(resolveStoppedTurn(input({ activeRuns: [requeued(reason)] }))).toBeNull();
+    }
+  });
+
+  it("is nothing outside that exact shape, or once a machine picked the turn up", () => {
+    const noHold = (activeRuns: RunRecord[]) => resolveStoppedTurn(input({ manualStopAt: null, activeRuns }));
+    expect(noHold([requeued("user_stop", { progressStage: "agent:queued" })])).toBeNull();
+    expect(noHold([requeued("user_stop", { metadata: { interruption: "user_stop" } })])).toBeNull();
+    expect(noHold([requeued("user_stop", { metadata: null })])).toBeNull();
+    // The lease moves the run on and leaves the record behind as history.
+    expect(noHold([resumed()])).toBeNull();
+    expect(resolveStoppedTurn(input({ runtimeReady: true, activeRuns: [resumed()] }))).toBeNull();
   });
 });
 
@@ -276,6 +368,61 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     expect(line()?.textContent).toBe(
       `The agents were stopped before finishing. They pick up again when the machine starts. ${KEPT_IN_HISTORY}`,
     );
+  });
+
+  it("shows every viewer the lead sentence from the controller's record, also after a reload", async () => {
+    // No hold: another viewer, or this tab after a reload. History may list
+    // unsaved work here, but only the tab whose stop answered knows.
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+    expect(line()?.getAttribute("role")).toBe("status");
+    expect(typingStatus()).toBeNull();
+
+    // A reload under a controller that records nothing finds a turn still in progress.
+    await render(<Harness activeRuns={[run()]} />);
+    expect(line()).toBeNull();
+    expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
+  });
+
+  it("stays for the whole wait the controller gives the turn, not five minutes", async () => {
+    // ChatPanel keeps only live runs (activeConversationRuns).
+    const tenMinutesOn = NOW + 30_000 + 10 * 60_000;
+    const live = [requeued()].filter((candidate) => isRunActivelyProgressing(candidate, tenMinutesOn));
+    await render(<Harness activeRuns={live} />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+  });
+
+  it("keeps what this tab's stop kept once the controller's record arrives", async () => {
+    recordManualStopFlush(PROJECT_ID, markManualStop(PROJECT_ID), SAVED_FLUSH);
+    await render(<Harness />);
+    expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
+
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
+
+    // Start or a send in this tab lifts the hold, and the record still explains the wait.
+    await act(async () => clearManualStop(PROJECT_ID));
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+  });
+
+  it("steps back once a machine picks the turn up again", async () => {
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    await render(<Harness runtimeReady activeRuns={[resumed()]} />);
+    expect(line()).toBeNull();
+    expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
+    // Still nothing while this tab's runtime status catches up.
+    await render(<Harness activeRuns={[resumed()]} />);
+    expect(line()).toBeNull();
+  });
+
+  it("says nothing for a stop nobody chose", async () => {
+    for (const reason of OTHER_STOP_REASONS) {
+      await render(<Harness activeRuns={[requeued(reason)]} />);
+      expect(line()).toBeNull();
+      expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
+    }
   });
 
   it("is wired into ChatPanel the same way", () => {

@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { shouldSuppressAgentEvaluationRunPresence } from "../../../conversations/groupParticipation";
+import { readRunInterruption } from "../../../conversations/runInterruption";
 import { MANUAL_STOP_CHANGED_EVENT, manualStopHold } from "../../../runtime/idlePauseRegistry";
+import { isPersonRuntimeStopReason } from "../../../runtime/unexpectedHostedRuntimeRecovery";
 import type { RuntimeStopFlush } from "../../../services/runtimeController/runtimes";
 import type { RunRecord } from "../../../types";
 import { useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
@@ -25,39 +27,66 @@ function startedBefore(run: RunRecord, at: number): boolean {
   return Number.isFinite(createdAt) && createdAt <= at;
 }
 
+/** Whether the controller recorded that someone's stop put this run back in the queue. */
+function isStoppedByPerson(run: RunRecord): boolean {
+  const interruption = readRunInterruption(run);
+  return interruption !== null && isPersonRuntimeStopReason(interruption.reason);
+}
+
 /**
- * Whether the person's Stop cut off a turn of this conversation: a run had
- * started before it, and no machine is left to finish it.
+ * Whether a person's Stop cut off a turn of this conversation and no machine
+ * is left to finish it: "held" when this tab's Stop did, so its hold knows
+ * what the stop kept; "recorded" when only the controller's record says so;
+ * null otherwise.
  *
- * The controller puts the stopped turn's job back in the queue without a
- * run update (and publishes no `runtime.stopped` for a person's stop), so
- * the run still reads as in progress. Only the tab that pressed Stop knows
- * why, through the hold that keeps the machine stopped. The hold lifts on
- * Start or a send, and a machine that comes back picks the turn up again
- * (for 15 minutes, before the controller gives up on it). Idle stops hold
- * differently, and a run still queued had not started.
+ * The controller records the stop on the run (see readRunInterruption): it
+ * is queued again, with the stop's reason, for every viewer and after a
+ * reload. A stop nobody chose (idle, credits, a lost heartbeat) keeps the
+ * waiting status instead. The record is announced only once the stop
+ * answers, and controllers before it put the job back in the queue without
+ * a run update (or a `runtime.stopped` for a person's stop), so the run
+ * still reads as in progress. Until then only the tab that pressed Stop
+ * knows why, through the hold that keeps the machine stopped. The hold
+ * lifts on Start or a send, and a machine that comes back picks the turn up
+ * again (for 15 minutes, before the controller gives up on it). Idle stops
+ * hold differently, and a queued run without the record had not started.
  *
  * The hold also outlives the Stop while a machine that came back without
  * asking through this tab (a Desktop runtime, another tab or a teammate's
  * Start) runs later turns, so a turn that began after the Stop and then
  * loses its machine was not cut off by it.
  */
-export function hasStoppedTurn(input: StoppedTurnInput): boolean {
-  const at = input.manualStopAt;
-  if (at === null || input.runtimeReady) {
-    return false;
+export function resolveStoppedTurn(input: StoppedTurnInput): "held" | "recorded" | null {
+  if (input.runtimeReady) {
+    return null;
   }
-  return input.activeRuns.some(
-    (run) =>
-      (run.status === "in_progress" || run.status === "awaiting_approval") &&
-      startedBefore(run, at) &&
+  const at = input.manualStopAt;
+  let stopped: "held" | "recorded" | null = null;
+  for (const run of input.activeRuns) {
+    const recorded = isStoppedByPerson(run);
+    const running = run.status === "in_progress" || run.status === "awaiting_approval";
+    const held = (recorded || running) && at !== null && startedBefore(run, at);
+    if (
+      !(held || recorded) ||
       // A silent skill-mode evaluation never said it was working.
-      !shouldSuppressAgentEvaluationRunPresence({
+      shouldSuppressAgentEvaluationRunPresence({
         runId: run.id,
         runMetadata: run.metadata,
         messages: input.messages,
-      }),
-  );
+      })
+    ) {
+      continue;
+    }
+    if (held) {
+      return "held";
+    }
+    stopped = "recorded";
+  }
+  return stopped;
+}
+
+export function hasStoppedTurn(input: StoppedTurnInput): boolean {
+  return resolveStoppedTurn(input) !== null;
 }
 
 /**
@@ -72,8 +101,10 @@ function stopKeptWorkInHistory(flush: RuntimeStopFlush | null): boolean {
 
 /**
  * The chat line that stands in for the typing status while a stopped turn
- * waits, or null. Per tab and never written into the conversation: a reload
- * drops the hold, and the line with it.
+ * waits, or null. Never written into the conversation. Every viewer gets the
+ * line from the controller's record, and only the tab whose Stop answered
+ * that its flush pushed everything names where the unsaved work went: a
+ * reload drops the hold, and that sentence with it.
  */
 export function useStoppedTurnNotice({
   projectId,
@@ -101,10 +132,14 @@ export function useStoppedTurnNotice({
   }, [projectId]);
 
   const hold = manualStopHold(projectId);
-  if (!hold || !hasStoppedTurn({ ...input, manualStopAt: hold.at })) {
+  const stopped = resolveStoppedTurn({ ...input, manualStopAt: hold?.at ?? null });
+  if (!stopped) {
     return null;
   }
   return describeStoppedTurn(agentDisplayName, {
-    unsavedWorkInHistory: stopKeptWorkInHistory(hold.flush) && unsavedWorkPlacementFor(versioning).unsavedWorkInHistory,
+    unsavedWorkInHistory:
+      stopped === "held" &&
+      stopKeptWorkInHistory(hold?.flush ?? null) &&
+      unsavedWorkPlacementFor(versioning).unsavedWorkInHistory,
   });
 }
