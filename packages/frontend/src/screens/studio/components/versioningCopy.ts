@@ -55,15 +55,23 @@ function stripSentenceEnd(value: string | null | undefined): string {
   return (value ?? "").trim().replace(/[.\s]+$/, "");
 }
 
-/** A server message appended as its own sentence, or nothing. */
-function appendServerMessage(message: string | null | undefined): string {
-  const text = stripSentenceEnd(message);
-  return text ? ` ${text}.` : "";
-}
-
 /** "secret files aren't saved" becomes "Secret files aren't saved." */
 function asSentence(clause: string): string {
   return `${clause.charAt(0).toUpperCase()}${clause.slice(1)}.`;
+}
+
+/**
+ * A server message appended as its own sentence, or nothing. Servers write
+ * theirs in lower case ("another file or folder here has this name ..."),
+ * so one that opens with a plain word gets a capital; one that opens with a
+ * path or a code ("src/a.ts is ...") keeps its spelling.
+ */
+function appendServerMessage(message: string | null | undefined): string {
+  const text = stripSentenceEnd(message);
+  if (!text) {
+    return "";
+  }
+  return /^[a-z]+(?![\w./-])/.test(text) ? ` ${asSentence(text)}` : ` ${text}.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -183,6 +183,29 @@ describe("versioning copy shared across surfaces", () => {
     ).toBe("Not saved. The work is kept under History, in Unsaved work.");
   });
 
+  it("starts a server message it appends with a capital, unless it opens with a path or a code", () => {
+    const alias = originError({
+      code: "path_alias",
+      paths: ["todo.md"],
+      message:
+        "another file or folder here has this name in another case or Unicode form, and a disk that ignores case takes the two for one; keep the current version or use another name",
+    });
+    expect(historyFailureCopy(alias, "stateless", "Couldn't save this file.")).toBe(
+      "Couldn't save this file. Another file or folder here has this name in another case or Unicode form, and a disk that ignores case takes the two for one; keep the current version or use another name.",
+    );
+    expect(desktopSaveFailureCopy(originError({ status: 400, message: "the folder is not a git checkout" }))).toBe(
+      "Couldn't save the folder's changes. The folder is not a git checkout.",
+    );
+    expect(historyRevertMessage(500, undefined, { message: "a merge needs a base." })).toBe(
+      "Couldn't revert this version. A merge needs a base.",
+    );
+    for (const message of ["src/a.ts is a link", "todo.md is a link", "runtime_id is missing", "Already capital"]) {
+      expect(historyFailureCopy(originError({ status: 400, message }), "stateless", "Couldn't save this file.")).toBe(
+        `Couldn't save this file. ${message}.`,
+      );
+    }
+  });
+
   it("words a revert the same in History and on the chat card", () => {
     expect(describeRevertConfirm([])).toBe(REVERT_DIALOG.body);
     expect(describeChangeRevertOutcome({ ok: true, rev: "c".repeat(40) }).message).toBe(revertSuccessCopy(true));
