@@ -62,9 +62,14 @@ const HELD_BEHIND_A_STOPPED_TURN_MESSAGE: &str =
     "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.";
 /// Requeue reasons of a stop a person asked for: Stop, Remove, and taking
 /// over the organization's hosted slot from the machines panel or a browser
-/// session. Only a person's click sends any of them. The expiry of a turn one
-/// of them interrupted runs no plan checkpoint and holds what was queued
-/// behind the turn (see [`expire_stale_requeued_jobs`]).
+/// session. A click sends each of them, with one exception: a browser
+/// session that hits the limit on its own space's standard hosted machine
+/// recycles that machine on its own with `runtime_limit_takeover`, through a
+/// stop with `skip_if_active_jobs` (the frontend's `stopIfIdle`). That stop
+/// never cuts off a turn whose lease is live, but it can requeue a job queued
+/// for that machine, and that job's expiry then counts as a person's stop.
+/// The expiry of a turn one of them interrupted runs no plan checkpoint and
+/// holds what was queued behind the turn (see [`expire_stale_requeued_jobs`]).
 const REQUEUE_REASONS_OF_A_PERSON: [&str; 4] = [
     "user_stop",
     "user_remove",

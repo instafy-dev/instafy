@@ -200,13 +200,19 @@ failure of a turn that a person stopped sends nothing that could start the
 machine they stopped. A person's stop is a Stop or Remove (`user_stop`,
 `user_remove`) or a takeover of the organization's hosted slot from the
 Machines panel or a browser session (`runtime_limit_takeover`,
-`browser_session_runtime_limit_takeover`); only a person's click sends any of
-them. Such a failure runs no plan checkpoint, and the messages queued in its
-conversation by the time of the stop become `failed` in the expiry's
-transaction, with a reason their owner sees in the queue. The send queue
-never sends a failed entry on its own, so neither the drain nor its recovery
-sweep picks them up; the owner can send one now or remove it. A message queued
-after the stop asks again and goes out as usual, which can start the machine.
+`browser_session_runtime_limit_takeover`). A click sends each of them, with
+one exception: a browser session that hits the limit on its own space's
+standard hosted machine recycles that machine on its own with
+`runtime_limit_takeover`, through a stop that spares a runtime with active
+jobs (`stopIfIdle`, `skip_if_active_jobs`). That stop never cuts off a turn
+whose lease is live, but it can requeue a job queued for that machine, and
+that job's expiry then counts as a person's stop. Such a failure runs no plan
+checkpoint, and the messages queued in its conversation by the time of the
+stop become `failed` in the expiry's transaction, with a reason their owner
+sees in the queue. The send queue never sends a failed entry on its own, so
+neither the drain nor its recovery sweep picks them up; the owner can send one
+now or remove it. A message queued after the stop asks again and goes out as
+usual, which can start the machine.
 
 ## A launch that does not come up
 
