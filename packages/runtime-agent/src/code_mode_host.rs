@@ -17,7 +17,6 @@ use codex_code_mode::{CodeModeSessionProvider, ProcessOwnedCodeModeSessionProvid
 use codex_core::config::Config;
 use codex_features::Feature;
 use codex_protocol::openai_models::{ModelInfo, ToolMode};
-use tracing_subscriber::EnvFilter;
 
 pub const EXECUTABLE_NAME: &str = if cfg!(windows) {
     "codex-code-mode-host.exe"
@@ -86,29 +85,6 @@ pub fn bundled_model_is_code_mode_only(slug: &str) -> Result<bool> {
 /// The provider a thread manager uses, bound to the checked host path.
 pub(crate) fn session_provider(host: PathBuf) -> Arc<dyn CodeModeSessionProvider> {
     Arc::new(ProcessOwnedCodeModeSessionProvider::with_host_program(host))
-}
-
-/// Codex logs the host's stderr (V8 fatal errors, panics) only at debug, under this target
-/// (`codex-rs/code-mode/src/remote_session/connection.rs`).
-const HOST_STDERR_LOG_TARGET: &str = "codex_code_mode::remote_session";
-
-/// Keeps the host's stderr in the runtime log whatever `RUST_LOG` selects, so a host that dies
-/// while starting leaves its reason in the log. It is a few lines per host spawn, but a host
-/// panic can print a cell's output. A `RUST_LOG` directive for this target is the operator's
-/// choice and stays: `add_directive` would replace it. A narrower one wins on its own.
-pub fn with_host_stderr_logging(filter: EnvFilter) -> EnvFilter {
-    let names_target = filter
-        .to_string()
-        .split(',')
-        .any(|directive| directive.split(['[', '=']).next() == Some(HOST_STDERR_LOG_TARGET));
-    if names_target {
-        return filter;
-    }
-    filter.add_directive(
-        format!("{HOST_STDERR_LOG_TARGET}=debug")
-            .parse()
-            .expect("the host stderr log directive is valid"),
-    )
 }
 
 /// Start-up report: an image or desktop build that lost the host still starts,
@@ -209,58 +185,5 @@ mod tests {
         assert!(!model_requires_host(&model_info, &config));
         ensure_host_for_model(&missing.path().join(EXECUTABLE_NAME), &model_info, &config)
             .expect("gpt-5.5 keeps direct tools");
-    }
-
-    #[derive(Clone, Default)]
-    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for CapturedLog {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn the_runtime_log_keeps_host_stderr_unless_rust_log_names_its_target() {
-        // "info" is init_tracing's default; the others stand for an operator's RUST_LOG.
-        for (rust_log, keeps_stderr) in [
-            ("info", true),
-            ("warn", true),
-            ("error,codex_code_mode=off", true),
-            // An operator's directive for the target itself, or a narrower one, decides.
-            ("info,codex_code_mode::remote_session=off", false),
-            (
-                "info,codex_code_mode::remote_session::connection=off",
-                false,
-            ),
-            ("warn,codex_code_mode::remote_session=trace", true),
-        ] {
-            let log = CapturedLog::default();
-            let writer = log.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_env_filter(with_host_stderr_logging(EnvFilter::new(rust_log)))
-                .with_writer(move || writer.clone())
-                .with_ansi(false)
-                .finish();
-            tracing::subscriber::with_default(subscriber, || {
-                tracing::debug!(
-                    target: "codex_code_mode::remote_session::connection",
-                    "code-mode host stderr: fatal"
-                );
-                tracing::debug!(target: "codex_code_mode::grpc_session", "unrelated debug");
-            });
-            let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
-            assert_eq!(
-                log.contains("code-mode host stderr: fatal"),
-                keeps_stderr,
-                "{rust_log}: {log}"
-            );
-            assert!(!log.contains("unrelated debug"), "{rust_log}: {log}");
-        }
     }
 }

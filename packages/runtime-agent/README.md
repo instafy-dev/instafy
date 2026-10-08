@@ -138,14 +138,12 @@ came back, `status` is `harness_error` with an `error_class` of `host_spawn_fail
 `session_shutdown` or `other`, and the runtime log gets a warning naming the job, the tool and
 the class.
 
-The runtime log includes the code-mode host's stderr (V8 fatal errors, panics): the agent adds
-`codex_code_mode::remote_session=debug` to its log filter whatever level `RUST_LOG` selects.
-That is usually a few lines per host spawn, but a host panic can print the running cell's
-output, including text the script read and image data URLs, as one long line. To keep host
-stderr out of the log, name the target in `RUST_LOG`, for example
-`RUST_LOG=info,codex_code_mode::remote_session=off`. A directive for that target, or for a
-narrower one such as `codex_code_mode::remote_session::connection`, takes precedence over the
-agent's.
+The code-mode host's stderr (V8 fatal errors, panics) stays out of the runtime log by default:
+Codex logs it at debug. To debug a host that will not start, turn it on for that target only,
+for example `RUST_LOG=info,codex_code_mode::remote_session=debug`. It is usually a few lines per
+host spawn, but a host panic can print the running cell's output as one long line, including
+file contents or environment values the script read and image data URLs, so turn it off again
+once the cause is known.
 
 ## Structured file results
 
