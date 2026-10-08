@@ -572,6 +572,45 @@ describe("runtime controller run event streaming", () => {
       unsubscribe();
     });
 
+    it("keeps the turn running when the announcement lands after the lease that picked it up", async () => {
+      const { subscribeToRunsFromController } = await import("../runtimeController/runs");
+      let state = createInitialRuntimeStoreState();
+      const onRun = vi.fn((run: RunRecord) => {
+        state = runtimeReducer(state, { type: "upsertRun", run });
+      });
+      const unsubscribe = subscribeToRunsFromController({
+        projectId, quietErrors: true, onRun, onRunPatch: vi.fn(),
+      });
+      await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+
+      // The stop answers only after the provider releases the machine, so a
+      // machine that leases the turn first is announced first.
+      const leasedAt = "2026-10-08T12:00:03.000Z";
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, conversation_id: conversationId,
+        run_id: runId, job_id: jobId, timestamp: leasedAt,
+        data: {
+          status: "in_progress", stage: "agent:leased", percent: 1, jobId,
+          run: { ...requeuedSnapshot, status: "in_progress", progress_stage: "agent:leased", updated_at: leasedAt },
+        },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+      streamingRequests[0].write(`data: ${JSON.stringify({
+        kind: "run.progress", project_id: projectId, session_id: null,
+        conversation_id: conversationId, run_id: runId, job_id: jobId,
+        channels: [`conversation:${conversationId}`], timestamp: interruptedAt,
+        data: { status: "queued", stage: "requeued", jobId, run: requeuedSnapshot },
+      })}\n\n`);
+      await vi.waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
+
+      expect(state.runs[runId]).toMatchObject({
+        status: "in_progress",
+        progressStage: "agent:leased",
+        updatedAt: leasedAt,
+      });
+      unsubscribe();
+    });
+
     it("is read the same way after a reload", async () => {
       fetchMock.mockResolvedValueOnce(
         new Response(JSON.stringify([requeuedSnapshot]), {

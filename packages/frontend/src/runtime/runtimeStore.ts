@@ -293,6 +293,27 @@ function mergeWorkspacePresenceWithOrigin(
   };
 }
 
+function runRecordTime(run: RunRecord | null): number | null {
+  const time = run?.updatedAt ? Date.parse(run.updatedAt) : Number.NaN;
+  return Number.isFinite(time) ? time : null;
+}
+
+/**
+ * Whether `incoming` describes the run as it was before the record the store
+ * holds, so it must not replace it. Every run write lands here: live events,
+ * their sparse patches, GET /runs hydration and the reconcile after a
+ * reconnect. Run events can arrive out of order: the controller stamps a
+ * stop's announcement with the time the stop put the turn back in the queue,
+ * and it answers only after the machine is released, so the lease that
+ * picked the turn up again (stamped when it is sent) can arrive first. Equal
+ * times apply, and so does a record without a readable time on either side.
+ */
+function isOlderRunRecord(incoming: RunRecord, stored: RunRecord | null): boolean {
+  const incomingAt = runRecordTime(incoming);
+  const storedAt = runRecordTime(stored);
+  return incomingAt !== null && storedAt !== null && incomingAt < storedAt;
+}
+
 export function runtimeReducer(
   state: RuntimeStoreState,
   action: RuntimeAction,
@@ -349,8 +370,11 @@ export function runtimeReducer(
       return runtimeReducer(state, { type: "upsertRun", run });
     }
     case "upsertRun": {
+      const existing = state.runs[action.run.id] ?? null;
+      if (isOlderRunRecord(action.run, existing)) {
+        return state;
+      }
       const nextRuns = { ...state.runs };
-      const existing = nextRuns[action.run.id] ?? null;
       nextRuns[action.run.id] = {
         ...existing,
         ...action.run,

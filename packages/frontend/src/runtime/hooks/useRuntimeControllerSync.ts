@@ -354,6 +354,8 @@ export function useRuntimeControllerSync({
           const eventUpdatedAt = Date.parse(latestRunEvent?.updatedAt ?? "");
           // Prefer an SSE update received while this request was in flight
           // unless the authoritative snapshot proves it is at least as new.
+          // The store also refuses a snapshot older than the record it holds
+          // (runtimeReducer), as it does every other run write.
           if (
             !latestRunEvent ||
             latestRunEvent.sequence <= eventSequenceAtStart ||
