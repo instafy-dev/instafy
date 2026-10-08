@@ -540,9 +540,9 @@ fn local_only(git: &WorkspaceGit<'_>, held_back: &BTreeSet<String>) -> Result<us
 }
 
 /// HEAD and the tracked `main` (a publish may move only `main`, onto the
-/// folder's own commits) plus `(path, mtime, size, mode)` of every path the
-/// publish filter lets through, and how many there are. Never takes
-/// `index.lock`.
+/// folder's own commits) plus `(path, mtime, size, mode, inode, ctime)` of
+/// every path the publish filter lets through, and how many there are.
+/// Never takes `index.lock`.
 fn fingerprint(
     publisher: &Publisher<'_>,
     status: &[(String, bool)],
@@ -574,7 +574,7 @@ fn fingerprint(
                     .unwrap_or_default();
                 hasher.update(modified.to_le_bytes());
                 hasher.update(metadata.len().to_le_bytes());
-                hasher.update(mode_of(&metadata).to_le_bytes());
+                hash_identity(&mut hasher, &metadata);
             }
             Err(_) => hasher.update(b"absent"),
         }
@@ -583,15 +583,22 @@ fn fingerprint(
     Ok((hasher.finalize().into(), listed))
 }
 
+/// The mode and, on unix, the inode and the change time. `tar -x`,
+/// `cp -p` and `rsync -a` put the mtime back after a rewrite; nothing in
+/// userland sets the ctime, so a rewrite of the same size still shows.
 #[cfg(unix)]
-fn mode_of(metadata: &std::fs::Metadata) -> u32 {
+fn hash_identity(hasher: &mut Sha256, metadata: &std::fs::Metadata) {
     use std::os::unix::fs::MetadataExt as _;
-    metadata.mode()
+    hasher.update(metadata.mode().to_le_bytes());
+    hasher.update(metadata.ino().to_le_bytes());
+    hasher.update(metadata.ctime().to_le_bytes());
+    hasher.update(metadata.ctime_nsec().to_le_bytes());
 }
 
 #[cfg(not(unix))]
-fn mode_of(metadata: &std::fs::Metadata) -> u32 {
-    u32::from(metadata.is_dir()) | (u32::from(metadata.permissions().readonly()) << 1)
+fn hash_identity(hasher: &mut Sha256, metadata: &std::fs::Metadata) {
+    let mode = u32::from(metadata.is_dir()) | (u32::from(metadata.permissions().readonly()) << 1);
+    hasher.update(mode.to_le_bytes());
 }
 
 /// What the folder holds now, from this machine alone: no network, no

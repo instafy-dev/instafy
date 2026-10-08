@@ -407,6 +407,40 @@ fn a_publish_that_moves_only_main_is_a_change() {
     assert!(!fx.state().changed);
 }
 
+/// `tar -x`, `unzip`, `cp -p` and `rsync -a` put a file's mtime back after
+/// rewriting it, and npm gives every tarball entry the same fixed time. A
+/// rewrite of the same size is still a change: a job's end skips its save
+/// on this check.
+#[test]
+fn a_same_size_rewrite_that_puts_the_mtime_back_is_a_change() {
+    const PATH: &str = "vendor/pkg/package.json";
+    let fx = Fixture::new();
+    let extract = |content: &str| {
+        fx.write(PATH, content.as_bytes());
+        let fixed = std::time::UNIX_EPOCH + Duration::from_secs(499_162_500);
+        fs::File::options()
+            .write(true)
+            .open(fx.ws.join(PATH))
+            .unwrap()
+            .set_modified(fixed)
+            .unwrap();
+    };
+    extract(r#"{"name":"pkg","version":"1.2.3"}"#);
+    let state = fx.save(PersistReason::TurnEnd);
+    assert!(state.durable && state.error.is_none(), "{state:?}");
+    assert!(!fx.state().changed);
+
+    extract(r#"{"name":"pkg","version":"1.2.4"}"#);
+    let state = fx.state();
+    assert!(state.changed && !state.durable, "{state:?}");
+    let state = fx.save(PersistReason::Tick);
+    assert!(state.durable && state.error.is_none(), "{state:?}");
+    assert_eq!(
+        fx.slot_file(PATH).as_deref(),
+        Some(r#"{"name":"pkg","version":"1.2.4"}"#)
+    );
+}
+
 #[test]
 fn nothing_unsaved_deletes_the_slot() {
     let fx = Fixture::new();

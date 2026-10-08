@@ -589,7 +589,9 @@ node's checkout a cache.
   passes the same publish filter as every save.
 - A tick first asks the origin in process whether the folder changed since
   its last confirmed save (HEAD, the tracked `main`, `git status` without
-  taking `index.lock`, then each candidate's size, mode and mtime). A
+  taking `index.lock`, then each candidate's size, mode, mtime, inode and
+  ctime: a rewrite of the same size whose mtime `tar -x` or `cp -p` put back
+  still moves the ctime). A
   publish that moved only `main` onto the folder's own commits counts as a
   change, so the next save drops the slot's copy of that work. Unchanged, it
   ends with no
