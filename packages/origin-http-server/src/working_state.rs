@@ -613,6 +613,7 @@ fn head_on_main(publisher: &Publisher<'_>) -> Result<bool> {
 pub(crate) struct Plan {
     reason: PersistReason,
     fingerprint: Fingerprint,
+    head: Option<String>,
     parent: Option<String>,
     main: Option<String>,
     tree: String,
@@ -801,6 +802,7 @@ impl Publisher<'_> {
         Ok(Plan {
             reason,
             fingerprint,
+            head,
             parent,
             main,
             tree,
@@ -865,15 +867,18 @@ impl Publisher<'_> {
         Ok(over)
     }
 
-    /// Whether `plan`'s view of the slot still stands: the record and any
-    /// unanswered push or delete are what they were when it was taken. A
-    /// route-level save lets the workspace go while it asks for write
-    /// access; another save of the folder may have moved the slot meanwhile.
+    /// Whether `plan` still stands: HEAD, the tracked `main`, the record and
+    /// any unanswered push or delete are what they were when it was taken.
+    /// A route-level save lets the workspace go while it asks for write
+    /// access; meanwhile the turn may have published (moving HEAD and
+    /// `main`), or another save of the folder may have moved the slot.
     pub(crate) fn plan_still_current(&self, plan: &Plan) -> Result<bool> {
         let recorded = self.git.commit_id(RECORD_REF)?;
         Ok(
             recorded.as_deref() == plan.record.as_ref().map(|record| record.commit.as_str())
-                && unsettled(&self.git)? == plan.unsettled,
+                && unsettled(&self.git)? == plan.unsettled
+                && self.git.commit_id("HEAD")? == plan.head
+                && self.tracked_main()? == plan.main,
         )
     }
 

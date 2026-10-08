@@ -3437,8 +3437,9 @@ async fn handle_workspace_persist(
             can_write: token.is_some() || config.skip_auth,
         };
         let mut publisher = crate::working_state::publisher(&ctx, budget);
-        // Another save of the folder (a runtime sharing it) may have moved
-        // the slot while the workspace was let go: take the snapshot again.
+        // The turn may have published, or another save of the folder (a
+        // runtime sharing it) moved the slot, while the workspace was let
+        // go: take the snapshot again.
         let plan = match publisher.plan_still_current(&plan) {
             Ok(true) => plan,
             _ => {

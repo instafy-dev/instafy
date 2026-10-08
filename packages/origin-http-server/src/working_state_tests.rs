@@ -1848,6 +1848,43 @@ fn a_plan_older_than_the_last_save_is_not_executed() {
     assert!(!waiting.plan_still_current(&plan).unwrap());
 }
 
+/// A plan taken before the turn published what it holds (while the save
+/// asked for write access) is taken again, so the slot never gets work
+/// `main` already has.
+#[test]
+fn a_plan_taken_before_the_turn_published_is_not_executed() {
+    let fx = Fixture::new();
+    fx.write("notes.md", b"published by the turn\n");
+    let ctx = fx.ctx();
+    let mut waiting = publisher(&ctx, TICK_BUDGET);
+    let plan = waiting
+        .plan_working_save(PersistReason::Tick, None)
+        .unwrap();
+    assert!(waiting.plan_still_current(&plan).unwrap());
+    // The turn's own publish: HEAD and canonical `main` move, the folder is
+    // clean, the record is untouched.
+    ig(&fx.ws, &["add", "notes.md"]);
+    ig(
+        &fx.ws,
+        &[
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "the turn",
+        ],
+    );
+    ig(&fx.ws, &["push", "-q", "origin", "HEAD:main"]);
+    ig(&fx.ws, &["fetch", "-q", "origin"]);
+    assert!(!waiting.plan_still_current(&plan).unwrap());
+    // Taken again, the save has nothing to send.
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    assert_eq!(fx.slot(), None);
+}
+
 /// What one save costs in git processes, the same for 20 dirty files as for
 /// 200: the config of the checkout is checked before every git command but
 /// parsed only when it changed, and each save reads what it needs once.
