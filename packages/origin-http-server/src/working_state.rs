@@ -582,16 +582,17 @@ fn local_only(git: &WorkspaceGit<'_>, held_back: &BTreeSet<String>) -> Result<us
         .count())
 }
 
-/// HEAD and the tracked `main` (a publish may move only `main`, onto the
-/// folder's own commits) plus `(path, mtime, size, mode, inode, ctime)` of
-/// every path the publish filter lets through, and how many there are.
-/// Never takes `index.lock`.
+/// `head` and the tracked `main` the caller read (a publish may move only
+/// `main`, onto the folder's own commits) plus `(path, mtime, size, mode,
+/// inode, ctime)` of every path the publish filter lets through, and how
+/// many there are. A save passes the HEAD its snapshot is built on, so a
+/// commit that lands meanwhile is a change. Never takes `index.lock`.
 fn fingerprint(
     publisher: &Publisher<'_>,
+    head: Option<&str>,
+    main: Option<&str>,
     status: &[(String, bool)],
 ) -> Result<(Fingerprint, usize)> {
-    let head = publisher.git.commit_id("HEAD")?;
-    let main = publisher.tracked_main()?;
     let root = publisher.git.root();
     let mut hasher = Sha256::new();
     hasher.update(b"instafy-working-state-v1\0");
@@ -650,7 +651,10 @@ fn hash_identity(hasher: &mut Sha256, metadata: &std::fs::Metadata) {
 pub fn local_state(ctx: &PublishContext<'_>, memory: &WorkingMemory) -> Result<WorkingState> {
     let publisher = Publisher::new(ctx, Duration::ZERO);
     let status = publisher.status_without_locks()?;
-    let (fingerprint, unsaved) = self::fingerprint(&publisher, &status)?;
+    let head = publisher.git.commit_id("HEAD")?;
+    let main = publisher.tracked_main()?;
+    let (fingerprint, unsaved) =
+        self::fingerprint(&publisher, head.as_deref(), main.as_deref(), &status)?;
     let local_only = recovery::pending(&publisher.git)?.len();
     let mut state = memory.state(fingerprint, unsaved, local_only);
     if unsettled(&publisher.git)? {
@@ -827,7 +831,7 @@ impl Publisher<'_> {
         } else {
             self.status()?
         };
-        let (fingerprint, _) = fingerprint(self, &status)?;
+        let (fingerprint, _) = fingerprint(self, head.as_deref(), main.as_deref(), &status)?;
         stopping(stop)?;
         let (dirty_tree, deferred) = self.stage_paths(
             &Selection::AllDirty,
@@ -942,9 +946,13 @@ impl Publisher<'_> {
         Ok(
             recorded.as_deref() == plan.record.as_ref().map(|record| record.commit.as_str())
                 && unsettled(&self.git)? == plan.unsettled
-                && self.git.commit_id("HEAD")? == plan.head
-                && self.tracked_main()? == plan.main,
+                && self.on_plan_head(plan)?,
         )
+    }
+
+    /// Whether HEAD and the tracked `main` are the ones `plan` was taken on.
+    fn on_plan_head(&self, plan: &Plan) -> Result<bool> {
+        Ok(self.git.commit_id("HEAD")? == plan.head && self.tracked_main()? == plan.main)
     }
 
     /// Bring canonical up to date with `plan`: push what waits on local
@@ -1503,28 +1511,35 @@ fn not_saved(memory: &WorkingMemory, error: SaveError) -> StopSave {
 }
 
 /// A finished save that needed no network call: the slot is current, or
-/// nothing is unsaved and there is no slot.
-pub(crate) fn settle_locally(
+/// nothing is unsaved and there is no slot. Only on the HEAD and `main` the
+/// snapshot was built on: a commit that landed while it was taken (the
+/// agent's own, during a tick) is not in it, so nothing is confirmed and
+/// the next save takes it.
+fn settle_locally(
     plan: &Plan,
     memory: &WorkingMemory,
-    git: &WorkspaceGit<'_>,
-) -> WorkingState {
+    publisher: &Publisher<'_>,
+) -> Result<WorkingState> {
+    let git = &publisher.git;
+    let current = publisher.on_plan_head(plan)?;
     let complete = plan.deferred.is_empty();
     let unsaved = plan
         .parent_tree(git)
         .and_then(|parent_tree| changed_paths(git, &parent_tree, &plan.tree))
         .map(|paths| paths.len())
         .unwrap_or_default();
-    let durable = complete && plan.pending == 0;
-    memory.confirm(plan.fingerprint, complete, durable, plan.more);
-    WorkingState {
+    let durable = current && complete && plan.pending == 0;
+    if current {
+        memory.confirm(plan.fingerprint, complete, durable, plan.more);
+    }
+    Ok(WorkingState {
         unsaved: count(unsaved),
         local_only: count(plan.pending),
         persisted_at: memory.persisted_at(),
         durable,
-        changed: false,
+        changed: !current,
         error: None,
-    }
+    })
 }
 
 /// A save that could not start.
@@ -1552,12 +1567,13 @@ pub(crate) fn plan_route_save(
     let planned = publisher
         .plan_working_save(reason, Some(stop))
         .and_then(|plan| {
-            let needs_network = plan.needs_network(&publisher.git, origin)?;
-            Ok((plan, needs_network))
+            if plan.needs_network(&publisher.git, origin)? {
+                return Ok(Planned::Network(plan));
+            }
+            Ok(Planned::Answered(settle_locally(&plan, memory, publisher)?))
         });
     match planned {
-        Ok((plan, true)) => Planned::Network(plan),
-        Ok((plan, false)) => Planned::Answered(settle_locally(&plan, memory, &publisher.git)),
+        Ok(planned) => planned,
         Err(error) => {
             let failure = local_failure(&error);
             if failure != SaveError::Stopping {

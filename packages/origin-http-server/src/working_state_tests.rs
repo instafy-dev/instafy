@@ -2285,6 +2285,46 @@ fn a_plan_taken_before_the_turn_published_is_not_executed() {
     assert_eq!(fx.slot(), None);
 }
 
+/// The agent's own commit can land while a tick takes its snapshot, after
+/// the tick read HEAD and before it listed the folder. The snapshot does not
+/// hold that commit, so the tick confirms nothing: the change check still
+/// reads a change, and the next save takes the commit.
+#[test]
+fn a_commit_that_lands_while_a_tick_looks_is_not_taken_as_saved() {
+    let fx = Fixture::new();
+    fx.write("notes.md", b"committed by the agent\n");
+    let committed = fx.root.join("committed");
+    let wrapper = GitWrapper::install(
+        &fx.root,
+        &format!(
+            "case \" $* \" in *\" status \"*) if [ ! -e '{committed}' ]; then : > '{committed}'; \
+             (unset $(env | sed -n 's/^\\(GIT_[A-Z_]*\\)=.*/\\1/p'); \
+             export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; cd '{ws}' && \
+             git --git-dir .instafy/.git --work-tree . add -A && \
+             git --git-dir .instafy/.git --work-tree . -c user.name=Agent \
+             -c user.email=agent@instafy.dev commit -q -m agent) || exit 1; fi ;; esac",
+            committed = committed.display(),
+            ws = fx.ws.display()
+        ),
+    );
+    let state = fx.save(PersistReason::Tick);
+    drop(wrapper);
+    assert!(committed.exists(), "the tick listed the folder");
+    assert_eq!(ig(&fx.ws, &["log", "-1", "--format=%s"]), "agent");
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(!state.durable && state.changed, "{state:?}");
+    let state = fx.state();
+    assert!(state.changed && !state.durable, "{state:?}");
+
+    let state = fx.save(PersistReason::TurnEnd);
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(state.durable, "{state:?}");
+    assert_eq!(
+        fx.slot_file("notes.md").as_deref(),
+        Some("committed by the agent\n")
+    );
+}
+
 /// What one save costs in git processes, the same for 20 dirty files as for
 /// 200: the config of the checkout is checked before every git command but
 /// parsed only when it changed, and each save reads what it needs once.
