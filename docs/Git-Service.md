@@ -70,8 +70,8 @@ configuration; it refuses to start otherwise, because git would silently accept 
 unchecked (for example on a `noexec` repo root, or with git older than 2.31). The built-in deny list
 is `REPO_POLICY_DENY_PATTERNS` in `packages/git-service/src/policy.rs`. The hook is rendered from
 it, and other packages can import the same list instead of copying it. The hook also refuses
-deleting a denied path, so the list holds build output and caches, not file patterns such as
-secrets.
+deleting a denied path (except from a working slot, below), so the list holds build output and
+caches, not file patterns such as secrets.
 
 The hook checks every pushed ref:
 
@@ -102,7 +102,8 @@ The hook checks every pushed ref:
   read in raw form, so unusual file names are checked exactly as stored. A working slot's update
   is also checked against the slot commit's own parent, so a path denied since its old tip was
   accepted (for example by a new `GIT_DENY_PATHS`) is refused even when this save did not change
-  it.
+  it. A working slot may always drop a denied path: a slot is never published, and a save refused
+  for keeping one leaves it out instead.
 
 Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)

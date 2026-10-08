@@ -322,6 +322,10 @@ check_changes() {{
     IFS= read -r -d '' path || break
     read -r _old_mode new_mode _old_oid new_oid status <<< "${{meta#:}}"
 
+    # A working slot may always drop a path: it is never published, and a
+    # path denied after the slot saved it must be able to leave.
+    [[ "$status" == "D" && "$working_slot" == "1" ]] && continue
+
     if is_denied_path "$path"; then
       echo "instafy: blocked path '$path' (repo hygiene policy)" >&2
       exit 1
@@ -1086,6 +1090,43 @@ mod tests {
         repo.accepts_with("refs/heads/feature", &earlier, &later, &deny_zip[..]);
         // A new slot is compared with main, which lacks the archive.
         let stderr = repo.refuses(&slot, ZERO, &earlier, &deny_zip);
+        assert!(
+            stderr.contains("blocked path 'assets/archive.zip'"),
+            "{stderr}"
+        );
+
+        // The slot may drop the archive: a slot is never published, so a
+        // path denied after it was saved can leave it. Any other ref still
+        // may not delete a denied path.
+        let without = repo.commit_with(&[("notes.md", b"notes\n")]);
+        repo.accepts_with(&slot, &earlier, &without, &deny_zip);
+        let stderr = repo.refuses("refs/heads/feature", &earlier, &without, &deny_zip);
+        assert!(
+            stderr.contains("blocked path 'assets/archive.zip'"),
+            "{stderr}"
+        );
+    }
+
+    /// A new slot is compared with main and with its own parent. When main
+    /// holds a path added before it was denied and the slot's parent (the
+    /// folder's merge base) does not, a slot without the path is accepted,
+    /// and one with it is refused.
+    #[test]
+    fn a_new_working_slot_may_leave_out_a_path_main_holds_and_policy_denies() {
+        let repo = HookRepo::new("slot-create");
+        repo.set_ignorecase(false);
+        let slot =
+            format!("{RECOVERY_REF_ROOT}/5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a/{WORKING_SLOT_NAME}");
+        let deny_zip = [("GIT_DENY_PATHS", "*.zip")];
+        // main moved on to a commit holding the archive; the folder's merge
+        // base is the main before it.
+        let newer_main = repo.commit_with(&[("assets/archive.zip", b"zip\n")]);
+        repo.git(&["update-ref", "refs/heads/main", &newer_main]);
+
+        let without = repo.commit_with(&[("notes.md", b"notes\n")]);
+        repo.accepts_with(&slot, ZERO, &without, &deny_zip);
+        let with = repo.commit_with(&[("assets/archive.zip", b"zip\n"), ("notes.md", b"notes\n")]);
+        let stderr = repo.refuses(&slot, ZERO, &with, &deny_zip);
         assert!(
             stderr.contains("blocked path 'assets/archive.zip'"),
             "{stderr}"

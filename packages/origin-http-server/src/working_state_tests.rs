@@ -868,6 +868,26 @@ fn ignored_private_unpublishable_and_oversized_files_are_never_saved() {
     }
 }
 
+/// A path the shard starts to deny after the slot saved it leaves the slot
+/// with the next save, and saving goes on: the shard (whose deny list the
+/// origin never sees) refuses the slot that keeps it, and accepts the one
+/// that drops it.
+#[test]
+fn a_path_denied_after_it_was_saved_leaves_the_slot() {
+    let fx = Fixture::new();
+    fx.write("assets/a.zip", b"zip\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    assert!(fx.slot_file("assets/a.zip").is_some());
+
+    install_shard_hook(&fx.remote, &[("GIT_DENY_PATHS", "*.zip")]);
+    fx.write("notes.md", b"later\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("later\n"));
+    assert!(fx.slot_file("assets/a.zip").is_none());
+    assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
+}
+
 #[test]
 fn an_unrelated_history_saves_on_main() {
     let fx = Fixture::new();
