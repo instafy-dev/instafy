@@ -3604,9 +3604,9 @@ pub(crate) struct CodexEventStreamAdapter {
     /// Turns with a count that moved the thread total off the turn's baseline.
     turns_with_reported_usage: HashSet<String>,
     usage_attempt: Option<(String, UsageAttempt)>,
-    /// Call ids of code-mode `exec` calls still waiting for their output. Kept only to classify
-    /// that output; never projected.
-    pending_code_mode_exec_calls: HashSet<String>,
+    /// Call ids of code-mode `exec` and `wait` calls still waiting for their output. Kept only to
+    /// classify that output; never projected.
+    pending_code_mode_cell_calls: HashSet<String>,
     /// The job this run serves, for log lines only.
     job_id: Option<uuid::Uuid>,
 }
@@ -3632,7 +3632,7 @@ impl CodexEventStreamAdapter {
             last_total_token_usage: None,
             turns_with_reported_usage: HashSet::new(),
             usage_attempt: None,
-            pending_code_mode_exec_calls: HashSet::new(),
+            pending_code_mode_cell_calls: HashSet::new(),
             job_id: None,
         }
     }
@@ -4053,11 +4053,29 @@ impl CodexEventStreamAdapter {
     }
 
     /// Adds enum-only fields to a function or custom tool call's activity: whether it is the
-    /// call or its output, the output's success flag and, for a code-mode `exec` output, how
-    /// its cell ended. Every value is a fixed string; nothing is copied from the item.
+    /// call or its output, the output's success flag and, for the output of a code-mode `exec`
+    /// or of the `wait` that resumes a yielded cell, how the cell ended. Every value is a fixed
+    /// string; nothing is copied from the item.
     fn annotate_tool_call_activity(&mut self, item: &ResponseItem, activity: &mut JsonValue) {
-        match item {
-            ResponseItem::FunctionCall { .. } => activity["phase"] = json!("call"),
+        // Codex's own wrapper test (`is_code_mode_wrapper`): `exec` as a custom tool and `wait`
+        // as a function tool, each by its plain name in the default namespace, which may also
+        // arrive as "functions" or "".
+        let (call_id, output, tool) = match item {
+            ResponseItem::FunctionCall {
+                call_id,
+                name,
+                namespace,
+                ..
+            } => {
+                activity["phase"] = json!("call");
+                self.track_code_mode_cell_call(
+                    call_id,
+                    name,
+                    namespace,
+                    codex_code_mode::WAIT_TOOL_NAME,
+                );
+                return;
+            }
             ResponseItem::CustomToolCall {
                 call_id,
                 name,
@@ -4065,40 +4083,55 @@ impl CodexEventStreamAdapter {
                 ..
             } => {
                 activity["phase"] = json!("call");
-                // Codex's own `exec` test (`is_exec_tool_name`): the plain name in the default
-                // namespace, which may also arrive as "functions" or "".
-                if name == codex_code_mode::PUBLIC_TOOL_NAME
-                    && ToolName::new(namespace.clone(), name.as_str()).is_default_namespace()
-                {
-                    self.pending_code_mode_exec_calls.insert(call_id.clone());
-                }
+                self.track_code_mode_cell_call(
+                    call_id,
+                    name,
+                    namespace,
+                    codex_code_mode::PUBLIC_TOOL_NAME,
+                );
+                return;
             }
-            ResponseItem::FunctionCallOutput { output, .. } => {
-                activity["phase"] = json!("output");
-                activity["success"] = json!(output.success);
-            }
+            ResponseItem::FunctionCallOutput {
+                call_id, output, ..
+            } => (call_id.as_deref(), output, codex_code_mode::WAIT_TOOL_NAME),
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
-            } => {
-                activity["phase"] = json!("output");
-                activity["success"] = json!(output.success);
-                if !self.pending_code_mode_exec_calls.remove(call_id) {
-                    return;
-                }
-                let Some((status, error_class)) = code_mode_exec_status(output) else {
-                    return;
-                };
-                activity["status"] = json!(status);
-                if let Some(error_class) = error_class {
-                    activity["error_class"] = json!(error_class);
-                    tracing::warn!(
-                        job_id = self.job_id.map(tracing::field::display),
-                        error_class,
-                        "code-mode exec returned a harness error instead of a cell result"
-                    );
-                }
-            }
-            _ => {}
+            } => (
+                Some(call_id.as_str()),
+                output,
+                codex_code_mode::PUBLIC_TOOL_NAME,
+            ),
+            _ => return,
+        };
+        activity["phase"] = json!("output");
+        activity["success"] = json!(output.success);
+        if !call_id.is_some_and(|call_id| self.pending_code_mode_cell_calls.remove(call_id)) {
+            return;
+        }
+        let Some((status, error_class)) = code_mode_cell_status(output) else {
+            return;
+        };
+        activity["status"] = json!(status);
+        if let Some(error_class) = error_class {
+            activity["error_class"] = json!(error_class);
+            tracing::warn!(
+                job_id = self.job_id.map(tracing::field::display),
+                tool,
+                error_class,
+                "code-mode call returned a harness error instead of a cell result"
+            );
+        }
+    }
+
+    fn track_code_mode_cell_call(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        namespace: &Option<String>,
+        cell_tool: &str,
+    ) {
+        if name == cell_tool && ToolName::new(namespace.clone(), name).is_default_namespace() {
+            self.pending_code_mode_cell_calls.insert(call_id.to_owned());
         }
     }
 
@@ -4158,15 +4191,17 @@ const CODE_MODE_HARNESS_ERROR_PREFIXES: &[(&str, &str)] = &[
     // The host died after the handshake, for example while running the cell.
     ("code-mode host closed its stdout", "host_exited"),
     ("code-mode host exited with status", "host_exited"),
+    // A `wait` or `terminate` request outlived its deadline; Codex then kills the host.
+    ("code-mode host timed out waiting for", "host_timeout"),
     ("code mode session is shutting down", "session_shutdown"),
 ];
 
-/// A code-mode `exec` output's status and, for a harness error, its class. Every cell result
-/// opens with the status line from Codex's `format_script_status`
+/// A code-mode `exec` or `wait` output's status and, for a harness error, its class. Every cell
+/// result opens with the status line from Codex's `format_script_status`
 /// (`codex-rs/core/src/tools/code_mode/mod.rs`, placed first by `output.rs`); an unsuccessful
 /// output without one is a harness error that returned no cell result. An interrupted call has
 /// no success flag and gets no status.
-fn code_mode_exec_status(
+fn code_mode_cell_status(
     output: &FunctionCallOutputPayload,
 ) -> Option<(&'static str, Option<&'static str>)> {
     let text = match &output.body {
@@ -6829,11 +6864,13 @@ required = true
     }
 
     #[test]
-    fn codex_event_stream_classifies_code_mode_exec_outputs_without_contents() {
+    fn codex_event_stream_classifies_code_mode_cell_outputs_without_contents() {
         fn raw(item: JsonValue, success: Option<bool>) -> Event {
             let mut item: ResponseItem =
                 serde_json::from_value(item).expect("valid raw tool fixture");
-            if let ResponseItem::CustomToolCallOutput { output, .. } = &mut item {
+            if let ResponseItem::CustomToolCallOutput { output, .. }
+            | ResponseItem::FunctionCallOutput { output, .. } = &mut item
+            {
                 output.success = success;
             }
             Event {
@@ -6849,7 +6886,16 @@ required = true
                 {"type": "input_text", "text": body},
             ])
         };
-        let exec = Some((codex_code_mode::PUBLIC_TOOL_NAME, None));
+        // The call's item type, and its tool name and namespace when the call was seen. `exec`
+        // is a custom tool; `wait`, which resumes a yielded cell, is a function tool.
+        let exec = (
+            "custom_tool_call",
+            Some((codex_code_mode::PUBLIC_TOOL_NAME, None)),
+        );
+        let wait = (
+            "function_call",
+            Some((codex_code_mode::WAIT_TOOL_NAME, None)),
+        );
         let cases = [
             (
                 exec,
@@ -6961,65 +7007,168 @@ required = true
                 Some("harness_error"),
                 Some("other"),
             ),
+            (
+                wait,
+                cell("Script completed", "private result /workspace/private.png"),
+                Some(true),
+                Some("completed"),
+                None,
+            ),
+            (
+                wait,
+                cell("Script failed", "Script error:\nError: private failure"),
+                Some(false),
+                Some("script_failed"),
+                None,
+            ),
+            (
+                wait,
+                json!(header("Script running with cell ID 7")),
+                Some(true),
+                Some("running"),
+                None,
+            ),
+            (
+                wait,
+                json!(header("Script terminated")),
+                Some(true),
+                Some("terminated"),
+                None,
+            ),
+            (
+                wait,
+                json!("code-mode host exited with status signal: 9 (SIGKILL)"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_exited"),
+            ),
+            (
+                wait,
+                json!("code-mode host closed its stdout"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_exited"),
+            ),
+            (
+                wait,
+                json!("code-mode host timed out waiting for wait response"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_timeout"),
+            ),
+            (
+                wait,
+                json!("code-mode host timed out waiting for terminate response"),
+                Some(false),
+                Some("harness_error"),
+                Some("host_timeout"),
+            ),
             // Codex also treats the "functions" namespace as the default one.
             (
-                Some((codex_code_mode::PUBLIC_TOOL_NAME, Some("functions"))),
+                (
+                    "custom_tool_call",
+                    Some((codex_code_mode::PUBLIC_TOOL_NAME, Some("functions"))),
+                ),
                 json!(header("Script completed")),
                 Some(true),
                 Some("completed"),
                 None,
             ),
-            // An interrupted call is not a harness error, another custom tool or an MCP tool
-            // has no cell, and an output whose call was never seen cannot be attributed to `exec`.
+            (
+                (
+                    "function_call",
+                    Some((codex_code_mode::WAIT_TOOL_NAME, Some("functions"))),
+                ),
+                json!(header("Script completed")),
+                Some(true),
+                Some("completed"),
+                None,
+            ),
+            // An interrupted call is not a harness error, another tool or an MCP tool has no
+            // cell, `exec` is never a function tool, and an output whose call was never seen
+            // cannot be attributed to `exec` or `wait`.
             (exec, json!("aborted by user after 1.0s"), None, None, None),
             (
-                Some(("apply_patch", None)),
+                ("custom_tool_call", Some(("apply_patch", None))),
                 json!("private patch failure"),
                 Some(false),
                 None,
                 None,
             ),
             (
-                Some((codex_code_mode::PUBLIC_TOOL_NAME, Some("mcp__private__"))),
+                (
+                    "custom_tool_call",
+                    Some((codex_code_mode::PUBLIC_TOOL_NAME, Some("mcp__private__"))),
+                ),
                 json!("private failure"),
                 Some(false),
                 None,
                 None,
             ),
             (
+                (
+                    "function_call",
+                    Some((codex_code_mode::WAIT_TOOL_NAME, Some("mcp__private__"))),
+                ),
+                json!("private failure"),
+                Some(false),
                 None,
+                None,
+            ),
+            (
+                (
+                    "function_call",
+                    Some((codex_code_mode::PUBLIC_TOOL_NAME, None)),
+                ),
+                json!("private failure"),
+                Some(false),
+                None,
+                None,
+            ),
+            (
+                ("custom_tool_call", None),
                 json!("failed to spawn code-mode host /workspace/private/codex-code-mode-host"),
+                Some(false),
+                None,
+                None,
+            ),
+            (
+                ("function_call", None),
+                json!("code-mode host closed its stdout"),
                 Some(false),
                 None,
                 None,
             ),
         ];
         let mut adapter = CodexEventStreamAdapter::default();
-        for (index, (call, body, success, status, error_class)) in cases.into_iter().enumerate() {
+        for (index, ((kind, call), body, success, status, error_class)) in
+            cases.into_iter().enumerate()
+        {
             let call_id = format!("private-call-{index}");
             let mut projected = Vec::new();
             if let Some((name, namespace)) = call {
-                let call = adapter.collect(&raw(
-                    json!({
-                        "type": "custom_tool_call", "name": name, "namespace": namespace,
-                        "call_id": call_id, "input": "private source /workspace/private.js",
-                    }),
-                    None,
-                ));
+                let mut item = json!({
+                    "type": kind, "name": name, "namespace": namespace, "call_id": call_id,
+                });
+                let input = if kind == "function_call" {
+                    "arguments"
+                } else {
+                    "input"
+                };
+                item[input] = json!("private source /workspace/private.js");
+                let call = adapter.collect(&raw(item, None));
                 assert_eq!(
                     call,
-                    vec![
-                        json!({"type": "tool.activity", "kind": "custom_tool_call", "phase": "call"})
-                    ]
+                    vec![json!({"type": "tool.activity", "kind": kind, "phase": "call"})]
                 );
                 projected.extend(call);
             }
             let output = adapter.collect(&raw(
-                json!({"type": "custom_tool_call_output", "call_id": call_id, "output": body}),
+                json!({"type": format!("{kind}_output"), "call_id": call_id, "output": body}),
                 success,
             ));
             let mut expected = json!({
-                "type": "tool.activity", "kind": "custom_tool_call",
+                "type": "tool.activity", "kind": kind,
                 "phase": "output", "success": success,
             });
             if let Some(status) = status {
@@ -7040,6 +7189,7 @@ required = true
                 "Wall time",
                 "code-mode host",
                 codex_code_mode::PUBLIC_TOOL_NAME,
+                codex_code_mode::WAIT_TOOL_NAME,
                 "apply_patch",
             ] {
                 assert!(

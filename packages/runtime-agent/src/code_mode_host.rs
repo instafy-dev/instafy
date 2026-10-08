@@ -90,13 +90,22 @@ pub(crate) fn session_provider(host: PathBuf) -> Arc<dyn CodeModeSessionProvider
 
 /// Codex logs the host's stderr (V8 fatal errors, panics) only at debug, under this target
 /// (`codex-rs/code-mode/src/remote_session/connection.rs`).
-pub const HOST_STDERR_LOG_DIRECTIVE: &str = "codex_code_mode::remote_session=debug";
+const HOST_STDERR_LOG_TARGET: &str = "codex_code_mode::remote_session";
 
 /// Keeps the host's stderr in the runtime log whatever `RUST_LOG` selects, so a host that dies
-/// while starting leaves its reason in the log. It is a few lines per host spawn.
+/// while starting leaves its reason in the log. It is a few lines per host spawn, but a host
+/// panic can print a cell's output. A `RUST_LOG` directive for this target is the operator's
+/// choice and stays: `add_directive` would replace it. A narrower one wins on its own.
 pub fn with_host_stderr_logging(filter: EnvFilter) -> EnvFilter {
+    let names_target = filter
+        .to_string()
+        .split(',')
+        .any(|directive| directive.split(['[', '=']).next() == Some(HOST_STDERR_LOG_TARGET));
+    if names_target {
+        return filter;
+    }
     filter.add_directive(
-        HOST_STDERR_LOG_DIRECTIVE
+        format!("{HOST_STDERR_LOG_TARGET}=debug")
             .parse()
             .expect("the host stderr log directive is valid"),
     )
@@ -217,9 +226,20 @@ mod tests {
     }
 
     #[test]
-    fn the_runtime_log_keeps_host_stderr_whatever_rust_log_selects() {
+    fn the_runtime_log_keeps_host_stderr_unless_rust_log_names_its_target() {
         // "info" is init_tracing's default; the others stand for an operator's RUST_LOG.
-        for rust_log in ["info", "warn", "error,codex_code_mode=off"] {
+        for (rust_log, keeps_stderr) in [
+            ("info", true),
+            ("warn", true),
+            ("error,codex_code_mode=off", true),
+            // An operator's directive for the target itself, or a narrower one, decides.
+            ("info,codex_code_mode::remote_session=off", false),
+            (
+                "info,codex_code_mode::remote_session::connection=off",
+                false,
+            ),
+            ("warn,codex_code_mode::remote_session=trace", true),
+        ] {
             let log = CapturedLog::default();
             let writer = log.clone();
             let subscriber = tracing_subscriber::fmt()
@@ -235,8 +255,9 @@ mod tests {
                 tracing::debug!(target: "codex_code_mode::grpc_session", "unrelated debug");
             });
             let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
-            assert!(
+            assert_eq!(
                 log.contains("code-mode host stderr: fatal"),
+                keeps_stderr,
                 "{rust_log}: {log}"
             );
             assert!(!log.contains("unrelated debug"), "{rust_log}: {log}");
