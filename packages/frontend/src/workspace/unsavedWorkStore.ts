@@ -305,11 +305,10 @@ async function settleStoppedOrigins(projectId: string): Promise<void> {
   }
   const batch = liveOrigins.settling;
   const originIds = projectLists(projectId).map(([originId]) => originId);
-  await Promise.allSettled(
-    originIds.map((originId) => refreshUnsavedWork({ projectId, originId, force: true })),
-  );
-  // A newer forced fetch may have taken over one of these: show its answer.
-  await Promise.allSettled(originIds.map((originId) => inflight.get(storeKey(projectId, originId))?.promise));
+  for (const originId of originIds) {
+    void refreshUnsavedWork({ projectId, originId, force: true });
+  }
+  await newestListsAnswered(projectId, originIds);
   const record = liveOrigins;
   if (!record || record.projectId !== projectId) {
     return;
@@ -317,6 +316,29 @@ async function settleStoppedOrigins(projectId: string): Promise<void> {
   const settling = new Set([...record.settling].filter((id) => !batch.has(id)));
   liveOrigins = liveOriginsRecord(projectId, record.live, settling);
   notify();
+}
+
+/**
+ * Resolves once the newest fetch of each of these lists has answered, or
+ * another project is open. Only the newest fetch per list stores its answer,
+ * so a newer one (the drawer opening, say) settles a list whose earlier
+ * fetch stalls.
+ */
+function newestListsAnswered(projectId: string, originIds: readonly string[]): Promise<void> {
+  const answered = () =>
+    liveOrigins?.projectId !== projectId ||
+    originIds.every((originId) => !getUnsavedWorkSnapshot(projectId, originId).loading);
+  if (answered()) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const unsubscribe = subscribeUnsavedWork(() => {
+      if (answered()) {
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
 }
 
 /** Which rolling saves are hidden in `projectId` right now. */
