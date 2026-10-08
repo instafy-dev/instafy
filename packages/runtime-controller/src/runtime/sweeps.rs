@@ -56,9 +56,13 @@ const REQUEUED_JOB_EXPIRED_MESSAGE: &str = "This run was interrupted when its ru
 /// The `failureCode` of a run, and the `kind` of the chat message, when the
 /// requeued-job expiry gives up an interrupted turn.
 pub(super) const INTERRUPTED_RUN_EXPIRED_CODE: &str = "interrupted_run_expired";
+/// Why a message queued behind a turn a person stopped was not sent when the
+/// requeued-job expiry gave that turn up (see [`expire_stale_requeued_jobs`]).
+const HELD_BEHIND_A_STOPPED_TURN_MESSAGE: &str =
+    "Not sent because the runtime was stopped. Send it now if you still need it, or remove it.";
 /// Requeue reasons of a stop a person asked for. The expiry of a turn one of
-/// them interrupted starts nothing on its own (see
-/// [`expire_stale_requeued_jobs`]).
+/// them interrupted runs no plan checkpoint and holds what was queued behind
+/// the turn (see [`expire_stale_requeued_jobs`]).
 const REQUEUE_REASONS_OF_A_PERSON: [&str; 2] = ["user_stop", "user_remove"];
 /// How long a queued platform AI job is left alone before
 /// `fail_platform_jobs_stranded_on_private_runtimes` may fail it. Dispatch
@@ -495,9 +499,9 @@ pub(super) struct FailedQueuedJobs {
     conversation_messages: Vec<crate::conversations::ConversationMessageRow>,
     /// Project, job, run and conversation of each failed job.
     jobs: Vec<(Uuid, Uuid, Option<Uuid>, Option<Uuid>)>,
-    /// The failed jobs whose failure dispatches nothing: no plan checkpoint
-    /// and no send-queue drain. Empty unless the sweep says otherwise.
-    dispatch_nothing_for: std::collections::BTreeSet<Uuid>,
+    /// The failed jobs whose failure runs no plan checkpoint. Empty unless
+    /// the sweep says otherwise.
+    skip_plan_checkpoint_for: std::collections::BTreeSet<Uuid>,
     /// The `kind` of the messages, which each run's failure also carries as
     /// its `failureCode`.
     kind: String,
@@ -578,7 +582,7 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
         settled,
         conversation_messages,
         jobs,
-        dispatch_nothing_for: std::collections::BTreeSet::new(),
+        skip_plan_checkpoint_for: std::collections::BTreeSet::new(),
         kind: kind.to_string(),
         outcome: outcome.to_string(),
         message: message.to_string(),
@@ -589,8 +593,8 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
 /// transaction has committed: input state, refunded credits, the conversation
 /// messages, each run's failure, the lead checkpoint of a plan whose last
 /// live worker failed, and a send-queue drain per conversation, since
-/// whatever was queued behind a failed turn may go now. The last two skip
-/// the jobs in `dispatch_nothing_for`.
+/// whatever was queued behind a failed turn may go now. The checkpoint skips
+/// the jobs in `skip_plan_checkpoint_for`.
 pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQueuedJobs) {
     crate::send_intents::publish_job_input_state_updates(
         state,
@@ -608,6 +612,9 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
     let mut conversations = std::collections::BTreeSet::new();
     let mut job_ids = Vec::with_capacity(failed.jobs.len());
     for (project_id, job_id, run_id, conversation_id) in failed.jobs {
+        if !failed.skip_plan_checkpoint_for.contains(&job_id) {
+            job_ids.push(job_id);
+        }
         if let Some(run_id) = run_id {
             publish_failed_run(
                 state,
@@ -621,10 +628,6 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
             )
             .await;
         }
-        if failed.dispatch_nothing_for.contains(&job_id) {
-            continue;
-        }
-        job_ids.push(job_id);
         if let Some(conversation_id) = conversation_id {
             conversations.insert(conversation_id);
         }
@@ -956,12 +959,16 @@ async fn fail_stranded_platform_jobs(
 /// An expired job fails like the work a limit wait gives up on
 /// ([`settle_failed_queued_jobs_with_message`]): its run fails with
 /// `run.completed` (`failureCode` [`INTERRUPTED_RUN_EXPIRED_CODE`]) and its
-/// conversation gets the reason as a controller error. Its failure starts
-/// nothing when a person's Stop or Remove requeued it
-/// ([`REQUEUE_REASONS_OF_A_PERSON`]): no plan checkpoint and no send-queue
-/// drain, either of which could start the machine they stopped. A message
-/// queued behind the turn still goes out with the send-queue recovery sweep
-/// (`send_queue::spawn_send_queue_recovery_sweep`), as it did before.
+/// conversation gets the reason as a controller error.
+///
+/// When a person's Stop or Remove requeued it ([`REQUEUE_REASONS_OF_A_PERSON`]),
+/// its failure sends nothing that could start the machine they stopped: it
+/// runs no plan checkpoint, and the messages queued in its conversation by
+/// the time of the Stop fail in the same transaction
+/// ([`HELD_BEHIND_A_STOPPED_TURN_MESSAGE`]). Neither the drain nor the
+/// send-queue recovery sweep (`send_queue::spawn_send_queue_recovery_sweep`)
+/// sends a failed entry; its owner can send it now or remove it. A message
+/// queued after the Stop asks again and goes out as usual.
 pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
     let mut connection = state
         .pool
@@ -1024,7 +1031,8 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
                    )
                    {skip_work_waiting_on_the_limit}
                  returning id, project_id, run_id, conversation_id, session_id, prompt_id,
-                           payload, error_message, lease_attempts"
+                           payload, error_message, lease_attempts,
+                           (payload ->> 'requeuedAt')::timestamptz as requeued_at"
             ),
             &[
                 &(REQUEUED_JOB_EXPIRY_SECONDS as f64),
@@ -1051,6 +1059,44 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
     )
     .await?;
 
+    // Hold what a person's Stop left queued behind the turn. Left queued, it
+    // would go out within seconds of this failure with the send-queue
+    // recovery sweep and start the machine they stopped.
+    let mut stopped_at_by_conversation = std::collections::BTreeMap::new();
+    for row in &rows {
+        let payload = row
+            .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
+            .0;
+        if !payload
+            .get("requeuedReason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reason| REQUEUE_REASONS_OF_A_PERSON.contains(&reason))
+        {
+            continue;
+        }
+        failed.skip_plan_checkpoint_for.insert(row.get("id"));
+        if let Some(conversation_id) = row.get::<_, Option<Uuid>>("conversation_id") {
+            let stopped_at: DateTime<Utc> = row.get("requeued_at");
+            stopped_at_by_conversation
+                .entry(conversation_id)
+                .and_modify(|latest: &mut DateTime<Utc>| *latest = (*latest).max(stopped_at))
+                .or_insert(stopped_at);
+        }
+    }
+    let mut held_entries = Vec::new();
+    for (conversation_id, stopped_at) in stopped_at_by_conversation {
+        held_entries.extend(
+            crate::send_queue::fail_queued_entries_queued_by(
+                &transaction,
+                conversation_id,
+                stopped_at,
+                HELD_BEHIND_A_STOPPED_TURN_MESSAGE,
+            )
+            .await
+            .context("failed to hold the messages queued behind a stopped turn")?,
+        );
+    }
+
     transaction
         .commit()
         .await
@@ -1065,16 +1111,9 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
             project_id = %project_id,
             "expired stale requeued job"
         );
-        let payload = row
-            .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
-            .0;
-        if payload
-            .get("requeuedReason")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|reason| REQUEUE_REASONS_OF_A_PERSON.contains(&reason))
-        {
-            failed.dispatch_nothing_for.insert(job_id);
-        }
+    }
+    for entries in held_entries {
+        crate::send_queue::publish_failed_queued_entries(state, entries);
     }
     publish_failed_queued_jobs(state, failed).await;
 
@@ -3389,20 +3428,87 @@ mod tests {
         cleanup
     }
 
-    /// The expiry of a turn a person stopped starts nothing on its own, so
-    /// the message queued behind it stays queued instead of starting the
-    /// machine they stopped. A turn another stop interrupted still drains
-    /// its conversation's send queue when it expires, as a limit wait's
-    /// give-up does.
+    /// Queue a follow-up from the owner of `fixture` in `conversation_id`,
+    /// queued `age_seconds` ago, the way the send queue stores one.
+    async fn queue_a_follow_up(
+        fixture: &crate::tests_managed_ai_refund::ReservedManagedAiPrompt,
+        conversation_id: Uuid,
+        age_seconds: i64,
+    ) -> anyhow::Result<Uuid> {
+        let entry_id = Uuid::new_v4();
+        fixture
+            .pool
+            .get()
+            .await?
+            .execute(
+                "insert into conversation_send_queue (
+                     id, project_id, conversation_id, user_id, status, request, created_at
+                 ) values ($1, $2, $3, $4, 'queued', $5, now() - interval '1 second' * $6)",
+                &[
+                    &entry_id,
+                    &fixture.project_id,
+                    &conversation_id,
+                    &fixture.owner_user_id,
+                    &tokio_postgres::types::Json(serde_json::json!({
+                        "sessionId": null,
+                        "promptText": "And the changelog too",
+                        "intent": "feature",
+                        "metadata": {
+                            "agentSelection": { "active": ["octo"], "mentions": [] }
+                        }
+                    })),
+                    &(age_seconds as f64),
+                ],
+            )
+            .await?;
+        Ok(entry_id)
+    }
+
+    /// Wait until the send queue has sent `entry_id`: dispatched with a run,
+    /// or failed by its dispatch. Return its status.
+    async fn wait_until_sent(
+        fixture: &crate::tests_managed_ai_refund::ReservedManagedAiPrompt,
+        entry_id: Uuid,
+    ) -> anyhow::Result<String> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let row = fixture
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select status, dispatched_run_id from conversation_send_queue
+                     where id = $1",
+                    &[&entry_id],
+                )
+                .await?;
+            let status: String = row.get("status");
+            if status == "failed" || row.get::<_, Option<Uuid>>("dispatched_run_id").is_some() {
+                return Ok(status);
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the send queue never sent {entry_id} ({status})"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// The expiry of a turn a person stopped sends nothing they had queued
+    /// behind it, so it cannot start the machine they stopped. In the
+    /// expiry's transaction those messages fail with a reason their owner
+    /// sees, so neither the expiry's drain nor the send-queue recovery sweep
+    /// (run here as production runs it every few seconds) sends them. A
+    /// message queued after the Stop asks again and goes out. A turn another
+    /// stop interrupted holds nothing back, as a limit wait's give-up does.
     #[tokio::test]
-    async fn expiring_a_turn_a_person_stopped_dispatches_nothing() -> anyhow::Result<()> {
+    async fn an_expired_user_stop_holds_what_was_queued_behind_it() -> anyhow::Result<()> {
         use crate::tests_managed_ai_refund::seed_reserved_managed_ai_prompt;
         use serde_json::json;
-        use tokio_postgres::types::Json as PgJson;
 
         let Some(stopped) = seed_reserved_managed_ai_prompt("expired-user-stop-queue").await?
         else {
-            eprintln!("skipping interrupted turn queue drain test: TEST_DATABASE_URL not set");
+            eprintln!("skipping interrupted turn queue hold test: TEST_DATABASE_URL not set");
             return Ok(());
         };
         let idle = match seed_reserved_managed_ai_prompt("expired-idle-queue").await {
@@ -3414,7 +3520,8 @@ mod tests {
             }
         };
         let test_result: anyhow::Result<()> = async {
-            let mut entries = Vec::new();
+            let stopped_ago = super::REQUEUED_JOB_EXPIRY_SECONDS + 60;
+            let mut conversations = Vec::new();
             for (fixture, reason) in [(&stopped, "user_stop"), (&idle, "idle")] {
                 let connection = fixture.pool.get().await?;
                 connection
@@ -3428,7 +3535,7 @@ mod tests {
                     fixture.job_id,
                     fixture.run_id,
                     reason,
-                    super::REQUEUED_JOB_EXPIRY_SECONDS + 60,
+                    stopped_ago,
                 )
                 .await?;
                 let conversation_id: Uuid = connection
@@ -3438,31 +3545,14 @@ mod tests {
                     )
                     .await?
                     .get(0);
-                let entry_id = Uuid::new_v4();
-                connection
-                    .execute(
-                        "insert into conversation_send_queue (
-                             id, project_id, conversation_id, status, request
-                         ) values ($1, $2, $3, 'queued', $4)",
-                        &[
-                            &entry_id,
-                            &fixture.project_id,
-                            &conversation_id,
-                            &PgJson(json!({
-                                "sessionId": null,
-                                "promptText": "And the changelog too",
-                                "intent": "feature",
-                                "metadata": {
-                                    "agentSelection": { "active": ["octo"], "mentions": [] }
-                                }
-                            })),
-                        ],
-                    )
-                    .await?;
-                entries.push(entry_id);
+                conversations.push(conversation_id);
             }
-            let (stopped_entry, idle_entry) = (entries[0], entries[1]);
+            let held = queue_a_follow_up(&stopped, conversations[0], stopped_ago + 60).await?;
+            let asked_again = queue_a_follow_up(&stopped, conversations[0], 60).await?;
+            let behind_idle = queue_a_follow_up(&idle, conversations[1], stopped_ago + 60).await?;
 
+            let _watch = stopped.state.events.watch_project(stopped.project_id);
+            let mut events = stopped.state.events.subscribe();
             super::expire_stale_requeued_jobs(&stopped.state).await?;
             for fixture in [&stopped, &idle] {
                 let status: String = fixture
@@ -3477,44 +3567,62 @@ mod tests {
                     .get(0);
                 assert_eq!(status, "failed");
             }
+            let mut announcements = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if event.kind == "conversation.sendQueue"
+                    && event.data["entry"]["id"] == json!(held)
+                {
+                    announcements.push(event);
+                }
+            }
 
-            // The drain is spawned: wait until it has dispatched the idle
-            // space's message, or failed it.
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            let mut cursor = None;
             loop {
-                let row = idle
-                    .pool
-                    .get()
-                    .await?
-                    .query_one(
-                        "select status, dispatched_run_id from conversation_send_queue
-                         where id = $1",
-                        &[&idle_entry],
-                    )
-                    .await?;
-                let status: String = row.get("status");
-                if status == "failed" || row.get::<_, Option<Uuid>>("dispatched_run_id").is_some() {
+                cursor = crate::send_queue::recover_send_queue_batch(&stopped.state, cursor)
+                    .await
+                    .map_err(|(status, body)| {
+                        anyhow::anyhow!("send-queue recovery: {status} {}", body.0.message)
+                    })?;
+                if cursor.is_none() {
                     break;
                 }
-                anyhow::ensure!(
-                    tokio::time::Instant::now() < deadline,
-                    "the idle stop's conversation was never drained ({status})"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            // Both drains would have been spawned by the same publish.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let stopped_status: String = stopped
+            let row = stopped
                 .pool
                 .get()
                 .await?
                 .query_one(
-                    "select status from conversation_send_queue where id = $1",
-                    &[&stopped_entry],
+                    "select status, error_message, dispatched_at, dispatched_run_id
+                     from conversation_send_queue where id = $1",
+                    &[&held],
                 )
-                .await?
-                .get(0);
-            assert_eq!(stopped_status, "queued");
+                .await?;
+            assert_eq!(row.get::<_, String>("status"), "failed");
+            assert_eq!(
+                row.get::<_, Option<String>>("error_message").as_deref(),
+                Some(super::HELD_BEHIND_A_STOPPED_TURN_MESSAGE)
+            );
+            assert_eq!(
+                row.get::<_, Option<chrono::DateTime<Utc>>>("dispatched_at"),
+                None,
+                "nothing ever claimed it"
+            );
+            assert_eq!(row.get::<_, Option<Uuid>>("dispatched_run_id"), None);
+            // Its owner hears that it was not sent, and why.
+            assert_eq!(announcements.len(), 1);
+            let announcement = &announcements[0];
+            assert_eq!(announcement.data["action"], json!("failed"));
+            assert_eq!(announcement.data["entry"]["status"], json!("failed"));
+            assert_eq!(
+                announcement.data["entry"]["errorMessage"],
+                json!(super::HELD_BEHIND_A_STOPPED_TURN_MESSAGE)
+            );
+            assert_eq!(announcement.target_user_id, Some(stopped.owner_user_id));
+            assert_eq!(announcement.conversation_id, Some(conversations[0]));
+
+            for (fixture, entry) in [(&stopped, asked_again), (&idle, behind_idle)] {
+                assert_eq!(wait_until_sent(fixture, entry).await?, "dispatched");
+            }
             Ok(())
         }
         .await;

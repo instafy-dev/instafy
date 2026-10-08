@@ -968,6 +968,80 @@ async fn mark_entry_failed_with<C>(
     }
 }
 
+/// Entries [`fail_queued_entries_queued_by`] failed in a caller's transaction,
+/// to announce to their owners once it commits
+/// ([`publish_failed_queued_entries`]).
+pub(crate) struct FailedQueuedEntries {
+    project_id: Uuid,
+    session_id: Option<Uuid>,
+    conversation_id: Uuid,
+    /// Owner and entry JSON of each failed entry.
+    entries: Vec<(Option<Uuid>, JsonValue)>,
+}
+
+/// Fail, with `message`, the entries of `conversation_id` still `queued` that
+/// were queued no later than `queued_by`. A failed entry is an owner-private
+/// dead letter: no drain or recovery sweep sends it, and its owner sees
+/// `message` beside it and can send it now (which takes a failed entry) or
+/// remove it. A claim already in flight (`dispatched`) is left to finish.
+pub(crate) async fn fail_queued_entries_queued_by<C>(
+    connection: &C,
+    conversation_id: Uuid,
+    queued_by: DateTime<Utc>,
+    message: &str,
+) -> Result<Option<FailedQueuedEntries>, tokio_postgres::Error>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    let rows = connection
+        .query(
+            &format!(
+                "update conversation_send_queue
+                 set status = 'failed', error_message = $3, updated_at = now()
+                 where conversation_id = $1
+                   and status = 'queued'
+                   and created_at <= $2
+                 returning {ENTRY_COLUMNS}"
+            ),
+            &[&conversation_id, &queued_by, &message],
+        )
+        .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let conversation = connection
+        .query_one(
+            "select project_id, session_id from conversations where id = $1",
+            &[&conversation_id],
+        )
+        .await?;
+    Ok(Some(FailedQueuedEntries {
+        project_id: conversation.get("project_id"),
+        session_id: conversation.get("session_id"),
+        conversation_id,
+        entries: rows
+            .iter()
+            .map(|row| (row.get("user_id"), entry_row_to_json(row)))
+            .collect(),
+    }))
+}
+
+/// Tell the owners of entries [`fail_queued_entries_queued_by`] failed, once
+/// the transaction that failed them has committed.
+pub(crate) fn publish_failed_queued_entries(state: &AppState, failed: FailedQueuedEntries) {
+    for (owner_user_id, entry) in failed.entries {
+        publish_send_queue_event(
+            state,
+            failed.project_id,
+            failed.session_id,
+            failed.conversation_id,
+            owner_user_id,
+            "failed",
+            entry,
+        );
+    }
+}
+
 fn stamp_queue_dispatch_idempotency(body: &mut ConversationPromptBody, queue_entry_id: Uuid) {
     // Queue status is recorded after dispatch commits. If the controller
     // crashes in that window, the reclaim pass retries this entry; preserve an
@@ -1065,7 +1139,9 @@ pub(crate) fn spawn_send_queue_recovery_sweep(state: AppState) {
     });
 }
 
-async fn recover_send_queue_batch(
+/// One pass of the recovery sweep: drain each conversation after `cursor`
+/// with queued work, up to a batch, and return where the next pass starts.
+pub(crate) async fn recover_send_queue_batch(
     state: &AppState,
     cursor: Option<Uuid>,
 ) -> Result<Option<Uuid>, (StatusCode, Json<ApiError>)> {

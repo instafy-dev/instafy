@@ -194,9 +194,13 @@ When the expiry gives a turn up, its run fails with `run.completed`
 conversation gets a controller error message (`kind`
 `interrupted_run_expired`, `interruptionReason` the stop's reason). The
 failure of a turn that a person's Stop or Remove (`user_stop`, `user_remove`)
-interrupted starts nothing on its own: no plan checkpoint and no send-queue
-drain. A message queued behind it still goes out with the send-queue recovery
-sweep.
+interrupted sends nothing that could start the machine they stopped. It runs
+no plan checkpoint, and the messages queued in its conversation by the time of
+the Stop become `failed` in the expiry's transaction, with a reason their owner
+sees in the queue. The send queue never sends a failed entry on its own, so
+neither the drain nor its recovery sweep picks them up; the owner can send one
+now or remove it. A message queued after the Stop asks again and goes out as
+usual, which can start the machine.
 
 ## A launch that does not come up
 
