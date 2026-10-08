@@ -498,6 +498,83 @@ async fn a_job_end_with_nothing_new_asks_for_nothing() {
     assert!(result.unwrap().artifacts.is_empty());
 }
 
+/// Everything written at `WARN` or above while it is held.
+#[derive(Clone, Default)]
+struct Warnings(Arc<Mutex<Vec<u8>>>);
+
+impl Warnings {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).to_string()
+    }
+}
+
+impl std::io::Write for Warnings {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Warnings {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// With rolling saves switched off, or refused for this job, a job's end
+/// writes no warning: neither is a save that went wrong. A save that failed
+/// still warns.
+#[tokio::test]
+async fn a_job_end_warns_only_about_a_save_that_went_wrong() {
+    for (status, body, warns) in [
+        (
+            403,
+            json!({ "message": "off", "code": "rolling_saves_off" }),
+            false,
+        ),
+        (
+            403,
+            json!({ "message": "this job is not allowed to write the workspace" }),
+            false,
+        ),
+        (502, json!({ "message": "unavailable" }), true),
+    ] {
+        let seen = Seen::default();
+        let origin_id = Uuid::new_v4();
+        let controller_url = controller(&seen, origin_id, Some((status, body))).await;
+        let endpoint = origin(&seen, (200, durable())).await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let saves = RollingSaves::from_gate(gate(
+            &controller_url,
+            local_origin(origin_id, &endpoint, Some(probe(true, 0, reads))),
+        ))
+        .unwrap();
+        let warnings = Warnings::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(warnings.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let artifact = {
+            let _logging = tracing::subscriber::set_default(subscriber);
+            saves.save_at_turn_end().await
+        };
+        assert_eq!(artifact.is_some(), warns, "{status}: {artifact:?}");
+        let text = warnings.text();
+        assert_eq!(
+            text.contains("could not save the working folder"),
+            warns,
+            "{status}: {text}"
+        );
+    }
+}
+
 /// A 403 `rolling_saves_off` ends the job's ticks; so does any other refusal
 /// for this job. Neither is recorded as a failed save.
 #[tokio::test]

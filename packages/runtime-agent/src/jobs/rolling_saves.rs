@@ -340,6 +340,16 @@ impl RollingSaves {
                 job_id = %self.job_id,
                 "the working folder is saved and unchanged at the end of the job"
             ),
+            // Neither is a save that went wrong, and both record nothing.
+            SaveOutcome::Off => debug!(
+                job_id = %self.job_id,
+                "rolling saves are off; no save at the end of the job"
+            ),
+            SaveOutcome::Refused(code) => info!(
+                job_id = %self.job_id,
+                %code,
+                "the controller does not save this job's folder"
+            ),
             other => warn!(
                 job_id = %self.job_id,
                 outcome = ?other,
