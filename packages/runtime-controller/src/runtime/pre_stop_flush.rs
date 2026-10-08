@@ -38,9 +38,11 @@
 //! runtime's provider, which launched the container on its node, where that
 //! generation's origin is (`POST /runtime/origin`), and sends the credential
 //! only to that address, and only when it is on the node or its private
-//! network ([`endpoint_is_node_local`]). When the provider does not vouch
-//! for one, the stop mints nothing and reports `no_writer` with the reason
-//! `origin_not_attested`.
+//! network ([`endpoint_is_node_local`]). The Docker provider's answer is an
+//! address on its own node's host gateway, so it gives one only when the
+//! controller its runtimes call is on that node. When the provider does not
+//! vouch for one, the stop mints nothing and reports `no_writer` with the
+//! reason `origin_not_attested`.
 //!
 //! A successful flush fences the origin's saves until the runtime stops. When
 //! the stop does not happen after all (it is skipped, or someone opened the

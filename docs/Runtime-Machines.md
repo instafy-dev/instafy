@@ -483,13 +483,16 @@ loses only work that never reached the remote:
   Either credential goes only to the runtime's own origin, at the address
   the runtime's provider gives for that exact lease generation on its node
   (`POST /runtime/origin`; the Docker provider answers the origin's
-  published port on the node's host gateway, `http://host.docker.internal:<port>`),
-  and only when that address is on the node or its private network. The
-  endpoint the runtime registered itself, with its machine token, is never
-  used: a hosted runtime's is a public tunnel host, and any runtime could
-  name any address. When the provider places no origin of that generation
+  published port on the node's host gateway, `http://host.docker.internal:<port>`,
+  and only when the controller its runtimes call is on the same node:
+  `CONTROLLER_BASE_URL` unset, or naming `host.docker.internal`, `localhost`
+  or a loopback address), and only when that address is on the node or its
+  private network. The endpoint the runtime registered itself, with its
+  machine token, is never used: a hosted runtime's is a public tunnel host,
+  and any runtime could name any address. When the provider places no origin of that generation
   on the node, the stop mints nothing and reports `no_writer` with the
-  reason `origin_not_attested`.
+  reason `origin_not_attested`; so does every stop through a Docker provider
+  whose runtimes call a controller on another machine.
   Otherwise (no owner, or a requested stop with no lease holder) the
   controller mints nothing and does not call the origin (`no_writer`), and
   the runtime's own shutdown flush keeps the work locally. The origin's

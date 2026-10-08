@@ -41,6 +41,31 @@ fn node_local_origin_endpoint(host_port: u16) -> String {
     format!("http://host.docker.internal:{host_port}")
 }
 
+/// Whether the controller this node's runtimes call (`CONTROLLER_BASE_URL`)
+/// runs on this node: unset (the compose file's host-gateway default), or
+/// naming the host gateway, `localhost` or a loopback address. An address
+/// from [`node_local_origin_endpoint`] means this node, so only a controller
+/// here may be told one: any other controller would read it as its own
+/// host and send a stop's save credential to the wrong machine.
+fn controller_on_this_node(controller_base_url: Option<&str>) -> bool {
+    let Some(base) = controller_base_url else {
+        return true;
+    };
+    let Some(host) = Url::parse(base.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    host == "host.docker.internal"
+        || host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// The host port in `docker port <container> <port>/tcp` output, as
 /// `0.0.0.0:49153` or `[::]:49153`, one binding per line.
 fn published_host_port(output: &str) -> Option<u16> {
@@ -1369,6 +1394,11 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
         runtime_id: Uuid,
         lease_id: Uuid,
     ) -> anyhow::Result<Option<String>> {
+        // The answer is an address on this node; a controller elsewhere (a
+        // provider registered with a remote one) would read it as its own.
+        if !controller_on_this_node(self.controller_base_url.as_deref()) {
+            return Ok(None);
+        }
         let project_name = self.sanitize_project_name(project_id, runtime_id);
         let running = self.running_service_container_ids(&project_name).await?;
         // One running container, of exactly that generation.
@@ -1494,6 +1524,57 @@ mod tests {
             node_local_origin_endpoint(49153),
             "http://host.docker.internal:49153"
         );
+    }
+
+    /// Only a controller on this node may be told an origin address on it.
+    #[test]
+    fn only_a_controller_on_this_node_is_told_where_an_origin_is() {
+        for base in [
+            None,
+            Some("http://host.docker.internal:80"),
+            Some("http://HOST.docker.internal:8788/"),
+            Some("http://localhost:8788"),
+            Some("http://127.0.0.1:8788"),
+            Some("http://127.1.2.3"),
+            Some("http://[::1]:8788"),
+        ] {
+            assert!(controller_on_this_node(base), "{base:?}");
+        }
+        for base in [
+            Some("https://controller.example.com"),
+            Some("http://10.0.0.5:8788"),
+            Some("http://192.168.1.20:8788"),
+            Some("http://instafy-controller:8788"),
+            Some("http://[fd00::1]:8788"),
+            Some("not a url"),
+            Some(""),
+        ] {
+            assert!(!controller_on_this_node(base), "{base:?}");
+        }
+    }
+
+    /// A provider whose runtimes call a controller elsewhere answers no
+    /// origin, before it looks at any container.
+    #[tokio::test]
+    async fn a_remote_controller_is_told_no_origin() {
+        let mut allocator = DockerRuntimeAllocator::new(&ProviderConfig::default_docker()).unwrap();
+        allocator.controller_base_url = Some("https://controller.example.com".to_string());
+        // Every compose operation slot is taken: any container lookup would wait.
+        let permits = allocator.compose_semaphore.available_permits() as u32;
+        let _held = allocator
+            .compose_semaphore
+            .clone()
+            .acquire_many_owned(permits)
+            .await
+            .unwrap();
+        let answer = tokio::time::timeout(
+            Duration::from_secs(5),
+            allocator.origin_endpoint(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()),
+        )
+        .await
+        .expect("answered without looking at containers")
+        .unwrap();
+        assert_eq!(answer, None);
     }
 
     fn env_value<'a>(envs: &'a [(String, String)], key: &str) -> Option<&'a str> {
