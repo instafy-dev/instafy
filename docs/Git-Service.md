@@ -60,6 +60,9 @@ configuration (`GIT_CONFIG_COUNT`, git 2.31 or later), which outranks every conf
   an unsafe `.gitmodules` refuses the whole push before any ref moves, and none of its objects
   are kept.
 - `receive.maxInputSize` bounds the pack a single push may send (`GIT_MAX_PUSH_BYTES`).
+- `receive.denyNonFastForwards=false` overrides a repository's own setting. A working slot (see
+  below) is replaced by a commit on `main`, not on its old tip, so its updates are not
+  fast-forwards; `main` stays fast-forward only through the update hook.
 
 Requests never write hook files, change repository config or run `git config`. Before it serves,
 the shard checks that the hooks can execute and that its `git` applies the command-scope
@@ -79,6 +82,11 @@ The hook checks every pushed ref:
 - **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) are
   reserved: no push may create, move or delete one. This check and the ASCII rule run before
   `GIT_POLICY_DISABLED`.
+- **Recovery refs** are named after the work they hold, so a push may create or delete one but
+  never move it (`is a recovery ref; it may be created or deleted, not moved`). The one exception
+  is a working folder's rolling save, `refs/instafy/recovery/<working-set id>/working`, which
+  every save replaces under a lease on the tip it last confirmed. This check also runs before
+  `GIT_POLICY_DISABLED`.
 - **`main`** is fast-forward only and cannot be deleted. A name that differs from it only in letter
   case is refused.
 - **`refs/instafy/`** holds only recovery refs, `refs/instafy/recovery/<origin id>/<name>` with a
@@ -91,7 +99,10 @@ The hook checks every pushed ref:
   already accepted: the ref's old value, else the current `main`, else the empty tree. That covers
   everything a merge or several new commits bring in, but earlier commits are not walked one by
   one: a path or blob that one new commit adds and a later one removes is not checked. Paths are
-  read in raw form, so unusual file names are checked exactly as stored.
+  read in raw form, so unusual file names are checked exactly as stored. A working slot's update
+  is also checked against the slot commit's own parent, so a path denied since its old tip was
+  accepted (for example by a new `GIT_DENY_PATHS`) is refused even when this save did not change
+  it.
 
 Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)
@@ -99,7 +110,7 @@ Knobs:
 - `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB; blank means the default): largest pack one
   push may send. A non-blank value other than a positive whole number of bytes stops the shard
   from starting.
-- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule, the recovery-ref rule (create or delete, never move, except a working slot) and the ASCII ref-name rule (local-only debugging; unsafe). Object checks, the push size bound and the `receive.denyNonFastForwards=false` override stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
 roll it back to an older shard image: older shards rewrite per-repository hooks on each request
@@ -107,8 +118,8 @@ and run without object checks or salvage ref protection.
 
 Behaviour that changed with the shared policy: a ref must point to a commit (or an annotated tag
 of one), malformed objects that older git versions wrote are refused by the object checks, a push
-may send at most `GIT_MAX_PUSH_BYTES`, and refs under `refs/instafy/` other than recovery refs
-cannot be created.
+may send at most `GIT_MAX_PUSH_BYTES`, refs under `refs/instafy/` other than recovery refs
+cannot be created, and a recovery ref other than a working slot cannot be moved.
 
 ### Push event hooks
 `git-shard` can emit best-effort JSON webhooks after successful `git-receive-pack` requests:
