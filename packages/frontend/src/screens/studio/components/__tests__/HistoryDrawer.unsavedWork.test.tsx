@@ -1001,14 +1001,26 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.openConversationTab).toHaveBeenCalledWith("conversation-1");
   });
 
-  describe("a name the space holds in another case", () => {
+  describe("a name the space holds in another spelling", () => {
     const GENERAL_INTRO = "These files changed since this work was kept. Choose a version for each:";
-    const ALIAS_INTRO = "Another file in this space has the same name in a different case. Choose what to keep:";
-    const ALIAS_NOTE = "Another file in this space has this name in a different case.";
+    const CLASH =
+      "another file or folder in this space has nearly the same name, and a disk that ignores case or Unicode form takes the two for one";
+    const ALIAS_INTRO = `A${CLASH.slice(1)}. Choose what to keep:`;
+    const ALIAS_NOTE = `A${CLASH.slice(1)}.`;
+    const notSaved = (path: string) =>
+      `Couldn't save ${path}: ${CLASH}. Choose Keep current, or ask the agent to use another name.`;
+
+    // The server answers path_alias for each of these, and none of them is a file in a
+    // different case that the person could look for.
+    const CLASHES = [
+      ["main holds TODO.md", "todo.md"],
+      ["main holds a file docs", "Docs/guide.md"],
+      ["main holds café.md composed", "cafe\u0301.md"],
+    ] as const;
 
     // A restore conflict lists paths without saying why: main gained TODO.md, and the work's
     // todo.md is a conflict for that alone. Only the save of "Use this version" tells.
-    function conflictOn(ref: string, paths: string[]) {
+    function conflictOn(ref: string, paths: string[], clash = "todo.md") {
       mocks.restoreRecovery.mockResolvedValueOnce({
         ok: false,
         stage: "response",
@@ -1016,13 +1028,13 @@ describe("HistoryDrawer: Unsaved work", () => {
         originId: "origin-1",
         originMode: "hosted",
       });
-      mocks.readAt.mockResolvedValue({ ok: true, file: { path: "todo.md", contentBase64: btoa("- [ ] x\n"), size: 8 } });
+      mocks.readAt.mockResolvedValue({ ok: true, file: { path: clash, contentBase64: btoa("- [ ] x\n"), size: 8 } });
       mocks.saveChanges.mockResolvedValue({
         ok: false,
         stage: "response",
         error: originError(409, "path_alias", {
           head: NEW_HEAD,
-          paths: ["todo.md"],
+          paths: [clash],
           message:
             "another file or folder here has this name in another case or Unicode form, and a disk that ignores case takes the two for one; keep the current version or use another name",
         }),
@@ -1032,7 +1044,9 @@ describe("HistoryDrawer: Unsaved work", () => {
     }
 
     function pathItem(ref: string, path: string): HTMLElement {
-      const item = row(container, ref).querySelector<HTMLElement>(`[data-testid="unsaved-work-path"][data-path="${path}"]`);
+      const item = Array.from(
+        row(container, ref).querySelectorAll<HTMLElement>('[data-testid="unsaved-work-path"]'),
+      ).find((element) => element.dataset.path === path);
       if (!item) {
         throw new Error(`no path ${path}`);
       }
@@ -1049,23 +1063,21 @@ describe("HistoryDrawer: Unsaved work", () => {
       return ids.map((id) => document.getElementById(id)?.textContent ?? "");
     }
 
-    it("says so in the intro once Use this version is refused for every file", async () => {
-      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["todo.md"] })]));
-      conflictOn(KEPT, ["todo.md"]);
+    it.each(CLASHES)("says so in the intro once Use this version is refused for every file (%s)", async (_, clash) => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", paths: [clash] })]));
+      conflictOn(KEPT, [clash], clash);
       await render();
       await press(row(container, KEPT), "unsaved-work-restore");
       expect(intro(KEPT)).toBe(GENERAL_INTRO);
 
-      await press(pathItem(KEPT, "todo.md"), "unsaved-work-path-use");
-      expect(q(container, "history-status")?.textContent).toBe(
-        "Couldn't save todo.md: another file in this space has the same name in a different case. Keep the current version, or ask the agent to use another name.",
-      );
+      await press(pathItem(KEPT, clash), "unsaved-work-path-use");
+      expect(q(container, "history-status")?.textContent).toBe(notSaved(clash));
       expect(intro(KEPT)).toBe(ALIAS_INTRO);
       // The intro says it for the only file: no note repeats it.
       expect(q(row(container, KEPT), "unsaved-work-path-alias")).toBeNull();
-      expect(describedBy(q(pathItem(KEPT, "todo.md"), "unsaved-work-path-keep"))).toEqual(["todo.md"]);
+      expect(describedBy(q(pathItem(KEPT, clash), "unsaved-work-path-keep"))).toEqual([clash]);
       // Nothing was resolved: keeping the current version is still the person's choice.
-      expect(q(pathItem(KEPT, "todo.md"), "unsaved-work-path-resolved")).toBeNull();
+      expect(q(pathItem(KEPT, clash), "unsaved-work-path-resolved")).toBeNull();
     });
 
     it("notes the clash under its file when other files of the conflict changed", async () => {

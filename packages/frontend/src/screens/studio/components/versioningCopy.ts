@@ -605,20 +605,25 @@ export const REMOVE_DIALOG = {
 
 export const RESTORE_CONFLICT_INTRO = "These files changed since this work was kept. Choose a version for each:";
 
+// A name the space holds in another spelling (`path_alias`): another case,
+// another Unicode form of the same letters, or a new folder whose name
+// differs only so from a file, a link or a submodule (`Docs/guide.md` beside
+// a file `docs`). None of these is always a file in a different case.
+const PATH_ALIAS_CLASH =
+  "another file or folder in this space has nearly the same name, and a disk that ignores case or Unicode form takes the two for one";
+
 /**
- * The per-file choices once every file turned out to be a name the space
- * holds in another case (`path_alias`): nothing changed there, so the
- * general intro would be wrong.
+ * The per-file choices once every file turned out to be such a name: nothing
+ * changed there, so the general intro would be wrong.
  */
-export const RESTORE_ALIAS_CONFLICT_INTRO =
-  "Another file in this space has the same name in a different case. Choose what to keep:";
+export const RESTORE_ALIAS_CONFLICT_INTRO = `${asSentence(PATH_ALIAS_CLASH)} Choose what to keep:`;
 
 /** Under one such file, when other files of the conflict changed. */
-export const PATH_ALIAS_NOTE = "Another file in this space has this name in a different case.";
+export const PATH_ALIAS_NOTE = asSentence(PATH_ALIAS_CLASH);
 
-/** "Use this version" on a name the space holds in another case (`path_alias`). */
+/** "Use this version" on such a name. */
 export function pathAliasNotSavedCopy(path: string): string {
-  return `Couldn't save ${path}: another file in this space has the same name in a different case. Keep the current version, or ask the agent to use another name.`;
+  return `Couldn't save ${path}: ${PATH_ALIAS_CLASH}. Choose Keep current, or ask the agent to use another name.`;
 }
 
 /** Announced when a restore stops at a conflict and the per-file choices open. */
