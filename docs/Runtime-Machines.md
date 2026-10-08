@@ -485,8 +485,8 @@ loses only work that never reached the remote:
   (`POST /runtime/origin`; the Docker provider answers the origin's
   published port on the node's host gateway, `http://host.docker.internal:<port>`,
   and only when the controller its runtimes call is on the same node:
-  `CONTROLLER_BASE_URL` unset, or naming `host.docker.internal`, `localhost`
-  or a loopback address), and only when that address is on the node or its
+  `CONTROLLER_BASE_URL` (or `PROXY_CONTROLLER_BASE_URL` when that is unset)
+  unset, or naming `host.docker.internal`, `localhost` or a loopback address), and only when that address is on the node or its
   private network. The endpoint the runtime registered itself, with its
   machine token, is never used: a hosted runtime's is a public tunnel host,
   and any runtime could name any address. When the provider places no origin of that generation
@@ -515,9 +515,11 @@ loses only work that never reached the remote:
   `main` is never held back), raises a stop flag so a rolling save in flight
   gives up (down again when the request ends, also when the controller gives
   up on it), waits for the workspace instead of refusing, and keeps the
-  whole stop under 22 seconds. The answer, the stop's `flush` and the `workspace_flush`
-  event add `workingState: {durable, persistedAt, error?}`: whether
-  canonical holds everything the folder held, and since when.
+  whole stop under 22 seconds. The answer and the stop's `flush` add
+  `workingState: {durable, persistedAt, error?}`, and the `workspace_flush`
+  event adds top-level `durable`, `persistedAt` and, when the save did not
+  land, `workingStateError`: whether canonical holds everything the folder
+  held, and since when.
 - An idle stop (the idle sweep, the idle reaper, an idle-slot reclaim) can
   wait up to 25 seconds on its flush. When someone comes back meanwhile (a
   new workspace lease this runtime serves, or a user's activity ping), the
@@ -696,9 +698,9 @@ checkouts:
   stop that could not keep its work may leave files or commits that exist
   nowhere else; such a checkout is kept until a later start and clean stop.
   Checkouts from before this marker are kept the same way. Origins with
-  rolling saves write the marker only after a durable stop, so a checkout
-  whose last save did not land, or that holds work only this node has, is
-  kept too.
+  rolling saves write the marker only when the stop leaves nothing
+  local-only, so a checkout that holds work only this node has is kept
+  too.
 
 A stop takes the same per-project lock as a start while it runs and marks the
 checkout as used, and the sweep reads that mark again once it holds the lock,

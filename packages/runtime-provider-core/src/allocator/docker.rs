@@ -41,8 +41,9 @@ fn node_local_origin_endpoint(host_port: u16) -> String {
     format!("http://host.docker.internal:{host_port}")
 }
 
-/// Whether the controller this node's runtimes call (`CONTROLLER_BASE_URL`)
-/// runs on this node: unset (the compose file's host-gateway default), or
+/// Whether the controller this node's runtimes call (`CONTROLLER_BASE_URL`,
+/// or `PROXY_CONTROLLER_BASE_URL` when that is unset) runs on this node:
+/// unset (the compose file's host-gateway default), or
 /// naming the host gateway, `localhost` or a loopback address. An address
 /// from [`node_local_origin_endpoint`] means this node, so only a controller
 /// here may be told one: any other controller would read it as its own
