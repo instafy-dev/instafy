@@ -543,9 +543,14 @@ loses only work that never reached the remote:
   the folder's last confirmed save holds. It writes the durable-stop marker
   `.instafy/.git/instafy-stopped-clean` (`durable v1`) only when the folder's
   final state is durable: nothing only this node holds, and canonical holds
-  everything the folder held (a clean folder whose HEAD `main` holds is
-  durable whether or not its process ever saved, as with rolling saves
-  off). Every origin start removes it, and so does
+  everything the folder held. Its local step has just stored a copy of
+  everything canonical does not hold (no `unsaved` copy of work the last
+  confirmed save holds, none of work already pushed or dismissed), so that
+  is the case exactly when no local recovery ref is left, whether or not
+  its process ever saved: a clean folder whose HEAD `main` holds, or a
+  dirty one whose `unsaved` copy a controller stop's flush pushed (as with
+  rolling saves off, or when the stop's own save failed). Every origin
+  start removes it, and so does
   every shutdown before its flush and anything that takes the workspace
   lock (a save, a publish, a refresh), so a marker another runtime on the
   same folder (or the workspace itself) left never outlives a shutdown that
@@ -627,7 +632,11 @@ node's checkout a cache.
   change.
 - `WORKING_STATE_SAVES=off` on the controller turns rolling saves off: the
   grant answers 403 `rolling_saves_off`, the runtime stops ticking, and
-  stops ask the origin for no save of their own. A 401 (the job's workspace
+  stops ask the origin for no save of their own. A stop's flush then pushes
+  the folder's `unsaved` copy as before rolling saves, and the shutdown
+  after it still leaves the durable-stop marker. Slots already written stay
+  on canonical, because nothing deletes them while saves are off, and are
+  listed as unsaved work once their origin stops. A 401 (the job's workspace
   token, minted once when the job is leased and valid for at least an hour,
   has expired) also ends the job's ticks, with one warning, and its own save
   at the end is recorded as `workspace_token_expired`. Between turns nothing ticks;

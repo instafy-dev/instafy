@@ -1760,6 +1760,53 @@ async fn a_clean_folder_stops_durably_without_ever_saving() {
     assert!(!state.durable, "{state:?}");
 }
 
+/// A dirty folder whose stop pushed its `unsaved` copy holds nothing only
+/// this node has, so the shutdown after that stop leaves the durable-stop
+/// marker although no save of the folder's own ever landed: with rolling
+/// saves off (the stop's flush carries no flag), and when the stop's own
+/// save failed and its held-back copy went out instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_that_pushed_its_unsaved_copy_is_durable_without_a_save() {
+    let marker = |fx: &Fixture| fs::read(fx.ws.join(crate::server::CLEAN_STOP_MARKER)).ok();
+    let unsaved_on_canonical = |fx: &Fixture| {
+        fx.remote_recovery_refs()
+            .into_iter()
+            .filter(|name| name.contains("-unsaved-"))
+            .count()
+    };
+
+    // Saves off.
+    let fx = Fixture::new();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    fx.write("doc.md", b"alpha\nbeta\nedited with saves off\n");
+    let report = flush_within(&fx.ctx(), false, Duration::from_secs(18)).unwrap();
+    assert!(report.working_state.is_none());
+    assert_eq!(report.unpushed_refs, 0, "{report:?}");
+    assert_eq!(unsaved_on_canonical(&fx), 1);
+    server.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+    assert!(fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty());
+    assert_eq!(unsaved_on_canonical(&fx), 1);
+
+    // Saves on, and the stop's own save never reaches canonical.
+    let fx = Fixture::new();
+    let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+    server.start().await.unwrap();
+    let memory = server.app_state().unwrap().working_memory;
+    fx.write("doc.md", b"alpha\nbeta\nedited when the save fails\n");
+    let lost = drop_slot_pushes();
+    let report = flush_saving(&fx.ctx(), false, Duration::from_secs(18), Some(&memory)).unwrap();
+    drop(lost);
+    let working = report.working_state.clone().expect("workingState");
+    assert!(!working.durable, "{working:?}");
+    assert_eq!(report.unpushed_refs, 0, "{report:?}");
+    assert_eq!(unsaved_on_canonical(&fx), 1);
+    server.stop_flushing_workspace().await.unwrap();
+    assert_eq!(marker(&fx).as_deref(), Some(DURABLE_MARKER));
+    assert!(fx.local_refs(LOCAL_RECOVERY_ROOT).is_empty());
+}
+
 /// Every shutdown decides the durable-stop marker on its own: one left by
 /// a sibling runtime's durable stop, or written by the workspace itself,
 /// never survives a shutdown that is not durable, whether its flush kept

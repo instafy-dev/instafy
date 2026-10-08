@@ -26,8 +26,8 @@ use crate::routes::{self, AppState};
 use serde_json::Value as JsonValue;
 
 /// The durable-stop marker: written into a hosted checkout's repository by a
-/// shutdown whose final [`crate::working_state::local_state`] was durable
-/// (canonical holds everything the folder held, and nothing is local-only),
+/// shutdown whose final state was durable (its flush left nothing
+/// local-only, so canonical holds everything the folder held),
 /// holding [`crate::working_state::DURABLE_MARKER`], and removed when an
 /// origin starts there. Checkout eviction keeps any checkout without it: the
 /// runtime that last used it crashed, was killed, could not save, or left
@@ -60,12 +60,18 @@ pub(crate) fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
 
 /// Write [`CLEAN_STOP_MARKER`] when the folder's state after a shutdown's
 /// flush is durable; otherwise remove any, so eviction keeps the checkout.
+/// That flush has just stored a local copy of everything canonical does not
+/// hold: it stores no `unsaved` copy only where the folder's last confirmed
+/// save holds the same work, and none of work already pushed (or dismissed
+/// by a person). So the stop is durable exactly when nothing is local-only,
+/// whether or not this process ever saved: with rolling saves off, or when
+/// a stop's own save failed and its `unsaved` copy was pushed instead.
 fn record_durable_stop(
     ctx: &crate::publish::PublishContext<'_>,
     memory: &crate::working_state::WorkingMemory,
 ) {
     match crate::working_state::local_state(ctx, memory) {
-        Ok(state) if state.durable => {
+        Ok(state) if state.local_only == 0 => {
             let mut marker: &[u8] = crate::working_state::DURABLE_MARKER;
             if let Err(error) = crate::workspace_fs::WorkspaceDir::open(ctx.workspace_root)
                 .and_then(|workspace| workspace.replace_file(CLEAN_STOP_MARKER, &mut marker, false))
