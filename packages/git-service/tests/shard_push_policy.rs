@@ -899,8 +899,7 @@ fn refs_instafy_holds_only_recovery_refs_and_main_has_no_aliases() {
 }
 
 /// A working slot is replaced under a lease on the tip its saver last
-/// confirmed: a correct lease moves it (a non-fast-forward update, which a
-/// repository's own `receive.denyNonFastForwards` cannot refuse), a stale
+/// confirmed: a correct lease moves it (a non-fast-forward update), a stale
 /// one is refused, and creating and deleting still work. Every other
 /// recovery ref may only be created or deleted.
 #[test]
@@ -908,8 +907,9 @@ fn a_working_slot_moves_only_under_a_current_lease() {
     let shard = Shard::start("working-slot", &[]);
     let client = Client::clone_from(&shard);
     let initial = client.head();
-    // The repository's own config would refuse every non-fast-forward
-    // update; the shard's command-scope setting wins.
+    // A repository may refuse non-fast-forward updates in its own config.
+    // Git applies that setting only to `refs/heads/*`, so it never blocks a
+    // slot's saves; this keeps it that way.
     assert!(shard
         .repo_git(&["config", "receive.denyNonFastForwards", "true"])
         .status
@@ -951,6 +951,20 @@ fn a_working_slot_moves_only_under_a_current_lease() {
         String::from_utf8_lossy(&replaced.stderr)
     );
     assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+    // The repository's setting is in force for a branch.
+    client.push_ok(&format!("{first}:refs/heads/feature"));
+    let rewritten = client.git(&[
+        "push",
+        "--force",
+        "origin",
+        &format!("{second}:refs/heads/feature"),
+    ]);
+    assert!(!rewritten.status.success());
+    assert!(
+        String::from_utf8_lossy(&rewritten.stderr).contains("non-fast-forward"),
+        "{}",
+        String::from_utf8_lossy(&rewritten.stderr)
+    );
 
     // A saver whose lease names the replaced tip is refused.
     let third = save("draft.md", b"third\n");

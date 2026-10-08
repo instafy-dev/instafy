@@ -60,9 +60,6 @@ configuration (`GIT_CONFIG_COUNT`, git 2.31 or later), which outranks every conf
   an unsafe `.gitmodules` refuses the whole push before any ref moves, and none of its objects
   are kept.
 - `receive.maxInputSize` bounds the pack a single push may send (`GIT_MAX_PUSH_BYTES`).
-- `receive.denyNonFastForwards=false` overrides a repository's own setting. A working slot (see
-  below) is replaced by a commit on `main`, not on its old tip, so its updates are not
-  fast-forwards; `main` stays fast-forward only through the update hook.
 
 Requests never write hook files, change repository config or run `git config`. Before it serves,
 the shard checks that the hooks can execute and that its `git` applies the command-scope
@@ -111,7 +108,7 @@ Knobs:
 - `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB; blank means the default): largest pack one
   push may send. A non-blank value other than a positive whole number of bytes stops the shard
   from starting.
-- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule, the recovery-ref rule (create or delete, never move, except a working slot) and the ASCII ref-name rule (local-only debugging; unsafe). Object checks, the push size bound and the `receive.denyNonFastForwards=false` override stay on.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule, the recovery-ref rule (create or delete, never move, except a working slot) and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
 roll it back to an older shard image: older shards rewrite per-repository hooks on each request
