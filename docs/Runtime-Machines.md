@@ -204,15 +204,17 @@ Machines panel or a browser session (`runtime_limit_takeover`,
 one exception: a browser session that hits the limit on its own space's
 standard hosted machine recycles that machine on its own with
 `runtime_limit_takeover`, through a stop that spares a runtime with active
-jobs (`stopIfIdle`, `skip_if_active_jobs`). That stop never cuts off a turn
-whose lease is live, but it can requeue a job queued for that machine, and
-that job's expiry then counts as a person's stop. Such a failure runs no plan
-checkpoint, and the messages queued in its conversation by the time of the
-stop become `failed` in the expiry's transaction, with a reason their owner
-sees in the queue. The send queue never sends a failed entry on its own, so
-neither the drain nor its recovery sweep picks them up; the owner can send one
-now or remove it. A message queued after the stop asks again and goes out as
-usual, which can start the machine.
+jobs (`stopIfIdle`, `skip_if_active_jobs`). That check counts only live
+leases, but the requeue takes every `leased` job of the machine. So the
+recycle never cuts off a turn whose lease is live, yet it can requeue a job
+queued for that machine and a turn whose lease has expired, which it marks
+interrupted; the expiry of either counts as a person's stop. Such a failure
+runs no plan checkpoint, and the messages queued in its conversation by the
+time of the stop become `failed` in the expiry's transaction, with a reason
+their owner sees in the queue. The send queue never sends a failed entry on
+its own, so neither the drain nor its recovery sweep picks them up; the owner
+can send one now or remove it. A message queued after the stop asks again and
+goes out as usual, which can start the machine.
 
 ## A launch that does not come up
 

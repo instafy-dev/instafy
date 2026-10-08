@@ -65,11 +65,15 @@ const HELD_BEHIND_A_STOPPED_TURN_MESSAGE: &str =
 /// session. A click sends each of them, with one exception: a browser
 /// session that hits the limit on its own space's standard hosted machine
 /// recycles that machine on its own with `runtime_limit_takeover`, through a
-/// stop with `skip_if_active_jobs` (the frontend's `stopIfIdle`). That stop
-/// never cuts off a turn whose lease is live, but it can requeue a job queued
-/// for that machine, and that job's expiry then counts as a person's stop.
-/// The expiry of a turn one of them interrupted runs no plan checkpoint and
-/// holds what was queued behind the turn (see [`expire_stale_requeued_jobs`]).
+/// stop with `skip_if_active_jobs` (the frontend's `stopIfIdle`). That check
+/// counts only live leases, but the stop's requeue
+/// (`stop::resolve_jobs_for_unavailable_runtime`) takes every `leased` job of
+/// the machine. So the recycle never cuts off a turn whose lease is live, yet
+/// it can requeue a job queued for that machine and a turn whose lease has
+/// expired, which it marks interrupted; the expiry of either counts as a
+/// person's stop. The expiry of a job one of them requeued runs no plan
+/// checkpoint and holds what was queued behind it (see
+/// [`expire_stale_requeued_jobs`]).
 const REQUEUE_REASONS_OF_A_PERSON: [&str; 4] = [
     "user_stop",
     "user_remove",
