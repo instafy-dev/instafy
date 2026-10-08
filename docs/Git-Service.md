@@ -90,7 +90,10 @@ The hook checks every pushed ref:
   lower-case UUID and a name of `[0-9A-Za-z._-]`. A push may create or move nothing else there, so
   a stray ref such as `refs/instafy/recovery` cannot block them.
 - **Other refs**, recovery refs included, may be deleted by any client allowed to push
-  (`git.write`).
+  (`git.write`). Deleting a working slot, `refs/instafy/recovery/<working-set id>/working`,
+  directly with git (for example a mirror or prune push of `refs/instafy/*`) counts as a dismissal
+  for the folder that is still running: like a person's Remove, its paths are not saved again
+  until they change.
 - **Every ref points to a commit**, directly or through an annotated tag.
 - **Paths and sizes** are checked on the net change between the new tip and what the repository
   already accepted: the ref's old value, else the current `main`, else the empty tree. That covers
