@@ -46,8 +46,8 @@ export function stopLeavesNoLiveHostedRuntime(
  * the person just stopped on its next status read. Only a refusal
  * (runtimeStopRefused) lifts the hold, unless a later Stop has set its own:
  * the machine is as it was. After a 5xx answer or none at all the stop may
- * have taken effect, and the controller then announces the turn it put back
- * in the queue, so the hold stays, without a word on where the work went.
+ * have taken effect, and the run record then shows the turn it put back in
+ * the queue, so the hold stays, without a word on where the work went.
  * Where the stop did not take, the machine is still ready and the chat says
  * nothing of a stopped turn (useStoppedTurnNotice); Start or a send lifts the
  * hold as always. Returns null unless the stop was committed.

@@ -362,8 +362,9 @@ for the waiting space's machine, and both keep the stopped space held (see
 runtime stays listed until a removal finishes, but keeps the hold as well. Any
 other 5xx answer, or none at all (a network failure, or a proxy or browser
 timeout during the release), shows the error and keeps the hold too: the
-controller may have committed the stop first, and it then announces the
-requeued turn. Only a 4xx refusal, such as 409 "provider-managed runtime is
+controller may have committed the stop first, and the run record then shows
+the requeued turn (the live announcement goes out only if the request ran to
+the end). Only a 4xx refusal, such as 409 "provider-managed runtime is
 missing its active lease generation", 403 or 404, lifts the hold, since the
 machine is as it was.
 
