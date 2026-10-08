@@ -593,7 +593,8 @@ node's checkout a cache.
   grant for `git.write`. A rolling save takes no workspace lease.
 - A tick never adds a path inside a nested repository and leaves out files
   over 2 MiB: both keep the slot's earlier entry (where that earlier save
-  changed them; otherwise the current parent's) until the job's end or a
+  changed them and `main` has not changed them since; otherwise the current
+  parent's) until the job's end or a
   stop saves them. A tick asks the controller for `git.write` with the
   workspace let go, within its own ten seconds, so a stop that comes
   meanwhile takes the workspace at once. A tick also sends at most 16 MiB of

@@ -643,6 +643,83 @@ fn a_deferred_file_the_earlier_save_never_changed_keeps_the_new_mains_version() 
     assert_eq!(changed, "a.md");
 }
 
+/// A deferred file the earlier save did change still keeps the new main's
+/// version where main changed it since that save: the folder published a
+/// newer version and its checkout followed main, and no save landed after
+/// that (one failed, or a copy was still waiting on a local ref). The
+/// earlier save's version would read as a change on the new main, and a
+/// Restore would put it back over the published one.
+#[test]
+fn a_deferred_file_main_changed_since_the_last_save_keeps_mains_version() {
+    let fx = Fixture::new();
+    fx.write("data/big.bin", b"v1\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    assert_eq!(fx.slot_file("data/big.bin").as_deref(), Some("v1\n"));
+
+    // The folder's own publish: v2 goes to main and the checkout is on it.
+    fx.write("data/big.bin", b"v2\n");
+    ig(&fx.ws, &["add", "-A"]);
+    ig(
+        &fx.ws,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@instafy.dev",
+            "commit",
+            "-q",
+            "-m",
+            "v2",
+        ],
+    );
+    ig(&fx.ws, &["push", "-q", "origin", "HEAD:main"]);
+    ig(&fx.ws, &["fetch", "-q", "origin"]);
+    let main = fx.main();
+
+    // The agent rewrites the file past what a tick sends, and edits another.
+    fx.write("data/big.bin", &vec![3; 3 * 1024 * 1024]);
+    fx.write("a.md", b"edited\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(!state.durable, "{state:?}");
+    let (slot_ref, slot) = fx.slot().unwrap();
+    assert_eq!(fx.slot_parent(), main);
+    let blob = |rev: &str| git_in(&fx.remote, &["rev-parse", &format!("{rev}:data/big.bin")]);
+    assert_eq!(blob(&slot), blob(&main), "the slot kept main's version");
+    let changed = git_in(&fx.remote, &["diff", "--name-only", &main, &slot]);
+    assert_eq!(changed, "a.md");
+
+    // Restored from another folder, the save brings back only the edit.
+    let other_ws = fx.root.join("other-ws");
+    fs::create_dir_all(&other_ws).unwrap();
+    let mut other_config = config_for(&other_ws, &fx.remote);
+    other_config.project_id = fx.config.project_id;
+    ensure_git_checkout(&other_config, None).unwrap();
+    let restored = crate::publish::restore(
+        &PublishContext {
+            config: &other_config,
+            workspace_root: &other_ws,
+            token: None,
+            can_write: true,
+        },
+        crate::publish::RestoreRequest {
+            reference: slot_ref,
+            rev: Some(slot),
+            keep: Vec::new(),
+            author: None,
+        },
+    )
+    .unwrap();
+    assert!(restored.committed);
+    assert!(restored.not_restored.is_empty());
+    assert_eq!(blob("main"), blob(&main), "main kept its published version");
+    assert_eq!(
+        git_in(&fx.remote, &["show", "main:a.md"]),
+        "edited",
+        "the edit came back"
+    );
+}
+
 /// A tick reads the folder and writes only objects and its own refs: HEAD,
 /// the real index and what `git status` says are the same afterwards, and
 /// it never needs `index.lock`, which another git command may hold.

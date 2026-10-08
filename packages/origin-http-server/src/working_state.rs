@@ -460,19 +460,34 @@ fn read_record(
     Ok(None)
 }
 
-/// The paths `record` changes against its own parent that lie at or under
-/// one of `roots`.
-fn changed_under(git: &WorkspaceGit<'_>, record: &Record, roots: &[String]) -> Result<Vec<String>> {
+/// The paths at or under one of `roots` that a save on `parent_tree` keeps
+/// from `record`: the ones `record` changes against its own parent, except
+/// where `main` changed them too since (the parents' trees differ there),
+/// whose version is then the newer one.
+fn kept_from_record(
+    git: &WorkspaceGit<'_>,
+    record: &Record,
+    roots: &[String],
+    parent_tree: &str,
+) -> Result<Vec<String>> {
     let base = match record.parent.as_deref() {
         Some(parent) => git.tree_id(parent)?,
         None => git.empty_tree()?,
     };
+    let moved: BTreeSet<String> = if base == parent_tree {
+        BTreeSet::new()
+    } else {
+        changed_paths(git, &base, parent_tree)?
+            .into_iter()
+            .collect()
+    };
     Ok(changed_paths(git, &base, &record.tree)?
         .into_iter()
         .filter(|path| {
-            roots
-                .iter()
-                .any(|root| path == root || path.starts_with(&format!("{root}/")))
+            !moved.contains(path)
+                && roots
+                    .iter()
+                    .any(|root| path == root || path.starts_with(&format!("{root}/")))
         })
         .collect())
 }
@@ -785,13 +800,15 @@ impl Publisher<'_> {
         }
         if !deferred.is_empty() {
             // A tick never drops what an earlier save held: a deferred path
-            // keeps the earlier save's entry where that save changed it, and
-            // the parent's everywhere else. An earlier save on an older
-            // `main` would otherwise carry that `main`'s version of a file
-            // onto this parent, as if the folder had changed it.
+            // keeps the earlier save's entry where that save changed it and
+            // `main` has not changed it since, and the parent's everywhere
+            // else. An earlier save on an older `main` would otherwise carry
+            // an older version of a file onto this parent, as if the folder
+            // had changed it back, and a Restore would apply it over the
+            // published one.
             tree = tree_with_entries_from(&self.git, &tree, parent.as_deref(), &deferred)?;
             if let Some(record) = record.as_ref() {
-                let kept = changed_under(&self.git, record, &deferred)?;
+                let kept = kept_from_record(&self.git, record, &deferred, &parent_tree)?;
                 tree = tree_with_entries_from(&self.git, &tree, Some(&record.commit), &kept)?;
             }
         }
