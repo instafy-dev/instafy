@@ -1001,6 +1001,92 @@ describe("HistoryDrawer: Unsaved work", () => {
     expect(mocks.openConversationTab).toHaveBeenCalledWith("conversation-1");
   });
 
+  describe("a name the space holds in another case", () => {
+    const GENERAL_INTRO = "These files changed since this work was kept. Choose a version for each:";
+    const ALIAS_INTRO = "Another file in this space has the same name in a different case. Choose what to keep:";
+    const ALIAS_NOTE = "Another file in this space has this name in a different case.";
+
+    // A restore conflict lists paths without saying why: main gained TODO.md, and the work's
+    // todo.md is a conflict for that alone. Only the save of "Use this version" tells.
+    function conflictOn(ref: string, paths: string[]) {
+      mocks.restoreRecovery.mockResolvedValueOnce({
+        ok: false,
+        stage: "response",
+        error: originError(409, "restore_conflict", { head: NEW_HEAD, paths }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+      mocks.readAt.mockResolvedValue({ ok: true, file: { path: "todo.md", contentBase64: btoa("- [ ] x\n"), size: 8 } });
+      mocks.saveChanges.mockResolvedValue({
+        ok: false,
+        stage: "response",
+        error: originError(409, "path_alias", {
+          head: NEW_HEAD,
+          paths: ["todo.md"],
+          message:
+            "another file or folder here has this name in another case or Unicode form, and a disk that ignores case takes the two for one; keep the current version or use another name",
+        }),
+        originId: "origin-1",
+        originMode: "hosted",
+      });
+    }
+
+    function pathItem(ref: string, path: string): HTMLElement {
+      const item = row(container, ref).querySelector<HTMLElement>(`[data-testid="unsaved-work-path"][data-path="${path}"]`);
+      if (!item) {
+        throw new Error(`no path ${path}`);
+      }
+      return item;
+    }
+
+    /** The sentence above the per-file choices. */
+    function intro(ref: string): string | undefined {
+      return q(row(container, ref), "unsaved-work-conflict")?.querySelector("p")?.textContent ?? undefined;
+    }
+
+    function describedBy(element: Element | null): string[] {
+      const ids = element?.getAttribute("aria-describedby")?.split(/\s+/).filter(Boolean) ?? [];
+      return ids.map((id) => document.getElementById(id)?.textContent ?? "");
+    }
+
+    it("says so in the intro once Use this version is refused for every file", async () => {
+      mocks.fetchRecovery.mockResolvedValue(list([recoveryEntry(KEPT, { kind: "unsaved", paths: ["todo.md"] })]));
+      conflictOn(KEPT, ["todo.md"]);
+      await render();
+      await press(row(container, KEPT), "unsaved-work-restore");
+      expect(intro(KEPT)).toBe(GENERAL_INTRO);
+
+      await press(pathItem(KEPT, "todo.md"), "unsaved-work-path-use");
+      expect(q(container, "history-status")?.textContent).toBe(
+        "Couldn't save todo.md: another file in this space has the same name in a different case. Keep the current version, or ask the agent to use another name.",
+      );
+      expect(intro(KEPT)).toBe(ALIAS_INTRO);
+      // The intro says it for the only file: no note repeats it.
+      expect(q(row(container, KEPT), "unsaved-work-path-alias")).toBeNull();
+      expect(describedBy(q(pathItem(KEPT, "todo.md"), "unsaved-work-path-keep"))).toEqual(["todo.md"]);
+      // Nothing was resolved: keeping the current version is still the person's choice.
+      expect(q(pathItem(KEPT, "todo.md"), "unsaved-work-path-resolved")).toBeNull();
+    });
+
+    it("notes the clash under its file when other files of the conflict changed", async () => {
+      conflictOn(RECOVERY, ["src/a.ts", "todo.md"]);
+      await render();
+      await press(row(container, RECOVERY), "unsaved-work-restore");
+      await press(pathItem(RECOVERY, "todo.md"), "unsaved-work-path-use");
+
+      expect(intro(RECOVERY)).toBe(GENERAL_INTRO);
+      expect(q(pathItem(RECOVERY, "todo.md"), "unsaved-work-path-alias")?.textContent).toBe(ALIAS_NOTE);
+      expect(q(pathItem(RECOVERY, "src/a.ts"), "unsaved-work-path-alias")).toBeNull();
+      for (const testId of ["unsaved-work-path-use", "unsaved-work-path-keep", "unsaved-work-path-ask"]) {
+        expect(describedBy(q(pathItem(RECOVERY, "todo.md"), testId))).toEqual(["todo.md", ALIAS_NOTE]);
+      }
+      expect(describedBy(q(pathItem(RECOVERY, "src/a.ts"), "unsaved-work-path-use"))).toEqual(["src/a.ts"]);
+
+      await press(pathItem(RECOVERY, "todo.md"), "unsaved-work-path-keep");
+      expect(q(pathItem(RECOVERY, "todo.md"), "unsaved-work-path-alias")).toBeNull();
+    });
+  });
+
   describe("choices across closing the drawer", () => {
     function conflictOnThree() {
       mocks.restoreRecovery.mockResolvedValueOnce({

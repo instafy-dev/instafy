@@ -605,6 +605,22 @@ export const REMOVE_DIALOG = {
 
 export const RESTORE_CONFLICT_INTRO = "These files changed since this work was kept. Choose a version for each:";
 
+/**
+ * The per-file choices once every file turned out to be a name the space
+ * holds in another case (`path_alias`): nothing changed there, so the
+ * general intro would be wrong.
+ */
+export const RESTORE_ALIAS_CONFLICT_INTRO =
+  "Another file in this space has the same name in a different case. Choose what to keep:";
+
+/** Under one such file, when other files of the conflict changed. */
+export const PATH_ALIAS_NOTE = "Another file in this space has this name in a different case.";
+
+/** "Use this version" on a name the space holds in another case (`path_alias`). */
+export function pathAliasNotSavedCopy(path: string): string {
+  return `Couldn't save ${path}: another file in this space has the same name in a different case. Keep the current version, or ask the agent to use another name.`;
+}
+
 /** Announced when a restore stops at a conflict and the per-file choices open. */
 export function restoreConflictNoticeCopy(count: number): string {
   return `Not restored yet: ${formatFileCount(count)} changed since this work was kept.`;
