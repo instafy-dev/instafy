@@ -2197,6 +2197,13 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
         .into_iter()
         .map(|row| row.get::<_, Uuid>("id"))
         .collect::<Vec<_>>();
+    super::run_interruptions::mark_interrupted_runs(
+        transaction,
+        &runtime.project_id,
+        &requeued_jobs,
+        requeue_reason,
+    )
+    .await?;
 
     let mut job_input_state_updates = Vec::new();
     for job_id in failed_personal_browser_jobs

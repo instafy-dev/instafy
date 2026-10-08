@@ -50,7 +50,7 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
        and (last_seen_at + interval '1 second' * idle_ttl_seconds) < now()";
 /// How long a stop-requeued job may wait for a runtime before it expires
 /// instead of silently re-running whenever a runtime next appears.
-const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
+pub(super) const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
 /// How long a queued platform AI job is left alone before
 /// `fail_platform_jobs_stranded_on_private_runtimes` may fail it. Dispatch
 /// queues a platform job for a runtime that is not dispatch-ready unpinned,
@@ -3107,5 +3107,115 @@ mod tests {
             "the inspection gave up after {waited:?}"
         );
         Ok(())
+    }
+
+    /// The idle sweep's stop (`auto_stop_idle_hosted_runtimes`). Its
+    /// candidate query passes over a runtime with a leased job, and the stop
+    /// spares one whose lease is live, so it requeues a running turn only
+    /// once that turn's lease has lapsed. The test makes the stop the sweep
+    /// makes, with the sweep's options, on such a runtime.
+    #[tokio::test]
+    async fn an_idle_stop_marks_the_turn_it_requeues() -> anyhow::Result<()> {
+        use crate::runtime::run_interruptions::db_tests::{RunningTurn, RuntimeShape};
+
+        let pool = crate::tests::require_origin_test_pool("idle stop interruption test").await?;
+        let project_id = Uuid::new_v4();
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        crate::tests::with_shared_db_fixture(fixture, async {
+            let turn = RunningTurn::start(
+                pool.clone(),
+                project_id,
+                RuntimeShape::Hosted,
+                axum::http::StatusCode::NO_CONTENT,
+            )
+            .await?;
+            turn.let_the_runtime_go_quiet().await?;
+
+            let stopped = super::stop_runtime_safely(
+                &turn.state,
+                &turn.runtime_id,
+                super::StopOptions {
+                    source: "idle_stop",
+                    reason: Some("idle".to_string()),
+                    skip_if_active_jobs: true,
+                    require_idle_timeout: false,
+                    allow_cleanup_pending_release: false,
+                    expected_identity: None,
+                },
+            )
+            .await
+            .map_err(|(status, body)| anyhow::anyhow!("idle stop: {status} {}", body.0.message))?;
+            assert!(stopped.outcome.status_changed);
+
+            turn.assert_interrupted("idle").await?;
+            turn.assert_resumed_by_a_lease().await
+        })
+        .await
+    }
+
+    /// The heartbeat-timeout sweep stops a runtime that stopped answering in
+    /// the middle of a turn.
+    #[tokio::test]
+    async fn a_heartbeat_timeout_marks_the_turn_it_requeues() -> anyhow::Result<()> {
+        use crate::runtime::run_interruptions::db_tests::{RunningTurn, RuntimeShape};
+
+        let pool =
+            crate::tests::require_origin_test_pool("heartbeat timeout interruption test").await?;
+        let project_id = Uuid::new_v4();
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        crate::tests::with_shared_db_fixture(fixture, async {
+            let turn = RunningTurn::start(
+                pool.clone(),
+                project_id,
+                RuntimeShape::Hosted,
+                axum::http::StatusCode::NO_CONTENT,
+            )
+            .await?;
+            turn.let_the_runtime_go_quiet().await?;
+
+            super::auto_stop_stale_runtimes(&turn.state).await?;
+
+            assert_eq!(turn.releases(), 1);
+            turn.assert_interrupted("heartbeat_timeout").await?;
+            turn.assert_resumed_by_a_lease().await
+        })
+        .await
+    }
+
+    /// The hosted-runtime billing sweep stops a runtime whose organization
+    /// ran out of credits mid-turn (`stop_runtime_for_credit_exhaustion`,
+    /// what the sweep calls once a burn is refused).
+    #[tokio::test]
+    async fn a_credit_exhaustion_stop_marks_the_turn_it_requeues() -> anyhow::Result<()> {
+        use crate::runtime::run_interruptions::db_tests::{RunningTurn, RuntimeShape};
+
+        let pool = crate::tests::require_origin_test_pool("credit stop interruption test").await?;
+        let project_id = Uuid::new_v4();
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        crate::tests::with_shared_db_fixture(fixture, async {
+            let turn = RunningTurn::start(
+                pool.clone(),
+                project_id,
+                RuntimeShape::Hosted,
+                axum::http::StatusCode::NO_CONTENT,
+            )
+            .await?;
+
+            super::stop_runtime_for_credit_exhaustion(&turn.state, turn.runtime_id).await?;
+
+            assert_eq!(turn.releases(), 1);
+            turn.assert_interrupted("credits_exhausted").await?;
+            turn.assert_resumed_by_a_lease().await
+        })
+        .await
     }
 }

@@ -174,6 +174,21 @@ work an idle-slot reclaim requeued. Work in that space pinned to a desktop or
 another machine is never retried or given up on by the wait, so it keeps this
 15-minute expiry.
 
+A turn a stop cuts off says so on its run. In the requeue's transaction, the
+run of each requeued job that was `in_progress` or `awaiting_approval` goes
+back to `queued` with `progress_stage` `requeued`, and `runs.metadata` gains
+`interruption`: `reason` (the stop's reason, such as `user_stop`, `idle` or
+`credits_exhausted`, or `other` when it is not a plain token), `jobId`,
+`interruptedAt` (the job's `requeuedAt`) and `resumeBy`, 15 minutes later:
+the earliest the expiry may give the turn up, not a deadline, since a space
+waiting on the limit or a stop still waiting on its provider release waits
+longer. `GET /runs` returns that record after a reload. `/runtime/stop` and
+`/runtime/remove` also announce it once they answer, as a `run.progress` of
+the stored run stamped with its `updated_at`; other stops do not, so other
+viewers see it on their next load of the runs. A lease resumes the turn like
+any queued run (`in_progress`, `agent:leased`), and `interruption` stays on
+the run as history.
+
 ## A launch that does not come up
 
 Until a launched runtime registers, it stays `requested` with a `launching`
