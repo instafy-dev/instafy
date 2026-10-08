@@ -147,7 +147,9 @@ export function useStoppedTurnNotice({
   const hold = manualStopHold(projectId);
   // Whether this tab asked for the space's machine, kept until one is ready.
   // A request ends before the machine it asked for has started, and only
-  // Start, Reconnect or a send lifts the hold. Read in the same render as
+  // Start, Reconnect or a send lifts the hold. A Stop that failed lifts it
+  // too, but leaves no record to show (stopUnderManualHold keeps the hold
+  // whenever the stop took effect). Read in the same render as
   // the lift, so the line never drops to its lead sentence on the way out.
   const [seen, setSeen] = useState({ projectId, hold, machineRequested: false });
   const sameSpace = seen.projectId === projectId;

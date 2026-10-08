@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ensureRuntime, fetchRuntimeStatus, startRuntime, stopRuntime } from "../runtimes";
+import { committedRuntimeStop, ensureRuntime, fetchRuntimeStatus, startRuntime, stopRuntime } from "../runtimes";
+import { ControllerApiError } from "../core";
 import { CONTROLLER_READ_BUDGET_MS } from "../readBudget";
 
 const { resolveContext, readError } = vi.hoisted(() => ({
   resolveContext: vi.fn(),
   readError: vi.fn(),
 }));
-vi.mock("../core", () => ({
+vi.mock("../core", async () => ({
+  // The error type and the reading of an error answer are the real ones.
+  ...(await vi.importActual<typeof import("../core")>("../core")),
   runtimeControllerEnabled: true,
   resolveControllerRequestContext: resolveContext,
   readControllerError: readError,
@@ -225,5 +228,85 @@ describe("stopRuntime", () => {
 
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
     await expect(stopRuntime({ runtimeId: "runtime-1" })).resolves.toEqual({ flush: null });
+  });
+});
+
+describe("a stop that answers an error", () => {
+  beforeEach(() => {
+    resolveContext.mockResolvedValue(context);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function answer(status: number, body: string) {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status })));
+  }
+
+  async function stopError(): Promise<unknown> {
+    return stopRuntime({ runtimeId: "runtime-1", reason: "user_stop" }).then(
+      () => {
+        throw new Error("the stop resolved");
+      },
+      (error: unknown) => error,
+    );
+  }
+
+  it("took effect when only the machine's release is still pending", async () => {
+    // The controller had committed the quarantine: the machine is fenced off
+    // and its running turn is back in the queue. The next ensure or a sweep
+    // retries the release.
+    answer(
+      502,
+      JSON.stringify({
+        ok: false,
+        status_changed: false,
+        provider_release_attempted: true,
+        provider_release_succeeded: false,
+        skip_reason: "provider_cleanup_pending",
+        flush: { status: "flushed", unpushedRefs: 0, unpushedRefNames: [] },
+      }),
+    );
+    const error = await stopError();
+
+    expect(error).toBeInstanceOf(ControllerApiError);
+    expect(error).toMatchObject({
+      status: 502,
+      code: "provider_cleanup_pending",
+      message: "runtime provider cleanup is still pending",
+    });
+    expect(committedRuntimeStop(error)).toEqual({ flush: { status: "flushed", unpushedRefs: 0, error: null } });
+
+    answer(502, JSON.stringify({ ok: false, status_changed: false, skip_reason: "provider_cleanup_pending" }));
+    expect(committedRuntimeStop(await stopError())).toEqual({ flush: null });
+  });
+
+  it("took effect when another stop released the same machine first", async () => {
+    answer(409, JSON.stringify({ message: "runtime lease generation is no longer current" }));
+    expect(committedRuntimeStop(await stopError())).toEqual({ flush: null });
+  });
+
+  it("may have left the machine running after any other failure", async () => {
+    for (const [status, body] of [
+      [409, JSON.stringify({ message: "provider-managed runtime is missing its active lease generation" })],
+      // A proxy in front of the controller, not the controller's answer.
+      [502, "<html>Bad Gateway</html>"],
+      [502, JSON.stringify({ ok: false, status_changed: false })],
+      [500, JSON.stringify({ message: "failed to commit runtime stop" })],
+      [403, JSON.stringify({ message: "forbidden" })],
+    ] as const) {
+      answer(status, body);
+      const error = await stopError();
+      expect(error, `${status} ${body}`).toBeInstanceOf(ControllerApiError);
+      expect(committedRuntimeStop(error), `${status} ${body}`).toBeNull();
+    }
+
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))));
+    expect(committedRuntimeStop(await stopError())).toBeNull();
+    expect(committedRuntimeStop(null)).toBeNull();
   });
 });

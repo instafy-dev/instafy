@@ -357,6 +357,17 @@ export async function stopRuntime(
     });
 
     if (!response.ok) {
+      const releasePending =
+        response.status === 502 ? await readReleasePendingStop(response.clone()) : null;
+      if (releasePending) {
+        throw new ControllerApiError({
+          status: response.status,
+          message: "runtime provider cleanup is still pending",
+          code: RUNTIME_STOP_RELEASE_PENDING,
+          details: releasePending,
+          url: response.url,
+        });
+      }
       // Keep status and code on the error so callers can tell a controller
       // refusal (409: nothing left to release) apart from a transport failure.
       throw new ControllerApiError(
@@ -371,6 +382,47 @@ export async function stopRuntime(
     console.warn("[runtime-controller] stopRuntime error:", message);
     throw error;
   }
+}
+
+/** The controller's `skip_reason` for a stop whose provider release is still pending. */
+const RUNTIME_STOP_RELEASE_PENDING = "provider_cleanup_pending";
+/** The controller's 409 when the machine's lease generation was already released. */
+const RUNTIME_LEASE_NO_LONGER_CURRENT = "runtime lease generation is no longer current";
+
+/** What a 502 stop answer kept, when it is the controller's release-pending answer. */
+async function readReleasePendingStop(response: Response): Promise<StopRuntimeResult | null> {
+  const body = (await response.json().catch(() => null)) as {
+    skip_reason?: unknown;
+    flush?: unknown;
+  } | null;
+  return body?.skip_reason === RUNTIME_STOP_RELEASE_PENDING
+    ? { flush: parseRuntimeStopFlush(body.flush) }
+    : null;
+}
+
+/**
+ * What a stop that answered `error` still did, or null when it may have
+ * changed nothing. The controller commits a stop's quarantine (the machine
+ * fenced off, its running turn put back in the queue) before it asks the
+ * provider to release the machine, so two error answers follow a stop that
+ * took effect: a 502 `provider_cleanup_pending`, when that release failed
+ * or ran out of time and the next ensure or a sweep retries it, and a 409
+ * "runtime lease generation is no longer current", when another stop
+ * released the same machine first. After any other failure the machine may
+ * still be running.
+ */
+export function committedRuntimeStop(error: unknown): StopRuntimeResult | null {
+  if (!(error instanceof ControllerApiError)) {
+    return null;
+  }
+  if (error.code === RUNTIME_STOP_RELEASE_PENDING) {
+    const details = error.details as Partial<StopRuntimeResult> | null;
+    return { flush: details?.flush ?? null };
+  }
+  if (error.status === 409 && error.message.trim().toLowerCase() === RUNTIME_LEASE_NO_LONGER_CURRENT) {
+    return { flush: null };
+  }
+  return null;
 }
 
 export interface StopRuntimeIfIdleResult {

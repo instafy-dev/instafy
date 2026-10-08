@@ -28,9 +28,8 @@ import {
   clearManualStop,
   clearRestoredAwaitingIntent,
   markManualStop,
-  recordManualStopFlush,
 } from "./idlePauseRegistry";
-import { stopLeavesNoLiveHostedRuntime } from "./hooks/manualStopDecisions";
+import { stopLeavesNoLiveHostedRuntime, stopUnderManualHold } from "./hooks/manualStopDecisions";
 import { resolveStartRuntimeParams } from "./hooks/startRuntimeDecisions";
 import { useRuntimeControllerSync } from "./hooks/useRuntimeControllerSync";
 import { useRuntimeStatusRefresh } from "./hooks/useRuntimeStatusRefresh";
@@ -441,17 +440,15 @@ export function RuntimeOperationsProvider({
       const holdManualStop = stopLeavesNoLiveHostedRuntime(state.runtimeStatuses, runtimeId);
       const hold = holdManualStop ? markManualStop(projectId) : null;
       try {
-        const stopped = await controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" });
-        // Whether the stop's flush put the work where History lists it: the
-        // chat names that place only then (useStoppedTurnNotice).
-        recordManualStopFlush(projectId, hold, stopped?.flush ?? null);
+        // Keeps the hold while the stop holds, also after an error answer
+        // that follows a stop the controller already committed.
+        await stopUnderManualHold(projectId, hold, () =>
+          controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" }),
+        );
         showStatus("Runtime termination requested", "info", 2500);
         await refreshRuntimeStatuses();
         return true;
       } catch (error) {
-        if (holdManualStop) {
-          clearManualStop(projectId);
-        }
         const message = error instanceof Error ? error.message : String(error);
         showStatus(`Unable to terminate runtime: ${message}`, "error", 4000);
         return false;

@@ -26,6 +26,8 @@ import {
   recordManualStopFlush,
 } from "../../../../runtime/idlePauseRegistry";
 import { isRunActivelyProgressing } from "../../../../conversations/runLiveness";
+import { stopUnderManualHold } from "../../../../runtime/hooks/manualStopDecisions";
+import { ControllerApiError } from "../../../../services/runtimeController/core";
 import { StoppedTurnRow } from "../ChatSystemRows";
 import { ChatTypingRows } from "../ChatTypingRows";
 import { resolveAgentWaitingActivityCopy } from "../runtimeAlertPresentation";
@@ -521,6 +523,49 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     }
   });
 
+  it("stays when the Stop took effect though its answer was an error", async () => {
+    // The controller fenced the machine off and put the turn back in the
+    // queue, then its provider's release failed or ran out of time.
+    const hold = markManualStop(PROJECT_ID);
+    await render(<Harness />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    await act(async () => {
+      await stopUnderManualHold(PROJECT_ID, hold, async () => {
+        throw new ControllerApiError({
+          status: 502,
+          message: "runtime provider cleanup is still pending",
+          code: "provider_cleanup_pending",
+          details: { flush: SAVED_FLUSH },
+        });
+      });
+    });
+    expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
+    // The announcement of the stop's record follows that answer.
+    await render(<Harness activeRuns={[requeued()]} />);
+    expect(line()?.textContent).toBe(`${STOPPED_COPY} ${KEPT_IN_HISTORY}`);
+  });
+
+  it("gives way when the Stop failed and the machine may still be running", async () => {
+    const hold = markManualStop(PROJECT_ID);
+    await render(<Harness />);
+    expect(line()?.textContent).toBe(STOPPED_COPY);
+
+    const failure = new ControllerApiError({
+      status: 409,
+      message: "provider-managed runtime is missing its active lease generation",
+      code: null,
+      details: null,
+    });
+    await act(async () => {
+      await stopUnderManualHold(PROJECT_ID, hold, async () => {
+        throw failure;
+      }).catch(() => undefined);
+    });
+    expect(line()).toBeNull();
+    expect(typingStatus()?.textContent).toContain(THINKING_LABEL);
+  });
+
   it("is wired into ChatPanel the same way", () => {
     const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
     const chatPanel = fs.readFileSync(path.resolve(componentsDir, "ChatPanel.tsx"), "utf8");
@@ -542,6 +587,7 @@ describe("a turn the person's Stop cut off, in the chat", () => {
     // Machines > Stop keeps what the stop answered next to the hold it set.
     const provider = fs.readFileSync(path.resolve(componentsDir, "../../../runtime/RuntimeOperationsProvider.tsx"), "utf8");
     expect(provider).toContain("const hold = holdManualStop ? markManualStop(projectId) : null;");
-    expect(provider).toContain("recordManualStopFlush(projectId, hold, stopped?.flush ?? null);");
+    expect(provider).toContain("await stopUnderManualHold(projectId, hold, () =>");
+    expect(provider).toContain('controllerClient.runtimes.stop({ runtimeId, reason: "user_stop" }),');
   });
 });
