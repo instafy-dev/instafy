@@ -51,6 +51,15 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
 /// How long a stop-requeued job may wait for a runtime before it expires
 /// instead of silently re-running whenever a runtime next appears.
 pub(super) const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
+/// What an expired stop-requeued job tells the person who sent it.
+const REQUEUED_JOB_EXPIRED_MESSAGE: &str = "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
+/// The `failureCode` of a run, and the `kind` of the chat message, when the
+/// requeued-job expiry gives up an interrupted turn.
+pub(super) const INTERRUPTED_RUN_EXPIRED_CODE: &str = "interrupted_run_expired";
+/// Requeue reasons of a stop a person asked for. The expiry of a turn one of
+/// them interrupted starts nothing on its own (see
+/// [`expire_stale_requeued_jobs`]).
+const REQUEUE_REASONS_OF_A_PERSON: [&str; 2] = ["user_stop", "user_remove"];
 /// How long a queued platform AI job is left alone before
 /// `fail_platform_jobs_stranded_on_private_runtimes` may fail it. Dispatch
 /// queues a platform job for a runtime that is not dispatch-ready unpinned,
@@ -486,6 +495,12 @@ pub(super) struct FailedQueuedJobs {
     conversation_messages: Vec<crate::conversations::ConversationMessageRow>,
     /// Project, job, run and conversation of each failed job.
     jobs: Vec<(Uuid, Uuid, Option<Uuid>, Option<Uuid>)>,
+    /// The failed jobs whose failure dispatches nothing: no plan checkpoint
+    /// and no send-queue drain. Empty unless the sweep says otherwise.
+    dispatch_nothing_for: std::collections::BTreeSet<Uuid>,
+    /// The `kind` of the messages, which each run's failure also carries as
+    /// its `failureCode`.
+    kind: String,
     outcome: String,
     message: String,
 }
@@ -493,9 +508,11 @@ pub(super) struct FailedQueuedJobs {
 /// Settle jobs a sweep has just moved from `queued` to `failed` with
 /// `message` ([`settle_expired_queued_jobs`]; `settle_kind` labels its errors)
 /// and write `message` into each job's conversation as a controller error
-/// tagged `kind`, so whoever sent the work sees why it never started. `rows`
-/// must also carry `session_id` and `prompt_id`. Publish the result with
-/// [`publish_failed_queued_jobs`] once the transaction commits.
+/// tagged `kind`, so whoever sent the work sees why it never started. The
+/// message also names the reason a stop requeued the job, if one did
+/// (`interruptionReason`). `rows` must also carry `session_id` and
+/// `prompt_id`. Publish the result with [`publish_failed_queued_jobs`] once
+/// the transaction commits.
 pub(super) async fn settle_failed_queued_jobs_with_message(
     transaction: &mut tokio_postgres::Transaction<'_>,
     rows: &[tokio_postgres::Row],
@@ -520,7 +537,7 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
         let payload = row
             .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
             .0;
-        let metadata = json!({
+        let mut metadata = json!({
             "source": "controller",
             "kind": kind,
             "outcome": "failed",
@@ -530,6 +547,13 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
             "errorMessage": message,
             "agent": payload.pointer("/metadata/agent").cloned(),
         });
+        if let Some(reason) = payload
+            .get("requeuedReason")
+            .and_then(serde_json::Value::as_str)
+        {
+            metadata["interruptionReason"] =
+                json!(super::run_interruptions::interruption_reason_token(reason));
+        }
         let recorded = crate::conversations::record_controller_assistant_message(
             transaction,
             &project_id,
@@ -554,6 +578,8 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
         settled,
         conversation_messages,
         jobs,
+        dispatch_nothing_for: std::collections::BTreeSet::new(),
+        kind: kind.to_string(),
         outcome: outcome.to_string(),
         message: message.to_string(),
     })
@@ -563,7 +589,8 @@ pub(super) async fn settle_failed_queued_jobs_with_message(
 /// transaction has committed: input state, refunded credits, the conversation
 /// messages, each run's failure, the lead checkpoint of a plan whose last
 /// live worker failed, and a send-queue drain per conversation, since
-/// whatever was queued behind a failed turn may go now.
+/// whatever was queued behind a failed turn may go now. The last two skip
+/// the jobs in `dispatch_nothing_for`.
 pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQueuedJobs) {
     crate::send_intents::publish_job_input_state_updates(
         state,
@@ -581,7 +608,6 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
     let mut conversations = std::collections::BTreeSet::new();
     let mut job_ids = Vec::with_capacity(failed.jobs.len());
     for (project_id, job_id, run_id, conversation_id) in failed.jobs {
-        job_ids.push(job_id);
         if let Some(run_id) = run_id {
             publish_failed_run(
                 state,
@@ -591,9 +617,14 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
                 conversation_id,
                 &failed.outcome,
                 &failed.message,
+                &failed.kind,
             )
             .await;
         }
+        if failed.dispatch_nothing_for.contains(&job_id) {
+            continue;
+        }
+        job_ids.push(job_id);
         if let Some(conversation_id) = conversation_id {
             conversations.insert(conversation_id);
         }
@@ -617,6 +648,7 @@ pub(super) async fn publish_failed_queued_jobs(state: &AppState, failed: FailedQ
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_failed_run(
     state: &AppState,
     project_id: Uuid,
@@ -625,6 +657,7 @@ async fn publish_failed_run(
     conversation_id: Option<Uuid>,
     outcome: &str,
     message: &str,
+    failure_code: &str,
 ) {
     let snapshot = match state.pool.get().await {
         Ok(mut connection) => crate::runs::load_run_snapshot(&mut *connection, &run_id)
@@ -654,6 +687,7 @@ async fn publish_failed_run(
             "finalStatus": "failed",
             "runStatus": "failed",
             "errorMessage": message,
+            "failureCode": failure_code,
             "run": run_payload,
         }),
     );
@@ -918,6 +952,16 @@ async fn fail_stranded_platform_jobs(
 /// Without this, a job killed by credit exhaustion re-runs from scratch
 /// whenever a runtime next appears — even days later — duplicating side
 /// effects and burning fresh credits unprompted.
+///
+/// An expired job fails like the work a limit wait gives up on
+/// ([`settle_failed_queued_jobs_with_message`]): its run fails with
+/// `run.completed` (`failureCode` [`INTERRUPTED_RUN_EXPIRED_CODE`]) and its
+/// conversation gets the reason as a controller error. Its failure starts
+/// nothing when a person's Stop or Remove requeued it
+/// ([`REQUEUE_REASONS_OF_A_PERSON`]): no plan checkpoint and no send-queue
+/// drain, either of which could start the machine they stopped. A message
+/// queued behind the turn still goes out with the send-queue recovery sweep
+/// (`send_queue::spawn_send_queue_recovery_sweep`), as it did before.
 pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
     let mut connection = state
         .pool
@@ -963,7 +1007,7 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
                 "update agent_jobs
                  set status = 'failed',
                      outcome = 'expired',
-                     error_message = 'This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.',
+                     error_message = $2,
                      completed_at = now(),
                      active_input_ready_runtime_id = null,
                      active_input_ready_expires_at = null,
@@ -979,25 +1023,41 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
                        and r.status not in ('stopped', 'offline', 'removed')
                    )
                    {skip_work_waiting_on_the_limit}
-                 returning id, project_id, run_id, conversation_id, payload, error_message,
-                           lease_attempts"
+                 returning id, project_id, run_id, conversation_id, session_id, prompt_id,
+                           payload, error_message, lease_attempts"
             ),
-            &[&(REQUEUED_JOB_EXPIRY_SECONDS as f64)],
+            &[
+                &(REQUEUED_JOB_EXPIRY_SECONDS as f64),
+                &REQUEUED_JOB_EXPIRED_MESSAGE,
+            ],
         )
         .await
         .context("failed to expire stale requeued jobs")?;
+    if rows.is_empty() {
+        transaction
+            .rollback()
+            .await
+            .context("failed to close an empty requeued job expiry")?;
+        return Ok(());
+    }
 
-    let settled = settle_expired_queued_jobs(&mut transaction, &rows, "requeued").await?;
+    let mut failed = settle_failed_queued_jobs_with_message(
+        &mut transaction,
+        &rows,
+        "requeued",
+        INTERRUPTED_RUN_EXPIRED_CODE,
+        "expired",
+        REQUEUED_JOB_EXPIRED_MESSAGE,
+    )
+    .await?;
 
     transaction
         .commit()
         .await
         .context("failed to commit requeued job expiry")?;
-    crate::send_intents::publish_job_input_state_updates(state, &settled.job_input_state_updates);
     drop(connection);
-    publish_credits_updated_for_orgs(state, settled.refunded_org_ids).await;
 
-    for row in rows {
+    for row in &rows {
         let job_id: Uuid = row.get("id");
         let project_id: Uuid = row.get("project_id");
         info!(
@@ -1005,7 +1065,18 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
             project_id = %project_id,
             "expired stale requeued job"
         );
+        let payload = row
+            .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
+            .0;
+        if payload
+            .get("requeuedReason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|reason| REQUEUE_REASONS_OF_A_PERSON.contains(&reason))
+        {
+            failed.dispatch_nothing_for.insert(job_id);
+        }
     }
+    publish_failed_queued_jobs(state, failed).await;
 
     Ok(())
 }
@@ -2777,6 +2848,10 @@ mod tests {
                         event.data["errorMessage"],
                         crate::dispatch::MANAGED_AI_SELF_HOSTED_RUNTIME_MESSAGE
                     );
+                    assert_eq!(
+                        event.data["failureCode"],
+                        crate::dispatch::MANAGED_AI_HOSTED_RUNTIME_REQUIRED_CODE
+                    );
                     run_failures += 1;
                 }
             }
@@ -3107,6 +3182,347 @@ mod tests {
             "the inspection gave up after {waited:?}"
         );
         Ok(())
+    }
+
+    /// A requeue as a stop with `reason` left the turn of `job_id` and
+    /// `run_id` `age_seconds` ago: the job queued with its stamp, the run
+    /// queued at `requeued` with its interruption.
+    async fn requeue_as_a_stop_did(
+        connection: &tokio_postgres::Client,
+        job_id: Uuid,
+        run_id: Uuid,
+        reason: &str,
+        age_seconds: i64,
+    ) -> anyhow::Result<()> {
+        connection
+            .execute(
+                "update agent_jobs
+                 set status = 'queued',
+                     leased_by_runtime_id = null,
+                     payload = payload || jsonb_build_object(
+                         'requeuedAt', (now() - interval '1 second' * $2)::text,
+                         'requeuedReason', $3::text
+                     )
+                 where id = $1",
+                &[&job_id, &(age_seconds as f64), &reason],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runs
+                 set status = 'queued',
+                     progress_stage = 'requeued',
+                     metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+                         'interruption', jsonb_build_object('reason', $2::text, 'jobId', $3::uuid)
+                     )
+                 where id = $1",
+                &[&run_id, &reason, &job_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Nothing resumed a turn a person's Stop interrupted within 15 minutes:
+    /// it fails the way a limit wait gives up. The run fails with
+    /// `run.completed`, and the conversation is told why.
+    #[tokio::test]
+    async fn expired_user_stop_requeue_fails_the_run_with_a_message_and_run_completed(
+    ) -> anyhow::Result<()> {
+        use crate::tests_managed_ai_refund::seed_reserved_managed_ai_prompt;
+        use serde_json::json;
+        use tokio_postgres::types::Json as PgJson;
+
+        let Some(fixture) = seed_reserved_managed_ai_prompt("expired-user-stop").await? else {
+            eprintln!("skipping interrupted turn expiry test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let test_result: anyhow::Result<()> = async {
+            let connection = fixture.pool.get().await?;
+            connection
+                .execute(
+                    "update runtimes set status = 'stopped' where project_id = $1",
+                    &[&fixture.project_id],
+                )
+                .await?;
+            requeue_as_a_stop_did(
+                &connection,
+                fixture.job_id,
+                fixture.run_id,
+                "user_stop",
+                super::REQUEUED_JOB_EXPIRY_SECONDS + 60,
+            )
+            .await?;
+            let conversation_id: Uuid = connection
+                .query_one(
+                    "select conversation_id from agent_jobs where id = $1",
+                    &[&fixture.job_id],
+                )
+                .await?
+                .get(0);
+            drop(connection);
+
+            let _watch = fixture.state.events.watch_project(fixture.project_id);
+            let mut events = fixture.state.events.subscribe();
+            super::expire_stale_requeued_jobs(&fixture.state).await?;
+
+            let connection = fixture.pool.get().await?;
+            let job = connection
+                .query_one(
+                    "select status, outcome, error_message from agent_jobs where id = $1",
+                    &[&fixture.job_id],
+                )
+                .await?;
+            assert_eq!(job.get::<_, String>("status"), "failed");
+            assert_eq!(
+                job.get::<_, Option<String>>("outcome").as_deref(),
+                Some("expired")
+            );
+            assert_eq!(
+                job.get::<_, Option<String>>("error_message").as_deref(),
+                Some(super::REQUEUED_JOB_EXPIRED_MESSAGE)
+            );
+            let run = connection
+                .query_one(
+                    "select status, last_message, metadata from runs where id = $1",
+                    &[&fixture.run_id],
+                )
+                .await?;
+            assert_eq!(run.get::<_, String>("status"), "failed");
+            assert_eq!(
+                run.get::<_, Option<String>>("last_message").as_deref(),
+                Some(super::REQUEUED_JOB_EXPIRED_MESSAGE)
+            );
+            let run_metadata = run.get::<_, PgJson<serde_json::Value>>("metadata").0;
+            assert_eq!(run_metadata["interruption"]["reason"], json!("user_stop"));
+
+            let messages = connection
+                .query(
+                    "select content, run_id, metadata from conversation_messages
+                     where conversation_id = $1 and role = 'assistant'",
+                    &[&conversation_id],
+                )
+                .await?;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0].get::<_, String>("content"),
+                super::REQUEUED_JOB_EXPIRED_MESSAGE
+            );
+            assert_eq!(
+                messages[0].get::<_, Option<Uuid>>("run_id"),
+                Some(fixture.run_id)
+            );
+            let metadata = messages[0]
+                .get::<_, PgJson<serde_json::Value>>("metadata")
+                .0;
+            assert_eq!(metadata["source"], json!("controller"));
+            assert_eq!(metadata["kind"], json!(super::INTERRUPTED_RUN_EXPIRED_CODE));
+            assert_eq!(metadata["messageType"], json!("error"));
+            assert_eq!(metadata["outcome"], json!("failed"));
+            assert_eq!(metadata["interruptionReason"], json!("user_stop"));
+            assert_eq!(metadata["jobId"], json!(fixture.job_id));
+            assert_eq!(metadata["runId"], json!(fixture.run_id));
+            drop(connection);
+
+            let mut messages_created = 0;
+            let mut run_failures = 0;
+            let mut credit_signals = 0;
+            while let Ok(event) = events.try_recv() {
+                if event.project_id != Some(fixture.project_id) {
+                    continue;
+                }
+                match event.kind.as_str() {
+                    "conversation.message_created" => messages_created += 1,
+                    crate::credits::CREDITS_UPDATED_EVENT => credit_signals += 1,
+                    "run.completed" if event.run_id == Some(fixture.run_id) => {
+                        assert_eq!(event.data["finalStatus"], json!("failed"));
+                        assert_eq!(event.data["runStatus"], json!("failed"));
+                        assert_eq!(event.data["outcome"], json!("expired"));
+                        assert_eq!(
+                            event.data["failureCode"],
+                            json!(super::INTERRUPTED_RUN_EXPIRED_CODE)
+                        );
+                        assert_eq!(
+                            event.data["errorMessage"],
+                            json!(super::REQUEUED_JOB_EXPIRED_MESSAGE)
+                        );
+                        assert_eq!(event.data["run"]["status"], json!("failed"));
+                        assert_eq!(
+                            event.data["run"]["metadata"]["interruption"]["reason"],
+                            json!("user_stop")
+                        );
+                        run_failures += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(messages_created, 1);
+            assert_eq!(run_failures, 1);
+            assert_eq!(credit_signals, 1, "the unused reserve is given back");
+
+            // A second sweep finds nothing to expire, writes nothing and
+            // says nothing.
+            super::expire_stale_requeued_jobs(&fixture.state).await?;
+            let mut repeated = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if event.project_id == Some(fixture.project_id) {
+                    repeated.push(event.kind);
+                }
+            }
+            assert!(repeated.is_empty(), "{repeated:?}");
+            let message_count: i64 = fixture
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select count(*) from conversation_messages
+                     where conversation_id = $1 and role = 'assistant'",
+                    &[&conversation_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(message_count, 1);
+            Ok(())
+        }
+        .await;
+        let cleanup = fixture.cleanup().await;
+        test_result?;
+        cleanup
+    }
+
+    /// The expiry of a turn a person stopped starts nothing on its own, so
+    /// the message queued behind it stays queued instead of starting the
+    /// machine they stopped. A turn another stop interrupted still drains
+    /// its conversation's send queue when it expires, as a limit wait's
+    /// give-up does.
+    #[tokio::test]
+    async fn expiring_a_turn_a_person_stopped_dispatches_nothing() -> anyhow::Result<()> {
+        use crate::tests_managed_ai_refund::seed_reserved_managed_ai_prompt;
+        use serde_json::json;
+        use tokio_postgres::types::Json as PgJson;
+
+        let Some(stopped) = seed_reserved_managed_ai_prompt("expired-user-stop-queue").await?
+        else {
+            eprintln!("skipping interrupted turn queue drain test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let idle = match seed_reserved_managed_ai_prompt("expired-idle-queue").await {
+            Ok(Some(idle)) => idle,
+            other => {
+                stopped.cleanup().await?;
+                other?;
+                anyhow::bail!("the second space was not seeded");
+            }
+        };
+        let test_result: anyhow::Result<()> = async {
+            let mut entries = Vec::new();
+            for (fixture, reason) in [(&stopped, "user_stop"), (&idle, "idle")] {
+                let connection = fixture.pool.get().await?;
+                connection
+                    .execute(
+                        "update runtimes set status = 'stopped' where project_id = $1",
+                        &[&fixture.project_id],
+                    )
+                    .await?;
+                requeue_as_a_stop_did(
+                    &connection,
+                    fixture.job_id,
+                    fixture.run_id,
+                    reason,
+                    super::REQUEUED_JOB_EXPIRY_SECONDS + 60,
+                )
+                .await?;
+                let conversation_id: Uuid = connection
+                    .query_one(
+                        "select conversation_id from agent_jobs where id = $1",
+                        &[&fixture.job_id],
+                    )
+                    .await?
+                    .get(0);
+                let entry_id = Uuid::new_v4();
+                connection
+                    .execute(
+                        "insert into conversation_send_queue (
+                             id, project_id, conversation_id, status, request
+                         ) values ($1, $2, $3, 'queued', $4)",
+                        &[
+                            &entry_id,
+                            &fixture.project_id,
+                            &conversation_id,
+                            &PgJson(json!({
+                                "sessionId": null,
+                                "promptText": "And the changelog too",
+                                "intent": "feature",
+                                "metadata": {
+                                    "agentSelection": { "active": ["octo"], "mentions": [] }
+                                }
+                            })),
+                        ],
+                    )
+                    .await?;
+                entries.push(entry_id);
+            }
+            let (stopped_entry, idle_entry) = (entries[0], entries[1]);
+
+            super::expire_stale_requeued_jobs(&stopped.state).await?;
+            for fixture in [&stopped, &idle] {
+                let status: String = fixture
+                    .pool
+                    .get()
+                    .await?
+                    .query_one(
+                        "select status from agent_jobs where id = $1",
+                        &[&fixture.job_id],
+                    )
+                    .await?
+                    .get(0);
+                assert_eq!(status, "failed");
+            }
+
+            // The drain is spawned: wait until it has dispatched the idle
+            // space's message, or failed it.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let row = idle
+                    .pool
+                    .get()
+                    .await?
+                    .query_one(
+                        "select status, dispatched_run_id from conversation_send_queue
+                         where id = $1",
+                        &[&idle_entry],
+                    )
+                    .await?;
+                let status: String = row.get("status");
+                if status == "failed" || row.get::<_, Option<Uuid>>("dispatched_run_id").is_some() {
+                    break;
+                }
+                anyhow::ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the idle stop's conversation was never drained ({status})"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            // Both drains would have been spawned by the same publish.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let stopped_status: String = stopped
+                .pool
+                .get()
+                .await?
+                .query_one(
+                    "select status from conversation_send_queue where id = $1",
+                    &[&stopped_entry],
+                )
+                .await?
+                .get(0);
+            assert_eq!(stopped_status, "queued");
+            Ok(())
+        }
+        .await;
+        let stopped_cleanup = stopped.cleanup().await;
+        let idle_cleanup = idle.cleanup().await;
+        test_result?;
+        stopped_cleanup?;
+        idle_cleanup
     }
 
     /// The idle sweep's stop (`auto_stop_idle_hosted_runtimes`). Its

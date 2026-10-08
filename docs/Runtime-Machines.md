@@ -189,6 +189,15 @@ viewers see it on their next load of the runs. A lease resumes the turn like
 any queued run (`in_progress`, `agent:leased`), and `interruption` stays on
 the run as history.
 
+When the expiry gives a turn up, its run fails with `run.completed`
+(`outcome` `expired`, `failureCode` `interrupted_run_expired`) and its
+conversation gets a controller error message (`kind`
+`interrupted_run_expired`, `interruptionReason` the stop's reason). The
+failure of a turn that a person's Stop or Remove (`user_stop`, `user_remove`)
+interrupted starts nothing on its own: no plan checkpoint and no send-queue
+drain. A message queued behind it still goes out with the send-queue recovery
+sweep.
+
 ## A launch that does not come up
 
 Until a launched runtime registers, it stays `requested` with a `launching`
