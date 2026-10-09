@@ -7,9 +7,10 @@ import test from "node:test";
 import vm from "node:vm";
 import { spawnSync } from "node:child_process";
 import { withoutImageBuildDeltas } from "./lib/imageBuildRoutingTestBaseline.mjs";
+import { withoutMergeQueue } from "./lib/mergeQueueTestBaseline.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const read = file => withoutImageBuildDeltas(file, withoutManualCiRouting(file, fs.readFileSync(path.join(root, ".github/workflows", file), "utf8")));
+const read = file => withoutImageBuildDeltas(file, withoutManualCiRouting(file, withoutMergeQueue(file, fs.readFileSync(path.join(root, ".github/workflows", file), "utf8"))));
 const jobs = [
   { file: "npm-release.yml", key: "select", label: "public-npm-select", name: "Select version or publish mode", minutes: 15,
     tools: ["bash", "git", "curl", "tar", "sha256sum", "unzip", "gh"],

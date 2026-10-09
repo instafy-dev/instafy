@@ -13,6 +13,9 @@ on:
   push:
     branches:
       - main
+  merge_group:
+    types:
+      - checks_requested
 
 concurrency:
   group: trusted-public-boundary-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
@@ -151,8 +154,9 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # PRs execute base-owned controls; protected-main pushes execute only
-          # the exact pushed commit. Neither path accepts an author-supplied ref.
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}
+          # the exact pushed commit; queued merge groups execute the controls
+          # of the group's parent commit. No path accepts an author-supplied ref.
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.sha }}
           path: trusted
           fetch-depth: 1
           persist-credentials: false
@@ -271,6 +275,53 @@ jobs:
           fi
           actual_sha="$(git -C "$TRUSTED_ROOT" rev-parse --verify "HEAD^{commit}")"
           test "$actual_sha" = "$EXPECTED_SHA"
+
+      - name: Checkout the queued merge group as data
+        if: github.event_name == 'merge_group'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Controls come from the group's parent (trusted checkout above); the
+          # queued group commit is scanned as unexecuted data, as for a PR.
+          # Unlike pull_request_target, a merge_group run reads this workflow
+          # file from the group commit, so the PR's own base-owned run stays
+          # the gate for workflow edits.
+          ref: ${{ github.event.merge_group.head_sha }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          lfs: false
+          set-safe-directory: false
+          show-progress: false
+
+      - name: Verify the exact merge group object and parent
+        if: github.event_name == 'merge_group'
+        env:
+          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
+          GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+          # Read-only: proves the group descends from its parent and that the
+          # parent is built on main. Never used to fetch candidate code.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          trap 'echo "::error::merge group verification failed on: ${BASH_COMMAND}"' ERR
+          [[ "$GROUP_BASE_REF" == "refs/heads/main" ]]
+          # The suffix is GitHub's; the pattern matches the internal queue lanes.
+          [[ "$GROUP_HEAD_REF" =~ ^refs/heads/gh-readonly-queue/main/[A-Za-z0-9._/-]+$ ]]
+          [[ "$GITHUB_REF" == "$GROUP_HEAD_REF" ]]
+          [[ "$GROUP_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GROUP_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_SHA" == "$GROUP_HEAD_SHA" ]]
+          test "$(git -C "$TRUSTED_ROOT" rev-parse --verify "HEAD^{commit}")" = "$GROUP_BASE_SHA"
+          test "$(git -C "$CANDIDATE_ROOT" rev-parse --verify "HEAD^{commit}")" = "$GROUP_HEAD_SHA"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/compare/${GROUP_BASE_SHA}...${GROUP_HEAD_SHA}" --jq .status)" = ahead
+          case "$(gh api "repos/${GITHUB_REPOSITORY}/compare/main...${GROUP_BASE_SHA}" --jq .status)" in
+            identical|ahead) ;;
+            *) echo "::error::Merge group parent ${GROUP_BASE_SHA} is not built on main."; exit 1 ;;
+          esac
 
       - name: Install pinned Gitleaks
         env:

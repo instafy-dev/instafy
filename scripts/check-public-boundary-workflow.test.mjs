@@ -63,13 +63,13 @@ function runScriptFromStep(source, name, nextName, env) {
   });
 }
 
-test("trusted boundary is restricted to main PR targets and protected-main pushes", () => {
+test("trusted boundary is restricted to main PR targets, protected-main pushes and main's merge queue", () => {
   const source = readWorkflow("public-boundary.yml");
 
   assert.match(source, /^name: Trusted Public Boundary$/mu);
   assert.match(
     source,
-    /^  pull_request_target:\n    branches:\n      - main\n    types:\n      - opened\n      - synchronize\n      - reopened\n      - ready_for_review\n      - edited\n  push:\n    branches:\n      - main\n\nconcurrency:$/mu,
+    /^  pull_request_target:\n    branches:\n      - main\n    types:\n      - opened\n      - synchronize\n      - reopened\n      - ready_for_review\n      - edited\n  push:\n    branches:\n      - main\n  merge_group:\n    types:\n      - checks_requested\n\nconcurrency:$/mu,
   );
   assert.doesNotMatch(source, /^  pull_request:$/mu);
   assert.doesNotMatch(source, /^  workflow_dispatch:$/mu);
@@ -130,6 +130,8 @@ test("bootstrap runner selection is default-off and refuses public, fork, or oth
     context => { context.event.pull_request.head.repo.fork = true; },
     context => { context.event_name = "pull_request"; },
     context => { context.event_name = "workflow_dispatch"; },
+    // Queued merge groups always use the hosted runner.
+    context => { context.event_name = "merge_group"; },
   ];
   for (const mutate of mutations) {
     const context = bootstrapContext();
@@ -172,7 +174,7 @@ test("bootstrap routing leaves job identity, permissions, timeout and check inve
   assert.match(source, /^    timeout-minutes: 20$/mu);
   assert.match(source, /^    permissions:\n      contents: read\n      pull-requests: read$/mu);
   assert.doesNotMatch(source, /secrets\.|instafy-ci-(?:control|build)|CI_SELF_HOSTED/u);
-  assert.equal((source.match(/^      - name:/gmu) ?? []).length, 12);
+  assert.equal((source.match(/^      - name:/gmu) ?? []).length, 14);
 });
 
 test("protected-main boundary binds and scans the exact pushed commit", () => {
@@ -196,7 +198,7 @@ test("protected-main boundary binds and scans the exact pushed commit", () => {
   const verifyMain = stepSection(
     source,
     "Verify the exact protected-main object",
-    "Install pinned Gitleaks",
+    "Checkout the queued merge group as data",
   );
 
   assert.match(
@@ -209,7 +211,7 @@ test("protected-main boundary binds and scans the exact pushed commit", () => {
   );
   assert.match(
     trustedCheckout,
-    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}/u,
+    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.event_name == 'merge_group' && github\.event\.merge_group\.base_sha \|\| github\.sha \}\}/u,
   );
   assert.match(
     candidateCheckout,
@@ -260,7 +262,7 @@ test("protected-main verifier accepts only the event ref and exact checkout SHA"
   const accepted = runScriptFromStep(
     source,
     "Verify the exact protected-main object",
-    "Install pinned Gitleaks",
+    "Checkout the queued merge group as data",
     baseEnv,
   );
   assert.equal(accepted.status, 0, `${accepted.stdout}\n${accepted.stderr}`);
@@ -268,7 +270,7 @@ test("protected-main verifier accepts only the event ref and exact checkout SHA"
   const wrongSha = runScriptFromStep(
     source,
     "Verify the exact protected-main object",
-    "Install pinned Gitleaks",
+    "Checkout the queued merge group as data",
     { ...baseEnv, EXPECTED_SHA: "f".repeat(40) },
   );
   assert.notEqual(wrongSha.status, 0);
@@ -276,7 +278,7 @@ test("protected-main verifier accepts only the event ref and exact checkout SHA"
   const wrongRef = runScriptFromStep(
     source,
     "Verify the exact protected-main object",
-    "Install pinned Gitleaks",
+    "Checkout the queued merge group as data",
     { ...baseEnv, GITHUB_REF: "refs/heads/not-main" },
   );
   assert.notEqual(wrongRef.status, 0);
@@ -534,11 +536,12 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
   assert.deepEqual(actions, [
     "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
     "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
   ]);
 
   assert.match(
     trustedCheckout,
-    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}/u,
+    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.event_name == 'merge_group' && github\.event\.merge_group\.base_sha \|\| github\.sha \}\}/u,
   );
   assert.match(trustedCheckout, /path: trusted/u);
   assert.match(trustedCheckout, /persist-credentials: false/u);
@@ -896,4 +899,59 @@ test("Public Build delegates PR gating but verifies controls before scanning mai
     manifest.scripts["test:public-boundary"],
     /check-public-boundary-workflow\.test\.mjs/u,
   );
+});
+
+test("merge-group boundary scans the queued group as data with its parent's controls", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const checkout = stepSection(source, "Checkout the queued merge group as data", "Verify the exact merge group object and parent");
+  assert.match(checkout, /if: github\.event_name == 'merge_group'/u);
+  assert.match(checkout, /ref: \$\{\{ github\.event\.merge_group\.head_sha \}\}/u);
+  assert.match(checkout, /path: candidate/u);
+  assert.match(checkout, /persist-credentials: false/u);
+  assert.doesNotMatch(checkout, /allow-unsafe-pr-checkout|repository:/u);
+  const verify = stepSection(source, "Verify the exact merge group object and parent", "Install pinned Gitleaks");
+  assert.match(verify, /if: github\.event_name == 'merge_group'/u);
+  assertOrdered(source, "Verify the exact merge group object and parent", "Run trusted public boundary regression tests",
+    "Enforce trusted public boundary policy", "Scan candidate tree with path-aware Gitleaks rules");
+});
+
+test("merge-group verifier accepts only main's queue ref, the exact group head and a parent built on main", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const head = childProcess.execFileSync("git", ["-C", repositoryRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "merge-group-gh-"));
+  // Stub gh: compare BASE...HEAD answers $GROUP_RELATION, compare main...BASE answers $MAIN_RELATION.
+  fs.writeFileSync(path.join(bin, "gh"), '#!/bin/bash\ncase "$2" in\n  */compare/main...*) echo "$MAIN_RELATION" ;;\n  */compare/*) echo "$GROUP_RELATION" ;;\n  *) exit 1 ;;\nesac\n', { mode: 0o755 });
+  const env = {
+    ...process.env, PATH: `${bin}:${process.env.PATH}`, GITHUB_REPOSITORY: "instafy-dev/instafy",
+    TRUSTED_ROOT: repositoryRoot, CANDIDATE_ROOT: repositoryRoot,
+    GROUP_BASE_REF: "refs/heads/main", GROUP_HEAD_REF: `refs/heads/gh-readonly-queue/main/pr-12-${head}`,
+    GITHUB_REF: `refs/heads/gh-readonly-queue/main/pr-12-${head}`,
+    GROUP_BASE_SHA: head, GROUP_HEAD_SHA: head, GITHUB_SHA: head, GROUP_RELATION: "ahead", MAIN_RELATION: "identical",
+  };
+  const run = (change = {}) => runScriptFromStep(source, "Verify the exact merge group object and parent", "Install pinned Gitleaks", { ...env, ...change });
+  const accepted = run();
+  assert.equal(accepted.status, 0, `${accepted.stdout}\n${accepted.stderr}`);
+  assert.equal(run({ MAIN_RELATION: "ahead" }).status, 0);
+  // GitHub owns the ref suffix; the lane accepts what the internal queue lanes accept.
+  for (const suffix of ["pr-12-0123abcd", "pr-12", "queue/a.b_c-d"]) {
+    const ref = `refs/heads/gh-readonly-queue/main/${suffix}`;
+    const result = run({ GROUP_HEAD_REF: ref, GITHUB_REF: ref });
+    assert.equal(result.status, 0, `${suffix}\n${result.stdout}\n${result.stderr}`);
+  }
+  const queueRef = (ref) => ({ GROUP_HEAD_REF: ref, GITHUB_REF: ref });
+  for (const change of [
+    { GROUP_BASE_REF: "refs/heads/topic" },
+    queueRef(`refs/heads/gh-readonly-queue/topic/pr-12-${head}`),
+    queueRef("refs/heads/gh-readonly-queue/main/"),
+    queueRef("refs/heads/gh-readonly-queue/main/pr 12"),
+    queueRef("refs/heads/main"),
+    { GROUP_HEAD_REF: `refs/heads/gh-readonly-queue/main/pr-13-${head}` },
+    { GITHUB_REF: "refs/heads/main" },
+    { GITHUB_SHA: "f".repeat(40) },
+    { GROUP_HEAD_SHA: "f".repeat(40), GITHUB_SHA: "f".repeat(40) },
+    { GROUP_BASE_SHA: "f".repeat(40) },
+    { GROUP_RELATION: "diverged" }, { GROUP_RELATION: "identical" },
+    { MAIN_RELATION: "behind" }, { MAIN_RELATION: "diverged" },
+  ]) assert.notEqual(run(change).status, 0, JSON.stringify(change));
+  fs.rmSync(bin, { recursive: true, force: true });
 });

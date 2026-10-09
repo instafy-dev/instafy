@@ -1,6 +1,7 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { ADDED_BUILD_CONTRACT_TESTS, addedBuildContractTestLine, withoutAddedBuildContractTests } from "./lib/buildContractTestsBaseline.mjs";
 import { cacheStepRuns, CACHE_REFS, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
+import { withoutMergeQueue } from "./lib/mergeQueueTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -9,7 +10,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
-const buildWorkflow = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
+const buildWorkflow = withoutManualCiRouting('build.yml', withoutMergeQueue('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8')));
 // The reviewed inventory below predates these contract tests; they are checked separately.
 const source = withoutAddedBuildContractTests(buildWorkflow);
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";

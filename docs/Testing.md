@@ -103,6 +103,49 @@ Gitleaks gates without secrets or write permission. This gives release tooling
 an exact-main attestation while the pull-request lane remains base-owned and
 continues to treat candidate bytes only as unexecuted data.
 
+The three workflows that report `main`'s required checks (Public Build, npm
+Package Releases and Trusted Public Boundary) also run for `merge_group`
+`checks_requested` events. GitHub sends those only for a merge queue required
+on `main`, so the trigger is inert until branch protection requires one. The
+only change pull-request and push runs see is the `pull-requests: read`
+permission added to the npm Changeset policy job. Merge-group runs always use
+hosted runners and skip `Secret scan` through its main-only condition, as pull
+requests do. The Cargo and migration-image `actions/cache` steps save only on
+`refs/heads/main`, so a group restores them without saving. The pnpm store
+cache of `actions/setup-node` behaves as on pull requests: on a miss it saves a
+cache scoped to the queue ref. npm Package Releases runs only its Changeset
+policy for a group, in a concurrency group keyed on the group ref rather than
+the main release lock. The policy checks the group's own diff from
+`merge_group.base_sha` (the group's parent: `main`, or `main` plus earlier
+queued groups) to `merge_group.head_sha`. A separate lookup step reads the
+queued pull request's head branch, head repository and author from the pulls
+API, using the `pr-<number>` part of the `gh-readonly-queue/main/` ref, so a
+queued generated version PR is checked against the changesets pending at the
+group's parent. That step runs before the checkout and calls only the runner
+image's `gh`, and it is the only step given the read-only token through its
+`env:` block. The policy step reads the identity from the step's outputs and has no
+token variable. This keeps the token out of the checked-out code's environment,
+not out of the job: actions such as checkout still receive the job token by
+default, and code in any step of a hosted job can reach the runner process that
+holds it, so its read-only `contents` and `pull-requests` scopes are the actual
+limit. Select, Version, Pack and Publish never run for a group.
+
+The boundary's merge-group lane is not base-owned: GitHub reads its workflow
+file from the queued group commit, which contains the pull request's changes.
+The lane checks out its regression tests, policy and Gitleaks configuration
+from `merge_group.base_sha` and the group commit separately as unexecuted data.
+It requires a `gh-readonly-queue/main/` ref equal to `GITHUB_REF`, a group head
+equal to `GITHUB_SHA`, both checkouts at the event SHAs, a head that descends
+from the parent and a parent that is `main` or built on `main`. It then repeats
+the policy and both Gitleaks scans with read-only permissions and no secrets.
+Workflow and boundary-control edits therefore stay gated by the pull request's
+own base-owned `pull_request_target` check and CODEOWNERS review, not by this
+lane. A change that the base-owned policy rejects by design, such as a new
+gitlink or binary approval in `scripts/public-boundary-policy.json`, fails this
+lane too. `node --test scripts/check-merge-queue-ci.test.mjs scripts/check-public-boundary-workflow.test.mjs`
+covers both lanes with stubbed `gh` reads; these source tests do not prove
+GitHub's queue behavior.
+
 The boundary job alone has a temporary, default-off runner bootstrap switch:
 `CI_BOOTSTRAP_SELF_HOSTED=true`. It selects a disposable Linux ARM64 runner only
 while this repository is private, for same-repository `pull_request_target`
