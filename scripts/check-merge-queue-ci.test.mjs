@@ -17,13 +17,15 @@ const REQUIRED = {
   "public-boundary.yml": ["Public boundary (trusted base)"],
 };
 
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
 test("exactly the workflows that report main's required checks run for queued merge groups", () => {
   for (const file of fs.readdirSync(path.join(root, ".github/workflows")).filter((name) => /\.ya?ml$/u.test(name))) {
     const source = read(file);
     const expected = file in REQUIRED ? 1 : 0;
     assert.equal(triggers(source).split(MERGE_GROUP_TRIGGER).length - 1, expected, file);
     assert.equal((source.match(/^  merge_group:$/gmu) ?? []).length, expected, file);
-    for (const name of REQUIRED[file] ?? []) assert.match(source, new RegExp(`^    name: ${name.replace(/[()]/gu, "\\$&")}$`, "mu"), `${file}: ${name}`);
+    for (const name of REQUIRED[file] ?? []) assert.match(source, new RegExp(`^    name: ${escapeRegExp(name)}$`, "mu"), `${file}: ${name}`);
   }
   const browser = read("browser-e2e.yml");
   for (const name of ["Personal Browser E2E", "Browser UI rendering", "Shared Browser profile E2E"]) assert.match(browser, new RegExp(`^    name: ${name}$`, "mu"));
