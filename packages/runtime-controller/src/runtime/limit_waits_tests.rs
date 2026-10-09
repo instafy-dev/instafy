@@ -851,6 +851,10 @@ async fn work_that_waits_out_the_window_fails_with_a_clear_reason() -> anyhow::R
             completed.data["errorMessage"],
             json!(LIMIT_WAIT_EXPIRED_MESSAGE)
         );
+        assert_eq!(
+            completed.data["failureCode"],
+            json!("runtime_limit_wait_expired")
+        );
 
         // The young job still waits, so the space keeps waiting too.
         let wait = fixture.wait_row(waiting).await?.expect("still waiting");
@@ -1088,6 +1092,10 @@ async fn an_unreadable_recorded_request_fails_the_waiting_work_with_a_plain_reas
             completed.data["errorMessage"],
             json!(LIMIT_WAIT_REFUSED_FALLBACK_MESSAGE)
         );
+        assert_eq!(
+            completed.data["failureCode"],
+            json!("runtime_limit_wait_refused")
+        );
         Ok(())
     })
     .await
@@ -1200,6 +1208,10 @@ async fn a_credits_refusal_fails_the_waiting_work_with_the_credits_reason() -> a
         assert_eq!(completed.data["runStatus"], json!("failed"));
         assert_eq!(completed.data["outcome"], json!("failed"));
         assert_eq!(completed.data["errorMessage"], json!(reason));
+        assert_eq!(
+            completed.data["failureCode"],
+            json!("runtime_limit_wait_refused")
+        );
         Ok(())
     })
     .await

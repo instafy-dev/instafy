@@ -784,6 +784,34 @@ pub(crate) fn publish_controller_event_with_conversation(
     job_id: Option<Uuid>,
     data: JsonValue,
 ) {
+    publish_controller_event_with_conversation_at(
+        hub,
+        kind,
+        project_id,
+        session_id,
+        conversation_id,
+        run_id,
+        job_id,
+        data,
+        Utc::now(),
+    );
+}
+
+/// [`publish_controller_event_with_conversation`] stamped with `timestamp`
+/// rather than now: an event that republishes a stored record carries the
+/// time the record changed, so a repeat never looks newer than it is.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn publish_controller_event_with_conversation_at(
+    hub: &EventHub,
+    kind: &str,
+    project_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    conversation_id: Option<Uuid>,
+    run_id: Option<Uuid>,
+    job_id: Option<Uuid>,
+    data: JsonValue,
+    timestamp: DateTime<Utc>,
+) {
     let session_chan = session_channel(session_id);
     let conversation_chan = conversation_channel(conversation_id);
     let mut channels = Vec::new();
@@ -805,7 +833,7 @@ pub(crate) fn publish_controller_event_with_conversation(
         channels,
         target_user_id: None,
         data,
-        timestamp: Utc::now(),
+        timestamp,
     };
     hub.publish(event);
 }
@@ -869,4 +897,64 @@ fn session_channel(session_id: Option<Uuid>) -> Option<String> {
 
 fn conversation_channel(conversation_id: Option<Uuid>) -> Option<String> {
     conversation_id.map(|value| format!("conversation:{value}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A republished record keeps the time it was stored at, and the
+    /// ordinary publish still stamps the moment it is sent.
+    #[test]
+    fn publish_at_keeps_the_given_timestamp_and_channels() {
+        let hub = EventHub::new();
+        let mut events = hub.subscribe();
+        let (project_id, session_id, conversation_id, run_id, job_id) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let stored_at = Utc::now() - ChronoDuration::minutes(7);
+
+        publish_controller_event_with_conversation_at(
+            &hub,
+            "run.progress",
+            Some(project_id),
+            Some(session_id),
+            Some(conversation_id),
+            Some(run_id),
+            Some(job_id),
+            serde_json::json!({ "status": "queued" }),
+            stored_at,
+        );
+        let event = events.try_recv().expect("the event is published");
+        assert_eq!(event.timestamp, stored_at);
+        assert_eq!(
+            event.channels,
+            vec![
+                format!("session:{session_id}"),
+                format!("conversation:{conversation_id}")
+            ]
+        );
+        assert_eq!(event.channel, Some(format!("session:{session_id}")));
+        assert_eq!(event.project_id, Some(project_id));
+        assert_eq!(event.run_id, Some(run_id));
+        assert_eq!(event.job_id, Some(job_id));
+
+        let before = Utc::now();
+        publish_controller_event_with_conversation(
+            &hub,
+            "run.progress",
+            Some(project_id),
+            Some(session_id),
+            Some(conversation_id),
+            Some(run_id),
+            Some(job_id),
+            serde_json::json!({ "status": "queued" }),
+        );
+        let event = events.try_recv().expect("the event is published");
+        assert!(event.timestamp >= before && event.timestamp <= Utc::now());
+    }
 }

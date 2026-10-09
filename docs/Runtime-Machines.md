@@ -174,6 +174,48 @@ work an idle-slot reclaim requeued. Work in that space pinned to a desktop or
 another machine is never retried or given up on by the wait, so it keeps this
 15-minute expiry.
 
+A turn a stop cuts off says so on its run. In the requeue's transaction, the
+run of each requeued job that was `in_progress` or `awaiting_approval` goes
+back to `queued` with `progress_stage` `requeued`, and `runs.metadata` gains
+`interruption`: `reason` (the stop's reason, such as `user_stop`, `idle` or
+`credits_exhausted`, or `other` when it is not a plain token), `jobId`,
+`interruptedAt` (the job's `requeuedAt`) and `resumeBy`, 15 minutes later:
+the earliest the expiry may give the turn up, not a deadline, since a space
+waiting on the limit or a stop still waiting on its provider release waits
+longer. `GET /runs` returns that record after a reload. `/runtime/stop` and
+`/runtime/remove` also announce it once they answer, as a `run.progress` of
+the stored run stamped with its `updated_at`; other stops do not, so other
+viewers see it on their next load of the runs. The announcement reads the run
+without locking it and publishes after the read, and it skips a run a lease
+has already resumed. A lease resumes the turn like any queued run
+(`in_progress`, `agent:leased`) with a `run.progress` of its own, stamped
+later, so a viewer keeps the newer of the two when they cross. `interruption`
+stays on the run as history.
+
+When the expiry gives a turn up, its run fails with `run.completed`
+(`outcome` `expired`, `failureCode` `interrupted_run_expired`) and its
+conversation gets a controller error message (`kind`
+`interrupted_run_expired`, `interruptionReason` the stop's reason). The
+failure of a turn that a person stopped sends nothing that could start the
+machine they stopped. A person's stop is a Stop or Remove (`user_stop`,
+`user_remove`) or a takeover of the organization's hosted slot from the
+Machines panel or a browser session (`runtime_limit_takeover`,
+`browser_session_runtime_limit_takeover`). A click sends each of them, with
+one exception: a browser session that hits the limit on its own space's
+standard hosted machine recycles that machine on its own with
+`runtime_limit_takeover`, through a stop that spares a runtime with active
+jobs (`stopIfIdle`, `skip_if_active_jobs`). That check counts only live
+leases, but the requeue takes every `leased` job of the machine. So the
+recycle never cuts off a turn whose lease is live, yet it can requeue a job
+queued for that machine and a turn whose lease has expired, which it marks
+interrupted; the expiry of either counts as a person's stop. Such a failure
+runs no plan checkpoint, and the messages queued in its conversation by the
+time of the stop become `failed` in the expiry's transaction, with a reason
+their owner sees in the queue. The send queue never sends a failed entry on
+its own, so neither the drain nor its recovery sweep picks them up; the owner
+can send one now or remove it. A message queued after the stop asks again and
+goes out as usual, which can start the machine.
+
 ## A launch that does not come up
 
 Until a launched runtime registers, it stays `requested` with a `launching`
