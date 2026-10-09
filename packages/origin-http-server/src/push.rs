@@ -305,24 +305,22 @@ pub(crate) fn classify_push(text: &str) -> PushClass {
     if LOST_RACE.iter().any(|marker| lower.contains(marker)) {
         return PushClass::LostRace(summary(text));
     }
-    for (marker, reason) in PATH_REFUSALS {
-        if let Some(path) = quoted_after(text, marker) {
-            let mut others = Vec::new();
-            for line in text.lines() {
-                for (marker, _) in PATH_REFUSALS {
-                    if let Some(other) = quoted_in(line, marker) {
-                        if other != path && !others.contains(&other) {
-                            others.push(other);
-                        }
-                    }
-                }
-            }
-            return PushClass::PathRejected {
-                path,
-                reason,
-                others,
-            };
-        }
+    let refused: Vec<(usize, String)> = text.lines().filter_map(refused_path).collect();
+    // `path` is the one the earlier parse took: the first line of the
+    // earliest kind in PATH_REFUSALS.
+    let first = (0..PATH_REFUSALS.len())
+        .find_map(|kind| refused.iter().find(|(refused, _)| *refused == kind));
+    if let Some((kind, path)) = first.cloned() {
+        let mut named = std::collections::HashSet::from([path.clone()]);
+        let others = refused
+            .into_iter()
+            .filter_map(|(_, other)| named.insert(other.clone()).then_some(other))
+            .collect();
+        return PushClass::PathRejected {
+            path,
+            reason: PATH_REFUSALS[kind].1,
+            others,
+        };
     }
     const PERMANENT: &[&str] = &[
         "[remote rejected]",
@@ -351,18 +349,23 @@ const PATH_REFUSALS: [(&str, RejectReason); 3] = [
     ("blocked non-blob object for '", RejectReason::Unsupported),
 ];
 
-/// The text between `marker` and the next `' (` (or the line's last quote)
-/// on the first line that holds one.
-fn quoted_after(text: &str, marker: &str) -> Option<String> {
-    text.lines().find_map(|line| quoted_in(line, marker))
-}
-
-fn quoted_in(line: &str, marker: &str) -> Option<String> {
-    let start = line.find(marker)?;
-    let rest = &line[start + marker.len()..];
-    let end = rest.rfind("' (").or_else(|| rest.rfind('\''))?;
-    let path = rest[..end].to_string();
-    (!path.is_empty()).then_some(path)
+/// The kind (an index into [`PATH_REFUSALS`]) and path of one refusal line
+/// of the shard hook, `instafy: <marker><path>' (<detail>)` after git's
+/// `remote: `. The hook prints the path as it is, so the line is read from
+/// its start, and the path runs to the line's last `' (`: a quote or
+/// another refusal's words inside a name stay in it.
+fn refused_path(line: &str) -> Option<(usize, String)> {
+    let line = line.trim_end();
+    let line = line.strip_prefix("remote: ").unwrap_or(line);
+    let rest = line.strip_prefix("instafy: ")?;
+    PATH_REFUSALS
+        .iter()
+        .enumerate()
+        .find_map(|(kind, (marker, _))| {
+            let quoted = rest.strip_prefix(marker)?;
+            let path = &quoted[..quoted.rfind("' (")?];
+            (!path.is_empty()).then(|| (kind, path.to_string()))
+        })
 }
 
 fn summary(text: &str) -> String {
@@ -482,6 +485,44 @@ mod tests {
                 others: vec!["dist/app.js".to_string(), "big.bin".to_string()],
             }
         );
+    }
+
+    /// The hook prints a refused path as it is, so a name may hold another
+    /// refusal's words. Each line is read from its start: `instafy: `, one
+    /// marker, the path up to the hook's last `' (`. A crafted name never
+    /// puts back an unrelated path or takes the place of the refused one.
+    #[test]
+    fn a_path_holding_another_refusal_is_one_path() {
+        assert_eq!(
+            classify_push(
+                "remote: instafy: blocked path 'generated/file too large 'src/app.ts' (repo hygiene policy)        \n\
+                 !\tabc:refs/instafy/recovery/x/working\t[remote rejected] (hook declined)"
+            ),
+            PushClass::PathRejected {
+                path: "generated/file too large 'src/app.ts".to_string(),
+                reason: RejectReason::Policy,
+                others: Vec::new(),
+            }
+        );
+        assert_eq!(
+            classify_push(
+                "remote: instafy: file too large 'data/blocked path 'src/main.rs' (30 bytes > 10)        \n\
+                 !\tabc:refs/instafy/recovery/x/working\t[remote rejected] (hook declined)"
+            ),
+            PushClass::PathRejected {
+                path: "data/blocked path 'src/main.rs".to_string(),
+                reason: RejectReason::TooLarge,
+                others: Vec::new(),
+            }
+        );
+        // Text that is not the hook's own line names nothing.
+        assert!(matches!(
+            classify_push(
+                "remote: error: blocked path 'src/app.ts' (repo hygiene policy)\n\
+                 !\tabc:refs/heads/main\t[remote rejected] (hook declined)"
+            ),
+            PushClass::Rejected(_)
+        ));
     }
 
     #[test]
