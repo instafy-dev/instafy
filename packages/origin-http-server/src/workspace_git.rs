@@ -12,8 +12,8 @@
 //! each checkout command the workspace-writable `.instafy/.git/config` is
 //! reduced to data-only settings; a bare repository's layout is checked
 //! instead (its config is the server's own). The bearer token is attached only
-//! to commands that talk to the remote, and for a bare repository only through
-//! the environment, never the argument list.
+//! to commands that talk to the remote, and only through the environment,
+//! never the argument list.
 //!
 //! New objects for a commit that is not on the remote yet can be written to a
 //! [`Quarantine`] instead of the repository, and moved in only once the push
@@ -273,13 +273,6 @@ impl<'a> WorkspaceGit<'a> {
                     .arg(".instafy/.git")
                     .arg("--work-tree")
                     .arg(".");
-                if network {
-                    if let Some(token) = self.token {
-                        command
-                            .arg("-c")
-                            .arg(format!("http.extraHeader=Authorization: Bearer {token}"));
-                    }
-                }
             }
             Layout::Bare { git_dir } => {
                 let repository = open_bare_repository(git_dir)?;
@@ -344,22 +337,22 @@ impl<'a> WorkspaceGit<'a> {
                         quoted_alternate(&git_dir.join("objects"))?,
                     );
                 }
-                if network {
-                    if let Some(token) = self.token {
-                        // `server_git_command` removed every inherited
-                        // `GIT_CONFIG_*` variable, so this is the only entry.
-                        command
-                            .env("GIT_CONFIG_COUNT", "1")
-                            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
-                            .env(
-                                "GIT_CONFIG_VALUE_0",
-                                format!("Authorization: Bearer {token}"),
-                            );
-                    }
-                }
             }
         }
         if network {
+            if let Some(token) = self.token {
+                // Through the environment, never the argument list, which
+                // any process on the machine can read. `server_git_command`
+                // removed every inherited `GIT_CONFIG_*` variable, so this is
+                // the only entry.
+                command
+                    .env("GIT_CONFIG_COUNT", "1")
+                    .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+                    .env(
+                        "GIT_CONFIG_VALUE_0",
+                        format!("Authorization: Bearer {token}"),
+                    );
+            }
             if let Some(seconds) = self.stall_seconds {
                 // The environment overrides the configured window.
                 command.env("GIT_HTTP_LOW_SPEED_TIME", seconds.to_string());
@@ -2265,9 +2258,12 @@ mod tests {
         }
     }
 
+    /// In both layouts the bearer reaches git only through the environment,
+    /// never its argument list, which any process on the machine can read
+    /// (`/proc/<pid>/cmdline`, `ps`).
     #[cfg(unix)]
     #[test]
-    fn a_bare_repository_passes_the_token_only_in_the_environment() {
+    fn the_bearer_reaches_git_only_in_the_environment() {
         let fixture = Fixture::new();
         let recording = RecordingGit::install(&fixture.root);
         let token = "token-for-this-test";
@@ -2299,7 +2295,7 @@ mod tests {
         assert!(!parsed[0].contains(token), "{parsed:?}");
         assert!(!parsed[0].contains("GIT_CONFIG_COUNT"), "{parsed:?}");
 
-        // A checkout keeps its command line: the token in a `-c` argument.
+        // So does a checkout's.
         let workspace = fixture.root.join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         crate::test_support::init_workspace_repo(&workspace);
@@ -2308,59 +2304,78 @@ mod tests {
             .unwrap();
         let checkout = recording.calls_with(&format!("[ls-remote] [{}]", fixture.url()));
         assert_eq!(checkout.len(), 2, "{checkout:?}");
-        let argv = checkout[1].lines().next().unwrap();
+        let (argv, env) = checkout[1].split_once('\n').unwrap();
+        assert!(!argv.contains(token), "{argv}");
         assert!(
-            argv.contains(&format!(
-                "[--git-dir] [.instafy/.git] [--work-tree] [.] [-c] \
-                 [http.extraHeader=Authorization: Bearer {token}] [ls-remote]"
-            )),
+            argv.contains("[--git-dir] [.instafy/.git] [--work-tree] [.] [ls-remote]"),
             "{argv}"
+        );
+        assert_eq!(
+            env.lines().collect::<Vec<_>>(),
+            vec![
+                "GIT_CONFIG_COUNT=1",
+                "GIT_CONFIG_KEY_0=http.extraHeader",
+                &format!("GIT_CONFIG_VALUE_0=Authorization: Bearer {token}"),
+            ]
         );
     }
 
     /// The environment entry is a real header on the wire.
     #[test]
-    fn a_bare_repository_sends_the_token_as_an_http_header() {
+    fn both_layouts_send_the_bearer_as_an_http_header() {
         let fixture = Fixture::new();
+        let workspace = fixture.root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        crate::test_support::init_workspace_repo(&workspace);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(20)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 4096];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => request.extend_from_slice(&buffer[..read]),
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(20)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&buffer[..read]),
+                    }
                 }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                requests.push(String::from_utf8_lossy(&request).to_string());
             }
-            let _ = stream.write_all(
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            );
-            String::from_utf8_lossy(&request).to_string()
+            requests
         });
-        let git = WorkspaceGit::bare(&fixture.mirror, Some("header-token")).with_stall_limit(20);
-        let output = git
-            .run_opts(
-                &["ls-remote", &format!("http://127.0.0.1:{port}/repo.git")],
-                &RunOpts {
-                    // The request must reach this listener, not a proxy.
-                    env: vec![("no_proxy", "*".into()), ("NO_PROXY", "*".into())],
-                    ..RunOpts::default()
-                },
-            )
-            .unwrap();
-        assert!(!output.status.success());
-        let request = server.join().unwrap();
-        assert!(
-            request
-                .lines()
-                .any(|line| line.trim() == "Authorization: Bearer header-token"),
-            "{request}"
-        );
+        for git in [
+            WorkspaceGit::bare(&fixture.mirror, Some("header-value")),
+            WorkspaceGit::new(&workspace, Some("header-value")),
+        ] {
+            let output = git
+                .with_stall_limit(20)
+                .run_opts(
+                    &["ls-remote", &format!("http://127.0.0.1:{port}/repo.git")],
+                    &RunOpts {
+                        // The request must reach this listener, not a proxy.
+                        env: vec![("no_proxy", "*".into()), ("NO_PROXY", "*".into())],
+                        ..RunOpts::default()
+                    },
+                )
+                .unwrap();
+            assert!(!output.status.success());
+        }
+        for request in server.join().unwrap() {
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line.trim() == "Authorization: Bearer header-value"),
+                "{request}"
+            );
+        }
     }
 
     #[test]

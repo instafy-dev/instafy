@@ -645,8 +645,16 @@ fn run_git(workspace_root: &Path, args: &[&str], bearer_token: Option<&str>) -> 
         .arg("--work-tree")
         .arg(".");
     if let Some(token) = bearer_token {
-        let header = format!("http.extraHeader=Authorization: Bearer {token}");
-        command.args(["-c", header.as_str()]);
+        // Through the environment, never the argument list, which any
+        // process on the machine can read. `server_git_command` removed every
+        // inherited `GIT_CONFIG_*` variable, so this is the only entry.
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("Authorization: Bearer {token}"),
+            );
     }
     command
         .args(args)
@@ -4451,6 +4459,59 @@ mod tests {
         let remote_head = git_stdout(&updater_dir, &["rev-parse", "HEAD"])?;
         assert_eq!(workspace_head, remote_head);
 
+        Ok(())
+    }
+
+    /// A checkout command gets the bearer through the environment, never its
+    /// argument list, which any process on the machine can read.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_command_gets_the_bearer_only_in_the_environment() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let root = sandbox.path();
+        let remote = root.join("remote.git");
+        run_git(root, &["init", "--bare", "-q", remote.to_str().unwrap()])?;
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        crate::test_support::init_workspace_repo(&workspace);
+        let log = root.join("git-calls.log");
+        let script = root.join("recording-git");
+        crate::test_support::install_script(
+            &script,
+            &format!(
+                "#!/bin/sh\n\
+                 {{ printf 'argv'; for arg in \"$@\"; do printf ' [%s]' \"$arg\"; done; \
+                 printf '\\n'; env | grep -E '^GIT_CONFIG_(COUNT|KEY_|VALUE_)' | sort; \
+                 printf 'end\\n'; }} >> '{}'\n\
+                 exec git \"$@\"\n",
+                log.display()
+            ),
+        );
+        GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(script));
+        let bearer = "bearer-for-this-test";
+        let listed = super::run_git(
+            &workspace,
+            &["ls-remote", remote.to_str().unwrap()],
+            Some(bearer),
+        );
+        GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+        assert!(listed?.status.success());
+
+        let calls = fs::read_to_string(&log)?;
+        let call = calls
+            .split("end\n")
+            .find(|call| call.contains("[ls-remote]"))
+            .expect("the ls-remote call");
+        let (argv, env) = call.split_once('\n').unwrap();
+        assert!(!argv.contains(bearer), "{argv}");
+        assert_eq!(
+            env.lines().collect::<Vec<_>>(),
+            vec![
+                "GIT_CONFIG_COUNT=1",
+                "GIT_CONFIG_KEY_0=http.extraHeader",
+                &format!("GIT_CONFIG_VALUE_0=Authorization: Bearer {bearer}"),
+            ]
+        );
         Ok(())
     }
 
