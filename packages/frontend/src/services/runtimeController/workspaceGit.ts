@@ -1468,10 +1468,17 @@ export interface WorkspaceRecoveryEntry {
   restoredRev?: string | null;
   /**
    * A working folder's rolling save, which its runtime keeps rewriting while
-   * it works. Set only when the server says so; older servers never do.
+   * it works: the server says so, or the ref is named like one
+   * (`refs/instafy/recovery/<working-set id>/working`). Never `restoredRev`.
    */
   rollingSave?: boolean;
 }
+
+/**
+ * A working folder's rolling save by its name: `refs/instafy/recovery/`, a
+ * lower-case UUID, `/working` (the shard's `is_working_slot_ref`).
+ */
+const WORKING_SLOT_REF = /^refs\/instafy\/recovery\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/working$/;
 
 export type WorkspaceRecoveryList =
   | {
@@ -1515,11 +1522,15 @@ function parseRecoveryEntry(value: unknown): WorkspaceRecoveryEntry | null {
     paths: readOriginPathList(record.paths),
     base: readPayloadString(record, "base"),
   };
+  // A slot's name is reused after a restore, so an older origin's restore
+  // mark on it would hide new work: a rolling save is never restored.
+  const rollingSave =
+    record.rollingSave === true || record.rolling_save === true || WORKING_SLOT_REF.test(ref);
   const restoredRev = readPayloadString(record, "restoredRev", "restored_rev");
-  if (restoredRev) {
+  if (restoredRev && !rollingSave) {
     entry.restoredRev = restoredRev;
   }
-  if (record.rollingSave === true || record.rolling_save === true) {
+  if (rollingSave) {
     entry.rollingSave = true;
   }
   return entry;
