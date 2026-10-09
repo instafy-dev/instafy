@@ -2367,8 +2367,8 @@ async fn a_rolling_save_grant_holds_only_while_its_write_job_does() -> anyhow::R
         assert_eq!(status, StatusCode::OK, "{body}");
         // The git token may change only what a rolling save changes: it
         // carries git.persist where git.write was asked for, never git.write.
-        let git_token = body["token"].as_str().expect("a git token");
-        let git_claims = decode_scoped_token(&fx.state.config, git_token, "git token")
+        let minted = body["token"].as_str().expect("a git token");
+        let git_claims = decode_scoped_token(&fx.state.config, minted, "git token")
             .map_err(|(_, body)| anyhow::anyhow!("decode git token: {}", body.0.message))?;
         assert_eq!(
             git_claims.scopes,
