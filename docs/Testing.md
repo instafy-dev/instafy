@@ -122,8 +122,8 @@ queued pull request's head branch, head repository and author from the pulls
 API, using the `pr-<number>` part of the `gh-readonly-queue/main/` ref, so a
 queued generated version PR is checked against the changesets pending at the
 group's parent. That step runs before the checkout and calls only the runner
-image's `gh`, and it is the only step whose environment carries the read-only
-token. The policy step reads the identity from the step's outputs and has no
+image's `gh`, and it is the only step given the read-only token through its
+`env:` block. The policy step reads the identity from the step's outputs and has no
 token variable. This keeps the token out of the checked-out code's environment,
 not out of the job: actions such as checkout still receive the job token by
 default, and code in any step of a hosted job can reach the runner process that
