@@ -1015,6 +1015,115 @@ fn a_working_slot_moves_only_under_a_current_lease() {
     assert!(shard.repo_rev(&content).is_none());
 }
 
+/// Git Edge marks a push it authorized only through `git.persist`, a
+/// rolling save's credential, with `x-instafy-git-push-scope`. The shard
+/// then lets that push create recovery refs and replace or delete a working
+/// slot, and nothing else; reads are unchanged.
+#[test]
+fn a_push_marked_as_a_rolling_save_changes_only_recovery_refs() {
+    let shard = Shard::start("persist-push", &[]);
+    let client = Client::clone_from(&shard);
+    let initial = client.head();
+    let first = client.commit_file("draft.md", b"first\n", "first");
+    let second = client.commit_file("draft.md", b"second\n", "second");
+    let marked = |args: &[&str]| {
+        let mut full = vec![
+            "-c",
+            "http.extraHeader=x-instafy-git-push-scope: git.persist",
+        ];
+        full.extend_from_slice(args);
+        client.git(&full)
+    };
+    let ok = |output: Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let refused = |output: Output| {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(!output.status.success(), "accepted: {stderr}");
+        assert!(
+            stderr.contains("instafy: a rolling save may not change"),
+            "{stderr}"
+        );
+    };
+    let slot = format!(
+        "refs/instafy/recovery/{}/{}",
+        uuid::Uuid::new_v4(),
+        git_service::policy::WORKING_SLOT_NAME
+    );
+    let content = format!(
+        "refs/instafy/recovery/{}/20261002T120000Z-unsaved-0123456789ab",
+        uuid::Uuid::new_v4()
+    );
+
+    // What a rolling save does: create and replace its slot under a lease,
+    // push a recovery ref, delete its slot, and read.
+    ok(marked(&[
+        "push",
+        &format!("--force-with-lease={slot}:"),
+        "origin",
+        &format!("{first}:{slot}"),
+    ]));
+    ok(marked(&[
+        "push",
+        &format!("--force-with-lease={slot}:{first}"),
+        "origin",
+        &format!("{second}:{slot}"),
+    ]));
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+    ok(marked(&["push", "origin", &format!("{first}:{content}")]));
+    assert_eq!(shard.repo_rev(&content).unwrap(), first);
+    ok(marked(&["ls-remote", "origin"]));
+    ok(marked(&["fetch", "-q", "origin"]));
+    ok(marked(&[
+        "push",
+        &format!("--force-with-lease={slot}:{second}"),
+        "origin",
+        &format!(":{slot}"),
+    ]));
+    assert!(shard.repo_rev(&slot).is_none());
+
+    // Nothing else.
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/heads/main"),
+    ]));
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/heads/feature"),
+    ]));
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/tags/v1"),
+    ]));
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/replace/{initial}"),
+    ]));
+    refused(marked(&["push", "origin", &format!(":{content}")]));
+    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), initial);
+    for absent in [
+        "refs/heads/feature".to_string(),
+        "refs/tags/v1".to_string(),
+        format!("refs/replace/{initial}"),
+    ] {
+        assert!(shard.repo_rev(&absent).is_none(), "{absent}");
+    }
+    assert_eq!(shard.repo_rev(&content).unwrap(), first);
+
+    // The same pushes without the mark are an ordinary writer's.
+    client.push_ok(&format!(":{content}"));
+    client.push_ok("main");
+    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), second);
+}
+
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)

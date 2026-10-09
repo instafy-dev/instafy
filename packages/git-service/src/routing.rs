@@ -13,6 +13,18 @@ pub const GIT_DELETE_RESULT_HEADER: &str = "x-instafy-git-delete-result";
 pub const GIT_DELETE_RESULT_DELETED: &str = "deleted-v1";
 pub const GIT_DELETE_RESULT_ABSENT: &str = "absent-v1";
 
+/// The scope of a rolling save's git token, which the controller mints from
+/// a running write job's save-only grant instead of `git.write`. It
+/// authorizes the requests of a push, and Git Edge then marks the push with
+/// [`GIT_PUSH_SCOPE_HEADER`]: the shard lets it create recovery refs and
+/// replace or delete a working slot, nothing else (see
+/// [`crate::policy::PERSIST_PUSH_ENV`]).
+pub const GIT_PERSIST_SCOPE: &str = "git.persist";
+
+/// Set by Git Edge on a push it authorized through [`GIT_PERSIST_SCOPE`]
+/// alone. A shard limits every push that carries it.
+pub const GIT_PUSH_SCOPE_HEADER: &str = "x-instafy-git-push-scope";
+
 pub fn parse_repo_segment(path: &str) -> Result<(String, String), ServiceError> {
     let trimmed = path.trim_start_matches('/');
     let Some(first) = trimmed.split('/').next() else {
@@ -95,7 +107,8 @@ pub fn required_scope(
 
 /// Check validated token claims against one request to `repo_name`: the
 /// `git` protocol, that project, and the scope [`required_scope`] names for
-/// the request. Signature, audience and expiry are checked by
+/// the request ([`GIT_PERSIST_SCOPE`] also stands for `git.write`, see
+/// [`push_scope_assertion`]). Signature, audience and expiry are checked by
 /// [`crate::auth::TokenValidator`] before this. A shard trusts Git Edge for
 /// every request but a repository deletion, so this is the only check of
 /// an ordinary push or read.
@@ -113,12 +126,31 @@ pub fn authorize_request_claims(
         return Err(ServiceError::forbidden("project mismatch"));
     }
     let required_scope = required_scope(method, path, query)?;
-    if claims.scopes.iter().any(|value| value == required_scope) {
+    if has_scope(claims, required_scope)
+        || (required_scope == "git.write" && has_scope(claims, GIT_PERSIST_SCOPE))
+    {
         return Ok(());
     }
     Err(ServiceError::forbidden(format!(
         "missing required scope {required_scope}"
     )))
+}
+
+/// The [`GIT_PUSH_SCOPE_HEADER`] Git Edge sends with a request that
+/// [`authorize_request_claims`] let through: [`GIT_PERSIST_SCOPE`] when it
+/// needs `git.write` and the claims hold only that narrower scope.
+pub fn push_scope_assertion(
+    claims: &AccessTokenClaims,
+    required_scope: &str,
+) -> Option<&'static str> {
+    (required_scope == "git.write"
+        && !has_scope(claims, "git.write")
+        && has_scope(claims, GIT_PERSIST_SCOPE))
+    .then_some(GIT_PERSIST_SCOPE)
+}
+
+fn has_scope(claims: &AccessTokenClaims, scope: &str) -> bool {
+    claims.scopes.iter().any(|value| value == scope)
 }
 
 /// Whether a client request header may pass through Git Edge to a shard.
@@ -427,6 +459,46 @@ mod tests {
             assert_eq!(allowed(&salvage_and_read), needed == "git.read", "{shape}");
             assert_eq!(allowed(&delete), needed == GIT_DELETE_SCOPE, "{shape}");
         }
+    }
+
+    /// A rolling save's git token (`git.persist` with `git.read`) may push
+    /// and read, and nothing more: it never deletes the repository, and
+    /// `git.persist` alone reads nothing. Git Edge marks each request it
+    /// authorizes only through `git.persist`, so the shard limits the push;
+    /// an ordinary writer's requests are never marked.
+    #[test]
+    fn a_rolling_saves_scope_authorizes_its_pushes() {
+        let persist = claims(&["git.persist", "git.read"]);
+        let persist_only = claims(&["git.persist"]);
+        let write = claims(&["git.read", "git.write"]);
+        let both = claims(&["git.persist", "git.write"]);
+        for (method, path, query) in &every_request() {
+            let needed = required_scope(method, path, query.as_deref()).unwrap();
+            let shape = format!("{method} {path}?{query:?}");
+            assert_eq!(
+                authorize_request_claims(&persist, method, path, query.as_deref(), PROJECT_ID)
+                    .is_ok(),
+                needed != GIT_DELETE_SCOPE,
+                "{shape}"
+            );
+            assert_eq!(
+                authorize_request_claims(&persist_only, method, path, query.as_deref(), PROJECT_ID)
+                    .is_ok(),
+                needed == "git.write",
+                "{shape}"
+            );
+            let marked = (needed == "git.write").then_some(GIT_PERSIST_SCOPE);
+            assert_eq!(push_scope_assertion(&persist, needed), marked, "{shape}");
+            assert_eq!(
+                push_scope_assertion(&persist_only, needed),
+                marked,
+                "{shape}"
+            );
+            assert_eq!(push_scope_assertion(&write, needed), None, "{shape}");
+            assert_eq!(push_scope_assertion(&both, needed), None, "{shape}");
+        }
+        assert!(GIT_PUSH_SCOPE_HEADER.starts_with(GIT_SERVICE_HEADER_PREFIX));
+        assert!(!is_forwardable_request_header(GIT_PUSH_SCOPE_HEADER));
     }
 
     #[test]

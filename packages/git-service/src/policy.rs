@@ -91,6 +91,13 @@ pub const SALVAGE_REF_ROOT: &str = "refs/instafy/salvage";
 /// [`crate::events::parse_push_report`]). Only the shard sets it, per request.
 pub const PUSH_REPORT_ENV: &str = "INSTAFY_GIT_PUSH_REPORT";
 
+/// Hook environment variable the shard sets to `1`, per request, for a push
+/// Git Edge authorized only through a rolling save's credential
+/// (`git.persist`, see `crate::routing::GIT_PERSIST_SCOPE`). Such a push may
+/// create recovery refs and replace or delete a working slot, and nothing
+/// else.
+pub const PERSIST_PUSH_ENV: &str = "INSTAFY_GIT_PERSIST_PUSH";
+
 /// Whether `path` (a repository-relative path with `/` separators) falls under
 /// one of [`REPO_POLICY_DENY_PATTERNS`]. This is the same rule the rendered
 /// hook applies with `case "$path" in <entry>/*|*/<entry>/*)`.
@@ -129,6 +136,7 @@ pub fn render_update_hook(default_branch: &str) -> Result<String> {
     let recovery_ref_root = RECOVERY_REF_ROOT;
     let working_slot_name = WORKING_SLOT_NAME;
     let salvage_ref_root = SALVAGE_REF_ROOT;
+    let persist_push_env = PERSIST_PUSH_ENV;
 
     Ok(format!(
         r#"#!/usr/bin/env bash
@@ -182,18 +190,34 @@ if [[ "$folded_ref" == "$salvage_root" || "$folded_ref" == "$salvage_root/"* ]];
   exit 1
 fi
 
-# ---------------------------------------------------------------------------
-# A recovery ref is named after the work it holds, so a push may create or
-# delete one but never move it. The one exception is a working folder's
-# rolling save, {recovery_ref_root}/<working-set id>/{working_slot_name}, which every save
-# replaces under a lease on the tip it last confirmed. This keeps saved work
-# from being swapped for other content under the same name, so
-# GIT_POLICY_DISABLED does not skip it.
-# ---------------------------------------------------------------------------
+# A working folder's rolling save:
+# {recovery_ref_root}/<working-set id>/{working_slot_name}.
 working_slot=0
 if [[ "$refname" =~ $recovery_ref_pattern && "${{refname##*/}}" == "$working_slot_name" ]]; then
   working_slot=1
 fi
+
+# ---------------------------------------------------------------------------
+# A push authorized only by a rolling save's credential (git.persist) may
+# create recovery refs and replace or delete a working slot, nothing else:
+# no branch, tag or other ref, and no recovery ref but a slot moves or goes.
+# An authorization boundary, so GIT_POLICY_DISABLED does not skip it.
+# ---------------------------------------------------------------------------
+if [[ "${{{persist_push_env}:-}}" == "1" ]]; then
+  if [[ ! "$refname" =~ $recovery_ref_pattern ]] \
+    || {{ [[ "$working_slot" != "1" ]] && ! is_zero "$oldrev"; }}; then
+    echo "instafy: a rolling save may not change '$refname'" >&2
+    exit 1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# A recovery ref is named after the work it holds, so a push may create or
+# delete one but never move it. The one exception is a working slot, which
+# every save replaces under a lease on the tip it last confirmed. This keeps
+# saved work from being swapped for other content under the same name, so
+# GIT_POLICY_DISABLED does not skip it.
+# ---------------------------------------------------------------------------
 if [[ "$folded_ref" == "$recovery_root/"* && "$working_slot" != "1" ]] \
   && ! is_zero "$oldrev" && ! is_zero "$newrev"; then
   echo "instafy: '$refname' is a recovery ref; it may be created or deleted, not moved" >&2
@@ -614,6 +638,16 @@ mod tests {
         assert!(
             move_rule < policy_switch,
             "the recovery ref move rule must not be skippable by GIT_POLICY_DISABLED"
+        );
+        // Nor does a rolling save's push change anything else.
+        let persist_rule = hook
+            .find(&format!(
+                "if [[ \"${{{PERSIST_PUSH_ENV}:-}}\" == \"1\" ]]; then"
+            ))
+            .unwrap();
+        assert!(
+            persist_rule < move_rule,
+            "the rolling save rule must not be skippable by GIT_POLICY_DISABLED"
         );
         assert!(hook.contains(&format!("working_slot_name=\"{WORKING_SLOT_NAME}\"")));
         // A single-commit diff-tree prints nothing for a merge, which would
@@ -1075,6 +1109,56 @@ mod tests {
             repo.accepts_with(&slot, child, main, env);
             repo.accepts_with(&slot, main, ZERO, env);
         }
+    }
+
+    /// A push only a rolling save's credential authorized (`git.persist`,
+    /// which Git Edge passes on to the shard) may create recovery refs and
+    /// replace or delete a working slot, and change nothing else, whatever
+    /// the policy switch says.
+    #[test]
+    fn a_rolling_saves_push_changes_only_recovery_refs() {
+        let repo = HookRepo::new("persist-push");
+        repo.set_ignorecase(false);
+        let (main, child) = (repo.main.as_str(), repo.child.as_str());
+        let origin = "5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a";
+        let slot = format!("{RECOVERY_REF_ROOT}/{origin}/{WORKING_SLOT_NAME}");
+        let content = format!("{RECOVERY_REF_ROOT}/{origin}/20261002T120000Z-unsaved-0123456789ab");
+        let other_slot =
+            format!("{RECOVERY_REF_ROOT}/0b4f2c1e-6a3d-4f5e-8c7b-9a8d7e6f5a4b/{WORKING_SLOT_NAME}");
+        let replace = format!("refs/replace/{main}");
+        let upper = format!("{RECOVERY_REF_ROOT}/{}/x", origin.to_uppercase());
+        let persist = (PERSIST_PUSH_ENV, "1");
+
+        for env in [&[persist][..], &[persist, POLICY_DISABLED][..]] {
+            repo.accepts_with(&slot, ZERO, child, env);
+            repo.accepts_with(&slot, child, main, env);
+            repo.accepts_with(&slot, main, ZERO, env);
+            repo.accepts_with(&other_slot, ZERO, child, env);
+            repo.accepts_with(&content, ZERO, child, env);
+            for (refname, old, new) in [
+                ("refs/heads/main", main, child),
+                ("refs/heads/feature", ZERO, child),
+                ("refs/heads/feature", child, ZERO),
+                ("refs/tags/v1", ZERO, child),
+                ("refs/notes/commits", ZERO, child),
+                (replace.as_str(), ZERO, child),
+                (content.as_str(), child, ZERO),
+                (content.as_str(), main, child),
+                (upper.as_str(), ZERO, child),
+            ] {
+                let stderr = repo.refuses(refname, old, new, env);
+                assert!(
+                    stderr.contains(&format!(
+                        "instafy: a rolling save may not change '{refname}'"
+                    )),
+                    "{env:?} {refname} {old}..{new}: {stderr}"
+                );
+            }
+        }
+        // The same updates of an ordinary push.
+        repo.accepts("refs/heads/main", main, child);
+        repo.accepts("refs/heads/feature", ZERO, child);
+        repo.accepts(&content, child, ZERO);
     }
 
     /// A slot update is checked against its own parent: a path its old tip

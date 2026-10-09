@@ -532,6 +532,90 @@ fn local_only_work_is_pushed_first_and_keeps_the_slot_while_it_cannot_be() {
     assert!(fx.slot().is_none());
 }
 
+/// A rolling save's git token (`git.persist`) pushes only what a rolling
+/// save changes: the shard then lets a push create recovery refs and replace
+/// or delete a working slot, nothing else. Every step of a save works under
+/// that: the slot is created and replaced, a local recovery ref goes out
+/// first, the slot is read back and deleted. A push to `main` is refused.
+#[test]
+fn every_step_of_a_save_works_with_a_save_only_push() {
+    let fx = Fixture::new();
+    install_shard_hook(&fx.remote, &[(git_service::policy::PERSIST_PUSH_ENV, "1")]);
+
+    fx.write("notes.md", b"one\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("one\n"));
+    fx.write("notes.md", b"two\n");
+    let state = fx.save(PersistReason::TurnEnd);
+    assert_eq!(state.error, None, "{state:?}");
+    assert!(state.durable, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("two\n"));
+    assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
+
+    // A local recovery ref goes out first; then nothing is unsaved and the
+    // slot is deleted.
+    let git = WorkspaceGit::new(&fx.ws, None);
+    let main = fx.main();
+    let listing = format!(
+        "{}\n100644 blob {}\tconflicted.md\n",
+        ig(&fx.ws, &["ls-tree", &main]),
+        String::from_utf8_lossy(
+            &git_output(
+                &fx.ws,
+                &["--git-dir", ".instafy/.git", "hash-object", "-w", "--stdin"],
+                Some(b"mine\n"),
+            )
+            .stdout
+        )
+        .trim()
+    );
+    let made = git_output(
+        &fx.ws,
+        &["--git-dir", ".instafy/.git", "mktree"],
+        Some(listing.as_bytes()),
+    );
+    let stored = crate::recovery::store(
+        &git,
+        RecoverySpec {
+            kind: RecoveryKind::Conflict,
+            tree: String::from_utf8_lossy(&made.stdout).trim().to_string(),
+            parent: Some(main.clone()),
+            source: None,
+            date: None,
+            paths: vec!["conflicted.md".to_string()],
+            commits: Vec::new(),
+            identity: GitIdentity::new("Instafy Origin", "origin@instafy.dev"),
+            origin_id: fx.config.origin_id,
+        },
+    )
+    .unwrap()
+    .expect("a conflict copy");
+    fs::remove_file(fx.ws.join("notes.md")).unwrap();
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(state.local_only, 0, "{state:?}");
+    assert!(state.durable, "{state:?}");
+    assert!(fx
+        .remote_recovery_refs()
+        .iter()
+        .any(|name| name.ends_with(&stored.name)));
+    assert!(fx.slot().is_none());
+
+    // The same remote refuses a push to main.
+    let seed = fx.root.join("seed");
+    git_in(&seed, &["commit", "-q", "--allow-empty", "-m", "published"]);
+    let pushed = git_output(&seed, &["push", fx.remote.to_str().unwrap(), "main"], None);
+    assert!(!pushed.status.success());
+    assert!(
+        String::from_utf8_lossy(&pushed.stderr)
+            .contains("a rolling save may not change 'refs/heads/main'"),
+        "{}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    assert_eq!(fx.main(), main);
+}
+
 #[test]
 fn a_tick_never_renames_a_nested_repository_and_keeps_its_earlier_entry() {
     let fx = Fixture::new();

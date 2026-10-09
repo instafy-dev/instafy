@@ -22,9 +22,12 @@
 //!
 //! The grant's audience is that origin, so it never selects another one. It
 //! opens the origin's `/workspace/persist` and nothing else, lives a minute,
-//! and the origin exchanges it for `git.write`
-//! ([`authorize_persist_grant`]) only after every one of those checks
-//! passes again. Commits stay authored by the origin.
+//! and the origin exchanges it for a git token ([`authorize_persist_grant`])
+//! only after every one of those checks passes again. That token carries
+//! [`GIT_PERSIST_SCOPE`] where `git.write` was asked for: Git Edge lets it
+//! push only as a rolling save does, creating recovery refs and replacing
+//! or deleting a working slot, so it never writes a branch, `main` or
+//! anyone's recovery ref but a slot. Commits stay authored by the origin.
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
@@ -49,6 +52,29 @@ use crate::tokens::{mint_scoped_token_expires_no_later_than, ScopedTokenRequest}
 /// The scope of a rolling save's grant. The origin's own
 /// `WORKSPACE_PERSIST_SCOPE` names the same string.
 pub(crate) const WORKSPACE_PERSIST_SCOPE: &str = "workspace.persist";
+
+/// The scope a rolling save's git token carries instead of `git.write`. Git
+/// Edge and the shard name the same string
+/// (`git_service::routing::GIT_PERSIST_SCOPE`).
+pub(crate) const GIT_PERSIST_SCOPE: &str = "git.persist";
+
+/// The git scopes a rolling save's grant is exchanged for: `requested`, with
+/// [`GIT_PERSIST_SCOPE`] in place of `git.write`.
+pub(super) fn persist_git_scopes(requested: &[String]) -> Vec<String> {
+    let mut scopes: Vec<String> = requested
+        .iter()
+        .map(|scope| {
+            if scope == "git.write" {
+                GIT_PERSIST_SCOPE.to_string()
+            } else {
+                scope.clone()
+            }
+        })
+        .collect();
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
 
 /// The code of a grant refused because rolling saves are off.
 pub(crate) const ROLLING_SAVES_OFF_CODE: &str = "rolling_saves_off";
@@ -374,10 +400,11 @@ pub(crate) async fn mint_persist_grant(
     })))
 }
 
-/// Check a rolling save's grant the origin presents to mint `git.write`:
-/// exactly [`WORKSPACE_PERSIST_SCOPE`] for this project and origin, whose
-/// job, runtime generation, online origin and user's write access all
-/// still hold (see the module docs). The git token never outlives it.
+/// Check a rolling save's grant the origin presents to mint git access
+/// ([`persist_git_scopes`]): exactly [`WORKSPACE_PERSIST_SCOPE`] for this
+/// project and origin, whose job, runtime generation, online origin and
+/// user's write access all still hold (see the module docs). The git token
+/// never outlives it.
 pub(super) async fn authorize_persist_grant(
     state: &AppState,
     context: &RequestContext,
@@ -467,6 +494,29 @@ mod tests {
             main.contains("origins::workspace_persist::working_state_header(&state.config)"),
             "/healthz sends the header"
         );
+    }
+
+    /// The git token of a rolling save never carries `git.write`.
+    #[test]
+    fn a_rolling_save_mints_git_persist_in_place_of_git_write() {
+        let scopes = |requested: &[&str]| {
+            persist_git_scopes(
+                &requested
+                    .iter()
+                    .map(|scope| scope.to_string())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            scopes(&["git.read", "git.write"]),
+            vec![GIT_PERSIST_SCOPE, "git.read"]
+        );
+        assert_eq!(scopes(&["git.write"]), vec![GIT_PERSIST_SCOPE]);
+        assert_eq!(scopes(&["git.read"]), vec!["git.read"]);
+        let git_service = include_str!("../../../git-service/src/routing.rs");
+        assert!(git_service.contains(&format!(
+            "pub const GIT_PERSIST_SCOPE: &str = \"{GIT_PERSIST_SCOPE}\";"
+        )));
     }
 
     #[test]

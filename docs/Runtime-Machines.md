@@ -608,12 +608,16 @@ node's checkout a cache.
   grants it only for a write job leased by this runtime (or cancelled in the
   last minute), whose user may still write, for this runtime generation's
   own online origin, and checks all of it again when the origin exchanges the
-  grant for `git.write`. A rolling save takes no workspace lease.
+  grant for a git token. That token carries `git.persist` instead of
+  `git.write`: Git Edge lets it push only as a rolling save does (create
+  recovery refs, replace or delete a working slot) and the shard refuses
+  every other ref update, so it never writes a branch or `main`. A rolling
+  save takes no workspace lease.
 - A tick never adds a path inside a nested repository and leaves out files
   over 2 MiB: both keep the slot's earlier entry (where that earlier save
   changed them and `main` has not changed them since; otherwise the current
   parent's) until the job's end or a
-  stop saves them. A tick asks the controller for `git.write` with the
+  stop saves them. A tick asks the controller for that token with the
   workspace let go, within its own ten seconds, so a stop that comes
   meanwhile takes the workspace at once. A tick also sends at most 16 MiB of
   new content, smallest
@@ -624,7 +628,7 @@ node's checkout a cache.
   overlap and a missed one is not queued.
 - Cost, measured with 20 or 200 changed files alike: an unchanged folder
   costs 6 git processes and no controller call; a changed tick about 38 git
-  processes, a grant and a `git.write` token from the controller, one leased
+  processes, a grant and a `git.persist` token from the controller, one leased
   push and one `ls-remote`; a job's end with nothing new since a save that
   held all of it costs the same 6 and no controller call. About 1,100 git
   processes per runtime-hour of

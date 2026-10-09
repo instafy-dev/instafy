@@ -7135,7 +7135,7 @@ async fn post_git_access_token(
 
     let direct_service_authentication =
         has_direct_git_delete_service_authentication(&state.config, &headers, &context);
-    let normalized_scopes =
+    let mut normalized_scopes =
         normalize_git_access_token_scopes(&context, &body.scopes, direct_service_authentication)?;
     let delete_requested = normalized_scopes.as_slice() == [GIT_DELETE_SCOPE];
 
@@ -7167,8 +7167,12 @@ async fn post_git_access_token(
         if rolling_save_grant {
             // A running write job's rolling save, through its own origin.
             // Valid only while that job and its runtime generation still
-            // hold; the git token never outlives the grant.
-            Some(workspace_persist::authorize_persist_grant(&state, &context, &project_id).await?)
+            // hold; the git token never outlives the grant, and it pushes
+            // only as a rolling save does (git.persist, never git.write).
+            let grant =
+                workspace_persist::authorize_persist_grant(&state, &context, &project_id).await?;
+            normalized_scopes = workspace_persist::persist_git_scopes(&normalized_scopes);
+            Some(grant)
         } else if pre_stop_save_grant {
             // The space owner's save-only permission, which only the
             // controller's own stop path issues, to the stopping runtime's

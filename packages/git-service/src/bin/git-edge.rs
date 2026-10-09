@@ -17,8 +17,8 @@ use git_service::config::{GitEdgeConfig, GitEdgeRoutingMode};
 use git_service::error::ServiceError;
 use git_service::routing::{
     authorize_request_claims, is_forwardable_request_header, parse_repo_segment, pick_shard_index,
-    required_scope, GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER,
-    GIT_DELETE_SCOPE,
+    push_scope_assertion, required_scope, GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED,
+    GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE, GIT_PUSH_SCOPE_HEADER,
 };
 
 #[derive(Clone)]
@@ -93,6 +93,7 @@ async fn handle_proxy(
 
     // GIT_EDGE_SKIP_AUTH is a local Smart HTTP convenience. Destructive
     // requests remain authenticated even when that development switch is on.
+    let mut push_scope = None;
     if request_requires_auth(state.config.skip_auth, scope) {
         let token = extract_token(&parts.headers)?;
         let claims = state
@@ -100,6 +101,8 @@ async fn handle_proxy(
             .validate(&token, Some(&state.config.audience))
             .await?;
         authorize_request_claims(&claims, &parts.method, uri.path(), uri.query(), &repo_name)?;
+        // A push only a rolling save's credential allows: the shard limits it.
+        push_scope = push_scope_assertion(&claims, scope);
     }
 
     let shard_idx = pick_shard_index(&repo_name, state.config.shards.len());
@@ -118,6 +121,7 @@ async fn handle_proxy(
         shard_base,
         &parts.method,
         &parts.headers,
+        push_scope,
         &uri,
         body,
     )
@@ -225,6 +229,7 @@ async fn proxy_request(
     shard_base: reqwest::Url,
     method: &Method,
     headers: &HeaderMap,
+    push_scope: Option<&str>,
     uri: &Uri,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ServiceError> {
@@ -251,6 +256,9 @@ async fn proxy_request(
             continue;
         };
         req = req.header(name.as_str(), value_str);
+    }
+    if let Some(scope) = push_scope {
+        req = req.header(GIT_PUSH_SCOPE_HEADER, scope);
     }
 
     req = req.body(reqwest::Body::wrap_stream(body_stream.map(|chunk| {
@@ -316,6 +324,71 @@ mod tests {
             );
         }
         response
+    }
+
+    /// The shard receives the push-scope mark only from the edge itself: a
+    /// client's copy is dropped, and the edge's own is sent once.
+    #[tokio::test]
+    async fn only_the_edge_marks_a_rolling_saves_push() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shard =
+            reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let received = tokio::spawn(async move {
+            let mut heads = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                heads.push(String::from_utf8_lossy(&request).to_ascii_lowercase());
+            }
+            heads
+        });
+
+        let client = reqwest::Client::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GIT_PUSH_SCOPE_HEADER,
+            axum::http::HeaderValue::from_static("forged"),
+        );
+        let uri: Uri = "/repo.git/git-receive-pack".parse().unwrap();
+        for push_scope in [Some("git.persist"), None] {
+            proxy_request(
+                &client,
+                shard.clone(),
+                &Method::POST,
+                &headers,
+                push_scope,
+                &uri,
+                axum::body::Body::empty(),
+            )
+            .await
+            .unwrap();
+        }
+        let heads = received.await.unwrap();
+        let marks = |head: &str| {
+            head.lines()
+                .filter(|line| line.starts_with(&format!("{GIT_PUSH_SCOPE_HEADER}:")))
+                .map(|line| line.trim_end().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            marks(&heads[0]),
+            vec![format!("{GIT_PUSH_SCOPE_HEADER}: git.persist")]
+        );
+        assert!(marks(&heads[1]).is_empty(), "{}", heads[1]);
     }
 
     #[test]

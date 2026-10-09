@@ -24,7 +24,7 @@ use git_service::policy::{install_shared_hooks, verify_shared_hooks};
 use git_service::repo::{delete_bare_repo, ensure_repo_exists};
 use git_service::routing::{
     is_exact_repo_root_delete, parse_repo_segment, GIT_DELETE_RESULT_ABSENT,
-    GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE,
+    GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE, GIT_PUSH_SCOPE_HEADER,
 };
 use runtime_contracts::{
     AccessTokenClaims, GIT_DELETE_TOKEN_SUBJECT, GIT_DELETE_TOKEN_TTL_SECONDS,
@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
         hooks_dir: &hooks_dir,
         max_push_bytes: config.max_push_bytes,
         push_report: None,
+        persist_push: false,
     })?;
     info!(hooks_dir = %hooks_dir, "installed shared push policy");
     let push_reports_dir: Option<Arc<Path>> = if config.events_webhook.is_some() {
@@ -149,6 +150,9 @@ async fn handle_git(
         hooks_dir: &state.hooks_dir,
         max_push_bytes: state.config.max_push_bytes,
         push_report: push_report.as_deref().and_then(Path::to_str),
+        // Git Edge marks a push it authorized only through a rolling save's
+        // credential, and drops the header from every client request.
+        persist_push: parts.headers.contains_key(GIT_PUSH_SCOPE_HEADER),
     };
 
     let backend =

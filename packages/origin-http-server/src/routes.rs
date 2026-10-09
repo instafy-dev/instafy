@@ -399,8 +399,10 @@ async fn require_flush(
 /// The scope of the save-only grant the controller issues to a running write
 /// job for the working folder's rolling save (the controller's
 /// `WORKSPACE_PERSIST_SCOPE`). It opens `/workspace/persist` and nothing
-/// else, here or at the controller, which exchanges it for `git.write` only
-/// while that job and its runtime generation are still current.
+/// else, here or at the controller, which exchanges it only while that job
+/// and its runtime generation are still current, and then for `git.persist`
+/// instead of `git.write`: a token that may push recovery refs and the
+/// folder's slot, nothing else.
 pub const WORKSPACE_PERSIST_SCOPE: &str = "workspace.persist";
 
 /// `/workspace/persist` takes either an `fs.write` token under a live
@@ -3322,7 +3324,7 @@ fn stopping_now() -> OriginError {
 /// save while a turn runs: it takes the locks only when they are free (409
 /// `busy` otherwise) and gives up when a stop begins. `turn_end` waits for
 /// them. Hosted checkouts only; 503 `stopping` while a stop's fence is up.
-/// `git.write` is minted only when something must be pushed.
+/// Git access is minted only when something must be pushed.
 async fn handle_workspace_persist(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,

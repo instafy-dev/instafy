@@ -2363,7 +2363,19 @@ async fn a_rolling_save_grant_holds_only_while_its_write_job_does() -> anyhow::R
             let project_id = fx.project_id;
             async move { send(&state, git_token_request(project_id, &bearer)).await }
         };
-        assert_eq!(exchange(grant.clone()).await.0, StatusCode::OK);
+        let (status, body) = exchange(grant.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // The git token may change only what a rolling save changes: it
+        // carries git.persist where git.write was asked for, never git.write.
+        let git_token = body["token"].as_str().expect("a git token");
+        let git_claims = decode_scoped_token(&fx.state.config, git_token, "git token")
+            .map_err(|(_, body)| anyhow::anyhow!("decode git token: {}", body.0.message))?;
+        assert_eq!(
+            git_claims.scopes,
+            vec!["git.persist".to_string(), "git.read".to_string()]
+        );
+        assert_eq!(body["scopes"], json!(["git.persist", "git.read"]));
+        assert_eq!(git_claims.lease_id, None);
         // It reads no workspace lease and opens nothing else here.
         let (lease_status, _) = send(
             &fx.state,

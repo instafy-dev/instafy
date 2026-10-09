@@ -79,6 +79,13 @@ The hook checks every pushed ref:
 - **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) are
   reserved: no push may create, move or delete one. This check and the ASCII rule run before
   `GIT_POLICY_DISABLED`.
+- **A rolling save's push.** The controller mints a running write job's rolling save a token
+  with `git.persist` instead of `git.write`. Git Edge accepts it for the requests of a push and
+  marks the push for the shard with `x-instafy-git-push-scope` (a client's own copy of that
+  header never passes the edge). The hook then lets that push create recovery refs and replace
+  or delete a working slot, and refuses every other ref update (`a rolling save may not change
+  '<ref>'`): no branch, `main`, tag or other ref, and no delete of any other recovery ref. This
+  check also runs before `GIT_POLICY_DISABLED`.
 - **Recovery refs** are named after the work they hold, so a push may create or delete one but
   never move it (`is a recovery ref; it may be created or deleted, not moved`). The one exception
   is a working folder's rolling save, `refs/instafy/recovery/<working-set id>/working`, which
@@ -113,11 +120,14 @@ Knobs:
 - `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB; blank means the default): largest pack one
   push may send. A non-blank value other than a positive whole number of bytes stops the shard
   from starting.
-- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule, the recovery-ref rule (create or delete, never move, except a working slot) and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule, the rolling save rule, the recovery-ref rule (create or delete, never move, except a working slot) and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
 roll it back to an older shard image: older shards rewrite per-repository hooks on each request
-and run without object checks or salvage ref protection.
+and run without object checks or salvage ref protection. The same order keeps a rolling save's
+token narrow: a controller that mints `git.persist` in front of an older Git Edge gets its pushes
+refused (the older edge knows only `git.write`), and an older shard behind a newer edge would
+ignore the edge's mark and let that token push as `git.write`.
 
 Behaviour that changed with the shared policy: a ref must point to a commit (or an annotated tag
 of one), malformed objects that older git versions wrote are refused by the object checks, a push
