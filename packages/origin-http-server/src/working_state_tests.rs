@@ -516,46 +516,43 @@ fn a_same_size_rewrite_that_puts_the_mtime_back_is_a_change() {
 /// On a filesystem whose clock ticks coarsely, a rewrite of the same size
 /// right after a save read a file can leave the timestamps the save saw.
 /// A save therefore never takes a file changed that recently as read: the
-/// next check saves again, and the rewrite reaches the slot.
+/// next check saves again, and the rewrite reaches the slot. The clock is
+/// frozen here, so the write, the save and the rewrite always fall in one
+/// tick of it, and the rewrite leaves everything the check reads as it was.
 #[test]
 fn a_same_size_rewrite_in_the_same_timestamp_tick_is_saved() {
-    struct Coarse;
-    impl Drop for Coarse {
+    struct Thawed;
+    impl Drop for Thawed {
         fn drop(&mut self) {
-            COARSE_TIMESTAMPS.set(false);
+            FROZEN_CLOCK.set(None);
         }
     }
-    COARSE_TIMESTAMPS.set(true);
-    let _coarse = Coarse;
-    let changed_at = |fx: &Fixture| {
+    let fx = Fixture::new();
+    FROZEN_CLOCK.set(Some(std::time::SystemTime::now()));
+    let _thawed = Thawed;
+    let identity = |fx: &Fixture| {
         let metadata = fs::symlink_metadata(fx.ws.join("notes.md")).unwrap();
-        stamps(&metadata)
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+        #[cfg(not(unix))]
+        let inode = 0u64;
+        (stamps(&metadata), metadata.len(), inode)
     };
-    // The write, the save and the rewrite must fall in one whole second.
-    for _ in 0..30 {
-        let fx = Fixture::new();
-        let elapsed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-        std::thread::sleep(Duration::from_nanos(
-            1_000_000_000 - u64::from(elapsed.subsec_nanos()),
-        ));
-        fx.write("notes.md", b"version 1\n");
-        let before = changed_at(&fx);
-        let state = fx.save(PersistReason::TurnEnd);
-        assert!(state.durable && state.error.is_none(), "{state:?}");
-        fx.write("notes.md", b"version 2\n");
-        if changed_at(&fx) != before {
-            continue;
-        }
-        let state = fx.state();
-        assert!(state.changed && !state.durable, "{state:?}");
-        let state = fx.save(PersistReason::Tick);
-        assert_eq!(state.error, None, "{state:?}");
-        assert_eq!(fx.slot_file("notes.md").as_deref(), Some("version 2\n"));
-        return;
-    }
-    panic!("no write, save and rewrite fell in one second");
+    fx.write("notes.md", b"version 1\n");
+    let before = identity(&fx);
+    let state = fx.save(PersistReason::TurnEnd);
+    assert!(state.durable && state.error.is_none(), "{state:?}");
+    fx.write("notes.md", b"version 2\n");
+    assert_eq!(
+        identity(&fx),
+        before,
+        "the rewrite shows only in its content"
+    );
+    let state = fx.state();
+    assert!(state.changed && !state.durable, "{state:?}");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("version 2\n"));
 }
 
 #[test]

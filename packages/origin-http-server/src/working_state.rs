@@ -665,18 +665,27 @@ fn stamps(metadata: &std::fs::Metadata) -> (u128, u128) {
     #[cfg(not(unix))]
     let changed = modified;
     #[cfg(test)]
-    if COARSE_TIMESTAMPS.get() {
-        let second = |nanos: u128| nanos - nanos % 1_000_000_000;
-        return (second(modified), second(changed));
+    if let Some(frozen) = FROZEN_CLOCK.get() {
+        return (since_epoch(frozen), since_epoch(frozen));
     }
     (modified, changed)
 }
 
+/// When a save starts, for [`RACY_MARGIN`].
+fn save_start() -> SystemTime {
+    #[cfg(test)]
+    if let Some(frozen) = FROZEN_CLOCK.get() {
+        return frozen;
+    }
+    SystemTime::now()
+}
+
 #[cfg(test)]
 thread_local! {
-    /// Whole-second timestamps, as a filesystem whose clock ticks coarsely
-    /// keeps them (tests only).
-    pub(crate) static COARSE_TIMESTAMPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// A clock that stands still (tests only): every path's timestamps and
+    /// every save's start read this time, as on a filesystem whose clock
+    /// does not tick between a save and the next write.
+    pub(crate) static FROZEN_CLOCK: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
 }
 
 /// The mode and, on unix, the inode.
@@ -884,7 +893,7 @@ impl Publisher<'_> {
             Some(parent) => self.git.tree_id(parent)?,
             None => self.git.empty_tree()?,
         };
-        let started = SystemTime::now();
+        let started = save_start();
         let (fingerprint, _, racy) = fingerprint(
             self,
             head.as_deref(),
