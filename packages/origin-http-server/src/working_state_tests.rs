@@ -822,6 +822,9 @@ fn a_tick_sends_small_edits_first_and_the_rest_over_later_ticks() {
         );
     }
     fx.write("src/small.rs", b"fn small() {}\n");
+    // Old enough that neither tick reads them as changed that moment: only
+    // the budget makes the first one leave work for the next.
+    age_files();
     let saved = |fx: &Fixture| {
         (0..count)
             .filter(|index| fx.slot_file(&format!("assets/{index:02}.bin")).is_some())
