@@ -946,6 +946,169 @@ test("the runtime entrypoint finds Playwright's Chromium in either build layout"
   }
 });
 
+// Headed Chromium's first launch on a cold hosted runner took up to 11.3 s, and
+// the entrypoint used to give it a fixed 60 polls (about 12.4 s) before killing
+// it. These cases run the entrypoint's own readiness functions in bash under
+// `set -euo pipefail`, called bare as the launch-chromium subcommand calls them.
+// The fake Chromium is started by that bash script, as in production, so the
+// shell reaps it and an exit is visible to `kill -0`.
+const cdpPort = "45999";
+
+function entrypointFunction(source, name) {
+  const start = source.indexOf(`\n${name}() {\n`);
+  const end = source.indexOf("\n}\n", start + 1);
+  assert.ok(start >= 0 && end > start, `${name} must exist in the runtime entrypoint`);
+  return source.slice(start + 1, end + 3);
+}
+
+function runChromiumReadiness({ chromium, readyAtCall = 0, timeout, wholeSecondClock = false }) {
+  const entrypoint = read("docker/runtime/entrypoint.sh");
+  const functions = [
+    "chromium_cdp_ready_timeout_secs",
+    "chromium_ready_clock_ms",
+    "check_chromium_cdp_ready",
+    "await_chromium_cdp_ready",
+  ].map((name) => entrypointFunction(entrypoint, name)).join("\n");
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cdp-ready-"));
+  const bin = path.join(fixture, "bin");
+  fs.mkdirSync(bin);
+  // Answers like Chromium's /json/version from call N on, and like a refused
+  // connection before that, including curl's own stderr line.
+  fs.writeFileSync(path.join(bin, "curl"), `#!/bin/sh
+calls=$(( $(cat "$FIXTURE/curl-calls" 2>/dev/null || echo 0) + 1 ))
+echo "$calls" > "$FIXTURE/curl-calls"
+printf '%s\\n' "$*" > "$FIXTURE/curl-args"
+if [ "$FAKE_CURL_READY_AT" -gt 0 ] && [ "$calls" -ge "$FAKE_CURL_READY_AT" ]; then
+  printf '%s' '{"Browser": "Chrome/140.0.0.0", "Protocol-Version": "1.3"}'
+  exit 0
+fi
+echo "curl: (7) Failed to connect to 127.0.0.1 port ${cdpPort} after 0 ms: Couldn't connect to server" >&2
+exit 7
+`, { mode: 0o755 });
+  const launch = { exits: "sh -c 'exit 3' >/dev/null 2>&1 &", runs: "command sleep 30 >/dev/null 2>&1 &" }[chromium];
+  assert.ok(launch, chromium);
+  // Without EPOCHREALTIME (bash before 5, or unset) the clock is whole SECONDS,
+  // so a sub-second start measures exactly 0 ms: the case that aborts a bash 5
+  // `(( ))` under set -e.
+  const script = `set -euo pipefail
+${wholeSecondClock ? "unset EPOCHREALTIME" : ""}
+${functions}
+chromium_pid_file() { printf '%s' "$FIXTURE/chromium.pid"; }
+chromium_log_file() { printf '%s' "$FIXTURE/chromium.log"; }
+chromium_warning_file() { printf '%s' "$FIXTURE/chromium-warning.txt"; }
+# Shorten only the poll interval so a start past the old 60-poll cap stays fast.
+sleep() { if [ "$1" = 0.2 ]; then command sleep 0.01; else command sleep "$@"; fi; }
+${launch}
+chromium_pid=$!
+trap 'kill "$chromium_pid" 2>/dev/null || true' EXIT
+echo "$chromium_pid" > "$(chromium_pid_file)"
+await_chromium_cdp_ready "$chromium_pid"
+echo "continued=yes"
+if [ -f "$(chromium_pid_file)" ]; then echo "pid-file=kept"; else echo "pid-file=removed"; fi
+for _ in $(seq 1 40); do
+  if [ -f "$(chromium_pid_file)" ] || ! kill -0 "$chromium_pid" 2>/dev/null; then break; fi
+  command sleep 0.05
+done
+if kill -0 "$chromium_pid" 2>/dev/null; then
+  echo "chromium=running"
+else
+  status=0
+  wait "$chromium_pid" 2>/dev/null || status=$?
+  echo "chromium=stopped:$status"
+fi
+`;
+  const env = { PATH: `${bin}:${process.env.PATH}`, FIXTURE: fixture, FAKE_CURL_READY_AT: String(readyAtCall), INSTAFY_PLAYWRIGHT_CDP_PORT: cdpPort };
+  if (timeout !== undefined) env.INSTAFY_CHROMIUM_CDP_READY_TIMEOUT_SECS = timeout;
+  try {
+    const started = process.hrtime.bigint();
+    const result = spawnSync("bash", ["-c", script], { encoding: "utf8", env, timeout: 20_000 });
+    const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+    const optional = (name) => (fs.existsSync(path.join(fixture, name)) ? fs.readFileSync(path.join(fixture, name), "utf8") : null);
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      elapsedMs,
+      fixture,
+      calls: Number(optional("curl-calls") ?? 0),
+      curlArgs: (optional("curl-args") ?? "").trim(),
+      warning: optional("chromium-warning.txt"),
+    };
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+}
+
+test("a slow but healthy headed Chromium start is ready past the old 60-poll budget", () => {
+  // Poll 1 also proves a sub-second start (elapsed 0) cannot abort under set -e.
+  for (const [readyAtCall, wholeSecondClock] of [[80, false], [1, false], [1, true]]) {
+    const run = runChromiumReadiness({ chromium: "runs", readyAtCall, wholeSecondClock });
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.calls, readyAtCall, `the readiness probe stopped after ${run.calls} calls`);
+    assert.match(run.stdout, /^continued=yes\npid-file=kept\nchromium=running$/mu);
+    assert.equal(run.warning, null);
+    assert.match(
+      run.stderr,
+      new RegExp(`^\\[instafy\\] Headed Chromium ready \\(CDP\\) on 127\\.0\\.0\\.1:${cdpPort} after [0-9]+\\.[0-9]{2}s$`, "mu"),
+    );
+    assert.doesNotMatch(run.stderr, /curl:/u, "a starting browser's refused probes stay quiet");
+    // A loopback probe never goes through a proxy and cannot hang on an
+    // accepted but silent connection.
+    assert.match(run.curlArgs, /(?:^| )--noproxy \*(?: |$)/u);
+    assert.match(run.curlArgs, /(?:^| )--max-time 1(?: |$)/u);
+    assert.match(run.curlArgs, new RegExp(` http://127\\.0\\.0\\.1:${cdpPort}/json/version$`, "u"));
+  }
+});
+
+test("a headed Chromium that exits is reported at once with its exit status", () => {
+  const run = runChromiumReadiness({ chromium: "exits" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.ok(run.calls <= 20, `probed ${run.calls} times after the process had exited`);
+  assert.ok(run.elapsedMs < 5_000, `returned after ${run.elapsedMs} ms instead of within a few polls of the exit`);
+  const message = `Headed Chromium did not become ready on CDP port ${cdpPort} (Chromium exited with status 3 after `;
+  assert.ok(run.warning?.startsWith(message), `warning file: ${run.warning}`);
+  assert.ok(run.warning.endsWith(`s). Check ${run.fixture}/chromium.log and restart runtime.\n`), run.warning);
+  assert.ok(run.stderr.includes(`[instafy] ${message}`), "the entrypoint log carries the same message");
+  assert.doesNotMatch(run.stderr, /curl:/u);
+  assert.match(run.stdout, /^continued=yes\npid-file=removed\n/mu);
+});
+
+test("a headed Chromium still starting at the deadline is stopped and reported", () => {
+  for (const wholeSecondClock of [false, true]) {
+    const run = runChromiumReadiness({ chromium: "runs", timeout: "1", wholeSecondClock });
+    assert.equal(run.status, 0, run.stderr);
+    assert.ok(run.calls > 1, `probed ${run.calls} times`);
+    // The wait is never shorter than the deadline, even on the whole-second
+    // clock, and not much longer.
+    assert.ok(run.elapsedMs >= 1_000 && run.elapsedMs < 6_000, `waited ${run.elapsedMs} ms for a 1 s deadline`);
+    const message = `Headed Chromium did not become ready on CDP port ${cdpPort} within 1s; Chromium was still running and was stopped. Check ${run.fixture}/chromium.log and restart runtime.`;
+    assert.equal(run.warning, `${message}\n`);
+    assert.ok(run.stderr.includes(`[instafy] ${message}\n`), "the entrypoint log carries the same message");
+    assert.doesNotMatch(run.stderr, /curl:/u);
+    // SIGTERM from the entrypoint, not the fake's own 30 s exit.
+    assert.match(run.stdout, /^continued=yes\npid-file=removed\nchromium=stopped:143$/mu);
+  }
+});
+
+test("the headed Chromium readiness deadline is whole seconds from 1 to 300, 30 by default", () => {
+  const helper = entrypointFunction(read("docker/runtime/entrypoint.sh"), "chromium_cdp_ready_timeout_secs");
+  const cases = [
+    [undefined, "30"], ["", "30"], ["45", "45"], ["045", "45"], ["0", "1"], ["300", "300"], ["301", "300"],
+    ["99999999999999999999", "300"], ["1.5", "30"], ["-5", "30"], ["30s", "30"], ["abc", "30"],
+  ];
+  for (const [value, expected] of cases) {
+    const env = { PATH: process.env.PATH };
+    if (value !== undefined) env.INSTAFY_CHROMIUM_CDP_READY_TIMEOUT_SECS = value;
+    const result = spawnSync("bash", ["-c", `set -euo pipefail\n${helper}\nchromium_cdp_ready_timeout_secs`], { encoding: "utf8", env });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected, `INSTAFY_CHROMIUM_CDP_READY_TIMEOUT_SECS=${JSON.stringify(value)}`);
+  }
+
+  // The launcher waits on the process it just started.
+  const daemon = entrypointFunction(read("docker/runtime/entrypoint.sh"), "start_headed_chromium_daemon");
+  assert.match(daemon, /\n  local chromium_pid=\$!\n  echo "\$\{chromium_pid\}" > "\$\{pid_file\}"\n\n  await_chromium_cdp_ready "\$\{chromium_pid\}"\n\}\n$/u);
+});
+
 test("a webdev image must start the Shared Browser before it is published", () => {
   for (const { file } of runtimePublishers) {
     const publish = read(`.github/workflows/${file}`);

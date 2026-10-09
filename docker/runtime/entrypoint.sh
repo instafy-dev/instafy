@@ -220,15 +220,97 @@ cleanup_chromium_profile_locks() {
     "${profile_dir}/SingletonCookie"
 }
 
+chromium_cdp_ready_timeout_secs() {
+  # How long a launched Chromium may take to answer on its CDP port. The first
+  # headed launch on a cold machine is the slow one: on hosted CI it took 3.8 s
+  # at the median, 9.7 s at p99 and up to 11.3 s, which a fixed 60-poll budget
+  # (about 12.4 s) cut off. 30 s is about 2.7x the slowest healthy start, and it
+  # keeps the persisted-profile relaunch, which runs after registration and
+  # before the first heartbeat, inside the controller's 60 s heartbeat window
+  # for queued-job recovery. Overrides are whole seconds clamped to 1..300; 300 s
+  # is the controller's stalled-launch window, so a longer wait cannot help.
+  awk -v raw="${INSTAFY_CHROMIUM_CDP_READY_TIMEOUT_SECS:-30}" 'BEGIN {
+    if (raw !~ /^[0-9]+$/) raw = 30;
+    if (raw < 1) raw = 1;
+    if (raw > 300) raw = 300;
+    printf "%d", raw;
+  }'
+}
+
+chromium_ready_clock_ms() {
+  # bash 5 exposes microseconds in EPOCHREALTIME; older shells fall back to
+  # whole SECONDS, so their readiness times are only accurate to a second.
+  local now="${EPOCHREALTIME:-}"
+  now="${now//[!0-9]/}"
+  if [ -n "${now}" ]; then
+    printf '%s' "$(( 10#${now} / 1000 ))"
+  else
+    printf '%s' "$(( SECONDS * 1000 ))"
+  fi
+}
+
 check_chromium_cdp_ready() {
+  # Poll until the Chromium launched as PID $1 answers on CDP (0), that process
+  # exits (2), or more than $2 seconds have passed while it still runs (1).
+  local pid="$1"
+  local timeout_secs="$2"
   local endpoint="http://127.0.0.1:${INSTAFY_PLAYWRIGHT_CDP_PORT}/json/version"
-  for _ in $(seq 1 60); do
-    if curl -sS "${endpoint}" | grep -q '"Browser"'; then
+  local now_ms deadline_ms version
+  now_ms="$(chromium_ready_clock_ms)"
+  deadline_ms=$(( now_ms + timeout_secs * 1000 ))
+  while :; do
+    # A refused connection is the normal state while Chromium starts, so the
+    # probe stays quiet. --max-time bounds a connection that is accepted but
+    # never answered, and the loopback endpoint never goes through a proxy.
+    version="$(curl --noproxy '*' -fsS --max-time 1 "${endpoint}" 2>/dev/null)" || version=""
+    if [[ "${version}" == *'"Browser"'* ]]; then
       return 0
+    fi
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      return 2
+    fi
+    now_ms="$(chromium_ready_clock_ms)"
+    if [ "${now_ms}" -gt "${deadline_ms}" ]; then
+      return 1
     fi
     sleep 0.2
   done
-  return 1
+}
+
+await_chromium_cdp_ready() {
+  # Wait for the Chromium launched as PID $1 and record the outcome. The
+  # launch-chromium subcommand runs this under `set -e`, so no line here may
+  # return non-zero: no bare `wait`, and no `(( ))` that can evaluate to 0.
+  # Messages are fixed text; Chromium's own output stays in its log file.
+  local chromium_pid="$1"
+  local timeout_secs started_ms finished_ms elapsed_ms elapsed ready_rc=0
+  timeout_secs="$(chromium_cdp_ready_timeout_secs)"
+  started_ms="$(chromium_ready_clock_ms)"
+  check_chromium_cdp_ready "${chromium_pid}" "${timeout_secs}" || ready_rc=$?
+  finished_ms="$(chromium_ready_clock_ms)"
+  elapsed_ms=$(( finished_ms - started_ms ))
+  if [ "${elapsed_ms}" -lt 0 ]; then
+    elapsed_ms=0
+  fi
+  elapsed="$(printf '%d.%02d' "$(( elapsed_ms / 1000 ))" "$(( elapsed_ms % 1000 / 10 ))")"
+
+  if [ "${ready_rc}" = "0" ]; then
+    echo "[instafy] Headed Chromium ready (CDP) on 127.0.0.1:${INSTAFY_PLAYWRIGHT_CDP_PORT} after ${elapsed}s" >&2
+    return 0
+  fi
+
+  local warning_text
+  if [ "${ready_rc}" = "2" ]; then
+    local exit_status=0
+    wait "${chromium_pid}" 2>/dev/null || exit_status=$?
+    warning_text="Headed Chromium did not become ready on CDP port ${INSTAFY_PLAYWRIGHT_CDP_PORT} (Chromium exited with status ${exit_status} after ${elapsed}s). Check $(chromium_log_file) and restart runtime."
+  else
+    kill "${chromium_pid}" >/dev/null 2>&1 || true
+    warning_text="Headed Chromium did not become ready on CDP port ${INSTAFY_PLAYWRIGHT_CDP_PORT} within ${timeout_secs}s; Chromium was still running and was stopped. Check $(chromium_log_file) and restart runtime."
+  fi
+  rm -f "$(chromium_pid_file)"
+  printf '%s\n' "${warning_text}" > "$(chromium_warning_file)"
+  echo "[instafy] ${warning_text}" >&2
 }
 
 browser_render_scale() {
@@ -408,22 +490,10 @@ start_headed_chromium_daemon() {
     "${viewport_flags[@]}" \
     about:blank \
     >"$(chromium_log_file)" 2>&1 &
-  echo "$!" > "${pid_file}"
+  local chromium_pid=$!
+  echo "${chromium_pid}" > "${pid_file}"
 
-  if check_chromium_cdp_ready; then
-    echo "[instafy] Headed Chromium ready (CDP) on 127.0.0.1:${INSTAFY_PLAYWRIGHT_CDP_PORT}" >&2
-    return
-  fi
-
-  if [ -f "${pid_file}" ]; then
-    kill "$(cat "${pid_file}")" >/dev/null 2>&1 || true
-    rm -f "${pid_file}"
-  fi
-
-  local warning_text
-  warning_text="Headed Chromium did not become ready on CDP port ${INSTAFY_PLAYWRIGHT_CDP_PORT}. Check $(chromium_log_file) and restart runtime."
-  printf '%s\n' "${warning_text}" > "$(chromium_warning_file)"
-  echo "[instafy] ${warning_text}" >&2
+  await_chromium_cdp_ready "${chromium_pid}"
 }
 
 start_browser_session() {
