@@ -84,8 +84,8 @@ The hook checks every pushed ref:
   marks the push for the shard with `x-instafy-git-push-scope` (a client's own copy of that
   header never passes the edge). The hook then lets that push create recovery refs and replace
   or delete a working slot, and refuses every other ref update (`a rolling save may not change
-  '<ref>'`): no branch, `main`, tag or other ref, and no delete of any other recovery ref. This
-  check also runs before `GIT_POLICY_DISABLED`.
+  '<ref>'`): no branch, `main`, tag or other ref, and no delete of any other recovery ref, whatever
+  old value the request names. This check also runs before `GIT_POLICY_DISABLED`.
 - **Recovery refs** are named after the work they hold, so a push may create or delete one but
   never move it (`is a recovery ref; it may be created or deleted, not moved`). The one exception
   is a working folder's rolling save, `refs/instafy/recovery/<working-set id>/working`, which

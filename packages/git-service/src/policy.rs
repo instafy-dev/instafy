@@ -205,11 +205,13 @@ fi
 # A push authorized only by a rolling save's credential (git.persist) may
 # create recovery refs and replace or delete a working slot, nothing else:
 # no branch, tag or other ref, and no recovery ref but a slot moves or goes.
+# A create names a new object: the old value is the client's own claim, and
+# git deletes a ref whatever it holds when that claim names no object.
 # An authorization boundary, so GIT_POLICY_DISABLED does not skip it.
 # ---------------------------------------------------------------------------
 if [[ "${{{persist_push_env}:-}}" == "1" ]]; then
   if [[ ! "$refname" =~ $recovery_ref_pattern ]] \
-    || {{ [[ "$working_slot" != "1" ]] && ! is_zero "$oldrev"; }}; then
+    || {{ [[ "$working_slot" != "1" ]] && {{ ! is_zero "$oldrev" || is_zero "$newrev"; }}; }}; then
     echo "instafy: a rolling save may not change '$refname'" >&2
     exit 1
   fi
@@ -1168,6 +1170,9 @@ mod tests {
                 ("refs/notes/commits", ZERO, child),
                 (replace.as_str(), ZERO, child),
                 (content.as_str(), child, ZERO),
+                // The old value is the client's claim, and git deletes a ref
+                // whatever it holds when that claim names no object.
+                (content.as_str(), ZERO, ZERO),
                 (content.as_str(), main, child),
                 (upper.as_str(), ZERO, child),
             ] {
