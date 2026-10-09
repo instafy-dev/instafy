@@ -239,15 +239,19 @@ describe("live origins come only from a status answer for the current project", 
     expect(current().visibleRevs).toEqual([]);
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(1);
 
-    // A refresh inside the failure backoff is skipped and changes nothing.
+    // A refresh inside the failure backoff is skipped and changes nothing;
+    // it runs once the backoff ends, and the turn is still running.
     await act(async () => {
       await current().refresh();
     });
     expect(mocks.fetchStatus).toHaveBeenCalledTimes(2);
     expect(current().visibleRevs).toEqual([]);
+    mocks.fetchStatus.mockResolvedValueOnce(answer(running(LIVE)));
+    await advance(5_000);
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(3);
+    expect(current().visibleRevs).toEqual([]);
 
     // The runtime really stops: the list is fetched again and the final save shows.
-    await advance(5_000);
     mocks.fetchRecovery.mockResolvedValue(list(rollingSave("2")));
     mocks.fetchStatus.mockResolvedValueOnce(answer());
     await act(async () => {
@@ -256,6 +260,56 @@ describe("live origins come only from a status answer for the current project", 
     await advance(UNSAVED_WORK_STOP_REFETCH_DELAY_MS);
     expect(mocks.fetchRecovery).toHaveBeenCalledTimes(2);
     expect(current().visibleRevs).toEqual([rollingSave("2").rev]);
+  });
+
+  it("runs a refresh the failure backoff skipped once the backoff ends, so a stop is not lost", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list(rollingSave("1")));
+    mocks.fetchStatus.mockResolvedValueOnce(answer(running(LIVE)));
+    await render({ projectId: SPACE_A, ready: true });
+    expect(current().visibleRevs).toEqual([]);
+
+    // One status request fails.
+    mocks.fetchStatus.mockResolvedValueOnce(null);
+    await act(async () => {
+      await current().refresh();
+    });
+    // Within the backoff the runtime stops: its stop event asks for a
+    // refresh, which the backoff skips, and its final save is listed.
+    await advance(1_000);
+    mocks.fetchRecovery.mockResolvedValue(list(rollingSave("2")));
+    mocks.fetchStatus.mockResolvedValueOnce(answer());
+    await act(async () => {
+      await current().refresh();
+      await current().refresh();
+    });
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(2);
+    expect(current().visibleRevs).toEqual([]);
+
+    // When the backoff ends, the skipped refresh runs once and the save shows.
+    await advance(4_000);
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(3);
+    await advance(UNSAVED_WORK_STOP_REFETCH_DELAY_MS);
+    expect(current().visibleRevs).toEqual([rollingSave("2").rev]);
+    await advance(10_000);
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it("drops a refresh the backoff skipped when the space changes", async () => {
+    mocks.fetchRecovery.mockResolvedValue(list());
+    mocks.fetchStatus.mockResolvedValueOnce(answer(running(LIVE)));
+    await render({ projectId: SPACE_A, ready: true });
+    mocks.fetchStatus.mockResolvedValueOnce(null);
+    await act(async () => {
+      await current().refresh();
+      await current().refresh();
+    });
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(2);
+
+    mocks.fetchStatus.mockResolvedValue(answer());
+    await render({ projectId: SPACE_B, ready: true });
+    const afterSwitch = mocks.fetchStatus.mock.calls.length;
+    await advance(10_000);
+    expect(mocks.fetchStatus).toHaveBeenCalledTimes(afterSwitch);
   });
 
   it("hides every rolling save of the space switched to until its own status answers", async () => {

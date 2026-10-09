@@ -53,6 +53,10 @@ export function useRuntimeStatusRefresh({
     at: number;
   }>({ projectId: null, at: 0 });
   const runtimeStatusAbortRef = useRef<AbortController | null>(null);
+  // A refresh the failure backoff skipped runs once when it ends: it may be
+  // the only one a runtime's stop asks for.
+  const trailingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshRuntimeStatusesRef = useRef<() => Promise<void>>(async () => {});
   const [runtimeStatusesResolved, setRuntimeStatusesResolved] = useState(false);
   // `runtimeStatuses` also reads [] after a failure, a skip or a switch, so
   // a reader that must tell "nothing runs" from "not known" uses this.
@@ -60,19 +64,28 @@ export function useRuntimeStatusRefresh({
   const answerProjectIdRef = useRef(answerProjectId);
   const [runtimeStatusAnswer, setRuntimeStatusAnswer] = useState<RuntimeStatusAnswer | null>(null);
 
+  const cancelTrailingRefresh = useCallback(() => {
+    if (trailingRefreshRef.current !== null) {
+      clearTimeout(trailingRefreshRef.current);
+      trailingRefreshRef.current = null;
+    }
+  }, []);
+
   useLayoutEffect(() => {
     if (answerProjectIdRef.current === answerProjectId) {
       return;
     }
     answerProjectIdRef.current = answerProjectId;
+    cancelTrailingRefresh();
     setRuntimeStatusAnswer(null);
-  }, [answerProjectId]);
+  }, [answerProjectId, cancelTrailingRefresh]);
 
   useEffect(
     () => () => {
       runtimeStatusAbortRef.current?.abort();
+      cancelTrailingRefresh();
     },
-    [],
+    [cancelTrailingRefresh],
   );
 
   const markControllerUnavailable = useCallback(() => {
@@ -170,6 +183,12 @@ export function useRuntimeStatusRefresh({
         Date.now() - lastFailure.at < 5000
       ) {
         debugLog("runtime-status:skip-backoff", { projectId: effectiveProjectId });
+        if (trailingRefreshRef.current === null) {
+          trailingRefreshRef.current = setTimeout(() => {
+            trailingRefreshRef.current = null;
+            void refreshRuntimeStatusesRef.current();
+          }, Math.max(0, lastFailure.at + 5000 - Date.now()));
+        }
         setRuntimeStatusesResolved(true);
         runtimeStatusAbortRef.current = null;
         return;
@@ -306,6 +325,10 @@ export function useRuntimeStatusRefresh({
     resolveProjectId,
     updateRuntime,
   ]);
+
+  useLayoutEffect(() => {
+    refreshRuntimeStatusesRef.current = refreshRuntimeStatuses;
+  }, [refreshRuntimeStatuses]);
 
   return {
     runtimeStatusesResolved,
