@@ -61,7 +61,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -127,6 +127,15 @@ const STALL_SECONDS: u32 = 8;
 /// Each puts back every path it names (a shard names them all), so a save
 /// on `main` needs one.
 const MAX_PATH_REFUSALS: usize = 8;
+
+/// How much older than a save's start a file's timestamps must be for the
+/// save to take the content it read as the file's. On a filesystem whose
+/// clock ticks coarsely (Linux before multigrain timestamps: a few
+/// milliseconds; some filesystems: a second), a rewrite of the same size
+/// right after the save read a file can leave the timestamps the save saw
+/// (git's "racily clean" case): such a save confirms its state as one the
+/// next check saves again.
+const RACY_MARGIN: Duration = Duration::from_secs(1);
 
 /// Paths named in one slot commit's message.
 const MAX_TRAILER_PATHS: usize = 200;
@@ -262,7 +271,9 @@ struct Saved {
     /// Nothing was deferred: canonical holds every file of that state.
     complete: bool,
     /// The save left new content for the next one (see
-    /// [`TICK_MAX_NEW_BYTES`]): it runs even if nothing changes meanwhile.
+    /// [`TICK_MAX_NEW_BYTES`]), or read a file changed too recently to
+    /// trust its timestamps (see [`RACY_MARGIN`]): it runs even if nothing
+    /// changes meanwhile.
     more: bool,
 }
 
@@ -588,13 +599,19 @@ fn local_only(git: &WorkspaceGit<'_>, held_back: &BTreeSet<String>) -> Result<us
 /// `main`, onto the folder's own commits) plus `(path, mtime, size, mode,
 /// inode, ctime)` of every path the publish filter lets through, and how
 /// many there are. A save passes the HEAD its snapshot is built on, so a
-/// commit that lands meanwhile is a change. Never takes `index.lock`.
+/// commit that lands meanwhile is a change. A save also passes its start:
+/// the third answer says whether a path's timestamps are too recent to
+/// trust (see [`RACY_MARGIN`]). Never takes `index.lock`.
 fn fingerprint(
     publisher: &Publisher<'_>,
     head: Option<&str>,
     main: Option<&str>,
     status: &[(String, bool)],
-) -> Result<(Fingerprint, usize)> {
+    started: Option<SystemTime>,
+) -> Result<(Fingerprint, usize, bool)> {
+    let racy_from = started
+        .and_then(|started| started.checked_sub(RACY_MARGIN))
+        .map(since_epoch);
     let root = publisher.git.root();
     let mut hasher = Sha256::new();
     hasher.update(b"instafy-working-state-v1\0");
@@ -603,6 +620,7 @@ fn fingerprint(
     hasher.update(main.unwrap_or_default().as_bytes());
     hasher.update(b"\0");
     let mut listed = 0usize;
+    let mut racy = false;
     for (path, deleted) in status {
         if publisher.pre_check(path, *deleted).is_some() {
             continue;
@@ -612,33 +630,61 @@ fn fingerprint(
         hasher.update(b"\0");
         match std::fs::symlink_metadata(root.join(path)) {
             Ok(metadata) => {
-                let modified = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                    .map(|elapsed| elapsed.as_nanos())
-                    .unwrap_or_default();
+                let (modified, changed) = stamps(&metadata);
                 hasher.update(modified.to_le_bytes());
                 hasher.update(metadata.len().to_le_bytes());
+                hasher.update(changed.to_le_bytes());
                 hash_identity(&mut hasher, &metadata);
+                racy |= racy_from.is_some_and(|from| modified.max(changed) >= from);
             }
             Err(_) => hasher.update(b"absent"),
         }
         hasher.update(b"\0");
     }
-    Ok((hasher.finalize().into(), listed))
+    Ok((hasher.finalize().into(), listed, racy))
 }
 
-/// The mode and, on unix, the inode and the change time. `tar -x`,
-/// `cp -p` and `rsync -a` put the mtime back after a rewrite; nothing in
-/// userland sets the ctime, so a rewrite of the same size still shows.
+fn since_epoch(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default()
+}
+
+/// A path's modification and change times, in nanoseconds since the epoch.
+/// `tar -x`, `cp -p` and `rsync -a` put the mtime back after a rewrite;
+/// nothing in userland sets the change time, so a rewrite of the same size
+/// still shows (where there is no change time, the mtime stands in).
+fn stamps(metadata: &std::fs::Metadata) -> (u128, u128) {
+    let modified = metadata.modified().map(since_epoch).unwrap_or_default();
+    #[cfg(unix)]
+    let changed = {
+        use std::os::unix::fs::MetadataExt as _;
+        u128::try_from(metadata.ctime()).unwrap_or_default() * 1_000_000_000
+            + u128::try_from(metadata.ctime_nsec()).unwrap_or_default()
+    };
+    #[cfg(not(unix))]
+    let changed = modified;
+    #[cfg(test)]
+    if COARSE_TIMESTAMPS.get() {
+        let second = |nanos: u128| nanos - nanos % 1_000_000_000;
+        return (second(modified), second(changed));
+    }
+    (modified, changed)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whole-second timestamps, as a filesystem whose clock ticks coarsely
+    /// keeps them (tests only).
+    pub(crate) static COARSE_TIMESTAMPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The mode and, on unix, the inode.
 #[cfg(unix)]
 fn hash_identity(hasher: &mut Sha256, metadata: &std::fs::Metadata) {
     use std::os::unix::fs::MetadataExt as _;
     hasher.update(metadata.mode().to_le_bytes());
     hasher.update(metadata.ino().to_le_bytes());
-    hasher.update(metadata.ctime().to_le_bytes());
-    hasher.update(metadata.ctime_nsec().to_le_bytes());
 }
 
 #[cfg(not(unix))]
@@ -655,8 +701,8 @@ pub fn local_state(ctx: &PublishContext<'_>, memory: &WorkingMemory) -> Result<W
     let status = publisher.status_without_locks()?;
     let head = publisher.git.commit_id("HEAD")?;
     let main = publisher.tracked_main()?;
-    let (fingerprint, unsaved) =
-        self::fingerprint(&publisher, head.as_deref(), main.as_deref(), &status)?;
+    let (fingerprint, unsaved, _) =
+        self::fingerprint(&publisher, head.as_deref(), main.as_deref(), &status, None)?;
     let local_only = recovery::pending(&publisher.git)?.len();
     let mut state = memory.state(fingerprint, unsaved, local_only);
     if unsettled(&publisher.git)? {
@@ -696,8 +742,10 @@ pub(crate) struct Plan {
     /// Paths the tree took from the slot (or the parent) instead of the
     /// folder.
     deferred: Vec<String>,
-    /// Some of them were left for the next tick only because this one had
-    /// sent [`TICK_MAX_NEW_BYTES`] already.
+    /// The next check saves again even if nothing changes: some of them
+    /// were left for the next tick only because this one had sent
+    /// [`TICK_MAX_NEW_BYTES`] already, or a file changed too recently to
+    /// trust its timestamps (see [`RACY_MARGIN`]).
     more: bool,
     record: Option<Record>,
     /// A push or delete of the slot is waiting for canonical's answer.
@@ -833,7 +881,14 @@ impl Publisher<'_> {
         } else {
             self.status()?
         };
-        let (fingerprint, _) = fingerprint(self, head.as_deref(), main.as_deref(), &status)?;
+        let started = SystemTime::now();
+        let (fingerprint, _, racy) = fingerprint(
+            self,
+            head.as_deref(),
+            main.as_deref(),
+            &status,
+            Some(started),
+        )?;
         stopping(stop)?;
         let (dirty_tree, deferred) = self.stage_paths(
             &Selection::AllDirty,
@@ -853,10 +908,12 @@ impl Publisher<'_> {
         };
         let record = read_record(&self.git, || self.working_set())?;
         let mut deferred = deferred;
-        let mut more = false;
+        // A file changed too recently may have changed again after this
+        // save read it, unseen by its timestamps: the next check saves again.
+        let mut more = racy;
         if reason == PersistReason::Tick {
             let over = self.over_budget(&tree, &parent_tree, record.as_ref(), &deferred)?;
-            more = !over.is_empty();
+            more |= !over.is_empty();
             deferred.extend(over);
         }
         tree = kept_by_save(

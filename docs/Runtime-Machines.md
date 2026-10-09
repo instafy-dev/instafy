@@ -599,7 +599,11 @@ node's checkout a cache.
   its last confirmed save (HEAD, the tracked `main`, `git status` without
   taking `index.lock`, then each candidate's size, mode, mtime, inode and
   ctime: a rewrite of the same size whose mtime `tar -x` or `cp -p` put back
-  still moves the ctime). A
+  still moves the ctime). A save never takes a file whose mtime or ctime is
+  less than a second older than the save's start as read: where the clock
+  behind file timestamps ticks coarsely, a rewrite of the same size right
+  after the save read it would keep those timestamps, so the next check
+  saves again (with nothing new, that save needs no network). A
   publish that moved only `main` onto the folder's own commits counts as a
   change, so the next save drops the slot's copy of that work. Unchanged, it
   ends with no

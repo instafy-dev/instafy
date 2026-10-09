@@ -237,6 +237,13 @@ impl Fixture {
     }
 }
 
+/// Let the files written so far grow older than [`RACY_MARGIN`], so the
+/// next save takes the content it reads as theirs and confirms the state
+/// as unchanged.
+fn age_files() {
+    std::thread::sleep(RACY_MARGIN + Duration::from_millis(50));
+}
+
 struct PushHookGuard;
 
 impl Drop for PushHookGuard {
@@ -342,6 +349,7 @@ fn the_first_save_creates_the_slot_on_main_and_a_second_replaces_it() {
 fn an_unchanged_folder_pushes_nothing_and_needs_no_write_access() {
     let fx = Fixture::new();
     fx.write("notes.md", b"new\n");
+    age_files();
     fx.save(PersistReason::Tick);
     let (_, before) = fx.slot().unwrap();
     let state = fx.state();
@@ -426,6 +434,7 @@ fn a_same_size_rewrite_that_puts_the_mtime_back_is_a_change() {
             .unwrap();
     };
     extract(r#"{"name":"pkg","version":"1.2.3"}"#);
+    age_files();
     let state = fx.save(PersistReason::TurnEnd);
     assert!(state.durable && state.error.is_none(), "{state:?}");
     assert!(!fx.state().changed);
@@ -439,6 +448,51 @@ fn a_same_size_rewrite_that_puts_the_mtime_back_is_a_change() {
         fx.slot_file(PATH).as_deref(),
         Some(r#"{"name":"pkg","version":"1.2.4"}"#)
     );
+}
+
+/// On a filesystem whose clock ticks coarsely, a rewrite of the same size
+/// right after a save read a file can leave the timestamps the save saw.
+/// A save therefore never takes a file changed that recently as read: the
+/// next check saves again, and the rewrite reaches the slot.
+#[test]
+fn a_same_size_rewrite_in_the_same_timestamp_tick_is_saved() {
+    struct Coarse;
+    impl Drop for Coarse {
+        fn drop(&mut self) {
+            COARSE_TIMESTAMPS.set(false);
+        }
+    }
+    COARSE_TIMESTAMPS.set(true);
+    let _coarse = Coarse;
+    let changed_at = |fx: &Fixture| {
+        let metadata = fs::symlink_metadata(fx.ws.join("notes.md")).unwrap();
+        stamps(&metadata)
+    };
+    // The write, the save and the rewrite must fall in one whole second.
+    for _ in 0..30 {
+        let fx = Fixture::new();
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        std::thread::sleep(Duration::from_nanos(
+            1_000_000_000 - u64::from(elapsed.subsec_nanos()),
+        ));
+        fx.write("notes.md", b"version 1\n");
+        let before = changed_at(&fx);
+        let state = fx.save(PersistReason::TurnEnd);
+        assert!(state.durable && state.error.is_none(), "{state:?}");
+        fx.write("notes.md", b"version 2\n");
+        if changed_at(&fx) != before {
+            continue;
+        }
+        let state = fx.state();
+        assert!(state.changed && !state.durable, "{state:?}");
+        let state = fx.save(PersistReason::Tick);
+        assert_eq!(state.error, None, "{state:?}");
+        assert_eq!(fx.slot_file("notes.md").as_deref(), Some("version 2\n"));
+        return;
+    }
+    panic!("no write, save and rewrite fell in one second");
 }
 
 #[test]
@@ -632,6 +686,7 @@ fn a_tick_never_renames_a_nested_repository_and_keeps_its_earlier_entry() {
 
     write(&nested, "a.txt", b"second\n");
     fx.write("doc.md", b"alpha\nbeta\nticked\n");
+    age_files();
     let state = fx.save(PersistReason::Tick);
     assert_eq!(state.error, None, "{state:?}");
     assert!(
