@@ -13,7 +13,7 @@ use tokio_util::io::ReaderStream;
 use tracing::warn;
 
 use crate::error::ServiceError;
-use crate::policy::PUSH_REPORT_ENV;
+use crate::policy::{PERSIST_PUSH_ENV, PUSH_REPORT_ENV};
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 
@@ -28,6 +28,10 @@ pub struct GitHttpBackendOptions<'a> {
     /// File the shared `post-receive` hook appends this push's ref updates
     /// to. `None` for requests whose updates nobody reads.
     pub push_report: Option<&'a str>,
+    /// Git Edge authorized this push only through a rolling save's
+    /// credential: the hook lets it change recovery refs alone (see
+    /// [`PERSIST_PUSH_ENV`]).
+    pub persist_push: bool,
 }
 
 pub struct GitHttpBackendResponse {
@@ -58,13 +62,14 @@ fn backend_config(options: &GitHttpBackendOptions<'_>) -> Vec<(&'static str, Str
 }
 
 /// Inherited environment that must never reach `git http-backend` or a hook.
-const REMOVED_BACKEND_ENV: [&str; 2] = [
+const REMOVED_BACKEND_ENV: [&str; 3] = [
     // `-c` style parameters are read after GIT_CONFIG_COUNT and would win, so
     // an inherited value could replace the shared hooks directory.
     "GIT_CONFIG_PARAMETERS",
     // Hook environment comes only from the shard, per request. Request
     // headers are never turned into environment variables.
     PUSH_REPORT_ENV,
+    PERSIST_PUSH_ENV,
 ];
 
 /// `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>` for
@@ -131,6 +136,9 @@ pub async fn run_git_http_backend(
     command.envs(backend_config_env(options));
     if let Some(push_report) = options.push_report {
         command.env(PUSH_REPORT_ENV, push_report);
+    }
+    if options.persist_push {
+        command.env(PERSIST_PUSH_ENV, "1");
     }
     let mut child = command
         .env("PATH_INFO", path)
@@ -318,6 +326,7 @@ mod tests {
             hooks_dir: "/var/lib/instafy-git/repos/.instafy-hooks",
             max_push_bytes: 4096,
             push_report: None,
+            persist_push: false,
         };
         assert_eq!(
             backend_config(&options),
@@ -365,6 +374,7 @@ mod tests {
             hooks_dir: hooks_str,
             max_push_bytes: 4096,
             push_report: None,
+            persist_push: false,
         };
         verify_backend_config(&options).expect("git applies GIT_CONFIG_COUNT");
         let _ = std::fs::remove_dir_all(&root);

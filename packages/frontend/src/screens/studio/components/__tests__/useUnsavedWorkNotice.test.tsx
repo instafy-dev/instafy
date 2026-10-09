@@ -20,7 +20,7 @@ vi.mock("../../../../workspace/useActiveWorkspaceVersioning", () => ({
 }));
 
 import { markUnsavedWorkSeen, resetUnsavedWorkSeenForTests } from "../../../../workspace/unsavedWorkSeen";
-import { resetUnsavedWorkStoreForTests } from "../../../../workspace/unsavedWorkStore";
+import { resetUnsavedWorkStoreForTests, setUnsavedWorkLiveOrigins } from "../../../../workspace/unsavedWorkStore";
 import { useUnsavedWorkNotice, type UnsavedWorkNotice } from "../useUnsavedWorkNotice";
 
 type Message = { metadata?: Record<string, unknown> | null };
@@ -165,6 +165,25 @@ describe("useUnsavedWorkNotice", () => {
       ]);
     });
     expect(notice).toBeNull();
+  });
+
+  it("never raises the row for a running workspace's rolling save", async () => {
+    const running = "11111111-1111-4111-8111-111111111111";
+    const stopped = "22222222-2222-4222-8222-222222222222";
+    mocks.fetchRecovery.mockResolvedValue(
+      ok([
+        recovery("refs/instafy/recovery/o/a", { origin: running }),
+        recovery("refs/instafy/recovery/w1/working", { kind: "unsaved", origin: running, rollingSave: true }),
+        recovery("refs/instafy/recovery/w2/working", { kind: "unsaved", origin: stopped, rollingSave: true }),
+      ]),
+    );
+    setUnsavedWorkLiveOrigins("project-1", [running]);
+    await render();
+    expect(notice?.count).toBe(2);
+    await act(async () => notice?.onDismiss());
+    const seen = window.localStorage.getItem("instafy.unsavedWork.seen.project-1.user-1") ?? "";
+    expect(seen).toContain("refs/instafy/recovery/w2/working@");
+    expect(seen).not.toContain("refs/instafy/recovery/w1/working@");
   });
 
   it("lists again when a finished turn reports a new recovery ref", async () => {

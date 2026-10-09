@@ -281,6 +281,14 @@ impl Stored {
 
 /// The stored copy whose name ends with `suffix`, in any state, except the
 /// pending ref `skip`.
+///
+/// The rejected backups ([`LOCAL_RECOVERY_REJECTED_ROOT`]) are left out on
+/// purpose. A copy lands there when canonical refused a path it holds (or
+/// it built on dismissed work), and a refused path then exists only in the
+/// folder and in local refs that neither the durable-stop marker nor
+/// eviction count. Storing the same work again as a new pending copy is
+/// what keeps the marker off and the checkout from being evicted (see
+/// `a_path_the_shard_refuses_keeps_the_checkout`).
 fn stored_with_suffix(
     git: &WorkspaceGit<'_>,
     suffix: &str,
@@ -529,15 +537,52 @@ fn one_line(value: &str) -> String {
 }
 
 /// Every local recovery ref not yet confirmed on canonical, as `(name, rev)`.
+///
+/// Only names this module gives a recovery commit count (see
+/// [`is_recovery_name`]). A local ref under any other name, such as one a
+/// turn planted, is not the folder's work: it is never pushed, so no push
+/// from here can name a working slot
+/// ([`git_service::policy::WORKING_SLOT_NAME`]). Only
+/// [`crate::working_state`] writes a slot, at the name the folder's own seed
+/// gives it.
 pub(crate) fn pending(git: &WorkspaceGit<'_>) -> Result<Vec<(String, String)>> {
     Ok(git
         .refs_under(LOCAL_RECOVERY_ROOT)?
         .into_iter()
         .filter_map(|(reference, rev)| {
             let name = reference.strip_prefix(&format!("{LOCAL_RECOVERY_ROOT}/"))?;
-            Some((name.to_string(), rev))
+            is_recovery_name(name).then(|| (name.to_string(), rev))
         })
         .collect())
+}
+
+/// Whether `name` has the shape [`store`] gives a recovery commit:
+/// `<YYYYMMDD>T<HHMMSS>Z-<kind>-<12 hex digits>`.
+pub(crate) fn is_recovery_name(name: &str) -> bool {
+    let mut parts = name.splitn(3, '-');
+    let (Some(stamp), Some(kind), Some(hash)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let stamp = stamp.as_bytes();
+    stamp.len() == 16
+        && stamp[8] == b'T'
+        && stamp[15] == b'Z'
+        && stamp[..8]
+            .iter()
+            .chain(&stamp[9..15])
+            .all(u8::is_ascii_digit)
+        && [
+            RecoveryKind::Conflict,
+            RecoveryKind::Unpublished,
+            RecoveryKind::Unsaved,
+            RecoveryKind::Stale,
+        ]
+        .iter()
+        .any(|known| known.as_str() == kind)
+        && hash.len() == 12
+        && hash
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Result of pushing the pending refs.
@@ -563,6 +608,9 @@ pub(crate) struct PushPending {
 /// refused file never keeps the rest of the work local forever. A ref that
 /// cannot be pushed is reported in `failed` and the others are still pushed.
 /// Pushing stops at `deadline`; whatever is left waits for the next call.
+/// Refs named in `held_back` are left alone: a stop holds back the `unsaved`
+/// copy it just made until it knows whether the working folder's own save
+/// holds the same work (see [`crate::working_state`]).
 pub(crate) fn push_pending(
     git: &WorkspaceGit<'_>,
     remote: &str,
@@ -570,9 +618,13 @@ pub(crate) fn push_pending(
     main: Option<&str>,
     published: &[String],
     deadline: Option<Instant>,
+    held_back: &BTreeSet<String>,
 ) -> Result<PushPending> {
     let mut report = PushPending::default();
     for (name, rev) in pending(git)? {
+        if held_back.contains(&name) {
+            continue;
+        }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             report
                 .failed
@@ -620,8 +672,11 @@ fn push_one(
                 .iter()
                 .any(|pushed| pushed.to == destination && pushed.ok());
         match result.class {
-            PushClass::PathRejected { path, .. } if !reported_ok => {
-                match without_path(git, &name, &rev, &path, main)? {
+            PushClass::PathRejected { path, others, .. } if !reported_ok => {
+                // Every path the refusal named is left out at once.
+                let mut refused = others;
+                refused.insert(0, path.clone());
+                match without_paths(git, &name, &rev, &refused, main)? {
                     Rebuilt::Replaced(next_name, next_rev) => {
                         name = next_name;
                         rev = next_rev;
@@ -839,38 +894,39 @@ pub(crate) fn retire_pending(git: &WorkspaceGit<'_>, name: &str, rev: &str) -> R
     )
 }
 
-/// Replace a pending recovery commit by one without `path`, which the
-/// repository policy refused. The hook compares a new recovery ref with
-/// `main`, so a path the commit itself did not change can be refused too
-/// (main changed it since the commit's parent): then the copy takes `main`'s
-/// entry and agrees with `main` there. When neither changes anything the
-/// commit can never pass the policy as it is, and it moves to the rejected
-/// backups ([`Rebuilt::Dropped`]).
-fn without_path(
+/// Replace a pending recovery commit by one without `paths`, which the
+/// repository policy refused (the first is the one an older shard named
+/// alone). The hook compares a new recovery ref with `main`, so a path the
+/// commit itself did not change can be refused too (main changed it since
+/// the commit's parent): then the copy takes `main`'s entries and agrees
+/// with `main` there. When neither changes anything the commit can never
+/// pass the policy as it is, and it moves to the rejected backups
+/// ([`Rebuilt::Dropped`]).
+fn without_paths(
     git: &WorkspaceGit<'_>,
     name: &str,
     rev: &str,
-    path: &str,
+    paths: &[String],
     main: Option<&str>,
 ) -> Result<Rebuilt> {
     let commit = read_recovery_commit(git, rev)?;
-    let paths = [path.to_string()];
     let mut new_tree = crate::tree_merge::tree_with_entries_from(
         git,
         &commit.tree,
         commit.parent.as_deref(),
-        &paths,
+        paths,
     )?;
     if new_tree == commit.tree {
         if let Some(main) = main {
             new_tree =
-                crate::tree_merge::tree_with_entries_from(git, &commit.tree, Some(main), &paths)?;
+                crate::tree_merge::tree_with_entries_from(git, &commit.tree, Some(main), paths)?;
         }
     }
     if new_tree == commit.tree {
         retire_pending(git, name, rev)?;
         return Ok(Rebuilt::Dropped(format!(
-            "the repository policy refused {path}, which {name} cannot leave out"
+            "the repository policy refused {}, which {name} cannot leave out",
+            paths.first().map(String::as_str).unwrap_or_default()
         )));
     }
     replace_refused(
@@ -880,7 +936,7 @@ fn without_path(
         &commit,
         &new_tree,
         commit.parent.as_deref(),
-        &paths,
+        paths,
     )
 }
 
@@ -1226,6 +1282,19 @@ mod tests {
         ] {
             let name = format!("20261002T120000Z-{}-0123456789ab", kind.as_str());
             assert_eq!(kind_of_name(&name), Some(kind));
+            assert!(is_recovery_name(&name), "{name}");
+        }
+        for other in [
+            git_service::policy::WORKING_SLOT_NAME,
+            "20261002T120000Z-working-0123456789ab",
+            "20261002T120000Z-unsaved-0123456789AB",
+            "20261002T120000Z-unsaved-0123456789a",
+            "20261002T120000Z-unsaved-0123456789ab-x",
+            "x-unsaved-0123456789ab",
+            "20261002X120000Z-unsaved-0123456789ab",
+            "20261002T120000Z-unsaved-0123456789ab/working",
+        ] {
+            assert!(!is_recovery_name(other), "{other}");
         }
     }
 

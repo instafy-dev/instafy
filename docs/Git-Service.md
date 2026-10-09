@@ -67,8 +67,8 @@ configuration; it refuses to start otherwise, because git would silently accept 
 unchecked (for example on a `noexec` repo root, or with git older than 2.31). The built-in deny list
 is `REPO_POLICY_DENY_PATTERNS` in `packages/git-service/src/policy.rs`. The hook is rendered from
 it, and other packages can import the same list instead of copying it. The hook also refuses
-deleting a denied path, so the list holds build output and caches, not file patterns such as
-secrets.
+deleting a denied path (except from a working slot, below), so the list holds build output and
+caches, not file patterns such as secrets.
 
 The hook checks every pushed ref:
 
@@ -79,19 +79,47 @@ The hook checks every pushed ref:
 - **Salvage refs** (`refs/instafy/salvage` and everything under it, in any letter case) are
   reserved: no push may create, move or delete one. This check and the ASCII rule run before
   `GIT_POLICY_DISABLED`.
+- **A rolling save's push.** The controller mints a running write job's rolling save a token
+  with `git.persist` instead of `git.write`. Git Edge accepts it for the requests of a push and
+  marks the push for the shard with `x-instafy-git-push-scope` (a client's own copy of that
+  header never passes the edge). The hook then lets that push create recovery refs and replace
+  or delete a working slot, and refuses every other ref update (`a rolling save may not change
+  '<ref>'`): no branch, `main`, tag or other ref, and no delete of any other recovery ref, whatever
+  old value the request names. This check also runs before `GIT_POLICY_DISABLED`.
+- **Recovery refs** are named after the work they hold, so a push may create or delete one but
+  never move it (`is a recovery ref; it may be created or deleted, not moved`). The one exception
+  is a working folder's rolling save, `refs/instafy/recovery/<working-set id>/working`, which
+  every save replaces under a lease on the tip it last confirmed. This check also runs before
+  `GIT_POLICY_DISABLED`.
 - **`main`** is fast-forward only and cannot be deleted. A name that differs from it only in letter
   case is refused.
+- **Replace refs** (`refs/replace/*`, in any letter case) may be deleted but not created or moved:
+  git would read the replacement wherever the replaced commit is named. The hook's own git
+  commands run with `GIT_NO_REPLACE_OBJECTS=1`, so one the repository already holds cannot make a
+  rewrite of `main` look like a fast-forward or hide a path from the checks below.
 - **`refs/instafy/`** holds only recovery refs, `refs/instafy/recovery/<origin id>/<name>` with a
   lower-case UUID and a name of `[0-9A-Za-z._-]`. A push may create or move nothing else there, so
   a stray ref such as `refs/instafy/recovery` cannot block them.
 - **Other refs**, recovery refs included, may be deleted by any client allowed to push
-  (`git.write`).
+  (`git.write`). Deleting a working slot, `refs/instafy/recovery/<working-set id>/working`,
+  directly with git (for example a mirror or prune push of `refs/instafy/*`) counts as a dismissal
+  for the folder that is still running: like a person's Remove, its paths are not saved again
+  until they change.
 - **Every ref points to a commit**, directly or through an annotated tag.
 - **Paths and sizes** are checked on the net change between the new tip and what the repository
   already accepted: the ref's old value, else the current `main`, else the empty tree. That covers
   everything a merge or several new commits bring in, but earlier commits are not walked one by
   one: a path or blob that one new commit adds and a later one removes is not checked. Paths are
-  read in raw form, so unusual file names are checked exactly as stored.
+  read in raw form, so unusual file names are checked exactly as stored. A working slot is checked
+  against the slot commit's own parent instead, when that parent is on `main`: what the slot shares
+  with it is already canonical history. So a path denied since the slot's old tip was accepted
+  (for example by a new `GIT_DENY_PATHS`) is refused when the slot keeps its own version, even if
+  this save did not change it, and accepted when the slot goes back to the parent's version, which
+  is what a save refused for that path does. A slot whose parent is not on `main` is checked
+  against both. A working slot may also delete a denied path: a slot is never published. A
+  refused push names every path it refuses, one line each (`blocked path '<path>'`, `file too
+  large '<path>'`, `blocked non-blob object for '<path>'`), so a client can leave them all out at
+  once; a client that reads only the first line still sees the one an older hook printed.
 
 Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)
@@ -99,16 +127,20 @@ Knobs:
 - `GIT_MAX_PUSH_BYTES` (default `1073741824` = 1 GiB; blank means the default): largest pack one
   push may send. A non-blank value other than a positive whole number of bytes stops the shard
   from starting.
-- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
+- `GIT_POLICY_DISABLED=1`: disable the hook's checks except the salvage ref rule, the rolling save rule, the recovery-ref rule (create or delete, never move, except a working slot) and the ASCII ref-name rule (local-only debugging; unsafe). Object checks and the push size bound stay on.
 
 Upgrades: deploy shards before Git Edge and the controller. Once a shard runs this policy, do not
 roll it back to an older shard image: older shards rewrite per-repository hooks on each request
-and run without object checks or salvage ref protection.
+and run without object checks or salvage ref protection. The same order keeps a rolling save's
+token narrow: a controller that mints `git.persist` in front of an older Git Edge gets its pushes
+refused (the older edge knows only `git.write`), and an older shard behind a newer edge would
+ignore the edge's mark and let that token push as `git.write`.
 
 Behaviour that changed with the shared policy: a ref must point to a commit (or an annotated tag
 of one), malformed objects that older git versions wrote are refused by the object checks, a push
-may send at most `GIT_MAX_PUSH_BYTES`, and refs under `refs/instafy/` other than recovery refs
-cannot be created.
+may send at most `GIT_MAX_PUSH_BYTES`, refs under `refs/instafy/` other than recovery refs
+cannot be created, a recovery ref other than a working slot cannot be moved, and a replace ref
+cannot be created or moved.
 
 ### Push event hooks
 `git-shard` can emit best-effort JSON webhooks after successful `git-receive-pack` requests:

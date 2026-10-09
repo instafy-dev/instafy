@@ -981,6 +981,7 @@ mod tests {
             hosted_runtime_credit_burn_amount: 0,
             hosted_runtime_credit_burn_interval_seconds: 600,
             managed_ai_enabled: true,
+            working_state_saves: true,
             managed_ai_label: "Instafy AI".to_string(),
             managed_ai_credit_burn_amount: 1,
             managed_ai_daily_prompt_limit: 20,

@@ -442,6 +442,10 @@ async fn main() -> anyhow::Result<()> {
                 // Release tooling tells a controller that serves the node drain
                 // routes apart from one that predates them by this header.
                 headers.insert("x-instafy-runtime-drain", HeaderValue::from_static("1"));
+                // And one whose running workspaces save their unfinished work
+                // to canonical (rolling saves) apart from one that does not.
+                let (name, value) = origins::workspace_persist::working_state_header(&state.config);
+                headers.insert(name, value);
                 if let Ok(value) =
                     HeaderValue::from_str(&state.config.database_pool_size.to_string())
                 {

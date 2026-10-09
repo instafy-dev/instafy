@@ -301,6 +301,7 @@ already accepted. The bounds are code constants in `runtime/provider.rs` and
 | `POST /runtime/release` | stop, remove, the idle, credit, heartbeat and launch-timeout sweeps, idle-slot reclaim, the dev-only offline endpoint | 180 s | The stop fails with 502 (a sweep logs it and moves on) and the generation stays quarantined (see below). The dev-only offline endpoint only logs it. |
 | `POST /runtime/inspect` | OOM post-mortem in the heartbeat-timeout sweep | 15 s | The attribution is unknown and the stop proceeds as `heartbeat_timeout`. |
 | `POST /runtime/census` | the pool-retirement drain (census, drain stop, flush-checkout) | 30 s | The census marks the provider as not answering (`complete: false`); a drain must then hold the node. |
+| `POST /runtime/origin` | a stop's pre-stop flush, to find the runtime's origin on its node | 10 s | The flush mints nothing and reports `no_writer` (`origin_not_attested`); the stop goes on. |
 
 An idle-slot reclaim (stopping an organization's idle machine so a waiting
 space can launch) runs while that launch holds the controller's single
@@ -479,12 +480,19 @@ loses only work that never reached the remote:
     with write access; the git token never outlives it. Commits stay
     authored by the origin. Each exchange is logged with the project, runtime
     and origin, never a token.
-  Either credential goes only to the runtime's own origin at an endpoint on
-  its node or private network (`localhost`, `host.docker.internal`, a
-  loopback or private address, as the node-local provider assigns them). The
-  runtime registers that endpoint itself, with its machine token, so any
-  other endpoint (a public host or a tunnel) gets nothing: the stop reports
-  `no_writer` with the reason `origin_endpoint_not_node_local`.
+  Either credential goes only to the runtime's own origin, at the address
+  the runtime's provider gives for that exact lease generation on its node
+  (`POST /runtime/origin`; the Docker provider answers the origin's
+  published port on the node's host gateway, `http://host.docker.internal:<port>`,
+  and only when the controller its runtimes call is on the same node:
+  `CONTROLLER_BASE_URL` (or `PROXY_CONTROLLER_BASE_URL` when that is unset)
+  unset, or naming `host.docker.internal`, `localhost` or a loopback address), and only when that address is on the node or its
+  private network. The endpoint the runtime registered itself, with its
+  machine token, is never used: a hosted runtime's is a public tunnel host,
+  and any runtime could name any address. When the provider places no origin of that generation
+  on the node, the stop mints nothing and reports `no_writer` with the
+  reason `origin_not_attested`; so does every stop through a Docker provider
+  whose runtimes call a controller on another machine.
   Otherwise (no owner, or a requested stop with no lease holder) the
   controller mints nothing and does not call the origin (`no_writer`), and
   the runtime's own shutdown flush keeps the work locally. The origin's
@@ -498,6 +506,20 @@ loses only work that never reached the remote:
   `origin_unreachable`, `origin_timeout` or `origin_refused:<status>`, never
   the origin's own text). A failure is logged and the stop goes on; whatever
   was stored stays on the local refs.
+- With rolling saves on (`WORKING_STATE_SAVES`, below), the flush body also
+  carries `workingState: true`: the stop ends with the working folder's own
+  save. The origin then stores no `unsaved` copy of work that save already
+  holds, holds back the copy it does store from every push until that save
+  settles (removed when canonical then holds every change the copy carries,
+  pushed as before otherwise; the copy of a turn on a history unrelated to
+  `main` is never held back), raises a stop flag so a rolling save in flight
+  gives up (down again when the request ends, also when the controller gives
+  up on it), waits for the workspace instead of refusing, and keeps the
+  whole stop under 22 seconds. The answer and the stop's `flush` add
+  `workingState: {durable, persistedAt, error?}`, and the `workspace_flush`
+  event adds top-level `durable`, `persistedAt` and, when the save did not
+  land, `workingStateError`: whether canonical holds everything the folder
+  held, and since when.
 - An idle stop (the idle sweep, the idle reaper, an idle-slot reclaim) can
   wait up to 25 seconds on its flush. When someone comes back meanwhile (a
   new workspace lease this runtime serves, or a user's activity ping), the
@@ -517,13 +539,133 @@ loses only work that never reached the remote:
   job started since (a fenced runtime may be shut down long after its stop),
   its commits are set aside instead of left for the next publish; each job
   counts on its own, as the controller's `turnActive` does, so one worker
-  finishing never hides another's cancel. After it succeeds it writes
-  `.instafy/.git/instafy-stopped-clean`, which every origin start removes. The
-  next publish or pre-turn refresh with `git.write` pushes the refs. Work
-  parked only locally is lost if the node is replaced before that push.
-  Desktop folders are never flushed.
-- Residual exposure: a hard node loss mid-run (the in-flight run's work), work
-  parked locally whose push has not happened yet, and gitignored files.
+  finishing never hides another's cancel. It raises the stop flag and waits
+  up to ten seconds for a rolling save to let the workspace go, so an
+  unfinished turn always steps back, and stores no `unsaved` copy of work
+  the folder's last confirmed save holds. It writes the durable-stop marker
+  `.instafy/.git/instafy-stopped-clean` (`durable v1`) only when the folder's
+  final state is durable: nothing only this node holds, and canonical holds
+  everything the folder held. Its local step has just stored a copy of
+  everything canonical does not hold (no `unsaved` copy of work the last
+  confirmed save holds, none of work already pushed or dismissed), so that
+  is the case exactly when no local recovery ref is left, whether or not
+  its process ever saved: a clean folder whose HEAD `main` holds, or a
+  dirty one whose `unsaved` copy a controller stop's flush pushed (as with
+  rolling saves off, or when the stop's own save failed). Every origin
+  start removes it, and so does
+  every shutdown before its flush and anything that takes the workspace
+  lock (a save, a publish, a refresh), so a marker another runtime on the
+  same folder (or the workspace itself) left never outlives a shutdown that
+  was not durable or could not run. A sibling runtime that keeps working
+  after another's durable stop clears that marker with its next save, so
+  while its rolling saves run its edits sit under that marker until its
+  next tick that gets a grant (about one save interval while grants
+  succeed). With rolling saves off,
+  or once its ticks have ended (a refused grant, an expired workspace
+  token), a sibling that is then killed without a shutdown can leave its
+  edits since its last save under the other runtime's marker until the
+  checkout is evicted, or until a pool-retirement drain reads the
+  checkout as clean (the marker and no local recovery ref) and the node is
+  deleted. The marker sits in a directory the workspace
+  can write, so it is a hint for eviction, never proof on its own. The next publish
+  or pre-turn refresh with `git.write` pushes the refs. Work parked only
+  locally is lost if the node is replaced before that push. Desktop folders
+  are never flushed.
+- Residual exposure: a hard node loss mid-run loses the folder's edits since
+  its last confirmed rolling save (about two minutes while saves succeed,
+  plus files a rolling save defers), work parked locally whose push has not
+  happened yet, writes by background processes after a turn ended that no
+  controller stop flushed, and gitignored files.
+
+**Rolling saves.** While a write job runs on a hosted checkout, the runtime
+saves the working folder's unfinished work to canonical every two minutes and
+once more when the job ends, without moving the checkout's HEAD, index, files
+or nested repositories. Canonical git is then the only permanent copy and the
+node's checkout a cache.
+
+- Each working folder has one save, its slot:
+  `refs/instafy/recovery/<working-set id>/working`. The working-set id is a
+  one-way hash of a random seed the first save writes to the checkout's
+  repository config (`instafy.workingSet`), so runtimes that share a folder
+  on a node share one slot, a fresh clone (another node) gets a new one, and
+  a turn that copies another folder's visible slot id into its own config
+  only renames its own slot. Each save replaces
+  the slot under a lease on the exact commit it last confirmed (the shard
+  lets only a slot move; every other recovery ref is created or deleted;
+  when a push's answer is lost the slot is looked at again, and a commit
+  this folder wrote becomes the one it last confirmed),
+  and the slot is deleted once nothing is unsaved and nothing waits on a
+  local recovery ref. Its commit sits on `main` (the merge base, or `main`
+  for an unrelated history), names its last writer in `Instafy-Origin`, and
+  passes the same publish filter as every save.
+- A tick first asks the origin in process whether the folder changed since
+  its last confirmed save (HEAD, the tracked `main`, `git status` without
+  taking `index.lock`, then each candidate's size, mode, mtime, inode and
+  ctime: a rewrite of the same size whose mtime `tar -x` or `cp -p` put back
+  still moves the ctime). A save never takes a file whose mtime or ctime is
+  less than a second older than the save's start as read: where the clock
+  behind file timestamps ticks coarsely, a rewrite of the same size right
+  after the save read it would keep those timestamps, so the next check
+  saves again (with nothing new, that save needs no network). A
+  publish that moved only `main` onto the folder's own commits counts as a
+  change, so the next save drops the slot's copy of that work. Unchanged, it
+  ends with no
+  controller call. Otherwise the runtime asks the controller for a one-minute
+  `workspace.persist` grant with the job's workspace token. The controller
+  grants it only for a write job leased by this runtime (or cancelled in the
+  last minute), whose user may still write, for this runtime generation's
+  own online origin, and checks all of it again when the origin exchanges the
+  grant for a git token. That token carries `git.persist` instead of
+  `git.write`: Git Edge lets it push only as a rolling save does (create
+  recovery refs, replace or delete a working slot) and the shard refuses
+  every other ref update, so it never writes a branch or `main`. A rolling
+  save takes no workspace lease.
+- A tick never adds a path inside a nested repository and leaves out files
+  over 2 MiB: both keep the slot's earlier entry (where that earlier save
+  changed them and `main` has not changed them since; otherwise the current
+  parent's) until the job's end or a
+  stop saves them. A tick asks the controller for that token with the
+  workspace let go, within its own ten seconds, so a stop that comes
+  meanwhile takes the workspace at once. A tick also sends at most 16 MiB of
+  new content, smallest
+  files first, so a small edit lands within its ten-second budget however
+  much else the turn wrote; the rest keeps its earlier entry and goes out
+  with the next tick, which runs even if nothing changed meanwhile. A tick that finds the workspace busy answers 409 and waits
+  for the next one; while a stop's fence is up it answers 503. Ticks never
+  overlap and a missed one is not queued.
+- Cost, measured with 20 or 200 changed files alike: an unchanged folder
+  costs 6 git processes and no controller call; a changed tick about 38 git
+  processes, a grant and a `git.persist` token from the controller, one leased
+  push and one `ls-remote`; a job's end with nothing new since a save that
+  held all of it costs the same 6 and no controller call. About 1,100 git
+  processes per runtime-hour of
+  continuous edits. Every git command in a checkout first checks that the
+  repository config holds only data; that config is parsed again only when
+  it changed.
+- When the job's body returns, whatever it returned (a terminal command and a
+  turn that changed no file included), the ticker stops and the job's own
+  save runs, unless the change check finds the folder exactly as its last
+  confirmed save held it, with nothing deferred and nothing local-only. A
+  save that did not land is recorded on the job as a `working-state`
+  artifact (`durable: false` and a fixed error code).
+- A slot a person removed (or restored) is gone from canonical while the
+  folder's record still names it: its paths are not saved again until they
+  change, and a stop that saves the folder, like every shutdown, stores no
+  `unsaved` copy of them when the slot already holds everything else the
+  folder changed. A stop's flush without `workingState` (rolling saves off)
+  still pushes the folder's whole copy.
+- `WORKING_STATE_SAVES=off` on the controller turns rolling saves off: the
+  grant answers 403 `rolling_saves_off`, the runtime stops ticking, and
+  stops ask the origin for no save of their own. A stop's flush then pushes
+  the folder's `unsaved` copy as before rolling saves, and the shutdown
+  after it still leaves the durable-stop marker. Slots already written stay
+  on canonical, because nothing deletes them while saves are off, and are
+  listed as unsaved work once their origin stops. A 401 (the job's workspace
+  token, minted once when the job is leased and valid for at least an hour,
+  has expired) also ends the job's ticks, with one warning, and its own save
+  at the end is recorded as `workspace_token_expired`. Between turns nothing ticks;
+  a requested stop (a user's or a runtime's) does not save under anyone's
+  write access, so the last turn-end save covers the agent's work.
 
 **Recovery refs.** Work that cannot reach `main` is never dropped. It is
 committed first to a local ref, `refs/instafy/local-recovery/<name>`, without
@@ -575,7 +717,10 @@ checkouts:
   (`.instafy/.git/instafy-stopped-clean`, see above). A crash, a kill or a
   stop that could not keep its work may leave files or commits that exist
   nowhere else; such a checkout is kept until a later start and clean stop.
-  Checkouts from before this marker are kept the same way.
+  Checkouts from before this marker are kept the same way. Origins with
+  rolling saves write the marker only when the stop leaves nothing
+  local-only, so a checkout that holds work only this node has is kept
+  too.
 
 A stop takes the same per-project lock as a start while it runs and marks the
 checkout as used, and the sweep reads that mark again once it holds the lock,
@@ -593,7 +738,8 @@ controller pool, the release workflow asks that controller (directly, with
 the service-role bearer; user, operator and scoped tokens get 403) to drain
 its node. A controller that serves these routes answers `/healthz` with
 `x-instafy-runtime-drain: 1`, so release tooling can tell it apart from one
-that predates them:
+that predates them, and one whose running workspaces take rolling saves
+answers `x-instafy-working-state: 1` (`0` when `WORKING_STATE_SAVES` is off):
 
 - `GET /operator/runtime-drain/census` lists what the node-local provider
   holds (`POST /runtime/census`: runtimes from their containers' `SPACE_ID`,

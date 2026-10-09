@@ -58,6 +58,7 @@ mod project_preferences_auth_tests;
 mod project_preferences_tests;
 #[cfg(test)]
 mod read_reference_tests;
+pub(crate) mod rolling_saves;
 mod skill_declaration;
 mod skills;
 mod workspace_change_detection;
@@ -4484,6 +4485,38 @@ impl JobProcessor {
 
     fn local_origin_sync(&self) -> Option<LocalOriginSync> {
         self.local_origin_sync.lock().clone()
+    }
+
+    /// The rolling saves of a write job, when it takes them (see
+    /// [`rolling_saves::Gate`]): a write job on a hosted checkout with a
+    /// canonical remote, an origin in this process and a verified workspace
+    /// token. Decided when the job starts, whatever lease its turn gets.
+    pub(crate) async fn rolling_saves_for(
+        &self,
+        registration: &Registration,
+        job: &LeaseJob,
+    ) -> Option<rolling_saves::RollingSaves> {
+        let settings = self.config.origin.as_ref()?;
+        let workspace_token = match self.verified_workspace_token(registration, job).await {
+            Ok(token) => token,
+            Err(error) => {
+                debug!(?error, job_id = %job.id, "no rolling saves: the workspace token did not verify");
+                None
+            }
+        };
+        rolling_saves::RollingSaves::from_gate(rolling_saves::Gate {
+            hosted_checkout: matches!(settings.mode.as_str(), "efs" | "hosted"),
+            has_git_remote: settings
+                .git_remote_url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty()),
+            read_only_job: metadata_requests_read_only_workspace(job.payload.get("metadata")),
+            workspace_token,
+            local_origin: self.local_origin_sync(),
+            controller_base_url: &self.config.controller_base_url,
+            project_id: self.project_id_for_job(job).ok()?,
+            job_id: job.id,
+        })
     }
 
     fn project_id_for_job(&self, job: &LeaseJob) -> Result<Uuid> {
@@ -18770,6 +18803,7 @@ mod tests {
                     Ok(json!({ "rev": "main", "checkoutMoved": true }))
                 }
             })),
+            working_state: None,
         }));
 
         let execution = processor

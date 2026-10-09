@@ -12,6 +12,7 @@ use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
 use crate::job_cancel::JobCancelSignal;
+use crate::jobs::rolling_saves;
 use crate::jobs::{JobExecution, JobMessage, JobProcessor, JobProgress};
 use crate::origin::LocalOriginSync;
 
@@ -211,7 +212,13 @@ impl AgentExecutor {
             status: progress_status,
         };
 
-        let result = self
+        // The folder's unfinished work reaches canonical every two minutes
+        // while the job runs, and once more when it ends.
+        let saves = self.processor.rolling_saves_for(registration, job).await;
+        let ticker = saves
+            .as_ref()
+            .map(rolling_saves::RollingSaves::start_ticker);
+        let mut result = self
             .processor
             .run_apply_job(
                 registration,
@@ -222,6 +229,9 @@ impl AgentExecutor {
                 active_turn_input,
             )
             .await;
+        if let Some(saves) = saves.as_ref() {
+            rolling_saves::finish_job(saves, ticker, &mut result).await;
+        }
 
         finish_progress_dispatch(progress_tx, progress_task, job.id).await;
         result
@@ -241,7 +251,11 @@ impl AgentExecutor {
             status: progress_status,
         };
 
-        let result = self
+        let saves = self.processor.rolling_saves_for(registration, job).await;
+        let ticker = saves
+            .as_ref()
+            .map(rolling_saves::RollingSaves::start_ticker);
+        let mut result = self
             .processor
             .run_parallel_direct_write_scoped_worker_job(
                 registration,
@@ -250,6 +264,9 @@ impl AgentExecutor {
                 lease_lost_signal.clone(),
             )
             .await;
+        if let Some(saves) = saves.as_ref() {
+            rolling_saves::finish_job(saves, ticker, &mut result).await;
+        }
 
         finish_progress_dispatch(progress_tx, progress_task, job.id).await;
         result

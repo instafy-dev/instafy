@@ -353,6 +353,22 @@ fn trusted_git_config_entry(key: &str, value: &str) -> Option<TrustedGitConfigEn
         });
     }
 
+    // The seed of the working folder's id (see `crate::working_state`): data
+    // only, kept only as a lower-case UUID. A slot is named by a hash of it,
+    // so whatever a turn writes here can only rename this folder's own slot.
+    if key == crate::working_state::WORKING_SET_CONFIG_KEY.to_ascii_lowercase() {
+        let value = value.trim();
+        if !crate::working_state::is_working_set_id(value) {
+            return None;
+        }
+        return Some(TrustedGitConfigEntry {
+            section: "instafy",
+            subsection: None,
+            name: "workingSet",
+            value: value.to_string(),
+        });
+    }
+
     None
 }
 
@@ -414,6 +430,67 @@ fn render_trusted_git_config(mut entries: Vec<TrustedGitConfigEntry>) -> String 
     output
 }
 
+/// The data-only config each checkout's `.instafy/.git/config` was last
+/// reduced to, by path, most recently used last. A file that still holds
+/// exactly those bytes is data-only already, so it is not parsed again:
+/// before every git command that would otherwise cost one more `git config`
+/// process.
+static REDUCED_CONFIGS: Lazy<Mutex<ReducedConfigs>> = Lazy::new(Mutex::default);
+
+/// Checkouts whose reduced config is remembered at once; the one used least
+/// recently is forgotten first.
+const MAX_REDUCED_CONFIGS: usize = 256;
+
+#[derive(Default)]
+struct ReducedConfigs {
+    by_path: HashMap<PathBuf, Vec<u8>>,
+    order: std::collections::VecDeque<PathBuf>,
+}
+
+impl ReducedConfigs {
+    fn touch(&mut self, config_path: &Path) {
+        if let Some(index) = self.order.iter().position(|path| path == config_path) {
+            if let Some(path) = self.order.remove(index) {
+                self.order.push_back(path);
+            }
+        }
+    }
+}
+
+fn already_reduced(config_path: &Path, existing: &[u8]) -> bool {
+    let mut reduced = REDUCED_CONFIGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let same = reduced
+        .by_path
+        .get(config_path)
+        .is_some_and(|bytes| bytes.as_slice() == existing);
+    if same {
+        reduced.touch(config_path);
+    }
+    same
+}
+
+fn remember_reduced(config_path: &Path, bytes: &[u8]) {
+    let mut reduced = REDUCED_CONFIGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if reduced
+        .by_path
+        .insert(config_path.to_path_buf(), bytes.to_vec())
+        .is_some()
+    {
+        reduced.touch(config_path);
+        return;
+    }
+    reduced.order.push_back(config_path.to_path_buf());
+    while reduced.order.len() > MAX_REDUCED_CONFIGS {
+        if let Some(oldest) = reduced.order.pop_front() {
+            reduced.by_path.remove(&oldest);
+        }
+    }
+}
+
 pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Result<()> {
     let config_path = instafy_git_dir(workspace_root).join("config");
     let workspace = WorkspaceDir::open(workspace_root)
@@ -430,6 +507,11 @@ pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Resu
         config_file
             .read_to_end(&mut existing)
             .with_context(|| format!("failed to read git config {:?}", config_path))?;
+    }
+    // Byte for byte what this function wrote (or found) last time: only
+    // data-only settings, and the same work tree.
+    if already_reduced(&config_path, &existing) {
+        return Ok(());
     }
 
     // `.instafy/.git` is a reserved, service-owned boundary. Before any Git
@@ -487,6 +569,7 @@ pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Resu
 
     let sanitized = render_trusted_git_config(entries);
     if existing == sanitized.as_bytes() {
+        remember_reduced(&config_path, sanitized.as_bytes());
         return Ok(());
     }
 
@@ -505,6 +588,7 @@ pub(crate) fn refresh_instafy_git_worktree_config(workspace_root: &Path) -> Resu
         .map_err(|error| error.error)
         .with_context(|| format!("failed to replace git config {:?}", config_path))?;
     sync_directory(git_dir)?;
+    remember_reduced(&config_path, sanitized.as_bytes());
 
     Ok(())
 }
@@ -561,8 +645,16 @@ fn run_git(workspace_root: &Path, args: &[&str], bearer_token: Option<&str>) -> 
         .arg("--work-tree")
         .arg(".");
     if let Some(token) = bearer_token {
-        let header = format!("http.extraHeader=Authorization: Bearer {token}");
-        command.args(["-c", header.as_str()]);
+        // Through the environment, never the argument list, which any
+        // process on the machine can read. `server_git_command` removed every
+        // inherited `GIT_CONFIG_*` variable, so this is the only entry.
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("Authorization: Bearer {token}"),
+            );
     }
     command
         .args(args)
@@ -2953,6 +3045,50 @@ mod tests {
         Ok(())
     }
 
+    /// A config this server already reduced to data-only settings is not
+    /// parsed again before the next command. Once the workspace changes it,
+    /// it is, and loses what was added.
+    #[test]
+    fn a_reduced_config_is_parsed_again_only_once_it_changes() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let workspace_dir = sandbox.path().join("workspace");
+        fs::create_dir_all(&workspace_dir)?;
+        init_repo(&workspace_dir, "main")?;
+        fs::create_dir_all(workspace_dir.join(".instafy"))?;
+        fs::rename(
+            workspace_dir.join(".git"),
+            workspace_dir.join(".instafy").join(".git"),
+        )?;
+        let config_path = workspace_dir.join(".instafy").join(".git").join("config");
+        let log = sandbox.path().join("git.log");
+        let _wrapper = crate::test_support::GitWrapper::install(
+            sandbox.path(),
+            &format!("echo \"$*\" >> '{}'", log.display()),
+        );
+        let parses = || {
+            fs::read_to_string(&log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains("config --file .instafy/.git/config"))
+                .count()
+        };
+
+        for _ in 0..3 {
+            run_git_ok(&workspace_dir, &["rev-parse", "--git-dir"], None)?;
+        }
+        assert_eq!(parses(), 1);
+
+        let mut text = fs::read_to_string(&config_path)?;
+        text.push_str("[alias]\n\tpwn = !touch pwned\n");
+        fs::write(&config_path, text)?;
+        run_git_ok(&workspace_dir, &["rev-parse", "--git-dir"], None)?;
+        assert_eq!(parses(), 2);
+        assert!(!fs::read_to_string(&config_path)?.contains("alias"));
+        run_git_ok(&workspace_dir, &["rev-parse", "--git-dir"], None)?;
+        assert_eq!(parses(), 2);
+        Ok(())
+    }
+
     #[test]
     fn run_git_never_deletes_an_unknown_index_lock() -> anyhow::Result<()> {
         let sandbox = tempdir()?;
@@ -4323,6 +4459,59 @@ mod tests {
         let remote_head = git_stdout(&updater_dir, &["rev-parse", "HEAD"])?;
         assert_eq!(workspace_head, remote_head);
 
+        Ok(())
+    }
+
+    /// A checkout command gets the bearer through the environment, never its
+    /// argument list, which any process on the machine can read.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkout_command_gets_the_bearer_only_in_the_environment() -> anyhow::Result<()> {
+        let sandbox = tempdir()?;
+        let root = sandbox.path();
+        let remote = root.join("remote.git");
+        run_git(root, &["init", "--bare", "-q", remote.to_str().unwrap()])?;
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        crate::test_support::init_workspace_repo(&workspace);
+        let log = root.join("git-calls.log");
+        let script = root.join("recording-git");
+        crate::test_support::install_script(
+            &script,
+            &format!(
+                "#!/bin/sh\n\
+                 {{ printf 'argv'; for arg in \"$@\"; do printf ' [%s]' \"$arg\"; done; \
+                 printf '\\n'; env | grep -E '^GIT_CONFIG_(COUNT|KEY_|VALUE_)' | sort; \
+                 printf 'end\\n'; }} >> '{}'\n\
+                 exec git \"$@\"\n",
+                log.display()
+            ),
+        );
+        GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = Some(script));
+        let bearer = "bearer-for-this-test";
+        let listed = super::run_git(
+            &workspace,
+            &["ls-remote", remote.to_str().unwrap()],
+            Some(bearer),
+        );
+        GIT_PROGRAM_OVERRIDE.with(|program| *program.borrow_mut() = None);
+        assert!(listed?.status.success());
+
+        let calls = fs::read_to_string(&log)?;
+        let call = calls
+            .split("end\n")
+            .find(|call| call.contains("[ls-remote]"))
+            .expect("the ls-remote call");
+        let (argv, env) = call.split_once('\n').unwrap();
+        assert!(!argv.contains(bearer), "{argv}");
+        assert_eq!(
+            env.lines().collect::<Vec<_>>(),
+            vec![
+                "GIT_CONFIG_COUNT=1",
+                "GIT_CONFIG_KEY_0=http.extraHeader",
+                &format!("GIT_CONFIG_VALUE_0=Authorization: Bearer {bearer}"),
+            ]
+        );
         Ok(())
     }
 

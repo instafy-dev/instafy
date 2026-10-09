@@ -564,6 +564,7 @@ describe("unsaved work (recovery)", () => {
     expect(result?.status).toBe("ok");
     expect(result?.entries[0]).toEqual({ ...listed[0] });
     expect(result?.entries[0]).not.toHaveProperty("restoredRev");
+    expect(result?.entries[0]).not.toHaveProperty("rollingSave");
     expect(result?.entries[1]).toMatchObject({ kind: "unsaved", paths: ["x", "y"], restoredRev: "m9" });
     expect(mocks.signal).toHaveBeenCalledWith("gateway", "recovery_supported");
   });
@@ -574,6 +575,44 @@ describe("unsaved work (recovery)", () => {
     expect(result?.entries).toEqual([
       { ref: "refs/instafy/recovery/o/x", rev: "r", kind: "unpublished", subject: "", date: null, origin: null, paths: [], base: null },
     ]);
+  });
+
+  it("keeps the rolling-save flag only when the server sets it", async () => {
+    fetchMock().mockResolvedValue(
+      json(200, [
+        { ...listed[0], ref: "refs/instafy/recovery/w/working", kind: "unsaved", rollingSave: true },
+        { ...listed[0], ref: "refs/instafy/recovery/w2/working", kind: "unsaved", rolling_save: true },
+        { ...listed[0], ref: "refs/instafy/recovery/w3/working", kind: "unsaved", rollingSave: false },
+        { ...listed[0], ref: "refs/instafy/recovery/w4/working", kind: "unsaved", rollingSave: "true" },
+      ]),
+    );
+    const result = await fetchWorkspaceRecoveryFromController({ projectId: "p" });
+    expect(result?.entries.map((entry) => entry.rollingSave)).toEqual([true, true, undefined, undefined]);
+    expect(result?.entries[0]).toMatchObject({ origin: listed[0].origin, kind: "unsaved" });
+    expect(result?.entries[2]).not.toHaveProperty("rollingSave");
+    expect(result?.entries[3]).not.toHaveProperty("rollingSave");
+  });
+
+  it("knows a working slot by its name and never shows one as restored", async () => {
+    // An origin built before rolling saves sets neither the flag nor a
+    // restore rule for slots: a reused slot name can match an old restore.
+    const slot = "refs/instafy/recovery/0b4f2c1e-6a3d-4f5e-8c7b-9a8d7e6f5a4b/working";
+    fetchMock().mockResolvedValue(
+      json(200, [
+        { ...listed[1], ref: slot, restoredRev: "m9" },
+        { ...listed[1], ref: slot.replace("0b4f2c1e", "0B4F2C1E"), restoredRev: "m9" },
+        { ...listed[1], ref: `${slot}-1`, restoredRev: "m9" },
+        { ...listed[1], ref: "refs/instafy/recovery/0b4f2c1e-6a3d-4f5e-8c7b/working", restoredRev: "m9" },
+        { ...listed[1], ref: "refs/instafy/recovery/x/0b4f2c1e-6a3d-4f5e-8c7b-9a8d7e6f5a4b/working", restoredRev: "m9" },
+      ]),
+    );
+    const result = await fetchWorkspaceRecoveryFromController({ projectId: "p" });
+    expect(result?.entries[0]).toMatchObject({ ref: slot, rollingSave: true });
+    expect(result?.entries[0]).not.toHaveProperty("restoredRev");
+    for (const entry of result?.entries.slice(1) ?? []) {
+      expect(entry).toMatchObject({ restoredRev: "m9" });
+      expect(entry).not.toHaveProperty("rollingSave");
+    }
   });
 
   it("treats 404 as unsupported, never as an error", async () => {

@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useSyncExternalStore } from "react";
-import { controllerClient, type OriginError, type WorkspaceRecoveryEntry } from "../sdk/instafy";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import {
+  controllerClient,
+  type ControllerRuntimeStatusEntry,
+  type OriginError,
+  type WorkspaceRecoveryEntry,
+} from "../sdk/instafy";
 
 /**
  * Unsaved work kept on recovery refs, shared by the History
@@ -7,8 +12,10 @@ import { controllerClient, type OriginError, type WorkspaceRecoveryEntry } from 
  * and `desktop` modes read it; legacy spaces never call the route.
  *
  * Fetched on Studio load and project switch, when the drawer opens, on focus
- * when older than five minutes, and when a finished turn reports a recovery
- * ref. There is no interval: no event exists for ref creation.
+ * when older than five minutes, when a finished turn reports a recovery
+ * ref, and when a runtime stops (once per stop, for a project with a list
+ * loaded or on the wire). There is no interval: no event exists for ref
+ * creation.
  */
 
 export type UnsavedWorkStatus = "idle" | "ok" | "unsupported" | "error";
@@ -83,6 +90,282 @@ export function subscribeUnsavedWork(listener: () => void): () => void {
 /** Entries that still hold unsaved work (a restored entry does not). */
 export function pendingUnsavedWorkEntries(entries: WorkspaceRecoveryEntry[]): WorkspaceRecoveryEntry[] {
   return entries.filter((entry) => !entry.restoredRev);
+}
+
+/** Which rolling saves Studio hides, for one project. */
+export interface RollingSaveScope {
+  /**
+   * Which origins are live is known. Until it is, every rolling save is
+   * hidden: one shown at first paint could belong to a running workspace.
+   */
+  known: boolean;
+  /** Origins whose rolling saves are hidden: live ones, and stopped ones until the list is fetched again. */
+  hidden: ReadonlySet<string>;
+}
+
+const EMPTY_ORIGINS: ReadonlySet<string> = new Set<string>();
+const UNKNOWN_SCOPE: RollingSaveScope = Object.freeze({ known: false, hidden: EMPTY_ORIGINS });
+
+/**
+ * The entries Studio shows: the Unsaved work section, the badge and the
+ * chat row all read through this one filter. A rolling save is hidden while
+ * the origin that last wrote it is live, because its rev changes on every
+ * save and a Restore or Remove would race the turn's own publish. Entries
+ * without the server's `rollingSave` flag always show, and a list without
+ * one is returned as it is.
+ */
+export function visibleUnsavedWorkEntries(
+  entries: WorkspaceRecoveryEntry[],
+  scope: RollingSaveScope,
+): WorkspaceRecoveryEntry[] {
+  if (!entries.some((entry) => entry.rollingSave === true)) {
+    return entries;
+  }
+  return entries.filter((entry) => {
+    if (entry.rollingSave !== true) {
+      return true;
+    }
+    if (!scope.known) {
+      return false;
+    }
+    return !entry.origin || !scope.hidden.has(entry.origin);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Live origins: which rolling saves are hidden, and the list after a stop
+// ---------------------------------------------------------------------------
+
+/** Wait this long after an origin stops, so stops close together share one list. */
+export const UNSAVED_WORK_STOP_REFETCH_DELAY_MS = 1_000;
+
+interface LiveOriginsRecord {
+  projectId: string;
+  /** The last live set the runtime status reported; null until one arrives. */
+  live: ReadonlySet<string> | null;
+  /** Origins that stopped: their rolling saves stay hidden until the list is fetched again. */
+  settling: ReadonlySet<string>;
+  scope: RollingSaveScope;
+}
+
+let liveOrigins: LiveOriginsRecord | null = null;
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function liveOriginsRecord(
+  projectId: string,
+  live: ReadonlySet<string> | null,
+  settling: ReadonlySet<string>,
+): LiveOriginsRecord {
+  const scope: RollingSaveScope =
+    live === null
+      ? UNKNOWN_SCOPE
+      : { known: true, hidden: settling.size === 0 ? live : new Set([...live, ...settling]) };
+  return { projectId, live, settling, scope };
+}
+
+function sameOrigins(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) {
+    return false;
+  }
+  for (const id of left) {
+    if (!right.has(id)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function cancelSettle(): void {
+  if (settleTimer !== null) {
+    clearTimeout(settleTimer);
+    settleTimer = null;
+  }
+}
+
+/** The origins the runtime status calls live: each visible runtime's latest unreleased origin. */
+export function liveOriginIds(statuses: readonly ControllerRuntimeStatusEntry[]): string[] {
+  const ids: string[] = [];
+  for (const entry of statuses) {
+    const origin = entry.origin;
+    const originId = typeof origin?.originId === "string" ? origin.originId.trim() : "";
+    if (originId && origin?.status !== "released") {
+      ids.push(originId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * Record the live origins of `projectId`, or `null` while they are not
+ * known (before the project's first status answer, or while a refresh
+ * loads, fails or is skipped). An unknown moment keeps the last known set.
+ *
+ * A loaded list can hold a stopped origin's rolling save at a rev older
+ * than its final save. That origin's saves stay hidden until the project's
+ * lists are fetched again, so the final save appears once, with its final
+ * rev. This covers an origin that leaves the live set, and, when the set
+ * first becomes known, a listed origin that is not live: it may have
+ * stopped while another project was open, or before the status answered.
+ * A list still on the wire may predate a stop too, so it is fetched again as
+ * well (at once when the set first becomes known), and its older answer is
+ * never shown.
+ */
+export function setUnsavedWorkLiveOrigins(
+  projectId: string | null | undefined,
+  originIds: Iterable<string> | null,
+): void {
+  const project = projectId?.trim() || null;
+  let current = liveOrigins && liveOrigins.projectId === project ? liveOrigins : null;
+  if (!current) {
+    // Another project, or none: nothing carries over.
+    cancelSettle();
+    if (!project) {
+      if (liveOrigins) {
+        liveOrigins = null;
+        notify();
+      }
+      return;
+    }
+    current = liveOriginsRecord(project, null, EMPTY_ORIGINS);
+    liveOrigins = current;
+    if (originIds === null) {
+      notify();
+      return;
+    }
+  }
+  if (originIds === null) {
+    return;
+  }
+  const live = new Set(originIds);
+  // Any stop counts, listed or not: the slot a turn wrote since the list
+  // loaded may be the only copy of that work, and no list carries it yet.
+  // A first known set can only judge what the loaded lists show.
+  const firstKnown = current.live === null;
+  const departed =
+    current.live === null
+      ? listedRollingSaveOrigins(current.projectId).filter((id) => !live.has(id))
+      : [...current.live].filter((id) => !live.has(id));
+  if (current.live && departed.length === 0 && sameOrigins(current.live, live)) {
+    return;
+  }
+  const settling = departed.length === 0 ? current.settling : new Set([...current.settling, ...departed]);
+  const sameProject = current.projectId;
+  liveOrigins = liveOriginsRecord(sameProject, live, settling);
+  if (firstKnown && projectLists(sameProject).some(([, snapshot]) => snapshot.loading)) {
+    // A list sent before the set was known may be older than a stop it shows
+    // as stopped: fetch it again now, before its answer can show.
+    cancelSettle();
+    void settleStoppedOrigins(sameProject);
+  } else if (departed.length > 0) {
+    cancelSettle();
+    settleTimer = setTimeout(() => {
+      settleTimer = null;
+      void settleStoppedOrigins(sameProject);
+    }, UNSAVED_WORK_STOP_REFETCH_DELAY_MS);
+  }
+  notify();
+}
+
+/**
+ * The lists of `projectId` that have loaded or are on the wire (a first
+ * fetch included), by the origin they are read from.
+ */
+function projectLists(projectId: string): Array<[string, UnsavedWorkSnapshot]> {
+  const prefix = `${projectId}:`;
+  const lists: Array<[string, UnsavedWorkSnapshot]> = [];
+  for (const [key, snapshot] of snapshots) {
+    if (key.startsWith(prefix) && (snapshot.status === "ok" || snapshot.status === "error" || snapshot.loading)) {
+      lists.push([key.slice(prefix.length), snapshot]);
+    }
+  }
+  return lists;
+}
+
+/** The origins that last wrote a rolling save in one of `projectId`'s lists. */
+function listedRollingSaveOrigins(projectId: string): string[] {
+  const origins = new Set<string>();
+  for (const [, snapshot] of projectLists(projectId)) {
+    for (const entry of snapshot.entries) {
+      if (entry.rollingSave === true && entry.origin) {
+        origins.add(entry.origin);
+      }
+    }
+  }
+  return [...origins];
+}
+
+/**
+ * Fetch every list of `projectId` again (see `projectLists`), then show the
+ * stopped origins' saves. Legacy spaces never loaded one, so they fetch
+ * nothing.
+ */
+async function settleStoppedOrigins(projectId: string): Promise<void> {
+  if (liveOrigins?.projectId !== projectId) {
+    return;
+  }
+  const batch = liveOrigins.settling;
+  const originIds = projectLists(projectId).map(([originId]) => originId);
+  for (const originId of originIds) {
+    void refreshUnsavedWork({ projectId, originId, force: true });
+  }
+  await newestListsAnswered(projectId, originIds);
+  const record = liveOrigins;
+  if (!record || record.projectId !== projectId) {
+    return;
+  }
+  const settling = new Set([...record.settling].filter((id) => !batch.has(id)));
+  liveOrigins = liveOriginsRecord(projectId, record.live, settling);
+  notify();
+}
+
+/**
+ * Resolves once the newest fetch of each of these lists has answered, or
+ * another project is open. Only the newest fetch per list stores its answer,
+ * so a newer one (the drawer opening, say) settles a list whose earlier
+ * fetch stalls.
+ */
+function newestListsAnswered(projectId: string, originIds: readonly string[]): Promise<void> {
+  const answered = () =>
+    liveOrigins?.projectId !== projectId ||
+    originIds.every((originId) => !getUnsavedWorkSnapshot(projectId, originId).loading);
+  if (answered()) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const unsubscribe = subscribeUnsavedWork(() => {
+      if (answered()) {
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
+}
+
+/** Which rolling saves are hidden in `projectId` right now. */
+export function getRollingSaveScope(projectId: string | null | undefined): RollingSaveScope {
+  const project = projectId?.trim() || null;
+  return liveOrigins && project && liveOrigins.projectId === project ? liveOrigins.scope : UNKNOWN_SCOPE;
+}
+
+/**
+ * Feed the live origins from the runtime status. Mounted once, where the
+ * statuses are kept. Only a status answer for `projectId` says which origins
+ * are live: until one arrives the set is unknown, and a failed or skipped
+ * refresh, which leaves the last answer in place, keeps the last known set.
+ */
+export function usePublishUnsavedWorkLiveOrigins({
+  projectId,
+  answer,
+}: {
+  projectId: string | null | undefined;
+  /** The last successful runtime status, and the project it answered for. */
+  answer: { projectId: string; statuses: readonly ControllerRuntimeStatusEntry[] } | null;
+}): void {
+  const project = projectId?.trim() || null;
+  useEffect(() => {
+    const known = answer !== null && answer.projectId === project;
+    setUnsavedWorkLiveOrigins(project, known ? liveOriginIds(answer.statuses) : null);
+  }, [answer, project]);
 }
 
 /**
@@ -287,6 +570,8 @@ export function resetUnsavedWorkStoreForTests(): void {
   latestSeq.clear();
   conflictStates.clear();
   fetchSeq = 0;
+  cancelSettle();
+  liveOrigins = null;
   notify();
 }
 
@@ -308,6 +593,8 @@ export function useUnsavedWorkConflicts(
 }
 
 export interface UseUnsavedWorkResult extends UnsavedWorkSnapshot {
+  /** `entries` as Studio shows them (see `visibleUnsavedWorkEntries`). */
+  visibleEntries: WorkspaceRecoveryEntry[];
   refresh: (options?: { force?: boolean }) => Promise<UnsavedWorkSnapshot>;
 }
 
@@ -316,6 +603,7 @@ export interface UseUnsavedWorkResult extends UnsavedWorkSnapshot {
  * when the project or origin changes (reusing a list fetched moments ago,
  * unless `mountRefresh` is `force`, as when the History drawer opens), and
  * again on window focus when the list is older than five minutes.
+ * `visibleEntries` leaves out a running workspace's rolling save.
  */
 export function useUnsavedWork({
   projectId,
@@ -332,6 +620,9 @@ export function useUnsavedWork({
   const origin = originId?.trim() || null;
   const getSnapshot = useCallback(() => getUnsavedWorkSnapshot(project, origin), [project, origin]);
   const snapshot = useSyncExternalStore(subscribeUnsavedWork, getSnapshot, getSnapshot);
+  const getScope = useCallback(() => getRollingSaveScope(project), [project]);
+  const scope = useSyncExternalStore(subscribeUnsavedWork, getScope, getScope);
+  const visibleEntries = useMemo(() => visibleUnsavedWorkEntries(snapshot.entries, scope), [scope, snapshot.entries]);
   const active = enabled && project !== null && origin !== null;
 
   const refresh = useCallback(
@@ -371,5 +662,5 @@ export function useUnsavedWork({
     return () => window.removeEventListener("focus", handleFocus);
   }, [active, origin, project]);
 
-  return { ...snapshot, refresh };
+  return { ...snapshot, visibleEntries, refresh };
 }

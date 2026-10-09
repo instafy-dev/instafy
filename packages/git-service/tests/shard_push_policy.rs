@@ -898,6 +898,275 @@ fn refs_instafy_holds_only_recovery_refs_and_main_has_no_aliases() {
     assert!(shard.repo_rev(&recovery).is_none());
 }
 
+/// A working slot is replaced under a lease on the tip its saver last
+/// confirmed: a correct lease moves it (a non-fast-forward update), a stale
+/// one is refused, and creating and deleting still work. Every other
+/// recovery ref may only be created or deleted.
+#[test]
+fn a_working_slot_moves_only_under_a_current_lease() {
+    let shard = Shard::start("working-slot", &[]);
+    let client = Client::clone_from(&shard);
+    let initial = client.head();
+    // A repository may refuse non-fast-forward updates in its own config.
+    // Git applies that setting only to `refs/heads/*`, so it never blocks a
+    // slot's saves; this keeps it that way.
+    assert!(shard
+        .repo_git(&["config", "receive.denyNonFastForwards", "true"])
+        .status
+        .success());
+    let slot = format!(
+        "refs/instafy/recovery/{}/{}",
+        uuid::Uuid::new_v4(),
+        git_service::policy::WORKING_SLOT_NAME
+    );
+    let save = |path: &str, contents: &[u8]| {
+        client.git_ok(&["checkout", "-q", "--detach", &initial]);
+        client.commit_file(path, contents, "Keep a workspace's unsaved changes")
+    };
+    let push_leased = |commit: &str, expected: &str| {
+        client.git(&[
+            "push",
+            "--porcelain",
+            &format!("--force-with-lease={slot}:{expected}"),
+            "origin",
+            &format!("{commit}:{slot}"),
+        ])
+    };
+
+    let first = save("draft.md", b"first\n");
+    let created = push_leased(&first, "");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert_eq!(shard.repo_rev(&slot).unwrap(), first);
+
+    // A second save on the same parent, not on the first save.
+    let second = save("draft.md", b"second\n");
+    let replaced = push_leased(&second, &first);
+    assert!(
+        replaced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replaced.stderr)
+    );
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+    // The repository's setting is in force for a branch.
+    client.push_ok(&format!("{first}:refs/heads/feature"));
+    let rewritten = client.git(&[
+        "push",
+        "--force",
+        "origin",
+        &format!("{second}:refs/heads/feature"),
+    ]);
+    assert!(!rewritten.status.success());
+    assert!(
+        String::from_utf8_lossy(&rewritten.stderr).contains("non-fast-forward"),
+        "{}",
+        String::from_utf8_lossy(&rewritten.stderr)
+    );
+
+    // A saver whose lease names the replaced tip is refused.
+    let third = save("draft.md", b"third\n");
+    let stale = push_leased(&third, &first);
+    assert!(!stale.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale.stdout).contains("stale info"),
+        "{}",
+        String::from_utf8_lossy(&stale.stdout)
+    );
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+    // So is a create of a slot that exists.
+    assert!(!push_leased(&third, "").status.success());
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+
+    let deleted = client.git(&[
+        "push",
+        "--porcelain",
+        &format!("--force-with-lease={slot}:{second}"),
+        "origin",
+        &format!(":{slot}"),
+    ]);
+    assert!(deleted.status.success());
+    assert!(shard.repo_rev(&slot).is_none());
+
+    // A recovery ref named after its content is never moved, not even with
+    // a lease that names its tip.
+    let content = format!(
+        "refs/instafy/recovery/{}/20261002T120000Z-unsaved-0123456789ab",
+        uuid::Uuid::new_v4()
+    );
+    client.push_ok(&format!("{first}:{content}"));
+    let moved = client.git(&[
+        "push",
+        &format!("--force-with-lease={content}:{first}"),
+        "origin",
+        &format!("{second}:{content}"),
+    ]);
+    assert!(!moved.status.success());
+    assert!(
+        String::from_utf8_lossy(&moved.stderr)
+            .contains("is a recovery ref; it may be created or deleted, not moved"),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert_eq!(shard.repo_rev(&content).unwrap(), first);
+    client.push_ok(&format!(":{content}"));
+    assert!(shard.repo_rev(&content).is_none());
+}
+
+/// Git Edge marks a push it authorized only through `git.persist`, a
+/// rolling save's credential, with `x-instafy-git-push-scope`. The shard
+/// then lets that push create recovery refs and replace or delete a working
+/// slot, and nothing else; reads are unchanged.
+#[test]
+fn a_push_marked_as_a_rolling_save_changes_only_recovery_refs() {
+    let shard = Shard::start("persist-push", &[]);
+    let client = Client::clone_from(&shard);
+    let initial = client.head();
+    let first = client.commit_file("draft.md", b"first\n", "first");
+    let second = client.commit_file("draft.md", b"second\n", "second");
+    let marked = |args: &[&str]| {
+        let mut full = vec![
+            "-c",
+            "http.extraHeader=x-instafy-git-push-scope: git.persist",
+        ];
+        full.extend_from_slice(args);
+        client.git(&full)
+    };
+    let ok = |output: Output| {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let refused = |output: Output| {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert!(!output.status.success(), "accepted: {stderr}");
+        assert!(
+            stderr.contains("instafy: a rolling save may not change"),
+            "{stderr}"
+        );
+    };
+    let slot = format!(
+        "refs/instafy/recovery/{}/{}",
+        uuid::Uuid::new_v4(),
+        git_service::policy::WORKING_SLOT_NAME
+    );
+    let content = format!(
+        "refs/instafy/recovery/{}/20261002T120000Z-unsaved-0123456789ab",
+        uuid::Uuid::new_v4()
+    );
+
+    // What a rolling save does: create and replace its slot under a lease,
+    // push a recovery ref, delete its slot, and read.
+    ok(marked(&[
+        "push",
+        &format!("--force-with-lease={slot}:"),
+        "origin",
+        &format!("{first}:{slot}"),
+    ]));
+    ok(marked(&[
+        "push",
+        &format!("--force-with-lease={slot}:{first}"),
+        "origin",
+        &format!("{second}:{slot}"),
+    ]));
+    assert_eq!(shard.repo_rev(&slot).unwrap(), second);
+    ok(marked(&["push", "origin", &format!("{first}:{content}")]));
+    assert_eq!(shard.repo_rev(&content).unwrap(), first);
+    ok(marked(&["ls-remote", "origin"]));
+    ok(marked(&["fetch", "-q", "origin"]));
+    ok(marked(&[
+        "push",
+        &format!("--force-with-lease={slot}:{second}"),
+        "origin",
+        &format!(":{slot}"),
+    ]));
+    assert!(shard.repo_rev(&slot).is_none());
+
+    // Nothing else.
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/heads/main"),
+    ]));
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/heads/feature"),
+    ]));
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/tags/v1"),
+    ]));
+    refused(marked(&[
+        "push",
+        "origin",
+        &format!("{first}:refs/replace/{initial}"),
+    ]));
+    refused(marked(&["push", "origin", &format!(":{content}")]));
+    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), initial);
+    for absent in [
+        "refs/heads/feature".to_string(),
+        "refs/tags/v1".to_string(),
+        format!("refs/replace/{initial}"),
+    ] {
+        assert!(shard.repo_rev(&absent).is_none(), "{absent}");
+    }
+    assert_eq!(shard.repo_rev(&content).unwrap(), first);
+
+    // The same pushes without the mark are an ordinary writer's.
+    client.push_ok(&format!(":{content}"));
+    client.push_ok("main");
+    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), second);
+}
+
+/// A replace ref makes git read another commit wherever the replaced one
+/// is named, the hook's own checks included. A push may not create one, and
+/// one the repository already holds cannot make a rewrite of main look like a
+/// fast-forward.
+#[test]
+fn replace_refs_cannot_get_around_mains_fast_forward_rule() {
+    let shard = Shard::start("replace-refs", &[]);
+    let client = Client::clone_from(&shard);
+    let first = client.commit_file("a.txt", b"a\n", "first");
+    client.push_ok("main");
+    // An unrelated commit, and one with its tree whose parent is main's tip.
+    let tree = client.git_ok(&["rev-parse", "HEAD^{tree}"]);
+    let unrelated = client.git_ok(&["commit-tree", "-m", "unrelated", &tree]);
+    let replacement = client.git_ok(&["commit-tree", "-p", &first, "-m", "replacement", &tree]);
+    client.push_ok(&format!("{unrelated}:refs/heads/unrelated"));
+    client.push_ok(&format!("{replacement}:refs/heads/replacement"));
+
+    let target = format!("refs/replace/{unrelated}");
+    let stderr = client.push_refused(&format!("{replacement}:{target}"));
+    assert!(
+        stderr.contains(&format!(
+            "instafy: '{target}' is a replace ref, which a push may not create or move"
+        )),
+        "{stderr}"
+    );
+    assert!(shard.repo_rev(&target).is_none());
+
+    // One the repository already holds.
+    assert!(shard
+        .repo_git(&["update-ref", &target, &replacement])
+        .status
+        .success());
+    let stderr = client.push_refused(&format!("+{unrelated}:main"));
+    assert!(
+        stderr.contains("instafy: non-fast-forward updates to main are not allowed"),
+        "{stderr}"
+    );
+    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), first);
+    // It may be deleted.
+    client.push_ok(&format!(":{target}"));
+    assert!(shard.repo_rev(&target).is_none());
+}
+
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)

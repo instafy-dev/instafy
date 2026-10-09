@@ -74,11 +74,36 @@ pub fn try_acquire_workspace_apply_lock(
     }
 
     match FileExt::try_lock_exclusive(&file) {
-        Ok(()) => Ok(Some(WorkspaceApplyLock { file })),
+        Ok(()) => {
+            // Whoever takes the workspace may change it, so a durable-stop
+            // marker an earlier stop on this folder left (a sibling runtime's,
+            // say) no longer holds: only a stop's own durable answer, written
+            // while it holds this lock, leaves one behind.
+            crate::server::clear_clean_stop_marker(workspace_root);
+            Ok(Some(WorkspaceApplyLock { file }))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(OriginError::internal(format!(
             "failed to lock workspace for apply: {error}"
         ))),
+    }
+}
+
+/// [`try_acquire_workspace_apply_lock`], trying again for up to `wait` while
+/// another holder has it. `None` once `wait` has passed.
+pub fn acquire_workspace_apply_lock_within(
+    workspace_root: &Path,
+    wait: std::time::Duration,
+) -> Result<Option<WorkspaceApplyLock>, OriginError> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Some(lock) = try_acquire_workspace_apply_lock(workspace_root)? {
+            return Ok(Some(lock));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 

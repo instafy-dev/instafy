@@ -272,6 +272,47 @@ async fn census_runtimes(
     })
 }
 
+#[derive(Deserialize)]
+struct OriginPayload {
+    project_id: Uuid,
+    runtime_id: Uuid,
+    lease_id: Uuid,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct OriginResponse {
+    endpoint: String,
+}
+
+/// Read-only: where the controller reaches a runtime's origin on this node,
+/// for exactly the lease generation it names. A stop sends its save
+/// credential there and nowhere else: never to the endpoint the runtime
+/// registered itself, which may be a public tunnel or any address the
+/// runtime chose. 404 when no running runtime of that generation is here.
+async fn runtime_origin(
+    State(state): State<ProviderState>,
+    Json(payload): Json<OriginPayload>,
+) -> Result<Json<OriginResponse>, (StatusCode, String)> {
+    match state
+        .allocator
+        .origin_endpoint(payload.project_id, payload.runtime_id, payload.lease_id)
+        .await
+    {
+        Ok(Some(endpoint)) => Ok(Json(OriginResponse { endpoint })),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            "no running runtime of that generation here".to_string(),
+        )),
+        Err(error) => {
+            error!(%error, "runtime origin lookup failed");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runtime origin lookup failed".to_string(),
+            ))
+        }
+    }
+}
+
 /// Evicts stopped workspace checkouts from this node's disk on a schedule:
 /// after `RUNTIME_CHECKOUT_TTL_DAYS` (default 7) idle, or oldest first while
 /// they exceed `RUNTIME_CHECKOUT_DISK_BUDGET_GIB`. The allocator never evicts
@@ -664,8 +705,8 @@ async fn try_register_with_controller(state: &ProviderState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        census_runtimes, ensure_runtime, release_runtime, resolve_auth_tokens, EnsurePayload,
-        ProviderState, ReleasePayload, RuntimeOperationLocks,
+        census_runtimes, ensure_runtime, release_runtime, resolve_auth_tokens, runtime_origin,
+        EnsurePayload, OriginPayload, ProviderState, ReleasePayload, RuntimeOperationLocks,
     };
     use async_trait::async_trait;
     use axum::{extract::State, http::StatusCode, Json};
@@ -1052,6 +1093,77 @@ mod tests {
         );
     }
 
+    /// Knows one running runtime generation and where its origin is.
+    struct OriginAllocator {
+        lease_id: Uuid,
+    }
+
+    #[async_trait]
+    impl RuntimeAllocator for OriginAllocator {
+        async fn ensure_runtime(
+            &self,
+            _request: EnsureRuntimeRequest,
+        ) -> anyhow::Result<EnsureRuntimeOutcome> {
+            Ok(EnsureRuntimeOutcome::default())
+        }
+
+        async fn origin_endpoint(
+            &self,
+            _project_id: Uuid,
+            _runtime_id: Uuid,
+            lease_id: Uuid,
+        ) -> anyhow::Result<Option<String>> {
+            Ok(
+                (lease_id == self.lease_id)
+                    .then(|| "http://host.docker.internal:49153".to_string()),
+            )
+        }
+    }
+
+    /// The origin route answers where the allocator sees the origin of
+    /// exactly the generation asked for, and nothing for any other.
+    #[tokio::test]
+    async fn origin_endpoint_answers_only_for_the_running_generation() {
+        let lease_id = Uuid::new_v4();
+        let state = ProviderState {
+            allocator: Arc::new(OriginAllocator { lease_id }),
+            runtime_operations: RuntimeOperationLocks::default(),
+            provider_id: "test-provider".to_string(),
+            accepted_auth_tokens: vec![],
+            provider_auth_token: None,
+            controller_registration_token: None,
+        };
+        let ask = |lease_id| {
+            runtime_origin(
+                State(state.clone()),
+                Json(OriginPayload {
+                    project_id: Uuid::new_v4(),
+                    runtime_id: Uuid::new_v4(),
+                    lease_id,
+                }),
+            )
+        };
+
+        let Json(found) = ask(lease_id).await.expect("the running generation");
+        assert_eq!(found.endpoint, "http://host.docker.internal:49153");
+        let (status, _) = ask(Uuid::new_v4())
+            .await
+            .expect_err("another generation has no origin here");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // An allocator that cannot tell vouches for nothing.
+        let (status, _) = runtime_origin(
+            State(provider_state(false, Arc::new(AtomicUsize::new(0)))),
+            Json(OriginPayload {
+                project_id: Uuid::new_v4(),
+                runtime_id: Uuid::new_v4(),
+                lease_id,
+            }),
+        )
+        .await
+        .expect_err("nothing to vouch for");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
     #[tokio::test]
     async fn release_endpoint_sanitizes_allocator_failure() {
         let release_calls = Arc::new(AtomicUsize::new(0));
@@ -1103,6 +1215,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/runtime/release", post(release_runtime))
         .route("/runtime/inspect", post(inspect_runtime))
         .route("/runtime/census", post(census_runtimes))
+        .route("/runtime/origin", post(runtime_origin))
         .route("/healthz", axum::routing::get(|| async { StatusCode::OK }))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state, auth_layer));

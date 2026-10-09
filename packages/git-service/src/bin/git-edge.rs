@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::routing::{any, get};
 use axum::Router;
@@ -17,9 +18,10 @@ use git_service::config::{GitEdgeConfig, GitEdgeRoutingMode};
 use git_service::error::ServiceError;
 use git_service::routing::{
     authorize_request_claims, is_forwardable_request_header, parse_repo_segment, pick_shard_index,
-    required_scope, GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER,
-    GIT_DELETE_SCOPE,
+    push_scope_assertion, required_scope, GIT_DELETE_RESULT_ABSENT, GIT_DELETE_RESULT_DELETED,
+    GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE, GIT_PUSH_SCOPE_HEADER,
 };
+use runtime_contracts::AccessTokenClaims;
 
 #[derive(Clone)]
 struct AppState {
@@ -85,24 +87,45 @@ async fn handle_proxy(
     request: Request,
 ) -> Result<axum::response::Response, ServiceError> {
     let (parts, body) = request.into_parts();
-    let uri = parts.uri.clone();
-
-    let path = uri.path().to_string();
-    let (_repo_dir, repo_name) = parse_repo_segment(&path)?;
-    let scope = required_scope(&parts.method, uri.path(), uri.query())?;
+    let (_repo_dir, repo_name) = parse_repo_segment(parts.uri.path())?;
+    let scope = required_scope(&parts.method, parts.uri.path(), parts.uri.query())?;
 
     // GIT_EDGE_SKIP_AUTH is a local Smart HTTP convenience. Destructive
     // requests remain authenticated even when that development switch is on.
-    if request_requires_auth(state.config.skip_auth, scope) {
+    let claims = if request_requires_auth(state.config.skip_auth, scope) {
         let token = extract_token(&parts.headers)?;
-        let claims = state
-            .validator
-            .validate(&token, Some(&state.config.audience))
-            .await?;
-        authorize_request_claims(&claims, &parts.method, uri.path(), uri.query(), &repo_name)?;
+        Some(
+            state
+                .validator
+                .validate(&token, Some(&state.config.audience))
+                .await?,
+        )
+    } else {
+        None
+    };
+    forward(&state, parts, body, &repo_name, claims.as_ref()).await
+}
+
+/// Send a request on to its shard once `claims` (validated; `None` only
+/// where no credential is needed) allow it. A push only a rolling save's
+/// credential allows is marked with [`GIT_PUSH_SCOPE_HEADER`], so the
+/// shard limits it; the client's own copy of that header never passes.
+async fn forward(
+    state: &AppState,
+    parts: Parts,
+    body: axum::body::Body,
+    repo_name: &str,
+    claims: Option<&AccessTokenClaims>,
+) -> Result<axum::response::Response, ServiceError> {
+    let uri = &parts.uri;
+    let scope = required_scope(&parts.method, uri.path(), uri.query())?;
+    let mut push_scope = None;
+    if let Some(claims) = claims {
+        authorize_request_claims(claims, &parts.method, uri.path(), uri.query(), repo_name)?;
+        push_scope = push_scope_assertion(claims, scope);
     }
 
-    let shard_idx = pick_shard_index(&repo_name, state.config.shards.len());
+    let shard_idx = pick_shard_index(repo_name, state.config.shards.len());
     let shard_base = match state.config.routing_mode {
         GitEdgeRoutingMode::Hash => state
             .config
@@ -110,7 +133,7 @@ async fn handle_proxy(
             .get(shard_idx)
             .ok_or_else(|| ServiceError::internal("shard routing failed"))?
             .clone(),
-        GitEdgeRoutingMode::Controller => resolve_shard_via_controller(&state, &repo_name).await?,
+        GitEdgeRoutingMode::Controller => resolve_shard_via_controller(state, repo_name).await?,
     };
 
     let response = proxy_request(
@@ -118,7 +141,8 @@ async fn handle_proxy(
         shard_base,
         &parts.method,
         &parts.headers,
-        &uri,
+        push_scope,
+        uri,
         body,
     )
     .await?;
@@ -225,6 +249,7 @@ async fn proxy_request(
     shard_base: reqwest::Url,
     method: &Method,
     headers: &HeaderMap,
+    push_scope: Option<&str>,
     uri: &Uri,
     body: axum::body::Body,
 ) -> Result<axum::response::Response, ServiceError> {
@@ -251,6 +276,9 @@ async fn proxy_request(
             continue;
         };
         req = req.header(name.as_str(), value_str);
+    }
+    if let Some(scope) = push_scope {
+        req = req.header(GIT_PUSH_SCOPE_HEADER, scope);
     }
 
     req = req.body(reqwest::Body::wrap_stream(body_stream.map(|chunk| {
@@ -294,6 +322,7 @@ async fn proxy_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git_service::routing::GIT_PERSIST_SCOPE;
 
     #[test]
     fn repository_deletion_never_inherits_skip_auth() {
@@ -316,6 +345,245 @@ mod tests {
             );
         }
         response
+    }
+
+    /// The shard receives the push-scope mark only from the edge itself: a
+    /// client's copy is dropped, and the edge's own is sent once.
+    #[tokio::test]
+    async fn only_the_edge_marks_a_rolling_saves_push() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shard =
+            reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let received = tokio::spawn(async move {
+            let mut heads = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                heads.push(String::from_utf8_lossy(&request).to_ascii_lowercase());
+            }
+            heads
+        });
+
+        let client = reqwest::Client::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GIT_PUSH_SCOPE_HEADER,
+            axum::http::HeaderValue::from_static("forged"),
+        );
+        let uri: Uri = "/repo.git/git-receive-pack".parse().unwrap();
+        for push_scope in [Some("git.persist"), None] {
+            proxy_request(
+                &client,
+                shard.clone(),
+                &Method::POST,
+                &headers,
+                push_scope,
+                &uri,
+                axum::body::Body::empty(),
+            )
+            .await
+            .unwrap();
+        }
+        let heads = received.await.unwrap();
+        let marks = |head: &str| {
+            head.lines()
+                .filter(|line| line.starts_with(&format!("{GIT_PUSH_SCOPE_HEADER}:")))
+                .map(|line| line.trim_end().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            marks(&heads[0]),
+            vec![format!("{GIT_PUSH_SCOPE_HEADER}: git.persist")]
+        );
+        assert!(marks(&heads[1]).is_empty(), "{}", heads[1]);
+    }
+
+    const PROJECT_ID: &str = "8ff62ca8-9150-4a4d-9940-6f2c922b2e4d";
+
+    /// Validated claims of a Git grant for [`PROJECT_ID`] with `scopes`.
+    fn claims(scopes: &[&str]) -> AccessTokenClaims {
+        AccessTokenClaims {
+            aud: "git".to_string(),
+            sub: uuid::Uuid::new_v4().to_string(),
+            project_id: PROJECT_ID.to_string(),
+            origin_id: None,
+            runtime_id: None,
+            protocol: Some("git".to_string()),
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            lease_id: None,
+            runtime_generation: None,
+            run_id: None,
+            iat: 1_700_000_000,
+            exp: 1_700_000_600,
+            jti: uuid::Uuid::new_v4().to_string(),
+            prefer_runtime: None,
+            actor_label: None,
+            browser_session_id: None,
+        }
+    }
+
+    /// A shard that answers every request with an empty 200 and hands over
+    /// each request head, lower-cased, in the order they came.
+    async fn recording_shard() -> (reqwest::Url, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shard =
+            reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let (heads, received) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+                let _ = heads.send(String::from_utf8_lossy(&request).to_ascii_lowercase());
+            }
+        });
+        (shard, received)
+    }
+
+    /// Git Edge marks exactly the pushes it lets through on a rolling
+    /// save's token alone, both requests of one (the ref advertisement for
+    /// receive-pack and the receive-pack POST): never an ordinary writer's
+    /// push, a read, or a request without a credential. A client's own
+    /// copy of the mark neither sets it nor clears it, and a request the
+    /// claims do not allow never reaches the shard.
+    #[tokio::test]
+    async fn the_edge_marks_exactly_the_pushes_a_rolling_saves_grant_allows() {
+        let (shard, mut received) = recording_shard().await;
+        let state = AppState {
+            config: Arc::new(GitEdgeConfig {
+                bind_host: "127.0.0.1".to_string(),
+                bind_port: 0,
+                skip_auth: false,
+                jwks_url: reqwest::Url::parse("http://127.0.0.1:9/jwks").unwrap(),
+                audience: "git".to_string(),
+                shards: vec![shard],
+                routing_mode: GitEdgeRoutingMode::Hash,
+                controller_url: None,
+                controller_token: None,
+                route_cache_seconds: 60,
+            }),
+            http: reqwest::Client::new(),
+            validator: TokenValidator::new(
+                reqwest::Client::new(),
+                reqwest::Url::parse("http://127.0.0.1:9/jwks").unwrap(),
+            ),
+            route_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        };
+        let persist = claims(&["git.persist", "git.read"]);
+        let persist_only = claims(&["git.persist"]);
+        let write = claims(&["git.read", "git.write"]);
+        let both = claims(&["git.persist", "git.write"]);
+        let read = claims(&["git.read"]);
+        let receive_post = (Method::POST, "/git-receive-pack");
+        let receive_refs = (Method::GET, "/info/refs?service=git-receive-pack");
+        let upload_post = (Method::POST, "/git-upload-pack");
+        let upload_refs = (Method::GET, "/info/refs?service=git-upload-pack");
+        let marked = Some(GIT_PERSIST_SCOPE);
+        let cases: Vec<(Option<&AccessTokenClaims>, (Method, &str), Option<&str>)> = vec![
+            (Some(&persist), receive_post.clone(), marked),
+            (Some(&persist), receive_refs.clone(), marked),
+            (Some(&persist_only), receive_post.clone(), marked),
+            (Some(&persist_only), receive_refs.clone(), marked),
+            (Some(&persist), upload_post.clone(), None),
+            (Some(&persist), upload_refs.clone(), None),
+            (Some(&write), receive_post.clone(), None),
+            (Some(&write), receive_refs.clone(), None),
+            (Some(&both), receive_post.clone(), None),
+            (Some(&both), receive_refs.clone(), None),
+            // No credential (GIT_EDGE_SKIP_AUTH): nothing to mark.
+            (None, receive_post.clone(), None),
+            (None, receive_refs.clone(), None),
+        ];
+        let marks = |head: &str| {
+            head.lines()
+                .filter(|line| line.starts_with(&format!("{GIT_PUSH_SCOPE_HEADER}:")))
+                .map(|line| line.trim_end().to_string())
+                .collect::<Vec<_>>()
+        };
+        let send = |grant: Option<&AccessTokenClaims>,
+                    (method, suffix): (Method, &str),
+                    forged: Option<&'static str>| {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(format!("/{PROJECT_ID}.git{suffix}"));
+            if let Some(forged) = forged {
+                request = request.header(GIT_PUSH_SCOPE_HEADER, forged);
+            }
+            let (parts, body) = request
+                .body(axum::body::Body::empty())
+                .unwrap()
+                .into_parts();
+            let grant = grant.cloned();
+            let state = state.clone();
+            async move { forward(&state, parts, body, PROJECT_ID, grant.as_ref()).await }
+        };
+        for (grant, request, expected) in cases {
+            for forged in [None, Some(GIT_PERSIST_SCOPE), Some("git.write"), Some("")] {
+                let shape = format!(
+                    "{:?} {} {} with {forged:?}",
+                    grant.map(|grant| grant.scopes.clone()),
+                    request.0,
+                    request.1
+                );
+                send(grant, request.clone(), forged).await.unwrap();
+                let head = received.recv().await.unwrap();
+                assert!(
+                    head.starts_with(&format!(
+                        "{} /{PROJECT_ID}.git{}",
+                        request.0.as_str().to_ascii_lowercase(),
+                        request.1
+                    )),
+                    "{shape}: {head}"
+                );
+                let want: Vec<String> = expected
+                    .map(|mark| format!("{GIT_PUSH_SCOPE_HEADER}: {mark}"))
+                    .into_iter()
+                    .collect();
+                assert_eq!(marks(&head), want, "{shape}: {head}");
+            }
+        }
+
+        // A push the claims do not allow is refused at the edge.
+        for request in [receive_post, receive_refs] {
+            let refused = send(Some(&read), request.clone(), Some(GIT_PERSIST_SCOPE)).await;
+            assert_eq!(
+                refused.expect_err("a read grant pushed").status_code(),
+                StatusCode::FORBIDDEN
+            );
+        }
+        send(Some(&read), upload_post, None).await.unwrap();
+        let head = received.recv().await.unwrap();
+        assert!(
+            head.starts_with(&format!("post /{PROJECT_ID}.git/git-upload-pack")),
+            "the refused pushes never reached the shard: {head}"
+        );
     }
 
     #[test]

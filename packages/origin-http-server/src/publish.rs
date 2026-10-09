@@ -255,6 +255,10 @@ pub struct FlushReport {
     pub publish_error: Option<String>,
     /// Local commits of an unfinished turn moved to a recovery ref.
     pub parked_commits: usize,
+    /// The working folder's own save at the end of the stop, when the
+    /// controller asked for one (see [`crate::working_state`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_state: Option<crate::working_state::WorkingState>,
 }
 
 /// Before a stop: store everything the checkout holds on local recovery
@@ -277,14 +281,50 @@ pub(crate) fn flush_within(
     turn_active: bool,
     budget: Duration,
 ) -> Result<FlushReport, OriginError> {
+    flush_saving(ctx, turn_active, budget, None)
+}
+
+/// [`flush_within`], and with `saves` the working folder's own save as the
+/// stop's last step (see [`crate::working_state`]): an `unsaved` copy that
+/// save holds already is not stored, one this stop stores is held back from
+/// every push until that save is settled, and the answer carries
+/// `workingState`.
+pub(crate) fn flush_saving(
+    ctx: &PublishContext<'_>,
+    turn_active: bool,
+    budget: Duration,
+    saves: Option<&crate::working_state::WorkingMemory>,
+) -> Result<FlushReport, OriginError> {
     let mut publisher = Publisher::new(ctx, budget);
     publisher.git = publisher
         .git
         .with_stall_limit(FLUSH_STALL_SECONDS)
         .with_network_deadline(publisher.deadline);
     publisher.push_deadline = Some(publisher.deadline);
+    publisher.skip_saved_copies = saves.is_some();
+    publisher.saves = saves;
     publisher.flush(turn_active).map_err(internal)
 }
+
+/// A process shutdown's flush (see [`flush`]): with no credential nothing is
+/// pushed, and an `unsaved` copy of work the working folder's last confirmed
+/// save already holds is not stored.
+pub(crate) fn flush_at_shutdown(
+    ctx: &PublishContext<'_>,
+    turn_active: bool,
+) -> Result<FlushReport, OriginError> {
+    let mut publisher = Publisher::new(ctx, FLUSH_BUDGET);
+    publisher.git = publisher
+        .git
+        .with_stall_limit(FLUSH_STALL_SECONDS)
+        .with_network_deadline(publisher.deadline);
+    publisher.push_deadline = Some(publisher.deadline);
+    publisher.skip_saved_copies = true;
+    publisher.flush(turn_active).map_err(internal)
+}
+
+/// The most a stop's flush may spend keeping its work.
+pub(crate) const STOP_FLUSH_BUDGET: Duration = FLUSH_BUDGET;
 
 /// Revert `commit` by applying its inverse to the index and work tree (only
 /// for the paths it touched), committing that, and publishing. `base` is the
@@ -389,33 +429,43 @@ pub fn repair_stale_checkout(
         .map_err(internal)
 }
 
-struct Publisher<'a> {
-    git: WorkspaceGit<'a>,
-    config: &'a ServerConfig,
-    can_write: bool,
-    deadline: Instant,
-    remote: String,
+pub(crate) struct Publisher<'a> {
+    pub(crate) git: WorkspaceGit<'a>,
+    pub(crate) config: &'a ServerConfig,
+    pub(crate) can_write: bool,
+    pub(crate) deadline: Instant,
+    pub(crate) remote: String,
     main_ref: String,
     tracking_ref: String,
-    identity: GitIdentity,
+    pub(crate) identity: GitIdentity,
     report: PublishReport,
     /// Paths frozen at their saved version, with why.
-    filtered: BTreeMap<String, RejectReason>,
+    pub(crate) filtered: BTreeMap<String, RejectReason>,
     /// The last fetch reached the remote.
     fetched: bool,
     /// Local commits whose sanitised rewrite reached `main`: work parked
     /// from them is on canonical too.
     published_aliases: Vec<String>,
     /// Stop pushing parked refs at this time (a stop's budget).
-    push_deadline: Option<Instant>,
+    pub(crate) push_deadline: Option<Instant>,
     /// The conflict copy of the attempt in flight, stored before its push so
     /// no push can land without it.
     conflict_copy: Option<RecoveryRefReport>,
     /// Copies stored in place of pending refs that built on dismissed work.
     separated: Vec<RecoveryRefReport>,
+    /// Local `unsaved` refs this stop made that no push sends until the
+    /// working folder's own save is settled.
+    pub(crate) held_back: BTreeSet<String>,
+    /// A stop that ends with the working folder's own save: its memory.
+    saves: Option<&'a crate::working_state::WorkingMemory>,
+    /// A stop stores no `unsaved` copy of work the working folder's last
+    /// confirmed save holds.
+    skip_saved_copies: bool,
+    /// The working folder's id, once a save read it.
+    pub(crate) working_set: std::cell::OnceCell<String>,
 }
 
-struct HistoryScan {
+pub(crate) struct HistoryScan {
     commits: Vec<(String, Vec<String>)>,
     touched: BTreeSet<String>,
     found: BTreeMap<String, RejectReason>,
@@ -443,7 +493,7 @@ enum Attempt {
 }
 
 impl<'a> Publisher<'a> {
-    fn new(ctx: &PublishContext<'a>, budget: Duration) -> Self {
+    pub(crate) fn new(ctx: &PublishContext<'a>, budget: Duration) -> Self {
         let config = ctx.config;
         Self {
             git: WorkspaceGit::new(ctx.workspace_root, ctx.token),
@@ -464,6 +514,10 @@ impl<'a> Publisher<'a> {
             push_deadline: None,
             conflict_copy: None,
             separated: Vec::new(),
+            held_back: BTreeSet::new(),
+            saves: None,
+            skip_saved_copies: false,
+            working_set: std::cell::OnceCell::new(),
         }
     }
 
@@ -550,7 +604,7 @@ impl<'a> Publisher<'a> {
     /// pushed. Failures are logged; their refs stay local for the next call.
     /// A pending ref that builds on dismissed work is separated from it
     /// first and never pushed as it is.
-    fn push_parked(&mut self) -> Vec<(String, String)> {
+    pub(crate) fn push_parked(&mut self) -> Vec<(String, String)> {
         if let Err(error) = self.separate_dismissed_work() {
             warn!(error = %format!("{error:#}"), "could not separate parked work from dismissed work; pushing nothing");
             return Vec::new();
@@ -573,6 +627,7 @@ impl<'a> Publisher<'a> {
             main.as_deref(),
             &published,
             self.push_deadline,
+            &self.held_back,
         ) {
             Ok(result) => {
                 for (name, detail) in &result.failed {
@@ -734,7 +789,7 @@ impl<'a> Publisher<'a> {
         self.git.commit_id(&self.tracking_ref)
     }
 
-    fn tracked_main(&self) -> Result<Option<String>> {
+    pub(crate) fn tracked_main(&self) -> Result<Option<String>> {
         self.git.commit_id(&self.tracking_ref)
     }
 
@@ -899,13 +954,29 @@ impl<'a> Publisher<'a> {
     /// Stage the selection on top of `head` in a temporary index and return
     /// the resulting tree. Paths that may not be published keep `head`'s
     /// entry and are reported.
-    fn stage(&mut self, selection: &Selection, head: Option<&str>) -> Result<String> {
+    pub(crate) fn stage(&mut self, selection: &Selection, head: Option<&str>) -> Result<String> {
+        Ok(self.stage_paths(selection, head, None, false)?.0)
+    }
+
+    /// [`Self::stage`] from `status` when the caller listed it already. A
+    /// `tick` (a rolling save while the agent may be working) never adds a
+    /// path inside a nested repository, so no `.git` is ever renamed, and
+    /// leaves out files over [`crate::working_state::TICK_MAX_BLOB_BYTES`];
+    /// both are returned as deferred, for the turn's end or the stop.
+    pub(crate) fn stage_paths(
+        &mut self,
+        selection: &Selection,
+        head: Option<&str>,
+        status: Option<Vec<(String, bool)>>,
+        tick: bool,
+    ) -> Result<(String, Vec<String>)> {
+        let mut deferred = Vec::new();
         let head_tree = match head {
             Some(head) => self.git.tree_id(head)?,
             None => self.git.empty_tree()?,
         };
         let wanted: Option<Vec<String>> = match selection {
-            Selection::None => return Ok(head_tree),
+            Selection::None => return Ok((head_tree, deferred)),
             Selection::AllDirty => None,
             Selection::Paths(paths) => Some(
                 paths
@@ -916,7 +987,7 @@ impl<'a> Publisher<'a> {
             ),
         };
         if wanted.as_ref().is_some_and(Vec::is_empty) {
-            return Ok(head_tree);
+            return Ok((head_tree, deferred));
         }
 
         let head_paths = |paths: &[String]| -> Result<BTreeSet<String>> {
@@ -934,7 +1005,15 @@ impl<'a> Publisher<'a> {
             }
         }
 
-        let status = self.status()?;
+        let status = match status {
+            Some(status) => status,
+            None => self.status()?,
+        };
+        let workspace = if tick {
+            Some(WorkspaceDir::open(self.git.root())?)
+        } else {
+            None
+        };
         let mut candidates = Vec::new();
         for (path, deleted) in status {
             if let Some(wanted) = &wanted {
@@ -954,6 +1033,12 @@ impl<'a> Publisher<'a> {
                 }
                 continue;
             }
+            if let Some(workspace) = workspace.as_ref() {
+                if crate::working_state::deferred_by_tick(workspace, self.git.root(), &path) {
+                    deferred.push(path);
+                    continue;
+                }
+            }
             candidates.push(path);
         }
         // `add` refuses a pathspec that matches nothing (a path staged and
@@ -964,7 +1049,7 @@ impl<'a> Publisher<'a> {
                 || std::fs::symlink_metadata(self.git.root().join(path)).is_ok()
         });
         if candidates.is_empty() {
-            return Ok(head_tree);
+            return Ok((head_tree, deferred));
         }
 
         let scratch = temp_index_dir(&self.git)?;
@@ -976,7 +1061,13 @@ impl<'a> Publisher<'a> {
         self.git.ok_opts(&["read-tree", &head_tree], &opts)?;
         {
             let touched: Vec<&str> = candidates.iter().map(String::as_str).collect();
-            let _guard = EmbeddedGitDirGuard::hide(self.git.root(), &touched)?;
+            // A tick added nothing inside a nested repository, so it never
+            // hides one while the agent may be using it.
+            let _guard = if tick {
+                None
+            } else {
+                Some(EmbeddedGitDirGuard::hide(self.git.root(), &touched)?)
+            };
             let list = nul_list(&candidates);
             self.git.ok_opts(
                 &["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"],
@@ -1019,23 +1110,44 @@ impl<'a> Publisher<'a> {
                 Some(&head_tree),
                 &revert,
             )?;
-            return Ok(restored);
+            return Ok((restored, deferred));
         }
-        self.git.stdout_opts(&["write-tree"], &opts)
+        Ok((self.git.stdout_opts(&["write-tree"], &opts)?, deferred))
     }
 
     /// `(path, deleted)` for each changed, deleted or untracked path that is
     /// not ignored. An untracked directory (an embedded repository) is listed
     /// once, without a trailing slash.
-    fn status(&self) -> Result<Vec<(String, bool)>> {
-        let raw = self.git.bytes(&[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--ignore-submodules=all",
-            "--no-renames",
-        ])?;
+    pub(crate) fn status(&self) -> Result<Vec<(String, bool)>> {
+        self.status_with(false)
+    }
+
+    /// [`Self::status`] that never takes `index.lock` (`GIT_OPTIONAL_LOCKS=0`,
+    /// so git does not refresh the index's stat data either): a rolling save
+    /// lists the folder while the agent's own git may be running.
+    pub(crate) fn status_without_locks(&self) -> Result<Vec<(String, bool)>> {
+        self.status_with(true)
+    }
+
+    fn status_with(&self, without_locks: bool) -> Result<Vec<(String, bool)>> {
+        let raw = self.git.bytes_opts(
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignore-submodules=all",
+                "--no-renames",
+            ],
+            &RunOpts {
+                env: if without_locks {
+                    vec![("GIT_OPTIONAL_LOCKS", "0".into())]
+                } else {
+                    Vec::new()
+                },
+                ..RunOpts::default()
+            },
+        )?;
         let mut entries = Vec::new();
         for record in raw.split(|byte| *byte == 0).filter(|r| r.len() > 3) {
             let code = &record[..2];
@@ -1082,7 +1194,7 @@ impl<'a> Publisher<'a> {
     }
 
     /// Cheap checks before staging, from the path and the file's size.
-    fn pre_check(&self, path: &str, deleted: bool) -> Option<RejectReason> {
+    pub(crate) fn pre_check(&self, path: &str, deleted: bool) -> Option<RejectReason> {
         if deleted {
             return (!deletion_allowed(path)).then_some(RejectReason::Excluded);
         }
@@ -1584,7 +1696,7 @@ impl<'a> Publisher<'a> {
                 main: pushed.to_string(),
             }),
             PushClass::LostRace(_) => Ok(Attempt::Retry),
-            PushClass::PathRejected { path, reason } => {
+            PushClass::PathRejected { path, reason, .. } => {
                 if self.filtered.contains_key(&path) {
                     return Ok(Attempt::Park {
                         reason: format!("the repository policy refused {path}"),
@@ -1620,7 +1732,11 @@ impl<'a> Publisher<'a> {
 
     /// Find never-published local commits that add, change or delete a path
     /// that may not be published, and add those paths to the frozen set.
-    fn scan_history(&mut self, local: &str, main: Option<&str>) -> Result<Option<HistoryScan>> {
+    pub(crate) fn scan_history(
+        &mut self,
+        local: &str,
+        main: Option<&str>,
+    ) -> Result<Option<HistoryScan>> {
         let mut args = vec![
             "rev-list".to_string(),
             "--topo-order".to_string(),
@@ -1894,7 +2010,7 @@ impl<'a> Publisher<'a> {
     /// `main`: `main` with what `top` changed, never removing what only
     /// `main` holds. After an earlier replay (the published frontier), only
     /// what changed since then. Frozen paths keep `main`'s entry.
-    fn unrelated_tree(&self, main: &str, head: &str, top: &str) -> Result<String> {
+    pub(crate) fn unrelated_tree(&self, main: &str, head: &str, top: &str) -> Result<String> {
         let frozen: Vec<String> = self.filtered.keys().cloned().collect();
         if let Some(frontier) = self.git.commit_id(PUBLISHED_FRONTIER_REF)? {
             if self.git.is_ancestor(&frontier, head)? {
@@ -2200,16 +2316,10 @@ impl<'a> Publisher<'a> {
             }
         }
         if self.can_write && self.fetched {
-            for (name, canonical) in self.push_parked() {
-                if let Some(entry) = flush
-                    .recovery_refs
-                    .iter_mut()
-                    .find(|entry| entry.name == name)
-                {
-                    entry.reference = canonical;
-                    entry.pushed = true;
-                }
-            }
+            self.push_parked_into(&mut flush);
+        }
+        if let Some(memory) = self.saves {
+            self.settle_working_state(memory, &mut flush)?;
         }
 
         // Copies that replaced parked work built on dismissed work (under a
@@ -2271,6 +2381,67 @@ impl<'a> Publisher<'a> {
         Ok(flush)
     }
 
+    /// Push the parked refs and mark the ones pushed in `flush`.
+    fn push_parked_into(&mut self, flush: &mut FlushReport) {
+        for (name, canonical) in self.push_parked() {
+            if let Some(entry) = flush
+                .recovery_refs
+                .iter_mut()
+                .find(|entry| entry.name == name)
+            {
+                entry.reference = canonical;
+                entry.pushed = true;
+            }
+        }
+    }
+
+    /// The working folder's own save, last in a stop that asked for it: an
+    /// `unsaved` copy this stop held back is removed when canonical now holds
+    /// every change it carries (the slot, or the parent when nothing is
+    /// unsaved); otherwise it is released and pushed as any stop pushes it.
+    fn settle_working_state(
+        &mut self,
+        memory: &crate::working_state::WorkingMemory,
+        flush: &mut FlushReport,
+    ) -> Result<()> {
+        let saved = self.persist_for_stop(memory);
+        let mut covered = Vec::new();
+        let mut released = false;
+        for entry in flush
+            .recovery_refs
+            .iter()
+            .filter(|entry| self.held_back.contains(&entry.name))
+        {
+            // Removed only when canonical now holds every change it carries.
+            let held = match saved.held.as_deref() {
+                Some(tree) => crate::working_state::holds_copy(&self.git, tree, &entry.rev)?,
+                None => false,
+            };
+            if held {
+                covered.push(entry.clone());
+            } else {
+                released = true;
+            }
+        }
+        self.unpark(&covered, flush)?;
+        self.held_back.clear();
+        let mut state = saved.state;
+        if released {
+            if self.can_write && self.fetched {
+                self.push_parked_into(flush);
+            }
+            // A released copy that is still local is work only this node
+            // holds, whatever the slot holds.
+            let left = recovery::pending(&self.git)?.len();
+            state.local_only = u32::try_from(left).unwrap_or(u32::MAX);
+            if left > 0 {
+                state.durable = false;
+            }
+        }
+        flush.working_state = Some(state);
+        Ok(())
+    }
+
     /// Store what a stop must keep, without any network call. With a turn
     /// active, its local commits and every unsaved edit go to one `unsaved`
     /// recovery commit and leave the branch, so no later publish sends them.
@@ -2325,21 +2496,31 @@ impl<'a> Publisher<'a> {
                 Some(parent) => changed_paths(&self.git, parent, &tree)?,
                 None => changed_paths(&self.git, &self.git.empty_tree()?, &tree)?,
             };
-            let stored = recovery::store(
-                &self.git,
-                RecoverySpec {
-                    kind: RecoveryKind::Unsaved,
-                    tree,
-                    parent: parent.clone(),
-                    source: Some(head.clone()),
-                    date: None,
-                    paths: paths.into_iter().take(MAX_TRAILER_PATHS).collect(),
-                    commits,
-                    identity: self.identity.clone(),
-                    origin_id: self.config.origin_id,
-                },
-            )?;
-            keep(stored, flush);
+            // On a history unrelated to `main` the commits are marked as
+            // handled below (the published frontier), so no later save of
+            // the folder holds them again: their copy is always stored and
+            // pushed, never left to the slot.
+            let unrelated = base.is_none() && main.is_some();
+            if unrelated || !self.working_save_holds(parent.as_deref(), &tree)? {
+                let stored = recovery::store(
+                    &self.git,
+                    RecoverySpec {
+                        kind: RecoveryKind::Unsaved,
+                        tree,
+                        parent: parent.clone(),
+                        source: Some(head.clone()),
+                        date: None,
+                        paths: paths.into_iter().take(MAX_TRAILER_PATHS).collect(),
+                        commits,
+                        identity: self.identity.clone(),
+                        origin_id: self.config.origin_id,
+                    },
+                )?;
+                if !unrelated {
+                    self.hold_back(stored.as_ref());
+                }
+                keep(stored, flush);
+            }
             match (base, main.as_deref()) {
                 (Some(base), _) => {
                     // Keep the files; only the branch steps back.
@@ -2380,7 +2561,7 @@ impl<'a> Publisher<'a> {
             Some(head) => self.git.tree_id(head)?,
             None => self.git.empty_tree()?,
         };
-        if dirty_tree != head_tree {
+        if dirty_tree != head_tree && !self.working_save_holds(head.as_deref(), &dirty_tree)? {
             let paths = changed_paths(&self.git, &head_tree, &dirty_tree)?;
             let stored = recovery::store(
                 &self.git,
@@ -2396,19 +2577,43 @@ impl<'a> Publisher<'a> {
                     origin_id: self.config.origin_id,
                 },
             )?;
+            self.hold_back(stored.as_ref());
             keep(stored, flush);
         }
         Ok(created)
     }
 
+    /// In a stop that skips them: whether the working folder's last
+    /// confirmed save already holds `tree` on `parent`, apart from work a
+    /// person removed from the slot, so no `unsaved` copy of the same work
+    /// is stored (see [`crate::working_state::record_holds`]).
+    fn working_save_holds(&self, parent: Option<&str>, tree: &str) -> Result<bool> {
+        if !self.skip_saved_copies {
+            return Ok(false);
+        }
+        crate::working_state::record_holds(&self.git, parent, tree)
+    }
+
+    /// Hold an `unsaved` copy this stop just made back from every push until
+    /// the working folder's own save is settled.
+    fn hold_back(&mut self, stored: Option<&RecoveryRefReport>) {
+        if self.saves.is_none() {
+            return;
+        }
+        if let Some(stored) = stored.filter(|stored| stored.created && !stored.pushed) {
+            self.held_back.insert(stored.name.clone());
+        }
+    }
+
     /// Delete never-pushed refs `park_for_stop` created that no longer match
     /// the branch.
-    fn unpark(&self, parked: &[RecoveryRefReport], flush: &mut FlushReport) -> Result<()> {
+    fn unpark(&mut self, parked: &[RecoveryRefReport], flush: &mut FlushReport) -> Result<()> {
         for entry in parked {
             let reference = format!("{}/{}", recovery::LOCAL_RECOVERY_ROOT, entry.name);
             if self.git.commit_id(&reference)?.as_deref() == Some(entry.rev.as_str()) {
                 self.git.delete_ref(&reference, &entry.rev)?;
             }
+            self.held_back.remove(&entry.name);
             flush.recovery_refs.retain(|kept| kept.name != entry.name);
         }
         Ok(())

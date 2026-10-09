@@ -45,11 +45,14 @@ use crate::publish::{self, PublishContext, PublishReport, PublishRequest, Select
 use crate::publish_policy::MAX_PUBLISH_BLOB_BYTES;
 use crate::recovery_view;
 use crate::route_auth::{self, bearer_token_from_headers, OriginAccessToken, RouteAuth};
+use crate::working_state::{PersistReason, StopFlag, WorkingMemory, WorkingState};
 use crate::workspace_fs::{WorkspaceDir, WorkspaceEntryKind};
 use crate::workspace_git::{
     blob_oid, workspace_file_blob_oid, GitIdentity, WorkspaceGit, MAX_LISTED_BLOB_BYTES,
 };
-use crate::workspace_lock::try_acquire_workspace_apply_lock;
+use crate::workspace_lock::{
+    acquire_workspace_apply_lock_within, try_acquire_workspace_apply_lock,
+};
 
 const GIT_WORKSPACE_SYNC_TTL_SECONDS: u64 = 120;
 
@@ -71,6 +74,11 @@ pub struct AppState {
     /// refused until the stop happens, or a refresh or the controller's
     /// resume lifts the fence.
     pub stopping: StopFence,
+    /// Raised while a stop keeps the workspace's work: a rolling save in
+    /// flight gives up so the stop can take the locks.
+    pub stop_flag: StopFlag,
+    /// What this process last confirmed about the working folder's own save.
+    pub working_memory: WorkingMemory,
 }
 
 /// How long the fence a pre-stop flush raises holds without a refresh or a
@@ -150,6 +158,8 @@ impl AppState {
             // one apply at a time.
             apply_slots: Arc::new(Semaphore::new(1)),
             stopping: StopFence::default(),
+            stop_flag: StopFlag::default(),
+            working_memory: WorkingMemory::default(),
         })
     }
 
@@ -271,6 +281,13 @@ pub fn router(state: AppState) -> Router {
             require_flush,
         ));
 
+    let persist_routes = Router::new()
+        .route("/workspace/persist", post(handle_workspace_persist))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_persist,
+        ));
+
     let browser_view_routes = browser::view_routes().route_layer(
         axum::middleware::from_fn_with_state(state.clone(), require_browser_view),
     );
@@ -288,6 +305,7 @@ pub fn router(state: AppState) -> Router {
         .merge(read_routes)
         .merge(write_routes)
         .merge(flush_routes)
+        .merge(persist_routes)
         .merge(browser_view_routes)
         .merge(browser_control_routes)
         .merge(browser_interactive_transport_routes)
@@ -368,6 +386,43 @@ async fn require_flush(
             .scopes
             .iter()
             .any(|scope| scope == PRE_STOP_SAVE_SCOPE)
+        {
+            let token = bearer_token_from_headers(request.headers()).unwrap_or_default();
+            request.extensions_mut().insert(claims);
+            request.extensions_mut().insert(OriginAccessToken { token });
+            return Ok(next.run(request).await);
+        }
+    }
+    authorize_and_continue(state, request, next, &["fs.write"]).await
+}
+
+/// The scope of the save-only grant the controller issues to a running write
+/// job for the working folder's rolling save (the controller's
+/// `WORKSPACE_PERSIST_SCOPE`). It opens `/workspace/persist` and nothing
+/// else, here or at the controller, which exchanges it only while that job
+/// and its runtime generation are still current, and then for `git.persist`
+/// instead of `git.write`: a token that may push recovery refs and the
+/// folder's slot, nothing else.
+pub const WORKSPACE_PERSIST_SCOPE: &str = "workspace.persist";
+
+/// `/workspace/persist` takes either an `fs.write` token under a live
+/// workspace lease (checked like every other write) or the controller's
+/// save-only grant for the running job, which needs no workspace lease: the
+/// controller checks the job again before it grants any push.
+async fn require_persist(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, OriginError> {
+    if !state.config.skip_auth {
+        let claims = state
+            .token_validator
+            .authorize(&state.config, request.headers(), &[])
+            .await?;
+        if claims
+            .scopes
+            .iter()
+            .any(|scope| scope == WORKSPACE_PERSIST_SCOPE)
         {
             let token = bearer_token_from_headers(request.headers()).unwrap_or_default();
             request.extensions_mut().insert(claims);
@@ -1593,6 +1648,12 @@ async fn handle_apply_status(
     }
 }
 
+/// How long an apply or a sync waits for another holder of the workspace
+/// (a rolling save, maybe a sibling runtime's on the same folder) to let it
+/// go before it answers 409: a background save never fails a turn's
+/// checkpoint or a person's save.
+const FOREGROUND_WORKSPACE_WAIT: Duration = Duration::from_secs(10);
+
 async fn handle_apply_json(
     State(state): State<AppState>,
     Extension(claims): Extension<OriginClaims>,
@@ -1648,7 +1709,7 @@ async fn apply_manifest_archive(
 
     let lock_workspace = workspace_root.clone();
     let workspace_apply_guard = tokio::task::spawn_blocking(move || {
-        try_acquire_workspace_apply_lock(lock_workspace.as_path())
+        acquire_workspace_apply_lock_within(lock_workspace.as_path(), FOREGROUND_WORKSPACE_WAIT)
     })
     .await
     .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
@@ -2293,6 +2354,17 @@ struct GitFlushRequest {
     /// go to a recovery ref instead of `main`.
     #[serde(default)]
     turn_active: bool,
+    /// End the stop with the working folder's own save and answer
+    /// `workingState` (see [`crate::working_state`]). Without it the flush
+    /// is what it always was.
+    #[serde(default)]
+    working_state: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspacePersistRequest {
+    reason: PersistReason,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2536,13 +2608,12 @@ async fn handle_git_sync(
     let config = state.config.clone();
     let workspace_root = checkout_root(&state);
     let lock_workspace = workspace_root.clone();
-    let workspace_apply_guard =
-        tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
-            .await
-            .map_err(|error| {
-                OriginError::internal(format!("workspace lock task failed: {error}"))
-            })??
-            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+    let workspace_apply_guard = tokio::task::spawn_blocking(move || {
+        acquire_workspace_apply_lock_within(&lock_workspace, FOREGROUND_WORKSPACE_WAIT)
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
+    .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
 
     let remote_url = config
         .git_remote_url_for_project(project_id)
@@ -3086,28 +3157,75 @@ async fn handle_git_flush(
             "flush is only available on a hosted workspace runtime",
         ));
     }
-    let turn_active = payload
-        .map(|Json(request)| request.turn_active)
-        .unwrap_or(false);
+    let request = payload.map(|Json(request)| request).unwrap_or_default();
+    let turn_active = request.turn_active;
     let project_id = project_id_for_request(&state, &claims)?;
-    let apply_lock = project_apply_lock(&state, project_id).await;
-    let apply_guard = apply_lock.lock_owned().await;
-    let config = state.config.clone();
-    let workspace_root = checkout_root(&state);
-    let lock_workspace = workspace_root.clone();
-    let workspace_apply_guard =
-        tokio::task::spawn_blocking(move || try_acquire_workspace_apply_lock(&lock_workspace))
+    if !request.working_state {
+        return flush_checkout(&state, project_id, turn_active, &access_token, None).await;
+    }
+    // A rolling save in flight gives up at its next step, so the stop gets
+    // the locks quickly; the fence this flush raises keeps saves out after.
+    // The flag goes down with this request, also when the controller gives
+    // up on it and the request is dropped.
+    let started = Instant::now();
+    let _stopping = state.stop_flag.raise();
+    flush_checkout(
+        &state,
+        project_id,
+        turn_active,
+        &access_token,
+        Some(started),
+    )
+    .await
+}
+
+/// The flush itself. With `saving_since` (the stop asked for the working
+/// folder's own save at that time) it waits for a rolling save to let the
+/// workspace go, keeps the whole stop under [`STOP_FLUSH_DEADLINE`] and
+/// ends with that save.
+async fn flush_checkout(
+    state: &AppState,
+    project_id: Uuid,
+    turn_active: bool,
+    access_token: &OriginAccessToken,
+    saving_since: Option<Instant>,
+) -> Result<Json<serde_json::Value>, OriginError> {
+    let apply_lock = project_apply_lock(state, project_id).await;
+    let apply_guard = match saving_since {
+        // Within the stop's deadline, whoever holds the project.
+        Some(since) => tokio::time::timeout(stop_time_left(since), apply_lock.lock_owned())
             .await
-            .map_err(|error| {
-                OriginError::internal(format!("workspace lock task failed: {error}"))
-            })??
-            .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
+            .map_err(|_| OriginError::conflict("workspace is already mutating"))?,
+        None => apply_lock.lock_owned().await,
+    };
+    let config = state.config.clone();
+    let workspace_root = checkout_root(state);
+    let lock_workspace = workspace_root.clone();
+    let workspace_apply_guard = tokio::task::spawn_blocking(move || match saving_since {
+        Some(since) => acquire_workspace_apply_lock_within(&lock_workspace, stop_time_left(since)),
+        None => try_acquire_workspace_apply_lock(&lock_workspace),
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
+    .ok_or_else(|| OriginError::conflict("workspace is already mutating"))?;
     let remote_url = config
         .git_remote_url_for_project(project_id)
         .ok_or_else(|| OriginError::bad_request("git remote is not configured for this project"))?;
 
-    // Without write access the flush still parks everything locally.
-    let token = match mint_git_write_token(&state, project_id, &access_token).await {
+    // Without write access the flush still parks everything locally. A stop
+    // waits for it only within what is left of its deadline.
+    let minted = mint_git_write_token(state, project_id, access_token);
+    let minted = match saving_since {
+        Some(since) => match tokio::time::timeout(stop_time_left(since), minted).await {
+            Ok(minted) => minted,
+            Err(_) => {
+                warn!("flush got no answer about write access in time; keeping work locally");
+                Ok(None)
+            }
+        },
+        None => minted.await,
+    };
+    let token = match minted {
         Ok(token) => token,
         Err(error) => {
             warn!(
@@ -3121,18 +3239,26 @@ async fn handle_git_flush(
     config_clone.workspace_root = workspace_root.clone();
     config_clone.git_remote_url = Some(remote_url);
     let stopping = state.stopping.clone();
+    let memory = state.working_memory.clone();
     let report = tokio::task::spawn_blocking(move || {
         let _apply_guard = apply_guard;
         let _workspace_apply_guard = workspace_apply_guard;
-        let report = publish::flush(
-            &PublishContext {
-                config: &config_clone,
-                workspace_root: workspace_root.as_path(),
-                token: token.as_deref(),
-                can_write: token.is_some() || config_clone.skip_auth,
-            },
-            turn_active,
-        )?;
+        let ctx = PublishContext {
+            config: &config_clone,
+            workspace_root: workspace_root.as_path(),
+            token: token.as_deref(),
+            can_write: token.is_some() || config_clone.skip_auth,
+        };
+        let report = match saving_since {
+            // The whole stop stays under the controller's wait.
+            Some(since) => publish::flush_saving(
+                &ctx,
+                turn_active,
+                stop_time_left(since).min(publish::STOP_FLUSH_BUDGET),
+                Some(&memory),
+            )?,
+            None => publish::flush(&ctx, turn_active)?,
+        };
         // Set before the locks are released, so no save slips in between.
         stopping.raise();
         Ok::<_, OriginError>(report)
@@ -3163,6 +3289,212 @@ async fn handle_git_flush_resume(
         info!("the stop did not happen; saves are accepted again");
     }
     Ok(Json(serde_json::json!({ "ok": true, "resumed": resumed })))
+}
+
+/// How long a stop that ends with the working folder's own save may take in
+/// all, waiting for the locks and for write access included: below the
+/// controller's 25 s wait.
+const STOP_FLUSH_DEADLINE: Duration = Duration::from_secs(22);
+
+/// What is left of [`STOP_FLUSH_DEADLINE`] for a stop that began at `since`.
+fn stop_time_left(since: Instant) -> Duration {
+    STOP_FLUSH_DEADLINE.saturating_sub(since.elapsed())
+}
+
+fn busy() -> OriginError {
+    OriginError::with_report(
+        axum::http::StatusCode::CONFLICT,
+        "busy",
+        "the workspace is busy; the save waits for the next one",
+        serde_json::json!({ "retryable": true }),
+    )
+}
+
+fn stopping_now() -> OriginError {
+    OriginError::with_report(
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "stopping",
+        "the workspace is stopping; its stop keeps the work",
+        serde_json::json!({ "retryable": false }),
+    )
+}
+
+/// `POST /workspace/persist {reason}`: save the working folder's unfinished
+/// work to canonical now (see [`crate::working_state`]). `tick` is a rolling
+/// save while a turn runs: it takes the locks only when they are free (409
+/// `busy` otherwise) and gives up when a stop begins. `turn_end` waits for
+/// them. Hosted checkouts only; 503 `stopping` while a stop's fence is up.
+/// Git access is minted only when something must be pushed.
+async fn handle_workspace_persist(
+    State(state): State<AppState>,
+    Extension(claims): Extension<OriginClaims>,
+    Extension(access_token): Extension<OriginAccessToken>,
+    Json(payload): Json<WorkspacePersistRequest>,
+) -> Result<Json<WorkingState>, OriginError> {
+    if !state.config.hosted_checkout {
+        return Err(OriginError::bad_request(
+            "rolling saves are only available on a hosted workspace runtime",
+        ));
+    }
+    let reason = payload.reason;
+    if reason == PersistReason::Stop {
+        return Err(OriginError::bad_request(
+            "a stop saves through its flush, not this route",
+        ));
+    }
+    let project_id = project_id_for_request(&state, &claims)?;
+    if state.stopping.is_up() || state.stop_flag.is_raised() {
+        return Err(stopping_now());
+    }
+    let memory = state.working_memory.clone();
+    let Some(remote_url) = state.config.git_remote_url_for_project(project_id) else {
+        return Ok(Json(crate::working_state::refused(
+            &memory,
+            crate::working_state::SaveError::NoBackend,
+        )));
+    };
+
+    let wait = crate::working_state::lock_wait(reason);
+    let workspace_root = checkout_root(&state);
+    let guards = save_locks(&state, project_id, &workspace_root, wait).await?;
+    // A stop may have raised its fence while this save waited.
+    if state.stopping.is_up() || state.stop_flag.is_raised() {
+        return Err(stopping_now());
+    }
+
+    let mut config = (*state.config).clone();
+    config.workspace_root = workspace_root.clone();
+    config.git_remote_url = Some(remote_url);
+    let config = Arc::new(config);
+    let budget = crate::working_state::budget(reason);
+    let stop = state.stop_flag.clone();
+
+    let planned = {
+        let config = config.clone();
+        let root = workspace_root.clone();
+        let memory = memory.clone();
+        let stop = stop.clone();
+        tokio::task::spawn_blocking(move || {
+            let _guards = guards;
+            let ctx = PublishContext {
+                config: &config,
+                workspace_root: root.as_path(),
+                token: None,
+                can_write: false,
+            };
+            let mut publisher = crate::working_state::publisher(&ctx, budget);
+            crate::working_state::plan_route_save(&mut publisher, reason, &memory, &stop)
+        })
+        .await
+        .map_err(|error| OriginError::internal(format!("working save task failed: {error}")))?
+    };
+    let plan = match planned {
+        crate::working_state::Planned::Network(plan) => plan,
+        crate::working_state::Planned::Answered(answer) => {
+            if answer.error.as_deref() == Some("stopping") {
+                return Err(stopping_now());
+            }
+            return Ok(Json(answer));
+        }
+    };
+
+    // The controller is asked for write access with the workspace let go,
+    // within the save's own budget: a stop that comes meanwhile takes the
+    // workspace at once, and this save gives up when the answer comes.
+    let token = match tokio::time::timeout(
+        budget,
+        mint_git_write_token(&state, project_id, &access_token),
+    )
+    .await
+    {
+        Ok(Ok(token)) => Some(token),
+        Ok(Err(error)) => {
+            warn!(?error, "a working save could not get write access");
+            None
+        }
+        Err(_) => {
+            warn!("a working save got no answer about write access in time");
+            None
+        }
+    };
+    if state.stopping.is_up() || state.stop_flag.is_raised() {
+        return Err(stopping_now());
+    }
+    let Some(token) = token else {
+        return Ok(Json(crate::working_state::refused(
+            &memory,
+            crate::working_state::SaveError::NoCredential,
+        )));
+    };
+    let guards = save_locks(&state, project_id, &workspace_root, wait).await?;
+    if state.stopping.is_up() || state.stop_flag.is_raised() {
+        return Err(stopping_now());
+    }
+    let answer = tokio::task::spawn_blocking(move || {
+        let _guards = guards;
+        let ctx = PublishContext {
+            config: &config,
+            workspace_root: workspace_root.as_path(),
+            token: token.as_deref(),
+            can_write: token.is_some() || config.skip_auth,
+        };
+        let mut publisher = crate::working_state::publisher(&ctx, budget);
+        // The turn may have published, or another save of the folder (a
+        // runtime sharing it) moved the slot, while the workspace was let
+        // go: take the snapshot again.
+        let plan = match publisher.plan_still_current(&plan) {
+            Ok(true) => plan,
+            _ => {
+                match crate::working_state::plan_route_save(&mut publisher, reason, &memory, &stop)
+                {
+                    crate::working_state::Planned::Network(plan) => plan,
+                    crate::working_state::Planned::Answered(answer) => return answer,
+                }
+            }
+        };
+        publisher
+            .execute_working_save(plan, &memory, Some(&stop))
+            .state
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("working save task failed: {error}")))?;
+    if answer.error.as_deref() == Some("stopping") {
+        return Err(stopping_now());
+    }
+    Ok(Json(answer))
+}
+
+/// The project apply lock and the workspace lock a working save holds: a
+/// tick (`wait` of `None`) takes them only when free and answers 409 `busy`
+/// otherwise; a turn-end save waits up to `wait` for each.
+async fn save_locks(
+    state: &AppState,
+    project_id: Uuid,
+    workspace_root: &Path,
+    wait: Option<Duration>,
+) -> Result<
+    (
+        tokio::sync::OwnedMutexGuard<()>,
+        crate::workspace_lock::WorkspaceApplyLock,
+    ),
+    OriginError,
+> {
+    let apply_lock = project_apply_lock(state, project_id).await;
+    let apply_guard = match wait {
+        None => apply_lock.try_lock_owned().map_err(|_| busy())?,
+        Some(wait) => tokio::time::timeout(wait, apply_lock.lock_owned())
+            .await
+            .map_err(|_| busy())?,
+    };
+    let lock_workspace = workspace_root.to_path_buf();
+    let workspace_guard = tokio::task::spawn_blocking(move || match wait {
+        None => try_acquire_workspace_apply_lock(&lock_workspace),
+        Some(wait) => acquire_workspace_apply_lock_within(&lock_workspace, wait),
+    })
+    .await
+    .map_err(|error| OriginError::internal(format!("workspace lock task failed: {error}")))??
+    .ok_or_else(busy)?;
+    Ok((apply_guard, workspace_guard))
 }
 
 /// Bring a single-tenant checkout up to date without write access: fetch

@@ -261,6 +261,24 @@ pub trait RuntimeAllocator: Send + Sync {
     async fn census(&self) -> anyhow::Result<RuntimeCensus> {
         Ok(RuntimeCensus::default())
     }
+
+    /// Where the controller, on this node, reaches the origin of the
+    /// runtime running lease generation `lease_id`: an address this
+    /// allocator assigned and can see, never one the runtime registered
+    /// itself, so a stop's save credential goes nowhere else. `None` when no
+    /// running runtime of exactly that generation is here, when the
+    /// allocator cannot tell, or when the controller is not on this node
+    /// (an address on this node would mean another machine to it).
+    /// Read-only.
+    async fn origin_endpoint(
+        &self,
+        project_id: Uuid,
+        runtime_id: Uuid,
+        lease_id: Uuid,
+    ) -> anyhow::Result<Option<String>> {
+        let _ = (project_id, runtime_id, lease_id);
+        Ok(None)
+    }
 }
 
 pub type DynRuntimeAllocator = Arc<dyn RuntimeAllocator>;

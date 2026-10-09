@@ -30,6 +30,52 @@ use crate::config::ProviderConfig;
 
 const DOCKER_COMMAND_OUTPUT_LIMIT: usize = 8_000;
 
+/// The port a runtime's origin listens on inside its container; the compose
+/// file publishes it on the node at the runtime's own host port.
+const ORIGIN_CONTAINER_PORT: u16 = 54332;
+
+/// How the node reaches a runtime origin published at `host_port`: through
+/// its host gateway, which every process on the node can reach, in a
+/// container or not.
+fn node_local_origin_endpoint(host_port: u16) -> String {
+    format!("http://host.docker.internal:{host_port}")
+}
+
+/// Whether the controller this node's runtimes call (`CONTROLLER_BASE_URL`,
+/// or `PROXY_CONTROLLER_BASE_URL` when that is unset) runs on this node:
+/// unset (the compose file's host-gateway default), or
+/// naming the host gateway, `localhost` or a loopback address. An address
+/// from [`node_local_origin_endpoint`] means this node, so only a controller
+/// here may be told one: any other controller would read it as its own
+/// host and send a stop's save credential to the wrong machine.
+fn controller_on_this_node(controller_base_url: Option<&str>) -> bool {
+    let Some(base) = controller_base_url else {
+        return true;
+    };
+    let Some(host) = Url::parse(base.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    host == "host.docker.internal"
+        || host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The host port in `docker port <container> <port>/tcp` output, as
+/// `0.0.0.0:49153` or `[::]:49153`, one binding per line.
+fn published_host_port(output: &str) -> Option<u16> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().rsplit_once(':'))
+        .find_map(|(_, port)| port.parse::<u16>().ok().filter(|port| *port != 0))
+}
+
 pub struct DockerRuntimeAllocator {
     compose_file: PathBuf,
     compose_dir: PathBuf,
@@ -743,7 +789,10 @@ impl DockerRuntimeAllocator {
         ));
         envs.push(("ORIGIN_HOST_PORT".to_string(), host_port.to_string()));
         envs.push(("ORIGIN_BIND_HOST".to_string(), "0.0.0.0".to_string()));
-        envs.push(("ORIGIN_BIND_PORT".to_string(), "54332".to_string()));
+        envs.push((
+            "ORIGIN_BIND_PORT".to_string(),
+            ORIGIN_CONTAINER_PORT.to_string(),
+        ));
         // The runtime compose stack includes a Codex proxy container. We only need it
         // reachable from within the compose network, so bind it to an ephemeral host
         // port to avoid collisions with the shared proxy service (and other runtimes).
@@ -776,7 +825,7 @@ impl DockerRuntimeAllocator {
                     .unwrap_or_else(|| "127.0.0.1".to_string());
                 format!("{scheme}://{host}:{host_port}")
             })
-            .unwrap_or_else(|| format!("http://host.docker.internal:{host_port}"));
+            .unwrap_or_else(|| node_local_origin_endpoint(host_port));
 
         envs.push(("ORIGIN_ENDPOINT".to_string(), endpoint));
 
@@ -1113,6 +1162,51 @@ fn list_runtime_containers(prefix: &str) -> anyhow::Result<(Vec<ContainerFacts>,
     Ok((facts, truncated))
 }
 
+/// The running containers of compose service `service` in compose project
+/// `project`, from one read-only `docker ps` that takes no compose permit:
+/// a stop's origin lookup never waits behind other runtimes' compose up or
+/// down. The arguments are fixed; the names are matched here.
+fn running_compose_service_containers(project: &str, service: &str) -> anyhow::Result<Vec<String>> {
+    let output = Command::new("docker")
+        .arg("ps")
+        .arg("--filter")
+        .arg("label=com.docker.compose.project")
+        .arg("--filter")
+        .arg("status=running")
+        .arg("--format")
+        .arg("{{.ID}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}")
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "docker ps failed: {}",
+        summarize_command_output(&output)
+    );
+    Ok(service_containers(
+        &String::from_utf8_lossy(&output.stdout),
+        project,
+        service,
+    ))
+}
+
+/// The container ids in `docker ps` lines of `<id>\t<project>\t<service>`
+/// that belong to `service` in `project`.
+fn service_containers(listing: &str, project: &str, service: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let (Some(id), Some(listed_project), Some(listed_service)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return None;
+            };
+            let id = id.trim();
+            (!id.is_empty() && listed_project.trim() == project && listed_service.trim() == service)
+                .then(|| id.to_string())
+        })
+        .collect()
+}
+
 fn summarize_command_output(output: &Output) -> String {
     let code = output
         .status
@@ -1340,6 +1434,48 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
         .await?)
     }
 
+    async fn origin_endpoint(
+        &self,
+        project_id: Uuid,
+        runtime_id: Uuid,
+        lease_id: Uuid,
+    ) -> anyhow::Result<Option<String>> {
+        // The answer is an address on this node; a controller elsewhere (a
+        // provider registered with a remote one) would read it as its own.
+        if !controller_on_this_node(self.controller_base_url.as_deref()) {
+            return Ok(None);
+        }
+        let project_name = self.sanitize_project_name(project_id, runtime_id);
+        let service = self.service_name.clone();
+        let running = task::spawn_blocking(move || {
+            running_compose_service_containers(&project_name, &service)
+        })
+        .await??;
+        // One running container, of exactly that generation.
+        let [container_id] = running.as_slice() else {
+            return Ok(None);
+        };
+        if self.container_lease_id(container_id).await? != Some(lease_id) {
+            return Ok(None);
+        }
+        let container_id = container_id.clone();
+        let output = task::spawn_blocking(move || {
+            Command::new("docker")
+                .arg("port")
+                .arg(&container_id)
+                .arg(format!("{ORIGIN_CONTAINER_PORT}/tcp"))
+                .output()
+        })
+        .await??;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        Ok(
+            published_host_port(&String::from_utf8_lossy(&output.stdout))
+                .map(node_local_origin_endpoint),
+        )
+    }
+
     async fn runtime_oom_killed(
         &self,
         project_id: Uuid,
@@ -1418,6 +1554,107 @@ mod tests {
             origin_protocols: Vec::new(),
             origin_metadata: None,
         }
+    }
+
+    #[test]
+    fn the_origin_endpoint_is_the_published_port_on_the_host_gateway() {
+        assert_eq!(
+            published_host_port("0.0.0.0:49153\n[::]:49153\n"),
+            Some(49153)
+        );
+        assert_eq!(published_host_port("[::]:40001\n"), Some(40001));
+        assert_eq!(published_host_port(""), None);
+        assert_eq!(published_host_port("0.0.0.0:0\n"), None);
+        assert_eq!(published_host_port("no such port\n"), None);
+        assert_eq!(
+            published_host_port("49153").map(node_local_origin_endpoint),
+            None
+        );
+        assert_eq!(
+            node_local_origin_endpoint(49153),
+            "http://host.docker.internal:49153"
+        );
+    }
+
+    /// Only a controller on this node may be told an origin address on it.
+    #[test]
+    fn only_a_controller_on_this_node_is_told_where_an_origin_is() {
+        for base in [
+            None,
+            Some("http://host.docker.internal:80"),
+            Some("http://HOST.docker.internal:8788/"),
+            Some("http://localhost:8788"),
+            Some("http://127.0.0.1:8788"),
+            Some("http://127.1.2.3"),
+            Some("http://[::1]:8788"),
+        ] {
+            assert!(controller_on_this_node(base), "{base:?}");
+        }
+        for base in [
+            Some("https://controller.example.com"),
+            Some("http://10.0.0.5:8788"),
+            Some("http://192.168.1.20:8788"),
+            Some("http://instafy-controller:8788"),
+            Some("http://[fd00::1]:8788"),
+            Some("not a url"),
+            Some(""),
+        ] {
+            assert!(!controller_on_this_node(base), "{base:?}");
+        }
+    }
+
+    /// A provider whose runtimes call a controller elsewhere answers no
+    /// origin, before it looks at any container.
+    #[tokio::test]
+    async fn a_remote_controller_is_told_no_origin() {
+        let mut allocator = DockerRuntimeAllocator::new(&ProviderConfig::default_docker()).unwrap();
+        allocator.controller_base_url = Some("https://controller.example.com".to_string());
+        let answer = allocator
+            .origin_endpoint(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4())
+            .await
+            .expect("answered without looking at containers");
+        assert_eq!(answer, None);
+    }
+
+    /// A stop's origin lookup reads containers without a compose permit, so
+    /// it answers while other runtimes' compose up or down hold every one.
+    #[tokio::test]
+    async fn the_origin_lookup_never_waits_for_compose_operations() {
+        let mut allocator = DockerRuntimeAllocator::new(&ProviderConfig::default_docker()).unwrap();
+        allocator.controller_base_url = None;
+        allocator.project_prefix = "origin-lookup-test-".to_string();
+        let permits = allocator.compose_semaphore.available_permits() as u32;
+        let _held = allocator
+            .compose_semaphore
+            .clone()
+            .acquire_many_owned(permits)
+            .await
+            .unwrap();
+        // Without Docker here the lookup fails; either way it answers.
+        let answer = tokio::time::timeout(
+            Duration::from_secs(20),
+            allocator.origin_endpoint(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()),
+        )
+        .await
+        .expect("the lookup waited for a compose permit");
+        if let Ok(endpoint) = answer {
+            assert_eq!(endpoint, None, "no such runtime here");
+        }
+    }
+
+    #[test]
+    fn the_origin_lookup_keeps_only_that_projects_service() {
+        let listing = "aaa\tinstafy-runtime-p-1\truntime\n\
+                       bbb\tinstafy-runtime-p-1\tproxy\n\
+                       ccc\tinstafy-runtime-p-10\truntime\n\
+                       \tinstafy-runtime-p-1\truntime\n\
+                       ddd\tinstafy-runtime-p-1\n\
+                       eee\tinstafy-runtime-p-1\truntime\n";
+        assert_eq!(
+            service_containers(listing, "instafy-runtime-p-1", "runtime"),
+            vec!["aaa".to_string(), "eee".to_string()]
+        );
+        assert!(service_containers("", "instafy-runtime-p-1", "runtime").is_empty());
     }
 
     fn env_value<'a>(envs: &'a [(String, String)], key: &str) -> Option<&'a str> {

@@ -197,7 +197,16 @@ impl DrainFixture {
             let ensured = node.ensured.clone();
             let pool = pool.clone();
             let endpoint = origin_endpoint.clone();
+            let attested = origin_endpoint.clone();
             axum::Router::new()
+                // The node's provider says where a runtime's origin is.
+                .route(
+                    "/runtime/origin",
+                    axum::routing::post(move || {
+                        let attested = attested.clone();
+                        async move { Json(json!({ "endpoint": attested })) }
+                    }),
+                )
                 .route(
                     "/runtime/census",
                     axum::routing::post(move || {
