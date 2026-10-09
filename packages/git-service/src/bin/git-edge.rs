@@ -474,7 +474,7 @@ mod tests {
     /// copy of the mark neither sets it nor clears it, and a request the
     /// claims do not allow never reaches the shard.
     #[tokio::test]
-    async fn the_edge_marks_exactly_the_pushes_a_rolling_saves_token_allows() {
+    async fn the_edge_marks_exactly_the_pushes_a_rolling_saves_grant_allows() {
         let (shard, mut received) = recording_shard().await;
         let state = AppState {
             config: Arc::new(GitEdgeConfig {
