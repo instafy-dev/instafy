@@ -281,6 +281,14 @@ impl Stored {
 
 /// The stored copy whose name ends with `suffix`, in any state, except the
 /// pending ref `skip`.
+///
+/// The rejected backups ([`LOCAL_RECOVERY_REJECTED_ROOT`]) are left out on
+/// purpose. A copy lands there when canonical refused a path it holds (or
+/// it built on dismissed work), and a refused path then exists only in the
+/// folder and in local refs that neither the durable-stop marker nor
+/// eviction count. Storing the same work again as a new pending copy is
+/// what keeps the marker off and the checkout from being evicted (see
+/// `a_path_the_shard_refuses_keeps_the_checkout`).
 fn stored_with_suffix(
     git: &WorkspaceGit<'_>,
     suffix: &str,

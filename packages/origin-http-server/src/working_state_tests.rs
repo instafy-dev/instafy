@@ -2178,6 +2178,60 @@ async fn the_durable_stop_marker_is_written_only_when_durable() {
     assert!(!ws.join(crate::server::CLEAN_STOP_MARKER).exists());
 }
 
+/// A path the shard refuses never lets the checkout go. Saves leave it out
+/// and still answer durable, so the folder holds its only copy. The stop's
+/// push of a local copy is refused for it, which retires that copy to the
+/// rejected backups; the shutdown then stores the work again as a new
+/// pending `unsaved` copy (the retired one is not taken for it), so no
+/// durable-stop marker is written and eviction keeps the checkout. With
+/// saves on and a flagged stop, and with saves off; the refused file alone
+/// and with another edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_path_the_shard_refuses_keeps_the_checkout() {
+    for (saves_on, other_edit) in [(true, false), (true, true), (false, false), (false, true)] {
+        let case = format!("saves on: {saves_on}, another edit: {other_edit}");
+        let fx = Fixture::new();
+        install_shard_hook(&fx.remote, &[("GIT_DENY_PATHS", "*.zip")]);
+        let mut server = crate::server::OriginHttpServer::new(fx.config.clone()).unwrap();
+        server.start().await.unwrap();
+        fx.write("assets/a.zip", b"zip\n");
+        if other_edit {
+            fx.write("notes.md", b"notes\n");
+        }
+        let memory = server.app_state().unwrap().working_memory;
+        let report = flush_saving(
+            &fx.ctx(),
+            false,
+            Duration::from_secs(18),
+            saves_on.then_some(&memory),
+        )
+        .unwrap();
+        if saves_on {
+            let working = report.working_state.clone().expect("workingState");
+            assert!(working.durable, "{case}: {working:?}");
+            assert!(fx.slot_file("assets/a.zip").is_none(), "{case}");
+        }
+        assert!(
+            !fx.local_refs(crate::recovery::LOCAL_RECOVERY_REJECTED_ROOT)
+                .is_empty(),
+            "{case}: the stop's push retired its copy"
+        );
+        server.stop_flushing_workspace().await.unwrap();
+
+        assert!(
+            !fx.ws.join(crate::server::CLEAN_STOP_MARKER).exists(),
+            "{case}: the stop is not durable"
+        );
+        let pending = fx.local_refs(LOCAL_RECOVERY_ROOT);
+        assert_eq!(pending.len(), 1, "{case}: {pending:?}");
+        assert_eq!(
+            ig(&fx.ws, &["show", &format!("{}:assets/a.zip", pending[0])]),
+            "zip",
+            "{case}: the pending copy holds the refused file"
+        );
+    }
+}
+
 /// A clean folder whose HEAD canonical `main` holds stops durably although
 /// its process never saved, as with rolling saves off, so eviction may take
 /// it. A commit `main` does not hold is never durable.
