@@ -195,6 +195,10 @@ pub(crate) enum SaveError {
     NoCredential,
     /// A stop began: the rolling save gave up.
     Stopping,
+    /// HEAD or the tracked `main` moved while the save listed the folder,
+    /// and again when it listed it once more: nothing was saved, and the
+    /// next save looks again.
+    Busy,
     /// The push's outcome is unknown; nothing was recorded.
     PushAmbiguous,
     /// Someone else moved the slot.
@@ -215,6 +219,7 @@ impl SaveError {
             Self::NoBackend => "no_backend",
             Self::NoCredential => "no_credential",
             Self::Stopping => "stopping",
+            Self::Busy => "busy",
             Self::PushAmbiguous => "push_ambiguous",
             Self::SlotMoved => "slot_moved",
             Self::PushRejected => "push_rejected",
@@ -854,9 +859,23 @@ impl std::fmt::Display for Stopped {
 
 impl std::error::Error for Stopped {}
 
+/// HEAD or the tracked `main` moved during each listing a save took.
+#[derive(Debug)]
+struct Moving;
+
+impl std::fmt::Display for Moving {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("HEAD or main moved while the save listed the folder")
+    }
+}
+
+impl std::error::Error for Moving {}
+
 fn local_failure(error: &anyhow::Error) -> SaveError {
     if error.downcast_ref::<Stopped>().is_some() {
         SaveError::Stopping
+    } else if error.downcast_ref::<Moving>().is_some() {
+        SaveError::Busy
     } else {
         SaveError::Local
     }
@@ -872,18 +891,7 @@ impl Publisher<'_> {
         stop: Option<&StopFlag>,
     ) -> Result<Plan> {
         stopping(stop)?;
-        // The agent may be running git in the folder during a tick; at a
-        // turn's end or a stop it is idle. The folder is listed before HEAD
-        // is read: a commit the agent makes meanwhile is then in that HEAD,
-        // or its files are in the listing, so the snapshot never builds on
-        // a HEAD the listing did not see.
-        let status = if reason == PersistReason::Tick {
-            self.status_without_locks()?
-        } else {
-            self.status()?
-        };
-        let head = self.git.commit_id("HEAD")?;
-        let main = self.tracked_main()?;
+        let (status, head, main) = self.list_on_one_head(reason)?;
         let base = match (head.as_deref(), main.as_deref()) {
             (Some(head), Some(main)) => self.git.merge_base(head, main)?,
             _ => None,
@@ -953,6 +961,34 @@ impl Publisher<'_> {
             pending,
             more,
         })
+    }
+
+    /// The folder's listing and the HEAD and tracked `main` it was taken
+    /// on. The agent may be running git in the folder during a tick (at a
+    /// turn's end or a stop it is idle): a commit, a reset or a fetch that
+    /// lands while the folder is listed leaves a listing of neither state,
+    /// and a snapshot of it can lack the work that moved, so the save would
+    /// shrink or delete the slot that holds it. HEAD and `main` are read
+    /// before and after the listing; when either moved, the folder is
+    /// listed once more, and when they moved again the save gives up
+    /// ([`SaveError::Busy`]) without touching the slot.
+    fn list_on_one_head(
+        &self,
+        reason: PersistReason,
+    ) -> Result<(Vec<(String, bool)>, Option<String>, Option<String>)> {
+        for _ in 0..2 {
+            let (head_before, main_before) = (self.git.commit_id("HEAD")?, self.tracked_main()?);
+            let status = if reason == PersistReason::Tick {
+                self.status_without_locks()?
+            } else {
+                self.status()?
+            };
+            let (head, main) = (self.git.commit_id("HEAD")?, self.tracked_main()?);
+            if head == head_before && main == main_before {
+                return Ok((status, head, main));
+            }
+        }
+        bail!(Moving)
     }
 
     /// The paths a tick leaves for the next one so it sends at most
@@ -1643,7 +1679,7 @@ pub(crate) fn plan_route_save(
         Ok(planned) => planned,
         Err(error) => {
             let failure = local_failure(&error);
-            if failure != SaveError::Stopping {
+            if !matches!(failure, SaveError::Stopping | SaveError::Busy) {
                 warn!(error = %format!("{error:#}"), "a working save could not take its snapshot");
             }
             Planned::Answered(refused(memory, failure))

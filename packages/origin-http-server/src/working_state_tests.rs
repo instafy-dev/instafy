@@ -2662,6 +2662,93 @@ fn a_commit_that_lands_while_a_save_looks_stays_saved() {
     }
 }
 
+/// The other way round: the agent undoes its own commit (`git reset --soft
+/// HEAD~1`) while a save lists the folder. The listing saw the commit's
+/// work as clean, the HEAD read after it is the commit's parent, and a
+/// snapshot of both lacks that work: the save would delete the slot that
+/// holds it. HEAD and `main` are read before and after the listing, so a
+/// move lists the folder again, and one that moves again answers `busy`
+/// and leaves the slot as it is.
+#[test]
+fn a_reset_that_lands_while_a_save_looks_keeps_the_slot() {
+    for keeps_moving in [false, true] {
+        let case = format!("keeps moving: {keeps_moving}");
+        let fx = Fixture::new();
+        let main = fx.main();
+        fx.write("new.ts", b"committed by the agent\n");
+        ig(&fx.ws, &["add", "new.ts"]);
+        ig(
+            &fx.ws,
+            &[
+                "-c",
+                "user.name=Agent",
+                "-c",
+                "user.email=agent@instafy.dev",
+                "commit",
+                "-q",
+                "-m",
+                "agent",
+            ],
+        );
+        let committed = ig(&fx.ws, &["rev-parse", "HEAD"]);
+        assert_eq!(fx.save(PersistReason::Tick).error, None, "{case}");
+        let (_, slot) = fx.slot().expect("a slot");
+        assert_eq!(fx.slot_parent(), main, "{case}");
+        assert_eq!(
+            fx.slot_file("new.ts").as_deref(),
+            Some("committed by the agent\n"),
+            "{case}"
+        );
+
+        // Each listing (the first only, or every one) is followed by a
+        // reset: to the parent, or back and forth between the two.
+        let moved = fx.root.join("moved");
+        let listing = fx.root.join("listing");
+        let reset = format!(
+            "(unset $(env | sed -n 's/^\\(GIT_[A-Z_]*\\)=.*/\\1/p'); \
+             export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; cd '{ws}' && \
+             git --git-dir .instafy/.git --work-tree . reset -q --soft \"$to\") || exit 1",
+            ws = fx.ws.display()
+        );
+        let prelude = if keeps_moving {
+            format!(
+                "case \" $* \" in *\" status \"*) git \"$@\" > '{listing}'; listed=$?; \
+                 if [ -e '{moved}' ]; then rm '{moved}'; to={committed}; \
+                 else : > '{moved}'; to={main}; fi; {reset}; cat '{listing}'; exit $listed ;; esac",
+                listing = listing.display(),
+                moved = moved.display(),
+            )
+        } else {
+            format!(
+                "case \" $* \" in *\" status \"*) if [ ! -e '{moved}' ]; then : > '{moved}'; \
+                 git \"$@\" > '{listing}'; listed=$?; to={main}; {reset}; cat '{listing}'; \
+                 exit $listed; fi ;; esac",
+                listing = listing.display(),
+                moved = moved.display(),
+            )
+        };
+        let wrapper = GitWrapper::install(&fx.root, &prelude);
+        let state = fx.save(PersistReason::Tick);
+        drop(wrapper);
+        let head = ig(&fx.ws, &["rev-parse", "HEAD"]);
+        if keeps_moving {
+            assert_eq!(state.error.as_deref(), Some("busy"), "{case}: {state:?}");
+            assert!(state.changed && !state.durable, "{case}: {state:?}");
+            assert_eq!(head, committed, "{case}: moved twice");
+        } else {
+            assert_eq!(state.error, None, "{case}: {state:?}");
+            assert_eq!(head, main, "{case}: the reset landed");
+        }
+        assert_eq!(fx.slot().map(|(_, rev)| rev), Some(slot.clone()), "{case}");
+        assert_eq!(fx.record(), Some(slot), "{case}");
+        assert_eq!(
+            fx.slot_file("new.ts").as_deref(),
+            Some("committed by the agent\n"),
+            "{case}"
+        );
+    }
+}
+
 /// What one save costs in git processes, the same for 20 dirty files as for
 /// 200: the config of the checkout is checked before every git command but
 /// parsed only when it changed, and each save reads what it needs once.
