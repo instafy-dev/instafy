@@ -888,6 +888,73 @@ fn a_path_denied_after_it_was_saved_leaves_the_slot() {
     assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
 }
 
+/// A path main holds that the shard starts to deny after a save changed it
+/// goes back to main's version in the slot, and saving goes on: the shard
+/// refuses the slot's own version and accepts the parent's.
+#[test]
+fn a_denied_path_main_holds_goes_back_to_mains_version_in_the_slot() {
+    let fx = Fixture::new();
+    fx.write("doc.md", b"alpha\nbeta\nedited\n");
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    assert_eq!(
+        fx.slot_file("doc.md").as_deref(),
+        Some("alpha\nbeta\nedited\n")
+    );
+
+    install_shard_hook(&fx.remote, &[("GIT_DENY_PATHS", "doc.md")]);
+    fx.write("notes.md", b"later\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_parent(), fx.main());
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("later\n"));
+    assert_eq!(fx.slot_file("doc.md").as_deref(), Some("alpha\nbeta\n"));
+    assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
+}
+
+/// A first save on an older main, where main changed a path since that the
+/// shard now denies: the slot keeps its parent's version, which the shard
+/// accepts, although it differs from main's.
+#[test]
+fn a_new_slot_on_an_older_main_keeps_its_parents_version_of_a_denied_path() {
+    let fx = Fixture::new();
+    let parent = fx.main();
+    let other = fx.root.join("other");
+    git_in(
+        &fx.root,
+        &[
+            "clone",
+            "-q",
+            fx.remote.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    write(&other, "doc.md", b"alpha\nbeta\npublished\n");
+    git_in(
+        &other,
+        &[
+            "-c",
+            "user.name=Other",
+            "-c",
+            "user.email=other@example.com",
+            "commit",
+            "-q",
+            "-a",
+            "-m",
+            "publish",
+        ],
+    );
+    git_in(&other, &["push", "-q", "origin", "main"]);
+    assert_ne!(fx.main(), parent);
+
+    install_shard_hook(&fx.remote, &[("GIT_DENY_PATHS", "doc.md")]);
+    fx.write("notes.md", b"draft\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_parent(), parent);
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("draft\n"));
+    assert_eq!(fx.slot_file("doc.md").as_deref(), Some("alpha\nbeta\n"));
+}
+
 #[test]
 fn an_unrelated_history_saves_on_main() {
     let fx = Fixture::new();

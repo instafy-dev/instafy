@@ -58,7 +58,8 @@ pub const RECOVERY_REF_ROOT: &str = "refs/instafy/recovery";
 /// is a lower-case UUID that names one working folder. It is the only
 /// recovery ref a push may move: each save replaces it under a lease on the
 /// exact tip the saver last confirmed. Its updates are checked against its
-/// own parent as well as its old tip.
+/// own parent: that parent alone when it is on the default branch, and also
+/// against the old tip (or the default branch) when it is not.
 pub const WORKING_SLOT_NAME: &str = "working";
 
 /// Whether `refname` is a working slot: `<RECOVERY_REF_ROOT>/<lower-case
@@ -373,15 +374,23 @@ check_changes() {{
   fi
 }}
 
-check_changes "$base"
-
-# A working slot is also checked against its own parent. Its old tip passed
-# the policy that applied then; against the parent every path the slot holds
-# is checked again, so a path denied since then (GIT_DENY_PATHS) is refused
-# even when this save did not change it.
+# A working slot is checked against its own parent, so a path denied since
+# its old tip was accepted (GIT_DENY_PATHS) is refused when the slot keeps
+# its own version, even if this save did not change it. A parent on the
+# default branch is canonical history, so the slot is checked against it
+# alone: everything else the slot holds differs from it, and the slot may go
+# back to the parent's version of a denied path, which is what a saver does
+# with a path the shard refuses. A parent off the default branch proves
+# nothing, so the slot is also checked against what was already accepted.
+slot_parent=""
 if [[ "$working_slot" == "1" ]] \
   && slot_parent="$(git rev-parse --verify --quiet "$newcommit^1")" \
-  && [[ "$slot_parent" != "$base" ]]; then
+  && git merge-base --is-ancestor "$slot_parent" "$main_ref" 2>/dev/null; then
+  base="$slot_parent"
+fi
+
+check_changes "$base"
+if [[ -n "$slot_parent" && "$slot_parent" != "$base" ]]; then
   check_changes "$slot_parent"
 fi
 
@@ -839,6 +848,11 @@ mod tests {
 
         /// A commit on top of main whose tree holds exactly `files`.
         fn commit_with(&self, files: &[(&str, &[u8])]) -> String {
+            self.commit_on(&self.main, files)
+        }
+
+        /// A commit on top of `parent` whose tree holds exactly `files`.
+        fn commit_on(&self, parent: &str, files: &[(&str, &[u8])]) -> String {
             let index = self.root.join("index");
             let _ = std::fs::remove_file(&index);
             for (path, contents) in files {
@@ -867,7 +881,7 @@ mod tests {
                 .unwrap();
             assert!(tree.status.success(), "write-tree {path}");
             let tree = String::from_utf8(tree.stdout).unwrap().trim().to_string();
-            self.git(&["commit-tree", "-p", &self.main, "-m", path, &tree])
+            self.git(&["commit-tree", "-p", parent, "-m", path, &tree])
         }
     }
 
@@ -1063,8 +1077,8 @@ mod tests {
         }
     }
 
-    /// A slot update is checked against its own parent as well as its old
-    /// tip: a path its old tip already held, denied since, is refused.
+    /// A slot update is checked against its own parent: a path its old tip
+    /// already held, denied since, is refused.
     #[test]
     fn a_working_slot_is_checked_against_its_parent() {
         let repo = HookRepo::new("slot-parent");
@@ -1088,7 +1102,7 @@ mod tests {
         // A ref whose update is compared with its old tip alone lets the
         // same change through.
         repo.accepts_with("refs/heads/feature", &earlier, &later, &deny_zip[..]);
-        // A new slot is compared with main, which lacks the archive.
+        // A new slot on the same parent is refused too.
         let stderr = repo.refuses(&slot, ZERO, &earlier, &deny_zip);
         assert!(
             stderr.contains("blocked path 'assets/archive.zip'"),
@@ -1107,10 +1121,10 @@ mod tests {
         );
     }
 
-    /// A new slot is compared with main and with its own parent. When main
-    /// holds a path added before it was denied and the slot's parent (the
-    /// folder's merge base) does not, a slot without the path is accepted,
-    /// and one with it is refused.
+    /// A new slot is compared with its own parent. When main holds a path
+    /// added before it was denied and the slot's parent (the folder's merge
+    /// base) does not, a slot without the path is accepted, and one with it
+    /// is refused.
     #[test]
     fn a_new_working_slot_may_leave_out_a_path_main_holds_and_policy_denies() {
         let repo = HookRepo::new("slot-create");
@@ -1131,5 +1145,70 @@ mod tests {
             stderr.contains("blocked path 'assets/archive.zip'"),
             "{stderr}"
         );
+    }
+
+    /// A slot built on a commit of main is checked against that commit
+    /// alone. When the parent holds a path policy denies since, the slot may
+    /// go back to the parent's version (what a saver does with a refused
+    /// path), on an update, on a create on an older main and after the
+    /// folder followed main, but may not keep a version of its own or main's
+    /// newer one. A parent off main proves nothing, so that slot is compared
+    /// with its old tip or main as well.
+    #[test]
+    fn a_working_slot_on_main_may_go_back_to_its_parents_version_of_a_denied_path() {
+        let repo = HookRepo::new("slot-on-main");
+        repo.set_ignorecase(false);
+        let slot =
+            format!("{RECOVERY_REF_ROOT}/5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a/{WORKING_SLOT_NAME}");
+        let deny_zip = [("GIT_DENY_PATHS", "*.zip")];
+        let refused = |old: &str, new: &str| {
+            let stderr = repo.refuses(&slot, old, new, &deny_zip);
+            assert!(
+                stderr.contains("blocked path 'assets/archive.zip'"),
+                "{stderr}"
+            );
+        };
+        // main holds the archive from before the deny, and an earlier save
+        // changed it while the policy allowed that.
+        let canonical = repo.commit_with(&[("assets/archive.zip", b"v1\n")]);
+        repo.git(&["update-ref", "refs/heads/main", &canonical]);
+        let earlier = repo.commit_on(&canonical, &[("assets/archive.zip", b"v2\n")]);
+        repo.accepts(&slot, ZERO, &earlier);
+
+        let kept = repo.commit_on(
+            &canonical,
+            &[("assets/archive.zip", b"v2\n"), ("notes.md", b"notes\n")],
+        );
+        refused(&earlier, &kept);
+        let put_back = repo.commit_on(
+            &canonical,
+            &[("assets/archive.zip", b"v1\n"), ("notes.md", b"notes\n")],
+        );
+        repo.accepts_with(&slot, &earlier, &put_back, &deny_zip);
+
+        // main changed the archive since the folder's merge base.
+        let newer_main = repo.commit_on(&canonical, &[("assets/archive.zip", b"v3\n")]);
+        repo.git(&["update-ref", "refs/heads/main", &newer_main]);
+        repo.accepts_with(&slot, ZERO, &put_back, &deny_zip);
+        let mains = repo.commit_on(
+            &canonical,
+            &[("assets/archive.zip", b"v3\n"), ("notes.md", b"notes\n")],
+        );
+        refused(ZERO, &mains);
+        // A folder that follows main moves the slot onto main's version.
+        let followed = repo.commit_on(
+            &newer_main,
+            &[("assets/archive.zip", b"v3\n"), ("notes.md", b"notes\n")],
+        );
+        repo.accepts_with(&slot, &earlier, &followed, &deny_zip);
+
+        // A parent off main that holds the archive.
+        let off_main = repo.commit_with(&[("assets/archive.zip", b"v4\n")]);
+        let on_it = repo.commit_on(
+            &off_main,
+            &[("assets/archive.zip", b"v4\n"), ("notes.md", b"notes\n")],
+        );
+        refused(ZERO, &on_it);
+        refused(&earlier, &on_it);
     }
 }

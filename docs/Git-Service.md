@@ -99,11 +99,13 @@ The hook checks every pushed ref:
   already accepted: the ref's old value, else the current `main`, else the empty tree. That covers
   everything a merge or several new commits bring in, but earlier commits are not walked one by
   one: a path or blob that one new commit adds and a later one removes is not checked. Paths are
-  read in raw form, so unusual file names are checked exactly as stored. A working slot's update
-  is also checked against the slot commit's own parent, so a path denied since its old tip was
-  accepted (for example by a new `GIT_DENY_PATHS`) is refused even when this save did not change
-  it. A working slot may always drop a denied path: a slot is never published, and a save refused
-  for keeping one leaves it out instead.
+  read in raw form, so unusual file names are checked exactly as stored. A working slot is checked
+  against the slot commit's own parent instead, when that parent is on `main`: what the slot shares
+  with it is already canonical history. So a path denied since the slot's old tip was accepted
+  (for example by a new `GIT_DENY_PATHS`) is refused when the slot keeps its own version, even if
+  this save did not change it, and accepted when the slot goes back to the parent's version, which
+  is what a save refused for that path does. A slot whose parent is not on `main` is checked
+  against both. A working slot may also delete a denied path: a slot is never published.
 
 Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)
