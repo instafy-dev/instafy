@@ -41,12 +41,15 @@ use serde_json::Value as JsonValue;
 /// the workspace lock removes it too, so a sibling runtime that saves,
 /// publishes or refreshes after another's durable stop clears that stop's
 /// verdict. That bounds a sibling's exposure only while its rolling saves
-/// run: with saves off, or once its ticks ended (a refused grant, an
-/// expired token), a sibling killed without a shutdown of its own can
-/// leave its edits since its last save under another runtime's marker
-/// until eviction. It sits in a directory the workspace can write, so it
-/// is a hint for eviction to combine with what it can check itself, never
-/// proof on its own.
+/// get grants: its next tick that gets one clears the marker (about one
+/// save interval while grants succeed). With saves off, or once its ticks
+/// ended (a refused grant, an expired token), a sibling killed without a
+/// shutdown of its own can leave its edits since its last save under
+/// another runtime's marker until eviction, or until a pool-retirement
+/// drain reads the checkout as clean (the marker and no local recovery
+/// ref) and the node is deleted. It sits in a directory the workspace can
+/// write, so it is a hint for eviction to combine with what it can check
+/// itself, never proof on its own.
 pub const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
 
 /// How long a shutdown waits for a rolling save to let the workspace go.
