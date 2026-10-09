@@ -15,6 +15,11 @@ import { recordRuntimeResourceSample } from "../runtimeResourceHistory";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
+/** No status request is sent this long after one fails. */
+const STATUS_FAILURE_BACKOFF_MS = 5_000;
+/** A failed request is retried after the backoff, doubling with each failure in a row up to this. */
+const STATUS_RETRY_MAX_MS = 60_000;
+
 /**
  * The runtime status of one project, as the controller last answered it. A
  * failed, skipped or not-yet-sent request leaves the previous answer in
@@ -51,11 +56,14 @@ export function useRuntimeStatusRefresh({
   const lastRuntimeStatusFailureRef = useRef<{
     projectId: string | null;
     at: number;
-  }>({ projectId: null, at: 0 });
+    failures: number;
+  }>({ projectId: null, at: 0, failures: 0 });
   const runtimeStatusAbortRef = useRef<AbortController | null>(null);
-  // A refresh the failure backoff skipped runs once when it ends: it may be
-  // the only one a runtime's stop asks for.
-  const trailingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // After a failed request one refresh stays scheduled until a request
+  // succeeds (a space switch or unmount drops it): a runtime's stop asks for
+  // a single refresh, which may fail or fall in the backoff. A refresh the
+  // backoff skips brings it forward to the backoff's end.
+  const scheduledRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshRuntimeStatusesRef = useRef<() => Promise<void>>(async () => {});
   const [runtimeStatusesResolved, setRuntimeStatusesResolved] = useState(false);
   // `runtimeStatuses` also reads [] after a failure, a skip or a switch, so
@@ -64,28 +72,39 @@ export function useRuntimeStatusRefresh({
   const answerProjectIdRef = useRef(answerProjectId);
   const [runtimeStatusAnswer, setRuntimeStatusAnswer] = useState<RuntimeStatusAnswer | null>(null);
 
-  const cancelTrailingRefresh = useCallback(() => {
-    if (trailingRefreshRef.current !== null) {
-      clearTimeout(trailingRefreshRef.current);
-      trailingRefreshRef.current = null;
+  const cancelScheduledRefresh = useCallback(() => {
+    if (scheduledRefreshRef.current !== null) {
+      clearTimeout(scheduledRefreshRef.current);
+      scheduledRefreshRef.current = null;
     }
   }, []);
+
+  const scheduleRefresh = useCallback(
+    (at: number) => {
+      cancelScheduledRefresh();
+      scheduledRefreshRef.current = setTimeout(() => {
+        scheduledRefreshRef.current = null;
+        void refreshRuntimeStatusesRef.current();
+      }, Math.max(0, at - Date.now()));
+    },
+    [cancelScheduledRefresh],
+  );
 
   useLayoutEffect(() => {
     if (answerProjectIdRef.current === answerProjectId) {
       return;
     }
     answerProjectIdRef.current = answerProjectId;
-    cancelTrailingRefresh();
+    cancelScheduledRefresh();
     setRuntimeStatusAnswer(null);
-  }, [answerProjectId, cancelTrailingRefresh]);
+  }, [answerProjectId, cancelScheduledRefresh]);
 
   useEffect(
     () => () => {
       runtimeStatusAbortRef.current?.abort();
-      cancelTrailingRefresh();
+      cancelScheduledRefresh();
     },
-    [cancelTrailingRefresh],
+    [cancelScheduledRefresh],
   );
 
   const markControllerUnavailable = useCallback(() => {
@@ -180,15 +199,10 @@ export function useRuntimeStatusRefresh({
       const lastFailure = lastRuntimeStatusFailureRef.current;
       if (
         lastFailure.projectId === effectiveProjectId &&
-        Date.now() - lastFailure.at < 5000
+        Date.now() - lastFailure.at < STATUS_FAILURE_BACKOFF_MS
       ) {
         debugLog("runtime-status:skip-backoff", { projectId: effectiveProjectId });
-        if (trailingRefreshRef.current === null) {
-          trailingRefreshRef.current = setTimeout(() => {
-            trailingRefreshRef.current = null;
-            void refreshRuntimeStatusesRef.current();
-          }, Math.max(0, lastFailure.at + 5000 - Date.now()));
-        }
+        scheduleRefresh(lastFailure.at + STATUS_FAILURE_BACKOFF_MS);
         setRuntimeStatusesResolved(true);
         runtimeStatusAbortRef.current = null;
         return;
@@ -258,17 +272,21 @@ export function useRuntimeStatusRefresh({
             provider: s.provider,
           })),
         });
-        lastRuntimeStatusFailureRef.current = { projectId: null, at: 0 };
+        lastRuntimeStatusFailureRef.current = { projectId: null, at: 0, failures: 0 };
+        cancelScheduledRefresh();
       } else {
         dispatch({
           type: "setRuntimeStatuses",
           statuses: [],
           preferredRuntimeId: null,
         });
-        lastRuntimeStatusFailureRef.current = {
-          projectId: effectiveProjectId,
-          at: Date.now(),
-        };
+        const previous = lastRuntimeStatusFailureRef.current;
+        const failures = previous.projectId === effectiveProjectId ? previous.failures + 1 : 1;
+        const at = Date.now();
+        lastRuntimeStatusFailureRef.current = { projectId: effectiveProjectId, at, failures };
+        scheduleRefresh(
+          at + Math.min(STATUS_FAILURE_BACKOFF_MS * 2 ** (failures - 1), STATUS_RETRY_MAX_MS),
+        );
         lastPreferredRuntimeIdRef.current = null;
         preferenceClearRequestedRef.current = false;
       }
@@ -316,6 +334,7 @@ export function useRuntimeStatusRefresh({
   }, [
     activeProjectId,
     allowPreferenceMutation,
+    cancelScheduledRefresh,
     debugLog,
     dispatch,
     lastPreferredRuntimeIdRef,
@@ -323,6 +342,7 @@ export function useRuntimeStatusRefresh({
     preferenceClearRequestedRef,
     projectReadyForRuntime,
     resolveProjectId,
+    scheduleRefresh,
     updateRuntime,
   ]);
 
