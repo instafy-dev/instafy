@@ -1124,6 +1124,49 @@ fn a_push_marked_as_a_rolling_save_changes_only_recovery_refs() {
     assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), second);
 }
 
+/// A replace ref makes git read another commit wherever the replaced one
+/// is named, the hook's own checks included. A push may not create one, and
+/// one the repository already holds cannot make a rewrite of main look like a
+/// fast-forward.
+#[test]
+fn replace_refs_cannot_get_around_mains_fast_forward_rule() {
+    let shard = Shard::start("replace-refs", &[]);
+    let client = Client::clone_from(&shard);
+    let first = client.commit_file("a.txt", b"a\n", "first");
+    client.push_ok("main");
+    // An unrelated commit, and one with its tree whose parent is main's tip.
+    let tree = client.git_ok(&["rev-parse", "HEAD^{tree}"]);
+    let unrelated = client.git_ok(&["commit-tree", "-m", "unrelated", &tree]);
+    let replacement = client.git_ok(&["commit-tree", "-p", &first, "-m", "replacement", &tree]);
+    client.push_ok(&format!("{unrelated}:refs/heads/unrelated"));
+    client.push_ok(&format!("{replacement}:refs/heads/replacement"));
+
+    let target = format!("refs/replace/{unrelated}");
+    let stderr = client.push_refused(&format!("{replacement}:{target}"));
+    assert!(
+        stderr.contains(&format!(
+            "instafy: '{target}' is a replace ref, which a push may not create or move"
+        )),
+        "{stderr}"
+    );
+    assert!(shard.repo_rev(&target).is_none());
+
+    // One the repository already holds.
+    assert!(shard
+        .repo_git(&["update-ref", &target, &replacement])
+        .status
+        .success());
+    let stderr = client.push_refused(&format!("+{unrelated}:main"));
+    assert!(
+        stderr.contains("instafy: non-fast-forward updates to main are not allowed"),
+        "{stderr}"
+    );
+    assert_eq!(shard.repo_rev("refs/heads/main").unwrap(), first);
+    // It may be deleted.
+    client.push_ok(&format!(":{target}"));
+    assert!(shard.repo_rev(&target).is_none());
+}
+
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)

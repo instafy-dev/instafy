@@ -143,8 +143,12 @@ pub fn render_update_hook(default_branch: &str) -> Result<String> {
 # Rendered by git-shard at startup. Every repository on this shard runs this
 # file through core.hooksPath; hooks inside a repository are not used.
 set -euo pipefail
-# Byte-wise patterns and ASCII-only case mapping, whatever the shard's locale.
+# Byte-wise patterns and ASCII-only case mapping, whatever the shard's locale,
+# and the objects a ref really names: a replace ref would show another commit
+# or tree wherever the replaced one is named (main's history for the
+# fast-forward and slot-parent tests, the trees the path and size checks read).
 export LC_ALL=C
+export GIT_NO_REPLACE_OBJECTS=1
 
 refname="$1"
 oldrev="$2"
@@ -258,6 +262,14 @@ fi
 # Deleting any other ref is allowed (salvage refs are refused above).
 if is_zero "$newrev"; then
   exit 0
+fi
+
+# A replace ref makes every git command that reads this repository, without
+# GIT_NO_REPLACE_OBJECTS, see another object than the one a ref names. A push
+# may delete one but not create or move it.
+if [[ "$folded_ref" == "refs/replace" || "$folded_ref" == "refs/replace/"* ]]; then
+  echo "instafy: '$refname' is a replace ref, which a push may not create or move" >&2
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -623,6 +635,9 @@ mod tests {
         )));
         // Patterns and case mapping must not depend on the shard's locale.
         assert!(hook.contains("\nexport LC_ALL=C\n"));
+        // Every check reads the objects a ref really names: a replace ref
+        // must not change what main's history or a pushed tree looks like.
+        assert!(hook.contains("\nexport LC_ALL=C\nexport GIT_NO_REPLACE_OBJECTS=1\n"));
         let salvage_check = hook
             .find("if [[ \"$folded_ref\" == \"$salvage_root\"")
             .unwrap();
@@ -1159,6 +1174,63 @@ mod tests {
         repo.accepts("refs/heads/main", main, child);
         repo.accepts("refs/heads/feature", ZERO, child);
         repo.accepts(&content, child, ZERO);
+    }
+
+    /// A push may not create or move a replace ref, in any letter case; it
+    /// may delete one.
+    #[test]
+    fn hook_refuses_creating_or_moving_replace_refs() {
+        let repo = HookRepo::new("replace-refs");
+        repo.set_ignorecase(false);
+        let (main, child) = (repo.main.as_str(), repo.child.as_str());
+        for refname in [
+            format!("refs/replace/{main}"),
+            format!("refs/REPLACE/{main}"),
+            "refs/replace".to_string(),
+        ] {
+            for (old, new) in [(ZERO, child), (main, child)] {
+                let stderr = repo.refuses(&refname, old, new, &[]);
+                assert!(
+                    stderr.contains(&format!(
+                        "instafy: '{refname}' is a replace ref, which a push may not create or move"
+                    )),
+                    "{refname}: {stderr}"
+                );
+            }
+            repo.accepts(&refname, child, ZERO);
+        }
+    }
+
+    /// A replace ref the repository holds (one made before the hook refused
+    /// them) cannot put a slot's parent off main on main's history, so the
+    /// slot is still checked against main as well.
+    #[test]
+    fn a_replace_ref_never_puts_a_slot_parent_on_main() {
+        let repo = HookRepo::new("slot-replace");
+        repo.set_ignorecase(false);
+        let slot =
+            format!("{RECOVERY_REF_ROOT}/5d0c7f0e-3b9a-4c41-9a51-1f2e3d4c5b6a/{WORKING_SLOT_NAME}");
+        let deny_zip = [("GIT_DENY_PATHS", "*.zip")];
+        // A commit unrelated to main that holds a denied path.
+        let holding = repo.commit_with(&[("assets/n.zip", b"n\n")]);
+        let holding_tree = repo.git(&["rev-parse", &format!("{holding}^{{tree}}")]);
+        let off_main = repo.git(&["commit-tree", "-m", "off main", &holding_tree]);
+        let saved = repo.commit_on(&off_main, &[("assets/n.zip", b"n\n"), ("notes.md", b"x\n")]);
+        let stderr = repo.refuses(&slot, ZERO, &saved, &deny_zip);
+        assert!(stderr.contains("blocked path 'assets/n.zip'"), "{stderr}");
+
+        // main's tip replaced by a commit with its tree and `off_main` as
+        // parent: `off_main` would look like an ancestor of main.
+        let tree = repo.git(&["rev-parse", &format!("{}^{{tree}}", repo.main)]);
+        let fake = repo.git(&["commit-tree", "-p", &off_main, "-m", "fake", &tree]);
+        repo.git(&["update-ref", &format!("refs/replace/{}", repo.main), &fake]);
+        assert_eq!(
+            repo.git(&["rev-list", "--count", "main"]),
+            "2",
+            "git sees the replacement"
+        );
+        let stderr = repo.refuses(&slot, ZERO, &saved, &deny_zip);
+        assert!(stderr.contains("blocked path 'assets/n.zip'"), "{stderr}");
     }
 
     /// A slot update is checked against its own parent: a path its old tip

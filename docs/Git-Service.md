@@ -93,6 +93,10 @@ The hook checks every pushed ref:
   `GIT_POLICY_DISABLED`.
 - **`main`** is fast-forward only and cannot be deleted. A name that differs from it only in letter
   case is refused.
+- **Replace refs** (`refs/replace/*`, in any letter case) may be deleted but not created or moved:
+  git would read the replacement wherever the replaced commit is named. The hook's own git
+  commands run with `GIT_NO_REPLACE_OBJECTS=1`, so one the repository already holds cannot make a
+  rewrite of `main` look like a fast-forward or hide a path from the checks below.
 - **`refs/instafy/`** holds only recovery refs, `refs/instafy/recovery/<origin id>/<name>` with a
   lower-case UUID and a name of `[0-9A-Za-z._-]`. A push may create or move nothing else there, so
   a stray ref such as `refs/instafy/recovery` cannot block them.
@@ -132,7 +136,8 @@ ignore the edge's mark and let that token push as `git.write`.
 Behaviour that changed with the shared policy: a ref must point to a commit (or an annotated tag
 of one), malformed objects that older git versions wrote are refused by the object checks, a push
 may send at most `GIT_MAX_PUSH_BYTES`, refs under `refs/instafy/` other than recovery refs
-cannot be created, and a recovery ref other than a working slot cannot be moved.
+cannot be created, a recovery ref other than a working slot cannot be moved, and a replace ref
+cannot be created or moved.
 
 ### Push event hooks
 `git-shard` can emit best-effort JSON webhooks after successful `git-receive-pack` requests:
