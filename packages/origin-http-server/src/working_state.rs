@@ -863,6 +863,16 @@ impl Publisher<'_> {
         stop: Option<&StopFlag>,
     ) -> Result<Plan> {
         stopping(stop)?;
+        // The agent may be running git in the folder during a tick; at a
+        // turn's end or a stop it is idle. The folder is listed before HEAD
+        // is read: a commit the agent makes meanwhile is then in that HEAD,
+        // or its files are in the listing, so the snapshot never builds on
+        // a HEAD the listing did not see.
+        let status = if reason == PersistReason::Tick {
+            self.status_without_locks()?
+        } else {
+            self.status()?
+        };
         let head = self.git.commit_id("HEAD")?;
         let main = self.tracked_main()?;
         let base = match (head.as_deref(), main.as_deref()) {
@@ -873,13 +883,6 @@ impl Publisher<'_> {
         let parent_tree = match parent.as_deref() {
             Some(parent) => self.git.tree_id(parent)?,
             None => self.git.empty_tree()?,
-        };
-        // The agent may be running git in the folder during a tick; at a
-        // turn's end or a stop it is idle.
-        let status = if reason == PersistReason::Tick {
-            self.status_without_locks()?
-        } else {
-            self.status()?
         };
         let started = SystemTime::now();
         let (fingerprint, _, racy) = fingerprint(
@@ -1573,35 +1576,24 @@ fn not_saved(memory: &WorkingMemory, error: SaveError) -> StopSave {
 }
 
 /// A finished save that needed no network call: the slot is current, or
-/// nothing is unsaved and there is no slot. Only on the HEAD and `main` the
-/// snapshot was built on: a commit that landed while it was taken (the
-/// agent's own, during a tick) is not in it, so nothing is confirmed and
-/// the next save takes it.
-fn settle_locally(
-    plan: &Plan,
-    memory: &WorkingMemory,
-    publisher: &Publisher<'_>,
-) -> Result<WorkingState> {
-    let git = &publisher.git;
-    let current = publisher.on_plan_head(plan)?;
+/// nothing is unsaved and there is no slot.
+fn settle_locally(plan: &Plan, memory: &WorkingMemory, git: &WorkspaceGit<'_>) -> WorkingState {
     let complete = plan.deferred.is_empty();
     let unsaved = plan
         .parent_tree(git)
         .and_then(|parent_tree| changed_paths(git, &parent_tree, &plan.tree))
         .map(|paths| paths.len())
         .unwrap_or_default();
-    let durable = current && complete && plan.pending == 0;
-    if current {
-        memory.confirm(plan.fingerprint, complete, durable, plan.more);
-    }
-    Ok(WorkingState {
+    let durable = complete && plan.pending == 0;
+    memory.confirm(plan.fingerprint, complete, durable, plan.more);
+    WorkingState {
         unsaved: count(unsaved),
         local_only: count(plan.pending),
         persisted_at: memory.persisted_at(),
         durable,
-        changed: !current,
+        changed: false,
         error: None,
-    })
+    }
 }
 
 /// A save that could not start.
@@ -1632,7 +1624,11 @@ pub(crate) fn plan_route_save(
             if plan.needs_network(&publisher.git, origin)? {
                 return Ok(Planned::Network(plan));
             }
-            Ok(Planned::Answered(settle_locally(&plan, memory, publisher)?))
+            Ok(Planned::Answered(settle_locally(
+                &plan,
+                memory,
+                &publisher.git,
+            )))
         });
     match planned {
         Ok(planned) => planned,

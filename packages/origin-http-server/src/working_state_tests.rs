@@ -2536,44 +2536,67 @@ fn a_plan_taken_before_the_turn_published_is_not_executed() {
     assert_eq!(fx.slot(), None);
 }
 
-/// The agent's own commit can land while a tick takes its snapshot, after
-/// the tick read HEAD and before it listed the folder. The snapshot does not
-/// hold that commit, so the tick confirms nothing: the change check still
-/// reads a change, and the next save takes the commit.
+/// The agent's own commit (`git add -A && git commit`) can land while a
+/// save takes its snapshot: before the save lists the folder, or after.
+/// Either way the snapshot holds the committed work, so a save never
+/// deletes or shrinks the slot, or confirms a state, that lacks it: with no
+/// slot yet, with one holding earlier work, and with the commit between the
+/// listing and the read of HEAD.
 #[test]
-fn a_commit_that_lands_while_a_tick_looks_is_not_taken_as_saved() {
-    let fx = Fixture::new();
-    fx.write("notes.md", b"committed by the agent\n");
-    let committed = fx.root.join("committed");
-    let wrapper = GitWrapper::install(
-        &fx.root,
-        &format!(
-            "case \" $* \" in *\" status \"*) if [ ! -e '{committed}' ]; then : > '{committed}'; \
-             (unset $(env | sed -n 's/^\\(GIT_[A-Z_]*\\)=.*/\\1/p'); \
+fn a_commit_that_lands_while_a_save_looks_stays_saved() {
+    for (slot_first, after_listing) in [(false, false), (true, false), (true, true)] {
+        let case = format!("slot first: {slot_first}, after the listing: {after_listing}");
+        let fx = Fixture::new();
+        if slot_first {
+            fx.write("notes.md", b"saved\n");
+            assert_eq!(fx.save(PersistReason::Tick).error, None, "{case}");
+            assert_eq!(fx.slot_file("notes.md").as_deref(), Some("saved\n"));
+        }
+        fx.write("other.md", b"committed by the agent\n");
+        let committed = fx.root.join("committed");
+        let listing = fx.root.join("listing");
+        let commit = format!(
+            "(unset $(env | sed -n 's/^\\(GIT_[A-Z_]*\\)=.*/\\1/p'); \
              export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1; cd '{ws}' && \
              git --git-dir .instafy/.git --work-tree . add -A && \
              git --git-dir .instafy/.git --work-tree . -c user.name=Agent \
-             -c user.email=agent@instafy.dev commit -q -m agent) || exit 1; fi ;; esac",
-            committed = committed.display(),
+             -c user.email=agent@instafy.dev commit -q -m agent) || exit 1",
             ws = fx.ws.display()
-        ),
-    );
-    let state = fx.save(PersistReason::Tick);
-    drop(wrapper);
-    assert!(committed.exists(), "the tick listed the folder");
-    assert_eq!(ig(&fx.ws, &["log", "-1", "--format=%s"]), "agent");
-    assert_eq!(state.error, None, "{state:?}");
-    assert!(!state.durable && state.changed, "{state:?}");
-    let state = fx.state();
-    assert!(state.changed && !state.durable, "{state:?}");
-
-    let state = fx.save(PersistReason::TurnEnd);
-    assert_eq!(state.error, None, "{state:?}");
-    assert!(state.durable, "{state:?}");
-    assert_eq!(
-        fx.slot_file("notes.md").as_deref(),
-        Some("committed by the agent\n")
-    );
+        );
+        let prelude = if after_listing {
+            format!(
+                "case \" $* \" in *\" status \"*) if [ ! -e '{committed}' ]; then : > '{committed}'; \
+                 git \"$@\" > '{listing}'; listed=$?; {commit}; cat '{listing}'; exit $listed; fi ;; esac",
+                committed = committed.display(),
+                listing = listing.display(),
+            )
+        } else {
+            format!(
+                "case \" $* \" in *\" status \"*) if [ ! -e '{committed}' ]; then : > '{committed}'; \
+                 {commit}; fi ;; esac",
+                committed = committed.display(),
+            )
+        };
+        let wrapper = GitWrapper::install(&fx.root, &prelude);
+        let state = fx.save(PersistReason::Tick);
+        drop(wrapper);
+        assert!(committed.exists(), "{case}: the save listed the folder");
+        assert_eq!(ig(&fx.ws, &["log", "-1", "--format=%s"]), "agent", "{case}");
+        assert_eq!(state.error, None, "{case}: {state:?}");
+        assert_eq!(
+            fx.slot_file("other.md").as_deref(),
+            Some("committed by the agent\n"),
+            "{case}: {state:?}"
+        );
+        if slot_first {
+            assert_eq!(
+                fx.slot_file("notes.md").as_deref(),
+                Some("saved\n"),
+                "{case}: {state:?}"
+            );
+        }
+        assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev), "{case}");
+    }
 }
 
 /// What one save costs in git processes, the same for 20 dirty files as for
