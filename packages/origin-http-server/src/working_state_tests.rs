@@ -972,6 +972,51 @@ fn a_path_denied_after_it_was_saved_leaves_the_slot() {
     assert_eq!(fx.record(), fx.slot().map(|(_, rev)| rev));
 }
 
+/// More paths than one save may be refused for, denied by the shard after
+/// they were saved, do not wedge the slot: the shard names every path it
+/// refuses in one refusal, and the save puts them all back at once. So does
+/// a folder that writes them with the deny already in place.
+#[test]
+fn many_paths_the_shard_denies_leave_the_slot_in_one_save() {
+    let fx = Fixture::new();
+    for index in 0..9 {
+        fx.write(&format!("assets/a{index}.zip"), b"zip\n");
+    }
+    assert_eq!(fx.save(PersistReason::Tick).error, None);
+    assert!(fx.slot_file("assets/a8.zip").is_some());
+
+    install_shard_hook(&fx.remote, &[("GIT_DENY_PATHS", "*.zip")]);
+    let pushes = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let counted = pushes.clone();
+    let _counting = with_push_hook(move |specs| {
+        if specs.iter().any(|spec| spec.ends_with("/working")) {
+            counted.set(counted.get() + 1);
+        }
+        PushHookAction::Proceed
+    });
+    fx.write("notes.md", b"later\n");
+    let state = fx.save(PersistReason::Tick);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("later\n"));
+    for index in 0..9 {
+        assert!(fx.slot_file(&format!("assets/a{index}.zip")).is_none());
+    }
+    assert_eq!(pushes.get(), 2, "one refusal named every path");
+
+    pushes.set(0);
+    for index in 9..30 {
+        fx.write(&format!("assets/a{index}.zip"), b"zip\n");
+    }
+    fx.write("notes.md", b"latest\n");
+    let state = fx.save(PersistReason::TurnEnd);
+    assert_eq!(state.error, None, "{state:?}");
+    assert_eq!(fx.slot_file("notes.md").as_deref(), Some("latest\n"));
+    for index in 0..30 {
+        assert!(fx.slot_file(&format!("assets/a{index}.zip")).is_none());
+    }
+    assert_eq!(pushes.get(), 2, "one refusal named every path");
+}
+
 /// A path main holds that the shard starts to deny after a save changed it
 /// goes back to main's version in the slot, and saving goes on: the shard
 /// refuses the slot's own version and accepts the parent's.

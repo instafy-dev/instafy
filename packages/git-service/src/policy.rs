@@ -345,12 +345,15 @@ fi
 # With -z, diff-tree prints ":<old mode> <new mode> <old oid> <new oid>
 # <status>" and the path as separate NUL-terminated fields, so every path is
 # checked exactly as stored. The marker after the listing is printed only
-# when diff-tree succeeded; without it the push is refused.
+# when diff-tree succeeded; without it the push is refused. Every refused
+# path is named, one line each, before the push is refused, so a client can
+# leave them all out at once.
 check_changes() {{
   local against="$1"
   blob_paths=()
   blob_oids=()
   listed=0
+  refused=0
   while IFS= read -r -d '' meta; do
     if [[ "$meta" == "end" ]]; then
       listed=1
@@ -365,14 +368,16 @@ check_changes() {{
 
     if is_denied_path "$path"; then
       echo "instafy: blocked path '$path' (repo hygiene policy)" >&2
-      exit 1
+      refused=1
+      continue
     fi
 
     [[ "$status" == "D" ]] && continue
 
     if [[ "$new_mode" == "160000" ]]; then
       echo "instafy: blocked non-blob object for '$path' (type=commit)" >&2
-      exit 1
+      refused=1
+      continue
     fi
     blob_paths+=("$path")
     blob_oids+=("$new_oid")
@@ -395,11 +400,12 @@ check_changes() {{
       fi
       if [[ "$obj_type" != "blob" ]]; then
         echo "instafy: blocked non-blob object for '$path' (type=$obj_type)" >&2
-        exit 1
+        refused=1
+        continue
       fi
       if (( 10#$obj_size > 10#$max_blob_bytes )); then
         echo "instafy: file too large '$path' ($obj_size bytes > $max_blob_bytes)" >&2
-        exit 1
+        refused=1
       fi
     done < <(printf '%s\n' "${{blob_oids[@]}}" | git cat-file --batch-check='%(objecttype) %(objectsize)')
 
@@ -407,6 +413,10 @@ check_changes() {{
       echo "instafy: could not check the objects in '$refname'" >&2
       exit 1
     fi
+  fi
+
+  if [[ "$refused" == "1" ]]; then
+    exit 1
   fi
 }}
 
@@ -1231,6 +1241,42 @@ mod tests {
         );
         let stderr = repo.refuses(&slot, ZERO, &saved, &deny_zip);
         assert!(stderr.contains("blocked path 'assets/n.zip'"), "{stderr}");
+    }
+
+    /// One refusal names every path the push may not change, a line each,
+    /// so a client can leave them all out at once; the first line is the one
+    /// an older hook printed alone.
+    #[test]
+    fn a_refusal_names_every_refused_path() {
+        let repo = HookRepo::new("every-path");
+        repo.set_ignorecase(false);
+        let tip = repo.commit_with(&[
+            ("assets/a.zip", b"a\n"),
+            ("dist/app.js", b"built\n"),
+            ("assets/b.zip", b"b\n"),
+            ("big.bin", b"0123456789\n"),
+            ("notes.md", b"notes\n"),
+        ]);
+        let stderr = repo.refuses(
+            "refs/heads/main",
+            &repo.main,
+            &tip,
+            &[("GIT_DENY_PATHS", "*.zip"), ("GIT_MAX_BLOB_BYTES", "8")],
+        );
+        let refused: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("instafy: "))
+            .collect();
+        assert_eq!(
+            refused,
+            vec![
+                "instafy: blocked path 'assets/a.zip' (repo hygiene policy)",
+                "instafy: blocked path 'assets/b.zip' (repo hygiene policy)",
+                "instafy: blocked path 'dist/app.js' (repo hygiene policy)",
+                "instafy: file too large 'big.bin' (11 bytes > 8)",
+            ],
+            "{stderr}"
+        );
     }
 
     /// A slot update is checked against its own parent: a path its old tip

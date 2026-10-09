@@ -523,7 +523,7 @@ pub(crate) fn cas_commit(
             PushClass::LostRace(detail) => {
                 info!(attempt, detail = %detail, "another save landed first; trying again");
             }
-            PushClass::PathRejected { path, reason } => {
+            PushClass::PathRejected { path, reason, .. } => {
                 info!(attempt, reason = reason.name(), "the shard refused a path");
                 change.refused(path, reason)?;
             }

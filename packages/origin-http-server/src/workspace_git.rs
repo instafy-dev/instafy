@@ -1700,7 +1700,8 @@ mod tests {
                 result.class,
                 PushClass::PathRejected {
                     path: "node_modules/left.js".to_string(),
-                    reason: RejectReason::Policy
+                    reason: RejectReason::Policy,
+                    others: Vec::new(),
                 }
             );
             assert!(quarantine.path().exists());

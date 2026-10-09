@@ -4133,6 +4133,40 @@ fn policy_refused_path_in_parked_work_is_left_out_and_the_rest_pushed() {
     assert!(sc.ws.join("bundle.zip").exists());
 }
 
+/// More refused paths than a push is retried for still leave a stop's copy
+/// in one push: the shard names them all and the copy leaves them all out.
+#[test]
+fn many_refused_paths_in_parked_work_are_left_out_at_once() {
+    let sc = Scenario::new(Options {
+        hook: true,
+        hook_env: vec![("GIT_DENY_PATHS", "*.zip")],
+        ..Options::default()
+    });
+    for index in 0..12 {
+        sc.write(&format!("assets/a{index}.zip"), b"PK fake archive\n");
+    }
+    sc.write("notes.md", b"keep me\n");
+    let report = flush(&sc.ctx(true), false).unwrap();
+    assert_eq!(report.unpushed_refs, 0, "{report:?}");
+    let pushed = sc.remote_refs("refs/instafy/recovery/");
+    assert_eq!(pushed.len(), 1, "{pushed:?}");
+    assert_eq!(
+        sc.recovery_file(&pushed[0].0, "notes.md").as_deref(),
+        Some("keep me\n")
+    );
+    for index in 0..12 {
+        assert!(sc
+            .recovery_file(&pushed[0].0, &format!("assets/a{index}.zip"))
+            .is_none());
+    }
+    assert_eq!(
+        sc.local_refs(crate::recovery::LOCAL_RECOVERY_REJECTED_ROOT)
+            .len(),
+        1,
+        "one refusal named every path"
+    );
+}
+
 /// r4.1: a flush with a clean tree still pushes every never-pushed local
 /// recovery ref, here the one a stop without network left behind.
 #[test]

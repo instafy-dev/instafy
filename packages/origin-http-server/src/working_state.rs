@@ -123,7 +123,9 @@ pub const TURN_END_LOCK_WAIT: Duration = Duration::from_secs(10);
 /// How long a save's push or `ls-remote` may move no data.
 const STALL_SECONDS: u32 = 8;
 
-/// Paths the repository policy may refuse in one save before it gives up.
+/// Refusals by the repository policy one save takes before it gives up.
+/// Each puts back every path it names (a shard names them all), so a save
+/// on `main` needs one.
 const MAX_PATH_REFUSALS: usize = 8;
 
 /// Paths named in one slot commit's message.
@@ -1137,18 +1139,21 @@ impl Publisher<'_> {
                     PushClass::Ambiguous(_) => {
                         return self.after_push(&slot, &commit, &tree, SaveError::PushAmbiguous)
                     }
-                    PushClass::PathRejected { path, .. } => {
+                    PushClass::PathRejected { path, others, .. } => {
                         self.clear_markers().map_err(local)?;
                         refusals += 1;
                         if refusals > MAX_PATH_REFUSALS {
                             return Err(SaveError::PushRejected);
                         }
-                        let left_out = without_refused_path(
+                        // Every path the refusal named goes back at once.
+                        let mut refused = others;
+                        refused.insert(0, path);
+                        let left_out = without_refused_paths(
                             &self.git,
                             &tree,
                             plan.parent.as_deref(),
                             plan.main.as_deref(),
-                            &path,
+                            &refused,
                         )
                         .map_err(local)?;
                         if left_out == tree {
@@ -1636,20 +1641,19 @@ fn without_dismissed(git: &WorkspaceGit<'_>, tree: &str, parent: Option<&str>) -
     tree_with_entries_from(git, tree, parent, &unchanged)
 }
 
-/// `tree` without `path`, which canonical refused: the parent's entry, or
-/// `main`'s when `main` changed that path since.
-fn without_refused_path(
+/// `tree` without `paths`, which canonical refused: the parent's entries,
+/// or `main`'s when those change nothing (`main` changed the paths since).
+fn without_refused_paths(
     git: &WorkspaceGit<'_>,
     tree: &str,
     parent: Option<&str>,
     main: Option<&str>,
-    path: &str,
+    paths: &[String],
 ) -> Result<String> {
-    let paths = [path.to_string()];
-    let mut next = tree_with_entries_from(git, tree, parent, &paths)?;
+    let mut next = tree_with_entries_from(git, tree, parent, paths)?;
     if next == tree {
         if let Some(main) = main {
-            next = tree_with_entries_from(git, tree, Some(main), &paths)?;
+            next = tree_with_entries_from(git, tree, Some(main), paths)?;
         }
     }
     Ok(next)

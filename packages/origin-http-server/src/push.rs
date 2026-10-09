@@ -25,6 +25,9 @@ pub(crate) enum PushClass {
     PathRejected {
         path: String,
         reason: RejectReason,
+        /// Every other path the same refusal named: a shard names each path
+        /// it refuses in one push (an older one only the first).
+        others: Vec<String>,
     },
     /// Any other refusal. Retrying the same push cannot succeed.
     Rejected(String),
@@ -302,13 +305,23 @@ pub(crate) fn classify_push(text: &str) -> PushClass {
     if LOST_RACE.iter().any(|marker| lower.contains(marker)) {
         return PushClass::LostRace(summary(text));
     }
-    for (marker, reason) in [
-        ("blocked path '", RejectReason::Policy),
-        ("file too large '", RejectReason::TooLarge),
-        ("blocked non-blob object for '", RejectReason::Unsupported),
-    ] {
+    for (marker, reason) in PATH_REFUSALS {
         if let Some(path) = quoted_after(text, marker) {
-            return PushClass::PathRejected { path, reason };
+            let mut others = Vec::new();
+            for line in text.lines() {
+                for (marker, _) in PATH_REFUSALS {
+                    if let Some(other) = quoted_in(line, marker) {
+                        if other != path && !others.contains(&other) {
+                            others.push(other);
+                        }
+                    }
+                }
+            }
+            return PushClass::PathRejected {
+                path,
+                reason,
+                others,
+            };
         }
     }
     const PERMANENT: &[&str] = &[
@@ -331,20 +344,25 @@ pub(crate) fn classify_push(text: &str) -> PushClass {
     PushClass::Ambiguous(summary(text))
 }
 
-/// The text between `marker` and the next `' (` (or the line's last quote).
+/// The shard hook's refusals of one path, and what each means.
+const PATH_REFUSALS: [(&str, RejectReason); 3] = [
+    ("blocked path '", RejectReason::Policy),
+    ("file too large '", RejectReason::TooLarge),
+    ("blocked non-blob object for '", RejectReason::Unsupported),
+];
+
+/// The text between `marker` and the next `' (` (or the line's last quote)
+/// on the first line that holds one.
 fn quoted_after(text: &str, marker: &str) -> Option<String> {
-    for line in text.lines() {
-        let Some(start) = line.find(marker) else {
-            continue;
-        };
-        let rest = &line[start + marker.len()..];
-        let end = rest.rfind("' (").or_else(|| rest.rfind('\''))?;
-        let path = rest[..end].to_string();
-        if !path.is_empty() {
-            return Some(path);
-        }
-    }
-    None
+    text.lines().find_map(|line| quoted_in(line, marker))
+}
+
+fn quoted_in(line: &str, marker: &str) -> Option<String> {
+    let start = line.find(marker)?;
+    let rest = &line[start + marker.len()..];
+    let end = rest.rfind("' (").or_else(|| rest.rfind('\''))?;
+    let path = rest[..end].to_string();
+    (!path.is_empty()).then_some(path)
 }
 
 fn summary(text: &str) -> String {
@@ -422,14 +440,16 @@ mod tests {
             ),
             PushClass::PathRejected {
                 path: "x/node_modules/y".to_string(),
-                reason: RejectReason::Policy
+                reason: RejectReason::Policy,
+                others: Vec::new(),
             }
         );
         assert_eq!(
             classify_push("remote: instafy: file too large 'data/it's big.csv' (30 bytes > 10)"),
             PushClass::PathRejected {
                 path: "data/it's big.csv".to_string(),
-                reason: RejectReason::TooLarge
+                reason: RejectReason::TooLarge,
+                others: Vec::new(),
             }
         );
         assert_eq!(
@@ -438,7 +458,28 @@ mod tests {
             ),
             PushClass::PathRejected {
                 path: "vendor/lib".to_string(),
-                reason: RejectReason::Unsupported
+                reason: RejectReason::Unsupported,
+                others: Vec::new(),
+            }
+        );
+    }
+
+    /// A refusal that names several paths keeps the first one an older
+    /// shard named alone, and lists the rest.
+    #[test]
+    fn a_refusal_of_several_paths_names_them_all() {
+        assert_eq!(
+            classify_push(
+                "remote: instafy: blocked path 'assets/a.zip' (repo hygiene policy)\n\
+                 remote: instafy: blocked path 'dist/app.js' (repo hygiene policy)\n\
+                 remote: instafy: file too large 'big.bin' (11 bytes > 8)\n\
+                 remote: instafy: blocked path 'assets/a.zip' (repo hygiene policy)\n\
+                 !\tabc:refs/heads/main\t[remote rejected] (hook declined)"
+            ),
+            PushClass::PathRejected {
+                path: "assets/a.zip".to_string(),
+                reason: RejectReason::Policy,
+                others: vec!["dist/app.js".to_string(), "big.bin".to_string()],
             }
         );
     }

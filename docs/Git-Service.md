@@ -116,7 +116,10 @@ The hook checks every pushed ref:
   (for example by a new `GIT_DENY_PATHS`) is refused when the slot keeps its own version, even if
   this save did not change it, and accepted when the slot goes back to the parent's version, which
   is what a save refused for that path does. A slot whose parent is not on `main` is checked
-  against both. A working slot may also delete a denied path: a slot is never published.
+  against both. A working slot may also delete a denied path: a slot is never published. A
+  refused push names every path it refuses, one line each (`blocked path '<path>'`, `file too
+  large '<path>'`, `blocked non-blob object for '<path>'`), so a client can leave them all out at
+  once; a client that reads only the first line still sees the one an older hook printed.
 
 Knobs:
 - `GIT_MAX_BLOB_BYTES` (default `20971520` = 20 MiB): reject large blobs (helps avoid accidental binary/caches as canonical)

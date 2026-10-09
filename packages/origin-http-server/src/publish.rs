@@ -1696,7 +1696,7 @@ impl<'a> Publisher<'a> {
                 main: pushed.to_string(),
             }),
             PushClass::LostRace(_) => Ok(Attempt::Retry),
-            PushClass::PathRejected { path, reason } => {
+            PushClass::PathRejected { path, reason, .. } => {
                 if self.filtered.contains_key(&path) {
                     return Ok(Attempt::Park {
                         reason: format!("the repository policy refused {path}"),
