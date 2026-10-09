@@ -50,6 +50,7 @@ const npmLookupStep = `      - name: Read the queued pull request identity
           } >> "$GITHUB_OUTPUT"
 
 `;
+const npmCheckout = "      - name: Checkout the exact pull request commit\n";
 const npmIdentityComment = [
   "          # A merge group takes the queued pull request's identity from the\n",
   "          # lookup step's outputs; this step and the checked-out code it runs\n",
@@ -72,7 +73,8 @@ const npm = [
     "          BASE_SHA: ${{ github.event.pull_request.base.sha }}\n"],
   ["          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}\n",
     "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n"],
-  [npmLookupStep, ""],
+  // Anchored to the checkout that follows it, so moving the lookup also fails.
+  [npmLookupStep + npmCheckout, npmCheckout],
   [npmIdentityComment, ""],
   npmIdentity("HEAD_REF", "head_ref", "github.event.pull_request.head.ref"),
   npmIdentity("HEAD_REPOSITORY", "head_repository", "github.event.pull_request.head.repo.full_name"),
