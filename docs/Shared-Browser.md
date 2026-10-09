@@ -797,6 +797,17 @@ never the path or contents. Disable traces, video, and automatic screenshots bef
 flow, use disposable local accounts and projects, and verify that the turn is recorded as BYOC with
 no managed-credit debit. Hosted canary accounts and orchestration are deployment-private.
 
+The runtime entrypoint gives a newly launched headed Chromium up to 30 seconds to answer on its CDP
+port, and stops waiting as soon as that process exits. The first launch on a cold machine is the
+slow one; later launches are ready in under a second. On success it logs
+`[instafy] Headed Chromium ready (CDP) on 127.0.0.1:<port> after <seconds>s`. Otherwise it writes
+`/tmp/instafy/playwright/chromium-warning.txt` saying whether Chromium was still running at the
+deadline (it is then stopped) or exited, with its exit status. `INSTAFY_CHROMIUM_CDP_READY_TIMEOUT_SECS`
+changes the wait for the boot-time launch (whole seconds, clamped to 1 to 300). The relaunch after
+a persisted-profile restore runs through runtime-agent's helper environment allowlist, so it always
+uses the 30-second default. That launch happens after registration and before the first heartbeat,
+and the default keeps it inside the controller's 60-second heartbeat window for queued-job recovery.
+
 Operational invariants:
 
 - Runtime image changes require a forced local rebuild
