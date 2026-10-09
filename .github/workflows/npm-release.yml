@@ -7,10 +7,13 @@ on:
   push:
     branches:
       - main
+  merge_group:
+    types:
+      - checks_requested
   workflow_dispatch:
 
 concurrency:
-  group: npm-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  group: npm-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'merge_group' && github.event.merge_group.head_ref || 'main' }}
   cancel-in-progress: false
   queue: max
 
@@ -19,7 +22,7 @@ permissions: {}
 jobs:
   pull-request-policy:
     name: Require reviewed Changeset release intent
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
     runs-on: >-
       ${{ vars.CI_EXPANDED_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -34,6 +37,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      pull-requests: read
 
     steps:
       - name: Qualify isolated expanded CI runner
@@ -61,7 +65,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           submodules: false
 
       - name: Set up pnpm
@@ -83,13 +87,40 @@ jobs:
       - name: Validate ordinary or generated release changes
         shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           PULL_REQUEST_AUTHOR: ${{ github.event.pull_request.user.login }}
+          MERGE_GROUP_BASE_REF: ${{ github.event.merge_group.base_ref }}
+          MERGE_GROUP_HEAD_REF: ${{ github.event.merge_group.head_ref }}
+          # Only the merge-group identity lookup reads the API; pull requests
+          # and the checked-out code never receive the token.
+          QUEUE_LOOKUP_TOKEN: ${{ github.event_name == 'merge_group' && github.token || '' }}
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
+            # A queued group is checked as its own diff over the group's parent
+            # (main plus any earlier queued group), with the identity of the
+            # pull request the queue names in the group ref. Any ref suffix is
+            # accepted; only the pr-<number> component this lookup needs is
+            # required.
+            if [[ "$MERGE_GROUP_BASE_REF" != "refs/heads/main" ]]; then
+              echo "::error::Merge group base ${MERGE_GROUP_BASE_REF} is not refs/heads/main."
+              exit 1
+            fi
+            if [[ ! "$MERGE_GROUP_HEAD_REF" =~ ^refs/heads/gh-readonly-queue/main/pr-([1-9][0-9]*)(-[A-Za-z0-9._/-]*)?$ ]]; then
+              echo "::error::Merge group ref ${MERGE_GROUP_HEAD_REF} names no queued pull request."
+              exit 1
+            fi
+            pull_request="${BASH_REMATCH[1]}"
+            identity="$(
+              GH_TOKEN="$QUEUE_LOOKUP_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/pulls/${pull_request}" \
+                --jq '[.head.ref, (.head.repo.full_name // ""), .user.login] | join("\u001f")'
+            )"
+            IFS=$'\x1f' read -r HEAD_REF HEAD_REPOSITORY PULL_REQUEST_AUTHOR <<< "$identity"
+            unset QUEUE_LOOKUP_TOKEN
+          fi
           args=(--base "$BASE_SHA" --head "$HEAD_SHA")
           if [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" && \
                 "$HEAD_REF" == "changeset-release/main" && \

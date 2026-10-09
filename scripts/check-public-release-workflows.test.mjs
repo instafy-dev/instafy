@@ -5,6 +5,7 @@ import test from "node:test";
 import "./check-hosted-sdk-cleanup.test.mjs";
 import "./check-image-coordinator.test.mjs";
 import "./check-public-control-ci.test.mjs";
+import "./check-merge-queue-ci.test.mjs";
 import "./check-image-build-routing.test.mjs";
 import "./check-image-scan-workflow.test.mjs";
 import "./check-runtime-multiarch-workflow.test.mjs";
