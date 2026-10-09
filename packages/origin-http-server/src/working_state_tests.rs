@@ -385,7 +385,7 @@ fn an_unchanged_folder_pushes_nothing_and_needs_no_write_access() {
 fn a_publish_that_moves_only_main_is_a_change() {
     let fx = Fixture::new();
     fx.write("notes.md", b"agent work\n");
-    ig(&fx.ws, &["add", "-A"]);
+    ig(&fx.ws, &["add", "notes.md"]);
     ig(
         &fx.ws,
         &[
@@ -413,6 +413,69 @@ fn a_publish_that_moves_only_main_is_a_change() {
     assert_eq!(state.unsaved, 0);
     assert_eq!(fx.slot(), None);
     assert!(!fx.state().changed);
+}
+
+/// Older git (2.34) takes the checkout's `.instafy` folder, which holds its
+/// repository, for a nested one: an agent's `git add -A` there commits it
+/// as a gitlink, which the shard refuses. A save never sends it (one push,
+/// never refused): it keeps the parent's entry (none), and the commit's
+/// other work is saved. The entry is made directly here, so every git sees
+/// it.
+#[test]
+fn a_committed_instafy_entry_never_reaches_the_slot() {
+    let fx = Fixture::new();
+    fx.write("notes.md", b"agent work\n");
+    let head = ig(&fx.ws, &["rev-parse", "HEAD"]);
+    ig(&fx.ws, &["add", "notes.md"]);
+    ig(
+        &fx.ws,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{head},.instafy"),
+        ],
+    );
+    ig(
+        &fx.ws,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@instafy.dev",
+            "commit",
+            "-q",
+            "-m",
+            "agent work",
+        ],
+    );
+    assert!(
+        ig(&fx.ws, &["ls-tree", "HEAD", ".instafy"]).starts_with("160000 commit "),
+        "the commit holds the gitlink"
+    );
+
+    let pushes = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let counted = pushes.clone();
+    let _counting = with_push_hook(move |specs| {
+        if specs.iter().any(|spec| spec.ends_with("/working")) {
+            counted.set(counted.get() + 1);
+        }
+        PushHookAction::Proceed
+    });
+    for (reason, doc) in [
+        (PersistReason::Tick, "ticked\n"),
+        (PersistReason::TurnEnd, "ended\n"),
+    ] {
+        fx.write("doc.md", doc.as_bytes());
+        pushes.set(0);
+        let state = fx.save(reason);
+        assert_eq!(state.error, None, "{reason:?}: {state:?}");
+        assert_eq!(pushes.get(), 1, "{reason:?}: the shard never saw it");
+        assert_eq!(fx.slot_file("notes.md").as_deref(), Some("agent work\n"));
+        assert_eq!(fx.slot_file("doc.md").as_deref(), Some(doc));
+        let (_, slot) = fx.slot().unwrap();
+        assert_eq!(git_in(&fx.remote, &["ls-tree", &slot, ".instafy"]), "");
+    }
 }
 
 /// `tar -x`, `unzip`, `cp -p` and `rsync -a` put a file's mtime back after
@@ -869,7 +932,7 @@ fn a_deferred_file_main_changed_since_the_last_save_keeps_mains_version() {
 
     // The folder's own publish: v2 goes to main and the checkout is on it.
     fx.write("data/big.bin", b"v2\n");
-    ig(&fx.ws, &["add", "-A"]);
+    ig(&fx.ws, &["add", "data/big.bin"]);
     ig(
         &fx.ws,
         &[
