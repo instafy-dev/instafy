@@ -267,7 +267,12 @@ export function getRuntimeLabel(
     } else if (tunnel.url) {
       detailParts.push(`Tunnel ${tunnel.url}`);
     }
-    const tunnelBadge = resolveTunnelStatusBadge(tunnel);
+    // A stop revokes the machine's tunnel. For a machine that is stopped or
+    // stopping, that is the stop itself, not a warning about the tunnel.
+    const tunnelEndedByStop =
+      (isStopping || normalizedStatus === "stopped") &&
+      (normalizedTunnelStatus === "revoked" || normalizedTunnelStatus === "expired");
+    const tunnelBadge = tunnelEndedByStop ? null : resolveTunnelStatusBadge(tunnel);
     if (tunnelBadge) {
       statusBadge = tunnelBadge;
       const badgeText = tunnelBadge.text.toLowerCase();
