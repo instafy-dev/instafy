@@ -934,6 +934,7 @@ mod tests {
             port: 8788,
             database_url: "postgres://localhost/test".to_string(),
             database_pool_size: 2,
+            event_access_recheck_after: crate::config::EVENT_ACCESS_RECHECK_AFTER,
             redis_url: None,
             redis_namespace: None,
             redis_events_channel: None,

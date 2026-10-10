@@ -54,6 +54,14 @@ pub(crate) fn database_tls() -> MakeRustlsConnect {
     MakeRustlsConnect::new(config)
 }
 
+/// How long an event stream takes its subscriber's project and conversation
+/// access, once checked, as current. Every matching event used to take a pool
+/// connection to recheck it, so a burst (a machine's stop publishes several at
+/// once) queued every open stream behind the pool. A change that publishes
+/// `project.access_changed` or `project.members_changed` takes effect at once;
+/// any other revocation within this long.
+pub(crate) const EVENT_ACCESS_RECHECK_AFTER: Duration = Duration::from_secs(5);
+
 fn database_pool_size_from_values(
     configured_pool_size: Option<&str>,
     dev_mode: Option<&str>,
@@ -482,6 +490,9 @@ pub struct AppConfig {
     pub port: u16,
     pub database_url: String,
     pub database_pool_size: u32,
+    /// How long an event stream's project and conversation access, once
+    /// checked, holds for its next events ([`EVENT_ACCESS_RECHECK_AFTER`]).
+    pub event_access_recheck_after: Duration,
     pub redis_url: Option<String>,
     pub redis_namespace: Option<String>,
     pub redis_events_channel: Option<String>,
@@ -1349,6 +1360,7 @@ impl AppConfig {
             port,
             database_url,
             database_pool_size,
+            event_access_recheck_after: EVENT_ACCESS_RECHECK_AFTER,
             redis_url,
             redis_namespace,
             redis_events_channel,
