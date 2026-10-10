@@ -167,6 +167,10 @@ mod task_shutdown_tests;
 #[path = "agent_turn_tests.rs"]
 mod turn_tests;
 
+#[cfg(test)]
+#[path = "agent_origin_cycle_tests.rs"]
+mod origin_cycle_tests;
+
 struct JobInputTask {
     stop_signal: ShutdownSignal,
     cancellation: ActiveTurnInputCancellation,
@@ -881,8 +885,10 @@ impl RuntimeAgent {
         renewal_task.abort().await;
         let renewed_registration = renewal_receiver.borrow().clone();
 
-        let shutdown_triggered = lease_result?;
-
+        // Tear the tunnel and origin down on every way out of the lease loop,
+        // a rejected agent token too. Left to drop, the origin's presence loop
+        // stopped without its offline beat, and the controller expired the
+        // origin while the next registration was still bringing one up.
         if let Some(lifecycle) = tunnel_lifecycle.as_mut() {
             lifecycle.shutdown().await;
         }
@@ -893,6 +899,8 @@ impl RuntimeAgent {
                 .shutdown_after_turn(executor.turn_interrupted())
                 .await;
         }
+
+        let shutdown_triggered = lease_result?;
 
         if shutdown_triggered {
             // Prefer the freshest tokens for the final calls: the original agent

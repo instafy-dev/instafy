@@ -110,6 +110,9 @@ pub struct OriginHttpServer {
     address: Option<SocketAddr>,
     presence_url: Option<Url>,
     presence_metadata: Arc<RwLock<JsonValue>>,
+    /// Set by [`OriginHttpServer::defer_presence_until_registered`]: `start`
+    /// leaves the presence loop to [`OriginHttpServer::start_presence`].
+    presence_deferred: bool,
     state: Option<AppState>,
     /// Set for a multi-tenant gateway, which serves the hosted routes.
     hosted: Option<Arc<HostedGatewayConfig>>,
@@ -214,6 +217,7 @@ impl OriginHttpServer {
             address: None,
             presence_url: None,
             presence_metadata: Arc::new(RwLock::new(default_metadata)),
+            presence_deferred: false,
             state: None,
             hosted,
             sweeper: None,
@@ -245,6 +249,25 @@ impl OriginHttpServer {
             return None;
         }
         self.state.clone().map(|state| WorkingStateReader { state })
+    }
+
+    /// Holds the presence loop back until [`OriginHttpServer::start_presence`].
+    /// The controller rejects a beat for an origin that is not registered yet
+    /// with 401, which reads as a lapsed credential and has the runtime agent
+    /// renew its registration, so a host that registers the origin after
+    /// `start` begins beating once that registration has landed.
+    pub fn defer_presence_until_registered(&mut self) {
+        self.presence_deferred = true;
+    }
+
+    /// Starts the presence loop held back by
+    /// [`OriginHttpServer::defer_presence_until_registered`]; its first beat
+    /// goes out at once. Does nothing when the loop is already running.
+    pub async fn start_presence(&mut self) -> Result<()> {
+        if self.presence_handle.is_some() {
+            return Ok(());
+        }
+        self.spawn_presence().await
     }
 
     pub async fn start(&mut self) -> Result<ServerStart> {
@@ -389,7 +412,9 @@ impl OriginHttpServer {
             }
         });
 
-        self.spawn_presence().await?;
+        if !self.presence_deferred {
+            self.spawn_presence().await?;
+        }
 
         self.address = Some(local_addr);
         self.shutdown_tx = Some(shutdown_tx);
@@ -1125,6 +1150,105 @@ mod presence_tests {
 
         assert_eq!(state.calls.load(Ordering::SeqCst), 2);
         assert_eq!(store.generation(), 0, "a 404 is not a credential problem");
+    }
+
+    /// A stand-in controller that records the status of every presence beat
+    /// for `project_id`, and accepts them all.
+    async fn spawn_beat_recorder(
+        project_id: uuid::Uuid,
+    ) -> (Url, Arc<std::sync::Mutex<Vec<String>>>) {
+        let statuses = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = statuses.clone();
+        let router = Router::new().route(
+            &format!("/projects/{project_id}/origin/presence/beat"),
+            post(move |body: String| {
+                let recorded = recorded.clone();
+                async move {
+                    let status = serde_json::from_str::<JsonValue>(&body)
+                        .ok()
+                        .and_then(|value| value["status"].as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    recorded.lock().unwrap().push(status);
+                    (AxumStatus::OK, "{}".to_string())
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock controller");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        });
+        let base = format!("http://{addr}/").parse().expect("base url");
+        (base, statuses)
+    }
+
+    /// The runtime agent registers its origin after `start`. A beat before
+    /// that registration is refused with 401 and costs the agent a renewed
+    /// registration, so a deferred server beats only from `start_presence` on.
+    #[tokio::test]
+    async fn a_deferred_server_beats_only_once_its_presence_starts() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let store: crate::config::SharedControllerToken =
+            Arc::new(ControllerTokenStore::new(Some("good-token".into())));
+        let mut config = presence_config(Some(store));
+        config.workspace_root = workspace.path().to_path_buf();
+        let (base, statuses) = spawn_beat_recorder(config.project_id).await;
+        config.controller_base_url = base;
+
+        let mut server = OriginHttpServer::new(config).expect("server");
+        server.defer_presence_until_registered();
+        server.start().await.expect("start");
+        time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            statuses.lock().unwrap().is_empty(),
+            "no beat may go out before the origin is registered"
+        );
+
+        server.start_presence().await.expect("presence");
+        server
+            .start_presence()
+            .await
+            .expect("a second start is a no-op");
+        let deadline = time::Instant::now() + Duration::from_secs(5);
+        while statuses.lock().unwrap().is_empty() && time::Instant::now() < deadline {
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        let started = statuses.lock().unwrap().clone();
+        assert!(
+            started.iter().all(|status| status == "online"),
+            "{started:?}"
+        );
+
+        server.stop().await.expect("stop");
+        let stopped = statuses.lock().unwrap().clone();
+        assert_eq!(stopped.len(), started.len() + 1, "{stopped:?}");
+        assert_eq!(stopped.last().map(String::as_str), Some("offline"));
+    }
+
+    /// Without the deferral `start` beats at once, as every other host expects.
+    #[tokio::test]
+    async fn a_server_beats_as_soon_as_it_starts_by_default() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let store: crate::config::SharedControllerToken =
+            Arc::new(ControllerTokenStore::new(Some("good-token".into())));
+        let mut config = presence_config(Some(store));
+        config.workspace_root = workspace.path().to_path_buf();
+        let (base, statuses) = spawn_beat_recorder(config.project_id).await;
+        config.controller_base_url = base;
+
+        let mut server = OriginHttpServer::new(config).expect("server");
+        server.start().await.expect("start");
+        let deadline = time::Instant::now() + Duration::from_secs(5);
+        while statuses.lock().unwrap().is_empty() && time::Instant::now() < deadline {
+            time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            statuses.lock().unwrap().first().map(String::as_str),
+            Some("online")
+        );
+        server.stop().await.expect("stop");
     }
 }
 
