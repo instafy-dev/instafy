@@ -477,6 +477,15 @@ monorepo installation on Node20. No existing check is removed:
 | JavaScript CLI and provider contract | CLI package artifact and automations; provider-contract packing | `public-js-cli` |
 | JavaScript Desktop and runtime | Runtime helper build/tests and complete Desktop build/tests | `public-js-desktop` |
 
+The Desktop test script installs the locked Electron binary once, with the
+package's own `install-electron`, before `node --test` starts. Electron 42 and
+newer download the binary on the first `require("electron")`, `node --test`
+runs each test file in its own process, and several Desktop test files load
+modules that require Electron. Without that single install, those processes
+extract into the same `dist` directory at once and intermittently fail with
+`File exists (os error 17)` or `No such file or directory (os error 2)`.
+`node --test scripts/check-javascript-ci.test.mjs` pins the order.
+
 The aggregate keeps the existing required name and fails if any fixed child
 fails, times out, is cancelled, skipped or missing. It receives no repository
 credentials and checks out no source. Its own label suffix is
