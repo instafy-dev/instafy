@@ -254,3 +254,73 @@ describe("useHostedRuntimeEnsure force", () => {
     expect(ensure).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("useHostedRuntimeEnsure in progress", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let inProgress: boolean | null = null;
+
+  function Harness({
+    statuses,
+    hostedRuntimeStopAtMs,
+  }: {
+    statuses: ControllerRuntimeStatusEntry[];
+    hostedRuntimeStopAtMs: number | null;
+  }) {
+    inProgress = useHostedRuntimeEnsure({
+      enabled: true,
+      projectId: PROJECT_ID,
+      runtimeStatuses: statuses,
+      runtimeStatusesResolved: true,
+      refreshRuntimeStatuses: async () => {},
+      showStatus: () => {},
+      setRuntimeEnsureError: () => {},
+      setRuntimeEnsureLimit: () => {},
+      showDesktopRuntimeHelp: () => {},
+      hostedRuntimeStopAtMs,
+    }).hasHostedRuntimeInProgress;
+    return null;
+  }
+
+  async function render(statuses: ControllerRuntimeStatusEntry[], hostedRuntimeStopAtMs: number | null) {
+    await act(async () => {
+      root.render(<Harness statuses={statuses} hostedRuntimeStopAtMs={hostedRuntimeStopAtMs} />);
+    });
+  }
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    inProgress = null;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("counts a stop's release, which no longer reads as booting, as in progress", async () => {
+    // A machine launched half an hour ago and stopped now: requested on that
+    // old launch, too old to read as booting, so it looked like no machine.
+    const launchedAt = new Date(Date.now() - 30 * 60_000).toISOString();
+    const releasing = {
+      ...staleRequestedRow(),
+      createdAt: launchedAt,
+      launchRequestedAt: launchedAt,
+    };
+    await render([releasing], Date.now() - 10_000);
+    expect(inProgress).toBe(true);
+
+    await render([{ ...releasing, stopRequestedAt: new Date().toISOString() }], null);
+    expect(inProgress).toBe(true);
+
+    // With no stop known, the same row is a launch that went stale.
+    await render([releasing], null);
+    expect(inProgress).toBe(false);
+  });
+});

@@ -7,6 +7,7 @@ import {
 } from "../../../runtime/hooks/useHostedRuntimeEnsure";
 import {
   STALLED_LAUNCH_AFTER_MS,
+  runtimeEntryIsStopping,
   stalledLaunchDeadlineMs,
 } from "../../../runtime/utils/runtimeEntry";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
@@ -27,6 +28,11 @@ export interface StalledWorkspaceStartInput {
   /** The last ensure was refused by the team's runtime limit. */
   runtimeLimitReached: boolean;
   outOfCredits: boolean;
+  /**
+   * The latest person's stop known in the space (useHostedRuntimeStopAtMs).
+   * A runtime that stop is releasing is no launch, stalled or not.
+   */
+  hostedRuntimeStopAtMs?: number | null;
 }
 
 export interface StalledWorkspaceStartState {
@@ -81,6 +87,9 @@ export function resolveStalledWorkspaceStart(
   let stalledLaunchRequestedAtMs: number | null = null;
   let nextCheckAtMs: number | null = null;
   for (const entry of input.runtimeStatuses) {
+    if (runtimeEntryIsStopping(entry, input.hostedRuntimeStopAtMs ?? null)) {
+      continue;
+    }
     const deadlineMs = stalledLaunchDeadlineMs(entry);
     if (deadlineMs === null) {
       continue;

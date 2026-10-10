@@ -257,6 +257,17 @@ on the same launch. Two things end a launch that never comes up:
 lease's request time, so the Studio can tell how long the current launch has
 been coming up without keeping a clock of its own.
 
+A stop leaves the runtime `requested` on its old launch, offline and never
+seen, while the provider releases the machine, which reads exactly like a
+launch that stalled. The Studio therefore takes such a runtime for a stop
+when it knows of one newer than that launch: this tab's own Stop or Remove, a
+turn a person's stop put back in the queue (see "Stop reasons"), or the
+runtime's own `stopRequestedAt` (or, without a time, `stopReason`) where the
+status answer carries one. Machines then labels it Stopping, without a
+spinner, the chat shows no stalled-launch notice for it, and the automatic
+starts count it as a machine still in progress, not as none. A launch
+requested after that stop is a launch again.
+
 ## Waiting on the runtime limit
 
 When every hosted runtime an organization may run is in use, an ensure for

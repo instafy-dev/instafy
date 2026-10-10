@@ -37,6 +37,14 @@ export interface ControllerRuntimeStatusEntry {
    * active lease, and from controllers older than the field.
    */
   launchRequestedAt?: string | null;
+  /**
+   * When a stop of this runtime was requested, while its provider release
+   * runs and the runtime still reads `requested` on its old launch. Absent
+   * from controllers older than the field.
+   */
+  stopRequestedAt?: string | null;
+  /** The reason of that stop, such as `user_stop`. Absent as above. */
+  stopReason?: string | null;
   endpointUrl?: string | null;
   taskRef?: string | null;
   isLocal: boolean;

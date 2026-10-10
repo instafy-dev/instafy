@@ -24,6 +24,7 @@ import { cloneRuntimeState } from "./defaults";
 import { useDesktopRuntimeEnsure } from "./hooks/useDesktopRuntimeEnsure";
 import { useHostedRuntimeEnsure, type EnsureHostedRuntimeOptions } from "./hooks/useHostedRuntimeEnsure";
 import { useHostedRuntimePolicy } from "./hooks/useHostedRuntimePolicy";
+import { useHostedRuntimeStopAtMs } from "./hooks/useHostedRuntimeStopAtMs";
 import {
   clearIdlePaused,
   clearManualStop,
@@ -66,6 +67,12 @@ interface RuntimeOperationsContextValue {
   runtimeEnsureError: string | null;
   runtimeEnsureLimit: HostedRuntimeLimitErrorDetails | null;
   hostedRuntimeEnsuring: boolean;
+  /**
+   * The latest person's stop known in the active space, or null. A hosted
+   * runtime still `requested` on an older launch is that stop's release
+   * (runtimeEntryIsStopping).
+   */
+  hostedRuntimeStopAtMs: number | null;
   hostedRuntimeTakeoverInProgress: boolean;
   ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
   takeOverHostedRuntimeLimit: () => Promise<boolean>;
@@ -241,6 +248,7 @@ export function RuntimeOperationsProvider({
   const showDesktopRuntimeHelp = useCallback(() => {
     setDesktopRuntimeHelpVisible(true);
   }, []);
+  const hostedRuntimeStopAtMs = useHostedRuntimeStopAtMs(activeProjectId ?? null, state.runs);
   const {
     hostedRuntimeEnsuring,
     ensureHostedRuntime,
@@ -256,6 +264,7 @@ export function RuntimeOperationsProvider({
     setRuntimeEnsureError,
     setRuntimeEnsureLimit,
     showDesktopRuntimeHelp,
+    hostedRuntimeStopAtMs,
   });
   const { desktopRuntimeEnsuring, ensureDesktopRuntime } =
     useDesktopRuntimeEnsure({
@@ -805,6 +814,7 @@ export function RuntimeOperationsProvider({
       runtimeEnsureError,
       runtimeEnsureLimit,
       hostedRuntimeEnsuring,
+      hostedRuntimeStopAtMs,
       hostedRuntimeTakeoverInProgress,
       ensureHostedRuntime,
       takeOverHostedRuntimeLimit,
@@ -831,6 +841,7 @@ export function RuntimeOperationsProvider({
       takeOverHostedRuntimeLimit,
       hideDesktopRuntimeHelp,
       hostedRuntimeEnsuring,
+      hostedRuntimeStopAtMs,
       hostedRuntimeTakeoverInProgress,
       runtimeEnsureError,
       runtimeEnsureLimit,

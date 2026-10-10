@@ -203,6 +203,40 @@ export function stalledLaunchDeadlineMs(
   return requestedAtMs === null ? null : requestedAtMs + STALLED_LAUNCH_AFTER_MS;
 }
 
+/**
+ * Whether this hosted runtime reads `requested` (or another booting status)
+ * because it is being stopped, not started. A stop leaves the runtime
+ * `requested`, offline and never seen, on its old launch while the provider
+ * releases the machine, which is a stalled launch by every status field. So
+ * it counts as a stop when a stop newer than its launch is known: the
+ * controller's own marker (`stopRequestedAt`, or `stopReason` without a
+ * time), or `knownStopAtMs`, the latest person's stop the client knows of in
+ * the space (this tab's Stop, or a turn such a stop put back in the queue).
+ * A launch requested after that stop is a launch again.
+ */
+export function runtimeEntryIsStopping(
+  entry: ControllerRuntimeStatusEntry | null | undefined,
+  knownStopAtMs: number | null,
+): boolean {
+  if (!entry || entry.isLocal || !isHostedRuntime(entry)) {
+    return false;
+  }
+  if (!BOOTING_STATUS_SET.has((entry.status ?? "").toLowerCase())) {
+    return false;
+  }
+  const markerAtMs =
+    parseIsoTimestamp(entry.stopRequestedAt ?? null) ??
+    (typeof entry.stopReason === "string" && entry.stopReason.trim().length > 0
+      ? Number.POSITIVE_INFINITY
+      : null);
+  const stopAtMs = Math.max(markerAtMs ?? Number.NEGATIVE_INFINITY, knownStopAtMs ?? Number.NEGATIVE_INFINITY);
+  if (stopAtMs === Number.NEGATIVE_INFINITY) {
+    return false;
+  }
+  const launchRequestedAtMs = parseIsoTimestamp(entry.launchRequestedAt ?? null);
+  return launchRequestedAtMs === null || launchRequestedAtMs <= stopAtMs;
+}
+
 export function resolveStalledHostedLaunch(
   entry: ControllerRuntimeStatusEntry | null | undefined,
   nowMs: number,

@@ -150,6 +150,51 @@ describe("resolveStalledWorkspaceStart", () => {
     expect(state).toEqual({ showNotice: true, nextCheckAtMs: null });
   });
 
+  it("does not take a stop's release for a stalled launch", () => {
+    // Production, Oct 10: Machines > Stop at 10:58:43. While the provider
+    // released the machine the runtime read requested, offline, never seen,
+    // on the launch it had been running since, and the turn the stop cut off
+    // waited queued. Every status field reads like a launch that stalled.
+    const stopAtMs = at(30);
+    const releasing = launchingRuntime();
+    const cutOffTurn = { "run-1": queuedRun({ progressStage: "requeued" }) };
+    const late = at(31);
+    // This tab's Stop, or a person's stop the turn records.
+    expect(
+      resolveStalledWorkspaceStart({
+        ...input({ runs: cutOffTurn, hostedRuntimeStopAtMs: stopAtMs }),
+        nowMs: late,
+      }),
+    ).toEqual({ showNotice: false, nextCheckAtMs: null });
+    // The controller's own mark on the stopping runtime.
+    for (const marker of [{ stopRequestedAt: new Date(stopAtMs).toISOString() }, { stopReason: "user_stop" }]) {
+      expect(
+        resolveStalledWorkspaceStart({
+          ...input({ runtimeStatuses: [launchingRuntime(marker)], runs: cutOffTurn }),
+          nowMs: late,
+        }).showNotice,
+      ).toBe(false);
+    }
+
+    // The same fields with no stop known: a launch that never came up.
+    expect(resolveStalledWorkspaceStart({ ...input({ runtimeStatuses: [releasing] }), nowMs: late }).showNotice).toBe(
+      true,
+    );
+    // A launch requested after the stop is a launch again.
+    expect(
+      resolveStalledWorkspaceStart({
+        ...input({ hostedRuntimeStopAtMs: at(-1) }),
+        nowMs: late,
+      }).showNotice,
+    ).toBe(true);
+    expect(
+      resolveStalledWorkspaceStart({
+        ...input({ runtimeStatuses: [launchingRuntime({ stopRequestedAt: new Date(at(-1)).toISOString() })] }),
+        nowMs: late,
+      }).showNotice,
+    ).toBe(true);
+  });
+
   it("is quiet when the workspace is ready, local, or no message of this conversation waits", () => {
     const late = at(10);
     expect(resolveStalledWorkspaceStart({ ...input({ runtimeReady: true }), nowMs: late }).showNotice).toBe(false);
@@ -396,6 +441,7 @@ describe("stalled workspace start in the chat", () => {
 
     expect(chatPanel).toContain("useStalledWorkspaceStart({");
     expect(chatPanel).toContain("runtimeLimitReached: Boolean(runtimeEnsureLimit?.limitReached),");
+    expect(chatPanel).toMatch(/useStalledWorkspaceStart\(\{[^}]*\bhostedRuntimeStopAtMs,/);
     expect(chatPanel).toContain("ensureHostedRuntime: projectWriteDisabled ? null : ensureHostedRuntime,");
     expect(chatPanel).toContain(
       "showOutOfCreditsNotice || workspaceStartStall.showNotice || stoppedTurnNotice !== null",

@@ -506,6 +506,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ensureDesktopRuntime,
     ensureHostedRuntime,
     hostedRuntimeEnsuring,
+    hostedRuntimeStopAtMs,
     runtimeEnsureError,
     runtimeEnsureLimit,
     runtimeStatuses,
@@ -3071,6 +3072,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     messages,
     runtimeLimitReached: Boolean(runtimeEnsureLimit?.limitReached),
     outOfCredits,
+    hostedRuntimeStopAtMs,
     ensureHostedRuntime: projectWriteDisabled ? null : ensureHostedRuntime,
     showStatus,
   });

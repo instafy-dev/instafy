@@ -14,6 +14,7 @@ import {
   isHostedRuntime,
   runtimeEntryIsBooting,
   runtimeEntryIsReady,
+  runtimeEntryIsStopping,
 } from "../utils/runtimeEntry";
 import { getDefaultRuntimeMetadata } from "../utils/webdevRuntime";
 import type { ShowStatusFn } from "./types";
@@ -45,6 +46,8 @@ interface UseHostedRuntimeEnsureOptions {
   setRuntimeEnsureError: (message: string | null) => void;
   setRuntimeEnsureLimit: (details: HostedRuntimeLimitErrorDetails | null) => void;
   showDesktopRuntimeHelp: () => void;
+  /** The latest person's stop known in the space (useHostedRuntimeStopAtMs). */
+  hostedRuntimeStopAtMs?: number | null;
 }
 
 export function useHostedRuntimeEnsure({
@@ -57,6 +60,7 @@ export function useHostedRuntimeEnsure({
   setRuntimeEnsureError,
   setRuntimeEnsureLimit,
   showDesktopRuntimeHelp,
+  hostedRuntimeStopAtMs = null,
 }: UseHostedRuntimeEnsureOptions) {
   const [hostedRuntimeEnsuring, setHostedRuntimeEnsuring] = useState(false);
   // Limit details of the most recent ensure failure, or null when the last
@@ -445,6 +449,9 @@ export function useHostedRuntimeEnsure({
     [debugLog, requestHostedRuntime, resolveEffectiveProjectId],
   );
 
+  // A machine on its way down counts as well as one on its way up: a stop's
+  // release reads `requested` on the old launch, and the automatic starts
+  // must not take it for no machine at all (runtimeEntryIsStopping).
   const hasHostedRuntimeInProgress = useMemo(() => {
     return runtimeStatuses.some((entry) => {
       if (!entry) {
@@ -454,9 +461,9 @@ export function useHostedRuntimeEnsure({
       if (runtimeEntryIsReady(entry)) {
         return true;
       }
-      return runtimeEntryIsBooting(entry);
+      return runtimeEntryIsBooting(entry) || runtimeEntryIsStopping(entry, hostedRuntimeStopAtMs);
     });
-  }, [runtimeStatuses]);
+  }, [hostedRuntimeStopAtMs, runtimeStatuses]);
 
   return {
     hostedRuntimeEnsuring,
