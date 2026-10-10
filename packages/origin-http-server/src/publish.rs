@@ -6,9 +6,13 @@
 //! fast-forward when `main` has not moved, or as one merge commit on top of
 //! the fetched tip R when it has. Every local commit keeps its id, author and
 //! message. Paths both sides changed keep `main`'s version, and the local
-//! version goes to a `conflict` recovery ref. Work that cannot be published at
-//! all goes to an `unpublished` recovery ref. Nothing is silently dropped, and
-//! nothing dirty reaches `main` unless a caller selected it.
+//! version goes to a `conflict` recovery ref. So does a new name that a disk
+//! ignoring case or Unicode form takes for another entry of the result
+//! (`todo.md` beside `main`'s `TODO.md`), which a person's save is refused
+//! for (`path_alias`); names `main` already holds are not judged. Work that
+//! cannot be published at all goes to an `unpublished` recovery ref. Nothing
+//! is silently dropped, and nothing dirty reaches `main` unless a caller
+//! selected it.
 //!
 //! Paths that may never be published (see [`crate::publish_policy`]) are not
 //! removed from history: commits that were never pushed are rewritten
@@ -38,7 +42,7 @@ use crate::recovery_view::{
 };
 use crate::restore_plan::{self, PathRoots, PlanError, RestoreInput};
 use crate::stale_align;
-use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from};
+use crate::tree_merge::{changed_paths, overlay, three_way, tree_with_entries_from, tree_without};
 use crate::workspace_fs::WorkspaceDir;
 use crate::workspace_git::{nul_list, temp_index_dir, GitIdentity, RunOpts, WorkspaceGit};
 
@@ -328,7 +332,10 @@ pub(crate) const STOP_FLUSH_BUDGET: Duration = FLUSH_BUDGET;
 
 /// Revert `commit` by applying its inverse to the index and work tree (only
 /// for the paths it touched), committing that, and publishing. `base` is the
-/// parent to revert against (required for merges and root commits).
+/// parent to revert against (required for merges and root commits). A name
+/// the inverse brings back that a disk ignoring case or Unicode form takes
+/// for another entry is refused (409 `path_alias`) before anything is
+/// written.
 pub fn revert_commit(
     ctx: &PublishContext<'_>,
     commit: &str,
@@ -451,6 +458,10 @@ pub(crate) struct Publisher<'a> {
     /// The conflict copy of the attempt in flight, stored before its push so
     /// no push can land without it.
     conflict_copy: Option<RecoveryRefReport>,
+    /// The new names the attempt in flight left off `main` because a disk
+    /// ignoring case takes each for another entry there (`aliases_added`):
+    /// their only copy is the conflict copy.
+    new_aliases: Vec<String>,
     /// Copies stored in place of pending refs that built on dismissed work.
     separated: Vec<RecoveryRefReport>,
     /// Local `unsaved` refs this stop made that no push sends until the
@@ -513,6 +524,7 @@ impl<'a> Publisher<'a> {
             published_aliases: Vec::new(),
             push_deadline: None,
             conflict_copy: None,
+            new_aliases: Vec::new(),
             separated: Vec::new(),
             held_back: BTreeSet::new(),
             saves: None,
@@ -1471,8 +1483,16 @@ impl<'a> Publisher<'a> {
             && !merged_conflicts.is_empty()
         {
             // A Desktop folder belongs to the user: their version of every
-            // conflicted file stays on disk as a local edit against `main`.
-            self.write_worktree_versions(&local, &merged_conflicts)?;
+            // conflicted file stays on disk as a local edit against `main`,
+            // except a new name left out for another entry there, which a
+            // disk ignoring case would write over that entry: it stays on
+            // the conflict copy.
+            let on_disk: Vec<String> = merged_conflicts
+                .iter()
+                .filter(|path| !self.new_aliases.contains(path))
+                .cloned()
+                .collect();
+            self.write_worktree_versions(&local, &on_disk)?;
         }
         if unrelated {
             self.git
@@ -1512,6 +1532,7 @@ impl<'a> Publisher<'a> {
         local: &str,
         main: Option<&str>,
     ) -> Result<(Attempt, Vec<String>, Option<String>, bool)> {
+        self.new_aliases.clear();
         let Some(main) = main else {
             // (a) main is missing: create it, unless someone else just did.
             self.discard_conflict_copy()?;
@@ -1526,8 +1547,9 @@ impl<'a> Publisher<'a> {
             return Ok((attempt, Vec::new(), None, false));
         };
 
-        if self.git.is_ancestor(main, local)? {
-            // (c) a fast-forward of main.
+        if self.git.is_ancestor(main, local)? && self.aliases_added(main, local)?.is_empty() {
+            // (c) a fast-forward of main, unless it adds a name that a disk
+            // ignoring case takes for another entry: (d) leaves that out.
             self.discard_conflict_copy()?;
             let spec = format!("{local}:{}", self.main_ref);
             let result = push(&self.git, &self.remote, &[spec], &[])?;
@@ -1537,15 +1559,29 @@ impl<'a> Publisher<'a> {
 
         match self.git.merge_base(local, main)? {
             Some(base) => {
-                // (d) one merge commit on top of main.
-                let merged = three_way(&self.git, Some(&base), main, local)?;
+                // (d) one merge commit on top of main. A new name that a
+                // disk ignoring case takes for another entry of the merge
+                // keeps `main`'s entry (none) and is kept on the conflict
+                // copy, like a path both sides changed.
+                let mut merged = three_way(&self.git, Some(&base), main, local)?;
+                self.new_aliases = self.aliases_added(main, &merged.tree)?;
+                if !self.new_aliases.is_empty() {
+                    merged.tree = tree_without(&self.git, &merged.tree, &self.new_aliases)?;
+                    merged.conflicts.extend(self.new_aliases.iter().cloned());
+                    merged.conflicts.sort();
+                }
                 self.stage_conflict_copy(local, &base, main, &merged.conflicts, false)?;
                 let count = self
                     .git
                     .stdout(&["rev-list", "--count", local, &format!("^{main}")])?
                     .parse::<usize>()
                     .unwrap_or(0);
-                let message = merge_message(self.config, count, &merged.conflicts);
+                let message = merge_message(
+                    self.config,
+                    count,
+                    &merged.conflicts,
+                    self.new_aliases.len(),
+                );
                 let merge = self.git.commit_tree(
                     &merged.tree,
                     &[main, local],
@@ -1565,6 +1601,24 @@ impl<'a> Publisher<'a> {
                 Ok((attempt, conflicts, Some(main.to_string()), true))
             }
         }
+    }
+
+    /// The names `tree` adds to `main` (paths `main` has no entry at) that a
+    /// disk ignoring case or Unicode form takes for another entry of `tree`
+    /// ([`restore_plan::aliases_in`]): a person's save of such a name is
+    /// refused (`path_alias`), so a publish leaves it out too. A pair
+    /// `main` already holds is not judged, so it blocks nothing.
+    fn aliases_added(&self, main: &str, tree: &str) -> Result<Vec<String>> {
+        let raw =
+            self.git
+                .bytes(&["diff-tree", "-r", "-z", "--no-renames", "--raw", main, tree])?;
+        let added: Vec<String> = parse_raw_changes(&raw)
+            .into_iter()
+            .filter(|change| change.status == 'A')
+            .map(|change| change.path)
+            .collect();
+        let added: Vec<&str> = added.iter().map(String::as_str).collect();
+        restore_plan::aliases_in(&self.git, tree, &added)
     }
 
     fn replay(&mut self, local: &str, main: &str) -> Result<(Attempt, Vec<String>)> {
@@ -2688,6 +2742,18 @@ impl<'a> Publisher<'a> {
                 inverse.conflicts,
             ));
         }
+        // A name the inverse brings back that a disk ignoring case takes for
+        // another entry (`todo.md` beside a `TODO.md` saved since) is refused
+        // as a person's save of it is, before anything is written: on such a
+        // disk the inverse would land in that other file.
+        let aliases = self.aliases_added(&head, &inverse.tree).map_err(internal)?;
+        if !aliases.is_empty() {
+            return Err(OriginError::conflict_paths(
+                "path_alias",
+                crate::apply::PATH_ALIAS_MESSAGE,
+                aliases,
+            ));
+        }
         let head_tree = self.git.tree_id(&head).map_err(internal)?;
         let mut local = Some(head.clone());
         if inverse.tree != head_tree {
@@ -3020,15 +3086,27 @@ fn jitter(attempt: usize) {
     ));
 }
 
-fn merge_message(config: &ServerConfig, commits: usize, conflicts: &[String]) -> String {
+/// The message of a merge onto `main`; `aliases` of the `conflicts` are new
+/// names left out for another entry a disk ignoring case takes them for.
+fn merge_message(
+    config: &ServerConfig,
+    commits: usize,
+    conflicts: &[String],
+    aliases: usize,
+) -> String {
     let mut message = String::from("Save changes from a workspace\n\n");
     message.push_str(&format!(
         "Adds {commits} commit{} made in a workspace to the saved version.\n",
         if commits == 1 { "" } else { "s" }
     ));
-    if !conflicts.is_empty() {
+    if conflicts.len() > aliases {
         message.push_str(
             "Some files were also changed in the saved version, which kept its own copy.\n",
+        );
+    }
+    if aliases > 0 {
+        message.push_str(
+            "Some new names were left out: the saved version has another file or folder by that name in another case or Unicode form.\n",
         );
     }
     message.push_str(&format!(

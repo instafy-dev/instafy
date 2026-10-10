@@ -357,6 +357,36 @@ pub(crate) fn tree_with_entries_from(
         .context("could not rebuild the tree after filtering paths")
 }
 
+/// `tree` (a tree id) without the entries at exactly `paths` (files, links
+/// or submodules). The paths reach git on stdin only: git on macOS composes
+/// the arguments it is given, so a decomposed name passed as one would
+/// match its composed twin instead of itself.
+pub(crate) fn tree_without(git: &WorkspaceGit<'_>, tree: &str, paths: &[String]) -> Result<String> {
+    let scratch = temp_index_dir(git)?;
+    let index = scratch.path().join("index");
+    let opts = RunOpts {
+        index_file: Some(&index),
+        ..RunOpts::default()
+    };
+    git.ok_opts(&["read-tree", tree], &opts)?;
+    let zero = "0".repeat(tree.len());
+    let mut info = Vec::new();
+    for path in paths {
+        info.extend_from_slice(format!("0 {zero}\t{path}").as_bytes());
+        info.push(0);
+    }
+    git.ok_opts(
+        &["update-index", "-z", "--index-info"],
+        &RunOpts {
+            index_file: Some(&index),
+            stdin: Some(&info),
+            ..RunOpts::default()
+        },
+    )?;
+    git.stdout_opts(&["write-tree"], &opts)
+        .context("could not rebuild the tree without those paths")
+}
+
 /// `base` with every path `top` adds or changes taken from `top`, except the
 /// paths in `keep` (and anything below them), which keep `base`'s entry.
 /// Paths only `base` has stay: for two unrelated histories nothing says

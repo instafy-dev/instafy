@@ -463,8 +463,9 @@ refused write leaves nothing behind.
   controller's managed-files applies (`autoCommitAfterApply`), add ignored files as tracked content
   and are not refused for `path_alias`.
 - `POST /git/revert-commit {commit, base?}` saves the inverse of a saved commit, merged onto
-  `main` (409 `revert_conflict` when later changes overlap). A merge or a first commit needs
-  `base`, which must be an ancestor of `commit`.
+  `main` (409 `revert_conflict` when later changes overlap, 409 `path_alias` when it brings back a
+  name `main` holds in another case or Unicode form, as for a save). A merge or a first commit
+  needs `base`, which must be an ancestor of `commit`.
 - `POST /git/recovery/restore` and `POST /git/recovery/dismiss` follow the single-tenant rules
   (one restore plan, `src/restore_plan.rs`).
 - `POST /git/sync` commits nothing: with `{expectedRev}` it checks that the commit is on `main`

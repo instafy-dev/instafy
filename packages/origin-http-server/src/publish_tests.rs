@@ -7093,3 +7093,346 @@ async fn a_discard_puts_back_only_the_file_it_names() {
     assert_eq!(sc.disk("app/i.tsx").as_deref(), Some("unsaved i\n"));
     assert_eq!(sc.disk("draft1.md").as_deref(), Some("unsaved draft\n"));
 }
+
+// ---------------------------------------------------------------------------
+// New names a disk ignoring case or Unicode form takes for another entry.
+// ---------------------------------------------------------------------------
+
+/// Plain git in `dir` with `input` on stdin; its output, trimmed.
+fn git_with_input(dir: &Path, args: &[&str], input: Option<&[u8]>) -> String {
+    let output = git_output(dir, args, input);
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string()
+}
+
+/// Stage `entries` (`None` removes) through stdin alone, with `git`
+/// running in the repository: no disk here needs to hold the names, and
+/// git on macOS composes the names it is given as arguments.
+fn stage_entries(
+    git: impl Fn(&[&str], Option<&[u8]>) -> String,
+    entries: &[(&str, Option<&[u8]>)],
+) {
+    let mut info = Vec::new();
+    for (path, content) in entries {
+        let line = match content {
+            Some(bytes) => format!(
+                "100644 {}\t{path}",
+                git(&["hash-object", "-w", "--stdin"], Some(bytes))
+            ),
+            None => format!("0 {}\t{path}", "0".repeat(40)),
+        };
+        info.extend_from_slice(line.as_bytes());
+        info.push(0);
+    }
+    git(&["update-index", "-z", "--index-info"], Some(&info));
+}
+
+impl Scenario {
+    /// Commit `entries` in the workspace as the agent, through its index
+    /// alone ([`stage_entries`]), as a runtime on a disk that tells case
+    /// apart can.
+    fn agent_commit_entries(&self, entries: &[(&str, Option<&[u8]>)], message: &str) -> String {
+        let git = |args: &[&str], input: Option<&[u8]>| {
+            let mut full = vec!["--git-dir", ".instafy/.git", "--work-tree", "."];
+            full.extend_from_slice(args);
+            git_with_input(&self.ws, &full, input)
+        };
+        stage_entries(git, entries);
+        ig(
+            &self.ws,
+            &[
+                "-c",
+                "user.name=Ada Agent",
+                "-c",
+                "user.email=ada@example.com",
+                "commit",
+                "-q",
+                "--no-gpg-sign",
+                "-m",
+                message,
+            ],
+        );
+        ig(&self.ws, &["rev-parse", "HEAD"])
+    }
+
+    /// Someone else saves `entries` to canonical main through the index
+    /// alone ([`stage_entries`]).
+    fn push_other_entries(&self, entries: &[(&str, Option<&[u8]>)], message: &str) {
+        let _ = git_output(
+            &self.other,
+            &["pull", "-q", "--ff-only", "origin", "main"],
+            None,
+        );
+        stage_entries(
+            |args: &[&str], input: Option<&[u8]>| git_with_input(&self.other, args, input),
+            entries,
+        );
+        git_in(&self.other, &["commit", "-q", "-m", message]);
+        git_in(&self.other, &["push", "-q", "origin", "main"]);
+    }
+
+    /// The paths `rev` (a ref or commit of canonical) holds, exactly as git
+    /// stores them.
+    fn remote_paths(&self, rev: &str) -> Vec<String> {
+        let output = git_output(
+            &self.remote,
+            &["ls-tree", "-r", "-z", "--name-only", "--full-tree", rev],
+            None,
+        );
+        assert!(output.status.success(), "{rev}");
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| String::from_utf8(record.to_vec()).unwrap())
+            .collect()
+    }
+}
+
+/// A turn's new `todo.md` beside the `TODO.md` a person saved on `main`
+/// meanwhile (the turn was stopped and resumed): a disk that ignores case
+/// takes the two for one file, so the publish leaves `todo.md` off `main`,
+/// as a person's save of it is refused (`path_alias`), and keeps the turn
+/// on a `conflict` ref, which Unsaved work offers as such a name: keeping
+/// the saved version lists it `path_alias` and keeps the ref. The rest of
+/// the turn is published. A Desktop folder does not get `todo.md` back on
+/// its disk, where it would be written over the person's `TODO.md`.
+#[test]
+fn a_new_name_main_holds_in_another_case_goes_to_a_conflict_ref() {
+    for desktop in [false, true] {
+        let sc = Scenario::new(Options {
+            hook: true,
+            desktop,
+            ..Options::default()
+        });
+        sc.write("todo.md", b"agent list\n");
+        sc.write("plan.md", b"agent plan\n");
+        sc.push_other(
+            &[("TODO.md", Some(b"person list\n"))],
+            "Save version: TODO.md",
+        );
+
+        let report = sc.publish_paths(&["todo.md", "plan.md"]);
+        assert_eq!(report.git_sync_status, SyncStatus::Partial, "{report:?}");
+        assert_eq!(report.conflicted_paths, vec!["todo.md".to_string()]);
+        let on_main = sc.remote_paths("main");
+        assert!(!on_main.contains(&"todo.md".to_string()), "{on_main:?}");
+        assert_eq!(sc.remote_file("TODO.md").as_deref(), Some("person list\n"));
+        assert_eq!(sc.remote_file("plan.md").as_deref(), Some("agent plan\n"));
+        let reference = report.recovery_ref.clone().expect("conflict ref");
+        assert!(reference.contains("-conflict-"), "{reference}");
+        assert_eq!(
+            sc.recovery_file(&reference, "todo.md").as_deref(),
+            Some("agent list\n")
+        );
+        assert!(report.checkout_moved, "{report:?}");
+        assert_eq!(sc.status(), "", "desktop {desktop}");
+        assert_eq!(sc.disk("TODO.md").as_deref(), Some("person list\n"));
+
+        let conflict = crate::publish::restore(
+            &sc.ctx(true),
+            crate::publish::RestoreRequest {
+                reference: reference.clone(),
+                ..Default::default()
+            },
+        );
+        match conflict {
+            Err(crate::error::OriginError::WithReport { code, report, .. }) => {
+                assert_eq!(code, "restore_conflict");
+                assert_eq!(report["paths"], serde_json::json!(["todo.md"]));
+            }
+            other => panic!("expected a restore conflict, got {other:?}"),
+        }
+        let kept = crate::publish::restore(
+            &sc.ctx(true),
+            crate::publish::RestoreRequest {
+                reference: reference.clone(),
+                keep: vec!["todo.md".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            kept.not_restored,
+            vec![crate::recovery_view::NotRestored {
+                path: "todo.md".to_string(),
+                reason: crate::recovery_view::PATH_ALIAS,
+            }]
+        );
+        assert!(!kept.ref_deleted, "{kept:?}");
+        assert_eq!(sc.remote_refs(&reference).len(), 1);
+    }
+}
+
+/// The same on a fast-forward: a turn on a checkout that holds `main`'s
+/// `TODO.md` commits a `todo.md` beside it. `main` gets the rest of the
+/// turn by one merge, without `todo.md`, which stays on a `conflict` ref.
+#[test]
+fn a_fast_forward_never_adds_a_name_main_holds_in_another_case() {
+    let sc = Scenario::new(Options {
+        hook: true,
+        seed: vec![("TODO.md", b"person list\n".to_vec())],
+        ..Options::default()
+    });
+    let before = sc.main();
+    let local = sc.agent_commit_entries(
+        &[
+            ("todo.md", Some(b"agent list\n")),
+            ("plan.md", Some(b"agent plan\n")),
+        ],
+        "agent work",
+    );
+
+    let report = sc.publish(Selection::None);
+    assert_eq!(report.git_sync_status, SyncStatus::Partial, "{report:?}");
+    assert_eq!(report.conflicted_paths, vec!["todo.md".to_string()]);
+    let on_main = sc.remote_paths("main");
+    assert!(!on_main.contains(&"todo.md".to_string()), "{on_main:?}");
+    assert_eq!(sc.remote_file("TODO.md").as_deref(), Some("person list\n"));
+    assert_eq!(sc.remote_file("plan.md").as_deref(), Some("agent plan\n"));
+    let parents = git_in(&sc.remote, &["rev-list", "--parents", "-n", "1", "main"]);
+    assert_eq!(parents, format!("{} {before} {local}", sc.main()));
+    let reference = report.recovery_ref.clone().expect("conflict ref");
+    assert!(reference.contains("-conflict-"), "{reference}");
+    assert_eq!(
+        sc.recovery_file(&reference, "todo.md").as_deref(),
+        Some("agent list\n")
+    );
+}
+
+/// A new name in another Unicode form of a name `main` gained (`café.md`
+/// decomposed beside `main`'s composed one) is one name on such a disk
+/// too, and goes to the `conflict` ref the same way.
+#[test]
+fn a_new_name_in_another_unicode_form_goes_to_a_conflict_ref() {
+    let composed = "caf\u{e9}.md";
+    let decomposed = "cafe\u{301}.md";
+    let sc = Scenario::new(Options::default());
+    sc.agent_commit_entries(
+        &[
+            (decomposed, Some(b"agent menu\n")),
+            ("plan.md", Some(b"agent plan\n")),
+        ],
+        "agent work",
+    );
+    sc.push_other(&[(composed, Some(b"person menu\n"))], "Save version: menu");
+
+    let report = sc.publish(Selection::None);
+    assert_eq!(report.git_sync_status, SyncStatus::Partial, "{report:?}");
+    assert_eq!(report.conflicted_paths, vec![decomposed.to_string()]);
+    let on_main = sc.remote_paths("main");
+    assert!(on_main.contains(&composed.to_string()), "{on_main:?}");
+    assert!(!on_main.contains(&decomposed.to_string()), "{on_main:?}");
+    assert_eq!(sc.remote_file("plan.md").as_deref(), Some("agent plan\n"));
+    let reference = report.recovery_ref.clone().expect("conflict ref");
+    assert!(sc
+        .remote_paths(&reference)
+        .contains(&decomposed.to_string()));
+}
+
+/// A pair of such names `main` already holds (`README.md` and `readme.md`,
+/// saved before this rule) stays as it is and blocks no other publish: only
+/// the names a publish adds are judged, on a merge and on a fast-forward
+/// alike.
+#[test]
+fn a_pair_main_already_holds_blocks_no_other_publish() {
+    let sc = Scenario::new(Options {
+        hook: true,
+        ..Options::default()
+    });
+    sc.push_other_entries(&[("readme.md", Some(b"lower\n"))], "an older save");
+    sc.write("notes.md", b"agent notes\n");
+    let merged = sc.publish_paths(&["notes.md"]);
+    assert_eq!(merged.git_sync_status, SyncStatus::Published, "{merged:?}");
+    sc.write("more.md", b"more\n");
+    let next = sc.publish_paths(&["more.md"]);
+    assert_eq!(next.git_sync_status, SyncStatus::Published, "{next:?}");
+    let on_main = sc.remote_paths("main");
+    for path in ["README.md", "readme.md", "notes.md", "more.md"] {
+        assert!(on_main.contains(&path.to_string()), "{path}: {on_main:?}");
+    }
+    assert_eq!(sc.remote_file("readme.md").as_deref(), Some("lower\n"));
+    assert_eq!(sc.remote_file("README.md").as_deref(), Some(README));
+}
+
+/// A rename of a file to another case of its own name (`README.md` to
+/// `readme.md`) adds a name no other entry has once the old one is gone:
+/// it is published, on a fast-forward and on a merge alike.
+#[test]
+fn a_case_rename_of_one_file_is_published() {
+    for moved in [false, true] {
+        let sc = Scenario::new(Options {
+            hook: true,
+            ..Options::default()
+        });
+        sc.agent_commit_entries(
+            &[("README.md", None), ("readme.md", Some(README.as_bytes()))],
+            "rename the readme",
+        );
+        if moved {
+            sc.push_other(
+                &[("notes.md", Some(b"person notes\n"))],
+                "Save version: notes.md",
+            );
+        }
+        let report = sc.publish(Selection::None);
+        assert_eq!(
+            report.git_sync_status,
+            SyncStatus::Published,
+            "moved {moved}: {report:?}"
+        );
+        let on_main = sc.remote_paths("main");
+        assert!(on_main.contains(&"readme.md".to_string()), "{on_main:?}");
+        assert!(!on_main.contains(&"README.md".to_string()), "{on_main:?}");
+    }
+}
+
+/// A revert that would bring back a name `main` now holds in another case
+/// (a saved commit deleted `todo.md`, then a person saved `TODO.md`) is
+/// refused (409 `path_alias`) before anything is written, as a person's
+/// save of that name is. On a Desktop folder on a disk that ignores case
+/// the inverse would otherwise land in the person's `TODO.md`, and the
+/// publish, which leaves `todo.md` out, would then take that file off the
+/// disk.
+#[test]
+fn a_revert_never_brings_back_a_name_main_holds_in_another_case() {
+    for desktop in [false, true] {
+        let sc = Scenario::new(Options {
+            hook: true,
+            desktop,
+            seed: vec![("todo.md", b"old list\n".to_vec())],
+            ..Options::default()
+        });
+        let deleted = sc.push_other(&[("todo.md", None)], "Save version: remove todo.md");
+        sc.push_other(
+            &[("TODO.md", Some(b"person list\n"))],
+            "Save version: TODO.md",
+        );
+        refresh(&sc.ctx(true)).unwrap();
+        let (head, main) = (sc.head(), sc.main());
+
+        match revert_commit(&sc.ctx(true), &deleted, None, None) {
+            Err(crate::error::OriginError::ConflictPaths { code, paths, .. }) => {
+                assert_eq!(code, "path_alias", "desktop {desktop}");
+                assert_eq!(paths, vec!["todo.md".to_string()], "desktop {desktop}");
+            }
+            other => panic!("desktop {desktop}: expected path_alias, got {other:?}"),
+        }
+        assert_eq!(sc.head(), head, "desktop {desktop}");
+        assert_eq!(sc.main(), main, "desktop {desktop}");
+        assert_eq!(sc.status(), "", "desktop {desktop}");
+        let names: Vec<String> = fs::read_dir(&sc.ws)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.eq_ignore_ascii_case("todo.md"))
+            .collect();
+        assert_eq!(names, vec!["TODO.md".to_string()], "desktop {desktop}");
+        assert_eq!(sc.disk("TODO.md").as_deref(), Some("person list\n"));
+    }
+}
