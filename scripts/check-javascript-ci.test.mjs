@@ -397,6 +397,23 @@ test('the full frontend, CLI, provider artifact and Desktop commands are preserv
   assert.match(step('javascript-cli', 'Validate provider contract package artifact'), /working-directory: packages\/provider-contract/u);
 });
 
+test('the Desktop test script installs the locked Electron binary once before node --test starts its file processes', () => {
+  // Electron 42 and newer download the binary on the first require("electron").
+  // node --test runs each file in its own process, and several Desktop test
+  // files load dist modules that require it. Without one install first, those
+  // processes extract into the same dist directory at once and fail with
+  // "File exists (os error 17)" or "No such file or directory (os error 2)".
+  const desktop = JSON.parse(fs.readFileSync(path.join(root, 'packages/desktop-app/package.json'), 'utf8'));
+  assert.deepEqual(desktop.scripts.test.split('&&').map(part => part.trim()),
+    ['pnpm build', 'install-electron', 'node --test test/*.test.mjs']);
+  assert.equal(step('javascript-desktop', 'Build and test desktop app'),
+    '      - name: Build and test desktop app\n        run: pnpm --filter @instafy/desktop-app test\n');
+  // The package script is the only install path for this lane: no second
+  // install step, unpinned download or install bypass.
+  assert.doesNotMatch(job('javascript-desktop'),
+    /install-electron|npx|pnpm dlx|electron@|ELECTRON_OVERRIDE_DIST_PATH|electron_use_remote_checksums|force_no_cache/u);
+});
+
 test('inline guest qualification rejects wrong identity and a non-ARM Linux Docker service', () => {
   for (const item of jobs) {
     const program = javascript(item.key, 'Qualify isolated JavaScript CI runner');
