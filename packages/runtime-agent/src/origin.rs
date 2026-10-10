@@ -207,6 +207,11 @@ impl OriginService {
 
         let register_token_source = server_config.controller_token_source.clone();
         let mut server = OriginHttpServer::new(server_config)?;
+        // The origin is registered below, after the server is up. A beat that
+        // reached the controller first was refused with 401 and had this agent
+        // renew its registration, which restarted the origin and its tunnel on
+        // every launch, so presence starts once the registration is in.
+        server.defer_presence_until_registered();
         let presence_metadata = compose_presence_metadata(&settings);
         server.set_presence_metadata(presence_metadata).await;
         let presence_handle = server.presence_metadata_handle();
@@ -313,6 +318,10 @@ impl OriginService {
             }
             return Err(error.context("failed to register origin with controller"));
         }
+        server
+            .start_presence()
+            .await
+            .context("failed to start origin presence")?;
 
         Ok(Some(Self {
             server: Some(server),
