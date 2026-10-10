@@ -44,6 +44,22 @@ import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
 /** How long a lost machine's start waits on its read of the space's runs. */
 export const LOSS_RUNS_READ_TIMEOUT_MS = 10_000;
 
+/** When this tab last saw a hosted machine in `projectId` come up, on its own clock. */
+interface HostedReadySince {
+  projectId: string | null;
+  ready: boolean;
+  at: number | null;
+}
+
+/**
+ * Whether a hold set at `heldAtMs` came after this tab last saw a hosted
+ * machine in `projectId` come up, so it stands for a stop of that machine.
+ */
+function heldSinceHostedReady(seen: HostedReadySince, projectId: string, heldAtMs: number): boolean {
+  const readySinceMs = seen.projectId === projectId ? seen.at : null;
+  return readySinceMs === null || heldAtMs >= readySinceMs;
+}
+
 /** The runs `fetchRuns` reads, or null when the read fails or takes too long. */
 function readRunsWithin(
   fetchRuns: (projectId: string) => Promise<readonly RunRecord[]>,
@@ -169,7 +185,7 @@ export function useHostedRuntimeRecoveryEffects({
       ),
     [runtimeStatuses],
   );
-  const hostedReadySinceRef = useRef<{ projectId: string | null; ready: boolean; at: number | null }>({
+  const hostedReadySinceRef = useRef<HostedReadySince>({
     projectId: null,
     ready: false,
     at: null,
@@ -219,9 +235,7 @@ export function useHostedRuntimeRecoveryEffects({
     if (heldAtMs === Number.NEGATIVE_INFINITY) {
       return false;
     }
-    const seen = hostedReadySinceRef.current;
-    const readySinceMs = seen.projectId === projectId ? seen.at : null;
-    return readySinceMs === null || heldAtMs >= readySinceMs;
+    return heldSinceHostedReady(hostedReadySinceRef.current, projectId, heldAtMs);
   }, []);
 
   // A turn a person's stop put back in the queue in `projectId` holds the
@@ -376,7 +390,19 @@ export function useHostedRuntimeRecoveryEffects({
             custom.detail?.data && typeof custom.detail.data.runtimeId === "string"
               ? custom.detail.data.runtimeId
               : "";
-          if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, runtimeId)) {
+          // Once the controller reports a person's stop, this tab's own Stop
+          // may be the one reported, before its request answers. Its hold is
+          // kept as it is: a new one would drop that answer
+          // (recordManualStopFlush). A hold older than the machine that was
+          // stopped stands for an earlier stop and is set anew.
+          const heldHere = manualStopHold(projectId);
+          const heldForThisStop =
+            heldHere !== null &&
+            heldSinceHostedReady(hostedReadySinceRef.current, projectId, heldHere.at);
+          if (
+            !heldForThisStop &&
+            stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, runtimeId)
+          ) {
             markManualStop(projectId);
           }
         } else if (hold === "idle_pause") {

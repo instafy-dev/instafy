@@ -4,6 +4,7 @@ import { act, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
+import type { StopRuntimeResult } from "../../../services/runtimeController/runtimes";
 import type { RunRecord } from "../../../types";
 import {
   clearIdlePaused,
@@ -11,6 +12,7 @@ import {
   forgetSupersededPersonStopsForTests,
   isIdlePaused,
   isManualStopHeld,
+  manualStopHold,
   markIdlePaused,
   markManualStop,
   supersedePersonStops,
@@ -19,6 +21,7 @@ import {
   latestPersonInterruptionAtMs,
   type HostedRuntimeLifecycleEventKind,
 } from "../../unexpectedHostedRuntimeRecovery";
+import { stopUnderManualHold } from "../manualStopDecisions";
 import {
   LOSS_RUNS_READ_TIMEOUT_MS,
   useHostedRuntimeRecoveryEffects,
@@ -315,6 +318,74 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
       expect(isManualStopHeld(PROJECT_ID)).toBe(true);
     },
   );
+
+  it("keeps this tab's Stop, and what it kept, when the controller announces that stop first", async () => {
+    // The controller publishes runtime.stopped once the stop commits, before
+    // this tab's own stop request answers with what the stop kept. Stamped
+    // again, the hold would drop that answer, and the chat would not say
+    // where the turn's unsaved work went.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const idle = { preferred: false, hasPendingProjectWork: false };
+      await render({ ...idle, stopped: false });
+      vi.setSystemTime(Date.now() + 1_000);
+      let answer: (result: StopRuntimeResult) => void = () => {};
+      let stopping: Promise<StopRuntimeResult | null> = Promise.resolve(null);
+      const hold = markManualStop(PROJECT_ID);
+      await act(async () => {
+        stopping = stopUnderManualHold(PROJECT_ID, hold, () =>
+          new Promise<StopRuntimeResult>((resolve) => {
+            answer = resolve;
+          }),
+        );
+      });
+
+      vi.setSystemTime(Date.now() + 1_000);
+      await publishStop({ reason: "user_stop" });
+      expect(manualStopHold(PROJECT_ID)).toBe(hold);
+
+      const saved = { status: "flushed", unpushedRefs: 0, error: null };
+      await act(async () => {
+        answer({ flush: saved });
+        await stopping;
+      });
+      expect(manualStopHold(PROJECT_ID)).toBe(hold);
+      expect(manualStopHold(PROJECT_ID)?.flush).toEqual(saved);
+
+      await render({ ...idle, stopped: true });
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds a machine that came back elsewhere for the person's stop the controller reports", async () => {
+    // This tab's earlier Stop left a hold; the person then started the
+    // machine from another tab and stopped it there. That hold is older than
+    // the machine, so it stands for no stop of it: the report holds the space
+    // anew, and the machine's origin expiring during its release is that stop.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const busy = { preferred: false, hasPendingProjectWork: true };
+      await render({ ...busy, stopped: false });
+      vi.setSystemTime(Date.now() + 1_000);
+      const earlier = markManualStop(PROJECT_ID);
+      await render({ ...busy, stopped: true });
+
+      vi.setSystemTime(Date.now() + 60_000);
+      await render({ ...busy, stopped: false });
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      await publishStop({ reason: "user_stop" });
+      expect(manualStopHold(PROJECT_ID)).not.toBe(earlier);
+      await publishOriginExpired();
+      await render({ ...busy, stopped: true, releasing: true });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("does not hold the space when another hosted machine stays live", async () => {
     // Stopping one of two machines elsewhere is not "no machine here", the
