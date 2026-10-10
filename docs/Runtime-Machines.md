@@ -192,6 +192,13 @@ has already resumed. A lease resumes the turn like any queued run
 later, so a viewer keeps the newer of the two when they cross. `interruption`
 stays on the run as history.
 
+The resumed attempt runs in the folder the cut-off one wrote to, and the
+runtime knows it from the job's `lease_attempts` (more than one). A write turn
+on such a lease counts the folder's unpublished changes as it began (by the
+save's publish filter) among its own files, so a turn that finds the work
+already done saves it rather than failing as a file-modifying request that
+changed nothing. A first lease counts only what its turn changes.
+
 When the expiry gives a turn up, its run fails with `run.completed`
 (`outcome` `expired`, `failureCode` `interrupted_run_expired`) and its
 conversation gets a controller error message (`kind`

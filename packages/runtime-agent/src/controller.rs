@@ -146,6 +146,18 @@ pub struct LeaseJob {
     pub workspace_token_scopes: Option<Vec<String>>,
     #[serde(default, rename = "workspace_token_expires_at")]
     pub workspace_token_expires_at: Option<String>,
+    /// How many times the controller has leased this job, this lease
+    /// included.
+    #[serde(default, rename = "lease_attempts")]
+    pub lease_attempts: i32,
+}
+
+impl LeaseJob {
+    /// An earlier lease of this job ended without a result: a stop (or a
+    /// lease that expired) requeued it mid-turn, and this lease resumes it.
+    pub fn resumes_an_interrupted_attempt(&self) -> bool {
+        self.lease_attempts > 1
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1257,6 +1269,28 @@ mod tests {
         assert!(job.workspace_token.is_none());
         assert!(job.workspace_token_scopes.is_none());
         assert!(job.workspace_token_expires_at.is_none());
+        assert_eq!(job.lease_attempts, 0);
+        assert!(!job.resumes_an_interrupted_attempt());
+    }
+
+    #[test]
+    fn a_job_leased_again_after_a_requeue_resumes_an_interrupted_attempt() {
+        let lease = |attempts: i32| {
+            let body = json!({
+                "jobs": [{
+                    "id": Uuid::new_v4(),
+                    "payload": { "prompt_text": "Create ALIAS.md" },
+                    "lease_attempts": attempts,
+                }]
+            });
+            parse_lease_response(&body.to_string())
+                .expect("parse lease response")
+                .remove(0)
+        };
+        assert!(!lease(1).resumes_an_interrupted_attempt());
+        let resumed = lease(2);
+        assert_eq!(resumed.lease_attempts, 2);
+        assert!(resumed.resumes_an_interrupted_attempt());
     }
 
     #[test]

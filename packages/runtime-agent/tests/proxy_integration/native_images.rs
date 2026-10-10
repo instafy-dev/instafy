@@ -347,6 +347,7 @@ fn job(project_id: Uuid, conversation_id: Uuid, payload: Value) -> LeaseJob {
         workspace_token: None,
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
+        lease_attempts: 1,
     }
 }
 

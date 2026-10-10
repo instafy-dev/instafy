@@ -650,11 +650,63 @@ async fn wait_for_port(port: u16) -> Result<()> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ReadReferenceCase {
     Initial,
     Recovery,
     RequiredWrite,
+    /// A required write on a job's first lease, in a checkout that already
+    /// holds a file no turn published.
+    RequiredWriteBesideUnpublishedFile,
+    /// The same checkout and request on a job a stop requeued mid-turn: the
+    /// cut-off attempt wrote that file, and this attempt changes nothing.
+    ResumedRequiredWrite,
+    /// A resumed required write in a checkout with nothing unpublished.
+    ResumedRequiredWriteWithNothingUnpublished,
+}
+
+impl ReadReferenceCase {
+    fn required_write(self) -> bool {
+        !matches!(self, Self::Initial | Self::Recovery)
+    }
+
+    fn resumed(self) -> bool {
+        matches!(
+            self,
+            Self::ResumedRequiredWrite | Self::ResumedRequiredWriteWithNothingUnpublished
+        )
+    }
+
+    fn in_git_checkout(self) -> bool {
+        self.resumed() || self == Self::RequiredWriteBesideUnpublishedFile
+    }
+
+    fn with_unpublished_file(self) -> bool {
+        matches!(
+            self,
+            Self::RequiredWriteBesideUnpublishedFile | Self::ResumedRequiredWrite
+        )
+    }
+
+    fn fails_the_required_write(self) -> bool {
+        self.required_write() && self != Self::ResumedRequiredWrite
+    }
+}
+
+const UNPUBLISHED_FILE: &str = "ALIAS.md";
+const UNPUBLISHED_FILE_CONTENT: &str = "# Alias\n";
+
+/// Runs git in `dir` without the operator's own git configuration.
+fn git_in(dir: &Path, args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .status()
+        .context("failed to run git")?;
+    anyhow::ensure!(status.success(), "git {args:?} failed: {status}");
+    Ok(())
 }
 
 #[test]
@@ -670,6 +722,24 @@ fn codex_read_reference_preserves_file_bytes_after_recovery_via_proxy() -> Resul
 #[test]
 fn codex_read_reference_does_not_satisfy_required_write_via_proxy() -> Result<()> {
     run_read_reference_proxy_case(ReadReferenceCase::RequiredWrite)
+}
+
+#[test]
+fn codex_read_reference_beside_unpublished_file_does_not_satisfy_required_write_via_proxy()
+-> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::RequiredWriteBesideUnpublishedFile)
+}
+
+#[test]
+fn codex_read_reference_on_resumed_job_saves_the_interrupted_attempts_file_via_proxy() -> Result<()>
+{
+    run_read_reference_proxy_case(ReadReferenceCase::ResumedRequiredWrite)
+}
+
+#[test]
+fn codex_read_reference_on_resumed_job_with_nothing_unpublished_does_not_satisfy_required_write_via_proxy()
+-> Result<()> {
+    run_read_reference_proxy_case(ReadReferenceCase::ResumedRequiredWriteWithNothingUnpublished)
 }
 
 fn run_read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
@@ -699,6 +769,33 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
     fs::write(workspace.join("reference.txt"), READ_REFERENCE_CONTENT)?;
     let sentinel = b"untouched sentinel\r\n";
     fs::write(workspace.join("sentinel.txt"), sentinel)?;
+    if case.in_git_checkout() {
+        git_in(&workspace, &["init", "-q", "-b", "main"])?;
+        // A space's main holds the memory scaffold from its seed; keep the
+        // copies the turn writes out of this checkout's status.
+        fs::create_dir_all(workspace.join(".git/info"))?;
+        fs::write(
+            workspace.join(".git/info/exclude"),
+            "/INSTAFY.md\n/AGENTS.md\n/CLAUDE.md\n/AGENTS.py\n/.agents/\n",
+        )?;
+        git_in(&workspace, &["add", "reference.txt", "sentinel.txt"])?;
+        git_in(
+            &workspace,
+            &[
+                "-c",
+                "user.name=Instafy Test",
+                "-c",
+                "user.email=test@instafy.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "main",
+            ],
+        )?;
+    }
+    if case.with_unpublished_file() {
+        fs::write(workspace.join(UNPUBLISHED_FILE), UNPUBLISHED_FILE_CONTENT)?;
+    }
 
     // This path is entirely local and uses constructed inert credentials. It
     // must not load the operator's auth.json or enable controller integration.
@@ -805,7 +902,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         runtime_access_token: None,
         parent_dispositions_runtime_on_shutdown: false,
     }));
-    let required_write = matches!(case, ReadReferenceCase::RequiredWrite);
+    let required_write = case.required_write();
     let job = LeaseJob {
         id: Uuid::new_v4(),
         intent: Some("feature".to_string()),
@@ -838,6 +935,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         workspace_token: None,
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
+        lease_attempts: if case.resumed() { 2 } else { 1 },
     };
     let registration = registration_for_live(Uuid::new_v4());
     let (sender, mut messages) = tokio::sync::mpsc::unbounded_channel();
@@ -863,6 +961,12 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         READ_REFERENCE_CONTENT.as_bytes()
     );
     assert_eq!(fs::read(workspace.join("sentinel.txt"))?, sentinel);
+    if case.with_unpublished_file() {
+        assert_eq!(
+            fs::read_to_string(workspace.join(UNPUBLISHED_FILE))?,
+            UNPUBLISHED_FILE_CONTENT
+        );
+    }
     let mut retries = Vec::new();
     while let Ok(message) = messages.try_recv() {
         if let Some(metadata) = message.metadata
@@ -871,7 +975,10 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
             retries.push(metadata);
         }
     }
-    let expected_retries = usize::from(!matches!(case, ReadReferenceCase::Initial));
+    let expected_retries = usize::from(!matches!(
+        case,
+        ReadReferenceCase::Initial | ReadReferenceCase::ResumedRequiredWrite
+    ));
     let result_diagnostics = match &result {
         Ok(execution) => json!({
             "status": "completed",
@@ -896,7 +1003,7 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         "result={result_diagnostics}; retry metadata={retries:?}"
     );
 
-    let artifacts = if required_write {
+    let artifacts = if case.fails_the_required_write() {
         let error = result.expect_err("a read reference cannot fulfill a required workspace write");
         assert!(
             extract_job_failure_message(&error)
@@ -922,15 +1029,40 @@ async fn read_reference_proxy_case(case: ReadReferenceCase) -> Result<()> {
         .and_then(|artifact| artifact.get("files"))
         .and_then(Value::as_array)
         .context("read reference should remain visible in apply/files")?;
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0]["path"], "reference.txt");
-    assert_eq!(files[0]["workspacePath"], "reference.txt");
-    assert_eq!(files[0]["change"], "read");
-    assert_eq!(files[0]["changeType"], "read");
+    let reference = files
+        .iter()
+        .find(|file| file["workspacePath"] == "reference.txt")
+        .context("apply/files should list the read reference")?;
+    assert_eq!(reference["path"], "reference.txt");
+    assert_eq!(reference["change"], "read");
+    assert_eq!(reference["changeType"], "read");
     assert!(
-        files[0].get("content").is_none(),
+        reference.get("content").is_none(),
         "display references must not retain inline write content"
     );
+    let saves_unpublished_file = case == ReadReferenceCase::ResumedRequiredWrite;
+    assert_eq!(
+        files.len(),
+        1 + usize::from(saves_unpublished_file),
+        "apply/files={files:?}"
+    );
+    if saves_unpublished_file {
+        // The resumed turn counts the cut-off attempt's file as its own and
+        // hands it to the save (this harness has no controller to save to).
+        let unpublished = files
+            .iter()
+            .find(|file| file["workspacePath"] == UNPUBLISHED_FILE)
+            .context("apply/files should list the interrupted attempt's file")?;
+        assert_eq!(unpublished["changeType"], "created");
+        assert!(
+            artifacts.iter().any(|artifact| {
+                artifact.get("kind").and_then(Value::as_str) == Some("origin/apply-skipped")
+                    && artifact.pointer("/metadata/reason").and_then(Value::as_str)
+                        == Some("missing_controller_token")
+            }),
+            "the turn should hand the file to the save"
+        );
+    }
 
     drop(stub_guard);
     drop(proxy_guard);
@@ -1113,6 +1245,7 @@ async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
         workspace_token: None,
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
+        lease_attempts: 1,
     };
 
     let execution = tokio::time::timeout(
@@ -1410,6 +1543,7 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
         workspace_token: None,
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
+        lease_attempts: 1,
     };
 
     let execution = tokio::time::timeout(
@@ -1601,6 +1735,7 @@ async fn codex_proxy_live_creates_file() -> Result<()> {
         workspace_token: None,
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
+        lease_attempts: 1,
     };
 
     let execution = tokio::time::timeout(
@@ -1835,6 +1970,7 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
         workspace_token: None,
         workspace_token_scopes: None,
         workspace_token_expires_at: None,
+        lease_attempts: 1,
     };
 
     let execution = tokio::time::timeout(

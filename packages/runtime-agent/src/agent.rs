@@ -2420,6 +2420,7 @@ mod tests {
             workspace_token: None,
             workspace_token_scopes: None,
             workspace_token_expires_at: None,
+            lease_attempts: 1,
         }
     }
 }

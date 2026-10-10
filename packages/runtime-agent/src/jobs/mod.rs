@@ -6627,6 +6627,13 @@ impl JobProcessor {
                 }
             }
         }
+        if expects_workspace_file_changes_after_actions {
+            add_resumed_turn_files(
+                &mut outcome.files,
+                job.resumes_an_interrupted_attempt(),
+                git_status_before.as_ref(),
+            );
+        }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -7215,6 +7222,13 @@ impl JobProcessor {
                         retry_outcome.files = normalize_codex_files(&workspace_dir, inferred)?;
                     }
                 }
+            }
+            if retry_expects_workspace_file_changes_after_actions {
+                add_resumed_turn_files(
+                    &mut retry_outcome.files,
+                    job.resumes_an_interrupted_attempt(),
+                    git_status_before.as_ref(),
+                );
             }
             // Recognize each attempt independently before merging: event IDs may
             // be reused by a fresh provider turn and must not erase earlier proof.
@@ -15031,6 +15045,24 @@ fn status_delta_files_for_checkpoint(
         .collect()
 }
 
+/// A job a stop (or an expired lease) requeued mid-turn resumes in the
+/// folder its cut-off attempt wrote to, and need not write that attempt's
+/// work again for the turn to have made it. So a resumed write turn adds to
+/// its files the folder's unpublished changes as the turn began, by the
+/// checkpoint's filter: the file-change requirement counts them and the
+/// checkpoint saves them. A first attempt adds nothing.
+fn add_resumed_turn_files(
+    files: &mut Vec<CodexFileDescriptor>,
+    resumes_an_interrupted_attempt: bool,
+    before: Option<&HashMap<String, GitStatusEntry>>,
+) {
+    let Some(before) = before.filter(|_| resumes_an_interrupted_attempt) else {
+        return;
+    };
+    let unpublished = status_delta_files_for_checkpoint(&HashMap::new(), before, files);
+    files.extend(unpublished);
+}
+
 fn infer_codex_files_from_git_status_delta(
     before: &HashMap<String, GitStatusEntry>,
     after: &HashMap<String, GitStatusEntry>,
@@ -17432,6 +17464,7 @@ mod tests {
             workspace_token: None,
             workspace_token_scopes: None,
             workspace_token_expires_at: None,
+            lease_attempts: 1,
         }
     }
 
@@ -18717,6 +18750,65 @@ mod tests {
             removed.change.as_ref().map(|change| &change.kind),
             Some(FileChangeKind::Deleted)
         ));
+    }
+
+    #[test]
+    fn a_resumed_write_turn_adds_the_unpublished_changes_its_folder_held() {
+        use workspace_change_detection::GitStatusEntry;
+        let entry = |code: &str, fingerprint: &str| {
+            GitStatusEntry::new(code, Some(fingerprint.to_string()))
+        };
+        let reported = |path: &str| CodexFileDescriptor {
+            path: path.to_string(),
+            workspace_path: path.to_string(),
+            label: None,
+            description: None,
+            mime_type: None,
+            content: None,
+            content_base64: None,
+            change: FileChangeDescriptor::parse(json!({ "type": "changed" })),
+        };
+        let paths = |files: &[CodexFileDescriptor]| {
+            let mut paths = files
+                .iter()
+                .map(|file| file.workspace_path.clone())
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths
+        };
+        // Before the stop, the cut-off attempt wrote ALIAS.md and changed
+        // notes/rolling.md; the resumed attempt finds them in place.
+        let before = HashMap::from([
+            ("ALIAS.md".to_string(), entry("??", "a")),
+            ("notes/rolling.md".to_string(), entry(" M", "b")),
+            (".env".to_string(), entry("??", "c")),
+            (".instafy/state.json".to_string(), entry("??", "d")),
+        ]);
+
+        let mut files = Vec::new();
+        add_resumed_turn_files(&mut files, true, Some(&before));
+        assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md"]);
+        let alias = files
+            .iter()
+            .find(|file| file.workspace_path == "ALIAS.md")
+            .unwrap();
+        assert!(matches!(
+            alias.change.as_ref().map(|change| &change.kind),
+            Some(FileChangeKind::Created)
+        ));
+
+        // A path the turn reports itself is not added again.
+        let mut files = vec![reported("notes/rolling.md")];
+        add_resumed_turn_files(&mut files, true, Some(&before));
+        assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md"]);
+
+        // A first attempt adds nothing, whatever the folder holds, and a
+        // resumed turn adds nothing from a folder with nothing unpublished.
+        let mut files = Vec::new();
+        add_resumed_turn_files(&mut files, false, Some(&before));
+        add_resumed_turn_files(&mut files, true, Some(&HashMap::new()));
+        add_resumed_turn_files(&mut files, true, None);
+        assert!(files.is_empty());
     }
 
     fn test_origin_settings(git_remote_url: Option<&str>) -> crate::config::OriginSettings {
