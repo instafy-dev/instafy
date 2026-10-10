@@ -813,6 +813,86 @@ async fn a_failed_provider_release_still_announces_the_requeued_turn() -> anyhow
     .await
 }
 
+/// About 17 seconds into a person's Stop of a hosted machine, the provider's
+/// signal reaches the machine and its agent stops its own runtime on the way
+/// out, as `agent_shutdown`. Seen twice on Oct 10: that second stop of a
+/// runtime the first had quarantined took the stop over, so the status said
+/// `agent_shutdown` for the rest of the release and the runtime stopped under
+/// it. It is the same stop: the status keeps the person's reason and time,
+/// the turn stays interrupted by it, and the stop finishes, and is
+/// announced, as the person's.
+#[tokio::test]
+async fn the_agents_own_shutdown_keeps_a_persons_stop() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("stop kept through agent shutdown test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(project_id), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await?;
+        // The person's stop, its provider release still out.
+        let (status, body) = turn.stop("user_stop").await?;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let run = turn.assert_interrupted("user_stop").await?;
+        let quarantined = turn.status_entry().await?;
+        assert_eq!(quarantined["stopReason"], "user_stop", "{quarantined}");
+        assert_eq!(json_time(&quarantined["stopRequestedAt"])?, run.updated_at);
+
+        // The machine's agent stops its own runtime while that release runs.
+        let (status, body) = turn.stop("agent_shutdown").await?;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let releasing = turn.status_entry().await?;
+        assert_eq!(releasing["stopReason"], "user_stop", "{releasing}");
+        assert_eq!(
+            releasing["stopRequestedAt"], quarantined["stopRequestedAt"],
+            "{releasing}"
+        );
+        turn.assert_interrupted("user_stop").await?;
+
+        // Once the provider releases the machine, the stop finishes as the
+        // person's.
+        turn.answer_releases_with(StatusCode::NO_CONTENT);
+        let mut events = turn.state.events.subscribe();
+        let (status, body) = turn.stop("agent_shutdown").await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let published: Vec<_> = drain(&mut events)
+            .into_iter()
+            .filter(|event| event.kind == "runtime.stopped")
+            .collect();
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_runtime_stopped(&published[0], &turn, "user_stop", "runtime_stop");
+        turn.assert_interrupted("user_stop").await?;
+        let stopped = turn.status_entry().await?;
+        assert_eq!(stopped["status"], "stopped", "{stopped}");
+        let reasons: Vec<Option<String>> = turn
+            .pool
+            .get()
+            .await?
+            .query(
+                "select data ->> 'reason' from runtime_events
+                 where runtime_id = $1
+                   and kind in ('provider_release_cleanup_pending', 'stopped')
+                 order by created_at",
+                &[&turn.runtime_id],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        // The person's quarantine, the agent's two, and the stop.
+        assert_eq!(
+            reasons,
+            vec![Some("user_stop".to_string()); 4],
+            "{reasons:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
 /// A runtime with no lease generation left is stopped without the
 /// quarantine (`perform_runtime_stop` directly); its turn is marked, and the
 /// stop and the turn published, the same.

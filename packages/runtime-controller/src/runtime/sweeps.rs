@@ -2058,7 +2058,7 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
             "select r.id, r.active_lease_id, quarantine.reason as quarantine_reason
              from runtimes r
              join runtime_leases rl on rl.id = r.active_lease_id
-             -- The reason of the stop that last quarantined the lease, as
+             -- The reason of the stop that first quarantined the lease, as
              -- the runtime status reads it. A launch quarantined after a
              -- failed provider call records another kind.
              left join lateral (
@@ -2068,7 +2068,7 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
                   and e.runtime_id = r.id
                   and e.kind = 'provider_release_cleanup_pending'
                   and e.data ->> 'runtimeLeaseId' = rl.id::text
-                order by e.created_at desc
+                order by e.created_at asc
                 limit 1
              ) quarantine on true
              where r.status = 'requested'
@@ -4145,6 +4145,59 @@ mod tests {
                 vec![Some("user_stop".to_string()); 3],
                 "{reasons:?}"
             );
+            Ok(())
+        })
+        .await
+    }
+
+    /// The machine's own `agent_shutdown`, sent while a person's stop waits
+    /// on its release, does not take that stop over: the sweep still finishes
+    /// it as the person's, and the turn stays interrupted by it.
+    #[tokio::test]
+    async fn the_launch_timeout_sweep_finishes_a_persons_stop_after_the_agents_own_shutdown(
+    ) -> anyhow::Result<()> {
+        use crate::runtime::run_interruptions::db_tests::{
+            assert_runtime_stopped, drain, RunningTurn, RuntimeShape,
+        };
+        use axum::http::StatusCode;
+
+        let pool =
+            crate::tests::require_origin_test_pool("stop kept through shutdown sweep test").await?;
+        let project_id = Uuid::new_v4();
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        crate::tests::with_shared_db_fixture(fixture, async {
+            let turn = RunningTurn::start(
+                pool.clone(),
+                project_id,
+                RuntimeShape::Hosted,
+                StatusCode::NO_CONTENT,
+            )
+            .await?;
+            quarantine_a_persons_stop(&turn, 20 * 60).await?;
+            turn.answer_releases_with(StatusCode::INTERNAL_SERVER_ERROR);
+            let (status, body) = turn.stop("agent_shutdown").await?;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+            turn.answer_releases_with(StatusCode::NO_CONTENT);
+            let mut events = turn.state.events.subscribe();
+
+            super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
+
+            assert_eq!(
+                runtime_and_lease_status(&turn).await?,
+                ("stopped".to_string(), "released".to_string())
+            );
+            let stopped: Vec<_> = drain(&mut events)
+                .into_iter()
+                .filter(|event| {
+                    event.project_id == Some(turn.project_id) && event.kind == "runtime.stopped"
+                })
+                .collect();
+            assert_eq!(stopped.len(), 1, "{stopped:?}");
+            assert_runtime_stopped(&stopped[0], &turn, "user_stop", "launch_timeout");
+            turn.assert_interrupted("user_stop").await?;
             Ok(())
         })
         .await

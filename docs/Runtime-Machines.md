@@ -130,16 +130,17 @@ the stop requeued). `/runtime/stop` and `/runtime/remove` publish it as soon
 as the stop commits, before the provider release, which can take a minute,
 and only for a stop that took the runtime out of service: a skipped stop, a
 repeat that finds the runtime already stopped, and a refused or rolled-back
-request publish nothing. A retry of a stop whose provider release is still
-pending quarantines the runtime again and publishes it again, and so does the
-launch-timeout sweep when it finishes the release of such a stop (see
-"Cleanup after a failed release (502)" below). Each tab holds those reasons
-like a manual Stop when they leave the space no live hosted machine; in the
-tab that pressed Stop or Remove, which already holds the space, the event
-keeps the hold that request set, so what the stop's answer says about the work
-still shows. A browser session's own recycle of its space's idle machine
-(`stopIfIdle` with `runtime_limit_takeover`, see "Stop reasons" below) is
-nobody's click and publishes none. A controller from before this event
+request publish nothing. A later stop of a runtime whose provider release is
+still pending (a retry, or the runtime agent's own `agent_shutdown`)
+quarantines it again and publishes it again under the first stop's reason, and
+so does the launch-timeout sweep when it finishes the release of such a stop
+(see "Cleanup after a failed release (502)" below). Each tab holds those
+reasons like a manual Stop when they leave the space no live hosted machine;
+in the tab that pressed Stop or Remove, which already holds the space, the
+event keeps the hold that request set, so what the stop's answer says about
+the work still shows. A browser session's own recycle of its space's idle
+machine (`stopIfIdle` with `runtime_limit_takeover`, see "Stop reasons" below)
+is nobody's click and publishes none. A controller from before this event
 publishes nothing for these stops. There another tab finds such a stop by the
 turn it put back in the queue (the run's `interruption` record, below, while
 its `resumeBy` is ahead): every automatic start checks the runs the tab has,
@@ -315,12 +316,17 @@ old `launchRequestedAt`, until the provider release is acknowledged, which can
 take a minute or, after a failed release, until a retry. By `status`,
 `lastSeenAt` and `launchRequestedAt` alone that is a launch that stalled, so
 while it lasts the runtime's status entry also carries `stopRequestedAt`, when
-the stop's quarantine committed (a retry's quarantine moves it), and
-`stopReason`, that stop's reason, such as `user_stop` or `idle`, or `other`
-when it is not a plain token. Both go once the release is acknowledged (the
-runtime is then `stopped`) or the next launch replaces the lease. A launch
-quarantined after a failed provider call is not a stop and carries neither,
-and a controller from before these fields sends neither.
+the stop's quarantine committed, and `stopReason`, that stop's reason, such as
+`user_stop` or `idle`, or `other` when it is not a plain token. A later stop
+of a runtime already quarantined is still that stop and changes neither: the
+runtime agent's own `agent_shutdown` once the provider signals the machine,
+about 20 seconds into a person's Stop, a person pressing Stop again, or the
+launch-timeout sweep's retry. Each records its quarantine under the first
+stop's reason, requeues under it and finishes the stop under it. Both go once
+the release is acknowledged (the runtime is then `stopped`) or the next launch
+replaces the lease. A launch quarantined after a failed provider call is not a
+stop and carries neither, and a controller from before these fields sends
+neither.
 
 The Studio takes such a runtime for a stop when it knows of one newer than
 that launch: this tab's own Stop or Remove, a turn a person's stop put back in
