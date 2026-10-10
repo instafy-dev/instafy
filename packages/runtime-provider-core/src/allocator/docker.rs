@@ -13,10 +13,7 @@ use tokio::task;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::census::{
-    census_checkouts, group_containers, projects_present, ContainerFacts, RuntimeCensus,
-    MAX_CENSUS_CONTAINERS,
-};
+use super::census::{group_containers, ContainerFacts, RuntimeCensus, MAX_CENSUS_CONTAINERS};
 use super::checkout_eviction::{
     sweep_checkouts, touch_checkout, CheckoutEvictionPolicy, CheckoutHost, CheckoutSweepReport,
 };
@@ -1400,19 +1397,10 @@ impl RuntimeAllocator for DockerRuntimeAllocator {
         let prefix = self.project_prefix.clone();
         let (facts, truncated) =
             task::spawn_blocking(move || list_runtime_containers(&prefix)).await??;
-        let containers = group_containers(&self.project_prefix, facts);
-        let present = projects_present(&containers);
-        let (checkouts, checkouts_truncated) = match self.repo_base.clone() {
-            Some(repo_base) => {
-                task::spawn_blocking(move || census_checkouts(&repo_base, &present)).await?
-            }
-            None => (Vec::new(), false),
-        };
         Ok(RuntimeCensus {
             supported: true,
-            containers,
-            checkouts,
-            truncated: truncated || checkouts_truncated,
+            containers: group_containers(&self.project_prefix, facts),
+            truncated,
         })
     }
 

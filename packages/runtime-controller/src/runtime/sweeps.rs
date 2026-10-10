@@ -1514,10 +1514,12 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
                  or replace(lower(r.provider), '-', '_') like 'instafy\\_cloud\\_%'
                )
                and r.status not in ('stopped','offline','removed')
-               -- A generation a pool-retirement drain started only to flush
-               -- its checkout runs no turn and is never billed: the drain
-               -- marks it `starting` before its launch and `started` with
-               -- its lease once it exists.
+               -- A generation an earlier pool-retirement drain started only
+               -- to flush its checkout ran no turn and is never billed: that
+               -- drain marked it `starting` before its launch and `started`
+               -- with its lease once it existed. No drain wakes a runtime any
+               -- more; this stays while such marks are inside the event
+               -- retention.
                and not exists (
                  select 1
                  from runtime_events wake

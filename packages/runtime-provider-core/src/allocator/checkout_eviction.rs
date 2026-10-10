@@ -1,39 +1,33 @@
 //! Eviction of hosted workspace checkouts from a node's disk.
 //!
 //! A hosted runtime's checkout is a bind mount, `<repo base>/<project id>`,
-//! that outlives the runtime's containers. Canonical `main` and this space's
-//! recovery refs are the durable copy of its work, so a checkout nobody has
-//! used for a while can be deleted and is cloned again on the next start.
+//! that outlives the runtime's containers. Canonical git is the durable copy
+//! of its work, so a checkout nobody has used for a while can be deleted and
+//! is cloned again on the next start.
 //!
 //! A checkout is evicted only when all of these hold:
 //! - it was last used (started or stopped here) at least the idle TTL ago
 //!   (7 days by default), or the node's checkouts exceed their disk budget and
 //!   it has been idle for at least an hour, oldest first;
 //! - no runtime container of the project exists on this node, running or
-//!   stopped, and no start is in progress for it;
-//! - the runtime that last used it stopped cleanly: its shutdown flush kept
-//!   every local commit and unsaved edit on `main` or on a recovery ref and
-//!   then wrote [`CLEAN_STOP_MARKER`], which every origin start removes. A
-//!   checkout without it (a crash, a kill, a stop that could not keep its
-//!   work, or a checkout from before the marker existed) can hold work that
-//!   exists nowhere else, and is kept until a later start and clean stop;
-//! - it is a canonical checkout (`.instafy/.git` with a remote) holding no
-//!   `refs/instafy/local-recovery/*` ref: that is work no publish has pushed
-//!   yet, which the next start pushes. Such a checkout is kept and logged,
-//!   and a later sweep evicts it once the refs are gone.
+//!   stopped, and no start holds its claim;
+//! - its durable-stop marker ([`CLEAN_STOP_MARKER`]) reads exactly
+//!   [`DURABLE_MARKER`]. The origin's shutdown writes it only when nothing is
+//!   left only on this node and canonical holds everything the folder held,
+//!   and every origin start removes it. A checkout without it (a crash, a
+//!   kill, a stop that could not save, a workspace without a canonical
+//!   remote, which never gets one) or with anything else in it (a marker
+//!   from before rolling saves says `stopped`) may hold work that exists
+//!   nowhere else, and is kept until a later start and durable stop.
 //!
 //! Stopping a runtime never evicts anything; it only marks the checkout as
 //! used, under the same per-project lock as a start, and the sweep reads the
-//! last use again once it holds that lock. Refs and the marker are read from
-//! the files git keeps them in (loose refs and `packed-refs`), without
-//! running git: the provider image has no git, and the repository's config
-//! is written by the workspace. Anything this code cannot read with
-//! certainty (another ref storage, a linked git dir, no remote) keeps the
-//! checkout.
+//! last use again once it holds that lock. The sweep reads no git refs and
+//! no repository config: the marker is the origin's own answer.
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{ErrorKind, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -46,17 +40,14 @@ pub(crate) const STAMP_DIR: &str = ".instafy-checkout-stamps";
 /// Where an evicted checkout is moved before it is deleted, so a half-deleted
 /// tree is never mistaken for a checkout.
 pub(crate) const TRASH_DIR: &str = ".instafy-evicted";
-/// Written by the origin's shutdown flush after it kept everything, removed
-/// by every origin start (the origin server's `CLEAN_STOP_MARKER`).
+/// Written by the origin's shutdown when the folder's final state is
+/// durable, holding [`DURABLE_MARKER`], and removed by every origin start
+/// (the origin server's `CLEAN_STOP_MARKER`).
 pub(crate) const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
-/// The local recovery refs that have not been pushed yet.
-const LOCAL_RECOVERY_DIR: &str = "refs/instafy/local-recovery";
-const LOCAL_RECOVERY_PREFIX: &str = "refs/instafy/local-recovery/";
-/// Bounds for reading refs and measuring checkouts.
-const MAX_REF_ENTRIES: usize = 10_000;
-const MAX_REF_DEPTH: usize = 16;
-const MAX_PACKED_REFS_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+/// What the marker holds after a durable stop (the origin server's
+/// `working_state::DURABLE_MARKER`).
+const DURABLE_MARKER: &[u8] = b"durable v1\n";
+/// Bound for measuring checkouts.
 const MAX_SIZE_ENTRIES: usize = 2_000_000;
 
 /// When stopped checkouts are evicted.
@@ -92,8 +83,8 @@ impl CheckoutEvictionPolicy {
 pub struct CheckoutSweepReport {
     /// Evicted checkouts and why (`idle` or `disk_budget`).
     pub evicted: Vec<(Uuid, &'static str)>,
-    /// Checkouts kept because they hold work that is not pushed yet, or whose
-    /// last runtime did not stop cleanly.
+    /// Checkouts kept because their last stop did not record a durable
+    /// state: they may hold work that exists nowhere else.
     pub kept_unpushed: Vec<Uuid>,
     /// Checkouts kept for another reason that blocks eviction.
     pub kept: Vec<(Uuid, String)>,
@@ -110,9 +101,21 @@ pub(crate) trait CheckoutHost {
     fn runtime_present(&self, project_id: Uuid) -> anyhow::Result<bool>;
 }
 
-/// Whether the runtime that last used `checkout` stopped cleanly.
-pub(crate) fn stopped_cleanly(checkout: &Path) -> bool {
-    fs::symlink_metadata(checkout.join(CLEAN_STOP_MARKER)).is_ok_and(|metadata| metadata.is_file())
+/// Whether the runtime that last used `checkout` stopped durably: its marker
+/// is a regular file that reads exactly [`DURABLE_MARKER`]. The workspace can
+/// write that directory, so the read is bounded and follows no link.
+fn stopped_durably(checkout: &Path) -> bool {
+    let marker = checkout.join(CLEAN_STOP_MARKER);
+    let expected = DURABLE_MARKER.len() as u64;
+    if !fs::symlink_metadata(&marker)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == expected)
+    {
+        return false;
+    }
+    let mut content = Vec::new();
+    fs::File::open(&marker)
+        .and_then(|file| file.take(expected + 1).read_to_end(&mut content))
+        .is_ok_and(|_| content == DURABLE_MARKER)
 }
 
 fn last_used(repo_base: &Path, project_id: Uuid) -> Option<SystemTime> {
@@ -129,131 +132,6 @@ pub(crate) fn touch_checkout(repo_base: &Path, project_id: Uuid) {
     {
         warn!(%project_id, %error, "could not record when the checkout was last used");
     }
-}
-
-/// The `refs/instafy/local-recovery/*` refs of a checkout, read from disk.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PendingRecovery {
-    None,
-    Refs(Vec<String>),
-    /// The refs cannot be read with certainty; the checkout is kept.
-    Unknown(String),
-}
-
-pub(crate) fn pending_local_recovery(checkout: &Path) -> PendingRecovery {
-    let git_dir = checkout.join(".instafy").join(".git");
-    match fs::symlink_metadata(&git_dir) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return PendingRecovery::Unknown("the git directory is not a directory".into()),
-        Err(error) if error.kind() == ErrorKind::NotFound => {
-            // No canonical repository: the files exist only on this node.
-            return PendingRecovery::Unknown("no canonical repository".into());
-        }
-        Err(error) => return PendingRecovery::Unknown(format!("git directory: {error}")),
-    }
-    if fs::symlink_metadata(git_dir.join("reftable")).is_ok() {
-        return PendingRecovery::Unknown("reftable ref storage".into());
-    }
-    let config = match read_bounded(&git_dir.join("config"), MAX_CONFIG_BYTES) {
-        Ok(Some(config)) => String::from_utf8_lossy(&config).to_ascii_lowercase(),
-        Ok(None) => return PendingRecovery::Unknown("no repository config".into()),
-        Err(error) => return PendingRecovery::Unknown(format!("repository config: {error}")),
-    };
-    if config.contains("refstorage") {
-        return PendingRecovery::Unknown("another ref storage".into());
-    }
-    if !config
-        .lines()
-        .any(|line| line.trim_start().starts_with("[remote "))
-    {
-        // Nothing canonical to clone back from.
-        return PendingRecovery::Unknown("no canonical remote".into());
-    }
-
-    let mut refs = Vec::new();
-    if let Err(reason) = loose_refs(&git_dir.join(LOCAL_RECOVERY_DIR), &mut refs) {
-        return PendingRecovery::Unknown(reason);
-    }
-    match read_bounded(&git_dir.join("packed-refs"), MAX_PACKED_REFS_BYTES) {
-        Ok(Some(packed)) => {
-            for line in String::from_utf8_lossy(&packed).lines() {
-                if line.starts_with('#') || line.starts_with('^') {
-                    continue;
-                }
-                if let Some((_, name)) = line.split_once(' ') {
-                    if name.starts_with(LOCAL_RECOVERY_PREFIX) {
-                        refs.push(name.trim().to_string());
-                    }
-                }
-            }
-        }
-        Ok(None) => {}
-        Err(error) => return PendingRecovery::Unknown(format!("packed-refs: {error}")),
-    }
-    refs.sort();
-    refs.dedup();
-    if refs.is_empty() {
-        PendingRecovery::None
-    } else {
-        PendingRecovery::Refs(refs)
-    }
-}
-
-fn loose_refs(root: &Path, refs: &mut Vec<String>) -> Result<(), String> {
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    let mut seen = 0usize;
-    while let Some((dir, depth)) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => return Err(format!("local recovery refs: {error}")),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|error| format!("local recovery refs: {error}"))?;
-            seen += 1;
-            if seen > MAX_REF_ENTRIES {
-                return Err("too many local recovery refs to read".into());
-            }
-            let file_type = entry
-                .file_type()
-                .map_err(|error| format!("local recovery refs: {error}"))?;
-            let path = entry.path();
-            if file_type.is_dir() {
-                if depth >= MAX_REF_DEPTH {
-                    return Err("local recovery refs nest too deeply".into());
-                }
-                stack.push((path, depth + 1));
-                continue;
-            }
-            // A file, or anything else (a link): either way something is
-            // there, and it counts as unpushed work.
-            let relative = path
-                .strip_prefix(root)
-                .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            refs.push(format!("{LOCAL_RECOVERY_PREFIX}{relative}"));
-        }
-    }
-    Ok(())
-}
-
-fn read_bounded(path: &Path, limit: u64) -> std::io::Result<Option<Vec<u8>>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    if !metadata.is_file() {
-        return Err(std::io::Error::other("not a regular file"));
-    }
-    if metadata.len() > limit {
-        return Err(std::io::Error::other("too large to read"));
-    }
-    let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(limit + 1)
-        .read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
 }
 
 /// Total size of the files under `root`, without following links. Stops
@@ -401,27 +279,10 @@ pub(crate) fn sweep_checkouts<H: CheckoutHost>(
                 continue;
             }
         }
-        match pending_local_recovery(&candidate.path) {
-            PendingRecovery::None => {}
-            PendingRecovery::Refs(refs) => {
-                warn!(
-                    %project_id,
-                    refs = ?refs,
-                    "keeping a stopped checkout: it holds work that is not pushed yet; the next start pushes it"
-                );
-                report.kept_unpushed.push(project_id);
-                continue;
-            }
-            PendingRecovery::Unknown(why) => {
-                warn!(%project_id, reason = %why, "keeping a stopped checkout whose saved state cannot be confirmed");
-                report.kept.push((project_id, why));
-                continue;
-            }
-        }
-        if !stopped_cleanly(&candidate.path) {
+        if !stopped_durably(&candidate.path) {
             warn!(
                 %project_id,
-                "keeping a stopped checkout: its last runtime did not stop cleanly, so it may hold work that is nowhere else"
+                "keeping a stopped checkout: its last stop did not record that canonical holds all of its work"
             );
             report.kept_unpushed.push(project_id);
             continue;
@@ -510,20 +371,14 @@ mod tests {
 
     const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
-    /// A canonical checkout with a remote and one file of `bytes` bytes,
-    /// last used `idle` ago.
+    /// A checkout whose last stop was durable, with one file of `bytes`
+    /// bytes, last used `idle` ago.
     fn checkout(base: &Path, now: SystemTime, idle: Duration, bytes: usize) -> Uuid {
         let project_id = Uuid::new_v4();
         let root = base.join(project_id.to_string());
-        let git_dir = root.join(".instafy/.git");
-        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
-        fs::write(
-            git_dir.join("config"),
-            "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://git.example/p.git\n",
-        )
-        .unwrap();
+        fs::create_dir_all(root.join(".instafy/.git")).unwrap();
         fs::write(root.join("file.bin"), vec![7u8; bytes]).unwrap();
-        fs::write(root.join(CLEAN_STOP_MARKER), b"stopped\n").unwrap();
+        fs::write(root.join(CLEAN_STOP_MARKER), DURABLE_MARKER).unwrap();
         touch_checkout(base, project_id);
         let stamp = fs::File::options()
             .write(true)
@@ -533,6 +388,10 @@ mod tests {
             .set_times(FileTimes::new().set_modified(now - idle))
             .unwrap();
         project_id
+    }
+
+    fn marker(base: &Path, project_id: Uuid) -> PathBuf {
+        base.join(project_id.to_string()).join(CLEAN_STOP_MARKER)
     }
 
     fn exists(base: &Path, project_id: Uuid) -> bool {
@@ -564,36 +423,43 @@ mod tests {
         );
     }
 
+    /// Only a marker that reads exactly `durable v1` lets a checkout go: no
+    /// marker (a crash, a kill, a stop that could not save, no remote), the
+    /// `stopped` marker of an origin from before rolling saves, and anything
+    /// else (other content, a directory, a link) keep it.
     #[test]
-    fn checkouts_holding_unpushed_recovery_refs_are_kept_and_logged() {
+    fn only_a_durable_marker_lets_an_idle_checkout_go() {
         let base = TempDir::new();
         let now = SystemTime::now();
-        let loose = checkout(&base.0, now, 30 * DAY, 10);
-        let git_dir = base.0.join(loose.to_string()).join(".instafy/.git");
-        fs::create_dir_all(git_dir.join("refs/instafy/local-recovery")).unwrap();
-        fs::write(
-            git_dir.join("refs/instafy/local-recovery/20261002T101010Z-unsaved-abc"),
-            "0123456789012345678901234567890123456789\n",
-        )
-        .unwrap();
-        let packed = checkout(&base.0, now, 30 * DAY, 10);
-        fs::write(
-            base.0.join(packed.to_string()).join(".instafy/.git/packed-refs"),
-            "# pack-refs with: peeled fully-peeled sorted\n\
-             0123456789012345678901234567890123456789 refs/heads/main\n\
-             0123456789012345678901234567890123456789 refs/instafy/local-recovery/20261001T000000Z-conflict-def\n",
-        )
-        .unwrap();
-        // Markers of refs already pushed (or dismissed) do not hold a checkout.
-        let pushed = checkout(&base.0, now, 30 * DAY, 10);
-        let pushed_git = base.0.join(pushed.to_string()).join(".instafy/.git");
-        fs::create_dir_all(pushed_git.join("refs/instafy/local-recovery-pushed")).unwrap();
-        fs::write(
-            pushed_git.join("refs/instafy/local-recovery-pushed/x"),
-            "0123456789012345678901234567890123456789\n",
-        )
-        .unwrap();
-        fs::create_dir_all(pushed_git.join("refs/instafy/local-recovery")).unwrap();
+        let durable = checkout(&base.0, now, 30 * DAY, 10);
+        let missing = checkout(&base.0, now, 30 * DAY, 10);
+        fs::remove_file(marker(&base.0, missing)).unwrap();
+        let mut kept = vec![missing];
+        for content in [
+            &b"stopped\n"[..],
+            b"",
+            b"durable v1",
+            b"durable v2\n",
+            b"durable v1\nstopped\n",
+            b"DURABLE V1\n",
+        ] {
+            let project_id = checkout(&base.0, now, 30 * DAY, 10);
+            fs::write(marker(&base.0, project_id), content).unwrap();
+            kept.push(project_id);
+        }
+        let directory = checkout(&base.0, now, 30 * DAY, 10);
+        fs::remove_file(marker(&base.0, directory)).unwrap();
+        fs::create_dir_all(marker(&base.0, directory)).unwrap();
+        kept.push(directory);
+        #[cfg(unix)]
+        {
+            let linked = checkout(&base.0, now, 30 * DAY, 10);
+            let elsewhere = base.0.join("elsewhere-marker");
+            fs::write(&elsewhere, DURABLE_MARKER).unwrap();
+            fs::remove_file(marker(&base.0, linked)).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, marker(&base.0, linked)).unwrap();
+            kept.push(linked);
+        }
 
         let report = sweep_checkouts(
             &base.0,
@@ -601,24 +467,14 @@ mod tests {
             now,
             &FakeHost::default(),
         );
-        let mut kept = report.kept_unpushed.clone();
+        assert_eq!(report.evicted, vec![(durable, "idle")]);
+        let mut kept_unpushed = report.kept_unpushed.clone();
+        kept_unpushed.sort();
         kept.sort();
-        let mut expected = vec![loose, packed];
-        expected.sort();
-        assert_eq!(kept, expected);
-        assert_eq!(report.evicted, vec![(pushed, "idle")]);
-        assert!(exists(&base.0, loose) && exists(&base.0, packed));
-
-        // Once the next start has pushed them, a later sweep evicts.
-        fs::remove_file(git_dir.join("refs/instafy/local-recovery/20261002T101010Z-unsaved-abc"))
-            .unwrap();
-        let report = sweep_checkouts(
-            &base.0,
-            &CheckoutEvictionPolicy::default(),
-            now,
-            &FakeHost::default(),
-        );
-        assert_eq!(report.evicted, vec![(loose, "idle")]);
+        assert_eq!(kept_unpushed, kept);
+        for project_id in kept {
+            assert!(exists(&base.0, project_id));
+        }
     }
 
     #[test]
@@ -653,39 +509,44 @@ mod tests {
         assert!(exists(&base.0, just_used));
     }
 
+    /// The budget follows the same rule: a checkout whose last stop was not
+    /// durable is kept however far over budget the node is, and the next
+    /// durable one goes instead.
     #[test]
-    fn running_starting_and_unsaved_checkouts_are_never_evicted() {
+    fn the_disk_budget_keeps_a_checkout_without_a_durable_stop() {
+        let base = TempDir::new();
+        let now = SystemTime::now();
+        let pre_rolling_saves = checkout(&base.0, now, 3 * DAY, 400);
+        fs::write(marker(&base.0, pre_rolling_saves), b"stopped\n").unwrap();
+        let durable = checkout(&base.0, now, 2 * DAY, 400);
+        let policy = CheckoutEvictionPolicy {
+            idle_ttl: None,
+            disk_budget_bytes: Some(1),
+            min_idle_for_budget: Duration::from_secs(60 * 60),
+        };
+        let report = sweep_checkouts(&base.0, &policy, now, &FakeHost::default());
+        assert_eq!(report.evicted, vec![(durable, "disk_budget")]);
+        assert_eq!(report.kept_unpushed, vec![pre_rolling_saves]);
+        assert!(exists(&base.0, pre_rolling_saves));
+    }
+
+    #[test]
+    fn running_and_starting_checkouts_are_never_evicted() {
         let base = TempDir::new();
         let now = SystemTime::now();
         let running = checkout(&base.0, now, 30 * DAY, 10);
+        let stopped_container = checkout(&base.0, now, 30 * DAY, 10);
         let starting = checkout(&base.0, now, 30 * DAY, 10);
-        let no_remote = checkout(&base.0, now, 30 * DAY, 10);
-        fs::write(
-            base.0
-                .join(no_remote.to_string())
-                .join(".instafy/.git/config"),
-            "[core]\n\tbare = false\n",
-        )
-        .unwrap();
-        let no_repo = checkout(&base.0, now, 30 * DAY, 10);
-        fs::remove_dir_all(base.0.join(no_repo.to_string()).join(".instafy")).unwrap();
-        let reftable = checkout(&base.0, now, 30 * DAY, 10);
-        fs::create_dir_all(
-            base.0
-                .join(reftable.to_string())
-                .join(".instafy/.git/reftable"),
-        )
-        .unwrap();
         let host = FakeHost {
-            present: HashSet::from([running]),
+            present: HashSet::from([running, stopped_container]),
             busy: HashSet::from([starting]),
             ..FakeHost::default()
         };
 
         let report = sweep_checkouts(&base.0, &CheckoutEvictionPolicy::default(), now, &host);
         assert!(report.evicted.is_empty(), "{report:?}");
-        assert_eq!(report.kept.len(), 5, "{report:?}");
-        for project_id in [running, starting, no_remote, no_repo, reftable] {
+        assert_eq!(report.kept.len(), 3, "{report:?}");
+        for project_id in [running, stopped_container, starting] {
             assert!(exists(&base.0, project_id));
         }
     }
@@ -721,28 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn checkouts_whose_runtime_did_not_stop_cleanly_are_kept() {
-        let base = TempDir::new();
-        let now = SystemTime::now();
-        // A crash: no shutdown flush wrote the marker. Dirty files or
-        // commits that are not on canonical may be the only copy.
-        let crashed = checkout(&base.0, now, 30 * DAY, 10);
-        fs::remove_file(base.0.join(crashed.to_string()).join(CLEAN_STOP_MARKER)).unwrap();
-        // A branch ahead of canonical, after a clean stop that parked it,
-        // pushed or not, is decided by its recovery refs alone.
-        let clean = checkout(&base.0, now, 30 * DAY, 10);
-        let report = sweep_checkouts(
-            &base.0,
-            &CheckoutEvictionPolicy::default(),
-            now,
-            &FakeHost::default(),
-        );
-        assert_eq!(report.kept_unpushed, vec![crashed]);
-        assert_eq!(report.evicted, vec![(clean, "idle")]);
-        assert!(exists(&base.0, crashed));
-    }
-
-    #[test]
     fn a_stop_that_finishes_before_the_sweep_gets_the_lock_keeps_the_checkout() {
         let base = TempDir::new();
         let now = SystemTime::now();
@@ -754,5 +593,19 @@ mod tests {
         let report = sweep_checkouts(&base.0, &CheckoutEvictionPolicy::default(), now, &host);
         assert!(report.evicted.is_empty(), "{report:?}");
         assert!(exists(&base.0, project_id));
+    }
+
+    /// The origin writes the marker eviction reads: the same bytes.
+    #[test]
+    fn the_durable_marker_is_the_one_the_origin_writes() {
+        let origin = include_str!("../../../origin-http-server/src/working_state.rs");
+        let definition = format!(
+            "DURABLE_MARKER: &[u8] = b\"{}\";",
+            DURABLE_MARKER.escape_ascii()
+        );
+        assert!(
+            origin.contains(&definition),
+            "the origin's DURABLE_MARKER differs from {definition}"
+        );
     }
 }

@@ -1,14 +1,13 @@
 //! Database-backed tests of the pool-retirement drain: a real controller
 //! state on the shared test database, a stand-in node provider (census,
-//! ensure, release) and a stand-in runtime origin that does what the real
-//! one does with the controller's credential.
+//! origin address, release) and a stand-in runtime origin that does what the
+//! real one does with the controller's credential.
 
 use std::sync::{Arc, Mutex};
 
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{HeaderMap, Request, StatusCode};
-use axum::response::IntoResponse as _;
 use axum::Json;
 use serde_json::{json, Value as JsonValue};
 use tower::ServiceExt as _;
@@ -24,36 +23,41 @@ use crate::AppState;
 
 const PROVIDER_ID: &str = "drain_test_provider";
 
-/// What the stand-in node holds, and how it changes.
+/// What the stand-in node holds, and what was released on it.
 #[derive(Clone, Default)]
 struct Node {
     census: Arc<Mutex<JsonValue>>,
-    /// Answers for the next census calls, in order, before `census` is
-    /// used again: a body, or `None` for a failed call.
-    census_script: Arc<Mutex<Vec<Option<JsonValue>>>>,
-    /// A woken runtime never registers its origin.
-    never_registers: Arc<Mutex<bool>>,
-    /// The census after each release, in order.
-    after_release: Arc<Mutex<Vec<JsonValue>>>,
     released: Arc<Mutex<Vec<JsonValue>>>,
-    ensured: Arc<Mutex<Vec<JsonValue>>>,
 }
 
 /// What the stand-in origin saw when the controller called `/git/flush`.
 #[derive(Debug, Clone)]
 struct FlushSeen {
     bearer: String,
+    body: JsonValue,
     git_write: StatusCode,
-    /// Jobs the woken runtime could lease while it flushed.
-    leasable_jobs: Option<usize>,
 }
 
 #[derive(Clone)]
 struct OriginStub {
     state: Arc<Mutex<Option<AppState>>>,
     project_id: Uuid,
-    runtime_id: Uuid,
     flushes: Arc<Mutex<Vec<FlushSeen>>>,
+}
+
+/// What the stand-in origin answers a flush: one local ref it could not
+/// push, and a working folder whose own save did not land.
+fn flush_answer() -> JsonValue {
+    json!({
+        "unpushedRefs": 1,
+        "unpushedRefNames": ["20261010T080000Z-unsaved-abc"],
+        "recoveryRefs": [],
+        "workingState": {
+            "durable": false,
+            "persistedAt": "2026-10-10T08:00:00Z",
+            "error": "unreachable",
+        },
+    })
 }
 
 async fn send(
@@ -76,7 +80,11 @@ async fn send(
     )
 }
 
-async fn handle_flush(State(stub): State<OriginStub>, headers: HeaderMap) -> Json<JsonValue> {
+async fn handle_flush(
+    State(stub): State<OriginStub>,
+    headers: HeaderMap,
+    Json(body): Json<JsonValue>,
+) -> Json<JsonValue> {
     let bearer = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -103,49 +111,12 @@ async fn handle_flush(State(stub): State<OriginStub>, headers: HeaderMap) -> Jso
             .expect("git token request"),
     )
     .await;
-    // The woken runtime asks for work while it flushes.
-    let lease_id = {
-        let connection = state.pool.get().await.expect("connection");
-        connection
-            .query_one(
-                "select active_lease_id from runtimes where id = $1",
-                &[&stub.runtime_id],
-            )
-            .await
-            .expect("runtime")
-            .get::<_, Option<Uuid>>(0)
-    };
-    let agent_token = crate::auth::issue_agent_token(
-        &state.config,
-        &stub.project_id,
-        &stub.runtime_id,
-        lease_id.as_ref(),
-        None,
-    )
-    .expect("agent token")
-    .token;
-    let (lease_status, leased) = send(
-        &state,
-        crate::agent::router(),
-        Request::builder()
-            .method("POST")
-            .uri("/agent/lease")
-            .header("authorization", format!("Bearer {agent_token}"))
-            .header("content-type", "application/json")
-            .body(Body::from(
-                json!({ "max": 1, "lease_seconds": 60, "runtime_id": stub.runtime_id }).to_string(),
-            ))
-            .expect("agent lease request"),
-    )
-    .await;
-    let leasable_jobs =
-        (lease_status == StatusCode::OK).then(|| leased["jobs"].as_array().map_or(0, Vec::len));
     stub.flushes.lock().unwrap().push(FlushSeen {
         bearer,
+        body,
         git_write,
-        leasable_jobs,
     });
-    Json(json!({ "unpushedRefs": 0, "unpushedRefNames": [], "recoveryRefs": [] }))
+    Json(flush_answer())
 }
 
 struct DrainFixture {
@@ -166,8 +137,7 @@ impl DrainFixture {
     /// stand-in provider, stopped (no active generation).
     async fn new(pool: PgPool, project_id: Uuid, owner_user_id: Uuid) -> anyhow::Result<Self> {
         let node = Node::default();
-        *node.census.lock().unwrap() =
-            json!({ "supported": true, "containers": [], "checkouts": [] });
+        *node.census.lock().unwrap() = json!({ "supported": true, "containers": [] });
         let runtime_id = Uuid::new_v4();
         let flushes = Arc::new(Mutex::new(Vec::new()));
         let shared_state: Arc<Mutex<Option<AppState>>> = Arc::new(Mutex::new(None));
@@ -177,7 +147,6 @@ impl DrainFixture {
             .with_state(OriginStub {
                 state: shared_state.clone(),
                 project_id,
-                runtime_id,
                 flushes: flushes.clone(),
             });
         let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -190,13 +159,7 @@ impl DrainFixture {
 
         let provider_app = {
             let census = node.census.clone();
-            let census_script = node.census_script.clone();
-            let never_registers = node.never_registers.clone();
-            let after_release = node.after_release.clone();
             let released = node.released.clone();
-            let ensured = node.ensured.clone();
-            let pool = pool.clone();
-            let endpoint = origin_endpoint.clone();
             let attested = origin_endpoint.clone();
             axum::Router::new()
                 // The node's provider says where a runtime's origin is.
@@ -211,82 +174,16 @@ impl DrainFixture {
                     "/runtime/census",
                     axum::routing::post(move || {
                         let census = census.clone();
-                        let census_script = census_script.clone();
-                        async move {
-                            let scripted = {
-                                let mut script = census_script.lock().unwrap();
-                                (!script.is_empty()).then(|| script.remove(0))
-                            };
-                            match scripted {
-                                Some(Some(body)) => Json(body).into_response(),
-                                Some(None) => StatusCode::BAD_GATEWAY.into_response(),
-                                None => Json(census.lock().unwrap().clone()).into_response(),
-                            }
-                        }
+                        async move { Json(census.lock().unwrap().clone()) }
                     }),
                 )
                 .route(
                     "/runtime/release",
-                    axum::routing::post({
-                        let census = node.census.clone();
-                        move |Json(body): Json<JsonValue>| {
-                            let released = released.clone();
-                            let after_release = after_release.clone();
-                            let census = census.clone();
-                            async move {
-                                released.lock().unwrap().push(body);
-                                let mut after_release = after_release.lock().unwrap();
-                                if !after_release.is_empty() {
-                                    *census.lock().unwrap() = after_release.remove(0);
-                                }
-                                StatusCode::NO_CONTENT
-                            }
-                        }
-                    }),
-                )
-                .route(
-                    "/runtime/ensure",
-                    axum::routing::post({
-                        let census = node.census.clone();
-                        move |Json(body): Json<JsonValue>| {
-                            let ensured = ensured.clone();
-                            let census = census.clone();
-                            let pool = pool.clone();
-                            let endpoint = endpoint.clone();
-                            let never_registers = never_registers.clone();
-                            async move {
-                                ensured.lock().unwrap().push(body.clone());
-                                let project: Uuid =
-                                    serde_json::from_value(body["project_id"].clone()).unwrap();
-                                let runtime: Uuid =
-                                    serde_json::from_value(body["runtime_id"].clone()).unwrap();
-                                let lease: Uuid =
-                                    serde_json::from_value(body["lease_id"].clone()).unwrap();
-                                let instance: Option<Uuid> =
-                                    serde_json::from_value(body["origin_instance_id"].clone())
-                                        .unwrap_or(None);
-                                {
-                                    let mut census = census.lock().unwrap();
-                                    census["containers"] = json!([{
-                                        "composeProject": format!("instafy-runtime-{}-x", project.simple()),
-                                        "projectId": project,
-                                        "runtimeId": runtime,
-                                        "leaseId": lease,
-                                        "running": true,
-                                    }]);
-                                    if let Some(checkouts) = census["checkouts"].as_array_mut() {
-                                        for checkout in checkouts {
-                                            checkout["runtimePresent"] = json!(true);
-                                        }
-                                    }
-                                }
-                                // The runtime boots and registers once the
-                                // launch fence lets go of its rows.
-                                if !*never_registers.lock().unwrap() {
-                                    tokio::spawn(register(pool, project, runtime, lease, instance, endpoint));
-                                }
-                                Json(json!({ "message": "ensured" }))
-                            }
+                    axum::routing::post(move |Json(body): Json<JsonValue>| {
+                        let released = released.clone();
+                        async move {
+                            released.lock().unwrap().push(body);
+                            StatusCode::NO_CONTENT
                         }
                     }),
                 )
@@ -386,7 +283,7 @@ impl DrainFixture {
             self.project_id,
             self.runtime_id,
             lease,
-            Some(instance),
+            instance,
             self.origin_endpoint.clone(),
         )
         .await;
@@ -402,28 +299,6 @@ impl DrainFixture {
 
     fn set_census(&self, census: JsonValue) {
         *self.node.census.lock().unwrap() = census;
-    }
-
-    /// The next census calls answer these, in order (`None`: the call
-    /// fails).
-    fn script_census(&self, answers: Vec<Option<JsonValue>>) {
-        *self.node.census_script.lock().unwrap() = answers;
-    }
-
-    fn after_releases(&self, censuses: Vec<JsonValue>) {
-        *self.node.after_release.lock().unwrap() = censuses;
-    }
-
-    fn checkout(&self, runtime_present: bool, clean: bool, unpushed: &[&str]) -> JsonValue {
-        json!({
-            "projectId": self.project_id,
-            "runtimePresent": runtime_present,
-            "stoppedCleanly": clean,
-            "unpushedRefs": unpushed.len(),
-            "unpushedRefNames": unpushed,
-            "unreadable": null,
-            "empty": false,
-        })
     }
 
     async fn call(
@@ -483,26 +358,10 @@ async fn register(
     project: Uuid,
     runtime: Uuid,
     lease: Uuid,
-    instance: Option<Uuid>,
+    instance: Uuid,
     endpoint: String,
 ) {
     let connection = pool.get().await.expect("connection");
-    let instance = match instance {
-        Some(instance) => instance,
-        None => {
-            let instance = Uuid::new_v4();
-            connection
-                .execute(
-                    "insert into origin_instances
-                        (id, project_id, runtime_id, lease_id, required, mode, status)
-                     values ($1, $2, $3, $4, true, 'hosted', 'requested')",
-                    &[&instance, &project, &runtime, &lease],
-                )
-                .await
-                .expect("origin instance");
-            instance
-        }
-    };
     connection
         .execute(
             "insert into workspace_origins (id, project_id, mode, endpoint, protocols)
@@ -555,7 +414,8 @@ async fn delete_users(users: &[Uuid]) -> anyhow::Result<()> {
 const SERVICE: Option<&str> = Some("internal");
 
 /// Every drain route answers the service role and nobody else: no bearer is
-/// a 401, a user (even the space owner) or a scoped token a 403.
+/// a 401, a user (even the space owner) or a scoped token a 403. The
+/// checkout rescue route is gone, for the service role too.
 #[tokio::test]
 async fn drain_routes_answer_only_the_service_role() -> anyhow::Result<()> {
     let pool = crate::tests::require_origin_test_pool("runtime drain auth test").await?;
@@ -579,18 +439,13 @@ async fn drain_routes_answer_only_the_service_role() -> anyhow::Result<()> {
         )
         .map_err(|(_, body)| anyhow::anyhow!("{}", body.0.message))?
         .token;
-        let routes: [(&str, &str, Option<JsonValue>); 4] = [
+        let routes: [(&str, &str, Option<JsonValue>); 3] = [
             ("GET", "/operator/runtime-drain/census", None),
             ("POST", "/operator/runtime-drain/fence", Some(json!({ "fenced": true, "ttlSeconds": 60 }))),
             (
                 "POST",
                 "/operator/runtime-drain/stop",
                 Some(json!({ "runtimeId": fx.runtime_id, "projectId": fx.project_id, "leaseId": Uuid::new_v4() })),
-            ),
-            (
-                "POST",
-                "/operator/runtime-drain/flush-checkout",
-                Some(json!({ "projectId": fx.project_id })),
             ),
         ];
         for (method, uri, body) in routes {
@@ -603,11 +458,19 @@ async fn drain_routes_answer_only_the_service_role() -> anyhow::Result<()> {
         }
         assert!(!fx.state.runtime_drain.is_fenced());
         assert!(fx.node.released.lock().unwrap().is_empty());
-        assert!(fx.node.ensured.lock().unwrap().is_empty());
         let (status, census) = fx
             .call("GET", "/operator/runtime-drain/census", SERVICE, None)
             .await;
         assert_eq!(status, StatusCode::OK, "{census}");
+        let (status, _) = fx
+            .call(
+                "POST",
+                "/operator/runtime-drain/flush-checkout",
+                SERVICE,
+                Some(json!({ "projectId": fx.project_id })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
         Ok(())
     })
     .await;
@@ -615,11 +478,13 @@ async fn drain_routes_answer_only_the_service_role() -> anyhow::Result<()> {
     result
 }
 
-/// The census joins the node with the database: the runtime's active
-/// generation is `live`, any other container an `orphan`, and a checkout
-/// without a runtime needs a flush unless nothing on it is only there.
+/// The census joins the node's containers with the database: the runtime's
+/// active generation is `live`, any other container an `orphan`. Checkouts
+/// are no part of it: an older provider's checkout list is ignored and never
+/// makes the census incomplete; only a provider that cannot list its node,
+/// does not answer or cut its container list does.
 #[tokio::test]
-async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() -> anyhow::Result<()>
+async fn the_census_tells_live_runtimes_from_orphans_and_lists_no_checkouts() -> anyhow::Result<()>
 {
     let pool = crate::tests::require_origin_test_pool("runtime drain census test").await?;
     let project_id = Uuid::new_v4();
@@ -632,9 +497,6 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
         let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
         let lease = fx.start_live().await?;
         let stale_lease = Uuid::new_v4();
-        let other_project = Uuid::new_v4();
-        let clean_project = Uuid::new_v4();
-        let crashed_project = Uuid::new_v4();
         fx.set_census(json!({
             "supported": true,
             "truncated": false,
@@ -655,42 +517,22 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
                 },
                 {
                     "composeProject": "instafy-runtime-crashed",
-                    "projectId": crashed_project,
+                    "projectId": Uuid::new_v4(),
                     "runtimeId": Uuid::new_v4(),
                     "leaseId": Uuid::new_v4(),
                     "running": false,
                 },
             ],
-            "checkouts": [
-                fx.checkout(true, false, &[]),
-                {
-                    "projectId": other_project,
-                    "runtimePresent": false,
-                    "stoppedCleanly": true,
-                    "unpushedRefs": 1,
-                    "unpushedRefNames": ["20261003T101010Z-unsaved-abc"],
-                    "unreadable": null,
-                    "empty": false,
-                },
-                {
-                    "projectId": clean_project,
-                    "runtimePresent": false,
-                    "stoppedCleanly": true,
-                    "unpushedRefs": 0,
-                    "unpushedRefNames": [],
-                    "unreadable": null,
-                    "empty": false,
-                },
-                {
-                    "projectId": crashed_project,
-                    "runtimePresent": true,
-                    "stoppedCleanly": false,
-                    "unpushedRefs": 1,
-                    "unpushedRefNames": ["20261003T101010Z-unsaved-def"],
-                    "unreadable": null,
-                    "empty": false,
-                },
-            ],
+            // What a provider from before this change still lists.
+            "checkouts": [{
+                "projectId": Uuid::new_v4(),
+                "runtimePresent": false,
+                "stoppedCleanly": false,
+                "unpushedRefs": 1,
+                "unpushedRefNames": ["20261003T101010Z-unsaved-abc"],
+                "unreadable": null,
+                "empty": false,
+            }],
         }));
         let (status, census) = fx
             .call("GET", "/operator/runtime-drain/census", SERVICE, None)
@@ -698,6 +540,7 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
         assert_eq!(status, StatusCode::OK, "{census}");
         assert_eq!(census["fenced"], false);
         assert_eq!(census["complete"], true, "{census}");
+        assert!(census.get("checkouts").is_none(), "{census}");
         let runtimes = census["runtimes"].as_array().unwrap();
         assert_eq!(runtimes.len(), 3, "{census}");
         let class_of = |compose: &str| {
@@ -708,6 +551,10 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
         };
         assert_eq!(class_of("instafy-runtime-live").as_deref(), Some("live"));
         assert_eq!(class_of("instafy-runtime-stale").as_deref(), Some("orphan"));
+        assert_eq!(
+            class_of("instafy-runtime-crashed").as_deref(),
+            Some("orphan")
+        );
         let live = runtimes
             .iter()
             .find(|runtime| runtime["class"] == "live")
@@ -715,33 +562,16 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
         assert_eq!(live["dbActiveLeaseId"], json!(lease));
         assert_eq!(live["dbStatus"], "ready");
 
-        let checkouts = census["checkouts"].as_array().unwrap();
-        let needs = |project: Uuid| {
-            checkouts
-                .iter()
-                .find(|checkout| checkout["projectId"] == json!(project))
-                .map(|checkout| checkout["needsFlush"].as_bool().unwrap())
-        };
-        assert_eq!(needs(fx.project_id), Some(false), "its runtime drains it");
-        assert_eq!(needs(other_project), Some(true));
-        assert_eq!(needs(clean_project), Some(false));
-        assert_eq!(
-            needs(crashed_project),
-            Some(true),
-            "a stopped container flushes nothing"
-        );
-        let own = checkouts
-            .iter()
-            .find(|checkout| checkout["projectId"] == json!(fx.project_id))
-            .unwrap();
-        assert_eq!(own["runtimeId"], json!(fx.runtime_id));
-
-        // A provider that cannot list its node leaves the census incomplete.
-        fx.set_census(json!({ "supported": false }));
-        let (_, census) = fx
-            .call("GET", "/operator/runtime-drain/census", SERVICE, None)
-            .await;
-        assert_eq!(census["complete"], false, "{census}");
+        for incomplete in [
+            json!({ "supported": false }),
+            json!({ "supported": true, "truncated": true, "containers": [] }),
+        ] {
+            fx.set_census(incomplete.clone());
+            let (_, census) = fx
+                .call("GET", "/operator/runtime-drain/census", SERVICE, None)
+                .await;
+            assert_eq!(census["complete"], false, "{incomplete}: {census}");
+        }
         Ok(())
     })
     .await;
@@ -751,7 +581,10 @@ async fn the_census_tells_live_runtimes_orphans_and_checkouts_needing_a_flush() 
 
 /// A drain stop refuses any generation but the one it names, and otherwise
 /// flushes under the owner's save-only permission (nobody holds a workspace
-/// lease), releases the runtime and reports the flush and the checkout.
+/// lease) with the working folder's own save, releases the runtime and
+/// reports the flush: what is still only on the node and whether canonical
+/// holds the folder. Fields a caller adds to the request are ignored, and
+/// the answer carries no checkout.
 #[tokio::test]
 async fn a_drain_stop_flushes_the_named_generation_only() -> anyhow::Result<()> {
     let pool = crate::tests::require_origin_test_pool("runtime drain stop test").await?;
@@ -764,14 +597,6 @@ async fn a_drain_stop_flushes_the_named_generation_only() -> anyhow::Result<()> 
     let result = with_shared_db_fixture(fixture, async {
         let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
         let lease = fx.start_live().await?;
-        let mut census = fx.node.census.lock().unwrap().clone();
-        census["checkouts"] = json!([fx.checkout(true, false, &[])]);
-        fx.set_census(census);
-        fx.after_releases(vec![json!({
-            "supported": true,
-            "containers": [],
-            "checkouts": [fx.checkout(false, true, &[])],
-        })]);
 
         let (status, wrong) = fx
             .call(
@@ -794,19 +619,36 @@ async fn a_drain_stop_flushes_the_named_generation_only() -> anyhow::Result<()> 
                 "POST",
                 "/operator/runtime-drain/stop",
                 SERVICE,
-                Some(json!({ "runtimeId": fx.runtime_id, "projectId": fx.project_id, "leaseId": lease })),
+                Some(json!({
+                    "runtimeId": fx.runtime_id,
+                    "projectId": fx.project_id,
+                    "leaseId": lease,
+                    "unknownField": "ignored",
+                })),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{stopped}");
+        assert_eq!(stopped["ok"], true, "{stopped}");
         assert_eq!(stopped["statusChanged"], true, "{stopped}");
         assert_eq!(
             stopped["flush"],
-            json!({ "status": "flushed", "unpushedRefs": 0, "unpushedRefNames": [] })
+            json!({
+                "status": "flushed",
+                "unpushedRefs": 1,
+                "unpushedRefNames": ["20261010T080000Z-unsaved-abc"],
+                "workingState": {
+                    "durable": false,
+                    "persistedAt": "2026-10-10T08:00:00Z",
+                    "error": "unreachable",
+                },
+            }),
+            "{stopped}"
         );
-        assert_eq!(stopped["checkout"]["stoppedCleanly"], true, "{stopped}");
-        assert_eq!(stopped["checkout"]["needsFlush"], false, "{stopped}");
+        assert!(stopped.get("checkout").is_none(), "{stopped}");
+        assert!(stopped.get("checkoutError").is_none(), "{stopped}");
         let flushes = fx.flushes.lock().unwrap().clone();
         assert_eq!(flushes.len(), 1, "{flushes:?}");
+        assert_eq!(flushes[0].body["workingState"], true, "{flushes:?}");
         let claims = decode_scoped_token(&fx.state.config, &flushes[0].bearer, "save grant")
             .map_err(|(_, body)| anyhow::anyhow!("{}", body.0.message))?;
         assert_eq!(claims.scopes, vec!["workspace.flush".to_string()]);
@@ -819,7 +661,10 @@ async fn a_drain_stop_flushes_the_named_generation_only() -> anyhow::Result<()> 
         let drained = fx.events("pool_retirement_drain").await?;
         assert_eq!(drained.len(), 2, "{drained:?}");
         assert_eq!(drained[1]["flushStatus"], "flushed");
+        assert_eq!(drained[1]["unpushedRefs"], 1);
         assert_eq!(drained[1]["action"], "pool_retirement_drain");
+        let flushed = fx.events("workspace_flush").await?;
+        assert_eq!(flushed.last().unwrap()["durable"], false, "{flushed:?}");
         Ok(())
     })
     .await;
@@ -882,7 +727,7 @@ async fn the_fence_stops_starts_and_sweeps_but_not_the_drain() -> anyhow::Result
         assert!(fx.node.released.lock().unwrap().is_empty());
         assert_eq!(fx.runtime_row().await?.0, "ready");
 
-        // No runtime starts.
+        // No runtime starts, the space's other runtimes included.
         let other_runtime = Uuid::new_v4();
         fx.pool
             .get()
@@ -903,13 +748,29 @@ async fn the_fence_stops_starts_and_sweeps_but_not_the_drain() -> anyhow::Result
             transaction.rollback().await?;
             other
         };
-        let refused = super::super::ensure::ensure_runtime_for_drain_flush(&fx.state, &other)
-            .await
-            .expect_err("a fenced controller starts nothing");
+        let refused = super::super::ensure::ensure_runtime_for_requeued_jobs(
+            &fx.state,
+            &other,
+            "runtime_drain_fence_test",
+        )
+        .await
+        .expect_err("a fenced controller starts nothing");
         assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE);
         let (_, Json(refusal)) = refused;
         assert_eq!(refusal.code.as_deref(), Some("controller_retiring"));
-        assert!(fx.node.ensured.lock().unwrap().is_empty());
+        assert_eq!(
+            fx.pool
+                .get()
+                .await?
+                .query_one(
+                    "select count(*) from runtime_leases where runtime_id = $1",
+                    &[&other_runtime],
+                )
+                .await?
+                .get::<_, i64>(0),
+            0,
+            "no generation was requested"
+        );
 
         // The drain's own stop runs.
         let (status, stopped) = fx
@@ -944,190 +805,12 @@ async fn the_fence_stops_starts_and_sweeps_but_not_the_drain() -> anyhow::Result
     result
 }
 
-/// A stopped checkout still holding unpushed work: the drain releases an
-/// orphan container of an older generation, wakes the space's runtime on
-/// this node (even while fenced), which leases no job while it runs and is
-/// never billed, flushes it under the owner's save-only permission, stops
-/// it, and reports the checkout clean.
-#[tokio::test]
-async fn flush_checkout_wakes_flushes_and_stops_without_jobs_or_billing() -> anyhow::Result<()> {
-    let pool = crate::tests::require_origin_test_pool("runtime drain flush-checkout test").await?;
-    let project_id = Uuid::new_v4();
-    let owner = Uuid::new_v4();
-    let fixture = SharedDbFixture {
-        projects: vec![project_id],
-        ..Default::default()
-    };
-    let result = with_shared_db_fixture(fixture, async {
-        let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
-        let orphan_lease = Uuid::new_v4();
-        fx.set_census(json!({
-            "supported": true,
-            "containers": [{
-                "composeProject": "instafy-runtime-orphan",
-                "projectId": fx.project_id,
-                "runtimeId": fx.runtime_id,
-                "leaseId": orphan_lease,
-                "running": false,
-            }],
-            "checkouts": [fx.checkout(true, false, &["20261003T101010Z-unsaved-abc"])],
-        }));
-        // After the orphan's release the checkout still holds its refs;
-        // after the woken runtime's stop it is clean.
-        fx.after_releases(vec![
-            json!({
-                "supported": true,
-                "containers": [],
-                "checkouts": [fx.checkout(false, false, &["20261003T101010Z-unsaved-abc"])],
-            }),
-            json!({
-                "supported": true,
-                "containers": [],
-                "checkouts": [fx.checkout(false, true, &[])],
-            }),
-        ]);
-        let job_id = Uuid::new_v4();
-        fx.pool
-            .get()
-            .await?
-            .execute(
-                "insert into agent_jobs (id, project_id, status, payload)
-                 values ($1, $2, 'queued', '{}'::jsonb)",
-                &[&job_id, &fx.project_id],
-            )
-            .await?;
-        let (status, _) = fx
-            .call(
-                "POST",
-                "/operator/runtime-drain/fence",
-                SERVICE,
-                Some(json!({ "fenced": true, "ttlSeconds": 600 })),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK);
-
-        let (status, flushed) = fx
-            .call(
-                "POST",
-                "/operator/runtime-drain/flush-checkout",
-                SERVICE,
-                Some(json!({ "projectId": fx.project_id })),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{flushed}");
-        assert_eq!(flushed["status"], "flushed", "{flushed}");
-        assert_eq!(flushed["runtimeId"], json!(fx.runtime_id));
-        assert_eq!(
-            flushed["releasedOrphans"],
-            json!(["instafy-runtime-orphan"])
-        );
-        assert_eq!(flushed["flush"]["status"], "flushed", "{flushed}");
-        assert_eq!(flushed["checkout"]["needsFlush"], false, "{flushed}");
-
-        let released = fx.node.released.lock().unwrap().clone();
-        assert_eq!(released.len(), 2, "{released:?}");
-        assert_eq!(
-            released[0]["lease_id"],
-            json!(orphan_lease),
-            "the orphan first, by its own generation"
-        );
-        let ensured = fx.node.ensured.lock().unwrap().clone();
-        assert_eq!(ensured.len(), 1, "woken once, while fenced");
-        let woken_lease: Uuid = serde_json::from_value(ensured[0]["lease_id"].clone())?;
-        assert_eq!(released[1]["lease_id"], json!(woken_lease));
-
-        let flushes = fx.flushes.lock().unwrap().clone();
-        assert_eq!(flushes.len(), 1, "{flushes:?}");
-        assert_eq!(flushes[0].git_write, StatusCode::OK);
-        assert_eq!(
-            flushes[0].leasable_jobs,
-            Some(0),
-            "the woken runtime leases no job"
-        );
-        let job_status: String = fx
-            .pool
-            .get()
-            .await?
-            .query_one("select status from agent_jobs where id = $1", &[&job_id])
-            .await?
-            .get(0);
-        assert_eq!(job_status, "queued");
-        assert_eq!(
-            fx.events("pool_retirement_flush_wake").await?,
-            vec![
-                json!({ "phase": "starting" }),
-                json!({ "phase": "started", "runtimeLeaseId": woken_lease }),
-            ]
-        );
-        assert_eq!(fx.runtime_row().await?.0, "stopped");
-        assert!(!fx.state.runtime_drain.is_flush_wake(&fx.runtime_id));
-        Ok(())
-    })
-    .await;
-    delete_users(&[owner]).await?;
-    result
-}
-
-/// A checkout whose space runs on another node is not this drain's to
-/// flush, and one with nothing left only here needs nothing.
-#[tokio::test]
-async fn flush_checkout_leaves_spaces_running_elsewhere_and_clean_checkouts() -> anyhow::Result<()>
-{
-    let pool = crate::tests::require_origin_test_pool("runtime drain busy test").await?;
-    let project_id = Uuid::new_v4();
-    let owner = Uuid::new_v4();
-    let fixture = SharedDbFixture {
-        projects: vec![project_id],
-        ..Default::default()
-    };
-    let result = with_shared_db_fixture(fixture, async {
-        let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
-        fx.set_census(json!({
-            "supported": true,
-            "containers": [],
-            "checkouts": [fx.checkout(false, true, &[])],
-        }));
-        let (_, clean) = fx
-            .call(
-                "POST",
-                "/operator/runtime-drain/flush-checkout",
-                SERVICE,
-                Some(json!({ "projectId": fx.project_id })),
-            )
-            .await;
-        assert_eq!(clean["status"], "clean", "{clean}");
-
-        // Its live generation is not on this node.
-        fx.start_live().await?;
-        fx.set_census(json!({
-            "supported": true,
-            "containers": [],
-            "checkouts": [fx.checkout(false, false, &["x-unsaved-1"])],
-        }));
-        let (_, busy) = fx
-            .call(
-                "POST",
-                "/operator/runtime-drain/flush-checkout",
-                SERVICE,
-                Some(json!({ "projectId": fx.project_id })),
-            )
-            .await;
-        assert_eq!(busy["status"], "busy_elsewhere", "{busy}");
-        assert!(fx.node.ensured.lock().unwrap().is_empty());
-        assert!(fx.node.released.lock().unwrap().is_empty());
-        assert!(fx.flushes.lock().unwrap().is_empty());
-        assert_eq!(fx.runtime_row().await?.0, "ready");
-        Ok(())
-    })
-    .await;
-    delete_users(&[owner]).await?;
-    result
-}
-
-/// No controller bills a generation a drain woke only to flush a checkout,
-/// from the moment its start is marked (before its lease exists) to its
-/// stop; a start marker only covers launches within minutes of it, and the
-/// space's other runtimes are billed as before.
+/// No controller bills a generation an earlier drain woke only to flush a
+/// checkout, from the moment its start was marked (before its lease
+/// existed) to its stop; a start marker only covers launches within minutes
+/// of it, and the space's other runtimes are billed as before. No controller
+/// writes these marks any more: the exclusion stays while a mark younger
+/// than the event retention may exist.
 #[tokio::test]
 async fn the_credit_sweep_never_bills_a_drain_wake() -> anyhow::Result<()> {
     let pool = crate::tests::require_origin_test_pool("runtime drain billing test").await?;
@@ -1255,153 +938,4 @@ async fn the_credit_sweep_never_bills_a_drain_wake() -> anyhow::Result<()> {
         Ok(())
     })
     .await
-}
-
-/// A census that cannot say what a checkout holds is never read as clean:
-/// one cut short at its bound, one that fails before the wake, and one that
-/// fails after the woken runtime's stop all answer `failed` with the reason,
-/// and the stop route says `ok: false` with `checkoutError`.
-#[tokio::test]
-async fn an_unknown_census_is_never_read_as_clean() -> anyhow::Result<()> {
-    let pool = crate::tests::require_origin_test_pool("runtime drain unknown census test").await?;
-    for case in [
-        "truncated",
-        "fails_before_wake",
-        "fails_after_stop",
-        "stop_route",
-    ] {
-        let project_id = Uuid::new_v4();
-        let owner = Uuid::new_v4();
-        let fixture = SharedDbFixture {
-            projects: vec![project_id],
-            ..Default::default()
-        };
-        let result = with_shared_db_fixture(fixture, async {
-            let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
-            let dirty = json!({
-                "supported": true,
-                "containers": [],
-                "checkouts": [fx.checkout(false, false, &["20261003T101010Z-unsaved-abc"])],
-            });
-            if case == "stop_route" {
-                let lease = fx.start_live().await?;
-                fx.script_census(vec![None]);
-                let (status, stopped) = fx
-                    .call(
-                        "POST",
-                        "/operator/runtime-drain/stop",
-                        SERVICE,
-                        Some(json!({
-                            "runtimeId": fx.runtime_id,
-                            "projectId": fx.project_id,
-                            "leaseId": lease,
-                        })),
-                    )
-                    .await;
-                assert_eq!(status, StatusCode::OK, "{stopped}");
-                assert_eq!(stopped["ok"], false, "{stopped}");
-                assert_eq!(stopped["statusChanged"], true, "{stopped}");
-                assert_eq!(
-                    stopped["checkoutError"], "the provider did not answer the census",
-                    "{stopped}"
-                );
-                assert_eq!(stopped["checkout"], JsonValue::Null);
-                let events = fx.events("pool_retirement_drain").await?;
-                assert_eq!(events.last().unwrap()["checkoutKnown"], false, "{events:?}");
-                return Ok(());
-            }
-            // The calls: the route's own census, the look before the wake,
-            // the stop's look and the look after it.
-            match case {
-                "truncated" => fx.set_census(json!({
-                    "supported": true,
-                    "truncated": true,
-                    "containers": [],
-                    "checkouts": [],
-                })),
-                "fails_before_wake" => fx.script_census(vec![Some(dirty.clone()), None]),
-                _ => fx.script_census(vec![Some(dirty.clone()), Some(dirty.clone()), None, None]),
-            }
-            let (status, flushed) = fx
-                .call(
-                    "POST",
-                    "/operator/runtime-drain/flush-checkout",
-                    SERVICE,
-                    Some(json!({ "projectId": fx.project_id })),
-                )
-                .await;
-            assert_eq!(status, StatusCode::OK, "{case}: {flushed}");
-            assert_eq!(flushed["status"], "failed", "{case}: {flushed}");
-            assert_eq!(
-                flushed["error"],
-                match case {
-                    "truncated" => "the provider's census was cut short",
-                    _ => "the provider did not answer the census",
-                },
-                "{case}: {flushed}"
-            );
-            let ensured = fx.node.ensured.lock().unwrap().len();
-            if case == "fails_after_stop" {
-                assert_eq!(ensured, 1, "{case}: woken and stopped");
-                assert_eq!(flushed["flush"]["status"], "flushed", "{flushed}");
-                assert_eq!(fx.runtime_row().await?.0, "stopped");
-            } else {
-                assert_eq!(ensured, 0, "{case}: nothing is woken on an unknown census");
-                assert!(fx.flushes.lock().unwrap().is_empty(), "{case}");
-            }
-            Ok(())
-        })
-        .await;
-        delete_users(&[owner]).await?;
-        result?;
-    }
-    Ok(())
-}
-
-/// A woken runtime whose origin never comes online is stopped again and
-/// answered `wake_failed`, not `flushed`.
-#[tokio::test]
-async fn flush_checkout_answers_wake_failed_when_the_origin_never_comes_online(
-) -> anyhow::Result<()> {
-    let pool = crate::tests::require_origin_test_pool("runtime drain wake failure test").await?;
-    let project_id = Uuid::new_v4();
-    let owner = Uuid::new_v4();
-    let fixture = SharedDbFixture {
-        projects: vec![project_id],
-        ..Default::default()
-    };
-    let result = with_shared_db_fixture(fixture, async {
-        let fx = DrainFixture::new(pool.clone(), project_id, owner).await?;
-        *fx.node.never_registers.lock().unwrap() = true;
-        fx.set_census(json!({
-            "supported": true,
-            "containers": [],
-            "checkouts": [fx.checkout(false, false, &["20261003T101010Z-unsaved-abc"])],
-        }));
-        // Whatever the census says after the stop, the wake failed.
-        fx.after_releases(vec![json!({
-            "supported": true,
-            "containers": [],
-            "checkouts": [fx.checkout(false, true, &[])],
-        })]);
-        let (status, flushed) = fx
-            .call(
-                "POST",
-                "/operator/runtime-drain/flush-checkout",
-                SERVICE,
-                Some(json!({ "projectId": fx.project_id })),
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "{flushed}");
-        assert_eq!(flushed["status"], "wake_failed", "{flushed}");
-        assert_eq!(fx.node.ensured.lock().unwrap().len(), 1);
-        assert!(fx.flushes.lock().unwrap().is_empty(), "nothing to flush");
-        assert_eq!(fx.node.released.lock().unwrap().len(), 1, "stopped again");
-        assert_ne!(fx.runtime_row().await?.0, "ready");
-        assert!(!fx.state.runtime_drain.is_flush_wake(&fx.runtime_id));
-        Ok(())
-    })
-    .await;
-    delete_users(&[owner]).await?;
-    result
 }

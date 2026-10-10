@@ -395,7 +395,7 @@ already accepted. The bounds are code constants in `runtime/provider.rs` and
 | `POST /runtime/ensure` | launch | 120 s | Handled like any provider error: the new lease is quarantined as `cleanup_pending`, then a compensating release (up to 15 min) runs outside the database fence. |
 | `POST /runtime/release` | stop, remove, the idle, credit, heartbeat and launch-timeout sweeps, idle-slot reclaim, the dev-only offline endpoint | 180 s | The stop fails with 502 (a sweep logs it and moves on) and the generation stays quarantined (see below). The dev-only offline endpoint only logs it. |
 | `POST /runtime/inspect` | OOM post-mortem in the heartbeat-timeout sweep | 15 s | The attribution is unknown and the stop proceeds as `heartbeat_timeout`. |
-| `POST /runtime/census` | the pool-retirement drain (census, drain stop, flush-checkout) | 30 s | The census marks the provider as not answering (`complete: false`); a drain must then hold the node. |
+| `POST /runtime/census` | the pool-retirement drain's census | 30 s | The census marks the provider as not answering (`complete: false`); a drain must then hold the node. |
 | `POST /runtime/origin` | a stop's pre-stop flush, to find the runtime's origin on its node | 10 s | The flush mints nothing and reports `no_writer` (`origin_not_attested`); the stop goes on. |
 
 An idle-slot reclaim (stopping an organization's idle machine so a waiting
@@ -658,11 +658,11 @@ loses only work that never reached the remote:
   succeed). With rolling saves off,
   or once its ticks have ended (a refused grant, an expired workspace
   token), a sibling that is then killed without a shutdown can leave its
-  edits since its last save under the other runtime's marker until the
-  checkout is evicted, or until a pool-retirement drain reads the
-  checkout as clean (the marker and no local recovery ref) and the node is
-  deleted. The marker sits in a directory the workspace
-  can write, so it is a hint for eviction, never proof on its own. The next publish
+  edits since its last save under the other runtime's marker, and eviction
+  then deletes them with the checkout. The marker sits in a directory the
+  workspace can write, so a workspace that writes it itself can lose its own
+  unsaved work to eviction; each checkout's eviction reads only its own
+  marker. The next publish
   or pre-turn refresh with `git.write` pushes the refs. Work parked only
   locally is lost if the node is replaced before that push. Desktop folders
   are never flushed.
@@ -670,7 +670,9 @@ loses only work that never reached the remote:
   its last confirmed rolling save (about two minutes while saves succeed,
   plus files a rolling save defers), work parked locally whose push has not
   happened yet, writes by background processes after a turn ended that no
-  controller stop flushed, and gitignored files.
+  controller stop flushed, and gitignored files. A node a release retires
+  loses the same from its stopped checkouts: the drain (below) stops live
+  runtimes with their flush and never wakes a stopped one.
 
 **Rolling saves.** While a write job runs on a hosted checkout, the runtime
 saves the working folder's unfinished work to canonical every two minutes and
@@ -802,50 +804,50 @@ checkouts:
   turns idle eviction off), and, oldest first, while the node's checkouts
   together exceed `RUNTIME_CHECKOUT_DISK_BUDGET_GIB` (unset or 0: no budget),
   skipping any used in the last hour;
-- never on stop (a stop only starts the idle clock), never while any runtime
-  container of the project exists on the node or a start is in progress, and
-  never for a workspace without a canonical remote;
-- never while the checkout holds a `refs/instafy/local-recovery/*` ref: that
-  work is not pushed yet. The sweep logs the project and keeps the checkout;
-  the next start pushes the refs, and a later sweep evicts;
-- never unless the runtime that last used it stopped cleanly
-  (`.instafy/.git/instafy-stopped-clean`, see above). A crash, a kill or a
-  stop that could not keep its work may leave files or commits that exist
-  nowhere else; such a checkout is kept until a later start and clean stop.
-  Checkouts from before this marker are kept the same way. Origins with
-  rolling saves write the marker only when the stop leaves nothing
-  local-only, so a checkout that holds work only this node has is kept
-  too.
+- never on stop (a stop only starts the idle clock), and never while any
+  runtime container of the project exists on the node or a start is in
+  progress;
+- only when the durable-stop marker `.instafy/.git/instafy-stopped-clean`
+  reads exactly `durable v1` (see above): the last stop left nothing only on
+  this node, and canonical holds everything the folder held. A crash, a
+  kill, a stop that could not save or left local recovery refs, and a
+  workspace without a canonical remote leave no such marker; such a checkout
+  may hold files or commits that exist nowhere else and is kept until a
+  later start and durable stop. Both the idle TTL and the disk budget follow
+  this rule. A marker an origin from before rolling saves wrote says
+  `stopped` and keeps its checkout the same way, so a long-lived node never
+  loses a checkout from before rolling saves to eviction.
 
 A stop takes the same per-project lock as a start while it runs and marks the
 checkout as used, and the sweep reads that mark again once it holds the lock,
 so a checkout is never evicted as its runtime stops.
 
 The sweep runs every `RUNTIME_CHECKOUT_SWEEP_INTERVAL_SECS` (default six
-hours, 0 turns it off). It reads refs from the repository files without
-running git, and keeps any checkout whose state it cannot read with certainty.
+hours, 0 turns it off). It reads only that marker, as a regular file and
+without following a link, never git refs or the repository config, and keeps
+any checkout whose marker it cannot read.
 
 **Draining a node before its pool is retired.** Hosted runtimes run on the
 node of the controller that started them, and their checkouts live on its
-disk, so deleting the node deletes both, including work that is only on a
-checkout's local recovery refs. Before a release retires the previous
-controller pool, the release workflow asks that controller (directly, with
-the service-role bearer; user, operator and scoped tokens get 403) to drain
-its node. A controller that serves these routes answers `/healthz` with
-`x-instafy-runtime-drain: 1`, so release tooling can tell it apart from one
-that predates them, and one whose running workspaces take rolling saves
-answers `x-instafy-working-state: 1` (`0` when `WORKING_STATE_SAVES` is off):
+disk. Canonical git holds their work (rolling saves, and each stop's own
+flush), so a stopped checkout is a cache that a later start clones again;
+what deleting the node can still lose is the residual exposure above. A live
+runtime is stopped first, so its flush runs. Before a release retires the
+previous controller pool, the release workflow asks that controller
+(directly, with the service-role bearer; user, operator and scoped tokens
+get 403) to drain its node. A controller that serves these routes answers
+`/healthz` with `x-instafy-runtime-drain: 1`, so release tooling can tell it
+apart from one that predates them, and one whose running workspaces take
+rolling saves answers `x-instafy-working-state: 1` (`0` when
+`WORKING_STATE_SAVES` is off):
 
-- `GET /operator/runtime-drain/census` lists what the node-local provider
-  holds (`POST /runtime/census`: runtimes from their containers' `SPACE_ID`,
-  `RUNTIME_ID` and `RUNTIME_LEASE_ID`, and checkouts with their unpushed
-  local refs and clean-stop marker, read from the files without git), joined
-  with the database: a runtime is `live` when its container runs the
-  runtime's active generation and `orphan` otherwise, and a checkout with no
-  running container (a stopped one flushes nothing) `needsFlush` when it
-  holds unpushed refs, lacks the clean-stop marker or cannot be read.
-  `complete: false` means a provider did not answer, cut its lists or could
-  not read its checkout directory.
+- `GET /operator/runtime-drain/census` lists the runtime containers the
+  node-local provider holds (`POST /runtime/census`: from their containers'
+  `SPACE_ID`, `RUNTIME_ID` and `RUNTIME_LEASE_ID`), joined with the
+  database: a runtime is `live` when its container runs the runtime's active
+  generation and `orphan` otherwise. It lists no checkouts.
+  `complete: false` means a provider did not answer, cannot list its node or
+  cut its container list.
 - `POST /operator/runtime-drain/fence {fenced, ttlSeconds <= 3600}` makes this
   process start no runtime (503 `controller_retiring`) and skip its own stop
   sweeps and reclaims (`controller_retiring`), which after a cutover act
@@ -857,20 +859,16 @@ answers `x-instafy-working-state: 1` (`0` when `WORKING_STATE_SAVES` is off):
   skipped as `runtime_lease_mismatch` unless the runtime's active generation
   is `leaseId`, before anything is flushed or fenced. An active turn is
   interrupted (its commits go to a recovery ref and its job is requeued). The
-  answer carries the stop's `flush` and the checkout as the census sees it
-  afterwards; when that census fails or cannot list the checkout, the answer
-  is `ok: false` with `checkoutError`, never an absent (clean) checkout.
-  `/runtime/stop` takes the same guard as `expected_lease_id`.
-- `POST /operator/runtime-drain/flush-checkout {projectId}` saves a stopped
-  checkout: it releases containers of other generations by their own ids,
-  then, when the checkout still holds work and the space runs nowhere else
-  (`busy_elsewhere` otherwise), starts the space's runtime on this node even
-  while fenced, stops it again through the same flush and reports the
-  checkout. That wake leases no job and is never billed (a
-  `pool_retirement_flush_wake` runtime event marks its generation). It
-  answers `clean`, `flushed`, `busy_here`, `busy_elsewhere`, `no_runtime`,
-  `wake_failed` or `failed`. A census that fails, cannot list the node or
-  was cut short is never read as clean: the answer is `failed` with `error`.
+  answer is `{ok: true, statusChanged, skipReason?, flush}`: the stop's
+  `flush` as above, with `unpushedRefs` and `unpushedRefNames` for what is
+  still only on the node and, with rolling saves, `workingState` (whether
+  canonical holds everything the folder held, and since when). Fields a
+  caller adds to the request are ignored. `/runtime/stop` takes the same
+  guard as `expected_lease_id`.
+
+A drain never starts a runtime and never reads a checkout; there is no route
+to flush a stopped checkout (`POST /operator/runtime-drain/flush-checkout`
+answers 404).
 
 Every drain action is recorded as a `pool_retirement_drain` runtime event
 with ids, statuses and counts only.

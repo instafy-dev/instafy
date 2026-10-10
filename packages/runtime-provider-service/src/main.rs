@@ -257,9 +257,9 @@ async fn inspect_runtime(
     Ok(Json(InspectResponse { oom_killed }))
 }
 
-/// Read-only: the runtimes and workspace checkouts on this node, for the
-/// controller's drain before the node is retired. No identity beyond the
-/// runtime, project and lease ids leaves the node, and no credential.
+/// Read-only: the runtime containers on this node, for the controller's
+/// drain before the node is retired. No identity beyond the runtime, project
+/// and lease ids leaves the node, and no credential.
 async fn census_runtimes(
     State(state): State<ProviderState>,
 ) -> Result<Json<RuntimeCensus>, (StatusCode, String)> {
@@ -842,7 +842,8 @@ mod tests {
     }
 
     /// The census of an allocator that cannot list its node says so, rather
-    /// than reporting an empty node.
+    /// than reporting an empty node. It lists containers only: no checkout
+    /// list can cut it short.
     #[tokio::test]
     async fn census_of_an_allocator_without_node_listing_is_unsupported() {
         let Json(census) =
@@ -855,7 +856,6 @@ mod tests {
             serde_json::json!({
                 "supported": false,
                 "containers": [],
-                "checkouts": [],
                 "truncated": false,
             })
         );

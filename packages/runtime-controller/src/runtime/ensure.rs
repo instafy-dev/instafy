@@ -1551,44 +1551,6 @@ pub(super) async fn ensure_runtime_for_requeued_jobs(
     .await
 }
 
-/// Start `runtime` on this controller's node only so a drain can flush the
-/// checkout it left there: the same launch settings as its newest
-/// generation, no limit wait recorded, no tunnel. The drain marks the
-/// runtime as a flush wake first, so it leases no job and starts even while
-/// the controller is fenced.
-pub(super) async fn ensure_runtime_for_drain_flush(
-    state: &AppState,
-    runtime: &RuntimeDetails,
-) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
-    let existing_metadata = load_runtime_requeue_metadata(state, runtime).await?;
-    let mut metadata = match existing_metadata {
-        Some(JsonValue::Object(existing)) => existing,
-        _ => serde_json::Map::new(),
-    };
-    metadata.insert(
-        "source".to_string(),
-        JsonValue::String("pool_retirement_flush".to_string()),
-    );
-    metadata.insert(
-        "reason".to_string(),
-        JsonValue::String("flush_checkout_before_pool_retirement".to_string()),
-    );
-    ensure_runtime_launch(
-        state,
-        runtime.project_id,
-        Some(runtime.id),
-        runtime.provider.clone(),
-        coerce_idle_ttl(Some(runtime.idle_ttl_seconds.max(0) as u32)),
-        runtime.display_name.clone(),
-        Some(JsonValue::Object(metadata)),
-        RuntimeLeaseScope::Exclusive,
-        OriginEnsureOptions::new(None, None, None),
-        ReusedLeaseMetadata::Requested,
-        StalledLaunch::Reuse,
-    )
-    .await
-}
-
 pub(crate) async fn ensure_runtime_for_dispatch_reconnect(
     state: &AppState,
     runtime: &RuntimeRecord,
@@ -2480,11 +2442,8 @@ async fn ensure_runtime_launch_inner(
     stalled_launch: StalledLaunch,
     #[cfg(test)] admission_test_hook: Option<ProviderLaunchAdmissionTestHook>,
 ) -> Result<RuntimeEnsureResponse, (StatusCode, Json<ApiError>)> {
-    // A controller being retired starts nothing on its node, except the
-    // runtime a drain wakes only to flush its checkout.
-    if state.runtime_drain.is_fenced()
-        && !runtime_id.is_some_and(|runtime_id| state.runtime_drain.is_flush_wake(&runtime_id))
-    {
+    // A controller being retired starts nothing on its node.
+    if state.runtime_drain.is_fenced() {
         return Err(super::drain::controller_retiring());
     }
     if super::provider::provider_is_self_hosted(state, &provider) && runtime_id.is_none() {

@@ -106,8 +106,8 @@ pub(crate) struct RuntimeIdentityExpectation {
 }
 
 /// Where a stop comes from when the pool-retirement drain makes it. Only
-/// these stops run while this controller is fenced for retirement.
-pub(crate) const DRAIN_STOP_SOURCES: [&str; 2] = ["pool_retirement_drain", "pool_retirement_flush"];
+/// this stop runs while this controller is fenced for retirement.
+pub(crate) const DRAIN_STOP_SOURCE: &str = "pool_retirement_drain";
 
 /// The controller's stops of a runtime nobody seemed to use. A pre-stop
 /// flush can take up to its timeout; when someone opens the space or takes
@@ -674,7 +674,7 @@ pub(super) async fn stop_runtime_safely_with(
     // A controller fenced for pool retirement acts only for the drain: its
     // own sweeps would act through this node's provider on runtimes that may
     // now live on another node.
-    if state.runtime_drain.is_fenced() && !DRAIN_STOP_SOURCES.contains(&options.source) {
+    if state.runtime_drain.is_fenced() && options.source != DRAIN_STOP_SOURCE {
         let mut connection =
             state.pool.get().await.map_err(|error| {
                 internal_error(format!("failed to get stop connection: {error}"))
