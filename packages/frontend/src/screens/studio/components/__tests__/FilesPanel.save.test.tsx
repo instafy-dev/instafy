@@ -160,10 +160,19 @@ describe("FilesPanel one Save", () => {
       ),
     );
   }
-  // Saves hash the saved bytes with WebCrypto, which resolves on a later task.
+  /**
+   * The WebCrypto digests the panel asked for and has not had back. A save
+   * hashes the saved bytes before it sends, and the digest settles on a later
+   * task: on a loaded machine, after any number of timer ticks.
+   */
+  const pendingDigests = new Set<Promise<ArrayBuffer>>();
+  // Waits for every digest the panel asked for, so a save has sent its request
+  // and handled the answer, and for the ticks the rest of the work takes, until
+  // no digest is left.
   async function settle() {
     await act(async () => {
-      for (let tick = 0; tick < 10; tick += 1) {
+      for (let tick = 0; tick < 10 || pendingDigests.size > 0; tick += 1) {
+        await Promise.allSettled([...pendingDigests]);
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     });
@@ -193,6 +202,20 @@ describe("FilesPanel one Save", () => {
     writeWorkspaceFileStaleNotice(null);
     window.addEventListener("instafy:workspace-file-stale", onStale);
     vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([new DOMRect(0, 0, 400, 400)] as unknown as DOMRectList);
+    // The real digest, so the blob ids are the real ones; each is tracked
+    // until it settles.
+    pendingDigests.clear();
+    const subtle = globalThis.crypto.subtle;
+    const digest = subtle.digest.bind(subtle);
+    vi.spyOn(subtle, "digest").mockImplementation((algorithm, data) => {
+      const result = digest(algorithm, data);
+      pendingDigests.add(result);
+      const forget = () => {
+        pendingDigests.delete(result);
+      };
+      result.then(forget, forget);
+      return result;
+    });
     mocks.versioning.mode = "stateless";
     mocks.versioning.originId = "origin-1";
     mocks.versioning.recovery = "unknown";
@@ -218,6 +241,8 @@ describe("FilesPanel one Save", () => {
   });
   afterEach(async () => {
     await act(async () => root.unmount());
+    // A save still hashing when the test ends finishes here, not in the next test.
+    await settle();
     container.remove();
     window.removeEventListener("instafy:workspace-file-stale", onStale);
     vi.restoreAllMocks();

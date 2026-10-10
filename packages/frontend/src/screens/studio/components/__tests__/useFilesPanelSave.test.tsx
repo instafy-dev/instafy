@@ -40,7 +40,7 @@ describe("useFilesPanelSave retry after an answer that says to try again later",
   let container: HTMLDivElement;
   let save: () => Promise<void>;
   const wait = vi.fn(async () => undefined);
-  const presentFailure = vi.fn();
+  const presentFailure = vi.fn<UseFilesPanelSaveOptions["presentFailure"]>();
   const updateWorkspace = vi.fn();
   let mode: VersioningMode = "stateless";
   const file: CodeFile = {
@@ -156,11 +156,16 @@ describe("useFilesPanelSave retry after an answer that says to try again later",
       expect.any(Function),
     );
     expect(updateWorkspace).not.toHaveBeenCalled();
-    // Trying again is the person's call.
+    // Trying again is the person's call. The save hashes the bytes with
+    // WebCrypto before it sends, which settles on a later task (later still
+    // on a loaded machine), so this awaits the save the retry starts rather
+    // than a timer tick.
     mocks.saveChanges.mockResolvedValueOnce(savedResult);
     await act(async () => presentFailure.mock.calls[0][1]());
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(mocks.saveChanges).toHaveBeenCalledTimes(2);
+    expect(wait).not.toHaveBeenCalled();
+    // The retry's answer is recorded once.
+    expect(updateWorkspace).toHaveBeenCalledTimes(1);
   });
 
   // The apply landed (here a no-op: the space already held these bytes) and
