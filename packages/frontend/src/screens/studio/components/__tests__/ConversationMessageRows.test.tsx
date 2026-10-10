@@ -918,6 +918,79 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
   });
 
+  it("shows a controller-written run failure under its speaker row", async () => {
+    // The controller failed a turn a stop left queued past its resume window.
+    // Its message is the thread's only entry; the speaker row must not stand
+    // over an empty body.
+    const errorText =
+      "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
+    const message = createMessage({
+      id: "expired-run",
+      role: "assistant",
+      content: "",
+      timestamp: 1,
+      messageType: "agent_job_thread",
+      metadata: {
+        messageType: "agent_job_thread",
+        jobId: "job-1",
+        agent: { handle: "octo" },
+        threadMessages: [
+          createMessage({
+            id: "expired-run-failure",
+            role: "assistant",
+            content: errorText,
+            timestamp: 2,
+            messageType: "error",
+            metadata: {
+              source: "controller",
+              kind: "interrupted_run_expired",
+              outcome: "failed",
+              messageType: "error",
+              jobId: "job-1",
+              runId: "run-1",
+              errorMessage: errorText,
+              interruptionReason: "user_stop",
+              agent: { handle: "octo" },
+            },
+          }),
+        ],
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[message]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map()}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+
+    const speaker = container.querySelector('[data-testid="chat-speaker-inline"]');
+    expect(speaker?.textContent).toContain("octo");
+    expect(
+      speaker?.querySelector('[data-testid="chat-speaker-run-status"]')?.textContent,
+    ).toBe("Run failed");
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "This turn was stopped and didn't pick up again in time. Try again to continue.",
+    );
+  });
+
   it("animates only the active job thread speaker avatar", async () => {
     const historicalThread = createMessage({
       id: "historical-thread",

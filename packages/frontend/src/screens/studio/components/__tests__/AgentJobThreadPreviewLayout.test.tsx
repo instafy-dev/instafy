@@ -328,6 +328,60 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(requestRetry).toHaveBeenCalledTimes(1);
   });
 
+  it("shows the failure when the controller fails a stopped turn that never resumed", async () => {
+    // A stop put the turn back in the queue and no machine picked it up in
+    // time, so the controller wrote the failure. It is the thread's only
+    // message: the agent never wrote a final outcome of its own.
+    const errorText =
+      "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
+    const threadMessages = [
+      {
+        id: "33333333-3333-4333-8333-333333333333",
+        role: "assistant",
+        authorId: null,
+        content: errorText,
+        timestamp: Date.now() - 180_000,
+        files: null,
+        messageType: "error",
+        metadata: {
+          source: "controller",
+          kind: "interrupted_run_expired",
+          outcome: "failed",
+          messageType: "error",
+          jobId: JOB_ID,
+          runId: "44444444-4444-4444-8444-444444444444",
+          errorMessage: errorText,
+          interruptionReason: "user_stop",
+          agent: { handle: "octo" },
+        },
+      },
+    ] satisfies ChatMessage[];
+    const baseMessage = createMessage();
+    const message = createMessage({
+      metadata: { ...baseMessage.metadata, threadMessages },
+    });
+    const requestRetry = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <RunFailureRetryProvider value={{ pendingRetryKey: null, requestRetry, autoRetryingKey: null }}>
+          <LiveAgentJobThreadPreview message={message} />
+        </RunFailureRetryProvider>,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
+      "Run failed",
+    );
+    expect(container.querySelector('[data-testid="run-failure-body"] p')?.textContent).toBe(
+      "This turn was stopped and didn't pick up again in time. Try again to continue.",
+    );
+    expect(container.querySelector('[data-testid="run-failure-retry"]')?.textContent).toBe(
+      "Try again",
+    );
+    expect(container.querySelector('[data-testid="run-failure-details-toggle"]')).not.toBeNull();
+  });
+
   it("renders owner identity without the prompt or scope summary chip", async () => {
     await act(async () => {
       root.render(<AgentJobThreadPreviewLayout {...createProps()} />);

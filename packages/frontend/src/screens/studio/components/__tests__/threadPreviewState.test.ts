@@ -165,4 +165,33 @@ describe("threadPreviewState", () => {
       ]),
     ).toEqual({ phase: "completed", status: "failed" });
   });
+
+  it("treats a controller-written run failure as terminal thread state", () => {
+    // The controller fails a turn a stop put back in the queue once no machine
+    // picks it up in time. Its message is the thread's only entry.
+    const content =
+      "This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.";
+    expect(
+      resolveThreadRunStatusFromMessages([
+        {
+          id: "msg-1",
+          role: "assistant",
+          content,
+          timestamp: 1,
+          messageType: "error",
+          metadata: {
+            source: "controller",
+            kind: "interrupted_run_expired",
+            outcome: "failed",
+            messageType: "error",
+            jobId: "job-1",
+            runId: "run-1",
+            errorMessage: content,
+            interruptionReason: "user_stop",
+            agent: { handle: "octo" },
+          },
+        },
+      ]),
+    ).toEqual({ phase: "completed", status: "failed" });
+  });
 });
