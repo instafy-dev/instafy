@@ -1,8 +1,11 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import { assertMainOnlySave, assertNoPullRequestCacheSave, withoutMainOnlyCaches } from "./lib/mainOnlyCacheTestBaseline.mjs";
+import { CONTROLLER_DB_GATE, CONTROLLER_DB_PATHS, MERGE_GROUP_TRIGGER, withoutMergeQueue } from "./lib/mergeQueueTestBaseline.mjs";
 import assert from 'node:assert/strict';
+import childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
@@ -12,7 +15,10 @@ const jobs = [
   { file: 'controller-db-tests.yml', key: 'controller-db-tests', label: 'public-controller-db', name: 'Controller database tests', minutes: 30 },
   { file: 'auth-email.yml', key: 'auth-email', label: 'public-auth-email', name: 'signup -> email -> activate', minutes: 25 },
 ];
-const source = job => withoutManualCiRouting(job.file, fs.readFileSync(path.join(root, '.github/workflows', job.file), 'utf8'));
+const raw = job => fs.readFileSync(path.join(root, '.github/workflows', job.file), 'utf8');
+// The reviewed workflows: Controller DB's relevance job, merge-group trigger
+// and removed paths filter have their own exact inverse, tested below.
+const source = job => withoutManualCiRouting(job.file, withoutMergeQueue(job.file, raw(job)));
 function step(job, name, text = source(job)) {
   const marker = `      - name: ${name}\n`, start = text.indexOf(marker);
   assert.ok(start >= 0, `missing ${job.file}/${name}`);
@@ -136,10 +142,200 @@ test('Auth opts into only the fixed five-service profile and changes to either h
       assert.ok(block(jobs[1], trigger).includes(`      - "${file}"`), `${trigger} must include ${file}`);
     }
   }
-  // Controller DB runs on every main push; its pull requests follow the
-  // database-only startup helpers (the lock is covered by supabase/**).
+  // Controller DB runs on every main push; its pull requests and merge groups
+  // follow the database-only startup helpers (the lock is covered by supabase/**).
   for (const file of ['scripts/lib/supabaseStartMode.mjs', 'scripts/lib/supabaseSerialPull.mjs', 'scripts/lib/supabaseImageMirror.mjs', 'supabase/**']) {
-    assert.ok(block(jobs[0], 'pull_request').includes(`      - "${file}"`), `controller pull_request must include ${file}`);
+    assert.ok(relevancePatterns().includes(file), `controller relevance must include ${file}`);
+  }
+});
+
+function jobSection(text, key) {
+  const blocks = text.split(`\n  ${key}:\n`);
+  assert.equal(blocks.length, 2, `missing or repeated job ${key}`);
+  return `  ${key}:\n` + blocks[1].split(/\n  [\w-]+:\n/u)[0];
+}
+// A step's literal env block and its run script as bash receives it.
+function parsedStep(text, name) {
+  const start = text.indexOf(`      - name: ${name}\n`);
+  assert.ok(start >= 0, `missing step ${name}`);
+  const end = text.indexOf('\n      - name: ', start + 1);
+  const value = text.slice(start, end < 0 ? text.length : end);
+  const env = {};
+  for (const line of (value.match(/\n        env:\n((?:          .*\n)+)/u)?.[1] ?? '').split('\n').filter(Boolean)) {
+    const [, key, expression] = line.match(/^          ([A-Z][A-Z0-9_]*): (.*)$/u);
+    env[key] = expression;
+  }
+  const marker = '\n        run: |\n';
+  assert.ok(value.includes(marker), `${name} has no run script`);
+  const run = value.slice(value.indexOf(marker) + marker.length).split('\n')
+    .filter(line => line === '' || line.startsWith('          ')).map(line => line.slice(10)).join('\n');
+  return { text: value, env, run, if: value.match(/^        if: (.*)$/mu)?.[1] };
+}
+const relevanceStep = () => parsedStep(jobSection(raw(jobs[0]), 'changes'), 'Decide whether the database tests apply');
+const guardStep = () => parsedStep(jobSection(raw(jobs[0]), 'controller-db-tests'), 'Require a completed relevance decision');
+function relevancePatterns() {
+  const list = relevanceStep().run.match(/^patterns=\(\n((?:  "[^"\n]+"\n)+)\)$/mu)?.[1];
+  assert.ok(list, 'the relevance step lists its patterns as one bash array');
+  return list.split('\n').filter(Boolean).map(line => line.trim().slice(1, -1));
+}
+// Evaluates a workflow expression the way Actions does for these operands:
+// missing properties are null, && / || return an operand, and strings
+// compare case-insensitively.
+function expression(value, context) {
+  const body = value.match(/^\$\{\{ (.+) \}\}$/u)?.[1];
+  if (body === undefined) return value;
+  const js = body.replace(/\b(github|needs)((?:\.[\w-]+)+)/gu, (_, head, rest) => head + rest.replaceAll('.', '?.'))
+    .replace(/([\w?.]+) ([!=])= ('[^']*')/gu, (_, operand, operator, literal) => `${operator === '!' ? '!' : ''}equal(${operand}, ${literal})`);
+  assert.doesNotMatch(js, /[!=]=/u, 'only comparisons with a literal are modelled');
+  const equal = (a, b) => typeof a === 'string' ? a.toLowerCase() === b.toLowerCase() : false;
+  const result = vm.runInNewContext(js, { ...context, equal }, { timeout: 1000 });
+  return typeof result === 'boolean' ? result : result === undefined || result === null ? '' : String(result);
+}
+
+test('every pull request and merge group runs Controller DB, and its required job always reports', () => {
+  const text = raw(jobs[0]);
+  // No workflow-level paths, branch or type filter: GitHub starts a run for
+  // every pull request and queued group, so the check is never left pending.
+  assert.equal(text.slice(text.indexOf('\non:\n') + 1, text.indexOf('\n\nconcurrency:\n') + 1),
+    'on:\n  pull_request:\n  push:\n    branches:\n      - main\n' + MERGE_GROUP_TRIGGER + '  workflow_dispatch:\n');
+  assert.doesNotMatch(text, /^ {4}paths(?:-ignore)?:/mu);
+  assert.doesNotMatch(text, /secrets\.|github\.token|continue-on-error|permissions:.*write/u);
+  assert.deepEqual([...text.slice(text.indexOf('\njobs:\n')).matchAll(/^  ([\w-]+):$/gmu)].map(match => match[1]),
+    ['changes', 'controller-db-tests']);
+  const job = jobSection(text, 'controller-db-tests');
+  assert.ok(job.startsWith('  controller-db-tests:\n    name: Controller database tests\n    needs: changes\n'));
+  assert.equal(job.match(/^    if: (.+)$/mu)?.[1], CONTROLLER_DB_GATE);
+  // The guard runs first, before the self-hosted qualification and checkout.
+  assert.equal(job.match(/^      - name: (.+)$/mu)?.[1], 'Require a completed relevance decision');
+  assert.equal(guardStep().if, 'always()');
+  // The relevance job is hosted, keeps the workflow's read-only contents
+  // permission, gets no secrets and runs no checked-out code: one pinned
+  // checkout without persisted credentials, then git alone.
+  const changes = jobSection(text, 'changes');
+  assert.match(changes, /^    runs-on: ubuntu-latest$/mu);
+  assert.doesNotMatch(changes, /secrets\.|vars\.|github\.token|permissions:|self-hosted|continue-on-error|environment:/u);
+  assert.equal((text.match(/^permissions:\n  contents: read\n/gmu) ?? []).length, 1);
+  assert.equal((text.match(/permissions:/gu) ?? []).length, 1);
+  assert.deepEqual([...changes.matchAll(/^ +uses: (.+)$/gmu)].map(match => match[1]),
+    ['actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6']);
+  assert.match(changes, /^          persist-credentials: false$/mu);
+  const decide = relevanceStep();
+  assert.deepEqual(Object.keys(decide.env), ['BASE_SHA', 'HEAD_SHA']);
+  assert.doesNotMatch(decide.run, /\b(?:node|pnpm|npx|npm|curl|wget|gh|eval|source)\b|\.\/|\buses:/u);
+  assert.deepEqual([...decide.run.matchAll(/\bgit (\S+)/gu)].map(match => match[1]), ['cat-file', 'diff']);
+  // The pattern list is exactly the reviewed pull_request paths filter, which
+  // the inverse restores and the whole-workflow hash below pins.
+  const reviewed = source(jobs[0]).split('  pull_request:\n    paths:\n')[1].split('  push:\n')[0];
+  assert.deepEqual(relevancePatterns(), reviewed.split('\n').filter(Boolean).map(line => line.match(/^      - "([^"]+)"$/u)[1]));
+  assert.deepEqual(relevancePatterns(), CONTROLLER_DB_PATHS);
+});
+
+test('merge groups keep their own concurrency group, as Public Build does', () => {
+  // A queued group's ref is its own gh-readonly-queue branch, so a newer group
+  // never cancels an older group's required run; pull requests and main keep
+  // cancelling superseded runs of the same ref.
+  assert.match(raw(jobs[0]), /^concurrency:\n  group: controller-db-tests-\$\{\{ github\.ref \}\}\n  cancel-in-progress: true\n/mu);
+  assert.match(fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'),
+    /^concurrency:\n  group: public-build-\$\{\{ github\.ref \}\}\n  cancel-in-progress: true\n/mu);
+});
+
+test('the database job is skipped only by a successful negative decision, never by a missing or cancelled one', () => {
+  const runs = (result, relevant, cancelled) =>
+    expression(CONTROLLER_DB_GATE, { needs: { changes: { result, outputs: { relevant } } }, cancelled: () => cancelled });
+  const guard = guardStep();
+  const passes = (result, relevant) => childProcess.spawnSync('bash', ['-c', guard.run], { encoding: 'utf8', timeout: 10_000,
+    env: { PATH: process.env.PATH, ...Object.fromEntries(Object.entries(guard.env).map(([key, value]) =>
+      [key, expression(value, { needs: { changes: { result, outputs: { relevant } } } })])) } }).status === 0;
+  for (const result of ['success', 'failure', 'cancelled', 'skipped']) {
+    for (const relevant of ['true', 'false', '', undefined, 'TRUE', 'FALSE', 'yes']) {
+      // Only a successful decision that nothing listed changed skips the job.
+      assert.equal(runs(result, relevant, false), !(result === 'success' && relevant?.toLowerCase() === 'false'), `${result}/${relevant}`);
+      // A cancellation re-evaluates the gate: a started database run after a
+      // successful decision is cancelled; a missing decision still starts the
+      // job so its guard fails it rather than leaving a skipped check.
+      assert.equal(runs(result, relevant, true), result !== 'success', `${result}/${relevant} cancelled`);
+      // The guard lets the database steps run only after a positive decision.
+      assert.equal(passes(result, relevant), result === 'success' && relevant === 'true', `${result}/${relevant} guard`);
+    }
+  }
+});
+
+test('the relevance decision runs git over the pull request or group diff and only the listed paths', () => {
+  const decide = relevanceStep();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'controller-db-relevance-'));
+  const env = { PATH: process.env.PATH, HOME: dir, LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
+  const git = (...args) => childProcess.execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args],
+    { cwd: dir, env, encoding: 'utf8', timeout: 10_000 }).trim();
+  const write = (file, text) => {
+    fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    fs.writeFileSync(path.join(dir, file), text);
+  };
+  const commit = (from, change) => {
+    git('checkout', '-q', '--detach', from);
+    change();
+    git('add', '-A');
+    git('commit', '-q', '--allow-empty', '-m', 'fixture');
+    return git('rev-parse', 'HEAD');
+  };
+  const outputs = path.join(dir, '.git', 'github-output');
+  const run = github => {
+    fs.writeFileSync(outputs, '');
+    const values = Object.fromEntries(Object.entries(decide.env).map(([key, value]) => [key, expression(value, { github })]));
+    const result = childProcess.spawnSync('bash', ['-c', decide.run], { cwd: dir, encoding: 'utf8', timeout: 10_000,
+      env: { ...env, ...values, GITHUB_EVENT_NAME: github.event_name, GITHUB_OUTPUT: outputs } });
+    return { ...result, output: fs.readFileSync(outputs, 'utf8') };
+  };
+  const relevant = github => {
+    const result = run(github);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    assert.match(result.output, /^relevant=(?:true|false)\n$/u);
+    return result.output === 'relevant=true\n';
+  };
+  const pull = (base, head) => ({ event_name: 'pull_request', event: { pull_request: { base: { sha: base }, head: { sha: head } } } });
+  const group = (base, head) => ({ event_name: 'merge_group', event: { merge_group: { base_sha: base, head_sha: head } } });
+  // One file under every listed pattern, plus near misses that must not match.
+  const files = CONTROLLER_DB_PATHS.map(pattern => pattern.replace(/\*\*$/u, 'nested/file.txt'));
+  const nearMisses = ['docs/Testing.md', 'packages/runtime-controller-extra/src/lib.rs', 'scripts/test-controller.mjs.bak',
+    'scripts/lib/other.mjs', 'nested/supabase/config.toml', 'packages/frontend/supabase/x.ts'];
+  try {
+    git('init', '-q', '-b', 'main');
+    for (const file of [...files, ...nearMisses]) write(file, 'base\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    const base = git('rev-parse', 'HEAD');
+    for (const file of files) {
+      const head = commit(base, () => write(file, 'changed\n'));
+      assert.equal(relevant(pull(base, head)), true, file);
+      assert.equal(relevant(group(base, head)), true, file);
+      // Removing or moving a listed file out of its pattern is a change too.
+      assert.equal(relevant(pull(base, commit(base, () => git('rm', '-q', file)))), true, `${file} removed`);
+      assert.equal(relevant(pull(base, commit(base, () => git('mv', file, 'docs/moved.txt')))), true, `${file} moved`);
+    }
+    for (const file of nearMisses) {
+      const head = commit(base, () => write(file, 'changed\n'));
+      assert.equal(relevant(pull(base, head)), false, file);
+      assert.equal(relevant(group(base, head)), false, file);
+    }
+    // A pull request is compared with its merge base, as the paths filter did:
+    // controller changes that reached main after the branch point do not count.
+    const main = commit(base, () => write('supabase/nested/file.txt', 'main\n'));
+    const docs = commit(base, () => write('docs/Testing.md', 'topic\n'));
+    assert.equal(relevant(pull(main, docs)), false);
+    assert.equal(relevant(pull(main, commit(docs, () => write('scripts/test-controller.mjs', 'topic\n')))), true);
+    // A group is compared with its parent, including every pull request queued in it.
+    const queued = commit(commit(main, () => write('docs/Testing.md', 'first\n')), () => write('packages/runtime-controller/nested/file.txt', 'second\n'));
+    assert.equal(relevant(group(main, queued)), true);
+    assert.equal(relevant(group(main, commit(main, () => write('docs/Testing.md', 'queued\n')))), false);
+    // Push and manual runs always run the database tests without comparing anything.
+    for (const event_name of ['push', 'workflow_dispatch']) assert.equal(relevant({ event_name, event: {} }), true, event_name);
+    // A missing or malformed commit fails the decision without an output.
+    for (const github of [pull('f'.repeat(40), docs), group(main, 'f'.repeat(40)), pull('main', docs), group('', docs), pull(main, `${docs} `)]) {
+      const result = run(github);
+      assert.notEqual(result.status, 0, JSON.stringify(github));
+      assert.equal(result.output, '', JSON.stringify(github));
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

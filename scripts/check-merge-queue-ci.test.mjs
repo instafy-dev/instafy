@@ -10,11 +10,14 @@ import { MERGE_GROUP_TRIGGER } from "./lib/mergeQueueTestBaseline.mjs";
 const root = path.resolve(import.meta.dirname, "..");
 const read = (file) => fs.readFileSync(path.join(root, ".github/workflows", file), "utf8");
 const triggers = (source) => source.slice(source.indexOf("\non:\n") + 5, source.search(/\n(?:concurrency|permissions|jobs):/u));
-// Every context main requires is reported by one of these three workflows.
+// Every context main requires is reported by one of these workflows. Controller
+// database tests reports on every pull request and merge group, so main can
+// require it too (check-database-ci-routing binds its relevance job).
 const REQUIRED = {
   "build.yml": ["Secret scan", "JavaScript packages", "Go packages", "Rust packages", "Browser verification"],
   "npm-release.yml": ["Require reviewed Changeset release intent"],
   "public-boundary.yml": ["Public boundary (trusted base)"],
+  "controller-db-tests.yml": ["Controller database tests"],
 };
 
 const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
