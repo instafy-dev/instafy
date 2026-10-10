@@ -61,6 +61,7 @@ mod read_reference_tests;
 pub(crate) mod rolling_saves;
 mod skill_declaration;
 mod skills;
+mod turn_baseline;
 mod workspace_change_detection;
 mod workspace_commit;
 
@@ -5686,6 +5687,15 @@ impl JobProcessor {
                 &task_usage,
             )
             .await;
+        // The job ends here, unless it lost its lease and a later lease may
+        // resume it: only then is the record of how its turn began kept.
+        if !result
+            .as_ref()
+            .is_err_and(|error| crate::agent_executor::is_lease_lost(error))
+            && let Ok(project_id) = self.project_id_for_job(job)
+        {
+            turn_baseline::forget(&self.config.project_workspace_dir(&project_id), job.id);
+        }
         attach_task_usage(result, &task_usage)
     }
 
@@ -6376,6 +6386,19 @@ impl JobProcessor {
         // Always taken, so the checkpoint can save files the turn changed
         // without reporting them.
         let git_status_before = collect_git_status_porcelain(&workspace_dir).await;
+        // How the folder began this job's earliest attempt here, when this
+        // lease resumes one a stop cut off (see `turn_baseline`).
+        let earlier_attempt_status = git_status_before
+            .as_ref()
+            .filter(|_| expects_workspace_file_changes && !read_only_workspace)
+            .and_then(|status| {
+                turn_baseline::begin(
+                    &workspace_dir,
+                    job.id,
+                    job.resumes_an_interrupted_attempt(),
+                    status,
+                )
+            });
         let codex_guard = CODEX_EXECUTION_LOCK.lock().await;
         let shared_browser_action_log_before =
             explicit_shared_browser_execution.then(crate::shared_browser::action_log_len);
@@ -6627,6 +6650,16 @@ impl JobProcessor {
                 }
             }
         }
+        // Taken before the paths an earlier attempt of this job changed are
+        // added: the retry and result checks weigh what this turn produced.
+        let own_files_empty = outcome.files.is_empty();
+        if expects_workspace_file_changes_after_actions {
+            add_resumed_turn_files(
+                &mut outcome.files,
+                earlier_attempt_status.as_ref(),
+                git_status_before.as_ref(),
+            );
+        }
 
         // Learning prompts require that we mention `INSTAFY.md` in the final summary (even when no
         // updates were needed). Relying on the model to follow this requirement is brittle, and
@@ -6693,7 +6726,7 @@ impl JobProcessor {
         }
 
         let transient_upstream_summary_failure =
-            outcome.files.is_empty() && is_retryable_codex_upstream_summary(&outcome.summary);
+            own_files_empty && is_retryable_codex_upstream_summary(&outcome.summary);
         let command_execution_missing = expects_command_execution
             && !observed_command_execution
             && !outcome_defers_command_execution(&outcome);
@@ -7216,6 +7249,14 @@ impl JobProcessor {
                     }
                 }
             }
+            let retry_own_files_len = retry_outcome.files.len();
+            if retry_expects_workspace_file_changes_after_actions {
+                add_resumed_turn_files(
+                    &mut retry_outcome.files,
+                    earlier_attempt_status.as_ref(),
+                    git_status_before.as_ref(),
+                );
+            }
             // Recognize each attempt independently before merging: event IDs may
             // be reused by a fresh provider turn and must not erase earlier proof.
             let (retry_attempt_evidence, retry_receipts) =
@@ -7245,7 +7286,7 @@ impl JobProcessor {
             );
             let retry_transient_upstream_summary_failure =
                 retry_shared_browser_terminal_consent_failure.is_none()
-                    && retry_outcome.files.is_empty()
+                    && retry_own_files_len == 0
                     && is_retryable_codex_upstream_summary(&retry_outcome.summary);
             let retry_shared_browser_execution_missing =
                 shared_browser_execution_missing_after_attempt(
@@ -7346,7 +7387,7 @@ impl JobProcessor {
                         || retry_personal_browser_execution_missing,
                     retry_expects_workspace_file_changes_after_actions,
                     retry_normalized_files_len,
-                    retry_outcome.files.len(),
+                    retry_own_files_len,
                     is_multi_agent_worker_job(job),
                     is_multi_agent_lead_continuation_job(job),
                 )
@@ -7500,7 +7541,7 @@ impl JobProcessor {
                 }
                 .into());
             }
-            let retry_has_user_visible_result = !retry_outcome.files.is_empty()
+            let retry_has_user_visible_result = retry_own_files_len > 0
                 || has_user_visible_codex_output_event(&retry_output.events);
             let retry_blocking_failure = retry_shared_browser_terminal_consent_failure
                 .is_none()
@@ -15031,6 +15072,26 @@ fn status_delta_files_for_checkpoint(
         .collect()
 }
 
+/// A job a stop (or an expired lease) requeued mid-turn may resume in the
+/// folder its cut-off attempt wrote to, and need not write that attempt's
+/// work again for the turn to have made it. So a resumed write turn adds to
+/// its files the paths whose status changed between `earlier_attempt` (how
+/// the folder began this job's earliest attempt here) and `before` (how it
+/// began this one), by the checkpoint's filter: the file-change requirement
+/// counts them and the checkpoint saves them. Without that record (a first
+/// lease, or another folder's attempt), it adds nothing.
+fn add_resumed_turn_files(
+    files: &mut Vec<CodexFileDescriptor>,
+    earlier_attempt: Option<&HashMap<String, GitStatusEntry>>,
+    before: Option<&HashMap<String, GitStatusEntry>>,
+) {
+    let (Some(earlier_attempt), Some(before)) = (earlier_attempt, before) else {
+        return;
+    };
+    let resumed = status_delta_files_for_checkpoint(earlier_attempt, before, files);
+    files.extend(resumed);
+}
+
 fn infer_codex_files_from_git_status_delta(
     before: &HashMap<String, GitStatusEntry>,
     after: &HashMap<String, GitStatusEntry>,
@@ -17432,6 +17493,7 @@ mod tests {
             workspace_token: None,
             workspace_token_scopes: None,
             workspace_token_expires_at: None,
+            lease_attempts: 1,
         }
     }
 
@@ -18717,6 +18779,81 @@ mod tests {
             removed.change.as_ref().map(|change| &change.kind),
             Some(FileChangeKind::Deleted)
         ));
+    }
+
+    #[test]
+    fn a_resumed_write_turn_adds_only_what_changed_since_the_jobs_first_attempt_began() {
+        use workspace_change_detection::GitStatusEntry;
+        let entry = |code: &str, fingerprint: &str| {
+            GitStatusEntry::new(code, Some(fingerprint.to_string()))
+        };
+        let reported = |path: &str| CodexFileDescriptor {
+            path: path.to_string(),
+            workspace_path: path.to_string(),
+            label: None,
+            description: None,
+            mime_type: None,
+            content: None,
+            content_base64: None,
+            change: FileChangeDescriptor::parse(json!({ "type": "changed" })),
+        };
+        let paths = |files: &[CodexFileDescriptor]| {
+            let mut paths = files
+                .iter()
+                .map(|file| file.workspace_path.clone())
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths
+        };
+        // As the job's first attempt began: the person's own edit, another
+        // turn's parked file and the memory scaffold, none of them published.
+        let earlier_attempt = HashMap::from([
+            ("src/app.ts".to_string(), entry(" M", "a")),
+            ("notes/parked.md".to_string(), entry("??", "b")),
+            ("AGENTS.md".to_string(), entry("??", "c")),
+            ("notes/rolling.md".to_string(), entry(" M", "d")),
+        ]);
+        // As this attempt began: the cut-off attempt wrote ALIAS.md, changed
+        // notes/rolling.md again and deleted old.md (and wrote two files no
+        // save publishes).
+        let before = HashMap::from([
+            ("src/app.ts".to_string(), entry(" M", "a")),
+            ("notes/parked.md".to_string(), entry("??", "b")),
+            ("AGENTS.md".to_string(), entry("??", "c")),
+            ("notes/rolling.md".to_string(), entry(" M", "e")),
+            ("ALIAS.md".to_string(), entry("??", "f")),
+            ("old.md".to_string(), entry(" D", "g")),
+            (".env".to_string(), entry("??", "h")),
+            (".instafy/state.json".to_string(), entry("??", "i")),
+        ]);
+
+        let mut files = Vec::new();
+        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&before));
+        assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md", "old.md"]);
+        let kind = |path: &str| {
+            files
+                .iter()
+                .find(|file| file.workspace_path == path)
+                .and_then(|file| file.change.as_ref())
+                .map(|change| change.kind.clone())
+        };
+        assert!(matches!(kind("ALIAS.md"), Some(FileChangeKind::Created)));
+        assert!(matches!(kind("old.md"), Some(FileChangeKind::Deleted)));
+
+        // A path the turn reports itself is not added again.
+        let mut files = vec![reported("notes/rolling.md")];
+        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&before));
+        assert_eq!(paths(&files), ["ALIAS.md", "notes/rolling.md", "old.md"]);
+
+        // Without a record of an earlier attempt in this folder (a first
+        // lease, or one another folder ran), or a status for this one, it
+        // adds nothing, whatever the folder holds. Nor does it when nothing
+        // changed since that attempt began.
+        let mut files = Vec::new();
+        add_resumed_turn_files(&mut files, None, Some(&before));
+        add_resumed_turn_files(&mut files, Some(&earlier_attempt), None);
+        add_resumed_turn_files(&mut files, Some(&earlier_attempt), Some(&earlier_attempt));
+        assert!(files.is_empty());
     }
 
     fn test_origin_settings(git_remote_url: Option<&str>) -> crate::config::OriginSettings {
