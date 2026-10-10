@@ -512,16 +512,61 @@ async fn runtime_has_active_hosted_jobs(
         .map_err(|error| internal_error(format!("failed to check active jobs: {error}")))
 }
 
+/// What a quarantine did: the job input updates to publish, and the reason of
+/// an earlier stop that had already quarantined the lease, which this stop
+/// keeps (see [`quarantine_runtime_for_provider_release`]).
+struct Quarantine {
+    job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
+    earlier_stop_reason: Option<String>,
+}
+
+/// The reason of the stop whose quarantine holds `lease_id`, the first that
+/// quarantined it, as the runtime status reads it, or None when no stop
+/// quarantined it (a launch quarantined after a failed provider call records
+/// another kind).
+async fn quarantined_stop_reason(
+    transaction: &Transaction<'_>,
+    runtime_id: &Uuid,
+    lease_id: &Uuid,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    let row = transaction
+        .query_opt(
+            "select data ->> 'reason' as reason
+             from runtime_events
+             where runtime_id = $1
+               and kind = 'provider_release_cleanup_pending'
+               and data ->> 'runtimeLeaseId' = $2
+             order by created_at asc
+             limit 1",
+            &[runtime_id, &lease_id.to_string()],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to read the stop that quarantined the runtime: {error}"
+            ))
+        })?;
+    Ok(row.and_then(|row| row.get::<_, Option<String>>("reason")))
+}
+
 /// Fence an exact provider allocation before release. New ensures and late
 /// registrations fail closed while the provider operation is in flight; a
 /// failed, timed-out, or cancelled stop remains retryable in this state.
+///
+/// A lease an earlier stop already quarantined stays that stop's: a later stop
+/// of it, such as the runtime agent's own `agent_shutdown` once the provider
+/// signals the machine, a person pressing Stop again or the launch-timeout
+/// sweep's retry, records its quarantine under the earlier stop's reason. The
+/// runtime status and the sweep read the first quarantine of the lease, so
+/// they keep that stop's reason and time, and the requeue keeps its reason.
+/// The caller finishes the stop under [`Quarantine::earlier_stop_reason`].
 async fn quarantine_runtime_for_provider_release(
     transaction: &Transaction<'_>,
     runtime: &RuntimeDetails,
     lease_id: &Uuid,
     reason: &str,
     source: &str,
-) -> Result<Vec<crate::send_intents::JobInputStateUpdate>, (StatusCode, Json<ApiError>)> {
+) -> Result<Quarantine, (StatusCode, Json<ApiError>)> {
     let lease = fetch_runtime_lease_for_update(transaction, lease_id).await?;
     if lease.project_id != runtime.project_id
         || lease.runtime_id != Some(runtime.id)
@@ -562,6 +607,13 @@ async fn quarantine_runtime_for_provider_release(
             ));
         }
     }
+
+    let earlier_stop_reason = if lease.status == "cleanup_pending" {
+        quarantined_stop_reason(transaction, &runtime.id, lease_id).await?
+    } else {
+        None
+    };
+    let reason = earlier_stop_reason.as_deref().unwrap_or(reason);
 
     let job_disposition =
         resolve_jobs_for_unavailable_runtime(transaction, runtime, reason).await?;
@@ -612,7 +664,10 @@ async fn quarantine_runtime_for_provider_release(
     )
     .await?;
 
-    Ok(job_disposition.job_input_state_updates)
+    Ok(Quarantine {
+        job_input_state_updates: job_disposition.job_input_state_updates,
+        earlier_stop_reason,
+    })
 }
 
 async fn preflight_runtime_stop(
@@ -727,7 +782,7 @@ pub(super) async fn stop_runtime_safely_with(
 async fn stop_after_flush(
     state: &AppState,
     runtime_id: &Uuid,
-    options: StopOptions,
+    mut options: StopOptions,
     reopened_since: Option<DateTime<Utc>>,
     fenced: &mut bool,
 ) -> Result<(RuntimeDetails, StopOutcome), (StatusCode, Json<ApiError>)> {
@@ -788,7 +843,7 @@ async fn stop_after_flush(
             .as_deref()
             .unwrap_or(options.source)
             .to_string();
-        let quarantine_input_updates = quarantine_runtime_for_provider_release(
+        let quarantine = quarantine_runtime_for_provider_release(
             &transaction,
             &runtime,
             &lease_id,
@@ -802,7 +857,13 @@ async fn stop_after_flush(
             ))
         })?;
         *fenced = true;
-        crate::send_intents::publish_job_input_state_updates(state, &quarantine_input_updates);
+        if let Some(reason) = quarantine.earlier_stop_reason {
+            options.reason = Some(reason);
+        }
+        crate::send_intents::publish_job_input_state_updates(
+            state,
+            &quarantine.job_input_state_updates,
+        );
         drop(connection);
 
         let provider_release = release_runtime_via_provider(
@@ -1126,7 +1187,7 @@ pub(crate) async fn runtime_stop(
             ));
         }
 
-        let stop_options = StopOptions {
+        let mut stop_options = StopOptions {
             source: "runtime_stop",
             reason,
             skip_if_active_jobs,
@@ -1200,7 +1261,7 @@ pub(crate) async fn runtime_stop(
         let (outcome, provider_release) = if let Some(lease_id) =
             fenced_release_lease_id.filter(|_| !preflight_skip)
         {
-            let quarantine_input_updates = quarantine_runtime_for_provider_release(
+            let quarantine = quarantine_runtime_for_provider_release(
                 &transaction,
                 &runtime,
                 &lease_id,
@@ -1213,7 +1274,13 @@ pub(crate) async fn runtime_stop(
                     "failed to commit runtime provider-release quarantine: {error}"
                 ))
             })?;
-            crate::send_intents::publish_job_input_state_updates(&state, &quarantine_input_updates);
+            if let Some(reason) = quarantine.earlier_stop_reason {
+                stop_options.reason = Some(reason);
+            }
+            crate::send_intents::publish_job_input_state_updates(
+                &state,
+                &quarantine.job_input_state_updates,
+            );
             drop(connection);
             announce_committed_stop(&state, &runtime, &stop_options, None).await;
 
@@ -1425,7 +1492,7 @@ pub(crate) async fn stop_runtime_for_project(
             ));
         }
 
-        let stop_options = StopOptions {
+        let mut stop_options = StopOptions {
             source,
             reason,
             skip_if_active_jobs: false,
@@ -1446,7 +1513,7 @@ pub(crate) async fn stop_runtime_for_project(
         };
 
         let (outcome, provider_release) = if let Some(lease_id) = provider_release_lease_id {
-            let quarantine_input_updates = quarantine_runtime_for_provider_release(
+            let quarantine = quarantine_runtime_for_provider_release(
                 &transaction,
                 &runtime,
                 &lease_id,
@@ -1459,7 +1526,13 @@ pub(crate) async fn stop_runtime_for_project(
                     "failed to commit runtime provider-release quarantine: {error}"
                 ))
             })?;
-            crate::send_intents::publish_job_input_state_updates(state, &quarantine_input_updates);
+            if let Some(reason) = quarantine.earlier_stop_reason {
+                stop_options.reason = Some(reason);
+            }
+            crate::send_intents::publish_job_input_state_updates(
+                state,
+                &quarantine.job_input_state_updates,
+            );
             drop(connection);
 
             let provider_release = release_runtime_via_provider(
@@ -1816,7 +1889,7 @@ pub(crate) async fn runtime_remove(
             ));
         }
 
-        let stop_options = StopOptions {
+        let mut stop_options = StopOptions {
             source: "runtime_remove",
             reason: reason.clone(),
             skip_if_active_jobs: false,
@@ -1832,7 +1905,7 @@ pub(crate) async fn runtime_remove(
         if let Some(lease_id) = runtime.active_lease_id {
             fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
             if runtime_requires_provider_release(&state, &runtime) {
-                let quarantine_input_updates = quarantine_runtime_for_provider_release(
+                let quarantine = quarantine_runtime_for_provider_release(
                     &transaction,
                     &runtime,
                     &lease_id,
@@ -1845,9 +1918,12 @@ pub(crate) async fn runtime_remove(
                         "failed to commit runtime removal quarantine: {error}"
                     ))
                 })?;
+                if let Some(reason) = quarantine.earlier_stop_reason {
+                    stop_options.reason = Some(reason);
+                }
                 crate::send_intents::publish_job_input_state_updates(
                     &state,
-                    &quarantine_input_updates,
+                    &quarantine.job_input_state_updates,
                 );
                 drop(connection);
                 announce_committed_stop(&state, &runtime, &stop_options, None).await;

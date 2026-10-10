@@ -787,9 +787,11 @@ async fn load_runtime_status_response_for_viewer(
              left join runtime_leases rl
                on rl.id = r.active_lease_id
              -- The stop whose quarantine holds the active lease while its
-             -- provider release is pending, as that quarantine recorded it.
-             -- A launch quarantined after a failed provider call records
-             -- another kind and is not a stop.
+             -- provider release is pending, as its first quarantine recorded
+             -- it: a later stop of the lease, such as the runtime's own
+             -- shutdown or the sweep's retry, is still that stop. A launch
+             -- quarantined after a failed provider call records another kind
+             -- and is not a stop.
              left join lateral (
                 select e.created_at, e.data ->> 'reason' as reason
                 from runtime_events e
@@ -798,7 +800,7 @@ async fn load_runtime_status_response_for_viewer(
                   and e.runtime_id = r.id
                   and e.kind = 'provider_release_cleanup_pending'
                   and e.data ->> 'runtimeLeaseId' = rl.id::text
-                order by e.created_at desc
+                order by e.created_at asc
                 limit 1
              ) quarantine on true
              left join lateral (
