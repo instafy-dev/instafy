@@ -29685,7 +29685,9 @@ async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert
             acknowledged[0]["runtimeLeaseId"],
             json!(idle_lease_id.to_string())
         );
-        // Both stops quarantined the same lease, and each says which stop it was.
+        // Both stops quarantined the same lease, and each says which stop it
+        // was. The reconnect's quarantine of a lease the idle stop already
+        // quarantined is still that stop, so it keeps the idle stop's reason.
         let quarantines = events_of("provider_release_cleanup_pending");
         let quarantined_by: Vec<(serde_json::Value, serde_json::Value)> = quarantines
             .iter()
@@ -29695,10 +29697,7 @@ async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert
             quarantined_by,
             vec![
                 (json!("idle_stop"), json!("idle")),
-                (
-                    json!("ensure_stale_generation"),
-                    json!("stale_generation_before_ensure")
-                ),
+                (json!("ensure_stale_generation"), json!("idle")),
             ],
             "{quarantines:?}"
         );
