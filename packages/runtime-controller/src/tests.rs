@@ -14442,6 +14442,161 @@ async fn resolve_origin_for_protocol_prefers_online_presence() -> anyhow::Result
     Ok(())
 }
 
+/// A project with one hosted origin whose presence is online, last beating
+/// `heartbeat_age_seconds` ago.
+async fn seed_origin_presence(
+    pool: &PgPool,
+    heartbeat_age_seconds: i64,
+) -> anyhow::Result<(Uuid, Uuid)> {
+    let project_id = Uuid::new_v4();
+    let origin_id = Uuid::new_v4();
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "INSERT INTO projects (id, project_type, status) VALUES ($1, 'customer', 'active')",
+            &[&project_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "INSERT INTO workspace_origins (id, project_id, mode, endpoint, protocols, region)
+             VALUES ($1, $2, 'hosted', 'https://machine-origin', ARRAY['http']::text[], 'iad')",
+            &[&origin_id, &project_id],
+        )
+        .await?;
+    drop(connection);
+    record_presence_heartbeat(
+        pool,
+        &origin_id,
+        &project_id,
+        OriginPresenceStatus::Online,
+        Some(40),
+        Some("iad"),
+        None,
+    )
+    .await?;
+    set_origin_heartbeat_age(pool, &origin_id, heartbeat_age_seconds).await?;
+    Ok((project_id, origin_id))
+}
+
+async fn set_origin_heartbeat_age(
+    pool: &PgPool,
+    origin_id: &Uuid,
+    age_seconds: i64,
+) -> anyhow::Result<()> {
+    pool.get()
+        .await?
+        .execute(
+            "UPDATE origin_presence
+                SET last_heartbeat = now() - ($2::bigint * interval '1 second')
+              WHERE origin_id = $1",
+            &[origin_id, &age_seconds],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn origin_presence_status(pool: &PgPool, origin_id: &Uuid) -> anyhow::Result<String> {
+    Ok(pool
+        .get()
+        .await?
+        .query_one(
+            "SELECT status FROM origin_presence WHERE origin_id = $1",
+            &[origin_id],
+        )
+        .await?
+        .get(0))
+}
+
+fn origin_expired_events_for(
+    events: &mut tokio::sync::broadcast::Receiver<crate::state::ControllerEvent>,
+    project_id: &Uuid,
+) -> usize {
+    let mut count = 0;
+    while let Ok(event) = events.try_recv() {
+        if event.kind == "origin.expired" && event.project_id == Some(*project_id) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[tokio::test]
+async fn origin_presence_sweep_rides_out_one_missed_beat() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping origins test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let state = build_test_state(
+        pool.clone(),
+        build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "origin-presence-sweep-test",
+        ),
+    );
+    let mut events = state.events.subscribe();
+
+    // One 20-second beat missed and the next one slow: 55 seconds since the
+    // last beat. Before this threshold, anything past 25 seconds expired.
+    let (project_id, origin_id) = seed_origin_presence(&pool, 55).await?;
+    crate::origins::sweep_stale_origin_presence(&state).await?;
+    assert_eq!(origin_presence_status(&pool, &origin_id).await?, "online");
+    assert_eq!(origin_expired_events_for(&mut events, &project_id), 0);
+
+    // Two beats missed in a row and the third not in yet: the origin is gone.
+    set_origin_heartbeat_age(
+        &pool,
+        &origin_id,
+        crate::origins::ORIGIN_PRESENCE_OFFLINE_THRESHOLD_SECONDS + 5,
+    )
+    .await?;
+    crate::origins::sweep_stale_origin_presence(&state).await?;
+    assert_eq!(origin_presence_status(&pool, &origin_id).await?, "offline");
+    assert_eq!(origin_expired_events_for(&mut events, &project_id), 1);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn origin_presence_offline_mark_keeps_a_beat_that_landed_after_the_sweep_read(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping origins test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    let threshold = crate::origins::ORIGIN_PRESENCE_OFFLINE_THRESHOLD_SECONDS;
+    // Stale when the sweep read it...
+    let (project_id, origin_id) = seed_origin_presence(&pool, threshold + 30).await?;
+    // ...then a beat lands before the sweep marks it offline.
+    record_presence_heartbeat(
+        &pool,
+        &origin_id,
+        &project_id,
+        OriginPresenceStatus::Online,
+        Some(40),
+        Some("iad"),
+        None,
+    )
+    .await?;
+
+    let marked =
+        crate::origins::mark_presence_offline(&pool, &origin_id, &project_id, threshold).await?;
+    assert!(marked.is_none(), "a fresh beat must not be marked offline");
+    assert_eq!(origin_presence_status(&pool, &origin_id).await?, "online");
+
+    // Without that beat the same mark applies.
+    set_origin_heartbeat_age(&pool, &origin_id, threshold + 30).await?;
+    let marked =
+        crate::origins::mark_presence_offline(&pool, &origin_id, &project_id, threshold).await?;
+    assert!(marked.is_some());
+    assert_eq!(origin_presence_status(&pool, &origin_id).await?, "offline");
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn resolve_origin_for_protocol_skips_offline_presence() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {

@@ -1241,7 +1241,18 @@ fn presence_from_row(row: &Row) -> Result<OriginPresenceRecord> {
     })
 }
 
-const ORIGIN_PRESENCE_OFFLINE_THRESHOLD_SECONDS: i64 = 25;
+/// How often an origin server beats by default (`ORIGIN_PRESENCE_INTERVAL_MS`
+/// in origin-http-server).
+const ORIGIN_PRESENCE_BEAT_INTERVAL_SECONDS: i64 = 20;
+
+/// How old an origin's last heartbeat may get before the sweep marks it
+/// offline and publishes `origin.expired`. Three beat intervals: after one
+/// missed beat the presence is at most two intervals old when the next one
+/// lands, which leaves a whole interval for that beat to be slow. Two missed
+/// beats in a row expire the origin. At one interval plus five seconds, a
+/// single late or failed beat expired a machine that was running.
+pub(crate) const ORIGIN_PRESENCE_OFFLINE_THRESHOLD_SECONDS: i64 =
+    3 * ORIGIN_PRESENCE_BEAT_INTERVAL_SECONDS;
 
 pub(crate) fn spawn_origin_presence_housekeeping(state: &AppState) {
     let state_clone = state.clone();
@@ -1256,7 +1267,7 @@ pub(crate) fn spawn_origin_presence_housekeeping(state: &AppState) {
     });
 }
 
-async fn sweep_stale_origin_presence(state: &AppState) -> Result<()> {
+pub(crate) async fn sweep_stale_origin_presence(state: &AppState) -> Result<()> {
     let threshold = ORIGIN_PRESENCE_OFFLINE_THRESHOLD_SECONDS.max(5);
     let connection = state
         .pool
@@ -1282,7 +1293,7 @@ async fn sweep_stale_origin_presence(state: &AppState) -> Result<()> {
     for row in rows {
         let origin_id: Uuid = row.get("origin_id");
         let project_id: Uuid = row.get("project_id");
-        match mark_presence_offline(&state.pool, &origin_id, &project_id).await {
+        match mark_presence_offline(&state.pool, &origin_id, &project_id, threshold).await {
             Ok(Some(presence)) => match load_origin_by_id(&state.pool, &origin_id).await {
                 Ok(Some(origin)) => {
                     publish_controller_event(
@@ -1314,10 +1325,14 @@ async fn sweep_stale_origin_presence(state: &AppState) -> Result<()> {
     Ok(())
 }
 
-async fn mark_presence_offline(
+/// Marks the origin offline only while its last heartbeat is still older than
+/// `threshold_seconds`: a beat that lands after the sweep read the row keeps
+/// it online, and publishes no expiry.
+pub(crate) async fn mark_presence_offline(
     pool: &PgPool,
     origin_id: &Uuid,
     project_id: &Uuid,
+    threshold_seconds: i64,
 ) -> Result<Option<OriginPresenceRecord>> {
     let connection = pool
         .get()
@@ -1331,8 +1346,9 @@ async fn mark_presence_offline(
              where origin_id = $1
                and project_id = $2
                and status <> 'offline'
+               and last_heartbeat < now() - ($3::bigint * interval '1 second')
              returning *",
-            &[origin_id, project_id],
+            &[origin_id, project_id, &threshold_seconds],
         )
         .await
         .context("failed to mark origin presence offline")?;
