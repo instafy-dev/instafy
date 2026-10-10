@@ -165,10 +165,9 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
     /dpkg --compare-versions[\s\S]*chromium\)" ge "\$\{CHROMIUM_MIN_VERSION\}"/u,
   );
 
-  assert.match(
-    read("packages/browser-webrtc-sender/go.mod"),
-    /^\s*golang\.org\/x\/crypto v0\.55\.0 \/\/ indirect$/mu,
-  );
+  const webrtcSenderModule = read("packages/browser-webrtc-sender/go.mod");
+  assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/crypto v0\.57\.0 \/\/ indirect$/mu);
+  assert.match(webrtcSenderModule, /^\s*golang\.org\/x\/net v0\.60\.0 \/\/ indirect$/mu);
 });
 
 test("base runtime explicitly refreshes inherited gzip, PCRE2 and SQLite and rejects obsolete versions", () => {
