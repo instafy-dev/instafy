@@ -316,9 +316,9 @@ async fn runtime_origin(
 /// Evicts stopped workspace checkouts from this node's disk on a schedule:
 /// after `RUNTIME_CHECKOUT_TTL_DAYS` (default 7) idle, or oldest first while
 /// they exceed `RUNTIME_CHECKOUT_DISK_BUDGET_GIB`. The allocator never evicts
-/// a checkout with a runtime container, a start in progress, or unpushed
-/// local recovery refs, and a stop never evicts. Canonical `main` and the
-/// space's recovery refs are the durable copy; the next start clones again.
+/// a checkout with a runtime container or a start in progress, or one whose
+/// last stop did not leave the `durable v1` marker, and a stop never evicts.
+/// Canonical git is the durable copy; the next start clones again.
 fn spawn_checkout_eviction(allocator: runtime_provider_core::allocator::DynRuntimeAllocator) {
     let interval = env::var("RUNTIME_CHECKOUT_SWEEP_INTERVAL_SECS")
         .ok()

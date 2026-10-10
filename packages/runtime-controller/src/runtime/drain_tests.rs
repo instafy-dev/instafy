@@ -480,9 +480,10 @@ async fn drain_routes_answer_only_the_service_role() -> anyhow::Result<()> {
 
 /// The census joins the node's containers with the database: the runtime's
 /// active generation is `live`, any other container an `orphan`. Checkouts
-/// are no part of it: an older provider's checkout list is ignored and never
-/// makes the census incomplete; only a provider that cannot list its node,
-/// does not answer or cut its container list does.
+/// are no part of it: an older provider's checkout list is ignored. Only a
+/// provider that cannot list its node, does not answer or sets `truncated`
+/// makes it incomplete; an older provider also sets `truncated` for a cut or
+/// unreadable checkout listing, which only holds the node.
 #[tokio::test]
 async fn the_census_tells_live_runtimes_from_orphans_and_lists_no_checkouts() -> anyhow::Result<()>
 {

@@ -607,8 +607,9 @@ mod tests {
         );
     }
 
-    /// An older provider's census still lists checkouts; only its own
-    /// container list can make it incomplete.
+    /// An older provider's census still lists checkouts, and the controller
+    /// ignores the list. That provider's `truncated` flag can still reflect
+    /// a cut or unreadable checkout listing, which only holds the node.
     #[test]
     fn a_provider_census_reads_containers_only() {
         let census: ProviderCensus = serde_json::from_value(json!({
