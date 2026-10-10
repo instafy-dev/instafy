@@ -782,12 +782,6 @@ pub(crate) async fn agent_lease(
         ));
     }
 
-    // A runtime a pool-retirement drain started only to flush its checkout
-    // runs no turn: it is stopped again within moments.
-    if state.runtime_drain.is_flush_wake(&runtime_id) {
-        return Ok(Json(AgentLeaseResponse { jobs: Vec::new() }));
-    }
-
     if let Some(resources) = resources {
         state
             .runtime_resource_usage

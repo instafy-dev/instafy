@@ -127,8 +127,4 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/operator/runtime-drain/census", get(drain::drain_census))
         .route("/operator/runtime-drain/fence", post(drain::drain_fence))
         .route("/operator/runtime-drain/stop", post(drain::drain_stop))
-        .route(
-            "/operator/runtime-drain/flush-checkout",
-            post(drain::drain_flush_checkout),
-        )
 }

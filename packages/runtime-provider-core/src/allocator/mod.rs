@@ -12,7 +12,7 @@ mod external_http;
 mod hetzner;
 mod noop;
 
-pub use census::{CensusCheckout, CensusContainer, RuntimeCensus};
+pub use census::{CensusContainer, RuntimeCensus};
 pub use checkout_eviction::{CheckoutEvictionPolicy, CheckoutSweepReport};
 pub use docker::DockerRuntimeAllocator;
 pub use docker_pool::DockerPoolRuntimeAllocator;
@@ -249,15 +249,16 @@ pub trait RuntimeAllocator: Send + Sync {
 
     /// Evict stopped workspace checkouts this allocator keeps on its node's
     /// disk, as its eviction policy allows (idle TTL or disk budget; never a
-    /// checkout with a runtime, a start in progress or unpushed work).
+    /// checkout with a runtime or a start in progress, or whose last stop
+    /// did not record a durable state).
     /// Allocators without node-local checkouts do nothing.
     async fn evict_idle_checkouts(&self) -> anyhow::Result<CheckoutSweepReport> {
         Ok(CheckoutSweepReport::default())
     }
 
-    /// The runtimes and workspace checkouts this allocator keeps on its
-    /// node, for a drain before the node is retired. Read-only. Allocators
-    /// that cannot list a node answer `supported: false`.
+    /// The runtime containers this allocator keeps on its node, for a drain
+    /// before the node is retired. Read-only. Allocators that cannot list a
+    /// node answer `supported: false`.
     async fn census(&self) -> anyhow::Result<RuntimeCensus> {
         Ok(RuntimeCensus::default())
     }

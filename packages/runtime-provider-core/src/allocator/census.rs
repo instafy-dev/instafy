@@ -1,41 +1,30 @@
 //! What a node holds for its hosted runtimes: the runtime containers it runs
-//! (or keeps stopped) and the workspace checkouts on its disk. A drain reads
-//! it before the node is retired, because a deleted node takes every
-//! container and checkout with it, including work that exists nowhere else.
+//! (or keeps stopped). A drain reads it before the node is retired, so that
+//! no live runtime runs into the node's deletion. Workspace checkouts are no
+//! part of it: canonical git holds their work, and a checkout on the node is
+//! a cache the next start clones again.
 //!
-//! Read-only, and like checkout eviction it reads refs and the clean-stop
-//! marker from the files git keeps them in, without running git. Every list
-//! is bounded; a census cut at a bound says so (`truncated`), and a drain
-//! must not treat it as complete.
+//! Read-only. The container list is bounded; a census cut at the bound says
+//! so (`truncated`), and a drain must not treat it as complete.
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs;
-use std::path::Path;
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::checkout_eviction::{pending_local_recovery, stopped_cleanly, PendingRecovery};
-
 /// At most this many runtime containers are listed.
 pub(crate) const MAX_CENSUS_CONTAINERS: usize = 1_000;
-/// At most this many checkouts are listed.
-pub(crate) const MAX_CENSUS_CHECKOUTS: usize = 5_000;
-/// At most this many unpushed ref names are listed per checkout.
-const MAX_REF_NAMES: usize = 50;
-const LOCAL_RECOVERY_PREFIX: &str = "refs/instafy/local-recovery/";
 
-/// The node's runtimes and checkouts.
+/// The node's runtimes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeCensus {
-    /// This allocator can list its node. `false` means the lists below say
+    /// This allocator can list its node. `false` means the list below says
     /// nothing about the node (not that it is empty).
     pub supported: bool,
     /// One entry per runtime (compose project), running or stopped.
     pub containers: Vec<CensusContainer>,
-    pub checkouts: Vec<CensusCheckout>,
-    /// A list reached its bound: the census is incomplete.
+    /// The container list reached its bound: the census is incomplete.
     pub truncated: bool,
 }
 
@@ -50,26 +39,6 @@ pub struct CensusContainer {
     pub lease_id: Option<Uuid>,
     /// At least one of its containers is running.
     pub running: bool,
-}
-
-/// One workspace checkout on the node's disk.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CensusCheckout {
-    pub project_id: Uuid,
-    /// A runtime container of the project exists here, running or stopped.
-    pub runtime_present: bool,
-    /// The runtime that last used it stopped cleanly (its shutdown flush
-    /// kept everything and wrote the clean-stop marker).
-    pub stopped_cleanly: bool,
-    /// Local recovery refs no push has confirmed yet.
-    pub unpushed_refs: usize,
-    /// Their names (under `refs/instafy/local-recovery/`), at most 50.
-    pub unpushed_ref_names: Vec<String>,
-    /// Why its refs could not be read with certainty, if they could not.
-    pub unreadable: Option<String>,
-    /// The directory holds nothing: no runtime ever used it.
-    pub empty: bool,
 }
 
 /// One container, as `docker ps` and `docker inspect` describe it.
@@ -131,112 +100,9 @@ pub(crate) fn group_containers(prefix: &str, facts: Vec<ContainerFacts>) -> Vec<
     grouped.into_values().collect()
 }
 
-/// The projects with a runtime container on the node, running or stopped.
-pub(crate) fn projects_present(containers: &[CensusContainer]) -> HashSet<Uuid> {
-    containers
-        .iter()
-        .filter_map(|container| container.project_id)
-        .collect()
-}
-
-/// The checkouts under `repo_base` (directories named by a project id).
-/// Returns them and whether the listing is incomplete: it reached its bound,
-/// or `repo_base` exists but cannot be read (a missing one holds nothing).
-pub(crate) fn census_checkouts(
-    repo_base: &Path,
-    present: &HashSet<Uuid>,
-) -> (Vec<CensusCheckout>, bool) {
-    let entries = match fs::read_dir(repo_base) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), false),
-        Err(_) => return (Vec::new(), true),
-    };
-    let mut checkouts = Vec::new();
-    for entry in entries.flatten() {
-        let Some(project_id) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| Uuid::parse_str(name).ok())
-        else {
-            continue;
-        };
-        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            continue;
-        }
-        if checkouts.len() >= MAX_CENSUS_CHECKOUTS {
-            return (checkouts, true);
-        }
-        let path = entry.path();
-        let empty = fs::read_dir(&path).is_ok_and(|mut inner| inner.next().is_none());
-        let (unpushed, unreadable) = if empty {
-            (Vec::new(), None)
-        } else {
-            match pending_local_recovery(&path) {
-                PendingRecovery::None => (Vec::new(), None),
-                PendingRecovery::Refs(refs) => (refs, None),
-                PendingRecovery::Unknown(why) => (Vec::new(), Some(why)),
-            }
-        };
-        checkouts.push(CensusCheckout {
-            project_id,
-            runtime_present: present.contains(&project_id),
-            stopped_cleanly: stopped_cleanly(&path),
-            unpushed_refs: unpushed.len(),
-            unpushed_ref_names: unpushed
-                .iter()
-                .take(MAX_REF_NAMES)
-                .map(|reference| {
-                    reference
-                        .strip_prefix(LOCAL_RECOVERY_PREFIX)
-                        .unwrap_or(reference)
-                        .to_string()
-                })
-                .collect(),
-            unreadable,
-            empty,
-        });
-    }
-    checkouts.sort_by_key(|checkout| checkout.project_id);
-    (checkouts, false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::allocator::checkout_eviction::CLEAN_STOP_MARKER;
-    use std::path::PathBuf;
-
-    struct TempDir(PathBuf);
-
-    impl TempDir {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!("runtime-census-{}", Uuid::new_v4()));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn canonical_checkout(base: &Path, project_id: Uuid, clean: bool) -> PathBuf {
-        let root = base.join(project_id.to_string());
-        let git_dir = root.join(".instafy/.git");
-        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
-        fs::write(
-            git_dir.join("config"),
-            "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://git.example/p.git\n",
-        )
-        .unwrap();
-        fs::write(root.join("README.md"), b"hello\n").unwrap();
-        if clean {
-            fs::write(root.join(CLEAN_STOP_MARKER), b"stopped\n").unwrap();
-        }
-        root
-    }
 
     #[test]
     fn runtimes_are_grouped_by_compose_project_with_their_generation() {
@@ -295,72 +161,6 @@ mod tests {
         ];
         expected.sort_by(|a, b| a.compose_project.cmp(&b.compose_project));
         assert_eq!(grouped, expected);
-        assert_eq!(
-            projects_present(&grouped),
-            HashSet::from([project, other_project]),
-            "a stopped runtime is present too"
-        );
-    }
-
-    #[test]
-    fn an_unreadable_checkout_base_is_an_incomplete_census() {
-        let base = TempDir::new();
-        let (checkouts, truncated) = census_checkouts(&base.0.join("missing"), &HashSet::new());
-        assert!(
-            checkouts.is_empty() && !truncated,
-            "a missing base holds nothing"
-        );
-        let file = base.0.join("not-a-directory");
-        fs::write(&file, b"x").unwrap();
-        let (checkouts, truncated) = census_checkouts(&file, &HashSet::new());
-        assert!(checkouts.is_empty());
-        assert!(truncated, "a base that cannot be read says nothing");
-    }
-
-    #[test]
-    fn checkouts_report_unpushed_refs_clean_stops_and_what_cannot_be_read() {
-        let base = TempDir::new();
-        let clean = Uuid::new_v4();
-        canonical_checkout(&base.0, clean, true);
-        let unpushed = Uuid::new_v4();
-        let root = canonical_checkout(&base.0, unpushed, true);
-        fs::create_dir_all(root.join(".instafy/.git/refs/instafy/local-recovery")).unwrap();
-        fs::write(
-            root.join(".instafy/.git/refs/instafy/local-recovery/20261003T101010Z-unsaved-abc"),
-            "0123456789012345678901234567890123456789\n",
-        )
-        .unwrap();
-        let crashed = Uuid::new_v4();
-        canonical_checkout(&base.0, crashed, false);
-        let no_git = Uuid::new_v4();
-        fs::create_dir_all(base.0.join(no_git.to_string())).unwrap();
-        fs::write(base.0.join(no_git.to_string()).join("notes.md"), b"x\n").unwrap();
-        let empty = Uuid::new_v4();
-        fs::create_dir_all(base.0.join(empty.to_string())).unwrap();
-        fs::create_dir_all(base.0.join(".instafy-checkout-stamps")).unwrap();
-
-        let (checkouts, truncated) = census_checkouts(&base.0, &HashSet::from([crashed]));
-        assert!(!truncated);
-        let by_id: BTreeMap<Uuid, CensusCheckout> = checkouts
-            .into_iter()
-            .map(|checkout| (checkout.project_id, checkout))
-            .collect();
-        assert_eq!(by_id.len(), 5, "{by_id:?}");
-        let entry = &by_id[&clean];
-        assert!(entry.stopped_cleanly && entry.unpushed_refs == 0 && entry.unreadable.is_none());
-        assert!(!entry.runtime_present && !entry.empty);
-        let entry = &by_id[&unpushed];
-        assert_eq!(entry.unpushed_refs, 1);
-        assert_eq!(
-            entry.unpushed_ref_names,
-            vec!["20261003T101010Z-unsaved-abc".to_string()]
-        );
-        let entry = &by_id[&crashed];
-        assert!(!entry.stopped_cleanly && entry.runtime_present);
-        let entry = &by_id[&no_git];
-        assert!(entry.unreadable.is_some(), "{entry:?}");
-        let entry = &by_id[&empty];
-        assert!(entry.empty && entry.unreadable.is_none() && entry.unpushed_refs == 0);
     }
 
     #[test]
