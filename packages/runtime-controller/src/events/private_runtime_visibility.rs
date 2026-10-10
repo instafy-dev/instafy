@@ -27,6 +27,20 @@ struct RuntimeReferences {
     tunnel_ids: HashSet<String>,
 }
 
+/// Whether [`ensure_visible`] reads the database for `event`, or decides it
+/// without one: true for an event about a runtime, origin, tunnel or local
+/// workspace, or one whose payload names a runtime (or cannot be read for
+/// one).
+pub(super) fn needs_lookup(event: &ControllerEvent, context: &RequestContext) -> bool {
+    if context.is_service_role {
+        return false;
+    }
+    if visibility_scope(&event.kind).is_some() {
+        return true;
+    }
+    collect_keyed_uuids(&event.data, runtime_id_key, true, &mut HashSet::new()).unwrap_or(true)
+}
+
 pub(super) async fn ensure_visible(
     state: &AppState,
     transaction: &Transaction<'_>,
@@ -34,7 +48,7 @@ pub(super) async fn ensure_visible(
     event: &ControllerEvent,
     context: &RequestContext,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
-    if context.is_service_role {
+    if !needs_lookup(event, context) {
         return Ok(());
     }
 

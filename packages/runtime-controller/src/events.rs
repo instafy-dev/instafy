@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
-use std::time::Duration;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::extract::Query;
 use axum::http::HeaderMap;
@@ -27,6 +29,79 @@ use crate::{database_unavailable, forbidden, load_project_record, too_many_reque
 mod private_runtime_visibility;
 
 const PROJECT_ACCESS_CHANGED_EVENT: &str = "project.access_changed";
+
+/// The access checks one stream has passed lately, by conversation (`None`
+/// for an event of the project as a whole), so a burst of events takes one
+/// check, not one pool connection per event. A check holds for
+/// `AppConfig::event_access_recheck_after`; an access change the stream sees
+/// drops them all.
+#[derive(Default)]
+struct RecentAccess {
+    passed: Mutex<HashMap<Option<uuid::Uuid>, Instant>>,
+}
+
+impl RecentAccess {
+    fn holds(
+        &self,
+        conversation_id: Option<uuid::Uuid>,
+        now: Instant,
+        for_how_long: Duration,
+    ) -> bool {
+        self.passed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&conversation_id)
+            .is_some_and(|passed_at| now.saturating_duration_since(*passed_at) < for_how_long)
+    }
+
+    fn record(&self, conversation_id: Option<uuid::Uuid>, now: Instant, for_how_long: Duration) {
+        let mut passed = self
+            .passed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        passed.retain(|_, passed_at| now.saturating_duration_since(*passed_at) < for_how_long);
+        passed.insert(conversation_id, now);
+    }
+
+    fn forget(&self) {
+        self.passed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+}
+
+/// Whether `event` can change who may read the project, so the stream checks
+/// access afresh for it and the events after it.
+fn changes_access(event: &ControllerEvent) -> bool {
+    event.kind == PROJECT_ACCESS_CHANGED_EVENT || event.kind == PROJECT_MEMBERS_CHANGED_EVENT
+}
+
+/// Whether delivering `event` reads the database beyond the stream's project
+/// and conversation access: a runtime, origin, tunnel or local workspace it
+/// refers to, or the organization roster.
+fn event_needs_lookup(event: &ControllerEvent, context: &RequestContext) -> bool {
+    private_runtime_visibility::needs_lookup(event, context)
+        || (event.kind == PROJECT_MEMBERS_CHANGED_EVENT
+            && event.data.get("reason").and_then(serde_json::Value::as_str)
+                != Some(MEMBERS_CHANGED_PROJECT_MEMBERSHIP))
+}
+
+/// Runs an access check once more when the database was only briefly out of
+/// reach (503, such as a pool wait that timed out), so a busy moment does not
+/// cost the subscriber the event. Any other answer stands.
+async fn retry_once_if_unavailable<T, F, Fut>(
+    mut check: F,
+) -> Result<T, (StatusCode, Json<ApiError>)>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, (StatusCode, Json<ApiError>)>>,
+{
+    match check().await {
+        Err((status, _)) if status == StatusCode::SERVICE_UNAVAILABLE => check().await,
+        answer => answer,
+    }
+}
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new().route("/events", get(events_stream))
@@ -93,6 +168,7 @@ async fn events_stream(
     let filters = Arc::new(filters);
     let context = Arc::new(context);
     let permit = Arc::new(permit);
+    let recent_access = Arc::new(RecentAccess::default());
     info!(
         project_id = %filters.project_id,
         session_id = ?filters.session_id,
@@ -110,6 +186,7 @@ async fn events_stream(
         let context = context.clone();
         let permit = permit.clone();
         let watch = watch.clone();
+        let recent_access = recent_access.clone();
         async move {
             // Keep the connection permit and the project watch alive for as
             // long as the response stream.
@@ -134,23 +211,43 @@ async fn events_stream(
                     // deliverable after revocation so an already-open client
                     // can immediately fail closed and refetch authoritative
                     // capabilities.
-                    if !is_targeted_access_invalidation(&event, &context) {
-                        match ensure_event_delivery_access(
-                            &state,
-                            filters.project_id,
-                            filters.session_id,
-                            event.conversation_id,
-                            &event,
-                            &context,
-                        )
-                        .await
-                        {
-                            Ok(Some(projected)) => event = projected,
-                            Ok(None) => {}
+                    if changes_access(&event) {
+                        recent_access.forget();
+                    }
+                    // The project and conversation access this stream passed
+                    // within `event_access_recheck_after` still holds for an
+                    // event that needs no lookup of its own.
+                    let now = Instant::now();
+                    let recheck_after = state.config.event_access_recheck_after;
+                    let access_holds =
+                        recent_access.holds(event.conversation_id, now, recheck_after)
+                            && !event_needs_lookup(&event, &context);
+                    if !is_targeted_access_invalidation(&event, &context) && !access_holds {
+                        let checked = retry_once_if_unavailable(|| {
+                            ensure_event_delivery_access(
+                                &state,
+                                filters.project_id,
+                                filters.session_id,
+                                event.conversation_id,
+                                &event,
+                                &context,
+                            )
+                        })
+                        .await;
+                        match checked {
+                            Ok(Some(projected)) => {
+                                recent_access.record(event.conversation_id, now, recheck_after);
+                                event = projected;
+                            }
+                            Ok(None) => {
+                                recent_access.record(event.conversation_id, now, recheck_after);
+                            }
                             Err((status, Json(error))) => {
+                                recent_access.forget();
                                 if status.is_server_error() {
                                     warn!(
                                         %status,
+                                        kind = %event.kind,
                                         conversation_id = ?event.conversation_id,
                                         project_id = %filters.project_id,
                                         error = %error.message,
@@ -603,5 +700,109 @@ mod tests {
         let mut other_project_event = access_event.clone();
         other_project_event.project_id = Some(Uuid::new_v4());
         assert!(!scoped_filters.matches(&other_project_event));
+    }
+
+    /// A stream's passed access check holds per conversation, for the window
+    /// only, and an access change drops every one of them.
+    #[test]
+    fn recent_access_holds_per_conversation_for_the_window_only() {
+        let window = Duration::from_secs(5);
+        let recent = RecentAccess::default();
+        let conversation = Some(Uuid::new_v4());
+        let start = Instant::now();
+        assert!(!recent.holds(conversation, start, window));
+
+        recent.record(conversation, start, window);
+        assert!(recent.holds(conversation, start + Duration::from_millis(4_900), window));
+        assert!(!recent.holds(conversation, start + window, window));
+        assert!(
+            !recent.holds(None, start, window),
+            "the project's own events check on their own"
+        );
+        assert!(!recent.holds(Some(Uuid::new_v4()), start, window));
+
+        recent.record(None, start, window);
+        recent.forget();
+        assert!(!recent.holds(conversation, start, window));
+        assert!(!recent.holds(None, start, window));
+    }
+
+    /// Events about runtimes, origins, tunnels, local workspaces or the org
+    /// roster are checked on their own every time; others can use the
+    /// stream's recent check.
+    #[test]
+    fn only_events_without_a_lookup_of_their_own_use_a_recent_check() {
+        let user = user_context(Uuid::new_v4());
+        let mut event = targeted_event("conversation.message_created", Uuid::new_v4());
+        event.data = json!({ "marker": "plain" });
+        assert!(!event_needs_lookup(&event, &user));
+
+        event.data = json!({ "nested": { "runtimeId": Uuid::new_v4() } });
+        assert!(event_needs_lookup(&event, &user));
+
+        for kind in [
+            "runtime.stopped",
+            "origin.expired",
+            "tunnel.grant_revoked",
+            "local_workspace.updated",
+        ] {
+            event.kind = kind.to_string();
+            event.data = json!({});
+            assert!(event_needs_lookup(&event, &user), "{kind}");
+        }
+
+        event.kind = PROJECT_MEMBERS_CHANGED_EVENT.to_string();
+        event.data = json!({ "reason": "org_membership" });
+        assert!(event_needs_lookup(&event, &user));
+        event.data = json!({ "reason": MEMBERS_CHANGED_PROJECT_MEMBERSHIP });
+        assert!(!event_needs_lookup(&event, &user));
+        assert!(changes_access(&event));
+    }
+
+    /// A pool wait that timed out (503) is tried once more; a refusal stands,
+    /// and a second 503 is the answer.
+    #[tokio::test]
+    async fn an_access_check_is_retried_once_when_the_database_was_busy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let unavailable = || crate::errors::service_unavailable("busy");
+        let calls = AtomicUsize::new(0);
+        let answer = retry_once_if_unavailable(|| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    Err(unavailable())
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(answer.ok(), Some(1));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let calls = AtomicUsize::new(0);
+        let answer: Result<(), _> = retry_once_if_unavailable(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err(forbidden("no access")) }
+        })
+        .await;
+        assert_eq!(
+            answer.err().map(|(status, _)| status),
+            Some(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let calls = AtomicUsize::new(0);
+        let answer: Result<(), _> = retry_once_if_unavailable(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move { Err(unavailable()) }
+        })
+        .await;
+        assert_eq!(
+            answer.err().map(|(status, _)| status),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

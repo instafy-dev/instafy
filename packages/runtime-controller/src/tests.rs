@@ -199,6 +199,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         port: 0,
         database_url: "".to_string(),
         database_pool_size: 2,
+        event_access_recheck_after: crate::config::EVENT_ACCESS_RECHECK_AFTER,
         redis_url: None,
         redis_namespace: None,
         redis_events_channel: None,
@@ -8715,11 +8716,16 @@ async fn controller_auth_is_header_only_and_event_stream_reauthorizes_private_co
             .await?;
     }
 
-    let config = build_app_config(
+    let mut config = build_app_config(
         test_origin_private_key(),
         test_origin_public_key(),
         "conversation-event-access",
     );
+    // A stream takes the access it checked as current for this long; the
+    // removals below publish no access change, so they take effect once it
+    // has passed.
+    config.event_access_recheck_after = std::time::Duration::from_millis(200);
+    let access_recheck_passes = std::time::Duration::from_millis(300);
     let project_member_token =
         crate::auth::issue_controller_token(&config, &project_member_user_id)
             .map_err(|error| controller_error("issue project member token", error))?
@@ -8948,6 +8954,7 @@ async fn controller_auth_is_header_only_and_event_stream_reauthorizes_private_co
             )
             .await?;
     }
+    tokio::time::sleep(access_recheck_passes).await;
     publish_controller_event_with_conversation(
         &state.events,
         "conversation.message_created",
@@ -8988,6 +8995,7 @@ async fn controller_auth_is_header_only_and_event_stream_reauthorizes_private_co
             )
             .await?;
     }
+    tokio::time::sleep(access_recheck_passes).await;
     assert!(crate::events::ensure_event_access(
         &state,
         project_id,
@@ -9106,6 +9114,166 @@ async fn controller_auth_is_header_only_and_event_stream_reauthorizes_private_co
     cleanup_origin_project(&pool, &project_id).await?;
     cleanup_org(&pool, &org_id).await?;
     cleanup_test_user(&pool, &project_member_user_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    Ok(())
+}
+
+/// Reads the stream until a chunk carries `needle`, or fails after 3 seconds.
+async fn next_chunk_with(
+    body: &mut axum::body::BodyDataStream,
+    needle: &str,
+) -> anyhow::Result<String> {
+    timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let chunk = body
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("event stream ended before {needle}"))??;
+            let chunk = std::str::from_utf8(&chunk)?.to_string();
+            if chunk.contains(needle) {
+                return Ok::<String, anyhow::Error>(chunk);
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out waiting for {needle}"))?
+}
+
+/// A stream checks its subscriber's project access once per
+/// `event_access_recheck_after`, not for every event: a burst of events no
+/// longer takes a pool connection each. A revocation that publishes nothing
+/// reaches the stream within that window; one that publishes an access
+/// change reaches it at once.
+#[tokio::test]
+async fn an_event_stream_rechecks_access_per_window_and_at_once_after_an_access_change(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping event access window test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let owner_user_id = Uuid::new_v4();
+    let member_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &member_user_id).await?;
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into organizations (id, slug, name) values ($1, $2, $3)",
+                &[
+                    &org_id,
+                    &format!("event-access-window-{org_id}"),
+                    &"Event access window test",
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into projects (id, org_id, project_type, owner_user_id, status)
+                 values ($1, $2, 'customer', $3, 'active')",
+                &[&project_id, &org_id, &owner_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_memberships (project_id, user_id, role)
+                 values ($1, $2, 'builder')",
+                &[&project_id, &member_user_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "event-access-window",
+    );
+    assert!(config.event_access_recheck_after <= std::time::Duration::from_secs(5));
+    let member_token = crate::auth::issue_controller_token(&config, &member_user_id)
+        .map_err(|error| controller_error("issue member token", error))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let response = crate::events::router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/events?projectId={project_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {member_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+
+    publish_controller_event(
+        &state.events,
+        "project.changed",
+        Some(project_id),
+        None,
+        None,
+        None,
+        json!({ "marker": "before-the-revocation" }),
+    );
+    next_chunk_with(&mut body, "before-the-revocation").await?;
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "delete from project_memberships where project_id = $1 and user_id = $2",
+                &[&project_id, &member_user_id],
+            )
+            .await?;
+    }
+    // Within the window the stream's check still holds: no lookup per event.
+    publish_controller_event(
+        &state.events,
+        "project.changed",
+        Some(project_id),
+        None,
+        None,
+        None,
+        json!({ "marker": "within-the-window" }),
+    );
+    next_chunk_with(&mut body, "within-the-window").await?;
+
+    // The access change drops the stream's check, so the next event is
+    // checked again and refused.
+    crate::state::publish_project_access_changed(&state.events, Some(project_id), member_user_id);
+    next_chunk_with(&mut body, "project.access_changed").await?;
+    publish_controller_event(
+        &state.events,
+        "project.changed",
+        Some(project_id),
+        None,
+        None,
+        None,
+        json!({ "marker": "after-the-access-change" }),
+    );
+    match timeout(std::time::Duration::from_secs(1), body.next()).await {
+        Err(_) => {}
+        Ok(Some(Ok(chunk))) => {
+            let chunk = std::str::from_utf8(&chunk)?;
+            assert!(
+                !chunk.contains("after-the-access-change"),
+                "a revoked member received an event after the access change: {chunk}"
+            );
+        }
+        Ok(Some(Err(error))) => return Err(error.into()),
+        Ok(None) => return Err(anyhow::anyhow!("event stream ended unexpectedly")),
+    }
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &member_user_id).await?;
     cleanup_test_user(&pool, &owner_user_id).await?;
     Ok(())
 }
@@ -29685,7 +29853,9 @@ async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert
             acknowledged[0]["runtimeLeaseId"],
             json!(idle_lease_id.to_string())
         );
-        // Both stops quarantined the same lease, and each says which stop it was.
+        // Both stops quarantined the same lease, and each says which stop it
+        // was. The reconnect's quarantine of a lease the idle stop already
+        // quarantined is still that stop, so it keeps the idle stop's reason.
         let quarantines = events_of("provider_release_cleanup_pending");
         let quarantined_by: Vec<(serde_json::Value, serde_json::Value)> = quarantines
             .iter()
@@ -29695,10 +29865,7 @@ async fn dispatch_during_an_idle_stop_release_relaunches_without_a_startup_alert
             quarantined_by,
             vec![
                 (json!("idle_stop"), json!("idle")),
-                (
-                    json!("ensure_stale_generation"),
-                    json!("stale_generation_before_ensure")
-                ),
+                (json!("ensure_stale_generation"), json!("idle")),
             ],
             "{quarantines:?}"
         );
