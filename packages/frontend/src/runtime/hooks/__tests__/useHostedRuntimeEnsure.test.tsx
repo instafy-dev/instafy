@@ -4,16 +4,19 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../../sdk/instafy";
+import type { RunRecord } from "../../../types";
 import {
   clearIdlePaused,
   clearManualStop,
   clearRestoredAwaitingIntent,
+  forgetSupersededPersonStopsForTests,
   isIdlePaused,
   isManualStopHeld,
   isRestoredAwaitingIntent,
   markIdlePaused,
   markManualStop,
   markRestoredAwaitingIntent,
+  personStopsSupersededAtMs,
 } from "../../idlePauseRegistry";
 
 // vi.mock is hoisted above module-level consts, so the spy has to be too.
@@ -67,7 +70,13 @@ describe("useHostedRuntimeEnsure force", () => {
   let ensureHostedRuntime: ReturnType<typeof useHostedRuntimeEnsure>["ensureHostedRuntime"] | null = null;
   const showStatus = vi.fn();
 
-  function Harness({ statuses }: { statuses: ControllerRuntimeStatusEntry[] }) {
+  function Harness({
+    statuses,
+    runs = null,
+  }: {
+    statuses: ControllerRuntimeStatusEntry[];
+    runs?: Record<string, RunRecord> | null;
+  }) {
     const result = useHostedRuntimeEnsure({
       enabled: true,
       projectId: PROJECT_ID,
@@ -78,6 +87,7 @@ describe("useHostedRuntimeEnsure force", () => {
       setRuntimeEnsureError: () => {},
       setRuntimeEnsureLimit: () => {},
       showDesktopRuntimeHelp: () => {},
+      runs,
     });
     ensureHostedRuntime = result.ensureHostedRuntime;
     return null;
@@ -101,6 +111,7 @@ describe("useHostedRuntimeEnsure force", () => {
       root.unmount();
     });
     container.remove();
+    forgetSupersededPersonStopsForTests();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -172,6 +183,45 @@ describe("useHostedRuntimeEnsure force", () => {
       clearRestoredAwaitingIntent(PROJECT_ID);
       clearIdlePaused(PROJECT_ID);
     }
+  });
+
+  it("overrides the person's stops the space's runs record", async () => {
+    // The turn a Stop put back in the queue stays queued until the machine
+    // this request starts takes it; no automatic start may read it as a stop
+    // still in effect and hold the space again.
+    const interruptedAt = new Date(Date.now() - 60_000).toISOString();
+    const cutOff: RunRecord = {
+      id: "run-1",
+      projectId: PROJECT_ID,
+      sessionId: null,
+      conversationId: "conversation-1",
+      promptId: null,
+      runType: "prompt",
+      status: "queued",
+      progress: 0,
+      progressStage: "requeued",
+      previewUrl: null,
+      lastMessage: null,
+      metadata: {
+        interruption: {
+          reason: "user_stop",
+          jobId: "job-1",
+          interruptedAt,
+          resumeBy: new Date(Date.now() + 14 * 60_000).toISOString(),
+        },
+      },
+      createdAt: new Date(Date.now() - 120_000).toISOString(),
+      updatedAt: interruptedAt,
+    };
+    await act(async () => {
+      root.render(<Harness statuses={[]} runs={{ "run-1": cutOff }} />);
+    });
+    expect(personStopsSupersededAtMs(PROJECT_ID)).toBeNull();
+
+    await act(async () => {
+      await ensureHostedRuntime!();
+    });
+    expect(personStopsSupersededAtMs(PROJECT_ID)).toBe(Date.parse(interruptedAt));
   });
 
   it("lifts the hold a Stop kept after an error answer", async () => {
@@ -316,8 +366,13 @@ describe("useHostedRuntimeEnsure in progress", () => {
     await render([releasing], Date.now() - 10_000);
     expect(inProgress).toBe(true);
 
-    await render([{ ...releasing, stopRequestedAt: new Date().toISOString() }], null);
+    await render([{ ...releasing, stopRequestedAt: new Date().toISOString(), stopReason: "user_stop" }], null);
     expect(inProgress).toBe(true);
+
+    // The release of a machine nobody stopped is no machine in progress: the
+    // automatic start has the controller retry it and launch again.
+    await render([{ ...releasing, stopRequestedAt: new Date().toISOString(), stopReason: "heartbeat_timeout" }], null);
+    expect(inProgress).toBe(false);
 
     // With no stop known, the same row is a launch that went stale.
     await render([releasing], null);

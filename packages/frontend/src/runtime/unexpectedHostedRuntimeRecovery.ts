@@ -116,11 +116,19 @@ export function hasPendingRunInProject(
  * The controller publishes no `runtime.stopped` for a person's stop, so in a
  * tab that did not make it this record is what tells the stop from a machine
  * that was lost.
+ *
+ * The record stays queued until a machine takes the turn again, so it also
+ * outlives a person's request for a machine. `overriddenBy` leaves out the
+ * stops such a request has overridden: one dated at or before
+ * `supersededAtMs` (personStopsSupersededAtMs), or before
+ * `launchRequestedAtMs`, a hosted launch requested since. Both are on the
+ * controller's clock, as `interruptedAt` is.
  */
 export function latestPersonInterruptionAtMs(
   runs: Record<string, RunRecord> | readonly RunRecord[] | null | undefined,
   projectId: string | null | undefined,
   nowMs: number,
+  overriddenBy?: { supersededAtMs?: number | null; launchRequestedAtMs?: number | null },
 ): number | null {
   const normalizedProjectId = projectId?.trim() ?? "";
   if (!normalizedProjectId || !runs) {
@@ -142,9 +150,14 @@ export function latestPersonInterruptionAtMs(
       continue;
     }
     const interruptedAtMs = Date.parse(readRunInterruptionIdentity(run)?.interruptedAt ?? "");
-    if (Number.isFinite(interruptedAtMs)) {
-      latestMs = latestMs === null ? interruptedAtMs : Math.max(latestMs, interruptedAtMs);
+    if (
+      !Number.isFinite(interruptedAtMs) ||
+      interruptedAtMs <= (overriddenBy?.supersededAtMs ?? Number.NEGATIVE_INFINITY) ||
+      interruptedAtMs < (overriddenBy?.launchRequestedAtMs ?? Number.NEGATIVE_INFINITY)
+    ) {
+      continue;
     }
+    latestMs = latestMs === null ? interruptedAtMs : Math.max(latestMs, interruptedAtMs);
   }
   return latestMs;
 }

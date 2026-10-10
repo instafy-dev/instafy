@@ -167,7 +167,10 @@ describe("resolveStalledWorkspaceStart", () => {
       }),
     ).toEqual({ showNotice: false, nextCheckAtMs: null });
     // The controller's own mark on the stopping runtime.
-    for (const marker of [{ stopRequestedAt: new Date(stopAtMs).toISOString() }, { stopReason: "user_stop" }]) {
+    for (const marker of [
+      { stopRequestedAt: new Date(stopAtMs).toISOString(), stopReason: "user_stop" },
+      { stopReason: "user_stop" },
+    ]) {
       expect(
         resolveStalledWorkspaceStart({
           ...input({ runtimeStatuses: [launchingRuntime(marker)], runs: cutOffTurn }),
@@ -189,9 +192,26 @@ describe("resolveStalledWorkspaceStart", () => {
     ).toBe(true);
     expect(
       resolveStalledWorkspaceStart({
-        ...input({ runtimeStatuses: [launchingRuntime({ stopRequestedAt: new Date(at(-1)).toISOString() })] }),
+        ...input({
+          runtimeStatuses: [
+            launchingRuntime({ stopRequestedAt: new Date(at(-1)).toISOString(), stopReason: "user_stop" }),
+          ],
+        }),
         nowMs: late,
       }).showNotice,
+    ).toBe(true);
+  });
+
+  it("still offers Try again when the release of a lost machine is overdue", () => {
+    // The machine crashed with this message queued and its provider release
+    // failed. The controller keeps its mark on the runtime until it retries
+    // the release, up to 15 minutes later; Try again has it retry now.
+    const crashed = launchingRuntime({
+      stopRequestedAt: new Date(at(1)).toISOString(),
+      stopReason: "heartbeat_timeout",
+    });
+    expect(
+      resolveStalledWorkspaceStart({ ...input({ runtimeStatuses: [crashed] }), nowMs: at(20) }).showNotice,
     ).toBe(true);
   });
 

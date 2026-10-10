@@ -41,7 +41,13 @@ describe("getRuntimeLabel for a stop's release", () => {
       // This tab's Stop, or a turn a person's stop put back in the queue.
       [releasing(launchedAgoMs), stopAtMs()],
       // The controller's own mark on the runtime.
-      [releasing(launchedAgoMs, { stopRequestedAt: new Date(stopAtMs()).toISOString() }), null],
+      [
+        releasing(launchedAgoMs, {
+          stopRequestedAt: new Date(stopAtMs()).toISOString(),
+          stopReason: "user_stop",
+        }),
+        null,
+      ],
     ] as const) {
       const info = getRuntimeLabel(entry, null, null, knownStopAtMs);
       expect(info.statusBadge).toEqual({ text: "Stopping", tone: "neutral" });

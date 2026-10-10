@@ -1,4 +1,5 @@
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
+import { isPersonRuntimeStopReason } from "../unexpectedHostedRuntimeRecovery";
 
 export type RuntimeConnectionState =
   | "connected"
@@ -204,15 +205,44 @@ export function stalledLaunchDeadlineMs(
 }
 
 /**
+ * The latest launch requested for a hosted runtime in `entries`, on the
+ * controller's clock, or null when none reports one.
+ */
+export function latestHostedLaunchRequestedAtMs(
+  entries: readonly (ControllerRuntimeStatusEntry | null | undefined)[],
+): number | null {
+  let latestMs: number | null = null;
+  for (const entry of entries) {
+    if (!entry || entry.isLocal || !isHostedRuntime(entry)) {
+      continue;
+    }
+    const requestedAtMs = parseIsoTimestamp(entry.launchRequestedAt ?? null);
+    if (requestedAtMs !== null && (latestMs === null || requestedAtMs > latestMs)) {
+      latestMs = requestedAtMs;
+    }
+  }
+  return latestMs;
+}
+
+/**
  * Whether this hosted runtime reads `requested` (or another booting status)
  * because it is being stopped, not started. A stop leaves the runtime
  * `requested`, offline and never seen, on its old launch while the provider
  * releases the machine, which is a stalled launch by every status field. So
- * it counts as a stop when a stop newer than its launch is known: the
- * controller's own marker (`stopRequestedAt`, or `stopReason` without a
- * time), or `knownStopAtMs`, the latest person's stop the client knows of in
- * the space (this tab's Stop, or a turn such a stop put back in the queue).
- * A launch requested after that stop is a launch again.
+ * it counts as a stop when a person's stop newer than its launch is known:
+ * the controller's own marker for one (`stopRequestedAt`, or a person's
+ * `stopReason` without a time), or `knownStopAtMs`, the latest person's stop
+ * the client knows of in the space (this tab's Stop, or a turn such a stop
+ * put back in the queue). A launch requested after that stop is a launch
+ * again.
+ *
+ * The controller marks every stop's release, also of a machine that crashed
+ * or never came up, and keeps the mark after a failed release until it
+ * retries, which can take 15 minutes. Such a machine must still read as a
+ * launch that stalled: the automatic start, or the stalled-launch notice's
+ * Try again, is what has the controller retry the release and launch again.
+ * A machine a person stopped stays stopped until someone asks for it, so the
+ * mark of a person's stop counts for as long as it is there.
  */
 export function runtimeEntryIsStopping(
   entry: ControllerRuntimeStatusEntry | null | undefined,
@@ -224,11 +254,9 @@ export function runtimeEntryIsStopping(
   if (!BOOTING_STATUS_SET.has((entry.status ?? "").toLowerCase())) {
     return false;
   }
-  const markerAtMs =
-    parseIsoTimestamp(entry.stopRequestedAt ?? null) ??
-    (typeof entry.stopReason === "string" && entry.stopReason.trim().length > 0
-      ? Number.POSITIVE_INFINITY
-      : null);
+  const markerAtMs = isPersonRuntimeStopReason(entry.stopReason)
+    ? (parseIsoTimestamp(entry.stopRequestedAt ?? null) ?? Number.POSITIVE_INFINITY)
+    : null;
   const stopAtMs = Math.max(markerAtMs ?? Number.NEGATIVE_INFINITY, knownStopAtMs ?? Number.NEGATIVE_INFINITY);
   if (stopAtMs === Number.NEGATIVE_INFINITY) {
     return false;

@@ -1,15 +1,21 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   controllerClient,
   type ControllerRuntimeStatusEntry,
 } from "../../sdk/instafy";
 import { isBrowserRuntimeClaimActive } from "../browserRuntimeClaimRegistry";
-import { clearIdlePaused, clearManualStop, clearRestoredAwaitingIntent } from "../idlePauseRegistry";
+import {
+  clearIdlePaused,
+  clearManualStop,
+  clearRestoredAwaitingIntent,
+  supersedePersonStops,
+} from "../idlePauseRegistry";
 import {
   hostedRuntimeLimitDetailsFromError,
   type HostedRuntimeLimitErrorDetails,
 } from "../hostedRuntimeLimitError";
 import { getRuntimeSizePreference } from "../runtimeSizePreference";
+import { latestPersonInterruptionAtMs } from "../unexpectedHostedRuntimeRecovery";
 import {
   isHostedRuntime,
   runtimeEntryIsBooting,
@@ -17,6 +23,7 @@ import {
   runtimeEntryIsStopping,
 } from "../utils/runtimeEntry";
 import { getDefaultRuntimeMetadata } from "../utils/webdevRuntime";
+import type { RunRecord } from "../../types";
 import type { ShowStatusFn } from "./types";
 
 export interface EnsureHostedRuntimeOptions {
@@ -48,6 +55,8 @@ interface UseHostedRuntimeEnsureOptions {
   showDesktopRuntimeHelp: () => void;
   /** The latest person's stop known in the space (useHostedRuntimeStopAtMs). */
   hostedRuntimeStopAtMs?: number | null;
+  /** The runs this client knows, for the person's stops a request overrides. */
+  runs?: Record<string, RunRecord> | null;
 }
 
 export function useHostedRuntimeEnsure({
@@ -61,6 +70,7 @@ export function useHostedRuntimeEnsure({
   setRuntimeEnsureLimit,
   showDesktopRuntimeHelp,
   hostedRuntimeStopAtMs = null,
+  runs = null,
 }: UseHostedRuntimeEnsureOptions) {
   const [hostedRuntimeEnsuring, setHostedRuntimeEnsuring] = useState(false);
   // Limit details of the most recent ensure failure, or null when the last
@@ -73,6 +83,25 @@ export function useHostedRuntimeEnsure({
   // `hostedRuntimeEnsuring` is set and wait on this one instead of asking the
   // controller for a second machine.
   const inFlightEnsureRef = useRef<{ projectId: string; request: Promise<boolean> } | null>(null);
+  const runsRef = useRef(runs);
+  useEffect(() => {
+    runsRef.current = runs;
+  }, [runs]);
+
+  // A person asked for the space's machine (Start, a send, Reconnect, Try
+  // again): lift every hold on it, and override the person's stops its runs
+  // record. The turn such a stop put back in the queue stays queued until a
+  // machine takes it, and an automatic start would otherwise read it as a
+  // stop still in effect and hold the space again.
+  const liftHoldsForRequest = useCallback((requestProjectId: string) => {
+    supersedePersonStops(
+      requestProjectId,
+      latestPersonInterruptionAtMs(runsRef.current, requestProjectId, Date.now()),
+    );
+    clearManualStop(requestProjectId);
+    clearRestoredAwaitingIntent(requestProjectId);
+    clearIdlePaused(requestProjectId);
+  }, []);
   const debugLog = useCallback((message: string, data?: unknown) => {
     if (typeof window === "undefined") {
       return;
@@ -316,9 +345,7 @@ export function useHostedRuntimeEnsure({
     // prompt) funnels through here; the auto-ensure effects are gated before
     // they call it. So reaching this point lifts a deliberate Stop, the wait
     // for intent and an idle pause.
-    clearManualStop(effectiveProjectId);
-    clearRestoredAwaitingIntent(effectiveProjectId);
-    clearIdlePaused(effectiveProjectId);
+    liftHoldsForRequest(effectiveProjectId);
     if (isBrowserRuntimeClaimActive(effectiveProjectId)) {
       debugLog("hosted-runtime:ensure-skip-browser-claim", {
         projectId: effectiveProjectId,
@@ -418,6 +445,7 @@ export function useHostedRuntimeEnsure({
     enabled,
     getLatestRuntimeStatuses,
     hostedRuntimeEnsuring,
+    liftHoldsForRequest,
     runtimeStatusesResolved,
     runtimeStatuses,
     refreshRuntimeStatuses,
@@ -470,5 +498,6 @@ export function useHostedRuntimeEnsure({
     ensureHostedRuntime,
     hasHostedRuntimeInProgress,
     lastHostedEnsureLimitRef,
+    liftHoldsForRequest,
   } as const;
 }

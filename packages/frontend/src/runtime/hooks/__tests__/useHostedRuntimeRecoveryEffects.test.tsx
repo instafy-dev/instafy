@@ -8,12 +8,17 @@ import type { RunRecord } from "../../../types";
 import {
   clearIdlePaused,
   clearManualStop,
+  forgetSupersededPersonStopsForTests,
   isIdlePaused,
   isManualStopHeld,
   markIdlePaused,
   markManualStop,
+  supersedePersonStops,
 } from "../../idlePauseRegistry";
-import type { HostedRuntimeLifecycleEventKind } from "../../unexpectedHostedRuntimeRecovery";
+import {
+  latestPersonInterruptionAtMs,
+  type HostedRuntimeLifecycleEventKind,
+} from "../../unexpectedHostedRuntimeRecovery";
 import {
   LOSS_RUNS_READ_TIMEOUT_MS,
   useHostedRuntimeRecoveryEffects,
@@ -59,6 +64,7 @@ function interruptedRun(reason: string, resumeByMs = Date.now() + 14 * 60_000): 
 function hostedEntry(
   status: "ready" | "stopped" | "requested",
   runtimeId = RUNTIME_ID,
+  launchRequestedAtMs = Date.now() - 600_000,
 ): ControllerRuntimeStatusEntry {
   return {
     runtimeId,
@@ -67,9 +73,10 @@ function hostedEntry(
     idleTtlSeconds: 300,
     createdAt: new Date(Date.now() - 600_000).toISOString(),
     lastSeenAt: status === "ready" ? new Date().toISOString() : null,
-    // The machine's own launch, ten minutes before. A stop's release keeps
-    // the runtime `requested` on that lease, never seen since.
-    launchRequestedAt: new Date(Date.now() - 600_000).toISOString(),
+    // The machine's own launch, ten minutes before unless said otherwise. A
+    // stop's release keeps the runtime `requested` on that lease, never seen
+    // since.
+    launchRequestedAt: new Date(launchRequestedAtMs).toISOString(),
     endpointUrl: null,
     taskRef: null,
     isLocal: false,
@@ -91,6 +98,12 @@ interface HarnessProps {
    * row as neither ready nor booting.
    */
   releasing?: boolean;
+  /**
+   * A launch requested at this time instead, as a Start in Machines leaves
+   * the runtime: `requested` on the new lease. The row is older than the
+   * booting window, so the ensure hook still reads it as no machine.
+   */
+  launchRequestedAtMs?: number;
   /** The runs this tab knows. */
   runs?: Record<string, RunRecord> | null;
   /** The controller's runs read for the space (GET /runs). */
@@ -114,11 +127,13 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     hasPendingProjectWork,
     otherReady = false,
     releasing = false,
+    launchRequestedAtMs,
     runs = null,
     fetchProjectRuns,
     activeProjectId = PROJECT_ID,
   }: HarnessProps) {
-    const entry = hostedEntry(stopped ? (releasing ? "requested" : "stopped") : "ready");
+    const status = stopped ? (releasing || launchRequestedAtMs !== undefined ? "requested" : "stopped") : "ready";
+    const entry = hostedEntry(status, RUNTIME_ID, launchRequestedAtMs);
     const statuses = otherReady ? [entry, hostedEntry("ready", OTHER_RUNTIME_ID)] : [entry];
     const readyRuntimeCount = (stopped ? 0 : 1) + (otherReady ? 1 : 0);
     const autoEnsureHostedRef = useRef(false);
@@ -206,6 +221,7 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     ensureHostedRuntime.mockClear();
     clearIdlePaused(PROJECT_ID);
     clearManualStop(PROJECT_ID);
+    forgetSupersededPersonStopsForTests();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -218,6 +234,7 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     container.remove();
     clearIdlePaused(PROJECT_ID);
     clearManualStop(PROJECT_ID);
+    forgetSupersededPersonStopsForTests();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -367,6 +384,63 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
     expect(isIdlePaused(PROJECT_ID)).toBe(true);
   });
 
+  it.each([
+    ["Stop", () => markManualStop(PROJECT_ID)],
+    ["idle pause", () => markIdlePaused(PROJECT_ID)],
+  ])(
+    "recovers a machine that came back elsewhere after this tab's %s and was then lost",
+    async (_label, hold) => {
+      // The person stopped the machine here, then sent from their phone (or
+      // a teammate pressed Start): that request lifts only its own tab's
+      // hold. Ten minutes later the machine is lost with a turn queued.
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        const busy = { preferred: false, hasPendingProjectWork: true };
+        await render({ ...busy, stopped: false });
+        vi.setSystemTime(Date.now() + 1_000);
+        await act(async () => {
+          hold();
+        });
+        await render({ ...busy, stopped: true });
+        expect(ensureHostedRuntime).not.toHaveBeenCalled();
+
+        vi.setSystemTime(Date.now() + 60_000);
+        await render({ ...busy, stopped: false });
+        vi.setSystemTime(Date.now() + 10 * 60_000);
+        await publishOriginExpired();
+        await render({ ...busy, stopped: true });
+
+        expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+        expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+        expect(isIdlePaused(PROJECT_ID)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps this tab's Stop when a status read after it still shows the machine ready", async () => {
+    // Only the machine coming up dates it, not every status that reads ready.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const busy = { preferred: false, hasPendingProjectWork: true };
+      await render({ ...busy, stopped: false });
+      vi.setSystemTime(Date.now() + 1_000);
+      await act(async () => {
+        markManualStop(PROJECT_ID);
+      });
+      vi.setSystemTime(Date.now() + 1_000);
+      await render({ ...busy, stopped: false });
+      await publishOriginExpired();
+      await render({ ...busy, stopped: true, releasing: true });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("still recovers a machine whose origin expired without a stop", async () => {
     const idle = { preferred: false, hasPendingProjectWork: false };
     await render({ ...idle, stopped: false });
@@ -437,6 +511,50 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
       // No origin.expired: this tab only reads the machine as gone.
       const runs = { "run-user_stop": interruptedRun("user_stop") };
       await render({ preferred: false, hasPendingProjectWork: true, stopped: true, runs });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+    });
+
+    it.each([
+      ["sends, reconnects or presses Try again", false],
+      ["presses Start in Machines", true],
+    ])("does not hold the space again once the person %s", async (_label, startedInMachines) => {
+      // The turn the Stop put back in the queue stays queued until the new
+      // machine takes it. The space has no preferred runtime and its row is
+      // older than the booting window, so the new launch does not read as
+      // booting and the fallback start runs when the hold lifts.
+      const runs = { "run-user_stop": interruptedRun("user_stop") };
+      await render({ ...withWork, stopped: true, runs });
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+
+      if (startedInMachines) {
+        // Start lifts the hold once the refresh shows the launch it asked for.
+        await render({ ...withWork, stopped: true, launchRequestedAtMs: Date.now(), runs });
+        await act(async () => {
+          clearManualStop(PROJECT_ID);
+        });
+      } else {
+        // The request lifts the hold before it asks the controller, while the
+        // runtime still reads stopped, as useHostedRuntimeEnsure does.
+        await act(async () => {
+          supersedePersonStops(PROJECT_ID, latestPersonInterruptionAtMs(runs, PROJECT_ID, Date.now()));
+          clearManualStop(PROJECT_ID);
+        });
+      }
+
+      expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+      // The fallback start joins the person's request.
+      expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    });
+
+    it("holds the space again for a person's stop made after the request", async () => {
+      const runs = { "run-user_stop": interruptedRun("user_stop") };
+      await act(async () => {
+        supersedePersonStops(PROJECT_ID, Date.now() - 5 * 60_000);
+      });
+      await render({ ...withWork, stopped: true, runs });
 
       expect(ensureHostedRuntime).not.toHaveBeenCalled();
       expect(isManualStopHeld(PROJECT_ID)).toBe(true);

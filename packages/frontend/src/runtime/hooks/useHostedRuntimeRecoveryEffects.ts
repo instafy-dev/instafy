@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import type { RunRecord } from "../../types";
 import {
   IDLE_PAUSE_CLEARED_EVENT,
   MANUAL_STOP_CHANGED_EVENT,
+  idlePausedAt,
   isIdlePaused,
   isManualStopHeld,
   isRestoredAwaitingIntent,
+  manualStopHold,
   markIdlePaused,
   markManualStop,
+  personStopsSupersededAtMs,
 } from "../idlePauseRegistry";
 import {
   BROWSER_RUNTIME_CLAIM_CHANGED_EVENT,
@@ -23,6 +26,11 @@ import {
   UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS,
   type HostedRuntimeLifecycleEventKind,
 } from "../unexpectedHostedRuntimeRecovery";
+import {
+  isHostedRuntime,
+  latestHostedLaunchRequestedAtMs,
+  runtimeEntryIsReady,
+} from "../utils/runtimeEntry";
 import {
   resolveHostedStatusPollInterval,
   shouldAutoEnsureHostedForEmptyState,
@@ -150,6 +158,31 @@ export function useHostedRuntimeRecoveryEffects({
   useEffect(() => {
     machineReadyRef.current = runtimeReady || readyRuntimeCount > 0;
   }, [readyRuntimeCount, runtimeReady]);
+  // When this tab last saw a hosted machine in the active space come up, on
+  // its own clock. The rising edge, not the latest status that read ready: a
+  // refresh that lands after a Stop, before the machine goes, would otherwise
+  // date the machine after the Stop.
+  const hostedReady = useMemo(
+    () =>
+      runtimeStatuses.some(
+        (entry) => Boolean(entry) && isHostedRuntime(entry) && runtimeEntryIsReady(entry),
+      ),
+    [runtimeStatuses],
+  );
+  const hostedReadySinceRef = useRef<{ projectId: string | null; ready: boolean; at: number | null }>({
+    projectId: null,
+    ready: false,
+    at: null,
+  });
+  useEffect(() => {
+    const seen = hostedReadySinceRef.current;
+    const sameSpace = seen.projectId === activeProjectId;
+    let at = sameSpace ? seen.at : null;
+    if (hostedReady && !(sameSpace && seen.ready)) {
+      at = Date.now();
+    }
+    hostedReadySinceRef.current = { projectId: activeProjectId, ready: hostedReady, at };
+  }, [activeProjectId, hostedReady]);
   const [browserRuntimeClaimEpoch, setBrowserRuntimeClaimEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -169,16 +202,46 @@ export function useHostedRuntimeRecoveryEffects({
   const suppressAutoRuntimeEnsure =
     disableAutoRuntimeEnsure || browserRuntimeClaimActive;
 
+  // Whether a hold stands for the loss of the space's machine: this tab's
+  // Stop or Remove, a stop the controller reported, or an idle pause, set
+  // since this tab last saw a hosted machine come up. A hold outlives a
+  // machine that came back without asking through this tab (a send from
+  // another tab or device, a teammate's Start); that machine's loss is no
+  // stop of anyone's, and is recovered as before.
+  const holdCoversLoss = useCallback((projectId: string | null) => {
+    if (!projectId) {
+      return false;
+    }
+    const heldAtMs = Math.max(
+      manualStopHold(projectId)?.at ?? Number.NEGATIVE_INFINITY,
+      idlePausedAt(projectId) ?? Number.NEGATIVE_INFINITY,
+    );
+    if (heldAtMs === Number.NEGATIVE_INFINITY) {
+      return false;
+    }
+    const seen = hostedReadySinceRef.current;
+    const readySinceMs = seen.projectId === projectId ? seen.at : null;
+    return readySinceMs === null || heldAtMs >= readySinceMs;
+  }, []);
+
   // A turn a person's stop put back in the queue in `projectId` holds the
   // space as that Stop does in its own tab, when it leaves no live hosted
   // machine there. True when there is such a turn: no machine is asked for.
+  // The turn stays queued until a new machine takes it, so a stop no longer
+  // counts once someone asked for a machine after it: in this tab
+  // (personStopsSupersededAtMs), or anywhere, as a hosted launch the status
+  // reports shows.
   const holdForPersonStop = useCallback(
     (
       projectId: string,
       knownRuns: Record<string, RunRecord> | readonly RunRecord[] | null | undefined,
       lostRuntimeId: string | null,
     ) => {
-      if (latestPersonInterruptionAtMs(knownRuns, projectId, Date.now()) === null) {
+      const stoppedAtMs = latestPersonInterruptionAtMs(knownRuns, projectId, Date.now(), {
+        supersededAtMs: personStopsSupersededAtMs(projectId),
+        launchRequestedAtMs: latestHostedLaunchRequestedAtMs(runtimeStatusesRef.current),
+      });
+      if (stoppedAtMs === null) {
         return false;
       }
       if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, lostRuntimeId ?? "")) {
@@ -197,10 +260,13 @@ export function useHostedRuntimeRecoveryEffects({
   // ensureHostedRuntime lifts every hold, as only a person's Start, Send,
   // Reconnect or Try again may, so the holds are read once more right before
   // it: one set after a gate read them (this tab's Stop, a stop the
-  // controller reported) wins. So does a person's stop the runs record.
+  // controller reported) wins. So does a person's stop the runs record. For
+  // a lost machine only a hold set since it came up counts (holdCoversLoss).
   const ensureHostedRuntimeAutomatically = useCallback(
     (projectId: string | null, loss?: { runtimeId: string | null }) => {
-      if (!projectId || isManualStopHeld(projectId) || isIdlePaused(projectId)) {
+      const held = (id: string) =>
+        loss ? holdCoversLoss(id) : isManualStopHeld(id) || isIdlePaused(id);
+      if (!projectId || held(projectId)) {
         return;
       }
       const lostRuntimeId = loss?.runtimeId ?? null;
@@ -229,8 +295,7 @@ export function useHostedRuntimeRecoveryEffects({
             return;
           }
           if (
-            isManualStopHeld(projectId) ||
-            isIdlePaused(projectId) ||
+            held(projectId) ||
             holdForPersonStop(projectId, fetched, lostRuntimeId) ||
             holdForPersonStop(projectId, runsRef.current, lostRuntimeId)
           ) {
@@ -244,7 +309,7 @@ export function useHostedRuntimeRecoveryEffects({
         autoEnsureHostedRef.current = false;
       });
     },
-    [autoEnsureHostedRef, ensureHostedRuntime, holdForPersonStop],
+    [autoEnsureHostedRef, ensureHostedRuntime, holdCoversLoss, holdForPersonStop],
   );
 
   useEffect(() => {
@@ -388,8 +453,9 @@ export function useHostedRuntimeRecoveryEffects({
     // A stop someone chose holds the space: this tab's Stop or Remove, or a
     // stop the controller reported. The machine it takes away is no loss to
     // recover, whether the stop or the loss reached this tab first, and a
-    // recovery would lift the hold and start the machine again.
-    const stopHeld = isManualStopHeld(activeProjectId) || isIdlePaused(activeProjectId);
+    // recovery would lift the hold and start the machine again. A hold older
+    // than the machine that was lost is not that machine's stop.
+    const stopHeld = holdCoversLoss(activeProjectId);
     if (
       !shouldAttemptUnexpectedHostedRuntimeRecovery({
         activeProjectId,
@@ -441,6 +507,7 @@ export function useHostedRuntimeRecoveryEffects({
     ensureHostedRuntimeAutomatically,
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
+    holdCoversLoss,
     hostedRuntimeEnsuring,
     pendingHostedRuntimeRecoveryRef,
     projectReadyForRuntime,

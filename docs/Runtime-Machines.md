@@ -131,20 +131,26 @@ below, while its `resumeBy` is ahead): every automatic start checks the runs
 the tab has, and before it starts a machine it saw go away it reads the
 space's runs once (`GET /runs`), since the stop announces that record only
 after its provider release. Either holds the space like a manual Stop (when
-the stop leaves it no live hosted machine). A read that fails or takes more
-than 10 seconds finds nothing, and the machine starts as before: the tab that
-pressed Stop keeps its own hold, and refusing would leave a machine that was
-really lost waiting with nothing to say why. A stop of a machine with no turn
-running records nothing, so another tab where someone already wrote in the
-chat can still start that machine again on its next status refresh. The
-frontend already holds those reasons like a manual Stop (when they leave the
-space no live hosted machine) once the controller publishes them. Unexpected
-loss (`heartbeat_timeout`, `origin.expired` within 20
-seconds of a machine this tab had ready) still recovers straight away, unless
-the space is held. A machine that goes away while this tab holds a Stop,
-Remove or idle pause is that stop: the tab neither starts it again nor lifts
-the hold, whether the stop or the loss reaches it first. Every automatic
-start reads the holds once more right before it asks for a machine.
+the stop leaves it no live hosted machine). That turn stays queued until a
+machine takes it again, so it also outlives a person asking for one: a stop
+no longer counts once someone in the tab asks for a machine with Send, Start,
+Reconnect or Try again, or once a hosted launch was requested after it. A
+read that fails or takes more than 10 seconds finds nothing, and the machine
+starts as before: the tab that pressed Stop keeps its own hold, and refusing
+would leave a machine that was really lost waiting with nothing to say why.
+A stop of a machine with no turn running records nothing, so another tab
+where someone already wrote in the chat can still start that machine again on
+its next status refresh. The frontend already holds those reasons like a
+manual Stop (when they leave the space no live hosted machine) once the
+controller publishes them. Unexpected loss (`heartbeat_timeout`,
+`origin.expired` within 20 seconds of a machine this tab had ready) still
+recovers straight away, unless the space is held. A machine that goes away
+while this tab holds a Stop, Remove or idle pause set since it last saw a
+hosted machine come up is that stop: the tab neither starts it again nor
+lifts the hold, whether the stop or the loss reaches it first. An older hold
+does not count: a machine started from another tab or device after it, then
+lost, is recovered as before. Every automatic start reads the holds once more
+right before it asks for a machine.
 
 ## Stop reasons
 
@@ -263,10 +269,14 @@ launch that stalled. The Studio therefore takes such a runtime for a stop
 when it knows of one newer than that launch: this tab's own Stop or Remove, a
 turn a person's stop put back in the queue (see "Stop reasons"), or the
 runtime's own `stopRequestedAt` (or, without a time, `stopReason`) where the
-status answer carries one. Machines then labels it Stopping, without a
-spinner, the chat shows no stalled-launch notice for it, and the automatic
-starts count it as a machine still in progress, not as none. A launch
-requested after that stop is a launch again.
+status answer carries one for a person's stop (`user_stop`, `user_remove` or
+a takeover). Machines then labels it Stopping, without a spinner, the chat
+shows no stalled-launch notice for it, and the automatic starts count it as a
+machine still in progress, not as none. A launch requested after that stop
+is a launch again. The controller marks the release of every stop, also of a
+machine that crashed or never came up, and after a failed release keeps the
+mark until it retries. Such a machine still reads as a launch that stalled,
+so an automatic start or Try again has the controller retry the release.
 
 ## Waiting on the runtime limit
 

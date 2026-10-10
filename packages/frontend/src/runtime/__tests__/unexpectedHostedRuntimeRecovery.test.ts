@@ -264,5 +264,27 @@ describe("unexpectedHostedRuntimeRecovery", () => {
     expect(latestPersonInterruptionAtMs([lost, expired, elsewhere, resumed], "project-1", nowMs)).toBeNull();
     expect(latestPersonInterruptionAtMs(null, "project-1", nowMs)).toBeNull();
     expect(latestPersonInterruptionAtMs([later], null, nowMs)).toBeNull();
+
+    // A person's request for a machine since, in this tab or by a launch the
+    // controller reports, overrides the stops before it.
+    const latestAtMs = Date.parse("2026-10-10T10:58:44.749Z");
+    const earlierAtMs = Date.parse("2026-10-10T10:50:00.000Z");
+    expect(latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { supersededAtMs: latestAtMs })).toBeNull();
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { supersededAtMs: earlierAtMs }),
+    ).toBe(latestAtMs);
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { launchRequestedAtMs: latestAtMs + 1 }),
+    ).toBeNull();
+    // A launch at the same instant as the stop does not override it.
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { launchRequestedAtMs: latestAtMs }),
+    ).toBe(latestAtMs);
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, {
+        supersededAtMs: null,
+        launchRequestedAtMs: null,
+      }),
+    ).toBe(latestAtMs);
   });
 });
