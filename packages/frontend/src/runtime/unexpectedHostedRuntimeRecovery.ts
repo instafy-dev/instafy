@@ -1,3 +1,4 @@
+import { readRunInterruption, readRunInterruptionIdentity } from "../conversations/runInterruption";
 import type { RunRecord } from "../types";
 
 export const UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS = 20_000;
@@ -105,6 +106,47 @@ export function hasPendingRunInProject(
   return Object.values(runs).some(
     (run) => run?.projectId === normalizedProjectId && PENDING_RUN_STATUSES.has(run.status),
   );
+}
+
+/**
+ * When the latest person's stop this client knows of in `projectId` was made,
+ * by the controller's clock, or null. Such a stop records itself on the turn
+ * it put back in the queue (readRunInterruption), and the record counts while
+ * the controller still keeps that turn for a machine (`resumeBy` is ahead).
+ * The controller publishes no `runtime.stopped` for a person's stop, so in a
+ * tab that did not make it this record is what tells the stop from a machine
+ * that was lost.
+ */
+export function latestPersonInterruptionAtMs(
+  runs: Record<string, RunRecord> | readonly RunRecord[] | null | undefined,
+  projectId: string | null | undefined,
+  nowMs: number,
+): number | null {
+  const normalizedProjectId = projectId?.trim() ?? "";
+  if (!normalizedProjectId || !runs) {
+    return null;
+  }
+  const records: readonly RunRecord[] = Array.isArray(runs) ? runs : Object.values(runs);
+  let latestMs: number | null = null;
+  for (const run of records) {
+    if (run?.projectId !== normalizedProjectId) {
+      continue;
+    }
+    const interruption = readRunInterruption(run);
+    if (
+      !interruption ||
+      !isPersonRuntimeStopReason(interruption.reason) ||
+      interruption.resumeByMs === null ||
+      interruption.resumeByMs <= nowMs
+    ) {
+      continue;
+    }
+    const interruptedAtMs = Date.parse(readRunInterruptionIdentity(run)?.interruptedAt ?? "");
+    if (Number.isFinite(interruptedAtMs)) {
+      latestMs = latestMs === null ? interruptedAtMs : Math.max(latestMs, interruptedAtMs);
+    }
+  }
+  return latestMs;
 }
 
 export interface ResolveHostedRuntimeRecoveryInput {

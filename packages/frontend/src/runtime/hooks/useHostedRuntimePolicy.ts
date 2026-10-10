@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, type Dispatch, type MutableRefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, type Dispatch, type MutableRefObject } from "react";
 import { controllerClient } from "../../sdk/instafy";
 import type { RuntimeAction, RuntimeStoreState } from "../runtimeStore";
 import {
@@ -108,6 +108,10 @@ export function useHostedRuntimePolicy({
     () => hasPendingRunInProject(state.runs, activeProjectId),
     [activeProjectId, state.runs],
   );
+  const fetchProjectRuns = useCallback(
+    async (projectId: string) => (await controllerClient.runs.fetch({ projectId })).runs,
+    [],
+  );
 
   useHostedRuntimeRecoveryEffects({
     activeProjectId,
@@ -125,6 +129,8 @@ export function useHostedRuntimePolicy({
     hasHostedRuntimeInProgress,
     hasLocalRuntime: selection.hasLocalRuntime,
     hasPendingProjectWork,
+    runs: state.runs,
+    fetchProjectRuns,
     disableAutoRuntimeEnsure: selection.disableAutoRuntimeEnsure,
     resolvedPreferredRuntimeId: selection.resolvedPreferredRuntimeId,
     ensureHostedRuntime,

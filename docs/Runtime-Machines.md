@@ -125,11 +125,21 @@ arrive as `runtime.stopped` and hold like an idle pause. A Stop, Remove or
 takeover made in another tab or device does not reach this tab yet. The
 controller records `user_stop`, `user_remove`, `runtime_limit_takeover` and
 `browser_session_runtime_limit_takeover` in `runtime_events` but does not
-publish `runtime.stopped` for them, so another tab where someone already
-wrote in the chat can still start that machine again on its next status
-refresh. The frontend already holds those reasons like a manual Stop (when
-they leave the space no live hosted machine) once the controller publishes
-them. Unexpected loss (`heartbeat_timeout`, `origin.expired` within 20
+publish `runtime.stopped` for them. Until it does, another tab finds such a
+stop by the turn it put back in the queue (the run's `interruption` record,
+below, while its `resumeBy` is ahead): every automatic start checks the runs
+the tab has, and before it starts a machine it saw go away it reads the
+space's runs once (`GET /runs`), since the stop announces that record only
+after its provider release. Either holds the space like a manual Stop (when
+the stop leaves it no live hosted machine). A read that fails or takes more
+than 10 seconds finds nothing, and the machine starts as before: the tab that
+pressed Stop keeps its own hold, and refusing would leave a machine that was
+really lost waiting with nothing to say why. A stop of a machine with no turn
+running records nothing, so another tab where someone already wrote in the
+chat can still start that machine again on its next status refresh. The
+frontend already holds those reasons like a manual Stop (when they leave the
+space no live hosted machine) once the controller publishes them. Unexpected
+loss (`heartbeat_timeout`, `origin.expired` within 20
 seconds of a machine this tab had ready) still recovers straight away, unless
 the space is held. A machine that goes away while this tab holds a Stop,
 Remove or idle pause is that stop: the tab neither starts it again nor lifts

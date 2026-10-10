@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
+import type { RunRecord } from "../../types";
 import {
   IDLE_PAUSE_CLEARED_EVENT,
   MANUAL_STOP_CHANGED_EVENT,
@@ -15,6 +16,7 @@ import {
 } from "../browserRuntimeClaimRegistry";
 import {
   isRuntimeLimitReclaimStopReason,
+  latestPersonInterruptionAtMs,
   resolveRuntimeStopHold,
   shouldAttemptUnexpectedHostedRuntimeRecovery,
   shouldTrackHostedRuntimeLifecycleEvent,
@@ -30,6 +32,24 @@ import {
 } from "./hostedRuntimeRecoveryDecisions";
 import { stopLeavesNoLiveHostedRuntime } from "./manualStopDecisions";
 import type { EnsureHostedRuntimeOptions } from "./useHostedRuntimeEnsure";
+
+/** How long a lost machine's start waits on its read of the space's runs. */
+export const LOSS_RUNS_READ_TIMEOUT_MS = 10_000;
+
+/** The runs `fetchRuns` reads, or null when the read fails or takes too long. */
+function readRunsWithin(
+  fetchRuns: (projectId: string) => Promise<readonly RunRecord[]>,
+  projectId: string,
+): Promise<readonly RunRecord[] | null> {
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => resolve(null), LOSS_RUNS_READ_TIMEOUT_MS);
+    const settle = (runs: readonly RunRecord[] | null) => {
+      clearTimeout(timeoutId);
+      resolve(runs);
+    };
+    fetchRuns(projectId).then(settle, () => settle(null));
+  });
+}
 
 interface UseHostedRuntimeRecoveryEffectsArgs {
   activeProjectId: string | null;
@@ -48,6 +68,14 @@ interface UseHostedRuntimeRecoveryEffectsArgs {
   hasLocalRuntime: boolean;
   /** A queued message or open turn of this client in the active space. */
   hasPendingProjectWork?: boolean;
+  /** The runs this client knows, to tell a person's stop from a lost machine. */
+  runs?: Record<string, RunRecord> | null;
+  /**
+   * The space's runs as the controller has them now (GET /runs). Read once
+   * before a lost machine is started again, since this tab may not have
+   * heard of the stop that took it.
+   */
+  fetchProjectRuns?: (projectId: string) => Promise<readonly RunRecord[]>;
   disableAutoRuntimeEnsure: boolean;
   resolvedPreferredRuntimeId: string | null;
   ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
@@ -83,6 +111,8 @@ export function useHostedRuntimeRecoveryEffects({
   hasHostedRuntimeInProgress,
   hasLocalRuntime,
   hasPendingProjectWork = false,
+  runs = null,
+  fetchProjectRuns,
   disableAutoRuntimeEnsure,
   resolvedPreferredRuntimeId,
   ensureHostedRuntime,
@@ -103,6 +133,23 @@ export function useHostedRuntimeRecoveryEffects({
   useEffect(() => {
     runtimeStatusesRef.current = runtimeStatuses;
   }, [runtimeStatuses]);
+  // Read again when a read of the runs for an automatic start settles.
+  const runsRef = useRef(runs);
+  useEffect(() => {
+    runsRef.current = runs;
+  }, [runs]);
+  const fetchProjectRunsRef = useRef(fetchProjectRuns);
+  useEffect(() => {
+    fetchProjectRunsRef.current = fetchProjectRuns;
+  }, [fetchProjectRuns]);
+  const activeProjectIdRef = useRef(activeProjectId);
+  useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
+  const machineReadyRef = useRef(runtimeReady || readyRuntimeCount > 0);
+  useEffect(() => {
+    machineReadyRef.current = runtimeReady || readyRuntimeCount > 0;
+  }, [readyRuntimeCount, runtimeReady]);
   const [browserRuntimeClaimEpoch, setBrowserRuntimeClaimEpoch] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -122,22 +169,82 @@ export function useHostedRuntimeRecoveryEffects({
   const suppressAutoRuntimeEnsure =
     disableAutoRuntimeEnsure || browserRuntimeClaimActive;
 
+  // A turn a person's stop put back in the queue in `projectId` holds the
+  // space as that Stop does in its own tab, when it leaves no live hosted
+  // machine there. True when there is such a turn: no machine is asked for.
+  const holdForPersonStop = useCallback(
+    (
+      projectId: string,
+      knownRuns: Record<string, RunRecord> | readonly RunRecord[] | null | undefined,
+      lostRuntimeId: string | null,
+    ) => {
+      if (latestPersonInterruptionAtMs(knownRuns, projectId, Date.now()) === null) {
+        return false;
+      }
+      if (stopLeavesNoLiveHostedRuntime(runtimeStatusesRef.current, lostRuntimeId ?? "")) {
+        markManualStop(projectId);
+      }
+      debugLog("hosted-runtime:auto-ensure-held-for-person-stop", {
+        projectId,
+        runtimeId: lostRuntimeId,
+      });
+      return true;
+    },
+    [debugLog],
+  );
+
   // Every automatic start below goes through here, after its own gate.
   // ensureHostedRuntime lifts every hold, as only a person's Start, Send,
   // Reconnect or Try again may, so the holds are read once more right before
   // it: one set after a gate read them (this tab's Stop, a stop the
-  // controller reported) wins.
+  // controller reported) wins. So does a person's stop the runs record.
   const ensureHostedRuntimeAutomatically = useCallback(
-    (projectId: string | null) => {
-      if (isManualStopHeld(projectId) || isIdlePaused(projectId)) {
+    (projectId: string | null, loss?: { runtimeId: string | null }) => {
+      if (!projectId || isManualStopHeld(projectId) || isIdlePaused(projectId)) {
+        return;
+      }
+      const lostRuntimeId = loss?.runtimeId ?? null;
+      if (holdForPersonStop(projectId, runsRef.current, lostRuntimeId)) {
         return;
       }
       autoEnsureHostedRef.current = true;
-      void ensureHostedRuntime().catch(() => {
+      const start = async () => {
+        const fetchRuns = fetchProjectRunsRef.current;
+        if (loss && fetchRuns) {
+          // A Stop, Remove or takeover made in another tab or device reaches
+          // this one only as the machine going away: the controller publishes
+          // no runtime.stopped for it, and announces the turn it cut off only
+          // after the provider's release. The runs hold that record from the
+          // moment of the stop, so they are read once. A read that fails or
+          // takes too long (the client also answers a failure with no runs)
+          // finds no stop, and the machine starts as it did before this read.
+          // That is the safer side: the tab that pressed Stop keeps its own
+          // hold, so only a stop made elsewhere is at risk, while refusing
+          // would leave a machine that was really lost, and its turn, waiting
+          // with nothing on screen to say why.
+          const fetched = await readRunsWithin(fetchRuns, projectId);
+          if (activeProjectIdRef.current !== projectId || machineReadyRef.current) {
+            // A switch dropped this loss, or a machine came up meanwhile;
+            // either reset the automatic start.
+            return;
+          }
+          if (
+            isManualStopHeld(projectId) ||
+            isIdlePaused(projectId) ||
+            holdForPersonStop(projectId, fetched, lostRuntimeId) ||
+            holdForPersonStop(projectId, runsRef.current, lostRuntimeId)
+          ) {
+            autoEnsureHostedRef.current = false;
+            return;
+          }
+        }
+        await ensureHostedRuntime();
+      };
+      void start().catch(() => {
         autoEnsureHostedRef.current = false;
       });
     },
-    [autoEnsureHostedRef, ensureHostedRuntime],
+    [autoEnsureHostedRef, ensureHostedRuntime, holdForPersonStop],
   );
 
   useEffect(() => {
@@ -193,8 +300,9 @@ export function useHostedRuntimeRecoveryEffects({
         // machine and start it again. The platform stops (credits_exhausted,
         // oom_killed) arrive here today. A Stop, Remove or takeover made in
         // another tab or device does not yet: the controller records those
-        // without publishing runtime.stopped, so this branch waits for that
-        // event and such a stop can still be undone elsewhere.
+        // without publishing runtime.stopped, so until it does the automatic
+        // starts find such a stop by the turn it put back in the queue, and
+        // a stop of a machine with no turn can still be undone elsewhere.
         const hold = resolveRuntimeStopHold(reason);
         if (hold === "manual_stop") {
           // Only the last live hosted machine means "no machine", as in the
@@ -321,7 +429,9 @@ export function useHostedRuntimeRecoveryEffects({
       kind: pendingRecovery?.kind ?? null,
       recoveryAgeMs,
     });
-    ensureHostedRuntimeAutomatically(activeProjectId);
+    ensureHostedRuntimeAutomatically(activeProjectId, {
+      runtimeId: pendingRecovery?.runtimeId ?? null,
+    });
   }, [
     activeProjectId,
     autoEnsureHostedRef,
