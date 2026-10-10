@@ -24648,12 +24648,14 @@ async fn runtime_idle_sweep_retains_ambiguous_launch_until_provider_release_succ
                 &[&runtime_id, &project_id, &provider_id],
             )
             .await?;
+        // Quarantined as long ago as it was launched: the sweep leaves a
+        // younger quarantine to the stop that made it.
         connection
             .execute(
                 "INSERT INTO runtime_leases
-                    (id, project_id, runtime_id, status, requested_at)
+                    (id, project_id, runtime_id, status, requested_at, updated_at)
                  VALUES ($1, $2, $3, 'cleanup_pending',
-                         now() - interval '2 hours')",
+                         now() - interval '2 hours', now() - interval '2 hours')",
                 &[&lease_id, &project_id, &runtime_id],
             )
             .await?;

@@ -10,13 +10,10 @@
 //! (`sweeps::expire_stale_requeued_jobs`).
 //!
 //! `/runtime/stop` and `/runtime/remove` also announce such runs as
-//! `run.progress` once the stop has answered, so open tabs see the turn stop
-//! working without a reload.
+//! `run.progress` as soon as the stop has committed, before any provider
+//! release, so open tabs see the turn stop working without a reload.
 
-use std::str::FromStr;
-
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value as JsonValue};
 use tokio_postgres::Transaction;
@@ -26,9 +23,6 @@ use uuid::Uuid;
 use crate::runs::{map_run_row, run_snapshot_to_json, RunSnapshot};
 use crate::{internal_error, ApiError, AppState};
 
-use super::stop::{
-    RuntimeRemovePayload, RuntimeRemoveResponse, RuntimeStopPayload, RuntimeStopResponse,
-};
 use super::sweeps::REQUEUED_JOB_EXPIRY_SECONDS;
 
 /// The longest stop reason a run records as given.
@@ -212,56 +206,6 @@ fn interrupted_run_event_data(snapshot: &RunSnapshot, job_id: &Uuid) -> JsonValu
     })
 }
 
-/// Whether a stop that answered `outcome` may have requeued a running turn.
-/// Only a request refused before it reached a runtime (malformed, without
-/// credentials, without access, or for no such runtime) cannot have. A
-/// conflict or a server error can follow a committed quarantine, and so can
-/// the 502 that reports a provider release still pending.
-fn announces_after(outcome: Result<(), StatusCode>) -> bool {
-    !matches!(
-        outcome,
-        Err(StatusCode::BAD_REQUEST
-            | StatusCode::UNAUTHORIZED
-            | StatusCode::FORBIDDEN
-            | StatusCode::NOT_FOUND)
-    )
-}
-
-/// `POST /runtime/stop`: [`super::stop::runtime_stop`], then the announcement
-/// of the turns it interrupted. The request and the answer are the stop's.
-pub(super) async fn runtime_stop_announcing_interruptions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<RuntimeStopPayload>,
-) -> Result<(StatusCode, Json<RuntimeStopResponse>), (StatusCode, Json<ApiError>)> {
-    let runtime_id = Uuid::from_str(&payload.runtime_id).ok();
-    let stopped = super::stop::runtime_stop(State(state.clone()), headers, Json(payload)).await;
-    if let Some(runtime_id) = runtime_id {
-        if announces_after(stopped.as_ref().map(|_| ()).map_err(|(status, _)| *status)) {
-            announce_interrupted_runs(&state, &runtime_id).await;
-        }
-    }
-    stopped
-}
-
-/// `POST /runtime/remove`: [`super::stop::runtime_remove`], then the
-/// announcement of the turns it interrupted. The request and the answer are
-/// the removal's.
-pub(super) async fn runtime_remove_announcing_interruptions(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<RuntimeRemovePayload>,
-) -> Result<Json<RuntimeRemoveResponse>, (StatusCode, Json<ApiError>)> {
-    let runtime_id = Uuid::from_str(&payload.runtime_id).ok();
-    let removed = super::stop::runtime_remove(State(state.clone()), headers, Json(payload)).await;
-    if let Some(runtime_id) = runtime_id {
-        if announces_after(removed.as_ref().map(|_| ()).map_err(|(status, _)| *status)) {
-            announce_interrupted_runs(&state, &runtime_id).await;
-        }
-    }
-    removed
-}
-
 #[cfg(test)]
 #[path = "run_interruptions_tests.rs"]
 pub(super) mod db_tests;
@@ -378,27 +322,5 @@ mod tests {
         assert_eq!(interruption_reason_token(""), "other");
         assert_eq!(interruption_reason_token("<b>x</b>"), "other");
         assert_eq!(interruption_reason_token("User Stop"), "other");
-    }
-
-    #[test]
-    fn announces_after_requeues_that_may_have_committed() {
-        for refused in [
-            StatusCode::BAD_REQUEST,
-            StatusCode::UNAUTHORIZED,
-            StatusCode::FORBIDDEN,
-            StatusCode::NOT_FOUND,
-        ] {
-            assert!(!announces_after(Err(refused)), "{refused}");
-        }
-        for after_a_requeue in [
-            StatusCode::CONFLICT,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            StatusCode::BAD_GATEWAY,
-        ] {
-            assert!(announces_after(Err(after_a_requeue)), "{after_a_requeue}");
-        }
-        // A 200, and the 502 answer of a stop whose provider release is
-        // still pending, are both `Ok` to the wrapper.
-        assert!(announces_after(Ok(())));
     }
 }

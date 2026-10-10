@@ -1,16 +1,20 @@
 //! Database-backed tests of a turn a runtime stop cuts off: the requeue marks
-//! its run, `/runtime/stop` and `/runtime/remove` announce it, and the
-//! existing lease resumes it. Each stop path that can requeue a running turn
-//! is driven once, here for the routes and in the sweeps' own tests for the
-//! sweeps. Requires `TEST_DATABASE_URL` like the tests in `tests.rs`.
+//! its run, `/runtime/stop` and `/runtime/remove` announce it (and a person's
+//! stop itself) before the provider release, and the existing lease resumes
+//! it. Each stop path that can requeue a running turn is driven once, here for
+//! the routes and in the sweeps' own tests for the sweeps. Requires
+//! `TEST_DATABASE_URL` like the tests in `tests.rs`.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::broadcast::Receiver;
+use tokio::sync::{watch, Notify};
+use tokio::time::timeout;
 use tokio_postgres::types::Json as PgJson;
 use tower::ServiceExt as _;
 use uuid::Uuid;
@@ -52,6 +56,11 @@ pub(crate) struct RunningTurn {
     pub(crate) job_id: Uuid,
     pub(crate) run_id: Uuid,
     releases: Arc<Mutex<usize>>,
+    /// Whether the stand-in provider answers a release; while it is `false`
+    /// every release waits.
+    releases_open: watch::Sender<bool>,
+    /// Told when the provider is asked for a release.
+    release_asked: Arc<Notify>,
     _provider: AbortingTask<()>,
 }
 
@@ -76,14 +85,21 @@ impl RunningTurn {
         release: StatusCode,
     ) -> anyhow::Result<Self> {
         let releases = Arc::new(Mutex::new(0));
+        let (releases_open, open) = watch::channel(true);
+        let release_asked = Arc::new(Notify::new());
         let provider_app = axum::Router::new().route(
             "/runtime/release",
             axum::routing::post({
                 let releases = releases.clone();
+                let release_asked = release_asked.clone();
                 move || {
                     let releases = releases.clone();
+                    let release_asked = release_asked.clone();
+                    let mut open = open.clone();
                     async move {
                         *releases.lock().unwrap() += 1;
+                        release_asked.notify_one();
+                        let _ = open.wait_for(|open| *open).await;
                         release
                     }
                 }
@@ -193,6 +209,8 @@ impl RunningTurn {
             job_id,
             run_id,
             releases,
+            releases_open,
+            release_asked,
             _provider: provider,
         })
     }
@@ -225,6 +243,74 @@ impl RunningTurn {
             status,
             serde_json::from_slice(&body).unwrap_or(JsonValue::Null),
         ))
+    }
+
+    /// `POST uri` while the provider holds the release it is asked for, and
+    /// `while_releasing` once it has been asked: the answer, and what
+    /// `while_releasing` found while the stop waited on the provider.
+    pub(crate) async fn post_while_releasing<T>(
+        &self,
+        uri: &str,
+        body: JsonValue,
+        while_releasing: impl std::future::Future<Output = T>,
+    ) -> anyhow::Result<(StatusCode, JsonValue, T)> {
+        self.releases_open.send_replace(false);
+        let during_release = async {
+            let asked = timeout(Duration::from_secs(10), self.release_asked.notified())
+                .await
+                .is_ok();
+            let found = if asked {
+                Some(while_releasing.await)
+            } else {
+                None
+            };
+            self.releases_open.send_replace(true);
+            found
+        };
+        let (answered, found) = tokio::join!(self.post(uri, body), during_release);
+        let (status, body) = answered?;
+        let found = found.ok_or_else(|| {
+            anyhow::anyhow!("the stop answered {status} {body} without asking for a release")
+        })?;
+        Ok((status, body, found))
+    }
+
+    /// `POST uri` while the provider holds the release it is asked for: the
+    /// answer, and what `events` received until the release was asked for,
+    /// that is what the stop published before the provider released the
+    /// machine.
+    pub(crate) async fn post_holding_the_release(
+        &self,
+        uri: &str,
+        body: JsonValue,
+        events: &mut Receiver<ControllerEvent>,
+    ) -> anyhow::Result<(StatusCode, JsonValue, Vec<ControllerEvent>)> {
+        self.post_while_releasing(uri, body, async { drain(events) })
+            .await
+    }
+
+    /// The runtime's entry in its space's `GET /projects/:id/runtime/status`.
+    pub(crate) async fn status_entry(&self) -> anyhow::Result<JsonValue> {
+        let mut connection = self.pool.get().await?;
+        let transaction = connection.transaction().await?;
+        let response = crate::runtime::load_runtime_status_response(
+            &self.state,
+            &transaction,
+            &self.project_id,
+        )
+        .await
+        .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?;
+        transaction.rollback().await?;
+        let response = serde_json::to_value(&response)?;
+        response["runtimes"]
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["runtimeId"] == json!(self.runtime_id.to_string()))
+            })
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("runtime missing from status: {response}"))
     }
 
     /// `POST /runtime/stop` of the turn's runtime with `reason`.
@@ -458,6 +544,30 @@ fn json_time(value: &JsonValue) -> anyhow::Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(text)?.with_timezone(&Utc))
 }
 
+/// Every event published since the last call.
+pub(crate) fn drain(events: &mut Receiver<ControllerEvent>) -> Vec<ControllerEvent> {
+    let mut found = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        found.push(event);
+    }
+    found
+}
+
+/// The events of `kind` among `events`, and for `run.progress` only those of
+/// `run_id`.
+fn of_kind<'a>(
+    events: &'a [ControllerEvent],
+    kind: &str,
+    run_id: Uuid,
+) -> Vec<&'a ControllerEvent> {
+    events
+        .iter()
+        .filter(|event| {
+            event.kind == kind && (kind != "run.progress" || event.run_id == Some(run_id))
+        })
+        .collect()
+}
+
 /// The `run.progress` events published for `run_id` since the last call.
 pub(crate) fn run_progress_events(
     events: &mut Receiver<ControllerEvent>,
@@ -502,12 +612,68 @@ fn assert_announces(event: &ControllerEvent, turn: &RunningTurn, run: &RunRecord
     assert!(event.data.get("percent").is_none());
 }
 
+/// The `runtime.stopped` of a person's stop, as a platform stop publishes
+/// it: the reason, the runtime, and the work left queued in the space, here
+/// the turn the stop requeued.
+fn assert_runtime_stopped(event: &ControllerEvent, turn: &RunningTurn, reason: &str, source: &str) {
+    assert_eq!(event.kind, "runtime.stopped");
+    assert_eq!(event.project_id, Some(turn.project_id));
+    assert_eq!(
+        event.data,
+        json!({
+            "runtimeId": turn.runtime_id,
+            "status": "stopped",
+            "reason": reason,
+            "source": source,
+            "queuedJobCount": 1,
+        })
+    );
+}
+
+/// What a person's stop publishes once it has committed: one
+/// `runtime.stopped` with `reason`, then the turn it interrupted, so a tab
+/// holds the space before it hears of the turn.
+fn assert_publishes_a_persons_stop(
+    published: &[ControllerEvent],
+    turn: &RunningTurn,
+    run: &RunRecord,
+    reason: &str,
+    source: &str,
+) {
+    let stopped = of_kind(published, "runtime.stopped", turn.run_id);
+    assert_eq!(stopped.len(), 1, "{published:?}");
+    assert_runtime_stopped(stopped[0], turn, reason, source);
+    let announced = of_kind(published, "run.progress", turn.run_id);
+    assert_eq!(announced.len(), 1, "{published:?}");
+    assert_announces(announced[0], turn, run, reason);
+    let position = |kind: &str| published.iter().position(|event| event.kind == kind);
+    assert!(
+        position("runtime.stopped") < position("run.progress"),
+        "{published:?}"
+    );
+}
+
+/// Nothing about the stop or the turn: no `runtime.stopped` and no
+/// `run.progress` of the turn's run.
+fn assert_publishes_nothing_of_the_stop(published: &[ControllerEvent], turn: &RunningTurn) {
+    assert!(
+        of_kind(published, "runtime.stopped", turn.run_id).is_empty(),
+        "{published:?}"
+    );
+    assert!(
+        of_kind(published, "run.progress", turn.run_id).is_empty(),
+        "{published:?}"
+    );
+}
+
 /// The Stop button on a hosted machine (the Oct 7 path): the stop commits
 /// the quarantine that requeues the turn, then waits on the provider's
-/// release. The turn is queued from the quarantine on, and the stop
-/// announces it once it answers.
+/// release, which can take a minute. The turn is queued from the quarantine
+/// on. The stop publishes `runtime.stopped` and announces the turn as soon as
+/// the quarantine commits: on Oct 10 another tab that heard nothing during
+/// the release started the machine again, and the stopped turn resumed.
 #[tokio::test]
-async fn a_users_stop_of_a_hosted_machine_marks_and_announces_the_turn() -> anyhow::Result<()> {
+async fn a_users_stop_of_a_hosted_machine_is_published_before_the_release() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("hosted user stop interruption test").await?;
     let project_id = Uuid::new_v4();
     with_shared_db_fixture(fixture(project_id), async {
@@ -520,23 +686,79 @@ async fn a_users_stop_of_a_hosted_machine_marks_and_announces_the_turn() -> anyh
         .await?;
         let mut events = turn.state.events.subscribe();
 
-        let (status, body) = turn.stop("user_stop").await?;
+        let (status, body, before_release) = turn
+            .post_holding_the_release(
+                "/runtime/stop",
+                json!({ "runtime_id": turn.runtime_id, "reason": "user_stop" }),
+                &mut events,
+            )
+            .await?;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["status_changed"], true, "{body}");
         assert_eq!(turn.releases(), 1);
 
         let run = turn.assert_interrupted("user_stop").await?;
-        let announced = run_progress_events(&mut events, turn.run_id);
-        assert_eq!(announced.len(), 1, "{announced:?}");
-        assert_announces(&announced[0], &turn, &run, "user_stop");
+        assert_publishes_a_persons_stop(&before_release, &turn, &run, "user_stop", "runtime_stop");
+        assert_publishes_nothing_of_the_stop(&drain(&mut events), &turn);
 
         turn.assert_resumed_by_a_lease().await
     })
     .await
 }
 
+/// While a stop's provider release runs, the runtime is `requested` and
+/// unseen on the lease it ran on, which by `status` and `launchRequestedAt`
+/// alone is a launch that stalled: on Oct 10 a tab read a stopped machine
+/// that way and started it again. The status entry says which stop holds
+/// it, and since when, until the stop is done.
+#[tokio::test]
+async fn the_runtime_status_tells_a_stops_release_from_a_launch() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("stop status interruption test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(project_id), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::NO_CONTENT,
+        )
+        .await?;
+        let running = turn.status_entry().await?;
+        assert!(running.get("stopRequestedAt").is_none(), "{running}");
+        assert!(running.get("stopReason").is_none(), "{running}");
+
+        let (status, body, releasing) = turn
+            .post_while_releasing(
+                "/runtime/stop",
+                json!({ "runtime_id": turn.runtime_id, "reason": "user_stop" }),
+                turn.status_entry(),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let releasing = releasing?;
+        assert_eq!(releasing["status"], "requested", "{releasing}");
+        assert_eq!(releasing["lastSeenAt"], JsonValue::Null, "{releasing}");
+        assert_eq!(
+            releasing["launchRequestedAt"], running["launchRequestedAt"],
+            "{releasing}"
+        );
+        assert_eq!(releasing["stopReason"], "user_stop", "{releasing}");
+        // The quarantine's time, which is also when it interrupted the turn.
+        let run = turn.assert_interrupted("user_stop").await?;
+        assert_eq!(json_time(&releasing["stopRequestedAt"])?, run.updated_at);
+
+        let stopped = turn.status_entry().await?;
+        assert_eq!(stopped["status"], "stopped", "{stopped}");
+        assert!(stopped.get("stopRequestedAt").is_none(), "{stopped}");
+        assert!(stopped.get("stopReason").is_none(), "{stopped}");
+        Ok(())
+    })
+    .await
+}
+
 /// A stop whose provider release fails answers 502 with its quarantine in
-/// place: the turn it requeued is queued all the same, and announced.
+/// place: the turn it requeued is queued all the same, and the stop and the
+/// turn are published.
 #[tokio::test]
 async fn a_failed_provider_release_still_announces_the_requeued_turn() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("failed release interruption test").await?;
@@ -556,16 +778,27 @@ async fn a_failed_provider_release_still_announces_the_requeued_turn() -> anyhow
         assert_eq!(body["skip_reason"], "provider_cleanup_pending", "{body}");
 
         let run = turn.assert_interrupted("user_stop").await?;
-        let announced = run_progress_events(&mut events, turn.run_id);
-        assert_eq!(announced.len(), 1, "{announced:?}");
-        assert_announces(&announced[0], &turn, &run, "user_stop");
+        assert_publishes_a_persons_stop(
+            &drain(&mut events),
+            &turn,
+            &run,
+            "user_stop",
+            "runtime_stop",
+        );
+        // The quarantine stays until a retry releases the machine, and so
+        // does what the status entry says of it.
+        let quarantined = turn.status_entry().await?;
+        assert_eq!(quarantined["status"], "requested", "{quarantined}");
+        assert_eq!(quarantined["stopReason"], "user_stop", "{quarantined}");
+        assert_eq!(json_time(&quarantined["stopRequestedAt"])?, run.updated_at);
         Ok(())
     })
     .await
 }
 
 /// A runtime with no lease generation left is stopped without the
-/// quarantine (`perform_runtime_stop` directly); its turn is marked the same.
+/// quarantine (`perform_runtime_stop` directly); its turn is marked, and the
+/// stop and the turn published, the same.
 #[tokio::test]
 async fn a_users_stop_of_a_runtime_without_a_lease_marks_and_announces_the_turn(
 ) -> anyhow::Result<()> {
@@ -587,9 +820,13 @@ async fn a_users_stop_of_a_runtime_without_a_lease_marks_and_announces_the_turn(
         assert_eq!(body["provider_release_attempted"], false, "{body}");
 
         let run = turn.assert_interrupted("user_stop").await?;
-        let announced = run_progress_events(&mut events, turn.run_id);
-        assert_eq!(announced.len(), 1, "{announced:?}");
-        assert_announces(&announced[0], &turn, &run, "user_stop");
+        assert_publishes_a_persons_stop(
+            &drain(&mut events),
+            &turn,
+            &run,
+            "user_stop",
+            "runtime_stop",
+        );
         Ok(())
     })
     .await
@@ -683,7 +920,8 @@ async fn requeue_marks_only_turns_that_were_running() -> anyhow::Result<()> {
 }
 
 /// A stop that is skipped, here for another lease generation, requeues
-/// nothing: the turn keeps running and nothing is announced.
+/// nothing: the turn keeps running, and neither the stop nor the turn is
+/// published.
 #[tokio::test]
 async fn a_skipped_stop_leaves_the_turn_running() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("skipped stop interruption test").await?;
@@ -716,7 +954,46 @@ async fn a_skipped_stop_leaves_the_turn_running() -> anyhow::Result<()> {
         assert_eq!(after, before);
         assert_eq!(after.status, "in_progress");
         assert_eq!(turn.job(turn.job_id).await?.0, "leased");
-        assert!(run_progress_events(&mut events, turn.run_id).is_empty());
+        assert_eq!(turn.releases(), 0);
+        assert_publishes_nothing_of_the_stop(&drain(&mut events), &turn);
+        Ok(())
+    })
+    .await
+}
+
+/// A stop the controller refuses, here with 409 for a hosted runtime that is
+/// ready without its lease generation, rolls back: the turn keeps running,
+/// and neither the stop nor the turn is published.
+#[tokio::test]
+async fn a_refused_stop_publishes_nothing() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("refused stop interruption test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(project_id), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::NO_CONTENT,
+        )
+        .await?;
+        turn.pool
+            .get()
+            .await?
+            .execute(
+                "update runtimes set active_lease_id = null where id = $1",
+                &[&turn.runtime_id],
+            )
+            .await?;
+        let before = turn.run(turn.run_id).await?;
+        let mut events = turn.state.events.subscribe();
+
+        let (status, body) = turn.stop("user_stop").await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        assert_eq!(turn.run(turn.run_id).await?, before);
+        assert_eq!(turn.job(turn.job_id).await?.0, "leased");
+        assert_eq!(turn.releases(), 0);
+        assert_publishes_nothing_of_the_stop(&drain(&mut events), &turn);
         Ok(())
     })
     .await
@@ -724,7 +1001,8 @@ async fn a_skipped_stop_leaves_the_turn_running() -> anyhow::Result<()> {
 
 /// A repeated Stop finds the runtime already stopped and changes nothing. It
 /// announces the same stored record again, with the same timestamp, so a
-/// viewer's clock on the waiting turn does not restart.
+/// viewer's clock on the waiting turn does not restart, but it stopped no
+/// runtime, so it publishes no second `runtime.stopped`.
 #[tokio::test]
 async fn repeating_the_stop_republishes_the_same_record() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("repeated stop interruption test").await?;
@@ -748,19 +1026,26 @@ async fn repeating_the_stop_republishes_the_same_record() -> anyhow::Result<()> 
         assert_eq!(body["skip_reason"], "already_stopped", "{body}");
 
         assert_eq!(turn.run(turn.run_id).await?, first);
-        let announced = run_progress_events(&mut events, turn.run_id);
+        let published = drain(&mut events);
+        let announced = of_kind(&published, "run.progress", turn.run_id);
         assert_eq!(announced.len(), 2, "{announced:?}");
         for event in &announced {
             assert_announces(event, &turn, &first, "user_stop");
         }
         assert_eq!(announced[0].data, announced[1].data);
+        assert_eq!(
+            of_kind(&published, "runtime.stopped", turn.run_id).len(),
+            1,
+            "{published:?}"
+        );
         Ok(())
     })
     .await
 }
 
-/// Remove on a hosted machine, which quarantines like a stop: the turn is
-/// marked, announced and resumed by the next lease.
+/// Remove on a hosted machine, which quarantines like a stop: the removal
+/// and the turn are published before the provider release, and the turn is
+/// resumed by the next lease.
 #[tokio::test]
 async fn a_users_remove_marks_and_announces_the_turn() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("user remove interruption test").await?;
@@ -775,19 +1060,26 @@ async fn a_users_remove_marks_and_announces_the_turn() -> anyhow::Result<()> {
         .await?;
         let mut events = turn.state.events.subscribe();
 
-        let (status, body) = turn
-            .post(
+        let (status, body, before_release) = turn
+            .post_holding_the_release(
                 "/runtime/remove",
                 json!({ "runtimeId": turn.runtime_id, "reason": "user_remove" }),
+                &mut events,
             )
             .await?;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["ok"], true, "{body}");
+        assert_eq!(turn.releases(), 1);
 
         let run = turn.assert_interrupted("user_remove").await?;
-        let announced = run_progress_events(&mut events, turn.run_id);
-        assert_eq!(announced.len(), 1, "{announced:?}");
-        assert_announces(&announced[0], &turn, &run, "user_remove");
+        assert_publishes_a_persons_stop(
+            &before_release,
+            &turn,
+            &run,
+            "user_remove",
+            "runtime_remove",
+        );
+        assert_publishes_nothing_of_the_stop(&drain(&mut events), &turn);
 
         turn.assert_resumed_by_a_lease().await
     })
@@ -795,7 +1087,8 @@ async fn a_users_remove_marks_and_announces_the_turn() -> anyhow::Result<()> {
 }
 
 /// Taking over the organization's hosted slot from another space stops this
-/// space's machine through `/runtime/stop` with `runtime_limit_takeover`.
+/// space's machine through `/runtime/stop` with `runtime_limit_takeover`, a
+/// person's stop like Stop.
 #[tokio::test]
 async fn a_runtime_limit_takeover_marks_the_turn_it_requeues() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("takeover interruption test").await?;
@@ -808,20 +1101,113 @@ async fn a_runtime_limit_takeover_marks_the_turn_it_requeues() -> anyhow::Result
             StatusCode::NO_CONTENT,
         )
         .await?;
+        let mut events = turn.state.events.subscribe();
 
         let (status, body) = turn.stop("runtime_limit_takeover").await?;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["status_changed"], true, "{body}");
 
-        turn.assert_interrupted("runtime_limit_takeover").await?;
+        let run = turn.assert_interrupted("runtime_limit_takeover").await?;
+        assert_publishes_a_persons_stop(
+            &drain(&mut events),
+            &turn,
+            &run,
+            "runtime_limit_takeover",
+            "runtime_stop",
+        );
         turn.assert_resumed_by_a_lease().await
     })
     .await
 }
 
+/// A browser session recycles its own space's idle machine with
+/// `runtime_limit_takeover` through a stop that spares active jobs, and then
+/// starts it again itself. Nobody clicked it, so it publishes no
+/// `runtime.stopped` that would hold that space in its other tabs. A turn
+/// whose lease lapsed is still requeued and announced.
+#[tokio::test]
+async fn a_browser_sessions_own_recycle_publishes_no_runtime_stopped() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("browser session recycle stop test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(project_id), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::NO_CONTENT,
+        )
+        .await?;
+        turn.let_the_runtime_go_quiet().await?;
+        let mut events = turn.state.events.subscribe();
+
+        let (status, body) = turn
+            .post(
+                "/runtime/stop",
+                json!({
+                    "runtime_id": turn.runtime_id,
+                    "reason": "runtime_limit_takeover",
+                    "skip_if_active_jobs": true,
+                    "expected_project_id": turn.project_id,
+                }),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status_changed"], true, "{body}");
+
+        let run = turn.assert_interrupted("runtime_limit_takeover").await?;
+        let published = drain(&mut events);
+        assert!(
+            of_kind(&published, "runtime.stopped", turn.run_id).is_empty(),
+            "{published:?}"
+        );
+        let announced = of_kind(&published, "run.progress", turn.run_id);
+        assert_eq!(announced.len(), 1, "{published:?}");
+        assert_announces(announced[0], &turn, &run, "runtime_limit_takeover");
+        Ok(())
+    })
+    .await
+}
+
+/// A stop through `/runtime/stop` that is not a person's, here a runtime
+/// shutting itself down, publishes no `runtime.stopped`: a tab reads a
+/// reason it does not know as an unexpected loss and starts the machine
+/// again. The turn it interrupted is announced as before.
+#[tokio::test]
+async fn a_stop_that_is_not_a_persons_publishes_no_runtime_stopped() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("runtime shutdown stop test").await?;
+    let project_id = Uuid::new_v4();
+    with_shared_db_fixture(fixture(project_id), async {
+        let turn = RunningTurn::start(
+            pool.clone(),
+            project_id,
+            RuntimeShape::Hosted,
+            StatusCode::NO_CONTENT,
+        )
+        .await?;
+        let mut events = turn.state.events.subscribe();
+
+        let (status, body) = turn.stop("agent_shutdown").await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["status_changed"], true, "{body}");
+
+        let run = turn.assert_interrupted("agent_shutdown").await?;
+        let published = drain(&mut events);
+        assert!(
+            of_kind(&published, "runtime.stopped", turn.run_id).is_empty(),
+            "{published:?}"
+        );
+        let announced = of_kind(&published, "run.progress", turn.run_id);
+        assert_eq!(announced.len(), 1, "{published:?}");
+        assert_announces(announced[0], &turn, &run, "agent_shutdown");
+        Ok(())
+    })
+    .await
+}
+
 /// The pool-retirement drain stops a live runtime with its active turn
-/// (`/operator/runtime-drain/stop`). It does not announce the turn; viewers
-/// see the record on their next load of the runs.
+/// (`/operator/runtime-drain/stop`). It neither announces the turn nor
+/// publishes `runtime.stopped`; viewers see the record on their next load of
+/// the runs.
 #[tokio::test]
 async fn a_pool_retirement_drain_marks_the_turn_it_requeues() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("drain interruption test").await?;
@@ -850,7 +1236,7 @@ async fn a_pool_retirement_drain_marks_the_turn_it_requeues() -> anyhow::Result<
         assert_eq!(body["statusChanged"], true, "{body}");
 
         turn.assert_interrupted("pool_retirement").await?;
-        assert!(run_progress_events(&mut events, turn.run_id).is_empty());
+        assert_publishes_nothing_of_the_stop(&drain(&mut events), &turn);
         turn.assert_resumed_by_a_lease().await
     })
     .await
