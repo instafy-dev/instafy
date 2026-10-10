@@ -164,11 +164,14 @@ older hold does not count: a machine started from another tab or device after
 it, then lost, is recovered as before. Every automatic start reads the holds
 once more right before it asks for a machine.
 
-Every hosted stop is followed, 25 to 35 seconds later, by `origin.expired`
-for the stopped machine's origin: once its heartbeats are 25 seconds old the
-origin presence sweep marks it offline and publishes the expiry, whatever
-stopped the machine. After a stop that expiry is part of the stop, not an
-unexpected loss, which is why the recovery above checks the holds first.
+Every hosted stop is followed, about a minute later, by `origin.expired` for
+the stopped machine's origin. The origin server beats every 20 seconds, and
+once its last heartbeat is 60 seconds old, three beats, the origin presence
+sweep (every 10 seconds) marks it offline and publishes the expiry, whatever
+stopped the machine. One missed or slow beat does not expire a running
+machine, and a beat that lands while the sweep is marking it keeps the origin
+online. After a stop that expiry is part of the stop, not an unexpected loss,
+which is why the recovery above checks the holds first.
 
 ## Stop reasons
 
