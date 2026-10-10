@@ -106,7 +106,8 @@ continues to treat candidate bytes only as unexecuted data.
 The three workflows that report `main`'s required checks (Public Build, npm
 Package Releases and Trusted Public Boundary) also run for `merge_group`
 `checks_requested` events. GitHub sends those only for a merge queue required
-on `main`, so the trigger is inert until branch protection requires one. The
+on `main`; branch protection on `main` requires one (squash merge, only
+non-failing pull requests). The
 only change pull-request and push runs see is the `pull-requests: read`
 permission added to the npm Changeset policy job. Merge-group runs always use
 hosted runners and skip `Secret scan` through its main-only condition, as pull
@@ -399,8 +400,10 @@ and retains `instafy-bot-2`'s **pull-request-only** exception. GitHub's
 skips that ruleset for the exempt actor instead of requiring an explicit bypass;
 it does not create a self-approval or a bypass audit entry. A separate active
 `main-requires-pull-request` ruleset has **no bypass actors**, so the review
-exemption does not permit direct pushes. Required CI, up-to-date branches and
-conversation resolution stay in separate branch protection.
+exemption does not permit direct pushes. Required CI, the merge queue and
+conversation resolution stay in separate branch protection. Branches no longer
+need to be up to date with `main`: the queue tests each pull request on top of
+current `main` and any pull requests queued ahead of it before it merges.
 
 This permits an explicitly authorized merge of a trusted bot's own changes
 after review and exact-head CI, without fabricating an approving review. Do not
@@ -418,20 +421,22 @@ that the bot lacks its configured exception. The CLI can reject a `BLOCKED`
 merge state before asking GitHub to evaluate the merging account; enabling
 auto-merge may also leave that PR waiting for review. For an already authorized
 trusted-bot merge, verify the exact repository, PR author, head SHA, applicable
-review-only exception, and every required check on that SHA. The current base
-must satisfy branch-update requirements. Do not ignore an outstanding request
-for changes, an unresolved required review thread, or another protection. Then
-use GitHub's normal merge endpoint with the reviewed head pinned:
+review-only exception, and every required check on that SHA. Do not ignore an
+outstanding request for changes, an unresolved required review thread, or
+another protection. Then add the pull request to the merge queue with the
+reviewed head pinned:
 
 ```bash
-gh api --method PUT "repos/instafy-dev/instafy/pulls/$REVIEWED_PR/merge" \
-  -f sha="$REVIEWED_HEAD" -f merge_method=squash
+gh pr merge "$REVIEWED_PR" --repo instafy-dev/instafy --squash \
+  --match-head-commit "$REVIEWED_HEAD"
 ```
 
 Set `REVIEWED_PR` and `REVIEWED_HEAD` from the reviewed PR, using the full commit
 SHA; do not resolve a moving branch name at merge time. The request lets GitHub
 evaluate the existing exception and remaining protections. It does not request
-a blanket `--admin` override. Never use it to ignore failed, pending or unknown
+a blanket `--admin` override. The queue then runs the required checks on the
+merge group and merges it only when they pass; a pull request that fails in the
+queue is removed from it. Never use it to ignore failed, pending or unknown
 required CI, waive an outside contribution's review, or change protection just
 to clear a merge block. If GitHub rejects the request, diagnose that rejection.
 
