@@ -130,7 +130,11 @@ wrote in the chat can still start that machine again on its next status
 refresh. The frontend already holds those reasons like a manual Stop (when
 they leave the space no live hosted machine) once the controller publishes
 them. Unexpected loss (`heartbeat_timeout`, `origin.expired` within 20
-seconds of a machine this tab had ready) still recovers straight away.
+seconds of a machine this tab had ready) still recovers straight away, unless
+the space is held. A machine that goes away while this tab holds a Stop,
+Remove or idle pause is that stop: the tab neither starts it again nor lifts
+the hold, whether the stop or the loss reaches it first. Every automatic
+start reads the holds once more right before it asks for a machine.
 
 ## Stop reasons
 

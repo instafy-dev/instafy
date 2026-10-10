@@ -115,6 +115,11 @@ export interface ResolveHostedRuntimeRecoveryInput {
   hostedRuntimeEnsuring: boolean;
   hasHostedRuntimeInProgress: boolean;
   hasLocalRuntime: boolean;
+  /**
+   * A stop someone chose holds the space in this tab: its own Stop or Remove
+   * (the manual hold), or an idle pause. The loss that follows is that stop.
+   */
+  stopHeld?: boolean;
   eventProjectId: string | null;
   eventAgeMs: number | null;
   maxEventAgeMs?: number;
@@ -145,7 +150,7 @@ export function shouldAttemptUnexpectedHostedRuntimeRecovery(
   if (!activeProjectId || !eventProjectId || activeProjectId !== eventProjectId) {
     return false;
   }
-  if (!input.runtimeControllerEnabled || !input.projectReadyForRuntime) {
+  if (!input.runtimeControllerEnabled || !input.projectReadyForRuntime || input.stopHeld === true) {
     return false;
   }
   if (

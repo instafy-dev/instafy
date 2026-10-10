@@ -9,6 +9,8 @@ import {
   clearManualStop,
   isIdlePaused,
   isManualStopHeld,
+  markIdlePaused,
+  markManualStop,
 } from "../../idlePauseRegistry";
 import type { HostedRuntimeLifecycleEventKind } from "../../unexpectedHostedRuntimeRecovery";
 import { useHostedRuntimeRecoveryEffects } from "../useHostedRuntimeRecoveryEffects";
@@ -18,7 +20,7 @@ const RUNTIME_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OTHER_RUNTIME_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 function hostedEntry(
-  status: "ready" | "stopped",
+  status: "ready" | "stopped" | "requested",
   runtimeId = RUNTIME_ID,
 ): ControllerRuntimeStatusEntry {
   return {
@@ -28,6 +30,9 @@ function hostedEntry(
     idleTtlSeconds: 300,
     createdAt: new Date(Date.now() - 600_000).toISOString(),
     lastSeenAt: status === "ready" ? new Date().toISOString() : null,
+    // The machine's own launch, ten minutes before. A stop's release keeps
+    // the runtime `requested` on that lease, never seen since.
+    launchRequestedAt: new Date(Date.now() - 600_000).toISOString(),
     endpointUrl: null,
     taskRef: null,
     isLocal: false,
@@ -43,15 +48,32 @@ interface HarnessProps {
   hasPendingProjectWork: boolean;
   /** A second hosted machine in the space that stays ready. */
   otherReady?: boolean;
+  /**
+   * The stopped machine as a stop's provider release leaves it: `requested`,
+   * offline and never seen, on the old launch. The ensure hook reads that
+   * row as neither ready nor booting.
+   */
+  releasing?: boolean;
 }
 
 describe("useHostedRuntimeRecoveryEffects after a stop", () => {
   let container: HTMLDivElement;
   let root: Root;
-  const ensureHostedRuntime = vi.fn(async () => true);
+  // Like the real request, asking for a machine lifts the space's holds.
+  const ensureHostedRuntime = vi.fn(async () => {
+    clearManualStop(PROJECT_ID);
+    clearIdlePaused(PROJECT_ID);
+    return true;
+  });
 
-  function Harness({ stopped, preferred, hasPendingProjectWork, otherReady = false }: HarnessProps) {
-    const entry = hostedEntry(stopped ? "stopped" : "ready");
+  function Harness({
+    stopped,
+    preferred,
+    hasPendingProjectWork,
+    otherReady = false,
+    releasing = false,
+  }: HarnessProps) {
+    const entry = hostedEntry(stopped ? (releasing ? "requested" : "stopped") : "ready");
     const statuses = otherReady ? [entry, hostedEntry("ready", OTHER_RUNTIME_ID)] : [entry];
     const readyRuntimeCount = (stopped ? 0 : 1) + (otherReady ? 1 : 0);
     const autoEnsureHostedRef = useRef(false);
@@ -111,6 +133,21 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
             projectId: PROJECT_ID,
             kind: "runtime.stopped",
             data: { runtimeId: RUNTIME_ID, status: "stopped", ...data },
+          },
+        }),
+      );
+    });
+  }
+
+  /** The machine's origin went away, as useRuntimeControllerSync forwards it. */
+  async function publishOriginExpired() {
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent("instafy:runtime-lifecycle-event", {
+          detail: {
+            projectId: PROJECT_ID,
+            kind: "origin.expired",
+            data: { runtimeId: RUNTIME_ID },
           },
         }),
       );
@@ -244,6 +281,75 @@ describe("useHostedRuntimeRecoveryEffects after a stop", () => {
         clearIdlePaused(PROJECT_ID);
       });
       expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    },
+  );
+  it("keeps this tab's Stop when the stopped machine's origin expires during its release", async () => {
+    // Production, Oct 10: Machines > Stop in the only open tab. While the
+    // provider released the machine the runtime read `requested`, offline,
+    // never seen, on its old launch; its origin then expired and the tab
+    // started the machine again, lifting the Stop.
+    const idle = { preferred: false, hasPendingProjectWork: true };
+    await render({ ...idle, stopped: false });
+    await act(async () => {
+      markManualStop(PROJECT_ID);
+    });
+    await publishOriginExpired();
+    await render({ ...idle, stopped: true, releasing: true });
+
+    expect(ensureHostedRuntime).not.toHaveBeenCalled();
+    expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+
+    // The release finishes; the loss is still the stop.
+    await render({ ...idle, stopped: true });
+    expect(ensureHostedRuntime).not.toHaveBeenCalled();
+    expect(isManualStopHeld(PROJECT_ID)).toBe(true);
+  });
+
+  it("does not undo an idle pause when the paused machine's origin expires", async () => {
+    const idle = { preferred: false, hasPendingProjectWork: false };
+    await render({ ...idle, stopped: false });
+    await publishStop({ reason: "idle" });
+    // StudioLayout pauses the space when it explains the idle stop.
+    await act(async () => {
+      markIdlePaused(PROJECT_ID);
+    });
+    await publishOriginExpired();
+    await render({ ...idle, stopped: true });
+
+    expect(ensureHostedRuntime).not.toHaveBeenCalled();
+    expect(isIdlePaused(PROJECT_ID)).toBe(true);
+  });
+
+  it("still recovers a machine whose origin expired without a stop", async () => {
+    const idle = { preferred: false, hasPendingProjectWork: false };
+    await render({ ...idle, stopped: false });
+    await publishOriginExpired();
+    await render({ ...idle, stopped: true });
+
+    expect(ensureHostedRuntime).toHaveBeenCalledTimes(1);
+    expect(isManualStopHeld(PROJECT_ID)).toBe(false);
+  });
+
+  it.each([
+    ["before", true],
+    ["after", false],
+  ])(
+    "never starts the machine again when a person's runtime.stopped arrives %s origin.expired",
+    async (_label, stoppedFirst) => {
+      const idle = { preferred: false, hasPendingProjectWork: true };
+      await render({ ...idle, stopped: false });
+      if (stoppedFirst) {
+        await publishStop({ reason: "user_stop" });
+        await publishOriginExpired();
+      } else {
+        await publishOriginExpired();
+        await publishStop({ reason: "user_stop" });
+      }
+      await render({ ...idle, stopped: true, releasing: true });
+      await render({ ...idle, stopped: true });
+
+      expect(ensureHostedRuntime).not.toHaveBeenCalled();
+      expect(isManualStopHeld(PROJECT_ID)).toBe(true);
     },
   );
 });

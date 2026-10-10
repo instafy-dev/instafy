@@ -142,6 +142,22 @@ describe("unexpectedHostedRuntimeRecovery", () => {
         eventAgeMs: UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS + 1,
       }),
     ).toBe(false);
+
+    // A stop someone chose holds the space: the loss is that stop.
+    expect(
+      shouldAttemptUnexpectedHostedRuntimeRecovery({
+        activeProjectId: "project-1",
+        runtimeControllerEnabled: true,
+        projectReadyForRuntime: true,
+        runtimeReady: false,
+        hostedRuntimeEnsuring: false,
+        hasHostedRuntimeInProgress: false,
+        hasLocalRuntime: false,
+        stopHeld: true,
+        eventProjectId: "project-1",
+        eventAgeMs: 1_000,
+      }),
+    ).toBe(false);
   });
 
   it("holds a runtime-limit reclaim stop unless this client has work of its own there", () => {

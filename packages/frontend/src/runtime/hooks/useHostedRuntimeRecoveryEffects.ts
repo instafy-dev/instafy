@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import {
   IDLE_PAUSE_CLEARED_EVENT,
@@ -121,6 +121,24 @@ export function useHostedRuntimeRecoveryEffects({
   const browserRuntimeClaimActive = isBrowserRuntimeClaimActive(activeProjectId);
   const suppressAutoRuntimeEnsure =
     disableAutoRuntimeEnsure || browserRuntimeClaimActive;
+
+  // Every automatic start below goes through here, after its own gate.
+  // ensureHostedRuntime lifts every hold, as only a person's Start, Send,
+  // Reconnect or Try again may, so the holds are read once more right before
+  // it: one set after a gate read them (this tab's Stop, a stop the
+  // controller reported) wins.
+  const ensureHostedRuntimeAutomatically = useCallback(
+    (projectId: string | null) => {
+      if (isManualStopHeld(projectId) || isIdlePaused(projectId)) {
+        return;
+      }
+      autoEnsureHostedRef.current = true;
+      void ensureHostedRuntime().catch(() => {
+        autoEnsureHostedRef.current = false;
+      });
+    },
+    [autoEnsureHostedRef, ensureHostedRuntime],
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -259,6 +277,11 @@ export function useHostedRuntimeRecoveryEffects({
       pendingRecovery && pendingRecovery.projectId === activeProjectId
         ? Date.now() - pendingRecovery.at
         : null;
+    // A stop someone chose holds the space: this tab's Stop or Remove, or a
+    // stop the controller reported. The machine it takes away is no loss to
+    // recover, whether the stop or the loss reached this tab first, and a
+    // recovery would lift the hold and start the machine again.
+    const stopHeld = isManualStopHeld(activeProjectId) || isIdlePaused(activeProjectId);
     if (
       !shouldAttemptUnexpectedHostedRuntimeRecovery({
         activeProjectId,
@@ -268,6 +291,7 @@ export function useHostedRuntimeRecoveryEffects({
         hostedRuntimeEnsuring,
         hasHostedRuntimeInProgress,
         hasLocalRuntime,
+        stopHeld,
         eventProjectId: pendingRecovery?.projectId ?? null,
         eventAgeMs: recoveryAgeMs,
       })
@@ -275,8 +299,14 @@ export function useHostedRuntimeRecoveryEffects({
       if (
         pendingRecovery &&
         typeof recoveryAgeMs === "number" &&
-        recoveryAgeMs > UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS
+        (stopHeld || recoveryAgeMs > UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS)
       ) {
+        if (stopHeld) {
+          debugLog("hosted-runtime:unexpected-loss-held", {
+            projectId: activeProjectId,
+            kind: pendingRecovery.kind,
+          });
+        }
         pendingHostedRuntimeRecoveryRef.current = null;
       }
       return;
@@ -285,23 +315,20 @@ export function useHostedRuntimeRecoveryEffects({
     if (autoEnsureHostedRef.current) {
       return;
     }
-    autoEnsureHostedRef.current = true;
     debugLog("hosted-runtime:ensure-unexpected-loss-recovery", {
       projectId: activeProjectId,
       runtimeId: pendingRecovery?.runtimeId ?? null,
       kind: pendingRecovery?.kind ?? null,
       recoveryAgeMs,
     });
-    void ensureHostedRuntime().catch(() => {
-      autoEnsureHostedRef.current = false;
-    });
+    ensureHostedRuntimeAutomatically(activeProjectId);
   }, [
     activeProjectId,
     autoEnsureHostedRef,
     browserRuntimeClaimActive,
     browserRuntimeClaimEpoch,
     debugLog,
-    ensureHostedRuntime,
+    ensureHostedRuntimeAutomatically,
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     hostedRuntimeEnsuring,
@@ -368,15 +395,12 @@ export function useHostedRuntimeRecoveryEffects({
     if (autoEnsureHostedRef.current) {
       return;
     }
-    autoEnsureHostedRef.current = true;
-    void ensureHostedRuntime().catch(() => {
-      autoEnsureHostedRef.current = false;
-    });
+    ensureHostedRuntimeAutomatically(activeProjectId);
   }, [
     activeProjectId,
     autoEnsureHostedRef,
     browserRuntimeClaimEpoch,
-    ensureHostedRuntime,
+    ensureHostedRuntimeAutomatically,
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     idlePauseEpoch,
@@ -427,16 +451,13 @@ export function useHostedRuntimeRecoveryEffects({
       runtimeStatusesResolved,
       statusCount: runtimeStatuses.length,
     });
-    autoEnsureHostedRef.current = true;
-    void ensureHostedRuntime().catch(() => {
-      autoEnsureHostedRef.current = false;
-    });
+    ensureHostedRuntimeAutomatically(activeProjectId);
   }, [
     activeProjectId,
     autoEnsureHostedRef,
     debugLog,
     browserRuntimeClaimEpoch,
-    ensureHostedRuntime,
+    ensureHostedRuntimeAutomatically,
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     hostedRuntimeEnsuring,
@@ -483,16 +504,13 @@ export function useHostedRuntimeRecoveryEffects({
       status: preferredRuntimeEntry?.status,
       health: preferredRuntimeEntry?.health,
     });
-    autoEnsureHostedRef.current = true;
-    void ensureHostedRuntime().catch(() => {
-      autoEnsureHostedRef.current = false;
-    });
+    ensureHostedRuntimeAutomatically(activeProjectId);
   }, [
     activeProjectId,
     autoEnsureHostedRef,
     debugLog,
     browserRuntimeClaimEpoch,
-    ensureHostedRuntime,
+    ensureHostedRuntimeAutomatically,
     hasHostedRuntimeInProgress,
     hostedRuntimeEnsuring,
     idlePauseEpoch,
