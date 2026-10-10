@@ -134,34 +134,35 @@ request publish nothing. A retry of a stop whose provider release is still
 pending quarantines the runtime again and publishes it again, and so does the
 launch-timeout sweep when it finishes the release of such a stop (see
 "Cleanup after a failed release (502)" below). Each tab holds those reasons
-like a manual Stop when they leave the space no live hosted machine; in the tab that pressed Stop or Remove, which already holds the
-space, the event keeps the hold that request set, so what the stop's answer
-says about the work still shows. A browser session's own recycle of its
-space's idle machine (`stopIfIdle` with `runtime_limit_takeover`, see "Stop
-reasons" below) is nobody's click and publishes none. A controller from
-before this event publishes nothing for these stops. There another tab finds
-such a stop by the turn it put back in the queue (the run's `interruption`
-record, below, while its `resumeBy` is ahead): every automatic start checks
-the runs the tab has, and before it starts a machine it saw go away it reads
-the space's runs once (`GET /runs`). Either holds the space like a manual
-Stop (when the stop leaves it no live hosted machine). That turn stays queued
-until a machine takes it again, so it also outlives a person asking for one:
-a stop no longer counts once someone in the tab asks for a machine with Send,
-Start, Reconnect or Try again, or once a hosted launch was requested after
-it. A read that fails or takes more than 10 seconds finds nothing, and the
-machine starts as before: the tab that pressed Stop keeps its own hold, and
-refusing would leave a machine that was really lost waiting with nothing to
-say why. With such a controller, a stop of a machine with no turn running
-records no turn, so another tab where someone already wrote in the chat can
-still start that machine again on its next status refresh. Unexpected loss
-(`heartbeat_timeout`, `origin.expired` within 20 seconds of a machine this
-tab had ready) still recovers straight away, unless the space is held. A
-machine that goes away while this tab holds a Stop, Remove or idle pause set
-since it last saw a hosted machine come up is that stop: the tab neither
-starts it again nor lifts the hold, whether the stop or the loss reaches it
-first. An older hold does not count: a machine started from another tab or
-device after it, then lost, is recovered as before. Every automatic start
-reads the holds once more right before it asks for a machine.
+like a manual Stop when they leave the space no live hosted machine; in the
+tab that pressed Stop or Remove, which already holds the space, the event
+keeps the hold that request set, so what the stop's answer says about the work
+still shows. A browser session's own recycle of its space's idle machine
+(`stopIfIdle` with `runtime_limit_takeover`, see "Stop reasons" below) is
+nobody's click and publishes none. A controller from before this event
+publishes nothing for these stops. There another tab finds such a stop by the
+turn it put back in the queue (the run's `interruption` record, below, while
+its `resumeBy` is ahead): every automatic start checks the runs the tab has,
+and before it starts a machine it saw go away it reads the space's runs once
+(`GET /runs`). Either holds the space like a manual Stop (when the stop leaves
+it no live hosted machine). That turn stays queued until a machine takes it
+again, so it also outlives a person asking for one: a stop no longer counts
+once someone in the tab asks for a machine with Send, Start, Reconnect or Try
+again, or once a hosted launch was requested after it. A read that fails or
+takes more than 10 seconds finds nothing, and the machine starts as before:
+the tab that pressed Stop keeps its own hold, and refusing would leave a
+machine that was really lost waiting with nothing to say why. With such a
+controller, a stop of a machine with no turn running records no turn, so
+another tab where someone already wrote in the chat can still start that
+machine again on its next status refresh. Unexpected loss
+(`heartbeat_timeout`, `origin.expired` within 20 seconds of a machine this tab
+had ready) still recovers straight away, unless the space is held. A machine
+that goes away while this tab holds a Stop, Remove or idle pause set since it
+last saw a hosted machine come up is that stop: the tab neither starts it
+again nor lifts the hold, whether the stop or the loss reaches it first. An
+older hold does not count: a machine started from another tab or device after
+it, then lost, is recovered as before. Every automatic start reads the holds
+once more right before it asks for a machine.
 
 Every hosted stop is followed, 25 to 35 seconds later, by `origin.expired`
 for the stopped machine's origin: once its heartbeats are 25 seconds old the
@@ -311,12 +312,12 @@ old `launchRequestedAt`, until the provider release is acknowledged, which can
 take a minute or, after a failed release, until a retry. By `status`,
 `lastSeenAt` and `launchRequestedAt` alone that is a launch that stalled, so
 while it lasts the runtime's status entry also carries `stopRequestedAt`, when
-the stop's quarantine committed, and `stopReason`, that stop's reason as a
-plain token (`user_stop`, `idle`, `launch_timeout`, or `other`). Both go once
-the release is acknowledged (the runtime is then `stopped`) or the next launch
-replaces the lease. A launch quarantined after a failed provider call is not
-a stop and carries neither, and a controller from before these fields sends
-neither.
+the stop's quarantine committed (a retry's quarantine moves it), and
+`stopReason`, that stop's reason, such as `user_stop` or `idle`, or `other`
+when it is not a plain token. Both go once the release is acknowledged (the
+runtime is then `stopped`) or the next launch replaces the lease. A launch
+quarantined after a failed provider call is not a stop and carries neither,
+and a controller from before these fields sends neither.
 
 The Studio takes such a runtime for a stop when it knows of one newer than
 that launch: this tab's own Stop or Remove, a turn a person's stop put back in
