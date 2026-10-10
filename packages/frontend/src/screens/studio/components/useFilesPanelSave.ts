@@ -67,8 +67,11 @@ export interface UseFilesPanelSaveOptions {
   keepFoldersRef: MutableRefObject<Set<string>>;
   loadDirectory: (path: string, options?: { force?: boolean }) => Promise<ControllerWorkspaceEntry[] | null>;
   ownRevisions: OwnRevisions;
-  /** Show a failure (or a partial save) with its copy; `retry` saves again. */
-  presentFailure: (copy: SaveCopy, retry: () => void) => void;
+  /**
+   * Show a failure (or a partial save) with its copy; `retry` saves again and
+   * settles once that save has.
+   */
+  presentFailure: (copy: SaveCopy, retry: () => Promise<void>) => void;
   /** Test seam for the wait before the save's own retry. */
   wait?: (ms: number) => Promise<void>;
 }
@@ -114,6 +117,8 @@ function raiseStale(
 }
 
 const RESOLVE = { kind: "resolve" as const, label: "Resolve" };
+/** The retry a failure carries once its panel has closed. */
+const noRetry = (): Promise<void> => Promise.resolve();
 const defaultWait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -215,9 +220,7 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
     const onDefaultOrigin = originId === current.versioning.originId;
     const label = labelOf(file);
     // Trying again saves this file, even when another one is open by then.
-    const retry = () => {
-      void saveRef.current({ fileId: file.id });
-    };
+    const retry = () => saveRef.current({ fileId: file.id });
     if (onDefaultOrigin && !current.originAvailable) {
       current.presentFailure(
         { message: mode === "desktop" ? SAVE_COPY.desktopUnreachable : SAVE_COPY.statelessUnreachable },
@@ -345,7 +348,7 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
           return;
         }
         // Trying again needs the panel; the message still reaches the user.
-        latest.presentFailure(copy.action?.kind === "retry" ? { message: copy.message } : copy, () => undefined);
+        latest.presentFailure(copy.action?.kind === "retry" ? { message: copy.message } : copy, noRetry);
       };
 
       if (!result.ok) {
@@ -438,11 +441,9 @@ export function useFilesPanelSave(options: UseFilesPanelSaveOptions) {
         label: file ? labelOf(file) : "file",
       });
       if (mountedRef.current) {
-        current.presentFailure(copy, () => {
-          void saveRef.current(file ? { fileId: file.id } : undefined);
-        });
+        current.presentFailure(copy, () => saveRef.current(file ? { fileId: file.id } : undefined));
       } else {
-        current.presentFailure({ message: copy.message }, () => undefined);
+        current.presentFailure({ message: copy.message }, noRetry);
       }
     } finally {
       savingRef.current = false;
