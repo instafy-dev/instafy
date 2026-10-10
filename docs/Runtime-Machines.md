@@ -122,39 +122,59 @@ release (502)" below).
 
 A platform stop holds every open tab: `credits_exhausted` and `oom_killed`
 arrive as `runtime.stopped` and hold like an idle pause. A Stop, Remove or
-takeover made in another tab or device does not reach this tab yet. The
-controller records `user_stop`, `user_remove`, `runtime_limit_takeover` and
-`browser_session_runtime_limit_takeover` in `runtime_events` but does not
-publish `runtime.stopped` for them. Until it does, another tab finds such a
-stop by the turn it put back in the queue (the run's `interruption` record,
-below, while its `resumeBy` is ahead): every automatic start checks the runs
-the tab has, and before it starts a machine it saw go away it reads the
-space's runs once (`GET /runs`), since the stop announces that record only
-after its provider release. Either holds the space like a manual Stop (when
-the stop leaves it no live hosted machine). That turn stays queued until a
-machine takes it again, so it also outlives a person asking for one: a stop
-no longer counts once someone in the tab asks for a machine with Send, Start,
-Reconnect or Try again, or once a hosted launch was requested after it. A
-read that fails or takes more than 10 seconds finds nothing, and the machine
-starts as before: the tab that pressed Stop keeps its own hold, and refusing
-would leave a machine that was really lost waiting with nothing to say why.
-A stop of a machine with no turn running records nothing, so another tab
-where someone already wrote in the chat can still start that machine again on
-its next status refresh. The frontend already holds those reasons like a
-manual Stop (when they leave the space no live hosted machine) once the
-controller publishes them. Unexpected loss (`heartbeat_timeout`,
-`origin.expired` within 20 seconds of a machine this tab had ready) still
-recovers straight away, unless the space is held. A machine that goes away
-while this tab holds a Stop, Remove or idle pause set since it last saw a
-hosted machine come up is that stop: the tab neither starts it again nor
-lifts the hold, whether the stop or the loss reaches it first. An older hold
-does not count: a machine started from another tab or device after it, then
-lost, is recovered as before. Every automatic start reads the holds once more
-right before it asks for a machine.
+takeover made in another tab or device arrives as `runtime.stopped` too, with
+its reason (`user_stop`, `user_remove`, `runtime_limit_takeover` or
+`browser_session_runtime_limit_takeover`), its `runtimeId` and
+`queuedJobCount`, the work left queued in the space (which includes the turns
+the stop requeued). `/runtime/stop` and `/runtime/remove` publish it as soon
+as the stop commits, before the provider release, which can take a minute,
+and only for a stop that took the runtime out of service: a skipped stop, a
+repeat that finds the runtime already stopped, and a refused or rolled-back
+request publish nothing. A retry of a stop whose provider release is still
+pending quarantines the runtime again and publishes it again, and so does the
+launch-timeout sweep when it finishes the release of such a stop (see
+"Cleanup after a failed release (502)" below). Each tab holds those reasons
+like a manual Stop when they leave the space no live hosted machine; in the
+tab that pressed Stop or Remove, which already holds the space, the event
+keeps the hold that request set, so what the stop's answer says about the work
+still shows. A browser session's own recycle of its space's idle machine
+(`stopIfIdle` with `runtime_limit_takeover`, see "Stop reasons" below) is
+nobody's click and publishes none. A controller from before this event
+publishes nothing for these stops. There another tab finds such a stop by the
+turn it put back in the queue (the run's `interruption` record, below, while
+its `resumeBy` is ahead): every automatic start checks the runs the tab has,
+and before it starts a machine it saw go away it reads the space's runs once
+(`GET /runs`). Either holds the space like a manual Stop (when the stop leaves
+it no live hosted machine). That turn stays queued until a machine takes it
+again, so it also outlives a person asking for one: a stop no longer counts
+once someone in the tab asks for a machine with Send, Start, Reconnect or Try
+again, or once a hosted launch was requested after it. A read that fails or
+takes more than 10 seconds finds nothing, and the machine starts as before:
+the tab that pressed Stop keeps its own hold, and refusing would leave a
+machine that was really lost waiting with nothing to say why. With such a
+controller, a stop of a machine with no turn running records no turn, so
+another tab where someone already wrote in the chat can still start that
+machine again on its next status refresh. Unexpected loss
+(`heartbeat_timeout`, `origin.expired` within 20 seconds of a machine this tab
+had ready) still recovers straight away, unless the space is held. A machine
+that goes away while this tab holds a Stop, Remove or idle pause set since it
+last saw a hosted machine come up is that stop: the tab neither starts it
+again nor lifts the hold, whether the stop or the loss reaches it first. An
+older hold does not count: a machine started from another tab or device after
+it, then lost, is recovered as before. Every automatic start reads the holds
+once more right before it asks for a machine.
+
+Every hosted stop is followed, 25 to 35 seconds later, by `origin.expired`
+for the stopped machine's origin: once its heartbeats are 25 seconds old the
+origin presence sweep marks it offline and publishes the expiry, whatever
+stopped the machine. After a stop that expiry is part of the stop, not an
+unexpected loss, which is why the recovery above checks the holds first.
 
 ## Stop reasons
 
-Sweep stops publish `runtime.stopped` with a `reason`:
+Sweep stops publish `runtime.stopped` with a `reason`, once the stop is
+done. A person's Stop, Remove or takeover publishes it as soon as its
+quarantine commits (see "Starting a machine on intent" above).
 
 - `idle` — pause; explained toast; wakes when you write in the chat.
 - `credits_exhausted` — no auto-restart (held like an idle pause); toast
@@ -171,7 +191,9 @@ Sweep stops publish `runtime.stopped` with a `reason`:
   launch that does not come up" below). The Studio handles it like
   `heartbeat_timeout`: a tab that had the space running starts it again. If
   the provider never brings the runtime up, such a tab therefore relaunches
-  it about every 15 minutes while it stays open.
+  it about every 15 minutes while it stays open. The sweep's retry of a
+  person's stop whose provider release failed is not a launch timeout: it
+  publishes that stop's reason (see "Cleanup after a failed release (502)").
 - `runtime_limit_reclaim` — the machine was idle and another space in the
   organization was waiting for the hosted runtime slot (see "Waiting on the
   runtime limit" below). The event carries `queuedJobCount`, the work left
@@ -203,14 +225,17 @@ back to `queued` with `progress_stage` `requeued`, and `runs.metadata` gains
 the earliest the expiry may give the turn up, not a deadline, since a space
 waiting on the limit or a stop still waiting on its provider release waits
 longer. `GET /runs` returns that record after a reload. `/runtime/stop` and
-`/runtime/remove` also announce it once they answer, as a `run.progress` of
-the stored run stamped with its `updated_at`; other stops do not, so other
-viewers see it on their next load of the runs. The announcement reads the run
-without locking it and publishes after the read, and it skips a run a lease
-has already resumed. A lease resumes the turn like any queued run
-(`in_progress`, `agent:leased`) with a `run.progress` of its own, stamped
-later, so a viewer keeps the newer of the two when they cross. `interruption`
-stays on the run as history.
+`/runtime/remove` also announce it as soon as the stop commits, before any
+provider release and right after a person's stop's `runtime.stopped`, as a
+`run.progress` of the stored run stamped with its `updated_at`; other stops
+do not, so other viewers see it on their next load of the runs. The
+announcement is best effort, a repeated stop announces the same record
+again, and a skipped stop announces nothing. It reads the run without locking
+it and publishes after the read, and it skips a run a lease has already
+resumed. A lease resumes the turn like any queued run (`in_progress`,
+`agent:leased`) with a `run.progress` of its own, stamped later, so a viewer
+keeps the newer of the two when they cross. `interruption` stays on the run as
+history.
 
 The resumed attempt may find its cut-off attempt's work already in its
 folder, or run somewhere else: the requeue clears the job's target, so any
@@ -281,20 +306,30 @@ on the same launch. Two things end a launch that never comes up:
 lease's request time, so the Studio can tell how long the current launch has
 been coming up without keeping a clock of its own.
 
-A stop leaves the runtime `requested` on its old launch, offline and never
-seen, while the provider releases the machine, which reads exactly like a
-launch that stalled. The Studio therefore takes such a runtime for a stop
-when it knows of one newer than that launch: this tab's own Stop or Remove, a
-turn a person's stop put back in the queue (see "Stop reasons"), or the
-runtime's own `stopRequestedAt` (or, without a time, `stopReason`) where the
-status answer carries one for a person's stop (`user_stop`, `user_remove` or
-a takeover). Machines then labels it Stopping, without a spinner, the chat
-shows no stalled-launch notice for it, and the automatic starts count it as a
-machine still in progress, not as none. A launch requested after that stop
-is a launch again. The controller marks the release of every stop, also of a
-machine that crashed or never came up, and after a failed release keeps the
-mark until it retries. Such a machine still reads as a launch that stalled,
-so an automatic start or Try again has the controller retry the release.
+A stop's quarantine (see "Cleanup after a failed release (502)" below) leaves
+the runtime `requested`, unseen and on the lease it ran on, with that lease's
+old `launchRequestedAt`, until the provider release is acknowledged, which can
+take a minute or, after a failed release, until a retry. By `status`,
+`lastSeenAt` and `launchRequestedAt` alone that is a launch that stalled, so
+while it lasts the runtime's status entry also carries `stopRequestedAt`, when
+the stop's quarantine committed (a retry's quarantine moves it), and
+`stopReason`, that stop's reason, such as `user_stop` or `idle`, or `other`
+when it is not a plain token. Both go once the release is acknowledged (the
+runtime is then `stopped`) or the next launch replaces the lease. A launch
+quarantined after a failed provider call is not a stop and carries neither,
+and a controller from before these fields sends neither.
+
+The Studio takes such a runtime for a stop when it knows of one newer than
+that launch: this tab's own Stop or Remove, a turn a person's stop put back in
+the queue (see "Stop reasons"), or the runtime's own `stopRequestedAt` (or,
+without a time, `stopReason`) where the status answer carries one for a
+person's stop (`user_stop`, `user_remove` or a takeover). Machines then labels
+it Stopping, without a spinner, the chat shows no stalled-launch notice for
+it, and the automatic starts count it as a machine still in progress, not as
+none. A launch requested after that stop is a launch again. The release of
+any other stop, also of a machine that crashed or never came up, still reads
+as a launch that stalled, so an automatic start or Try again has the
+controller retry the release.
 
 ## Waiting on the runtime limit
 
@@ -429,7 +464,25 @@ retry the stop") and the quarantine stays in place:
   active-job preconditions are not re-checked; they held before the quarantine.
 - Cleanup is also retried without a caller: the next ensure for that runtime
   retries the quarantined release before launching, and the launch-timeout
-  sweep retries quarantined runtimes whose lease is older than 15 minutes.
+  sweep retries quarantined runtimes whose lease was requested more than 15
+  minutes ago and quarantined more than 4 minutes ago (the release's 180 s
+  deadline and a minute to finalize, `QUARANTINE_RELEASE_GRACE_SECONDS`). The
+  quarantine's own age (the lease's last change) matters because a stop of a
+  machine that ran for hours leaves it `requested` on an old lease, and the
+  sweep would otherwise stop it again as a `launch_timeout` while the stop's
+  own release still runs. The wait is sized to the release, not to a launch,
+  because the quarantined runtime still counts toward the organization's
+  hosted limit, so another space waiting on that limit waits on the retry
+  too.
+- When the quarantine it retries is a person's stop (`user_stop`,
+  `user_remove`, `runtime_limit_takeover` or
+  `browser_session_runtime_limit_takeover` recorded on the lease's latest
+  `provider_release_cleanup_pending`), the sweep finishes that stop: it
+  quarantines and stops the runtime under the same reason, publishes
+  `runtime.stopped` with it and `queuedJobCount` as the stop did when it
+  committed, and files no launch-timeout bug report. Any other quarantine it
+  retries ends as a `launch_timeout`. It retries only the lease generation it
+  found, so a launch that replaced it meanwhile is left alone.
 - Once the provider acknowledges a release, the stop finalizes: the lease is
   `released`, the runtime `stopped`, and a `provider_release_acknowledged`
   event is recorded.
@@ -459,10 +512,10 @@ runtime stays listed until a removal finishes, but keeps the hold as well. Any
 other 5xx answer, or none at all (a network failure, or a proxy or browser
 timeout during the release), shows the error and keeps the hold too: the
 controller may have committed the stop first, and the run record then shows
-the requeued turn (the live announcement goes out only if the request ran to
-the end). Only a 4xx refusal, such as 409 "provider-managed runtime is
-missing its active lease generation", 403 or 404, lifts the hold, since the
-machine is as it was.
+the requeued turn (the live announcement and a person's `runtime.stopped`
+went out when the stop committed). Only a 4xx refusal, such as 409
+"provider-managed runtime is missing its active lease generation", 403 or 404,
+lifts the hold, since the machine is as it was.
 
 ## Caches
 

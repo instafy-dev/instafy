@@ -79,6 +79,16 @@ pub(crate) struct RuntimeStatusEntry {
     /// it tells a client how long the current launch has been coming up.
     #[serde(skip_serializing_if = "Option::is_none")]
     launch_requested_at: Option<String>,
+    /// When a stop took the runtime out of service, while that stop's
+    /// provider release is still pending: its quarantine leaves the runtime
+    /// `requested` and unseen on the lease it ran on, which `status` and
+    /// `launchRequestedAt` alone cannot tell from a launch that stalled. The
+    /// next launch clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_requested_at: Option<String>,
+    /// That stop's reason, such as `user_stop` or `idle`, as a bounded token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_reason: Option<String>,
     endpoint_url: Option<String>,
     task_ref: Option<String>,
     #[serde(default)]
@@ -770,10 +780,27 @@ async fn load_runtime_status_response_for_viewer(
                     oi.protocols as origin_protocols,
                     oi.metadata as origin_metadata,
                     rl.metadata as lease_metadata,
-                    rl.requested_at as lease_requested_at
+                    rl.requested_at as lease_requested_at,
+                    quarantine.created_at as stop_requested_at,
+                    quarantine.reason as stop_reason
              from runtimes r
              left join runtime_leases rl
                on rl.id = r.active_lease_id
+             -- The stop whose quarantine holds the active lease while its
+             -- provider release is pending, as that quarantine recorded it.
+             -- A launch quarantined after a failed provider call records
+             -- another kind and is not a stop.
+             left join lateral (
+                select e.created_at, e.data ->> 'reason' as reason
+                from runtime_events e
+                where rl.status = 'cleanup_pending'
+                  and rl.released_at is null
+                  and e.runtime_id = r.id
+                  and e.kind = 'provider_release_cleanup_pending'
+                  and e.data ->> 'runtimeLeaseId' = rl.id::text
+                order by e.created_at desc
+                limit 1
+             ) quarantine on true
              left join lateral (
                 select oi.*
                 from origin_instances oi
@@ -831,6 +858,12 @@ async fn load_runtime_status_response_for_viewer(
         let last_seen_at: Option<DateTime<Utc>> = row.get("last_seen_at");
         let created_at: Option<DateTime<Utc>> = row.get("created_at");
         let launch_requested_at: Option<DateTime<Utc>> = row.get("lease_requested_at");
+        let stop_requested_at: Option<DateTime<Utc>> = row.get("stop_requested_at");
+        let stop_reason: Option<&str> = row.get("stop_reason");
+        let stop_reason = stop_requested_at.map(|_| {
+            super::run_interruptions::interruption_reason_token(stop_reason.unwrap_or_default())
+                .to_string()
+        });
         let idle_ttl_seconds: i32 = row.get("idle_ttl_seconds");
         let origin = origin_info_from_status_row(&row);
         let is_private_self_hosted =
@@ -860,6 +893,8 @@ async fn load_runtime_status_response_for_viewer(
             created_at: created_at.map(|value| value.to_rfc3339()),
             last_seen_at: last_seen_at.map(|value| value.to_rfc3339()),
             launch_requested_at: launch_requested_at.map(|value| value.to_rfc3339()),
+            stop_requested_at: stop_requested_at.map(|value| value.to_rfc3339()),
+            stop_reason,
             endpoint_url: endpoint_url.clone(),
             task_ref: row.get("task_ref"),
             is_local,

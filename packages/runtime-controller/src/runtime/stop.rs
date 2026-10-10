@@ -892,6 +892,90 @@ async fn stop_after_flush(
     Ok((runtime_snapshot, outcome))
 }
 
+/// Whether a stop asked of `/runtime/stop` or `/runtime/remove` is a
+/// person's: Stop, Remove or a slot takeover
+/// ([`super::sweeps::REQUEUE_REASONS_OF_A_PERSON`]). The browser session's
+/// own recycle of its space's idle machine reuses `runtime_limit_takeover`,
+/// but nobody clicked it and that tab starts the machine again right away;
+/// it is the only stop with that reason that spares active jobs.
+fn is_a_persons_stop(options: &StopOptions) -> bool {
+    !options.skip_if_active_jobs
+        && super::sweeps::REQUEUE_REASONS_OF_A_PERSON
+            .contains(&options.reason.as_deref().unwrap_or(options.source))
+}
+
+/// What `/runtime/stop` and `/runtime/remove` tell open tabs once their stop
+/// has committed, before any provider release, which can take a minute. A
+/// person's stop ([`is_a_persons_stop`]) that stopped the runtime publishes
+/// `runtime.stopped` with its reason, as the platform's stops do, so a tab
+/// that did not make it holds the space instead of starting the machine
+/// again. Then the turns the stop interrupted are announced
+/// ([`super::run_interruptions::announce_interrupted_runs`]). Best effort;
+/// the caller has given its connection back to the pool.
+///
+/// `skip_reason` is the committed stop's own; a quarantine has none, since it
+/// always takes the runtime out of service. A skipped stop requeued nothing
+/// and tells nothing, and a repeat that found the runtime already stopped
+/// only announces the same runs again.
+async fn announce_committed_stop(
+    state: &AppState,
+    runtime: &RuntimeDetails,
+    options: &StopOptions,
+    skip_reason: Option<&str>,
+) {
+    match skip_reason {
+        None => {}
+        Some("already_stopped") => {
+            super::run_interruptions::announce_interrupted_runs(state, &runtime.id).await;
+            return;
+        }
+        Some(_) => return,
+    }
+    if is_a_persons_stop(options) {
+        notify_a_persons_stop(
+            state,
+            runtime,
+            options.reason.as_deref().unwrap_or(options.source),
+            options.source,
+        )
+        .await;
+    }
+    super::run_interruptions::announce_interrupted_runs(state, &runtime.id).await;
+}
+
+/// `runtime.stopped` for a person's stop with `reason`, as the platform's
+/// stops publish it, plus `queuedJobCount` as on a reclaim's: the work left
+/// queued in the space, which includes the turns the stop requeued. Also what
+/// the launch-timeout sweep publishes when it finishes such a stop's release.
+pub(super) async fn notify_a_persons_stop(
+    state: &AppState,
+    runtime: &RuntimeDetails,
+    reason: &str,
+    source: &str,
+) {
+    let queued_job_count =
+        match super::limit_waits::count_waiting_jobs(state, &runtime.project_id).await {
+            Ok(count) => count,
+            Err(error) => {
+                warn!(
+                    runtime_id = %runtime.id,
+                    project_id = %runtime.project_id,
+                    ?error,
+                    "could not count work left queued by a person's stop"
+                );
+                0
+            }
+        };
+    super::sweeps::notify_runtime_stopped_with_extra(
+        state,
+        runtime.project_id,
+        runtime.id,
+        reason,
+        source,
+        json!({ "queuedJobCount": queued_job_count }),
+    );
+}
+
 /// The identity a `/runtime/stop` caller expects the runtime to have.
 fn expected_runtime_identity(
     expected_project_id: Option<&str>,
@@ -1131,6 +1215,7 @@ pub(crate) async fn runtime_stop(
             })?;
             crate::send_intents::publish_job_input_state_updates(&state, &quarantine_input_updates);
             drop(connection);
+            announce_committed_stop(&state, &runtime, &stop_options, None).await;
 
             let provider_release = release_runtime_via_provider(
                 &state,
@@ -1200,7 +1285,8 @@ pub(crate) async fn runtime_stop(
             drop(final_connection);
             (outcome, provider_release)
         } else {
-            let outcome = perform_runtime_stop(&transaction, &runtime, stop_options).await?;
+            let outcome =
+                perform_runtime_stop(&transaction, &runtime, stop_options.clone()).await?;
             transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to commit runtime stop: {error}"))
             })?;
@@ -1209,6 +1295,13 @@ pub(crate) async fn runtime_stop(
                 &outcome.job_input_state_updates,
             );
             drop(connection);
+            announce_committed_stop(
+                &state,
+                &runtime,
+                &stop_options,
+                outcome.skip_reason.as_deref(),
+            )
+            .await;
 
             let provider_release = if require_provider_release
                 && private_self_hosted_runtime
@@ -1757,6 +1850,7 @@ pub(crate) async fn runtime_remove(
                     &quarantine_input_updates,
                 );
                 drop(connection);
+                announce_committed_stop(&state, &runtime, &stop_options, None).await;
 
                 let provider_release = release_runtime_via_provider(
                     &state,
@@ -1857,7 +1951,7 @@ pub(crate) async fn runtime_remove(
             }
         }
 
-        let outcome = perform_runtime_stop(&transaction, &runtime, stop_options).await?;
+        let outcome = perform_runtime_stop(&transaction, &runtime, stop_options.clone()).await?;
 
         // Mark runtime as removed and clear endpoint/task
         transaction
@@ -1889,6 +1983,13 @@ pub(crate) async fn runtime_remove(
             &outcome.job_input_state_updates,
         );
         drop(connection);
+        announce_committed_stop(
+            &state,
+            &runtime,
+            &stop_options,
+            outcome.skip_reason.as_deref(),
+        )
+        .await;
 
         // Revoke tunnels for this runtime scope.
         if let Err((status, payload)) = revoke_tunnels_for_scope(

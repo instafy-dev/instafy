@@ -686,6 +686,9 @@ async fn runtime_status_reports_when_the_active_launch_was_requested() -> anyhow
         let entry = fixture.status_entry().await?;
         assert_eq!(entry["launchRequestedAt"], json!(requested_at.to_rfc3339()));
         assert_eq!(entry["lastSeenAt"], JsonValue::Null);
+        // A launch, not a stop's release (see `run_interruptions_tests.rs`).
+        assert!(entry.get("stopRequestedAt").is_none(), "{entry}");
+        assert!(entry.get("stopReason").is_none(), "{entry}");
 
         {
             let mut connection = fixture.pool.get().await?;

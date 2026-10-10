@@ -85,10 +85,7 @@ pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/runtime/register", post(register::runtime_register))
         .route("/runtime/ensure", post(ensure::runtime_ensure))
-        .route(
-            "/runtime/stop",
-            post(run_interruptions::runtime_stop_announcing_interruptions),
-        )
+        .route("/runtime/stop", post(stop::runtime_stop))
         .route(
             "/runtime/offline/:project_id",
             post(stop::runtime_mark_offline),
@@ -97,10 +94,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/projects/:project_id/runtime/token",
             post(token::mint_runtime_access_token),
         )
-        .route(
-            "/runtime/remove",
-            post(run_interruptions::runtime_remove_announcing_interruptions),
-        )
+        .route("/runtime/remove", post(stop::runtime_remove))
         .route("/runtime/idle-reaper", post(stop::runtime_idle_reaper))
         .route(
             "/projects/:project_id/runtime/activity",
