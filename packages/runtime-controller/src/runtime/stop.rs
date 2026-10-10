@@ -932,31 +932,48 @@ async fn announce_committed_stop(
         Some(_) => return,
     }
     if is_a_persons_stop(options) {
-        // As on a reclaim's `runtime.stopped`: the work left queued in the
-        // space, which includes the turns this stop requeued.
-        let queued_job_count =
-            match super::limit_waits::count_waiting_jobs(state, &runtime.project_id).await {
-                Ok(count) => count,
-                Err(error) => {
-                    warn!(
-                        runtime_id = %runtime.id,
-                        project_id = %runtime.project_id,
-                        ?error,
-                        "could not count work left queued by a person's stop"
-                    );
-                    0
-                }
-            };
-        super::sweeps::notify_runtime_stopped_with_extra(
+        notify_a_persons_stop(
             state,
-            runtime.project_id,
-            runtime.id,
+            runtime,
             options.reason.as_deref().unwrap_or(options.source),
             options.source,
-            json!({ "queuedJobCount": queued_job_count }),
-        );
+        )
+        .await;
     }
     super::run_interruptions::announce_interrupted_runs(state, &runtime.id).await;
+}
+
+/// `runtime.stopped` for a person's stop with `reason`, as the platform's
+/// stops publish it, plus `queuedJobCount` as on a reclaim's: the work left
+/// queued in the space, which includes the turns the stop requeued. Also what
+/// the launch-timeout sweep publishes when it finishes such a stop's release.
+pub(super) async fn notify_a_persons_stop(
+    state: &AppState,
+    runtime: &RuntimeDetails,
+    reason: &str,
+    source: &str,
+) {
+    let queued_job_count =
+        match super::limit_waits::count_waiting_jobs(state, &runtime.project_id).await {
+            Ok(count) => count,
+            Err(error) => {
+                warn!(
+                    runtime_id = %runtime.id,
+                    project_id = %runtime.project_id,
+                    ?error,
+                    "could not count work left queued by a person's stop"
+                );
+                0
+            }
+        };
+    super::sweeps::notify_runtime_stopped_with_extra(
+        state,
+        runtime.project_id,
+        runtime.id,
+        reason,
+        source,
+        json!({ "queuedJobCount": queued_job_count }),
+    );
 }
 
 /// The identity a `/runtime/stop` caller expects the runtime to have.

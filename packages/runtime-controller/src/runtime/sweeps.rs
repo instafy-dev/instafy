@@ -17,16 +17,27 @@ use super::db::{fetch_runtime_for_update, release_origin_instances_for_runtime};
 use super::ensure::ensure_runtime_for_requeued_jobs;
 use super::provider::{
     call_provider_endpoint, select_provider_config, ProviderReleaseRequest,
-    RUNTIME_PROVIDER_INSPECT_TIMEOUT,
+    RUNTIME_PROVIDER_INSPECT_TIMEOUT, RUNTIME_PROVIDER_RELEASE_TIMEOUT,
 };
 use super::status::{release_leases_for_project, IdleRelease};
-use super::stop::{stop_runtime_safely, SafeRuntimeStop, StopOptions};
+use super::stop::{
+    notify_a_persons_stop, stop_runtime_safely, RuntimeIdentityExpectation, SafeRuntimeStop,
+    StopOptions,
+};
 
 const TERMINAL_RUNTIME_RETENTION_SECONDS: i64 = 10 * 60;
 const TERMINAL_RUNTIME_CLEANUP_BATCH_SIZE: i64 = 50;
 /// How long a launch may go without its runtime registering before
 /// `auto_stop_stuck_requested_runtimes` stops it as timed out.
 pub(crate) const REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS: i64 = 15 * 60;
+/// How long `auto_stop_stuck_requested_runtimes` leaves a `cleanup_pending`
+/// lease to the stop that quarantined it: that stop's provider release
+/// ([`RUNTIME_PROVIDER_RELEASE_TIMEOUT`]) and a minute to finalize. A
+/// quarantine older than that is a release that failed or timed out, which
+/// the sweep retries, since the quarantined runtime still counts toward the
+/// organization's hosted limit.
+const QUARANTINE_RELEASE_GRACE_SECONDS: i64 =
+    RUNTIME_PROVIDER_RELEASE_TIMEOUT.as_secs() as i64 + 60;
 /// How long a launch may go without its runtime registering before a
 /// person's explicit retry (`replaceStalledLaunch` on `/runtime/ensure`)
 /// replaces it instead of reusing it. The Studio offers that retry after the
@@ -2037,26 +2048,40 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
     // A stop's quarantine also leaves a runtime `requested` and unseen, with
     // the lease it launched on hours ago `cleanup_pending`. That release is
     // the stop's to finish; the sweep retries it only once the quarantine
-    // itself (the lease's last change) is as old as a launch it would time
-    // out. Without that it stopped a runtime a person had just stopped,
-    // again, as a `launch_timeout`.
+    // itself (the lease's last change) is older than the release could run
+    // (`QUARANTINE_RELEASE_GRACE_SECONDS`). Without that it stopped a runtime
+    // a person had just stopped, again, as a `launch_timeout`.
     let rows = connection
         .query(
-            "select r.id
+            "select r.id, r.active_lease_id, quarantine.reason as quarantine_reason
              from runtimes r
              join runtime_leases rl on rl.id = r.active_lease_id
+             -- The reason of the stop that last quarantined the lease, as
+             -- the runtime status reads it. A launch quarantined after a
+             -- failed provider call records another kind.
+             left join lateral (
+                select e.data ->> 'reason' as reason
+                from runtime_events e
+                where rl.status = 'cleanup_pending'
+                  and e.runtime_id = r.id
+                  and e.kind = 'provider_release_cleanup_pending'
+                  and e.data ->> 'runtimeLeaseId' = rl.id::text
+                order by e.created_at desc
+                limit 1
+             ) quarantine on true
              where r.status = 'requested'
                and r.active_lease_id is not null
                and r.last_seen_at is null
                and rl.released_at is null
                and rl.requested_at < now() - ($1::bigint * interval '1 second')
                and (rl.status <> 'cleanup_pending'
-                    or rl.updated_at < now() - ($1::bigint * interval '1 second'))
+                    or rl.updated_at < now() - ($3::bigint * interval '1 second'))
              order by rl.requested_at asc
              limit $2",
             &[
                 &REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS,
                 &REQUESTED_RUNTIME_CLEANUP_BATCH_SIZE,
+                &QUARANTINE_RELEASE_GRACE_SECONDS,
             ],
         )
         .await
@@ -2066,15 +2091,32 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
 
     for row in rows {
         let runtime_id: Uuid = row.get("id");
+        let lease_id: Uuid = row.get("active_lease_id");
+        // A person's Stop, Remove or takeover whose provider release failed
+        // is no launch: the sweep finishes that stop, under its reason.
+        let persons_stop = row
+            .get::<_, Option<String>>("quarantine_reason")
+            .filter(|reason| REQUEUE_REASONS_OF_A_PERSON.contains(&reason.as_str()));
 
         // Avoid permanently blocking org runtime limits on records that never came online.
         let stop_options = StopOptions {
             source: "launch_timeout",
-            reason: Some("launch_timeout".to_string()),
+            reason: Some(
+                persons_stop
+                    .clone()
+                    .unwrap_or_else(|| "launch_timeout".to_string()),
+            ),
             skip_if_active_jobs: true,
             require_idle_timeout: false,
             allow_cleanup_pending_release: false,
-            expected_identity: None,
+            // Only the generation found above. A launch that replaced it
+            // meanwhile has neither timed out nor been stopped.
+            expected_identity: Some(RuntimeIdentityExpectation {
+                project_id: None,
+                provider: None,
+                display_name: None,
+                lease_id: Some(lease_id),
+            }),
         };
         let stop_reason_label = stop_options
             .reason
@@ -2102,6 +2144,13 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
                             error = payload.0.message,
                             "failed to auto-revoke tunnels during launch timeout stop"
                         );
+                    }
+                    if let Some(reason) = persons_stop.as_deref() {
+                        // Published as the stop published it when it
+                        // committed, for a tab opened since. Nothing timed
+                        // out, so no bug report.
+                        notify_a_persons_stop(state, &runtime, reason, "launch_timeout").await;
+                        continue;
                     }
                     notify_runtime_stopped(
                         state,
@@ -3832,8 +3881,7 @@ mod tests {
     /// that release to the stop: on Oct 10 it stopped such a runtime again
     /// 8 seconds after a Stop, as a `launch_timeout` it would also have
     /// published and filed a bug report for. It still retries a quarantine
-    /// that is itself 15 minutes old (`tests.rs`,
-    /// `runtime_idle_sweep_retains_ambiguous_launch_until_provider_release_succeeds`).
+    /// older than the release could run (the tests below).
     #[tokio::test]
     async fn the_launch_timeout_sweep_leaves_a_fresh_stop_quarantine_alone() -> anyhow::Result<()> {
         use crate::runtime::run_interruptions::db_tests::{drain, RunningTurn, RuntimeShape};
@@ -3905,6 +3953,196 @@ mod tests {
                 .await?
                 .get(0);
             assert_eq!(launch_timeouts, 0);
+            Ok(())
+        })
+        .await
+    }
+
+    /// A person's Stop of a turn on a machine that has run for two hours,
+    /// while the provider fails every release: the stop answers 502 and
+    /// leaves its quarantine, which is then `quarantined_seconds` old when
+    /// the provider starts releasing again.
+    async fn quarantine_a_persons_stop(
+        turn: &crate::runtime::run_interruptions::db_tests::RunningTurn,
+        quarantined_seconds: i64,
+    ) -> anyhow::Result<()> {
+        use axum::http::StatusCode;
+
+        turn.pool
+            .get()
+            .await?
+            .execute(
+                "update runtime_leases
+                 set requested_at = now() - interval '2 hours',
+                     launched_at = now() - interval '2 hours'
+                 where id = $1",
+                &[&turn.runtime_lease_id],
+            )
+            .await?;
+        turn.answer_releases_with(StatusCode::INTERNAL_SERVER_ERROR);
+        let (status, body) = turn.stop("user_stop").await?;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(turn.releases(), 1);
+        // The lease's last change dates the quarantine. Its trigger stamps
+        // every update with the current time, so this one runs without it,
+        // in a transaction no other session sees the trigger off in.
+        let mut connection = turn.pool.get().await?;
+        let transaction = connection.transaction().await?;
+        transaction
+            .batch_execute(
+                "alter table runtime_leases disable trigger set_runtime_leases_updated_at",
+            )
+            .await?;
+        transaction
+            .execute(
+                "update runtime_leases
+                 set updated_at = now() - ($2::bigint * interval '1 second')
+                 where id = $1",
+                &[&turn.runtime_lease_id, &quarantined_seconds],
+            )
+            .await?;
+        transaction
+            .batch_execute(
+                "alter table runtime_leases enable trigger set_runtime_leases_updated_at",
+            )
+            .await?;
+        transaction.commit().await?;
+        turn.answer_releases_with(StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    /// The runtime's status and its lease's.
+    async fn runtime_and_lease_status(
+        turn: &crate::runtime::run_interruptions::db_tests::RunningTurn,
+    ) -> anyhow::Result<(String, String)> {
+        let row = turn
+            .pool
+            .get()
+            .await?
+            .query_one(
+                "select r.status, rl.status as lease_status
+                 from runtimes r, runtime_leases rl
+                 where r.id = $1 and rl.id = $2",
+                &[&turn.runtime_id, &turn.runtime_lease_id],
+            )
+            .await?;
+        Ok((row.get("status"), row.get("lease_status")))
+    }
+
+    /// A stop's quarantine is the stop's for as long as its provider release
+    /// can run, not for a whole launch timeout: the quarantined runtime holds
+    /// one of the organization's hosted slots, which another space may be
+    /// waiting for. Five minutes after a release that failed, the sweep
+    /// releases the machine again.
+    #[tokio::test]
+    async fn the_launch_timeout_sweep_retries_a_stop_quarantine_once_its_release_is_over(
+    ) -> anyhow::Result<()> {
+        use crate::runtime::run_interruptions::db_tests::{RunningTurn, RuntimeShape};
+
+        let quarantined_seconds = 5 * 60;
+        assert!(quarantined_seconds > super::QUARANTINE_RELEASE_GRACE_SECONDS);
+        assert!(quarantined_seconds < super::REQUESTED_RUNTIME_LAUNCH_TIMEOUT_SECONDS);
+        let pool = crate::tests::require_origin_test_pool("stop quarantine retry test").await?;
+        let project_id = Uuid::new_v4();
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        crate::tests::with_shared_db_fixture(fixture, async {
+            let turn = RunningTurn::start(
+                pool.clone(),
+                project_id,
+                RuntimeShape::Hosted,
+                axum::http::StatusCode::NO_CONTENT,
+            )
+            .await?;
+            quarantine_a_persons_stop(&turn, quarantined_seconds).await?;
+
+            super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
+
+            assert_eq!(turn.releases(), 2, "the sweep left the failed release");
+            assert_eq!(
+                runtime_and_lease_status(&turn).await?,
+                ("stopped".to_string(), "released".to_string())
+            );
+            Ok(())
+        })
+        .await
+    }
+
+    /// The sweep's retry of a person's stop finishes that stop, not a launch
+    /// that timed out: the runtime stops under the person's reason, and
+    /// `runtime.stopped` carries it as the stop's own did when it committed.
+    /// As a `launch_timeout` it was an unexpected loss to a tab that still
+    /// had the machine as its last ready one, which started the machine the
+    /// person had stopped again, and it filed a launch-timeout bug report.
+    #[tokio::test]
+    async fn the_launch_timeout_sweep_finishes_a_persons_stop_as_that_stop() -> anyhow::Result<()> {
+        use crate::runtime::run_interruptions::db_tests::{
+            assert_runtime_stopped, drain, RunningTurn, RuntimeShape,
+        };
+
+        let pool = crate::tests::require_origin_test_pool("stop quarantine finish test").await?;
+        let project_id = Uuid::new_v4();
+        let fixture = crate::tests::SharedDbFixture {
+            projects: vec![project_id],
+            ..Default::default()
+        };
+        crate::tests::with_shared_db_fixture(fixture, async {
+            let turn = RunningTurn::start(
+                pool.clone(),
+                project_id,
+                RuntimeShape::Hosted,
+                axum::http::StatusCode::NO_CONTENT,
+            )
+            .await?;
+            quarantine_a_persons_stop(&turn, 20 * 60).await?;
+            let mut events = turn.state.events.subscribe();
+
+            super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
+
+            assert_eq!(turn.releases(), 2);
+            assert_eq!(
+                runtime_and_lease_status(&turn).await?,
+                ("stopped".to_string(), "released".to_string())
+            );
+            let published: Vec<_> = drain(&mut events)
+                .into_iter()
+                .filter(|event| event.project_id == Some(turn.project_id))
+                .collect();
+            let stopped: Vec<_> = published
+                .iter()
+                .filter(|event| event.kind == "runtime.stopped")
+                .collect();
+            assert_eq!(stopped.len(), 1, "{published:?}");
+            assert_runtime_stopped(stopped[0], &turn, "user_stop", "launch_timeout");
+            assert!(
+                !published
+                    .iter()
+                    .any(|event| event.kind.starts_with("telemetry.system_issue")),
+                "{published:?}"
+            );
+            let reasons: Vec<Option<String>> = turn
+                .pool
+                .get()
+                .await?
+                .query(
+                    "select data ->> 'reason' from runtime_events
+                     where runtime_id = $1
+                       and kind in ('provider_release_cleanup_pending', 'stopped')
+                     order by created_at",
+                    &[&turn.runtime_id],
+                )
+                .await?
+                .iter()
+                .map(|row| row.get(0))
+                .collect();
+            // The stop's quarantine, the sweep's, and the stop.
+            assert_eq!(
+                reasons,
+                vec![Some("user_stop".to_string()); 3],
+                "{reasons:?}"
+            );
             Ok(())
         })
         .await

@@ -131,9 +131,10 @@ as the stop commits, before the provider release, which can take a minute,
 and only for a stop that took the runtime out of service: a skipped stop, a
 repeat that finds the runtime already stopped, and a refused or rolled-back
 request publish nothing. A retry of a stop whose provider release is still
-pending quarantines the runtime again and publishes it again. Each tab holds
-those reasons like a manual Stop when they leave the space no live hosted
-machine; in the tab that pressed Stop or Remove, which already holds the
+pending quarantines the runtime again and publishes it again, and so does the
+launch-timeout sweep when it finishes the release of such a stop (see
+"Cleanup after a failed release (502)" below). Each tab holds those reasons
+like a manual Stop when they leave the space no live hosted machine; in the tab that pressed Stop or Remove, which already holds the
 space, the event keeps the hold that request set, so what the stop's answer
 says about the work still shows. A browser session's own recycle of its
 space's idle machine (`stopIfIdle` with `runtime_limit_takeover`, see "Stop
@@ -162,6 +163,12 @@ first. An older hold does not count: a machine started from another tab or
 device after it, then lost, is recovered as before. Every automatic start
 reads the holds once more right before it asks for a machine.
 
+Every hosted stop is followed, 25 to 35 seconds later, by `origin.expired`
+for the stopped machine's origin: once its heartbeats are 25 seconds old the
+origin presence sweep marks it offline and publishes the expiry, whatever
+stopped the machine. After a stop that expiry is part of the stop, not an
+unexpected loss, which is why the recovery above checks the holds first.
+
 ## Stop reasons
 
 Sweep stops publish `runtime.stopped` with a `reason`, once the stop is
@@ -183,7 +190,9 @@ quarantine commits (see "Starting a machine on intent" above).
   launch that does not come up" below). The Studio handles it like
   `heartbeat_timeout`: a tab that had the space running starts it again. If
   the provider never brings the runtime up, such a tab therefore relaunches
-  it about every 15 minutes while it stays open.
+  it about every 15 minutes while it stays open. The sweep's retry of a
+  person's stop whose provider release failed is not a launch timeout: it
+  publishes that stop's reason (see "Cleanup after a failed release (502)").
 - `runtime_limit_reclaim` — the machine was idle and another space in the
   organization was waiting for the hosted runtime slot (see "Waiting on the
   runtime limit" below). The event carries `queuedJobCount`, the work left
@@ -454,11 +463,25 @@ retry the stop") and the quarantine stays in place:
   active-job preconditions are not re-checked; they held before the quarantine.
 - Cleanup is also retried without a caller: the next ensure for that runtime
   retries the quarantined release before launching, and the launch-timeout
-  sweep retries quarantined runtimes whose lease was requested and quarantined
-  more than 15 minutes ago. The quarantine's own age (the lease's last change)
-  matters because a stop of a machine that ran for hours leaves it
-  `requested` on an old lease, and the sweep would otherwise stop it again as
-  a `launch_timeout` while the stop's own release still runs.
+  sweep retries quarantined runtimes whose lease was requested more than 15
+  minutes ago and quarantined more than 4 minutes ago (the release's 180 s
+  deadline and a minute to finalize, `QUARANTINE_RELEASE_GRACE_SECONDS`). The
+  quarantine's own age (the lease's last change) matters because a stop of a
+  machine that ran for hours leaves it `requested` on an old lease, and the
+  sweep would otherwise stop it again as a `launch_timeout` while the stop's
+  own release still runs. The wait is sized to the release, not to a launch,
+  because the quarantined runtime still counts toward the organization's
+  hosted limit, so another space waiting on that limit waits on the retry
+  too.
+- When the quarantine it retries is a person's stop (`user_stop`,
+  `user_remove`, `runtime_limit_takeover` or
+  `browser_session_runtime_limit_takeover` recorded on the lease's latest
+  `provider_release_cleanup_pending`), the sweep finishes that stop: it
+  quarantines and stops the runtime under the same reason, publishes
+  `runtime.stopped` with it and `queuedJobCount` as the stop did when it
+  committed, and files no launch-timeout bug report. Any other quarantine it
+  retries ends as a `launch_timeout`. It retries only the lease generation it
+  found, so a launch that replaced it meanwhile is left alone.
 - Once the provider acknowledges a release, the stop finalizes: the lease is
   `released`, the runtime `stopped`, and a `provider_release_acknowledged`
   event is recorded.

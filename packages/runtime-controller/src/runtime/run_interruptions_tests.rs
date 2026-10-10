@@ -56,6 +56,8 @@ pub(crate) struct RunningTurn {
     pub(crate) job_id: Uuid,
     pub(crate) run_id: Uuid,
     releases: Arc<Mutex<usize>>,
+    /// What the stand-in provider answers a release with.
+    release_answer: Arc<Mutex<StatusCode>>,
     /// Whether the stand-in provider answers a release; while it is `false`
     /// every release waits.
     releases_open: watch::Sender<bool>,
@@ -77,7 +79,7 @@ pub(crate) struct RunRecord {
 impl RunningTurn {
     /// Seed `project_id` (the caller's fixture deletes it) with a runtime of
     /// `shape` running a turn. The stand-in provider answers every release
-    /// with `release`.
+    /// with `release` until [`Self::answer_releases_with`] changes it.
     pub(crate) async fn start(
         pool: PgPool,
         project_id: Uuid,
@@ -85,22 +87,26 @@ impl RunningTurn {
         release: StatusCode,
     ) -> anyhow::Result<Self> {
         let releases = Arc::new(Mutex::new(0));
+        let release_answer = Arc::new(Mutex::new(release));
         let (releases_open, open) = watch::channel(true);
         let release_asked = Arc::new(Notify::new());
         let provider_app = axum::Router::new().route(
             "/runtime/release",
             axum::routing::post({
                 let releases = releases.clone();
+                let release_answer = release_answer.clone();
                 let release_asked = release_asked.clone();
                 move || {
                     let releases = releases.clone();
+                    let release_answer = release_answer.clone();
                     let release_asked = release_asked.clone();
                     let mut open = open.clone();
                     async move {
                         *releases.lock().unwrap() += 1;
                         release_asked.notify_one();
                         let _ = open.wait_for(|open| *open).await;
-                        release
+                        let answer = *release_answer.lock().unwrap();
+                        answer
                     }
                 }
             }),
@@ -209,6 +215,7 @@ impl RunningTurn {
             job_id,
             run_id,
             releases,
+            release_answer,
             releases_open,
             release_asked,
             _provider: provider,
@@ -218,6 +225,11 @@ impl RunningTurn {
     /// Provider releases so far.
     pub(crate) fn releases(&self) -> usize {
         *self.releases.lock().unwrap()
+    }
+
+    /// Have the stand-in provider answer every later release with `release`.
+    pub(crate) fn answer_releases_with(&self, release: StatusCode) {
+        *self.release_answer.lock().unwrap() = release;
     }
 
     /// `POST uri` on the runtime routes as the service role.
@@ -615,7 +627,12 @@ fn assert_announces(event: &ControllerEvent, turn: &RunningTurn, run: &RunRecord
 /// The `runtime.stopped` of a person's stop, as a platform stop publishes
 /// it: the reason, the runtime, and the work left queued in the space, here
 /// the turn the stop requeued.
-fn assert_runtime_stopped(event: &ControllerEvent, turn: &RunningTurn, reason: &str, source: &str) {
+pub(crate) fn assert_runtime_stopped(
+    event: &ControllerEvent,
+    turn: &RunningTurn,
+    reason: &str,
+    source: &str,
+) {
     assert_eq!(event.kind, "runtime.stopped");
     assert_eq!(event.project_id, Some(turn.project_id));
     assert_eq!(
