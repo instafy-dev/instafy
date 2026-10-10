@@ -332,7 +332,10 @@ pub(crate) const STOP_FLUSH_BUDGET: Duration = FLUSH_BUDGET;
 
 /// Revert `commit` by applying its inverse to the index and work tree (only
 /// for the paths it touched), committing that, and publishing. `base` is the
-/// parent to revert against (required for merges and root commits).
+/// parent to revert against (required for merges and root commits). A name
+/// the inverse brings back that a disk ignoring case or Unicode form takes
+/// for another entry is refused (409 `path_alias`) before anything is
+/// written.
 pub fn revert_commit(
     ctx: &PublishContext<'_>,
     commit: &str,
@@ -2737,6 +2740,18 @@ impl<'a> Publisher<'a> {
                 "revert_conflict",
                 "later changes touch the same lines; this version cannot be reverted automatically",
                 inverse.conflicts,
+            ));
+        }
+        // A name the inverse brings back that a disk ignoring case takes for
+        // another entry (`todo.md` beside a `TODO.md` saved since) is refused
+        // as a person's save of it is, before anything is written: on such a
+        // disk the inverse would land in that other file.
+        let aliases = self.aliases_added(&head, &inverse.tree).map_err(internal)?;
+        if !aliases.is_empty() {
+            return Err(OriginError::conflict_paths(
+                "path_alias",
+                crate::apply::PATH_ALIAS_MESSAGE,
+                aliases,
             ));
         }
         let head_tree = self.git.tree_id(&head).map_err(internal)?;

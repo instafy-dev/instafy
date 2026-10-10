@@ -7392,3 +7392,47 @@ fn a_case_rename_of_one_file_is_published() {
         assert!(!on_main.contains(&"README.md".to_string()), "{on_main:?}");
     }
 }
+
+/// A revert that would bring back a name `main` now holds in another case
+/// (a saved commit deleted `todo.md`, then a person saved `TODO.md`) is
+/// refused (409 `path_alias`) before anything is written, as a person's
+/// save of that name is. On a Desktop folder on a disk that ignores case
+/// the inverse would otherwise land in the person's `TODO.md`, and the
+/// publish, which leaves `todo.md` out, would then take that file off the
+/// disk.
+#[test]
+fn a_revert_never_brings_back_a_name_main_holds_in_another_case() {
+    for desktop in [false, true] {
+        let sc = Scenario::new(Options {
+            hook: true,
+            desktop,
+            seed: vec![("todo.md", b"old list\n".to_vec())],
+            ..Options::default()
+        });
+        let deleted = sc.push_other(&[("todo.md", None)], "Save version: remove todo.md");
+        sc.push_other(
+            &[("TODO.md", Some(b"person list\n"))],
+            "Save version: TODO.md",
+        );
+        refresh(&sc.ctx(true)).unwrap();
+        let (head, main) = (sc.head(), sc.main());
+
+        match revert_commit(&sc.ctx(true), &deleted, None, None) {
+            Err(crate::error::OriginError::ConflictPaths { code, paths, .. }) => {
+                assert_eq!(code, "path_alias", "desktop {desktop}");
+                assert_eq!(paths, vec!["todo.md".to_string()], "desktop {desktop}");
+            }
+            other => panic!("desktop {desktop}: expected path_alias, got {other:?}"),
+        }
+        assert_eq!(sc.head(), head, "desktop {desktop}");
+        assert_eq!(sc.main(), main, "desktop {desktop}");
+        assert_eq!(sc.status(), "", "desktop {desktop}");
+        let names: Vec<String> = fs::read_dir(&sc.ws)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name.eq_ignore_ascii_case("todo.md"))
+            .collect();
+        assert_eq!(names, vec!["TODO.md".to_string()], "desktop {desktop}");
+        assert_eq!(sc.disk("TODO.md").as_deref(), Some("person list\n"));
+    }
+}
