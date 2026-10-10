@@ -27,8 +27,16 @@ export interface ManualStopHold {
   flush: RuntimeStopFlush | null;
 }
 
-const paused = new Set<string>();
+/** When each space was paused, on this tab's clock. */
+const paused = new Map<string, number>();
 const manualStops = new Map<string, ManualStopHold>();
+/**
+ * Per space, the latest person's stop that a person's own request for a
+ * machine in this tab has since overridden, as the controller dated it on the
+ * turn that stop put back in the queue. That record stays queued until a
+ * machine takes the turn again, so it outlives the request.
+ */
+const supersededPersonStops = new Map<string, number>();
 /**
  * Spaces whose machine waits for the person to ask for it. Every time a space
  * becomes the active one (startup, a switch, a link, a Machines deep link) it
@@ -49,7 +57,7 @@ function dispatchProjectEvent(eventName: string, projectId: string) {
 
 export function markIdlePaused(projectId: string) {
   if (projectId) {
-    paused.add(projectId);
+    paused.set(projectId, Date.now());
   }
 }
 
@@ -62,6 +70,11 @@ export function clearIdlePaused(projectId: string | null | undefined) {
 
 export function isIdlePaused(projectId: string | null | undefined): boolean {
   return Boolean(projectId && paused.has(projectId));
+}
+
+/** When the space's latest idle pause was set, on this tab's clock, or null without one. */
+export function idlePausedAt(projectId: string | null | undefined): number | null {
+  return projectId ? (paused.get(projectId) ?? null) : null;
 }
 
 /**
@@ -112,6 +125,31 @@ export function isManualStopHeld(projectId: string | null | undefined): boolean 
 
 export function manualStopHold(projectId: string | null | undefined): ManualStopHold | null {
   return (projectId && manualStops.get(projectId)) || null;
+}
+
+/**
+ * A person asked for the space's machine (Start, a send, Reconnect, Try
+ * again) after the person's stop dated `stoppedAtMs` on the controller's
+ * clock, or after none when null. That stop and every earlier one no longer
+ * hold the space (personStopsSupersededAtMs).
+ */
+export function supersedePersonStops(projectId: string | null | undefined, stoppedAtMs: number | null) {
+  if (!projectId || stoppedAtMs === null) {
+    return;
+  }
+  const supersededAtMs = supersededPersonStops.get(projectId);
+  if (supersededAtMs === undefined || stoppedAtMs > supersededAtMs) {
+    supersededPersonStops.set(projectId, stoppedAtMs);
+  }
+}
+
+/** The latest person's stop a person's request in this tab overrode in the space, or null. */
+export function personStopsSupersededAtMs(projectId: string | null | undefined): number | null {
+  return projectId ? (supersededPersonStops.get(projectId) ?? null) : null;
+}
+
+export function forgetSupersededPersonStopsForTests() {
+  supersededPersonStops.clear();
 }
 
 export function markRestoredAwaitingIntent(projectId: string | null | undefined) {

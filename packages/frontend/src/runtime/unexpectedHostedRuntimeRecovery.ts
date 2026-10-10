@@ -1,3 +1,4 @@
+import { readRunInterruption, readRunInterruptionIdentity } from "../conversations/runInterruption";
 import type { RunRecord } from "../types";
 
 export const UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS = 20_000;
@@ -107,6 +108,60 @@ export function hasPendingRunInProject(
   );
 }
 
+/**
+ * When the latest person's stop this client knows of in `projectId` was made,
+ * by the controller's clock, or null. Such a stop records itself on the turn
+ * it put back in the queue (readRunInterruption), and the record counts while
+ * the controller still keeps that turn for a machine (`resumeBy` is ahead).
+ * The controller publishes no `runtime.stopped` for a person's stop, so in a
+ * tab that did not make it this record is what tells the stop from a machine
+ * that was lost.
+ *
+ * The record stays queued until a machine takes the turn again, so it also
+ * outlives a person's request for a machine. `overriddenBy` leaves out the
+ * stops such a request has overridden: one dated at or before
+ * `supersededAtMs` (personStopsSupersededAtMs), or before
+ * `launchRequestedAtMs`, a hosted launch requested since. Both are on the
+ * controller's clock, as `interruptedAt` is.
+ */
+export function latestPersonInterruptionAtMs(
+  runs: Record<string, RunRecord> | readonly RunRecord[] | null | undefined,
+  projectId: string | null | undefined,
+  nowMs: number,
+  overriddenBy?: { supersededAtMs?: number | null; launchRequestedAtMs?: number | null },
+): number | null {
+  const normalizedProjectId = projectId?.trim() ?? "";
+  if (!normalizedProjectId || !runs) {
+    return null;
+  }
+  const records: readonly RunRecord[] = Array.isArray(runs) ? runs : Object.values(runs);
+  let latestMs: number | null = null;
+  for (const run of records) {
+    if (run?.projectId !== normalizedProjectId) {
+      continue;
+    }
+    const interruption = readRunInterruption(run);
+    if (
+      !interruption ||
+      !isPersonRuntimeStopReason(interruption.reason) ||
+      interruption.resumeByMs === null ||
+      interruption.resumeByMs <= nowMs
+    ) {
+      continue;
+    }
+    const interruptedAtMs = Date.parse(readRunInterruptionIdentity(run)?.interruptedAt ?? "");
+    if (
+      !Number.isFinite(interruptedAtMs) ||
+      interruptedAtMs <= (overriddenBy?.supersededAtMs ?? Number.NEGATIVE_INFINITY) ||
+      interruptedAtMs < (overriddenBy?.launchRequestedAtMs ?? Number.NEGATIVE_INFINITY)
+    ) {
+      continue;
+    }
+    latestMs = latestMs === null ? interruptedAtMs : Math.max(latestMs, interruptedAtMs);
+  }
+  return latestMs;
+}
+
 export interface ResolveHostedRuntimeRecoveryInput {
   activeProjectId: string | null;
   runtimeControllerEnabled: boolean;
@@ -115,6 +170,11 @@ export interface ResolveHostedRuntimeRecoveryInput {
   hostedRuntimeEnsuring: boolean;
   hasHostedRuntimeInProgress: boolean;
   hasLocalRuntime: boolean;
+  /**
+   * A stop someone chose holds the space in this tab: its own Stop or Remove
+   * (the manual hold), or an idle pause. The loss that follows is that stop.
+   */
+  stopHeld?: boolean;
   eventProjectId: string | null;
   eventAgeMs: number | null;
   maxEventAgeMs?: number;
@@ -145,7 +205,7 @@ export function shouldAttemptUnexpectedHostedRuntimeRecovery(
   if (!activeProjectId || !eventProjectId || activeProjectId !== eventProjectId) {
     return false;
   }
-  if (!input.runtimeControllerEnabled || !input.projectReadyForRuntime) {
+  if (!input.runtimeControllerEnabled || !input.projectReadyForRuntime || input.stopHeld === true) {
     return false;
   }
   if (

@@ -4,7 +4,7 @@ import type {
   LocalWorkspacePresence
 } from "../sdk/instafy";
 import { describeTimeUntil } from "../utils/time";
-import { runtimeEntryIsBooting } from "./utils/runtimeEntry";
+import { runtimeEntryIsBooting, runtimeEntryIsStopping } from "./utils/runtimeEntry";
 
 export type RuntimeStatusBadgeTone = "neutral" | "warning" | "danger";
 export type RuntimeStatusState = "online" | "idle" | "offline" | "booting";
@@ -150,7 +150,9 @@ export function resolveTunnelStatusBadge(
 export function getRuntimeLabel(
   entry: ControllerRuntimeStatusEntry,
   localWorkspace: LocalWorkspacePresence | null,
-  tunnel?: ControllerTunnelGrant | null
+  tunnel?: ControllerTunnelGrant | null,
+  /** The latest person's stop known in the space (useHostedRuntimeStopAtMs). */
+  hostedRuntimeStopAtMs: number | null = null
 ): RuntimeLabelInfo {
   const baseTypeName = "Instafy Runtime";
   const runtimeDisplayNameCandidate =
@@ -176,9 +178,12 @@ export function getRuntimeLabel(
   const normalizedHealth = (entry.health ?? "").toLowerCase();
   const normalizedStatus = (entry.status ?? "").toLowerCase();
 
-  const isBooting = runtimeEntryIsBooting(entry);
+  // A stop's release reads like a launch by its status; it is shown as the
+  // stop it is, without the spinner of a machine coming up.
+  const isStopping = runtimeEntryIsStopping(entry, hostedRuntimeStopAtMs);
+  const isBooting = !isStopping && runtimeEntryIsBooting(entry);
   const isOffline = originStatus === "offline" || normalizedHealth === "offline";
-  const shouldDisplayOfflineState = !isBooting && isOffline;
+  const shouldDisplayOfflineState = !isBooting && !isStopping && isOffline;
   const isIdle = originStatus === "idle" || normalizedHealth === "idle";
   const isOnline =
     originStatus === "online" ||
@@ -187,7 +192,10 @@ export function getRuntimeLabel(
   const isDegraded = originStatus === "degraded";
 
   let statusState: RuntimeStatusState = "offline";
-  if (isBooting) {
+  if (isStopping) {
+    statusState = "offline";
+    statusBadge = { text: "Stopping", tone: "neutral" };
+  } else if (isBooting) {
     statusState = "booting";
   } else if (isOffline) {
     statusState = "offline";

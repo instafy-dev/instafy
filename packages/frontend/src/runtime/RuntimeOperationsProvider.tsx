@@ -24,12 +24,8 @@ import { cloneRuntimeState } from "./defaults";
 import { useDesktopRuntimeEnsure } from "./hooks/useDesktopRuntimeEnsure";
 import { useHostedRuntimeEnsure, type EnsureHostedRuntimeOptions } from "./hooks/useHostedRuntimeEnsure";
 import { useHostedRuntimePolicy } from "./hooks/useHostedRuntimePolicy";
-import {
-  clearIdlePaused,
-  clearManualStop,
-  clearRestoredAwaitingIntent,
-  markManualStop,
-} from "./idlePauseRegistry";
+import { useHostedRuntimeStopAtMs } from "./hooks/useHostedRuntimeStopAtMs";
+import { markManualStop } from "./idlePauseRegistry";
 import {
   removeUnderManualHold,
   stopLeavesNoLiveHostedRuntime,
@@ -66,6 +62,12 @@ interface RuntimeOperationsContextValue {
   runtimeEnsureError: string | null;
   runtimeEnsureLimit: HostedRuntimeLimitErrorDetails | null;
   hostedRuntimeEnsuring: boolean;
+  /**
+   * The latest person's stop known in the active space, or null. A hosted
+   * runtime still `requested` on an older launch is that stop's release
+   * (runtimeEntryIsStopping).
+   */
+  hostedRuntimeStopAtMs: number | null;
   hostedRuntimeTakeoverInProgress: boolean;
   ensureHostedRuntime: (options?: EnsureHostedRuntimeOptions) => Promise<boolean>;
   takeOverHostedRuntimeLimit: () => Promise<boolean>;
@@ -241,11 +243,13 @@ export function RuntimeOperationsProvider({
   const showDesktopRuntimeHelp = useCallback(() => {
     setDesktopRuntimeHelpVisible(true);
   }, []);
+  const hostedRuntimeStopAtMs = useHostedRuntimeStopAtMs(activeProjectId ?? null, state.runs);
   const {
     hostedRuntimeEnsuring,
     ensureHostedRuntime,
     hasHostedRuntimeInProgress,
     lastHostedEnsureLimitRef,
+    liftHoldsForRequest,
   } = useHostedRuntimeEnsure({
     enabled: runtimeControllerEnabled && runtimeMutationEnabled,
     projectId: activeProjectId ?? null,
@@ -256,6 +260,8 @@ export function RuntimeOperationsProvider({
     setRuntimeEnsureError,
     setRuntimeEnsureLimit,
     showDesktopRuntimeHelp,
+    hostedRuntimeStopAtMs,
+    runs: state.runs,
   });
   const { desktopRuntimeEnsuring, ensureDesktopRuntime } =
     useDesktopRuntimeEnsure({
@@ -580,13 +586,12 @@ export function RuntimeOperationsProvider({
         showStatus("Runtime start requested", "info", 2500);
         await refreshRuntimeStatuses();
         // An explicit Start is intent in this space, so it lifts a deliberate
-        // Stop and every other hold. Lifted only once the refresh shows the
-        // machine starting: before that the auto-start would read "no
-        // machine" and ask for a second one. If the start fails, the fallback
-        // below goes through ensureHostedRuntime, which lifts them too.
-        clearManualStop(projectId);
-        clearRestoredAwaitingIntent(projectId);
-        clearIdlePaused(projectId);
+        // Stop and every other hold, and overrides the person's stops its
+        // runs record. Lifted only once the refresh shows the machine
+        // starting: before that the auto-start would read "no machine" and
+        // ask for a second one. If the start fails, the fallback below goes
+        // through ensureHostedRuntime, which lifts them too.
+        liftHoldsForRequest(projectId);
         return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -605,6 +610,7 @@ export function RuntimeOperationsProvider({
     },
     [
       ensureHostedRuntime,
+      liftHoldsForRequest,
       refreshRuntimeStatuses,
       resolveProjectId,
       runtimeMutationEnabled,
@@ -805,6 +811,7 @@ export function RuntimeOperationsProvider({
       runtimeEnsureError,
       runtimeEnsureLimit,
       hostedRuntimeEnsuring,
+      hostedRuntimeStopAtMs,
       hostedRuntimeTakeoverInProgress,
       ensureHostedRuntime,
       takeOverHostedRuntimeLimit,
@@ -831,6 +838,7 @@ export function RuntimeOperationsProvider({
       takeOverHostedRuntimeLimit,
       hideDesktopRuntimeHelp,
       hostedRuntimeEnsuring,
+      hostedRuntimeStopAtMs,
       hostedRuntimeTakeoverInProgress,
       runtimeEnsureError,
       runtimeEnsureLimit,

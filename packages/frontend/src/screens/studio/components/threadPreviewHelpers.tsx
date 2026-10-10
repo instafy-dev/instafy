@@ -479,8 +479,11 @@ export function resolveThreadRunStatusFromMessages(threadMessages: ChatMessage[]
       candidateMetadata && typeof candidateMetadata["kind"] === "string"
         ? candidateMetadata["kind"].trim().toLowerCase()
         : "";
+    // The controller writes a run's final outcome itself when it fails a turn
+    // no runtime finished, such as one a stop left queued past its resume
+    // window. Every outcome it writes on a message is terminal.
     const looksLikeFinalAgentOutcomeMessage =
-      candidateSource === "agent" &&
+      (candidateSource === "agent" || candidateSource === "controller") &&
       candidateOutcome !== "" &&
       candidateOutcome !== "in_progress" &&
       candidateKind !== "update";

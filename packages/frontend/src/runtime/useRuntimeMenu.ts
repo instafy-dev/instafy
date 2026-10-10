@@ -93,6 +93,7 @@ export function useRuntimeMenuOptions(): RuntimeMenuData & {
     effectiveRuntimeId,
     effectiveRuntimeSource,
     preferredRuntimeId,
+    hostedRuntimeStopAtMs,
   } = runtime;
   const controllerProjectMissing = runtime.runtime.controllerProjectMissing;
   const controllerUnavailable = runtime.runtime.controllerUnavailable;
@@ -118,6 +119,7 @@ export function useRuntimeMenuOptions(): RuntimeMenuData & {
           entry,
           localWorkspace,
           tunnelGrants[entry.runtimeId] ?? null,
+          hostedRuntimeStopAtMs ?? null,
         ),
       }));
     const filtered: Array<{ entry: ControllerRuntimeStatusEntry; info: RuntimeLabelInfo }> = [];
@@ -169,6 +171,7 @@ export function useRuntimeMenuOptions(): RuntimeMenuData & {
     sessionRuntimeId,
     effectiveRuntimeId,
     preferredRuntimeId,
+    hostedRuntimeStopAtMs,
   ]);
 
   const aggregateState = useMemo<RuntimeStatusState>(() => {

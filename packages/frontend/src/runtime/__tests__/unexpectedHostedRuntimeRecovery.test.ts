@@ -3,6 +3,7 @@ import type { RunRecord } from "../../types";
 import {
   hasPendingRunInProject,
   isRuntimeLimitReclaimStopReason,
+  latestPersonInterruptionAtMs,
   resolveRuntimeStopHold,
   shouldAttemptUnexpectedHostedRuntimeRecovery,
   shouldTrackHostedRuntimeLifecycleEvent,
@@ -142,6 +143,22 @@ describe("unexpectedHostedRuntimeRecovery", () => {
         eventAgeMs: UNEXPECTED_HOSTED_RUNTIME_RECOVERY_WINDOW_MS + 1,
       }),
     ).toBe(false);
+
+    // A stop someone chose holds the space: the loss is that stop.
+    expect(
+      shouldAttemptUnexpectedHostedRuntimeRecovery({
+        activeProjectId: "project-1",
+        runtimeControllerEnabled: true,
+        projectReadyForRuntime: true,
+        runtimeReady: false,
+        hostedRuntimeEnsuring: false,
+        hasHostedRuntimeInProgress: false,
+        hasLocalRuntime: false,
+        stopHeld: true,
+        eventProjectId: "project-1",
+        eventAgeMs: 1_000,
+      }),
+    ).toBe(false);
   });
 
   it("holds a runtime-limit reclaim stop unless this client has work of its own there", () => {
@@ -216,5 +233,58 @@ describe("unexpectedHostedRuntimeRecovery", () => {
     for (const reason of ["idle", "runtime_limit_reclaim", "heartbeat_timeout", "", null, undefined]) {
       expect(resolveRuntimeStopHold(reason)).toBeNull();
     }
+  });
+  it("dates the latest person's stop from the turns it put back in the queue", () => {
+    const nowMs = Date.parse("2026-10-10T11:00:00.000Z");
+    const interrupted = (
+      id: string,
+      reason: string,
+      interruptedAt: string,
+      resumeBy: string,
+      projectId = "project-1",
+    ): RunRecord => ({
+      ...run(id, projectId, "queued"),
+      progressStage: "requeued",
+      metadata: { interruption: { reason, jobId: `job-${id}`, interruptedAt, resumeBy } },
+    });
+    const earlier = interrupted("a", "user_stop", "2026-10-10T10:50:00.000Z", "2026-10-10T11:05:00.000Z");
+    const later = interrupted("b", "user_remove", "2026-10-10T10:58:44.749Z", "2026-10-10T11:13:44.749Z");
+    expect(latestPersonInterruptionAtMs({ a: earlier, b: later }, "project-1", nowMs)).toBe(
+      Date.parse("2026-10-10T10:58:44.749Z"),
+    );
+    expect(latestPersonInterruptionAtMs([earlier], "project-1", nowMs)).toBe(
+      Date.parse("2026-10-10T10:50:00.000Z"),
+    );
+
+    // Not a person's stop, given up on, another space, or picked up again.
+    const lost = interrupted("c", "heartbeat_timeout", "2026-10-10T10:58:00.000Z", "2026-10-10T11:13:00.000Z");
+    const expired = interrupted("d", "user_stop", "2026-10-10T10:40:00.000Z", "2026-10-10T10:55:00.000Z");
+    const elsewhere = interrupted("e", "user_stop", "2026-10-10T10:58:00.000Z", "2026-10-10T11:13:00.000Z", "project-2");
+    const resumed = { ...later, status: "in_progress" as const, progressStage: "agent:leased" };
+    expect(latestPersonInterruptionAtMs([lost, expired, elsewhere, resumed], "project-1", nowMs)).toBeNull();
+    expect(latestPersonInterruptionAtMs(null, "project-1", nowMs)).toBeNull();
+    expect(latestPersonInterruptionAtMs([later], null, nowMs)).toBeNull();
+
+    // A person's request for a machine since, in this tab or by a launch the
+    // controller reports, overrides the stops before it.
+    const latestAtMs = Date.parse("2026-10-10T10:58:44.749Z");
+    const earlierAtMs = Date.parse("2026-10-10T10:50:00.000Z");
+    expect(latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { supersededAtMs: latestAtMs })).toBeNull();
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { supersededAtMs: earlierAtMs }),
+    ).toBe(latestAtMs);
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { launchRequestedAtMs: latestAtMs + 1 }),
+    ).toBeNull();
+    // A launch at the same instant as the stop does not override it.
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, { launchRequestedAtMs: latestAtMs }),
+    ).toBe(latestAtMs);
+    expect(
+      latestPersonInterruptionAtMs([earlier, later], "project-1", nowMs, {
+        supersededAtMs: null,
+        launchRequestedAtMs: null,
+      }),
+    ).toBe(latestAtMs);
   });
 });

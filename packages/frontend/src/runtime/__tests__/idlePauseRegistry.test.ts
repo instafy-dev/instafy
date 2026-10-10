@@ -6,13 +6,17 @@ import {
   MANUAL_STOP_CHANGED_EVENT,
   clearIdlePaused,
   clearManualStop,
+  forgetSupersededPersonStopsForTests,
+  idlePausedAt,
   isAutoEnsureHeld,
   isIdlePaused,
   isManualStopHeld,
   manualStopHold,
   markIdlePaused,
   markManualStop,
+  personStopsSupersededAtMs,
   recordManualStopFlush,
+  supersedePersonStops,
 } from "../idlePauseRegistry";
 
 describe("idlePauseRegistry manual stop hold", () => {
@@ -155,5 +159,53 @@ describe("idlePauseRegistry restored-space hold", () => {
     clearRestoredAwaitingIntent("project-a");
     expect(lifted).toHaveBeenCalledTimes(1);
     window.removeEventListener(IDLE_PAUSE_CLEARED_EVENT, lifted);
+  });
+});
+
+describe("idlePauseRegistry idle pause time", () => {
+  afterEach(() => {
+    clearIdlePaused("project-a");
+  });
+
+  it("records when the latest pause was set", () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      expect(idlePausedAt("project-a")).toBeNull();
+      now.mockReturnValue(1_000);
+      markIdlePaused("project-a");
+      expect(idlePausedAt("project-a")).toBe(1_000);
+      now.mockReturnValue(5_000);
+      markIdlePaused("project-a");
+      expect(idlePausedAt("project-a")).toBe(5_000);
+      expect(idlePausedAt("project-b")).toBeNull();
+      expect(idlePausedAt(null)).toBeNull();
+
+      clearIdlePaused("project-a");
+      expect(idlePausedAt("project-a")).toBeNull();
+    } finally {
+      now.mockRestore();
+    }
+  });
+});
+
+describe("idlePauseRegistry superseded person's stops", () => {
+  afterEach(() => {
+    forgetSupersededPersonStopsForTests();
+  });
+
+  it("keeps the latest person's stop a request overrode, per project", () => {
+    expect(personStopsSupersededAtMs("project-a")).toBeNull();
+
+    supersedePersonStops("project-a", 5_000);
+    // A request that knew of no stop, or only an earlier one, changes nothing.
+    supersedePersonStops("project-a", null);
+    supersedePersonStops("project-a", 1_000);
+    expect(personStopsSupersededAtMs("project-a")).toBe(5_000);
+    supersedePersonStops("project-a", 9_000);
+    expect(personStopsSupersededAtMs("project-a")).toBe(9_000);
+
+    expect(personStopsSupersededAtMs("project-b")).toBeNull();
+    supersedePersonStops(null, 1_000);
+    expect(personStopsSupersededAtMs(null)).toBeNull();
   });
 });

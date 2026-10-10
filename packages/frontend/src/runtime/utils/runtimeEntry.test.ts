@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import {
+  latestHostedLaunchRequestedAtMs,
   resolveStalledHostedLaunch,
   runtimeEntryIsBooting,
   runtimeEntryIsStaleBooting,
+  runtimeEntryIsStopping,
   STALLED_LAUNCH_AFTER_MS,
   stalledLaunchDeadlineMs,
 } from "./runtimeEntry";
@@ -107,5 +109,92 @@ describe("stalled hosted launch", () => {
     expect(resolveStalledHostedLaunch(launching({ provider: "self-hosted" }), late)).toBe(false);
     expect(resolveStalledHostedLaunch(launching({ endpointUrl: "http://127.0.0.1:8080" }), late)).toBe(false);
     expect(resolveStalledHostedLaunch(null, late)).toBe(false);
+  });
+});
+
+describe("a stop's release", () => {
+  // What the status answer showed during a stop's release (Oct 10): the old
+  // launch, offline, never seen, no origin or endpoint.
+  const launchedAt = "2026-10-10T10:52:00.000Z";
+  const stopAtMs = Date.parse("2026-10-10T10:58:43.000Z");
+  const releasing = (overrides: Partial<ControllerRuntimeStatusEntry> = {}) =>
+    createEntry({
+      createdAt: launchedAt,
+      lastSeenAt: null,
+      launchRequestedAt: launchedAt,
+      endpointUrl: null,
+      origin: null,
+      ...overrides,
+    });
+
+  it("is a stop when a stop newer than the launch is known", () => {
+    expect(runtimeEntryIsStopping(releasing(), stopAtMs)).toBe(true);
+    // A controller that dates the stop on the runtime itself.
+    expect(
+      runtimeEntryIsStopping(
+        releasing({ stopRequestedAt: new Date(stopAtMs).toISOString(), stopReason: "user_stop" }),
+        null,
+      ),
+    ).toBe(true);
+    expect(runtimeEntryIsStopping(releasing({ stopReason: "user_stop" }), null)).toBe(true);
+    // Without a launch time to compare, the known stop is the newer fact.
+    expect(runtimeEntryIsStopping(releasing({ launchRequestedAt: null }), stopAtMs)).toBe(true);
+  });
+
+  it("is a launch when no stop is known, or the launch came after it", () => {
+    expect(runtimeEntryIsStopping(releasing(), null)).toBe(false);
+    expect(runtimeEntryIsStopping(releasing({ launchRequestedAt: "2026-10-10T11:00:00.000Z" }), stopAtMs)).toBe(false);
+    expect(
+      runtimeEntryIsStopping(
+        releasing({
+          launchRequestedAt: "2026-10-10T11:00:00.000Z",
+          stopRequestedAt: new Date(stopAtMs).toISOString(),
+          stopReason: "user_stop",
+        }),
+        null,
+      ),
+    ).toBe(false);
+    // The fields alone cannot tell: the same row is what a stalled launch shows.
+    expect(resolveStalledHostedLaunch(releasing(), stopAtMs)).toBe(true);
+  });
+
+  it("leaves the release of a stop nobody chose to read as a launch that stalled", () => {
+    // The controller marks every stop's release, and after a failed one keeps
+    // the mark until it retries, up to 15 minutes later. A machine that
+    // crashed must still be started again, or offered Try again.
+    const stopRequestedAt = new Date(stopAtMs).toISOString();
+    for (const stopReason of ["heartbeat_timeout", "launch_timeout", "idle", "other", "", null]) {
+      expect(runtimeEntryIsStopping(releasing({ stopRequestedAt, stopReason }), null)).toBe(false);
+    }
+    expect(runtimeEntryIsStopping(releasing({ stopRequestedAt }), null)).toBe(false);
+    for (const stopReason of ["user_stop", "user_remove", "runtime_limit_takeover"]) {
+      expect(runtimeEntryIsStopping(releasing({ stopRequestedAt, stopReason }), null)).toBe(true);
+    }
+  });
+
+  it("only applies to a hosted runtime that still reads as launching", () => {
+    for (const status of ["stopped", "ready", "failed"]) {
+      expect(runtimeEntryIsStopping(releasing({ status }), stopAtMs)).toBe(false);
+    }
+    expect(runtimeEntryIsStopping(releasing({ isLocal: true }), stopAtMs)).toBe(false);
+    expect(runtimeEntryIsStopping(releasing({ provider: "self-hosted" }), stopAtMs)).toBe(false);
+    expect(runtimeEntryIsStopping(null, stopAtMs)).toBe(false);
+  });
+});
+
+describe("latestHostedLaunchRequestedAtMs", () => {
+  it("is the latest launch of a hosted runtime", () => {
+    expect(
+      latestHostedLaunchRequestedAtMs([
+        createEntry({ launchRequestedAt: "2026-10-10T10:52:00.000Z" }),
+        createEntry({ launchRequestedAt: "2026-10-10T11:01:00.000Z" }),
+        // A desktop runtime's launch is no hosted machine.
+        createEntry({ isLocal: true, launchRequestedAt: "2026-10-10T11:05:00.000Z" }),
+        createEntry({ launchRequestedAt: null }),
+        null,
+      ]),
+    ).toBe(Date.parse("2026-10-10T11:01:00.000Z"));
+    expect(latestHostedLaunchRequestedAtMs([createEntry()])).toBeNull();
+    expect(latestHostedLaunchRequestedAtMs([])).toBeNull();
   });
 });
