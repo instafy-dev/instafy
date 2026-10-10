@@ -68,8 +68,10 @@ export interface UseFilesPanelSaveOptions {
   loadDirectory: (path: string, options?: { force?: boolean }) => Promise<ControllerWorkspaceEntry[] | null>;
   ownRevisions: OwnRevisions;
   /**
-   * Show a failure (or a partial save) with its copy; `retry` saves again and
-   * settles once that save has.
+   * Show a failure (or a partial save) with its copy. `retry` saves that file
+   * again and settles once that save, and any save queued behind it, has
+   * finished. Pressed while another save runs, it only queues the one trailing
+   * save and settles at once; after the panel has closed, it saves nothing.
    */
   presentFailure: (copy: SaveCopy, retry: () => Promise<void>) => void;
   /** Test seam for the wait before the save's own retry. */
