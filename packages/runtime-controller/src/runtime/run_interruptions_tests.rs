@@ -819,8 +819,9 @@ async fn a_failed_provider_release_still_announces_the_requeued_turn() -> anyhow
 /// runtime the first had quarantined took the stop over, so the status said
 /// `agent_shutdown` for the rest of the release and the runtime stopped under
 /// it. It is the same stop: the status keeps the person's reason and time,
-/// the turn stays interrupted by it, and the stop finishes, and is
-/// announced, as the person's.
+/// the turn stays interrupted by it, and it is announced as the person's
+/// again. It leaves the release and its finish to the stop already running
+/// one: no second provider release, no second finalize.
 #[tokio::test]
 async fn the_agents_own_shutdown_keeps_a_persons_stop() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("stop kept through agent shutdown test").await?;
@@ -836,15 +837,32 @@ async fn the_agents_own_shutdown_keeps_a_persons_stop() -> anyhow::Result<()> {
         // The person's stop, its provider release still out.
         let (status, body) = turn.stop("user_stop").await?;
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(turn.releases(), 1);
         let run = turn.assert_interrupted("user_stop").await?;
         let quarantined = turn.status_entry().await?;
         assert_eq!(quarantined["stopReason"], "user_stop", "{quarantined}");
         assert_eq!(json_time(&quarantined["stopRequestedAt"])?, run.updated_at);
 
         // The machine's agent stops its own runtime while that release runs.
+        turn.answer_releases_with(StatusCode::NO_CONTENT);
+        let mut events = turn.state.events.subscribe();
         let (status, body) = turn.stop("agent_shutdown").await?;
-        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["skip_reason"], "release_in_progress", "{body}");
+        assert_eq!(body["provider_release_attempted"], false, "{body}");
+        assert_eq!(
+            turn.releases(),
+            1,
+            "the agent's stop released the machine again"
+        );
+        let published: Vec<_> = drain(&mut events)
+            .into_iter()
+            .filter(|event| event.kind == "runtime.stopped")
+            .collect();
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_runtime_stopped(&published[0], &turn, "user_stop", "runtime_stop");
         let releasing = turn.status_entry().await?;
+        assert_eq!(releasing["status"], "requested", "{releasing}");
         assert_eq!(releasing["stopReason"], "user_stop", "{releasing}");
         assert_eq!(
             releasing["stopRequestedAt"], quarantined["stopRequestedAt"],
@@ -852,18 +870,10 @@ async fn the_agents_own_shutdown_keeps_a_persons_stop() -> anyhow::Result<()> {
         );
         turn.assert_interrupted("user_stop").await?;
 
-        // Once the provider releases the machine, the stop finishes as the
-        // person's.
-        turn.answer_releases_with(StatusCode::NO_CONTENT);
-        let mut events = turn.state.events.subscribe();
-        let (status, body) = turn.stop("agent_shutdown").await?;
+        // The person's retry releases the machine and finishes the stop.
+        let (status, body) = turn.stop("user_stop").await?;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let published: Vec<_> = drain(&mut events)
-            .into_iter()
-            .filter(|event| event.kind == "runtime.stopped")
-            .collect();
-        assert_eq!(published.len(), 1, "{published:?}");
-        assert_runtime_stopped(&published[0], &turn, "user_stop", "runtime_stop");
+        assert_eq!(turn.releases(), 2);
         turn.assert_interrupted("user_stop").await?;
         let stopped = turn.status_entry().await?;
         assert_eq!(stopped["status"], "stopped", "{stopped}");
@@ -882,7 +892,7 @@ async fn the_agents_own_shutdown_keeps_a_persons_stop() -> anyhow::Result<()> {
             .iter()
             .map(|row| row.get(0))
             .collect();
-        // The person's quarantine, the agent's two, and the stop.
+        // The person's quarantine, the agent's, the retry's, and the stop.
         assert_eq!(
             reasons,
             vec![Some("user_stop".to_string()); 4],

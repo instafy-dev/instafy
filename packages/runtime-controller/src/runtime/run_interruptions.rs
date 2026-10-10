@@ -145,6 +145,15 @@ pub(super) async fn announce_interrupted_runs(state: &AppState, runtime_id: &Uui
             return;
         }
     };
+    announce_interrupted_runs_on(state, &connection, runtime_id).await;
+}
+
+/// [`announce_interrupted_runs`] on a connection the caller already holds.
+pub(super) async fn announce_interrupted_runs_on(
+    state: &AppState,
+    connection: &tokio_postgres::Client,
+    runtime_id: &Uuid,
+) {
     let rows = connection
         .query(
             "select r.id, r.project_id, r.session_id, r.conversation_id, r.prompt_id,
@@ -165,7 +174,6 @@ pub(super) async fn announce_interrupted_runs(state: &AppState, runtime_id: &Uui
             &[runtime_id, &ANNOUNCED_RUNS_LIMIT],
         )
         .await;
-    drop(connection);
     let rows = match rows {
         Ok(rows) => rows,
         Err(error) => {

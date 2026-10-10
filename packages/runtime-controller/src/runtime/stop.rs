@@ -512,6 +512,10 @@ async fn runtime_has_active_hosted_jobs(
         .map_err(|error| internal_error(format!("failed to check active jobs: {error}")))
 }
 
+/// The reason the runtime agent gives when it stops its own runtime on its way
+/// out (`stop_runtime(.., "agent_shutdown")`).
+const AGENT_SHUTDOWN_STOP_REASON: &str = "agent_shutdown";
+
 /// What a quarantine did: the job input updates to publish, and the reason of
 /// an earlier stop that had already quarantined the lease, which this stop
 /// keeps (see [`quarantine_runtime_for_provider_release`]).
@@ -992,16 +996,41 @@ async fn announce_committed_stop(
         }
         Some(_) => return,
     }
+    // One connection for both reads: a stop already takes several in a row
+    // from a small pool.
+    let connection = match state.pool.get().await {
+        Ok(connection) => Some(connection),
+        Err(error) => {
+            warn!(
+                runtime_id = %runtime.id,
+                %error,
+                "failed to get a connection to announce a committed stop"
+            );
+            None
+        }
+    };
     if is_a_persons_stop(options) {
-        notify_a_persons_stop(
+        let queued_job_count = match connection.as_deref() {
+            Some(connection) => {
+                count_queued_jobs_left(runtime, || {
+                    super::limit_waits::count_waiting_jobs_on(connection, &runtime.project_id)
+                })
+                .await
+            }
+            None => 0,
+        };
+        notify_a_persons_stop_with_count(
             state,
             runtime,
             options.reason.as_deref().unwrap_or(options.source),
             options.source,
-        )
-        .await;
+            queued_job_count,
+        );
     }
-    super::run_interruptions::announce_interrupted_runs(state, &runtime.id).await;
+    if let Some(connection) = connection.as_deref() {
+        super::run_interruptions::announce_interrupted_runs_on(state, connection, &runtime.id)
+            .await;
+    }
 }
 
 /// `runtime.stopped` for a person's stop with `reason`, as the platform's
@@ -1014,19 +1043,41 @@ pub(super) async fn notify_a_persons_stop(
     reason: &str,
     source: &str,
 ) {
-    let queued_job_count =
-        match super::limit_waits::count_waiting_jobs(state, &runtime.project_id).await {
-            Ok(count) => count,
-            Err(error) => {
-                warn!(
-                    runtime_id = %runtime.id,
-                    project_id = %runtime.project_id,
-                    ?error,
-                    "could not count work left queued by a person's stop"
-                );
-                0
-            }
-        };
+    let queued_job_count = count_queued_jobs_left(runtime, || {
+        super::limit_waits::count_waiting_jobs(state, &runtime.project_id)
+    })
+    .await;
+    notify_a_persons_stop_with_count(state, runtime, reason, source, queued_job_count);
+}
+
+/// The work left queued in the stopped runtime's space, or 0 when it cannot
+/// be counted: the stop is announced either way.
+async fn count_queued_jobs_left<F, Fut>(runtime: &RuntimeDetails, count: F) -> i64
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<i64>>,
+{
+    match count().await {
+        Ok(count) => count,
+        Err(error) => {
+            warn!(
+                runtime_id = %runtime.id,
+                project_id = %runtime.project_id,
+                ?error,
+                "could not count work left queued by a person's stop"
+            );
+            0
+        }
+    }
+}
+
+fn notify_a_persons_stop_with_count(
+    state: &AppState,
+    runtime: &RuntimeDetails,
+    reason: &str,
+    source: &str,
+    queued_job_count: i64,
+) {
     super::sweeps::notify_runtime_stopped_with_extra(
         state,
         runtime.project_id,
@@ -1274,6 +1325,8 @@ pub(crate) async fn runtime_stop(
                     "failed to commit runtime provider-release quarantine: {error}"
                 ))
             })?;
+            let agents_own_shutdown_of_a_pending_stop = quarantine.earlier_stop_reason.is_some()
+                && stop_options.reason.as_deref() == Some(AGENT_SHUTDOWN_STOP_REASON);
             if let Some(reason) = quarantine.earlier_stop_reason {
                 stop_options.reason = Some(reason);
             }
@@ -1283,6 +1336,27 @@ pub(crate) async fn runtime_stop(
             );
             drop(connection);
             announce_committed_stop(&state, &runtime, &stop_options, None).await;
+
+            // The runtime agent stops its own runtime on its way out, once the
+            // provider signals the machine an earlier stop is releasing. That
+            // stop's release and finalize are still running; a second
+            // release, which the provider queues behind the first, and a
+            // second finalize only cost pool connections. A person's retry
+            // still releases, and the launch-timeout sweep retries a release
+            // that failed.
+            if agents_own_shutdown_of_a_pending_stop {
+                return Ok((
+                    StatusCode::OK,
+                    RuntimeStopResponse {
+                        ok: true,
+                        status_changed: false,
+                        provider_release_attempted: false,
+                        provider_release_succeeded: false,
+                        skip_reason: Some("release_in_progress".to_string()),
+                        flush: None,
+                    },
+                ));
+            }
 
             let provider_release = release_runtime_via_provider(
                 &state,

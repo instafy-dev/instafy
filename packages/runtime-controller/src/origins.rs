@@ -4376,9 +4376,8 @@ async fn proxy_origin_request(
             }
         })?;
 
-    let mut upstream = builder
-        .body(body)
-        .send()
+    let idle = crate::proxy_read::ORIGIN_PROXY_IDLE_TIMEOUT;
+    let mut upstream = crate::proxy_read::send_within_idle(builder.body(body), idle)
         .await
         .map_err(|error| bad_gateway(format!("origin proxy request failed: {error}")))?;
 
@@ -4386,11 +4385,14 @@ async fn proxy_origin_request(
     let headers = upstream.headers().clone();
     let bytes = if is_webrtc_offer {
         let mut bounded = Vec::new();
-        while let Some(chunk) = upstream.chunk().await.map_err(|error| {
-            bad_gateway(format!(
-                "failed to read origin proxy response body: {error}"
-            ))
-        })? {
+        while let Some(chunk) = crate::proxy_read::next_chunk_within_idle(&mut upstream, idle)
+            .await
+            .map_err(|error| {
+                bad_gateway(format!(
+                    "failed to read origin proxy response body: {error}"
+                ))
+            })?
+        {
             if bounded.len().saturating_add(chunk.len()) > ORIGIN_PROXY_WEBRTC_BODY_BYTES {
                 return Err(bad_gateway("WebRTC answer exceeds 256 KiB"));
             }
@@ -4398,11 +4400,13 @@ async fn proxy_origin_request(
         }
         Bytes::from(bounded)
     } else {
-        upstream.bytes().await.map_err(|error| {
-            bad_gateway(format!(
-                "failed to read origin proxy response body: {error}"
-            ))
-        })?
+        crate::proxy_read::read_body_within_idle(upstream, idle)
+            .await
+            .map_err(|error| {
+                bad_gateway(format!(
+                    "failed to read origin proxy response body: {error}"
+                ))
+            })?
     };
 
     let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);

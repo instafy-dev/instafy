@@ -322,8 +322,10 @@ of a runtime already quarantined is still that stop and changes neither: the
 runtime agent's own `agent_shutdown` once the provider signals the machine,
 about 20 seconds into a person's Stop, a person pressing Stop again, or the
 launch-timeout sweep's retry. Each records its quarantine under the first
-stop's reason, requeues under it and finishes the stop under it. Both go once
-the release is acknowledged (the runtime is then `stopped`) or the next launch
+stop's reason and requeues under it. A retry or the sweep releases the machine
+and finishes the stop under it; the agent's own stop leaves that to the stop
+already releasing it (it answers `release_in_progress`). Both go once the
+release is acknowledged (the runtime is then `stopped`) or the next launch
 replaces the lease. A launch quarantined after a failed provider call is not a
 stop and carries neither, and a controller from before these fields sends
 neither.

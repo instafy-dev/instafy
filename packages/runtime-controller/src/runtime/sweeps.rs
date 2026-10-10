@@ -4177,10 +4177,12 @@ mod tests {
             )
             .await?;
             quarantine_a_persons_stop(&turn, 20 * 60).await?;
-            turn.answer_releases_with(StatusCode::INTERNAL_SERVER_ERROR);
+            // The agent's stop leaves the release to the stop already
+            // running one.
             let (status, body) = turn.stop("agent_shutdown").await?;
-            assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
-            turn.answer_releases_with(StatusCode::NO_CONTENT);
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["skip_reason"], "release_in_progress", "{body}");
+            assert_eq!(turn.releases(), 1);
             let mut events = turn.state.events.subscribe();
 
             super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
