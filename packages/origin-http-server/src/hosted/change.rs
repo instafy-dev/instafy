@@ -812,7 +812,9 @@ fn build_tree(
 }
 
 /// The inverse of `commit` (relative to `base`, an ancestor of it) applied
-/// to `main` with a three-way merge.
+/// to `main` with a three-way merge. Like a save, it never brings back a
+/// path that may never be saved, or a name a disk ignoring case takes for
+/// another entry of the result (409 `path_alias`).
 pub(crate) struct Revert {
     commit: String,
     base: String,
@@ -847,6 +849,7 @@ impl Revert {
             ])
             .map_err(internal)?;
         let mut refused = Vec::new();
+        let mut added = Vec::new();
         for change in parse_raw_changes(&raw) {
             if change.status == 'D' {
                 if !deletion_allowed(&change.path) {
@@ -854,10 +857,19 @@ impl Revert {
                 }
             } else if let Some(reason) = unpublishable_reason(&change.path) {
                 refused.push((change.path, reason));
+            } else if change.status == 'A' {
+                added.push(change.path);
             }
         }
         if !refused.is_empty() {
             return Err(excluded_path(refused));
+        }
+        // A name it brings back that a disk ignoring case takes for another
+        // entry (`todo.md` beside a `TODO.md` saved since), as for a save.
+        let added: Vec<&str> = added.iter().map(String::as_str).collect();
+        let aliases = aliases_in(git, &merged.tree, &added).map_err(internal)?;
+        if !aliases.is_empty() {
+            return Err(path_alias(Some(main), aliases));
         }
         Ok(merged.tree)
     }

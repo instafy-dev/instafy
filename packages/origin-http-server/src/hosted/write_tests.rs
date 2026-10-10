@@ -2814,6 +2814,30 @@ async fn reverts_merge_the_inverse_onto_main() {
     );
 }
 
+/// A revert that would bring back a name `main` now holds in another case
+/// (a saved commit deleted `todo.md`, then a person saved `TODO.md`) is
+/// refused (409 `path_alias`), as a person's save of that name is: `main`
+/// would hold both, which a disk that ignores case takes for one file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revert_never_brings_back_a_name_main_holds_in_another_case() {
+    let sc = HostedScenario::new();
+    sc.push(&[("todo.md", Some(b"old list\n"))], "seed");
+    let deleted = sc.push(&[("todo.md", None)], "remove todo.md");
+    let main = sc.push(&[("TODO.md", Some(b"person list\n"))], "save TODO.md");
+    let served = serve(&sc).await;
+
+    let answer = post(&served, "/git/revert-commit", json!({ "commit": deleted })).await;
+    assert_eq!(
+        (answer.status, answer.code().as_str()),
+        (409, "path_alias"),
+        "{}",
+        answer.json()
+    );
+    assert_eq!(answer.json()["paths"], json!(["todo.md"]));
+    assert_eq!(answer.json()["head"], main.as_str());
+    assert_eq!(canonical(&sc, &["rev-parse", "main"]), main);
+}
+
 /// A write that could not move the mirror's `main` (a fetch held its refs)
 /// makes the next read fetch instead of reusing an earlier fetch.
 #[tokio::test(flavor = "multi_thread")]
