@@ -9,6 +9,7 @@ import {
 import {
   isHostedRuntime,
   isSelfHostedRuntime,
+  runtimeEntryLaunchedAt,
 } from "./utils/runtimeEntry";
 import type {
   ControllerTunnelGrant,
@@ -204,11 +205,7 @@ export function useRuntimeMenuOptions(): RuntimeMenuData & {
       const needsActivation =
         isLocalLike && (!originEndpoint || originEndpoint.length === 0);
       const detail = info.detail;
-      const launchedAt =
-        entry.createdAt ??
-        entry.agentTokenIssuedAt ??
-        entry.lastSeenAt ??
-        null;
+      const launchedAt = runtimeEntryLaunchedAt(entry);
 
       return {
         id: entry.runtimeId,

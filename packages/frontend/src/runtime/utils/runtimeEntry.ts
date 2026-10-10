@@ -176,6 +176,18 @@ export function isHostedRuntime(entry: ControllerRuntimeStatusEntry): boolean {
 }
 
 /**
+ * When this runtime's current machine was launched. A hosted runtime keeps one
+ * runtime row across launches, so its `createdAt` is when the space first had
+ * one; the active lease's `launchRequestedAt` is when this machine was asked
+ * for. Other runtimes keep their row's creation time.
+ */
+export function runtimeEntryLaunchedAt(entry: ControllerRuntimeStatusEntry): string | null {
+  const hostedLaunch =
+    !entry.isLocal && isHostedRuntime(entry) ? (entry.launchRequestedAt ?? null) : null;
+  return hostedLaunch ?? entry.createdAt ?? entry.agentTokenIssuedAt ?? entry.lastSeenAt ?? null;
+}
+
+/**
  * How long a hosted launch may go without coming up before Studio offers to
  * replace it. The controller replaces one on an explicit retry only after the
  * same five minutes (STALLED_LAUNCH_REPLACE_AFTER_SECONDS).

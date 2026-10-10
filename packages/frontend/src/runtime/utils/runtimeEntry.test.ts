@@ -6,6 +6,7 @@ import {
   runtimeEntryIsBooting,
   runtimeEntryIsStaleBooting,
   runtimeEntryIsStopping,
+  runtimeEntryLaunchedAt,
   STALLED_LAUNCH_AFTER_MS,
   stalledLaunchDeadlineMs,
 } from "./runtimeEntry";
@@ -196,5 +197,29 @@ describe("latestHostedLaunchRequestedAtMs", () => {
     ).toBe(Date.parse("2026-10-10T11:01:00.000Z"));
     expect(latestHostedLaunchRequestedAtMs([createEntry()])).toBeNull();
     expect(latestHostedLaunchRequestedAtMs([])).toBeNull();
+  });
+});
+
+describe("runtimeEntryLaunchedAt", () => {
+  const rowCreatedAt = "2026-10-07T12:40:54.000Z";
+  const launchRequestedAt = "2026-10-10T16:22:07.000Z";
+
+  it("is the current launch of a hosted runtime, not when its row was created", () => {
+    const entry = createEntry({ status: "ready", createdAt: rowCreatedAt, launchRequestedAt });
+    expect(runtimeEntryLaunchedAt(entry)).toBe(launchRequestedAt);
+  });
+
+  it("falls back to the row's creation without a launch time", () => {
+    expect(runtimeEntryLaunchedAt(createEntry({ createdAt: rowCreatedAt }))).toBe(rowCreatedAt);
+  });
+
+  it("keeps a self-hosted runtime's creation time", () => {
+    const entry = createEntry({
+      provider: "self-hosted",
+      isLocal: true,
+      createdAt: rowCreatedAt,
+      launchRequestedAt,
+    });
+    expect(runtimeEntryLaunchedAt(entry)).toBe(rowCreatedAt);
   });
 });
