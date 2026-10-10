@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 use origin_http_server::untrusted_git::list_untrusted_worktree_status;
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::warn;
 
@@ -19,7 +20,7 @@ const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct GitStatusEntry {
     pub(super) code: String,
     fingerprint: Option<String>,
