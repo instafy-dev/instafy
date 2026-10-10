@@ -103,9 +103,9 @@ Gitleaks gates without secrets or write permission. This gives release tooling
 an exact-main attestation while the pull-request lane remains base-owned and
 continues to treat candidate bytes only as unexecuted data.
 
-The three workflows that report `main`'s required checks (Public Build, npm
-Package Releases and Trusted Public Boundary) also run for `merge_group`
-`checks_requested` events. GitHub sends those only for a merge queue required
+The workflows that report `main`'s required checks (Public Build, npm
+Package Releases, Trusted Public Boundary and Controller DB Tests) also run
+for `merge_group` `checks_requested` events. GitHub sends those only for a merge queue required
 on `main`; branch protection on `main` requires one (squash merge, only
 non-failing pull requests). The
 only change pull-request and push runs see is the `pull-requests: read`
@@ -134,8 +134,8 @@ limit. Select, Version, Pack and Publish never run for a group.
 Controller DB Tests also runs for every pull request and `merge_group` event,
 so its `Controller database tests` check reports on every pull request and
 group and `main` can require it. The workflow has no paths filter. A hosted
-`Controller database relevance` job, with read-only `contents`, no secrets and
-no checked-out code, lists which of the paths the filter used to list have
+`Controller database relevance` job, with read-only `contents` and no secrets,
+runs none of the code it checks out and lists which of the paths the filter used to list have
 changed: for a pull request from the merge base of its base and head to the
 head, as the filter compared them, and for a group from `merge_group.base_sha`
 to `merge_group.head_sha`. When none of them changed, the database job
