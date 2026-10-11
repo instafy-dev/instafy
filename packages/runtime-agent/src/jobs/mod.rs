@@ -17377,8 +17377,10 @@ mod tests {
 
             let output = child.output().expect("run isolated env guard test");
             assert!(
-                output.status.success(),
-                "isolated env guard test failed\nstdout:\n{}\nstderr:\n{}",
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "isolated env guard test failed or did not run exactly once\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -17473,6 +17475,134 @@ mod tests {
         for key in INTERNAL_CREDENTIAL_ENV_KEYS {
             let expected = format!("original-{key}");
             assert_eq!(env::var(key).as_deref(), Ok(expected.as_str()));
+        }
+    }
+
+    /// A git process the origin spawns between jobs (the startup checkout here; also a
+    /// turn-end save, a pre-stop flush or a Studio git action) must not inherit the launch
+    /// runtime token once the agent has captured it, including after a job's controller-token
+    /// guard has restored the environment it found.
+    #[cfg(unix)]
+    #[test]
+    fn origin_git_child_does_not_inherit_launch_credentials_after_a_job_guard() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_MARKER: &str = "INSTAFY_LAUNCH_CREDENTIAL_GIT_CHILD_TEST_CHILD";
+        const TEST_NAME: &str =
+            "jobs::tests::origin_git_child_does_not_inherit_launch_credentials_after_a_job_guard";
+        const ENV_LOG: &str = "INSTAFY_TEST_GIT_CHILD_ENV_LOG";
+        const PROBE: &str = "INSTAFY_TEST_GIT_CHILD_ENV_PROBE";
+
+        // Run the environment mutation in an isolated test process so it cannot race
+        // unrelated unit tests that inspect process-wide environment variables.
+        if env::var_os(CHILD_MARKER).is_none() {
+            let scratch = tempdir().expect("create scratch dir");
+            let fake_bin = scratch.path().join("bin");
+            fs::create_dir_all(&fake_bin).expect("create fake git dir");
+            let fake_git = fake_bin.join("git");
+            fs::write(
+                &fake_git,
+                "#!/bin/sh\nenv >> \"$INSTAFY_TEST_GIT_CHILD_ENV_LOG\"\nexit 1\n",
+            )
+            .expect("write fake git");
+            fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
+                .expect("make fake git executable");
+            let workspace = scratch.path().join("workspace");
+            fs::create_dir_all(&workspace).expect("create workspace");
+            let env_log = scratch.path().join("git-child-env.log");
+
+            let mut path = std::ffi::OsString::from(fake_bin.as_os_str());
+            if let Some(existing) = env::var_os("PATH") {
+                path.push(":");
+                path.push(existing);
+            }
+            let mut child = std::process::Command::new(
+                std::env::current_exe().expect("resolve runtime-agent test executable"),
+            );
+            child
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_MARKER, "1")
+                .env("PATH", path)
+                .env(ENV_LOG, &env_log)
+                .env(PROBE, "inherited")
+                .env("INSTAFY_TEST_GIT_CHILD_WORKSPACE", &workspace);
+            for key in crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS {
+                child.env(key, format!("launch-{key}"));
+            }
+
+            let output = child.output().expect("run isolated git child test");
+            assert!(
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "isolated git child test failed or did not run exactly once\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // SAFETY: this isolated process runs only this test, so no other thread touches the
+        // environment.
+        unsafe { crate::config::capture_and_scrub_launch_credentials() }
+            .expect("capture launch credentials");
+        {
+            let _guard = ControllerTokenGuard::new(
+                "verified-scoped-job-token",
+                &["prompt.execute".to_string()],
+                None,
+                None,
+                None,
+            );
+        }
+        for key in crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS {
+            assert!(
+                env::var_os(key).is_none(),
+                "the job guard restored launch credential {key}"
+            );
+        }
+
+        let workspace =
+            PathBuf::from(env::var_os("INSTAFY_TEST_GIT_CHILD_WORKSPACE").expect("workspace path"));
+        let controller = reqwest::Url::parse("http://127.0.0.1:9/").expect("controller url");
+        let config = origin_http_server::config::ServerConfig {
+            project_id: Uuid::new_v4(),
+            origin_id: Uuid::new_v4(),
+            workspace_root: workspace,
+            git_remote_url: Some("http://127.0.0.1:9/space.git".to_string()),
+            git_remote_base_url: None,
+            git_branch: "main".to_string(),
+            git_remote_name: "origin".to_string(),
+            git_author_name: "Instafy Origin".to_string(),
+            git_author_email: "origin@instafy.dev".to_string(),
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 9,
+            controller_base_url: controller.clone(),
+            controller_internal_token: None,
+            controller_token_source: None,
+            jwks_url: controller.join("/.well-known/jwks.json").expect("jwks url"),
+            skip_auth: false,
+            enable_presence_heartbeat: false,
+            presence_interval: Duration::from_secs(60),
+            max_archive_bytes: 1024 * 1024,
+            staging_base: None,
+            multi_tenant: false,
+            hosted_checkout: true,
+        };
+        // The fake git records its environment and fails, which ends the checkout.
+        let _ = origin_http_server::git::ensure_git_checkout(&config, Some("scoped-git-bearer"));
+
+        let log = fs::read_to_string(env::var_os(ENV_LOG).expect("env log path"))
+            .expect("the origin spawned git");
+        assert!(
+            log.lines().any(|line| line == format!("{PROBE}=inherited")),
+            "git did not inherit the agent environment:\n{log}"
+        );
+        for key in crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS {
+            assert!(
+                !log.lines().any(|line| line.starts_with(&format!("{key}="))),
+                "the origin's git child inherited launch credential {key}"
+            );
         }
     }
 

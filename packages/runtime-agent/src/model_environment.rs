@@ -4,11 +4,12 @@ use std::ffi::OsString;
 /// subprocess. The verified per-job `CONTROLLER_ACCESS_TOKEN` and the proxy
 /// envelope API keys are intentionally not included here.
 pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
-    // Runtime, origin, and interactive launcher credentials.
+    // Launch credentials: the first `LAUNCH_CREDENTIAL_KEY_COUNT` entries.
     "RUNTIME_ACCESS_TOKEN",
     "RUNTIME_TOKEN",
     "ORIGIN_INTERNAL_TOKEN",
     "ORIGIN_ACCESS_TOKEN",
+    // Other runtime, origin, and interactive launcher credentials.
     "ORIGIN_TOKEN",
     "WORKSPACE_ACCESS_TOKEN",
     "WORKSPACE_INTERNAL_TOKEN",
@@ -64,6 +65,17 @@ pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "OPENAI_IDENTITY_TOKEN_FILE",
     "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
 ];
+
+const LAUNCH_CREDENTIAL_KEY_COUNT: usize = 4;
+
+/// Credentials a launcher hands the runtime agent so it can register and start
+/// its origin. The agent keeps the ones its configuration reads and then
+/// removes all of them from its own environment
+/// (`config::capture_and_scrub_launch_credentials`), so no process it spawns
+/// inherits them.
+pub(crate) const LAUNCH_CREDENTIAL_ENV_KEYS: &[&str] = INTERNAL_CREDENTIAL_ENV_KEYS
+    .split_at(LAUNCH_CREDENTIAL_KEY_COUNT)
+    .0;
 
 /// Credentials the parent runtime must retain for in-process features but a
 /// model-controlled subprocess must never inherit.
@@ -293,16 +305,35 @@ mod tests {
     }
 
     #[test]
-    fn runtime_compose_files_drop_ptrace_capability() {
+    fn runtime_compose_files_drop_ptrace_and_raw_socket_capabilities() {
         for compose in [
             include_str!("../../../docker/docker-compose.runtime.yml"),
             include_str!("../../../docker/docker-compose.runtime.provider.yml"),
         ] {
-            assert_eq!(
-                compose.matches("      - SYS_PTRACE").count(),
-                1,
-                "runtime service must explicitly drop SYS_PTRACE exactly once"
-            );
+            for capability in ["SYS_PTRACE", "NET_RAW"] {
+                let entry = format!("      - {capability}");
+                assert_eq!(
+                    compose
+                        .lines()
+                        .filter(|line| line.trim_end() == entry)
+                        .count(),
+                    1,
+                    "runtime service must explicitly drop {capability} exactly once"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn launch_credentials_are_the_runtime_and_origin_launch_tokens() {
+        assert_eq!(
+            LAUNCH_CREDENTIAL_ENV_KEYS,
+            [
+                "RUNTIME_ACCESS_TOKEN",
+                "RUNTIME_TOKEN",
+                "ORIGIN_INTERNAL_TOKEN",
+                "ORIGIN_ACCESS_TOKEN",
+            ]
+        );
     }
 }

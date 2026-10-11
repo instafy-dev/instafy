@@ -32,6 +32,16 @@ Per-size credits/hour are exposed in `/credits/policy` (`usage.runtimeSizes`).
 The frontend preference is per-project (`runtime/runtimeSizePreference.ts`,
 localStorage) with a picker in the runtime menu; it applies on next start.
 
+## Container hardening
+
+Runtime containers started from the runtime compose files and by
+`instafy runtime start` drop the `SYS_PTRACE` and `NET_RAW` capabilities. The
+runtime agent reads `RUNTIME_ACCESS_TOKEN` and `ORIGIN_INTERNAL_TOKEN` into its
+configuration at startup and then clears all four launch credentials
+(`RUNTIME_ACCESS_TOKEN`, `RUNTIME_TOKEN`, `ORIGIN_INTERNAL_TOKEN`,
+`ORIGIN_ACCESS_TOKEN`) from its environment, so the processes it spawns, git
+included, do not inherit them.
+
 ## Tenant leases
 
 `POST /runtime/ensure` with `scope: "tenant"` and a `runtimeId` attaches the
