@@ -1,0 +1,115 @@
+name: Mirror Docker Hub build images
+
+# Copies every digest-pinned Docker Hub image the repository's image builds
+# pull (Dockerfile bases, syntax frontends and the workflows' BuildKit image)
+# to ghcr.io/instafy-dev/dockerhub/<path> without changing its digest, reading
+# official images from ECR Public first and Docker Hub second. Image
+# builds list that prefix as BuildKit's docker.io mirror and fall back to
+# Docker Hub for anything it lacks, so anonymous Docker Hub rate limits stop
+# failing publication and scans. The set is discovered from this commit by
+# scripts/mirror-docker-hub-images.mjs; nothing is built or executed from the
+# images. Never trigger this from pull requests: the job holds packages: write.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**/Dockerfile"
+      - "**/Dockerfile.*"
+      - "**/*.Dockerfile"
+      - ".github/workflows/image-scan.yml"
+      - ".github/workflows/publish-production-services.yml"
+      - ".github/workflows/publish-runtime-agent.yml"
+      - ".github/workflows/publish-runtime-agent-multiarch.yml"
+      - ".github/workflows/mirror-docker-hub-images.yml"
+      - "scripts/mirror-docker-hub-images.mjs"
+      - "scripts/lib/dockerHubImageMirror.mjs"
+      - "scripts/lib/registryManifests.mjs"
+  schedule:
+    # Daily: finishes a copy that a registry rate limit cut short and
+    # re-copies any manifest, tag or child manifest GHCR no longer serves. A
+    # run with nothing missing makes only anonymous GHCR reads.
+    - cron: "41 5 * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: mirror-docker-hub-images
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Mirror pinned Docker Hub images to GHCR
+    if: >-
+      github.repository == 'instafy-dev/instafy'
+      && github.repository_id == '1309636737'
+      && github.ref == 'refs/heads/main'
+      && github.ref_protected == true
+      && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Bind to protected main
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" ]]; then
+            echo "::error::The Docker Hub image mirror runs only in instafy-dev/instafy."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" || "$GITHUB_REF_PROTECTED" != "true" ]]; then
+            echo "::error::The Docker Hub image mirror runs only from protected main."
+            exit 1
+          fi
+
+      - name: Checkout exact protected-main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+
+      # The docker driver needs no BuildKit container image, so this job pulls
+      # nothing from Docker Hub but the images it copies.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+          driver: docker
+
+      # Anonymous reads only: which discovered images GHCR does not fully serve
+      # publicly (manifest, immutable tag and every child manifest).
+      - name: Plan the copy from the repository
+        id: plan
+        run: node scripts/mirror-docker-hub-images.mjs plan
+
+      - name: Login to GHCR
+        if: steps.plan.outputs.missing != '0'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copy exact digests to GHCR
+        if: steps.plan.outputs.missing != '0'
+        run: node scripts/mirror-docker-hub-images.mjs mirror
+
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+      # Anonymous proof that every build, including untrusted public PR runs,
+      # can pull each discovered digest from the mirror.
+      - name: Verify anonymous pulls by digest
+        run: node scripts/mirror-docker-hub-images.mjs verify

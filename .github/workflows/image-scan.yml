@@ -54,6 +54,9 @@ on:
       - "scripts/fetch-rusty-v8.sh"
       - "scripts/runtime-image-browser-smoke.sh"
       - "scripts/image-scan-report.mjs"
+      - "scripts/resolve-buildkit-image.mjs"
+      - "scripts/lib/dockerHubImageMirror.mjs"
+      - "scripts/lib/registryManifests.mjs"
       - "scripts/check-production-image-inputs.test.mjs"
       - "scripts/check-image-scan-workflow.test.mjs"
       - ".github/workflows/publish-runtime-agent.yml"
@@ -149,10 +152,26 @@ jobs:
             exit 1
           fi
 
+      # dockerd pulls the BuildKit image itself, outside BuildKit's registry
+      # mirror; take the pinned digest from the GHCR mirror when it serves it.
+      - name: Resolve the BuildKit image
+        id: buildkit
+        env:
+          # Hosted builders run the native image of the multi-platform index,
+          # the publishers' hosted BuildKit.
+          BUILDKIT_IMAGE: moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+        run: node scripts/resolve-buildkit-image.mjs
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.35.0
+          driver-opts: image=${{ steps.buildkit.outputs.image }}
+          # BuildKit pulls Docker Hub images by digest from the GHCR mirror and
+          # falls back to Docker Hub for anything the mirror lacks.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+            mirrors = ["ghcr.io/instafy-dev/dockerhub"]
 
       - name: Install pinned Trivy
         env:
@@ -324,10 +343,26 @@ jobs:
           ref: ${{ github.sha }}
           submodules: recursive
 
+      # dockerd pulls the BuildKit image itself, outside BuildKit's registry
+      # mirror; take the pinned digest from the GHCR mirror when it serves it.
+      - name: Resolve the BuildKit image
+        id: buildkit
+        env:
+          # Hosted builders run the native image of the multi-platform index,
+          # the publishers' hosted BuildKit.
+          BUILDKIT_IMAGE: moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+        run: node scripts/resolve-buildkit-image.mjs
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.35.0
+          driver-opts: image=${{ steps.buildkit.outputs.image }}
+          # BuildKit pulls Docker Hub images by digest from the GHCR mirror and
+          # falls back to Docker Hub for anything the mirror lacks.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+            mirrors = ["ghcr.io/instafy-dev/dockerhub"]
 
       - name: Install pinned Trivy
         env:

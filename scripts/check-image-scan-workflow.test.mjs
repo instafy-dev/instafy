@@ -199,11 +199,13 @@ const context = (changes = {}) => ({ repository: "instafy-dev/instafy", ref: "re
 test("no step logs in, pushes, tags a registry reference, writes a cache or holds a secret", () => {
   assert.doesNotMatch(scanSource,
     /docker\/login-action|docker login|docker push|--push\b|push: true|cache-to|type=gha|imagetools|docker tag\b|--output[= ]type=(?:registry|image)|registry-auth|DOCKER_AUTH_CONFIG|packages:|write-all|secrets\./u);
-  // The only registry reference is the anonymous read of the publisher's layer cache.
+  // The only registry references are the anonymous read of the publisher's
+  // layer cache and each builder's anonymous Docker Hub mirror.
   const cacheFrom = withInputs(step(publisher.runtime, "Build audit image"))["cache-from"];
   assert.equal(withInputs(step(publisher.arm64, "Build audit image"))["cache-from"], cacheFrom);
+  const mirror = '            mirrors = ["ghcr.io/instafy-dev/dockerhub"]';
   assert.deepEqual(scanSource.split("\n").filter((line) => /(?:^|[\s=:,"'])ghcr\.io\//u.test(line)),
-    [`          cache-from: ${cacheFrom}`]);
+    [mirror, `          cache-from: ${cacheFrom}`, mirror]);
   // Images exist only in the runner's engine, under a local name with no registry or namespace.
   const build = withInputs(step(scan.runtime, "Build audit image"));
   assert.equal(build.push, "false");
@@ -430,10 +432,10 @@ test("each cell builds the publisher's exact Dockerfile, target, platform and ar
 test("steps run in the publisher's order and every action is a publisher's exact pin", () => {
   const names = (section) => steps(section).map((value) => value.match(/^ {6}- name: (.+)$/mu)[1]);
   assert.deepEqual(names(scan.runtime), ["Checkout", "Reclaim hosted-runner disk for the audited image",
-    "Require sufficient free disk for the audited image", "Set up Docker Buildx", "Install pinned Trivy",
+    "Require sufficient free disk for the audited image", "Resolve the BuildKit image", "Set up Docker Buildx", "Install pinned Trivy",
     "Build audit image", "Scan audit image", "List the findings that failed the scan",
     "Prove the webdev image starts the Shared Browser", "Summarize this image", "Upload the failure record"]);
-  assert.deepEqual(names(scan.services), ["Checkout", "Set up Docker Buildx", "Install pinned Trivy", "Build amd64 image",
+  assert.deepEqual(names(scan.services), ["Checkout", "Resolve the BuildKit image", "Set up Docker Buildx", "Install pinned Trivy", "Build amd64 image",
     "Scan amd64 image", "List the findings that failed the scan", "Summarize this image", "Upload the failure record"]);
   for (const section of [scan.runtime, scan.services]) {
     const checkout = withInputs(step(section, "Checkout"));

@@ -16,6 +16,7 @@ on:
       - ".github/workflows/mirror-supabase-images.yml"
       - "scripts/mirror-supabase-images.mjs"
       - "scripts/lib/supabaseImageMirror.mjs"
+      - "scripts/lib/registryManifests.mjs"
   schedule:
     # Weekly re-verification; re-copies any index, tag or child manifest GHCR
     # no longer serves.
