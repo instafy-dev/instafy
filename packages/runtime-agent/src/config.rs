@@ -16,8 +16,13 @@ use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
 /// tests), in which case `Config::from_env` reads the environment directly.
 static LAUNCH_CREDENTIALS: OnceLock<Vec<(&'static str, String)>> = OnceLock::new();
 
-/// Keeps the launch credentials (`LAUNCH_CREDENTIAL_ENV_KEYS`) for
-/// [`Config::from_env`] and removes them from the process environment, so
+/// The launch credentials `Config::from_env` reads. Only these are kept; the
+/// other `LAUNCH_CREDENTIAL_ENV_KEYS` are removed without being retained.
+const CONFIGURED_LAUNCH_CREDENTIAL_KEYS: [&str; 2] =
+    ["RUNTIME_ACCESS_TOKEN", "ORIGIN_INTERNAL_TOKEN"];
+
+/// Keeps the launch credentials [`Config::from_env`] reads and removes every
+/// `LAUNCH_CREDENTIAL_ENV_KEYS` entry from the process environment, so
 /// processes the agent spawns later (git, tunnels, helpers) do not inherit
 /// them. The agent then holds the runtime token in memory and renews it there.
 ///
@@ -30,7 +35,7 @@ static LAUNCH_CREDENTIALS: OnceLock<Vec<(&'static str, String)>> = OnceLock::new
 /// Mutates the process environment. The caller must ensure no other thread
 /// reads or writes the environment while it runs.
 pub unsafe fn capture_and_scrub_launch_credentials() -> Result<()> {
-    let captured = LAUNCH_CREDENTIAL_ENV_KEYS
+    let captured = CONFIGURED_LAUNCH_CREDENTIAL_KEYS
         .iter()
         .filter_map(|&key| std::env::var(key).ok().map(|value| (key, value)))
         .collect();
@@ -45,6 +50,10 @@ pub unsafe fn capture_and_scrub_launch_credentials() -> Result<()> {
 }
 
 fn launch_credential(key: &str) -> Option<String> {
+    debug_assert!(
+        CONFIGURED_LAUNCH_CREDENTIAL_KEYS.contains(&key),
+        "{key} is not a captured launch credential"
+    );
     match LAUNCH_CREDENTIALS.get() {
         Some(captured) => captured
             .iter()
@@ -615,12 +624,22 @@ fn detect_rathole_use_subcommands(bin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, apply_local_browser_capability, capture_and_scrub_launch_credentials,
-        normalize_lease_max_jobs,
+        CONFIGURED_LAUNCH_CREDENTIAL_KEYS, Config, apply_local_browser_capability,
+        capture_and_scrub_launch_credentials, normalize_lease_max_jobs,
     };
     use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn configured_launch_credentials_are_scrubbed_launch_credentials() {
+        for key in CONFIGURED_LAUNCH_CREDENTIAL_KEYS {
+            assert!(
+                LAUNCH_CREDENTIAL_ENV_KEYS.contains(&key),
+                "{key} is captured but never removed from the environment"
+            );
+        }
+    }
 
     #[test]
     fn launch_credentials_leave_the_environment_once_the_configuration_has_them() {
@@ -652,8 +671,10 @@ mod tests {
 
             let output = child.output().expect("run isolated launch credential test");
             assert!(
-                output.status.success(),
-                "isolated launch credential test failed\nstdout:\n{}\nstderr:\n{}",
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "isolated launch credential test failed or did not run exactly once\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );

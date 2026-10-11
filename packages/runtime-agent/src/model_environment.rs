@@ -69,9 +69,10 @@ pub(crate) const INTERNAL_CREDENTIAL_ENV_KEYS: &[&str] = &[
 const LAUNCH_CREDENTIAL_KEY_COUNT: usize = 4;
 
 /// Credentials a launcher hands the runtime agent so it can register and start
-/// its origin. The agent reads them once into its configuration and then
-/// removes them from its own environment (`config::capture_and_scrub_launch_credentials`),
-/// so no process it spawns inherits them.
+/// its origin. The agent keeps the ones its configuration reads and then
+/// removes all of them from its own environment
+/// (`config::capture_and_scrub_launch_credentials`), so no process it spawns
+/// inherits them.
 pub(crate) const LAUNCH_CREDENTIAL_ENV_KEYS: &[&str] = INTERNAL_CREDENTIAL_ENV_KEYS
     .split_at(LAUNCH_CREDENTIAL_KEY_COUNT)
     .0;
@@ -310,8 +311,12 @@ mod tests {
             include_str!("../../../docker/docker-compose.runtime.provider.yml"),
         ] {
             for capability in ["SYS_PTRACE", "NET_RAW"] {
+                let entry = format!("      - {capability}");
                 assert_eq!(
-                    compose.matches(&format!("      - {capability}\n")).count(),
+                    compose
+                        .lines()
+                        .filter(|line| line.trim_end() == entry)
+                        .count(),
                     1,
                     "runtime service must explicitly drop {capability} exactly once"
                 );

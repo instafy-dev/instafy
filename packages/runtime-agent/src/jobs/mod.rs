@@ -17377,8 +17377,10 @@ mod tests {
 
             let output = child.output().expect("run isolated env guard test");
             assert!(
-                output.status.success(),
-                "isolated env guard test failed\nstdout:\n{}\nstderr:\n{}",
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "isolated env guard test failed or did not run exactly once\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -17530,8 +17532,10 @@ mod tests {
 
             let output = child.output().expect("run isolated git child test");
             assert!(
-                output.status.success(),
-                "isolated git child test failed\nstdout:\n{}\nstderr:\n{}",
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains("test result: ok. 1 passed"),
+                "isolated git child test failed or did not run exactly once\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );

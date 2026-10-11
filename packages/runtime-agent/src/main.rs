@@ -71,6 +71,8 @@ fn main() -> anyhow::Result<()> {
     // this process's environment, so no git, tunnel or helper process spawned later inherits
     // them. This follows `arg0_dispatch`, which may load `$CODEX_HOME/.env` into the
     // environment, so the configuration sees the same values it did before.
+    // The unit tests in `config` and `jobs` cover the scrub itself; keep this call before the
+    // Tokio runtime and before `Config::from_env`.
     // SAFETY: no other thread exists yet; the Tokio runtime is built on the next line.
     unsafe { config::capture_and_scrub_launch_credentials() }
         .context("failed to capture runtime launch credentials")?;
