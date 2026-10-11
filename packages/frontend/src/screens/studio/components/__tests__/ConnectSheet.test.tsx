@@ -42,7 +42,6 @@ type HarnessSpies = {
   onClose: Mock;
   openImportModal: Mock;
   beginGithubImport: Mock;
-  openSkillsPanel: Mock;
   onStateChange: Mock;
 };
 
@@ -53,14 +52,12 @@ function spies(): HarnessSpies {
     onClose: vi.fn(),
     openImportModal: vi.fn(),
     beginGithubImport: vi.fn(),
-    openSkillsPanel: vi.fn(),
     onStateChange: vi.fn(),
   };
 }
 
 // The harness wires the sheet exactly like ChatPanel: one state hook, one
-// router, and the same close-then-hand-off pairs for the paste link and the
-// Skills panel. `initial` picks the stage the sheet opens in; a new `openKey`
+// router, and the same close-then-hand-off pair for custom imports. `initial` picks the stage the sheet opens in; a new `openKey`
 // opens it again on the same instance (what a chip or menu row does).
 function Harness({
   initial,
@@ -116,10 +113,6 @@ function Harness({
       onPasteLink={() => {
         close();
         s.openImportModal();
-      }}
-      onSearchAllSkills={(searchQuery: string) => {
-        close();
-        s.openSkillsPanel(searchQuery);
       }}
       onConnect={s.onConnect}
       onSetUpAgain={s.onSetUpAgain}
@@ -343,7 +336,7 @@ describe("ConnectSheet", () => {
       );
 
       // Footer: the paste link and Cancel; no sending control anywhere.
-      expect(query('[data-testid="connect-paste-link"]')?.textContent).toBe("Paste a skill link");
+      expect(query('[data-testid="connect-paste-link"]')?.textContent).toBe("Import custom skill");
       expect(query('[data-testid="connect-browse-cancel"]')?.textContent).toBe("Cancel");
       expect(query('[data-testid="connect-confirm-submit"]')).toBeNull();
       expect(query('[data-testid="connect-confirm-stage"]')).toBeNull();
@@ -445,25 +438,24 @@ describe("ConnectSheet", () => {
       expect(s.onConnect).not.toHaveBeenCalled();
     });
 
-    it("offers Search all skills when nothing matches, closing the sheet on press", async () => {
+    it("keeps an unmatched search in the chooser with explicit custom import available", async () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
       await typeQuery("zzzz");
-      expect(query('[data-testid="connect-empty"]')?.textContent).toContain('No tool named "zzzz".');
+      expect(query('[data-testid="connect-empty"]')?.textContent).toContain('No available tool matches "zzzz".');
+      expect(query('[data-testid="connect-search-all"]')).toBeNull();
       expect(query('[data-testid="connect-categories"]')).toBeNull();
       expect(query('[data-testid="connect-popular"]')).toBeNull();
-      // The footer stays: the paste link is always reachable.
-      expect(query('[data-testid="connect-paste-link"]')).not.toBeNull();
-      expect(document.body.textContent).not.toContain(EM_DASH);
-
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-search-all"]')?.click());
-      expect(s.openSkillsPanel).toHaveBeenCalledTimes(1);
-      // The typed query travels with the hand-off.
-      expect(s.openSkillsPanel).toHaveBeenCalledWith("zzzz");
-      expect(query('[role="dialog"]')).toBeNull();
+      expect(query('[data-testid="connect-paste-link"]')?.textContent).toBe("Import custom skill");
+      expect(query('[role="dialog"]')).not.toBeNull();
       expect(s.onConnect).not.toHaveBeenCalled();
       expect(s.openImportModal).not.toHaveBeenCalled();
+
+      await act(async () => query<HTMLButtonElement>('[data-testid="connect-paste-link"]')?.click());
+      expect(s.openImportModal).toHaveBeenCalledTimes(1);
+      expect(query('[role="dialog"]')).toBeNull();
+      expect(s.onConnect).not.toHaveBeenCalled();
     });
 
     it("moves an available skill row to the confirm stage without sending, with Back returning to the kept query", async () => {
@@ -510,7 +502,7 @@ describe("ConnectSheet", () => {
       await typeQuery("chat");
       expect(query('[data-testid="connect-search-status"]')?.textContent).toBe("2 tools");
       await typeQuery("zzzz");
-      expect(query('[data-testid="connect-search-status"]')?.textContent).toContain("No tool named");
+      expect(query('[data-testid="connect-search-status"]')?.textContent).toContain("No available tool matches");
       await typeQuery("   ");
       expect(query('[data-testid="connect-search-status"]')?.textContent).toBe("");
     });
@@ -560,7 +552,7 @@ describe("ConnectSheet", () => {
       expect(s.openImportModal).not.toHaveBeenCalled();
     });
 
-    it("closes and opens the import modal from Paste a skill link", async () => {
+    it("closes and opens the import modal from Import custom skill", async () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 

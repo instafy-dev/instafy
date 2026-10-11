@@ -26,7 +26,8 @@ import { useStatus } from "../../../status/useStatus";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { studioPerformance } from "../../../telemetry/studioPerformance";
 import { useProjects } from "../../../projects/useProjects";
-import { useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
+import { mergeControllerProjects, useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
 import { mostRecentProjectId } from "../../../projects/projectRecency";
 import { useProjectRecency } from "../../../projects/useProjectRecency";
 import { spaceDisplayName } from "../../../projects/spaceName";
@@ -188,6 +189,7 @@ export function StudioSidebar({
     runtimeControllerEnabled ? "loading" : "ready",
   );
   const hydratedOrgUserRef = useRef<string | null>(normalizeSidebarOrgUser(userEmail));
+  const [resolvedOrgUser, setResolvedOrgUser] = useState<string | null>(null);
   const [pendingOrgSwitchKey, setPendingOrgSwitchKey] = useState<string | null>(null);
   const revealedOrgFailureRef = useRef<string | null>(null);
   const [orgsRefreshEpoch, setOrgsRefreshEpoch] = useState(0);
@@ -480,6 +482,7 @@ export function StudioSidebar({
       .then((orgs) => {
         if (!cancelled) {
           setControllerOrgs(orgs);
+          setResolvedOrgUser(userKey);
           setOrgsFetchState("ready");
         }
       })
@@ -506,8 +509,19 @@ export function StudioSidebar({
       return;
     }
     const bump = () => setOrgsRefreshEpoch((epoch) => epoch + 1);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") bump();
+    };
     window.addEventListener("instafy:orgs-updated", bump);
-    return () => window.removeEventListener("instafy:orgs-updated", bump);
+    window.addEventListener("focus", bump);
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, bump);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("instafy:orgs-updated", bump);
+      window.removeEventListener("focus", bump);
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, bump);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   const activeProject = useMemo(
@@ -521,12 +535,13 @@ export function StudioSidebar({
   const workspaceOrgFilterId =
     workspaceOrgKey === "all" || workspaceOrgKey === "personal" ? null : workspaceOrgKey;
   const {
-    mergedProjects,
+    mergedProjects: cachedMergedProjects,
     remoteLoading: mergedProjectsLoading,
     remoteLoadedScope,
     remoteDiscoveryResolved,
     remoteError: mergedProjectsError,
     remoteRefreshing: mergedProjectsRefreshing,
+    allRemoteProjects,
     retryRemoteProjects,
   } = useMergedControllerProjects({
     localProjects: projectList,
@@ -553,6 +568,23 @@ export function StudioSidebar({
     });
     return map;
   }, [controllerOrgs]);
+  const mergedProjects = useMemo(() => {
+    const projects = allRemoteProjects == null
+      ? cachedMergedProjects
+      : mergeControllerProjects(projectList, allRemoteProjects);
+    if (!runtimeControllerEnabled || allRemoteProjects == null
+      || !resolvedOrgUser || resolvedOrgUser !== normalizeSidebarOrgUser(userEmail)) {
+      return projects;
+    }
+    const accessibleProjectIds = new Set(allRemoteProjects.map((project) => project.projectId));
+    // Local workspace state can outlive a deleted team. It must not recreate
+    // that team after both controller directories have resolved. /orgs alone
+    // is insufficient: project-only guests legitimately lack team membership.
+    // Keep the last successful directories during transient refresh failures.
+    return projects.filter((project) => !project.orgId
+      || controllerOrgInfoById.has(project.orgId)
+      || accessibleProjectIds.has(project.id));
+  }, [allRemoteProjects, controllerOrgInfoById, cachedMergedProjects, projectList, resolvedOrgUser, userEmail]);
   const orgOptions = useMemo(() => {
     const options = new Map<
       string,

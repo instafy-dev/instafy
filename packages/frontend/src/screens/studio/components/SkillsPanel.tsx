@@ -4,28 +4,19 @@ import { Plus, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
-import {
-  buildSkillStartMessage,
-  humanizeSkillName,
-  normalizeSkillName,
-} from "../../../conversations/skillCommands";
+import { humanizeSkillName } from "../../../conversations/skillCommands";
 import { useConversation } from "../../../conversations/useConversation";
 import { useProject } from "../../../projects/useProject";
 import { useRuntime } from "../../../runtime/useRuntime";
-import {
-  controllerClient,
-  type ControllerSkillDiscoverLane,
-  type ControllerSkillDiscoveryItem,
-} from "../../../sdk/instafy";
+import { controllerClient } from "../../../sdk/instafy";
+import { useStudioGuardedNavigation } from "../../../navigation/StudioDraftNavigationGuard";
 import { useStatus } from "../../../status/useStatus";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
 import { describeProjectMemoryBootstrapResult } from "./projectMemoryBootstrapStatus";
-import { SkillsDiscoverySection } from "./SkillsDiscoverySection";
 import { SkillsImportModal } from "./SkillsImportModal";
-import { SettingsShell, type SettingsCategory } from "./SettingsShell";
-import { useSkillsDiscoveryRequest } from "./skillsDiscoveryRequest";
-import { useSkillsDiscoveryState } from "./useSkillsDiscoveryState";
+import { SettingsShell } from "./SettingsShell";
+import { requestConnectTools } from "./connectToolRequest";
 import { useSkillsImportFlow } from "./useSkillsImportFlow";
 import { isVersionedFilesMode, LEGACY_FILES_VERSIONING, type FilesVersioning } from "./filesVersioning";
 import { skillsWorkspaceReads, toggleSkillAsVersion, uninstallSkillAsVersion } from "./skillsWorkspaceWrites";
@@ -57,13 +48,6 @@ type SkillItem = {
   enabledPath: string;
   disabledPath: string;
 };
-
-type SkillsDiscoverLaneFilter = "all" | ControllerSkillDiscoverLane;
-type SkillsPrimaryTab = "installed" | "discover";
-type SkillsDiscoverySort = "relevance" | "stars_desc" | "name_asc";
-
-const DEFAULT_DISCOVERY_QUERY = "";
-const DISCOVERY_RESULT_LIMIT = 16;
 
 function stripWrappingQuotes(value: string): string {
   const trimmed = value.trim();
@@ -442,115 +426,6 @@ function parseSkillDocumentDetails(markdown: string): SkillDocumentDetails {
   };
 }
 
-function resolveDiscoveredSkillSlug(discovered: ControllerSkillDiscoveryItem): string | null {
-  const suggested = normalizeSkillName(discovered.suggestedName ?? "");
-  if (suggested) {
-    return suggested;
-  }
-
-  const installSource = (discovered.installSource ?? "").trim();
-  if (!installSource) {
-    return null;
-  }
-
-  try {
-    const parsed = new URL(installSource);
-    const segments = parsed.pathname
-      .split("/")
-      .map((segment) => segment.trim())
-      .filter((segment) => segment.length > 0);
-    if (segments.length === 0) {
-      return null;
-    }
-
-    const last = segments[segments.length - 1]?.toLowerCase() ?? "";
-    const candidate = last === "skill.md" && segments.length >= 2 ? segments[segments.length - 2] : last;
-    const normalized = normalizeSkillName(candidate ?? "");
-    return normalized || null;
-  } catch {
-    return null;
-  }
-}
-
-function decodeDiscoveryHtmlEntities(value: string): string {
-  return value
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, "\"")
-    .replace(/&#39;/gi, "'");
-}
-
-function sanitizeDiscoveryCategoryLabel(value: string): string {
-  const decoded = decodeDiscoveryHtmlEntities(value);
-  const withoutTags = decoded.replace(/<[^>]*>/g, " ");
-  return withoutTags.replace(/\s+/g, " ").trim();
-}
-
-function normalizeDiscoveryCategory(value: string): string {
-  const sanitized = sanitizeDiscoveryCategoryLabel(value).toLowerCase();
-  return sanitized || "other";
-}
-
-function parseHttpUrl(value: string | null | undefined): URL | null {
-  if (!value) {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    const parsed = new URL(trimmed);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function resolveDiscoverySourceMeta(discovered: ControllerSkillDiscoveryItem): {
-  label: string;
-  faviconUrl: string | null;
-} {
-  const sourceLabel = (discovered.sourceLabel ?? "").trim();
-  const homepage = parseHttpUrl(discovered.homepage ?? null);
-  if (homepage) {
-    return {
-      label: sourceLabel || homepage.hostname.replace(/^www\./i, ""),
-      faviconUrl: `${homepage.origin}/favicon.ico`,
-    };
-  }
-
-  const installSource = parseHttpUrl(discovered.installSource ?? null);
-  if (installSource) {
-    return {
-      label: sourceLabel || installSource.hostname.replace(/^www\./i, ""),
-      faviconUrl: `${installSource.origin}/favicon.ico`,
-    };
-  }
-
-  if ((discovered.source ?? "").toLowerCase() === "github") {
-    return {
-      label: sourceLabel || "GitHub",
-      faviconUrl: "https://github.com/favicon.ico",
-    };
-  }
-  if ((discovered.source ?? "").toLowerCase() === "playbooks") {
-    return {
-      label: sourceLabel || "Playbooks",
-      faviconUrl: "https://playbooks.com/favicon.ico",
-    };
-  }
-
-  return {
-    label: sourceLabel || "Source",
-    faviconUrl: null,
-  };
-}
-
 export function SkillsPanel() {
   const { activeProjectId } = useProject();
   const { effectiveRuntimeId } = useRuntime();
@@ -572,9 +447,10 @@ export function SkillsPanel() {
     () => skillsWorkspaceReads(readsVersioning, versioned, effectiveRuntimeId ?? null),
     [effectiveRuntimeId, readsVersioning, versioned],
   );
-  const { activeConversationId, assistantEnabled, onInputChange, onSubmit, isAssistantTyping } =
+  const { activeConversationId, assistantEnabled, onSubmit, isAssistantTyping } =
     useConversation();
   const { openPanelTab, requestUrlPush } = useWorkspaceTabs();
+  const guardNavigation = useStudioGuardedNavigation();
 
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -582,7 +458,6 @@ export function SkillsPanel() {
   const [bootstrapPending, setBootstrapPending] = useState(false);
   const [togglePendingSkillId, setTogglePendingSkillId] = useState<string | null>(null);
   const [uninstallPendingSkillId, setUninstallPendingSkillId] = useState<string | null>(null);
-  const [activePrimaryTab, setActivePrimaryTab] = useState<SkillsPrimaryTab>("installed");
   const [brokenSkillIcons, setBrokenSkillIcons] = useState<Record<string, true>>({});
 
   const loadVersionRef = useRef(0);
@@ -752,7 +627,6 @@ export function SkillsPanel() {
     importPending,
     addSkillModalOpen,
     setAddSkillModalOpen,
-    queueSkillImportTask,
     handleSubmitImport,
     handleOpenAddSkillModal,
   } = useSkillsImportFlow({
@@ -764,52 +638,6 @@ export function SkillsPanel() {
     // Only the toast's "Open chat" action leaves Settings; the flow never navigates.
     onOpenChat: () => openPanelTab("chat"),
   });
-
-  const {
-    discoveryQuery,
-    setDiscoveryQuery,
-    discoveryLaneFilter,
-    discoveryCategoryFilter,
-    discoverySort,
-    discoveryLoading,
-    discoveryError,
-    discoveryWarnings,
-    discoveryLaneCounts,
-    totalDiscoveryCount,
-    discoveryCategoryOptions,
-    preparedDiscoveryResults,
-    setDiscoverySort,
-    handleDiscoverySearchSubmit,
-    handleDiscoveryLaneChange,
-    handleDiscoveryCategoryFilterChange,
-    markDiscoverySourceIconBroken,
-    runDiscoverySearch,
-  } = useSkillsDiscoveryState({
-    activeProjectId,
-    skills,
-    discoveryResultLimit: DISCOVERY_RESULT_LIMIT,
-    defaultDiscoveryQuery: DEFAULT_DISCOVERY_QUERY,
-    activateDiscoverTab: () => {
-      setActivePrimaryTab("discover");
-    },
-    normalizeCategory: normalizeDiscoveryCategory,
-    sanitizeCategoryLabel: sanitizeDiscoveryCategoryLabel,
-    resolveDiscoveredSkillSlug,
-    normalizeSkillName,
-    resolveDiscoverySourceMeta,
-  });
-
-  // "Search all skills" in the Connect sheet: open Discover with its query,
-  // whether this panel was mounted for it or was already open.
-  const handleSkillsDiscoveryRequest = useCallback(
-    (query: string) => {
-      setActivePrimaryTab("discover");
-      setDiscoveryQuery(query);
-      void runDiscoverySearch({ query });
-    },
-    [runDiscoverySearch, setDiscoveryQuery],
-  );
-  useSkillsDiscoveryRequest(handleSkillsDiscoveryRequest);
 
   const handleBootstrapSkills = useCallback(async () => {
     const projectId = activeProjectId?.trim() ?? "";
@@ -848,18 +676,6 @@ export function SkillsPanel() {
       setBootstrapPending(false);
     }
   }, [activeProjectId, loadSkills, showStatus]);
-
-  // The one navigation in the skills flow: a prefill the user must finish in
-  // the composer, so the chat is shown. Nothing is sent.
-  const handleDraftSkillPrompt = useCallback(
-    (skillSlug: string) => {
-      requestUrlPush();
-      openPanelTab("chat");
-      onInputChange(activeConversationId, `${buildSkillStartMessage(skillSlug)} `);
-      showStatus("Drafted /skills start in the composer.", "info", 2500);
-    },
-    [activeConversationId, onInputChange, openPanelTab, requestUrlPush, showStatus],
-  );
 
   const handleOpenSkillFile = useCallback(
     (skill: SkillItem) => {
@@ -1036,85 +852,25 @@ export function SkillsPanel() {
     [activeProjectId, effectiveRuntimeId, filesVersioning, loadSkills, showStatus, versioned],
   );
 
-  const handleDiscoveredSkillAction = useCallback(
-    async (discovered: ControllerSkillDiscoveryItem, existingSkill: SkillItem | null) => {
-      if (existingSkill) {
-        if (existingSkill.status === "disabled") {
-          await handleToggleSkill(existingSkill, true);
-          return;
-        }
-        handleOpenSkillFile(existingSkill);
-        showStatus(`${existingSkill.title} is already installed.`, "info", 2500);
-        return;
-      }
-
-      const installSource = discovered.installSource?.trim() ?? "";
-      if (!installSource) {
-        showStatus(
-          "This skill result does not expose an installable SKILL.md path yet.",
-          "warning",
-          3500,
-        );
-        return;
-      }
-
-      await queueSkillImportTask({
-        source: installSource,
-        skillName: discovered.suggestedName ?? null,
-        overwrite: false,
-      });
-    },
-    [
-      handleOpenSkillFile,
-      handleToggleSkill,
-      queueSkillImportTask,
-      showStatus,
-    ],
-  );
-
   const hasProject = Boolean(activeProjectId && activeProjectId.trim().length > 0);
-  const primaryCategories: SettingsCategory[] = [
-    {
-      id: "installed",
-      label: `Installed (${skills.length})`,
-      testId: "skills-tab-installed",
-    },
-    {
-      id: "discover",
-      label: `Discover (${totalDiscoveryCount})`,
-      testId: "skills-tab-discover",
-    },
-  ];
-  const handlePrimaryCategoryChange = (categoryId: string) => {
-    if (categoryId === "installed" || categoryId === "discover") {
-      setActivePrimaryTab(categoryId);
-    }
+  const handleConnectTool = () => {
+    if (!activeProjectId) return;
+    requestConnectTools({ projectId: activeProjectId, conversationId: activeConversationId });
+    requestUrlPush();
+    openPanelTab("chat", { activate: true });
   };
-
-  const handleRefresh = useCallback(() => {
-    void loadSkills();
-    if (activePrimaryTab === "discover") {
-      setActivePrimaryTab("discover");
-      void runDiscoverySearch({ query: discoveryQuery });
-    }
-  }, [activePrimaryTab, discoveryQuery, loadSkills, runDiscoverySearch]);
 
   return (
     <SettingsShell
       testId="skills-panel"
       title="Skills"
-      subtitle="Manage space skills and imports."
-      navLabel="Sections"
-      categories={primaryCategories}
-      activeCategoryId={activePrimaryTab}
-      onCategoryChange={handlePrimaryCategoryChange}
       actions={
         <div className="flex items-center gap-2">
           <IconButton
             variant="outline"
             size="sm"
             radius="full"
-            onPress={handleRefresh}
+            onPress={() => void loadSkills()}
             isDisabled={!hasProject || loading}
             data-testid="skills-refresh"
             aria-label="Refresh skills"
@@ -1122,94 +878,52 @@ export function SkillsPanel() {
           >
             {loading ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : <Refresh className="h-4 w-4" aria-hidden="true" />}
           </IconButton>
-          {!(activePrimaryTab === "installed" && hasProject && !loading && !error && skills.length === 0) ? <Button
+          <Button
             variant="primary"
             size="sm"
             radius="xl"
-            onPress={() => handleOpenAddSkillModal()}
+            onPress={handleConnectTool}
             isDisabled={!hasProject}
-            data-testid="skills-new"
+            data-testid="skills-connect-tool"
           >
             <Plus className="h-4 w-4" aria-hidden="true" />
-            Import
-          </Button> : null}
+            Connect a tool
+          </Button>
         </div>
       }
     >
-      {activePrimaryTab === "installed" ? (
-        <InstalledSkillsSection
-          hasProject={hasProject}
-          loading={loading}
-          skills={skills}
-          error={error}
-          bootstrapPending={bootstrapPending}
-          brokenSkillIcons={brokenSkillIcons}
-          togglePendingSkillId={togglePendingSkillId}
-          uninstallPendingSkillId={uninstallPendingSkillId}
-          onReload={() => {
-            void loadSkills();
-          }}
-          onBootstrapSkills={() => {
-            void handleBootstrapSkills();
-          }}
-          onOpenAddSkillModal={() => handleOpenAddSkillModal()}
-          onMarkSkillIconBroken={(skillId) => {
-            setBrokenSkillIcons((current) => {
-              if (current[skillId]) {
-                return current;
-              }
-              return { ...current, [skillId]: true };
-            });
-          }}
-          onToggleSkill={(skill, enabled) => {
-            void handleToggleSkill(skill, enabled);
-          }}
-          onUninstallSkill={(skill) => {
-            void handleUninstallSkill(skill);
-          }}
-          onOpenSkillFile={handleOpenSkillFile}
-        />
-      ) : null}
-
-      {activePrimaryTab === "discover" ? (
-        <SkillsDiscoverySection
-          hasProject={hasProject}
-          discoveryQuery={discoveryQuery}
-          onDiscoveryQueryChange={setDiscoveryQuery}
-          onDiscoverySearchSubmit={handleDiscoverySearchSubmit}
-          discoveryLaneFilter={discoveryLaneFilter}
-          onDiscoveryLaneFilterChange={(value) => {
-            handleDiscoveryLaneChange(value as SkillsDiscoverLaneFilter);
-          }}
-          discoveryCategoryFilter={discoveryCategoryFilter}
-          onDiscoveryCategoryFilterChange={handleDiscoveryCategoryFilterChange}
-          discoverySort={discoverySort}
-          onDiscoverySortChange={(value) => {
-            setDiscoverySort(value as SkillsDiscoverySort);
-          }}
-          discoveryLoading={discoveryLoading}
-          discoveryError={discoveryError}
-          discoveryWarnings={discoveryWarnings}
-          totalDiscoveryCount={totalDiscoveryCount}
-          discoveryLaneCounts={discoveryLaneCounts}
-          discoveryCategoryOptions={discoveryCategoryOptions}
-          preparedDiscoveryResults={preparedDiscoveryResults}
-          importPending={importPending}
-          togglePendingSkillId={togglePendingSkillId}
-          onMarkDiscoverySourceIconBroken={markDiscoverySourceIconBroken}
-          onToggleExistingSkill={(skill, enabled) => {
-            void handleToggleSkill(skill, enabled);
-          }}
-          onAskExistingSkill={(skill) => {
-            handleDraftSkillPrompt(skill.slug);
-          }}
-          onOpenExistingSkill={handleOpenSkillFile}
-          onDiscoveredSkillAction={(discovered, existingSkill) => {
-            void handleDiscoveredSkillAction(discovered, existingSkill);
-          }}
-        />
-      ) : null}
-
+      <InstalledSkillsSection
+        hasProject={hasProject}
+        loading={loading}
+        skills={skills}
+        error={error}
+        bootstrapPending={bootstrapPending}
+        brokenSkillIcons={brokenSkillIcons}
+        togglePendingSkillId={togglePendingSkillId}
+        uninstallPendingSkillId={uninstallPendingSkillId}
+        onReload={() => {
+          void loadSkills();
+        }}
+        onBootstrapSkills={() => {
+          void handleBootstrapSkills();
+        }}
+        onOpenAddSkillModal={() => handleOpenAddSkillModal()}
+        onMarkSkillIconBroken={(skillId) => {
+          setBrokenSkillIcons((current) => {
+            if (current[skillId]) {
+              return current;
+            }
+            return { ...current, [skillId]: true };
+          });
+        }}
+        onToggleSkill={(skill, enabled) => {
+          void handleToggleSkill(skill, enabled);
+        }}
+        onUninstallSkill={(skill) => {
+          void handleUninstallSkill(skill);
+        }}
+        onOpenSkillFile={handleOpenSkillFile}
+      />
       <SkillsImportModal
         isOpen={addSkillModalOpen}
         onOpenChange={setAddSkillModalOpen}
@@ -1221,6 +935,10 @@ export function SkillsPanel() {
         importOverwrite={importOverwrite}
         onImportOverwriteChange={setImportOverwrite}
         hasProject={hasProject}
+        onBrowseSkills={() => guardNavigation(() => {
+          setAddSkillModalOpen(false);
+          handleConnectTool();
+        })}
         onSubmitImport={() => {
           void handleSubmitImport({ closeModalOnSuccess: true });
         }}

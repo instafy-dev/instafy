@@ -200,6 +200,22 @@ describe("production Shared modal resume selection", () => {
     await render(null); expect(mocks.ensure).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("no new browser was started");
   });
+
+  it("explains missing browser setup and keeps the original failure in collapsed diagnostics", async () => {
+    mocks.fetchStatus.mockResolvedValue({ runtimes: [] });
+    mocks.ensure.mockRejectedValue(new Error("provider 'test-cloud' is not configured on this controller"));
+    await render(null);
+    const notice = document.querySelector('[data-testid="browser-session-error-notice"]')!;
+    expect(notice.textContent).toContain("Browsing hasn't been set up for this workspace.");
+    expect(notice.textContent).toContain("Ask your administrator");
+    const details = notice.querySelector("details")!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")?.textContent).toBe("Technical details");
+    expect(details.textContent).toContain("provider 'test-cloud' is not configured on this controller");
+    const previousCalls = mocks.ensure.mock.calls.length;
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="browser-session-error-retry"]')!.click());
+    expect(mocks.ensure.mock.calls.length).toBeGreaterThan(previousCalls);
+  });
   it("pins a resolved session through repeated retries even when another browser remains live", async () => {
     mocks.fetchStatus.mockResolvedValue({ runtimes: [entry(firstId)] });
     await render(null);

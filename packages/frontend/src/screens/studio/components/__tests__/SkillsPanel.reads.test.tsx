@@ -7,6 +7,10 @@ import { SkillsPanel } from "../SkillsPanel";
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
+  openPanelTab: vi.fn(),
+  requestConnectTools: vi.fn(),
+  discover: vi.fn(),
+  openImport: vi.fn(),
   read: vi.fn(),
   listAt: vi.fn(),
   readAt: vi.fn(),
@@ -24,6 +28,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../../sdk/instafy", () => ({
   controllerClient: {
+    skills: { discover: mocks.discover },
     workspace: {
       files: { list: mocks.list, read: mocks.read, listAt: mocks.listAt, readAt: mocks.readAt, getRawUrl: mocks.getRawUrl },
     },
@@ -48,13 +53,12 @@ vi.mock("../../../../conversations/useConversation", () => ({
   }),
 }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
-  useWorkspaceTabs: () => ({ openPanelTab: vi.fn(), requestUrlPush: vi.fn() }),
+  useWorkspaceTabs: () => ({ openPanelTab: mocks.openPanelTab, requestUrlPush: vi.fn() }),
 }));
+vi.mock("../connectToolRequest", () => ({ requestConnectTools: mocks.requestConnectTools }));
 vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children, actions }: { children: ReactNode; actions: ReactNode }) => <div>{actions}{children}</div> }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
-vi.mock("../SkillsDiscoverySection", () => ({ SkillsDiscoverySection: () => null }));
 vi.mock("../SkillsImportModal", () => ({ SkillsImportModal: () => null }));
-vi.mock("../skillsDiscoveryRequest", () => ({ useSkillsDiscoveryRequest: () => undefined }));
 vi.mock("../useSkillsImportFlow", () => ({
   useSkillsImportFlow: () => ({
     importSource: "",
@@ -68,32 +72,9 @@ vi.mock("../useSkillsImportFlow", () => ({
     setAddSkillModalOpen: vi.fn(),
     queueSkillImportTask: vi.fn(),
     handleSubmitImport: vi.fn(),
-    handleOpenAddSkillModal: vi.fn(),
+    handleOpenAddSkillModal: mocks.openImport,
   }),
 }));
-vi.mock("../useSkillsDiscoveryState", () => ({
-  useSkillsDiscoveryState: () => ({
-    discoveryQuery: "",
-    setDiscoveryQuery: vi.fn(),
-    discoveryLaneFilter: "all",
-    discoveryCategoryFilter: "all",
-    discoverySort: "relevance",
-    discoveryLoading: false,
-    discoveryError: null,
-    discoveryWarnings: [],
-    discoveryLaneCounts: {},
-    totalDiscoveryCount: 0,
-    discoveryCategoryOptions: [],
-    preparedDiscoveryResults: [],
-    setDiscoverySort: vi.fn(),
-    handleDiscoverySearchSubmit: vi.fn(),
-    handleDiscoveryLaneChange: vi.fn(),
-    handleDiscoveryCategoryFilterChange: vi.fn(),
-    markDiscoverySourceIconBroken: vi.fn(),
-    runDiscoverySearch: vi.fn(async () => undefined),
-  }),
-}));
-
 describe("SkillsPanel reads", () => {
   let root: Root;
   let container: HTMLDivElement;
@@ -136,13 +117,33 @@ describe("SkillsPanel reads", () => {
     await render();
     expect(container.querySelector('[data-testid="skills-new"]')).toBeNull();
     expect(container.querySelector('[data-testid="skills-empty-new"]')?.textContent).toContain("Import");
-    expect(Array.from(container.querySelectorAll("button")).filter(button => button.textContent?.trim() === "Import")).toHaveLength(1);
+    expect(Array.from(container.querySelectorAll("button")).filter(button => button.textContent?.trim() === "Import custom skill")).toHaveLength(1);
   });
 
-  it("keeps Import in the toolbar when there are installed skills", async () => {
+  it("keeps Import available when there are installed skills", async () => {
     await render();
     expect(container.querySelector('[data-testid="skills-new"]')?.textContent).toContain("Import");
     expect(container.querySelector('[data-testid="skills-empty-new"]')).toBeNull();
+  });
+
+  it("opens the shared tool chooser in the current chat without importing anything", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="skills-connect-tool"]')?.click());
+    expect(mocks.requestConnectTools).toHaveBeenCalledWith({ projectId: "space-a", conversationId: null });
+    expect(mocks.openPanelTab).toHaveBeenCalledWith("chat", { activate: true });
+  });
+
+  it("manages installed skills without requesting an external catalog and keeps custom import explicit", async () => {
+    await render();
+    expect(mocks.discover).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Installed skills");
+    expect(container.querySelector('[data-testid="skills-tab-discover"]')).toBeNull();
+    expect(container.querySelector('[data-testid="skills-list"]')).not.toBeNull();
+    const customImport = container.querySelector<HTMLButtonElement>('[data-testid="skills-new"]');
+    expect(customImport?.textContent).toContain("Import custom skill");
+    await act(async () => customImport?.click());
+    expect(mocks.openImport).toHaveBeenCalledOnce();
+    expect(mocks.requestConnectTools).not.toHaveBeenCalled();
   });
 
   it("does not send today's requests again in legacy mode when the origin id arrives", async () => {

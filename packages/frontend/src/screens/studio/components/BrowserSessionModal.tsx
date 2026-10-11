@@ -48,6 +48,7 @@ import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPoin
 import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
 import { BrowserIdentityBadge } from "./BrowserIdentityBadge";
+import { BrowserUnavailableNotice } from "./BrowserUnavailableNotice";
 import {
   shouldForceDockedBrowserFullscreen,
   shouldRenderBrowserSessionFullscreen,
@@ -2390,14 +2391,7 @@ export function BrowserSessionModal({
             </div>
           ) : collapsedCardMode === "error" ? (
             <div className="space-y-3 px-3.5 py-3">
-              <div className="min-w-0 space-y-1">
-                <Text as="p" variant="bodyStrong" tone="primary">
-                  Browser unavailable
-                </Text>
-                <Text as="p" variant="caption" tone="muted" className="leading-snug">
-                  {error}
-                </Text>
-              </div>
+              <BrowserUnavailableNotice error={error} compact />
               <div className="flex items-center gap-2">
                 <Button onPress={retryConnection} variant="ghost" size="sm" radius="full">
                   Retry
@@ -2898,19 +2892,7 @@ export function BrowserSessionModal({
                     </div>
                   ) : (
                     <div className="space-y-3" data-testid="browser-session-error-notice">
-                      <div className="space-y-1">
-                        <Text as="p" variant="bodyStrong" tone="primary">
-                          Browser unavailable
-                        </Text>
-                        <Text
-                          as="p"
-                          variant="body"
-                          tone="secondary"
-                          className="whitespace-pre-wrap leading-snug"
-                        >
-                          {error}
-                        </Text>
-                      </div>
+                      <BrowserUnavailableNotice error={error} />
                       <div className="flex items-center">
                         <Button
                           onPress={retryConnection}

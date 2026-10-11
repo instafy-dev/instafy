@@ -106,7 +106,7 @@ describe("ConnectChipStrip", () => {
     expect(more?.querySelector("svg")).toBeNull();
     expect(strip?.lastElementChild?.contains(more!)).toBe(true);
     expect(chipButtons()[0]!.compareDocumentPosition(more!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(container.textContent).not.toContain("Paste a skill link");
+    expect(container.textContent).not.toContain("Import custom skill");
     expect(container.textContent).not.toContain("please");
     expect(container.textContent).not.toContain(EM_DASH);
   });

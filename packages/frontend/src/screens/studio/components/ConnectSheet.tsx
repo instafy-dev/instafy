@@ -25,7 +25,7 @@ import type { ConnectSheetStage } from "./useConnectSheetState";
 // stays listed, greyed and disabled with a "Soon" Badge, and is left out of
 // Popular. Stage "confirm" is the per-skill confirm whose
 // "Connect" button is the only sending control in the whole flow. Cancel,
-// Close, Escape, Back, "Paste a skill link", "Search all skills" and
+// Close, Escape, Back, "Import custom skill" and
 // "Set up again" never send.
 
 type ConnectSheetProps = {
@@ -40,10 +40,8 @@ type ConnectSheetProps = {
   /** A browse row or Popular mark press; the host routes it (skill or GitHub). */
   onSelect: (connector: ProductConnector) => void;
   onBack: () => void;
-  /** "Paste a skill link" in the browse footer: the host closes and opens the import modal. */
+  /** "Import custom skill" in the browse footer: closes and opens the import modal. */
   onPasteLink: () => void;
-  /** "Search all skills" in the empty state: the host closes and opens Skills discovery with the query. */
-  onSearchAllSkills: (query: string) => void;
   onConnect: (connector: SkillConnector) => void;
   onSetUpAgain: (connector: SkillConnector) => void;
   onClose: () => void;
@@ -139,7 +137,7 @@ function searchStatus(trimmedQuery: string, count: number): string {
     return "";
   }
   if (count === 0) {
-    return `No tool named "${trimmedQuery}".`;
+    return `No available tool matches "${trimmedQuery}".`;
   }
   return `${count} ${count === 1 ? "tool" : "tools"}`;
 }
@@ -151,7 +149,6 @@ function BrowseStage({
   installedSkillNames,
   onSelect,
   onPasteLink,
-  onSearchAllSkills,
   onClose,
 }: {
   query: string;
@@ -161,7 +158,6 @@ function BrowseStage({
   installedSkillNames: ReadonlySet<string>;
   onSelect: (connector: ProductConnector) => void;
   onPasteLink: () => void;
-  onSearchAllSkills: (query: string) => void;
   onClose: () => void;
 }) {
   const [autoFocusSearch] = useState(prefersSearchAutoFocus);
@@ -311,18 +307,8 @@ function BrowseStage({
       ) : (
         <div className="space-y-2 py-1" data-testid="connect-empty">
           <Text as="p" variant="body" tone="secondary">
-            No tool named &quot;{trimmedQuery}&quot;.
+            No available tool matches &quot;{trimmedQuery}&quot;.
           </Text>
-          <Button
-            variant="ghost"
-            size="sm"
-            radius="xl"
-            className="-mx-2.5"
-            onPress={() => onSearchAllSkills(trimmedQuery)}
-            data-testid="connect-search-all"
-          >
-            Search all skills
-          </Button>
         </div>
       )}
       <div className={FOOTER_CLASS}>
@@ -336,7 +322,7 @@ function BrowseStage({
         >
           {/* Tone on a span: a text colour on the Button loses to the ghost
               variant's text-slate-700 (no tailwind-merge). */}
-          <span className="text-slate-500 dark:text-slate-400">Paste a skill link</span>
+          <span className="text-slate-500 dark:text-slate-400">Import custom skill</span>
         </Button>
         <Button
           variant="outline"
@@ -470,7 +456,6 @@ export function ConnectSheet({
   onSelect,
   onBack,
   onPasteLink,
-  onSearchAllSkills,
   onConnect,
   onSetUpAgain,
   onClose,
@@ -547,7 +532,6 @@ export function ConnectSheet({
           installedSkillNames={installedSkillNames}
           onSelect={onSelect}
           onPasteLink={onPasteLink}
-          onSearchAllSkills={onSearchAllSkills}
           onClose={onClose}
         />
       )}

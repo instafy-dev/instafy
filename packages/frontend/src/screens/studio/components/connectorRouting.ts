@@ -3,7 +3,7 @@ import { isConnectorAvailable, type Connector, type SkillConnector } from "./con
 // Where a chip, sheet-row or menu-row press goes. Pure so every branch can be
 // asserted without mounting ChatPanel: a skill opens the confirm stage, GitHub
 // leaves the sheet for the existing import and device-login flow, and
-// "Paste a skill link" leaves it for the import modal. A "soon" connector goes
+// "Import custom skill" leaves it for the import modal. A "soon" connector goes
 // nowhere: its controls are disabled, and this guard keeps the confirm stage
 // unreachable even if one is reported anyway. No branch sends anything.
 

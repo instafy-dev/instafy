@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Text } from "../../../components/Text";
+import { useHeadingRepeatedInSettingsNavigation } from "../../../components/SettingsNavigationLabelContext";
 
 type StudioListTone = "neutral" | "attention" | "activity" | "suggestion";
 
@@ -36,11 +37,12 @@ export function StudioListSection({
   className,
   "data-testid": dataTestId,
 }: StudioListSectionProps) {
+  const repeatedHeading = useHeadingRepeatedInSettingsNavigation(title);
   return (
     <section className={["min-w-0 space-y-4", className].filter(Boolean).join(" ")} data-testid={dataTestId}>
       <div className="flex min-w-0 items-center justify-between gap-4">
         <div className="flex min-w-0 items-center gap-3">
-          {icon ? (
+          {icon && !repeatedHeading ? (
             <span
               className={[
                 "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full",
@@ -56,12 +58,12 @@ export function StudioListSection({
               as="h2"
               variant="bodyStrong"
               tone="primary"
-              className="truncate text-base font-semibold leading-5 tracking-[-0.015em] text-slate-900 dark:text-slate-100"
+              className={repeatedHeading ? "sr-only" : "truncate text-base font-semibold leading-5 tracking-[-0.015em] text-slate-900 dark:text-slate-100"}
             >
               {title}
             </Text>
             {description ? (
-              <Text variant="body" tone="muted" className="mt-0.5 leading-5">
+              <Text variant="body" tone="muted" className={repeatedHeading ? "leading-5" : "mt-0.5 leading-5"}>
                 {description}
               </Text>
             ) : null}

@@ -1196,6 +1196,9 @@ test.describe.serial("Shared Browser disconnected presentation", () => {
       const errorNotice = modal.getByTestId("browser-session-error-notice");
       await expect(errorNotice).toBeVisible({ timeout: 30_000 });
       await expect(errorNotice.getByText("Browser unavailable", { exact: true })).toBeVisible();
+      await expect(errorNotice.getByText("The browser couldn't connect. Try again in a moment.", { exact: true })).toBeVisible();
+      await expect(errorNotice.getByText(GENERIC_BROWSER_ERROR, { exact: true })).toBeHidden();
+      await errorNotice.getByText("Technical details", { exact: true }).click();
       await expect(errorNotice.getByText(GENERIC_BROWSER_ERROR, { exact: true })).toBeVisible();
       const retryButton = errorNotice.getByTestId("browser-session-error-retry");
       await expect(retryButton).toBeVisible();

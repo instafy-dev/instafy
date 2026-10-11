@@ -142,6 +142,7 @@ describe("useMergedControllerProjects accessible discovery", () => {
       orgId: "44444444-4444-4444-8444-444444444444",
       signal: expect.any(AbortSignal),
     });
+    expect(resultRef.current?.allRemoteProjects).toBeNull();
     expect(resultRef.current?.mergedProjects).toEqual([
       expect.objectContaining({
         id: "33333333-3333-4333-8333-333333333333",
@@ -159,6 +160,7 @@ describe("useMergedControllerProjects accessible discovery", () => {
     for (const [orgId, project] of [["org-b", projectB], ["org-a", projectA]] as const) {
       await act(async () => { root.render(<Harness resultRef={resultRef} orgId={orgId} />); });
       expect(resultRef.current?.remoteProjects).toEqual([project]);
+      expect(resultRef.current?.allRemoteProjects).toEqual([projectA, projectB]);
       expect(resultRef.current?.remoteLoadedScope).toBe(orgId);
       expect(resultRef.current?.remoteLoading).toBe(false);
     }
@@ -235,10 +237,12 @@ describe("useMergedControllerProjects accessible discovery", () => {
     expect(resultRef.current?.remoteProjects).toEqual([projectB]);
     expect(resultRef.current?.remoteLoading).toBe(false);
     expect(resultRef.current?.remoteLoadedScope).toBe("org-b");
+    expect(resultRef.current?.allRemoteProjects).toEqual([projectA, projectB]);
     expect(listOrganizationsMock).not.toHaveBeenCalled();
     await act(async () => { window.dispatchEvent(new Event("focus")); });
     expect(resultRef.current?.remoteProjects).toEqual([]);
     expect(resultRef.current?.remoteLoadedScope).toBe("org-b");
+    expect(resultRef.current?.allRemoteProjects).toEqual([]);
     expect(listOrganizationsMock).not.toHaveBeenCalled();
   });
 
@@ -249,6 +253,7 @@ describe("useMergedControllerProjects accessible discovery", () => {
 
     expect(resultRef.current?.remoteLoading).toBe(false);
     expect(resultRef.current?.remoteLoadedScope).toBeNull();
+    expect(resultRef.current?.allRemoteProjects).toBeNull();
     expect(listOrganizationsMock).not.toHaveBeenCalled();
   });
 
@@ -457,6 +462,23 @@ describe("useMergedControllerProjects accessible discovery", () => {
 
     expect(resultRef.current?.remoteProjects).toEqual([projectA]);
     expect(resultRef.current?.remoteLoading).toBe(false);
+    expect(resultRef.current?.allRemoteProjects).toEqual([]);
+  });
+
+  it("does not restore a removed team to the complete directory from a stale requested summary", async () => {
+    listProjectsMock.mockResolvedValueOnce(successfulProjects([projectA, projectB]))
+      .mockResolvedValueOnce(successfulProjects([projectB]));
+    getSummaryMock.mockResolvedValueOnce({ summary: projectA })
+      .mockResolvedValueOnce({ summary: null, notFound: false, forbidden: false, unauthorized: false });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} requestedProjectId="project-a" />); });
+    expect(resultRef.current?.allRemoteProjects).toEqual([projectA, projectB]);
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+
+    // Deep-link metadata may stay warm while its endpoint is unavailable, but
+    // it must not recreate organization navigation after directory removal.
+    expect(resultRef.current?.remoteProjects).toContainEqual(projectA);
+    expect(resultRef.current?.allRemoteProjects).toEqual([projectB]);
   });
 
   it("ignores a requested summary fetched before an in-flight access invalidation", async () => {

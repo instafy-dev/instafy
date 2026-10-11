@@ -1907,7 +1907,8 @@ function StudioLayoutInner() {
       : readCachedControllerOrgs(user?.email).find(org => org.id === homeListState.teamFilter)?.name ?? "Team",
   };
   const { org: searchOrg, space: searchSpace } = navigationScope.page === "home"
-    ? { org: homeSearchTeam, space: null } : workspaceSearchContext;
+    ? { org: homeSearchTeam, space: null }
+    : navigationScope.page === "account" ? { org: null, space: null } : workspaceSearchContext;
   const searchNavigation = useStudioSearchNavigation({
     viewerUserId: currentUserId, location, activeProjectId,
     projectReady: projectReadyForWorkspace, projectAccessBlocked, conversationsProjectKey,
@@ -1941,6 +1942,11 @@ function StudioLayoutInner() {
   closeSearchForNavigation.current = () => { search.closeSearch(false); searchNavigation.cancelPending(); };
   useNativeBackButtonAction(search.open, () => search.closeSearch(), 200);
   const contextHomeActive = navigationScope.page === "home";
+  const accountOverview = navigationScope.page === "account";
+  const handleAccountReturn = () => runStudioNavigation(() => {
+    if (mobileHistory.canGoBack) mobileHistory.goBack();
+    else handleOpenHome();
+  });
   const compactMobileSettingsHeader = conversationWorkspace && activePanel === "settings";
   const mobileSettingsTitle = settingsTab === "profile" ? "Your settings" : settingsTab === "project" ? "Space settings"
     : navigationScope.orgKey === "personal" ? "Personal settings" : "Team settings";
@@ -1951,6 +1957,7 @@ function StudioLayoutInner() {
     teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} accentColor={selectedTeamMetadata?.accentColor} teamId={navigationScope.orgKey}
     projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
     orgContext={navigationScope.page === "workspace" || navigationScope.page === "team"}
+    accountOverview={accountOverview && !overlay} onAccountReturn={handleAccountReturn}
     homeActive={contextHomeActive} homeOverview={homeOverview && !overlay} onHomeReturn={handleHomeReturn} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
     onHome={handleOpenHome} onSearch={search.openSearch} onProfile={handleOpenProfileSettings}
     onSupport={() => runStudioNavigation(bugReportController.onOpenBugReportInbox)}
@@ -1982,7 +1989,7 @@ function StudioLayoutInner() {
 
   return (
     <StudioNavigationProvider value={runStudioNavigation}>
-    <PageTitleInNavigationContext.Provider value={homeOverview ? "Home" : isLargeScreen ? null : mobilePageTitle}>
+    <PageTitleInNavigationContext.Provider value={accountOverview ? "Your settings" : homeOverview ? "Home" : isLargeScreen ? null : mobilePageTitle}>
     <StudioListNavigationProvider value={listNavigation}>
     <StudioSearchReturnProvider value={{ originToken: searchHistory.originToken, returnToResults: () => runStudioNavigation(searchHistory.returnToResults) }}>
     <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
@@ -2064,7 +2071,8 @@ function StudioLayoutInner() {
           {isLargeScreen ? <StudioDesktopHeader contextRef={setDesktopContextTarget} searchTriggerRef={desktopSearchTriggerRef}
             searchOpen={search.open} onSearch={search.openSearch} orgContext={navigationScope.page === "workspace" || navigationScope.page === "team"} orgName={activeTeamName} accentColor={selectedTeamMetadata?.accentColor}
             drawerHeaderRef={setDesktopDrawerHeaderTarget} drawerWidth={leftDrawer ? leftDrawerWidth : 0}
-            navigationCollapsed={sidebarCollapsed} navigationHidden={globalNavigationContext} homeOverview={homeOverview} onHomeReturn={handleHomeReturn}>
+            navigationCollapsed={sidebarCollapsed} navigationHidden={globalNavigationContext} homeOverview={homeOverview} onHomeReturn={handleHomeReturn}
+            accountOverview={accountOverview} onAccountReturn={handleAccountReturn}>
             <StudioTopBar newChatInSidebar inlineDesktop />
           </StudioDesktopHeader> : null}
           {isLargeScreen ? (
@@ -2075,7 +2083,7 @@ function StudioLayoutInner() {
                 navigationHeaderPortalTarget={desktopContextTarget}
                 renderNavigationHeader={context => search.open
                   ? search.renderControl(false, <StudioSearchContext scope={search.scope} context={context} onBroaden={search.changeScope} />)
-                  : homeOverview ? null : <div className="studio-desktop-context" role="group" aria-label="Active space">
+                  : homeOverview || accountOverview ? null : <div className="studio-desktop-context" role="group" aria-label="Active space">
                     {context.space}
                   </div>}
                 onNavigationHeaderAction={() => search.closeSearch(false)}
@@ -2169,8 +2177,8 @@ function StudioLayoutInner() {
             aria-hidden={search.open || showMobileLeftDrawerOverlay || undefined}
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
-            {!isLargeScreen && !hideMobileContextWhileTyping && (!conversationWorkspace || navigationScope.page !== "workspace" && !compactMobileSettingsHeader) ? mobileContextHeader() : null}
-            {!isLargeScreen && !homeOverview ? compactMobileSettingsHeader ? renderMobileWorkspaceHeader({ title: mobilePageTitle, actions: null }) : navigationScope.page === "workspace" ? shouldShowFilesWorkspace && filesMobileView === "tree" ? null : renderMobileWorkspaceHeader(!showMobileLeftDrawerOverlay && filesMobileView === "tree" ? mobileDrawerPageHeader : undefined) : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
+            {!isLargeScreen && !hideMobileContextWhileTyping && (accountOverview || !conversationWorkspace || navigationScope.page !== "workspace" && !compactMobileSettingsHeader) ? mobileContextHeader() : null}
+            {!isLargeScreen && !homeOverview && !accountOverview ? compactMobileSettingsHeader ? renderMobileWorkspaceHeader({ title: mobilePageTitle, actions: null }) : navigationScope.page === "workspace" ? shouldShowFilesWorkspace && filesMobileView === "tree" ? null : renderMobileWorkspaceHeader(!showMobileLeftDrawerOverlay && filesMobileView === "tree" ? mobileDrawerPageHeader : undefined) : <div className={`flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 bg-slate-50 px-1 py-1 ${DARK_RAIL_SURFACE_CLASS}`}>
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <MobileStudioHistoryControls history={mobileHistory} />
               <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{mobilePageTitle}</h1>

@@ -20,12 +20,12 @@ type SkillsImportModalProps = {
   importOverwrite: boolean;
   onImportOverwriteChange: (nextSelected: boolean) => void;
   hasProject: boolean;
-  /** When provided, a ghost "Browse skills" button opens the Skills panel. */
+  /** Opens the shared tool chooser. The host guards and dismisses this import first. */
   onBrowseSkills?: () => void;
   onSubmitImport: () => void;
 };
 
-// Reached from the "Other" tile and from Settings > Skills "Import". Its
+// Reached from "Import custom skill" in the tool chooser or Skills. Its
 // "Add and start" button is the only control here that sends.
 export function SkillsImportModal({
   isOpen,
@@ -93,7 +93,7 @@ export function SkillsImportModal({
               isDisabled={importPending}
               data-testid="skills-browse"
             >
-              Browse skills
+              Browse tools
             </Button>
           ) : (
             <span />
@@ -125,7 +125,7 @@ export function SkillsImportModal({
 
   if (!isDesktop) {
     return <MobileFocusDialog isOpen={isOpen} onOpenChange={changeOpen}
-      dialogAriaLabel="Add skills" closeDisabled={importPending}
+      dialogAriaLabel="Import custom skill" closeDisabled={importPending}
       footer={actions} data-testid="skills-add-modal">
       {form}
     </MobileFocusDialog>;
@@ -137,12 +137,12 @@ export function SkillsImportModal({
       onOpenChange={changeOpen}
       isDismissable={!importPending}
       isKeyboardDismissDisabled={importPending}
-      dialogAriaLabel="Add skills"
+      dialogAriaLabel="Import custom skill"
       modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
       dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col"
       data-testid="skills-add-modal"
     >
-      <StudioDialogHeader title="Add skills" onClose={() => changeOpen(false)}
+      <StudioDialogHeader title="Import custom skill" onClose={() => changeOpen(false)}
         closeLabel="Close" closeButtonDisabled={importPending} className="shrink-0" />
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{form}</div>
       <div className="shrink-0">{actions}</div>

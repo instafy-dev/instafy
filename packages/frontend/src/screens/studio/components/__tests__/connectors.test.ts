@@ -33,7 +33,7 @@ describe("CONNECTORS", () => {
     expect(ids(CONNECTORS)).toEqual(["slack", "notion", "github", "discord", "freefinance", "other"]);
     const last = CONNECTORS[CONNECTORS.length - 1]!;
     expect(last.kind).toBe("other");
-    expect(last.name).toBe("Paste a skill link");
+    expect(last.name).toBe("Import custom skill");
     const github = CONNECTORS.find((entry) => entry.id === "github");
     expect(github?.kind).toBe("github");
     expect(github?.name).toBe("GitHub");

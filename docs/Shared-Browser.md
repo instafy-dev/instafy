@@ -75,6 +75,10 @@ can be retried. This is a read deadline, not a limit on runtime startup time.
 
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
 
+Connection failures show brief recovery guidance. If the runtime provider is not configured,
+the message explains that browsing needs setup; **Technical details** keeps the original error
+available for troubleshooting without making it the main instruction. Retry remains available.
+
 On narrow screens and split panes, the address bar keeps participant avatars on its
 right. Open the avatars to see the participant list, where a cursor icon marks the
 current controller. **Request control** appears below the list; this

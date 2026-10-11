@@ -105,7 +105,7 @@ export function SettingsShell({
   const activeCategory = categories?.find(category => category.id === activeCategoryId) ?? categories?.[0];
   const activeChild = activeCategory?.children?.find(child => child.id === activeChildCategoryId)
     ?? activeCategory?.children?.[0];
-  const repeatedHeading = hasCategories && !useSideNavigation && !useCompactTabs
+  const repeatedHeading = hasCategories && !useSideNavigation
     ? activeChild?.label ?? activeCategory?.label ?? null
     : null;
   const content = (

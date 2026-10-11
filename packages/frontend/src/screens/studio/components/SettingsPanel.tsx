@@ -14,6 +14,7 @@ import { useAuth } from "../../../providers/AuthProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useProject } from "../../../projects/useProject";
 import { useProjectMembers } from "../../../projects/useProjectMembers";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
 import { realSpaceName } from "../../../projects/spaceName";
 import { useOrgMembers } from "../../../org/useOrgMembers";
 import {
@@ -1381,6 +1382,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       setOrgDeletePending(false);
       return;
     }
+    window.dispatchEvent(new Event(PROJECT_ACCESS_REFRESH_EVENT));
     const nextProject = projectList.find((project) => project.orgId !== deletedOrgId) ?? null;
     if (nextProject) {
       handleOpenProjectsPanel({ projectId: nextProject.id });

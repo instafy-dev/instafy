@@ -1,7 +1,6 @@
 import { MoreHoriz, NavArrowRight, Plus, Puzzle, Trash } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
-import { Card } from "../../../components/Card";
 import { LoadingStatus } from "../../../components/LoadingStatus";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Spinner } from "../../../components/Spinner";
@@ -61,9 +60,20 @@ export function InstalledSkillsSection({
 }: InstalledSkillsSectionProps) {
   const isLargeScreen = useStudioDesktopLayout();
   return (
-    <Card tone="default" radius="2xl" className="space-y-4">
+    <section className="min-w-0 space-y-4" aria-label="Installed skills">
+      <div className="flex items-start justify-between gap-3">
+        <Text as="h2" variant="bodyStrong" tone="primary">
+          Installed skills
+        </Text>
+        {skills.length > 0 || error ? (
+          <Button variant="outline" size="sm" radius="xl" onPress={onOpenAddSkillModal}
+            isDisabled={!hasProject} className="shrink-0" data-testid="skills-new">
+            Import custom skill
+          </Button>
+        ) : null}
+      </div>
       <Text variant="caption" tone="muted">
-        Enable or disable skills used by this space.
+        Instructions available to the AI in this space.
       </Text>
 
       {!hasProject ? (
@@ -86,6 +96,9 @@ export function InstalledSkillsSection({
           <Text variant="caption" tone="muted">
             No installed skills yet.
           </Text>
+          <Text variant="caption" tone="muted">
+            Choose Connect a tool for guided setup, or import your own skill.
+          </Text>
           <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
@@ -96,17 +109,17 @@ export function InstalledSkillsSection({
               data-testid="skills-bootstrap"
             >
               {bootstrapPending ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : null}
-              Bootstrap Default Skills
+              Restore defaults
             </Button>
             <Button
-              variant="primary"
+              variant="outline"
               size="sm"
               radius="xl"
               onPress={onOpenAddSkillModal}
               data-testid="skills-empty-new"
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
-              Import
+              Import custom skill
             </Button>
           </div>
         </div>
@@ -257,6 +270,6 @@ export function InstalledSkillsSection({
           })}
         </div>
       )}
-    </Card>
+    </section>
   );
 }
