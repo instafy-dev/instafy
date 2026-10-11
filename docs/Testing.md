@@ -996,15 +996,21 @@ Docker Hub as the fallback.
   the workflows. Other registries, `scratch` and stage names are skipped. A
   Docker Hub reference without a digest is reported and not mirrored.
 - `.github/workflows/mirror-docker-hub-images.yml` runs only on protected `main`
-  (Dockerfile, BuildKit-pin workflow, script or workflow changes, weekly, or
+  (Dockerfile, BuildKit-pin workflow, script or workflow changes, daily, or
   manual dispatch; never for pull requests). It copies each
   `docker.io/<path>@<digest>` to `ghcr.io/instafy-dev/dockerhub/<path>` with
-  `docker buildx imagetools create --prefer-index=false`, which keeps both index
-  and single-manifest digests unchanged, under the immutable tag
-  `<upstream tag>-<first 12 digest hex>` (`pinned-<hex>` without a tag). It skips
-  images whose manifest, tag and child manifests GHCR already serves, retries
-  Docker Hub rate limits with backoff, and then proves anonymously that every
-  digest, tag and child manifest resolves. The job summary lists each image's
+  `docker buildx imagetools create --prefer-index=false` under the immutable tag
+  `<upstream tag>-<first 12 digest hex>` (`pinned-<hex>` without a tag). That
+  keeps index and single-manifest digests unchanged, unless buildx adds an
+  attestation it finds only through the source's referrers API; the anonymous
+  check refuses any changed digest. Official `library/` images are read from
+  `public.ecr.aws/docker/library` first, which serves the same digests without
+  Docker Hub's anonymous limit, and from Docker Hub only when ECR Public fails.
+  `docker/dockerfile` and `moby/buildkit` come from Docker Hub. It skips images
+  whose manifest, tag and child manifests GHCR already serves, retries rate
+  limits with backoff, and then proves anonymously that every digest, tag and
+  child manifest resolves. A copy cut short by a rate limit fails the run and is
+  finished by the next daily run or a manual dispatch. The job summary lists each image's
   state, unpinned references and skipped registries. Only `GITHUB_TOKEN` with
   `packages: write` is used.
 - Every docker-container Buildx builder that builds images (both image scan
@@ -1026,7 +1032,12 @@ Docker Hub as the fallback.
 
 When a base image or BuildKit digest changes, nothing else needs to change. The
 next push to `main` mirrors the new digest; until then builds fetch it from
-Docker Hub exactly as before. If the workflow reports that a package is not
+Docker Hub exactly as before. The hosted BuildKit index no longer follows
+`buildx-stable-1`, so a BuildKit upgrade is a deliberate change: replace the
+digest everywhere `git grep` finds it (the `BUILDKIT_IMAGE` lines in the four
+image workflows and the constants in their contract tests and
+`scripts/lib/imageBuildRoutingTestBaseline.mjs`) with the new
+`moby/buildkit:buildx-stable-1` index digest, in the same pull request. If the workflow reports that a package is not
 anonymously pullable, an organization owner must set that `dockerhub/<path>`
 package's visibility to Public in its package settings. Run
 `node --test scripts/lib/dockerHubImageMirror.test.mjs scripts/mirror-docker-hub-images.test.mjs scripts/check-docker-hub-mirror-workflows.test.mjs`

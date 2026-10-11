@@ -2,7 +2,8 @@ name: Mirror Docker Hub build images
 
 # Copies every digest-pinned Docker Hub image the repository's image builds
 # pull (Dockerfile bases, syntax frontends and the workflows' BuildKit image)
-# to ghcr.io/instafy-dev/dockerhub/<path> without changing its digest. Image
+# to ghcr.io/instafy-dev/dockerhub/<path> without changing its digest, reading
+# official images from ECR Public first and Docker Hub second. Image
 # builds list that prefix as BuildKit's docker.io mirror and fall back to
 # Docker Hub for anything it lacks, so anonymous Docker Hub rate limits stop
 # failing publication and scans. The set is discovered from this commit by
@@ -26,9 +27,10 @@ on:
       - "scripts/lib/dockerHubImageMirror.mjs"
       - "scripts/lib/registryManifests.mjs"
   schedule:
-    # Weekly re-verification; re-copies any manifest, tag or child manifest
-    # GHCR no longer serves.
-    - cron: "41 5 * * 1"
+    # Daily: finishes a copy that a registry rate limit cut short and
+    # re-copies any manifest, tag or child manifest GHCR no longer serves. A
+    # run with nothing missing makes only anonymous GHCR reads.
+    - cron: "41 5 * * *"
   workflow_dispatch: {}
 
 permissions: {}

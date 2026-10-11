@@ -16,8 +16,13 @@
 // For an index source that republishes the index bytes unchanged together with
 // every child manifest; for a single-manifest source --prefer-index=false makes
 // it a carbon copy instead of wrapping the manifest in a new index (buildx
-// v0.35.0 util/imagetools/create.go). Either way the anonymous check after
-// the copy refuses any result whose digest differs.
+// v0.35.0 util/imagetools/create.go). The one exception is an index whose
+// platform manifest has an attestation only through the registry's referrers
+// API: buildx then adds it and the index digest changes. Either way the
+// anonymous check after the copy refuses any result whose digest differs.
+// Official images are read from ECR Public first and Docker Hub second
+// (copySources), so the first copy does not spend Docker Hub's anonymous limit
+// on them.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -27,10 +32,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   DOCKER_HUB_MIRROR,
+  copySources,
   discoverRepositoryImages,
   inspectMirror,
   mirrorTagRef,
-  sourceDigestRef,
 } from "./lib/dockerHubImageMirror.mjs";
 import { commandTail, delay, fetchManifest, readManifestWithBackoff, retryableStatus } from "./lib/registryManifests.mjs";
 
@@ -82,7 +87,8 @@ export async function planMirror(images, { read = fetchManifest, sleep = delay, 
 }
 
 /**
- * Copy each image GHCR lacks from Docker Hub, by digest, then prove anonymously
+ * Copy each image GHCR lacks from its sources in order (ECR Public, then Docker
+ * Hub, for official images; Docker Hub otherwise), by digest, then prove anonymously
  * that GHCR serves exactly that digest, its immutable tag and every child
  * manifest. Every image is attempted; the result lists each outcome.
  */
@@ -97,21 +103,24 @@ export async function mirrorImages(images, { execute = spawnSync, read = fetchMa
       continue;
     }
     const target = mirrorTagRef(image);
-    const source = sourceDigestRef(image);
     let copied = false;
-    for (let attempt = 1; attempt <= COPY_ATTEMPTS; attempt += 1) {
-      log(`${image.path}: copying ${source} to ${target} (attempt ${attempt}/${COPY_ATTEMPTS})...`);
-      const result = execute(
-        "docker",
-        ["buildx", "imagetools", "create", "--prefer-index=false", "--tag", target, source],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: COPY_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
-      );
-      if (result && !result.error && result.status === 0) {
-        copied = true;
-        break;
+    for (const source of copySources(image)) {
+      const registry = source.split("/")[0];
+      for (let attempt = 1; attempt <= COPY_ATTEMPTS && !copied; attempt += 1) {
+        log(`${image.path}: copying ${source} to ${target} (attempt ${attempt}/${COPY_ATTEMPTS})...`);
+        const result = execute(
+          "docker",
+          ["buildx", "imagetools", "create", "--prefer-index=false", "--tag", target, source],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: COPY_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
+        );
+        if (result && !result.error && result.status === 0) {
+          copied = true;
+          break;
+        }
+        log(`::warning::${image.path}: copy from ${registry} failed.\n${commandTail(result)}`);
+        if (attempt < COPY_ATTEMPTS) await sleep(COPY_BACKOFF_MS * 2 ** (attempt - 1));
       }
-      log(`::warning::${image.path}: copy from Docker Hub failed.\n${commandTail(result)}`);
-      if (attempt < COPY_ATTEMPTS) await sleep(COPY_BACKOFF_MS * 2 ** (attempt - 1));
+      if (copied) break;
     }
     if (!copied) {
       results.push({ image, state: "copy failed" });

@@ -29,7 +29,10 @@ function steps(job) {
 
 const stepName = (step) => step.match(/^ {6}- name: (.+)$/mu)?.[1];
 const input = (step, name) => step.match(new RegExp(`^ {10}${name}: (.*)$`, "mu"))?.[1];
-const buildsImages = (job) => /docker\/build-push-action@|docker buildx build\b|docker build\b/u.test(job);
+// Every way a job can drive a build: the build and bake actions, buildx build
+// and bake, the classic builder and Compose builds.
+const buildsImages = (job) =>
+  /docker\/(?:build-push|bake)-action@|docker buildx (?:build|bake)\b|docker build\b|docker[ -]compose\b[^\n]*\bbuild\b/u.test(job);
 
 const builders = workflows.flatMap(({ file, source }) => jobs(source).flatMap((job) => steps(job.source)
   .map((step, index, all) => ({ file, job, step, index, all }))
@@ -66,6 +69,8 @@ test("every docker-container builder uses the Docker Hub mirror and a resolved B
       continue;
     }
     assert.equal(driver, undefined, `${where} uses an unexpected driver`);
+    // use: false would leave later builds on the default docker-driver builder, which has no mirror.
+    assert.equal(input(step, "use"), undefined, `${where} must make the mirrored builder the default`);
     mirrored += 1;
     assert.equal(blockScalar(step, "buildkitd-config-inline"), BUILDKITD_MIRROR_CONFIG, where);
     assert.equal(input(step, "driver-opts"), "image=${{ steps.buildkit.outputs.image }}", where);
@@ -124,5 +129,15 @@ test("the resolver CLI writes the image output the builders read and rejects an 
     assert.equal(result.status, 1, value);
     assert.match(result.stderr, /BUILDKIT_IMAGE must be a digest-pinned moby\/buildkit reference/u);
     assert.ok(!fs.existsSync(output), "an invalid input writes no output");
+  }
+});
+
+test("build detection covers every build entry point and ignores manifest-only jobs", () => {
+  for (const line of [
+    "uses: docker/build-push-action@0", "uses: docker/bake-action@0", "run: docker buildx build .", "run: docker buildx bake all",
+    "run: docker build -t app .", "run: docker compose -f ci.yml build app", "run: docker-compose up --build -d",
+  ]) assert.ok(buildsImages(line), line);
+  for (const line of ["run: docker buildx imagetools create --tag a b", "run: docker compose pull", "run: docker compose up -d"]) {
+    assert.ok(!buildsImages(line), line);
   }
 });

@@ -93,6 +93,19 @@ export function mirrorTag(tag, digest) {
 export const mirrorDigestRef = (image) => `${DOCKER_HUB_MIRROR}/${image.path}@${image.digest}`;
 export const mirrorTagRef = (image) => `${DOCKER_HUB_MIRROR}/${image.path}:${image.mirrorTag}`;
 export const sourceDigestRef = (image) => `${DOCKER_HUB_SOURCE}/${image.path}@${image.digest}`;
+// Docker publishes the official (library/) images to ECR Public under the
+// same digests, without Docker Hub's anonymous pull limit.
+export const ECR_LIBRARY_SOURCE = "public.ecr.aws/docker";
+
+/**
+ * Where to copy one image from, in order. Official images are read from ECR
+ * Public first; Docker Hub is the fallback and the only source for everything
+ * else. The digest makes the source irrelevant to what lands in GHCR.
+ */
+export function copySources(image) {
+  const dockerHub = sourceDigestRef(image);
+  return image.path.startsWith("library/") ? [`${ECR_LIBRARY_SOURCE}/${image.path}@${image.digest}`, dockerHub] : [dockerHub];
+}
 
 // --- Discovery ---------------------------------------------------------------
 

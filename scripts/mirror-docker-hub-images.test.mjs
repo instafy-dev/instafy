@@ -14,6 +14,7 @@ import {
 } from "./mirror-docker-hub-images.mjs";
 import {
   DOCKER_HUB_MIRROR,
+  copySources,
   discoverRepositoryImages,
   mirrorDigestRef,
   mirrorTagRef,
@@ -181,13 +182,13 @@ test("mirroring copies by digest without re-wrapping a single manifest, then pro
   assert.deepEqual(results.map((result) => [result.image.path, result.state]), [["library/rust", "mirrored"], ["moby/buildkit", "present"]]);
   assert.deepEqual(calls.map((call) => [call.binary, ...call.args]), [
     ["docker", "buildx", "imagetools", "create", "--prefer-index=false", "--tag",
-      `${DOCKER_HUB_MIRROR}/library/rust:1.88-aaaaaaaaaaaa`, `docker.io/library/rust@${digest("a")}`],
+      `${DOCKER_HUB_MIRROR}/library/rust:1.88-aaaaaaaaaaaa`, `public.ecr.aws/docker/library/rust@${digest("a")}`],
   ]);
   assert.equal(sourceDigestRef(rust), `docker.io/library/rust@${digest("a")}`);
   assert.ok(calls[0].options.timeout > 0);
 });
 
-test("a Docker Hub rate limit is retried with backoff; a copy that never lands fails that image only", async () => {
+test("a registry rate limit is retried with backoff; a copy that never lands fails that image only", async () => {
   const waits = [];
   const target = registry({});
   const { execute, calls } = executor((args, count) => {
@@ -209,9 +210,33 @@ test("a Docker Hub rate limit is retried with backoff; a copy that never lands f
   assert.match(logs.join("\n"), /::error::moby\/buildkit: after the copy GHCR does not serve its manifest anonymously/u);
 
   const failing = executor(() => ({ status: 1, stderr: "toomanyrequests" }));
-  const failed = await mirrorImages([rust], { execute: failing.execute, read: registry({}).read, sleep: noSleep, log: quiet });
-  assert.deepEqual(failed.map((result) => result.state), ["copy failed"]);
-  assert.equal(failing.calls.length, COPY_ATTEMPTS);
+  const failed = await mirrorImages([rust, buildkit], { execute: failing.execute, read: registry({}).read, sleep: noSleep, log: quiet });
+  assert.deepEqual(failed.map((result) => result.state), ["copy failed", "copy failed"]);
+  assert.deepEqual(failing.calls.map((call) => call.args.at(-1)), [
+    ...Array(COPY_ATTEMPTS).fill(`public.ecr.aws/docker/library/rust@${digest("a")}`),
+    ...Array(COPY_ATTEMPTS).fill(`docker.io/library/rust@${digest("a")}`),
+    ...Array(COPY_ATTEMPTS).fill(`docker.io/moby/buildkit@${digest("b")}`),
+  ]);
+});
+
+test("official images are copied from ECR Public first and fall back to Docker Hub; others use Docker Hub only", async () => {
+  assert.deepEqual(copySources(rust), [`public.ecr.aws/docker/library/rust@${digest("a")}`, `docker.io/library/rust@${digest("a")}`]);
+  assert.deepEqual(copySources(buildkit), [`docker.io/moby/buildkit@${digest("b")}`]);
+  const target = registry({});
+  // ECR Public does not hold this digest; Docker Hub does.
+  const { execute, calls } = executor((args) => {
+    if (args.at(-1).startsWith("public.ecr.aws/")) return { status: 1, stderr: "not found" };
+    Object.assign(target.entries, complete(rust, rustChildren));
+    return { status: 0, stdout: "", stderr: "" };
+  });
+  const logs = [];
+  const results = await mirrorImages([rust], { execute, read: target.read, sleep: noSleep, log: (line) => logs.push(line) });
+  assert.deepEqual(results.map((result) => result.state), ["mirrored"]);
+  assert.deepEqual(calls.map((call) => call.args.at(-1)), [
+    ...Array(COPY_ATTEMPTS).fill(`public.ecr.aws/docker/library/rust@${digest("a")}`),
+    `docker.io/library/rust@${digest("a")}`,
+  ]);
+  assert.match(logs.join("\n"), /copy from public\.ecr\.aws failed/u);
 });
 
 test("verification reports private, missing and incomplete packages with an actionable fix", async () => {
