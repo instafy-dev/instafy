@@ -24,8 +24,10 @@ export interface StudioMobileContextHeaderProps {
   attentionCounts: Record<string, number>;
   homeActive: boolean;
   homeOverview?: boolean;
+  accountOverview?: boolean;
   orgContext?: boolean;
   onHomeReturn?: () => void;
+  onAccountReturn?: () => void;
   homeAttentionCount: number;
   searchRef: RefObject<HTMLButtonElement | null>;
   onHome: () => void;
@@ -51,8 +53,10 @@ export function StudioMobileContextHeader({
   attentionCounts,
   homeActive,
   homeOverview = false,
+  accountOverview = false,
   orgContext = true,
   onHomeReturn,
+  onAccountReturn,
   homeAttentionCount,
   searchRef,
   onHome,
@@ -74,29 +78,31 @@ export function StudioMobileContextHeader({
     .map(project => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor, avatarUrl: project.projectAvatarUrl }));
   const selectedSpaceId = spaces.some(space => space.id === activeProjectId) ? activeProjectId : null;
   const unreadCount = Number.isFinite(homeAttentionCount) && homeAttentionCount > 0 ? Math.floor(homeAttentionCount) : 0;
+  const globalOverview = homeOverview || accountOverview;
+  const onReturn = accountOverview ? onAccountReturn : onHomeReturn;
 
   return (
     <header
-      data-org-accent={!homeOverview && orgContext ? normalizeOrgAccent(accentColor) ?? "slate" : undefined}
+      data-org-accent={!globalOverview && orgContext ? normalizeOrgAccent(accentColor) ?? "slate" : undefined}
       className={`studio-mobile-context-header org-context-tint border-b border-transparent bg-slate-50 text-slate-900 dark:text-slate-100 ${DARK_RAIL_BG_CLASS}`}
       style={{
         paddingTop: "calc(var(--instafy-safe-area-inset-top, env(safe-area-inset-top, 0px)) + 4px)",
       }}
-      aria-label={homeOverview ? "Home" : "Working context"}
+      aria-label={accountOverview ? "Your settings" : homeOverview ? "Home" : "Working context"}
       data-testid="studio-mobile-context-header"
     >
-      {homeOverview ? <>
-        {onHomeReturn ? <IconButton variant="ghost" radius="lg" onPress={onHomeReturn}
-          aria-label="Back to previous page" title="Back to previous page" data-testid="home-return-navigation"
+      {globalOverview ? <>
+        {onReturn ? <IconButton variant="ghost" radius="lg" onPress={onReturn}
+          aria-label="Back to previous page" title="Back to previous page" data-testid={accountOverview ? "account-return-navigation" : "home-return-navigation"}
           className="!min-h-12 !min-w-11 shrink-0">
           <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
         </IconButton> : null}
-        <h1 className="min-w-0 flex-1 truncate px-2 text-sm font-semibold" data-testid="studio-home-title">Home</h1>
-        <IconButton variant="ghost" radius="lg" onPress={onSwitchTeam}
+        <h1 className="min-w-0 flex-1 truncate px-2 text-sm font-semibold" data-testid={accountOverview ? "studio-account-title" : "studio-home-title"}>{accountOverview ? "Your settings" : "Home"}</h1>
+        {!accountOverview ? <IconButton variant="ghost" radius="lg" onPress={onSwitchTeam}
           aria-label="Browse teams and spaces" title="Browse teams and spaces" data-testid="home-browse-navigation"
           className="!min-h-12 !min-w-11 shrink-0">
           <ViewGrid className="h-5 w-5" aria-hidden="true" />
-        </IconButton>
+        </IconButton> : null}
       </> : <>
       <IconButton
         variant="ghost" radius="lg" onPress={onHome}

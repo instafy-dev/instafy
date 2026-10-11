@@ -32,7 +32,8 @@ import { ConnectSheet } from "./ConnectSheet";
 import { SkillsImportModal } from "./SkillsImportModal";
 import type { Connector, SkillConnector } from "./connectors";
 import { routeConnectorSelection } from "./connectorRouting";
-import { requestSkillsDiscovery } from "./skillsDiscoveryRequest";
+import { useConnectToolsRequest } from "./connectToolRequest";
+import { useStudioGuardedNavigation } from "../../../navigation/StudioDraftNavigationGuard";
 import { useConnectSheetState } from "./useConnectSheetState";
 import { useInstalledSkillNames } from "./useInstalledSkillNames";
 import { useSkillsImportFlow } from "./useSkillsImportFlow";
@@ -1139,6 +1140,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setPreparedEmailInviteFromCommand(null);
   }, []);
   const { tabs: workspaceTabs, keepTabOpen, openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
+  const guardNavigation = useStudioGuardedNavigation();
   const hasComposerViewNavigation = showComposerNavigationButton && (hasResources || (conversationWorkspace && workspaceTabs.some(tab => tab.workspaceOwner?.conversationId === activeConversationId)));
   const { keepComposerTabOpen, keepComposerTabOpenForEdit } = useChatComposerPreviewTab({
     conversationId: activeConversationId,
@@ -3843,7 +3845,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     runtimeControllerEnabled,
   });
   // Connect: one sheet (browse and confirm stages) shared by the composer
-  // sub-view, the getting-started card and the "Paste a skill link" modal.
+  // sub-view, the getting-started card and the custom skill import modal.
   // Every send lands in the current conversation as a new turn; nothing here
   // creates a conversation or switches tabs.
   const installedSkills = useInstalledSkillNames({
@@ -3861,6 +3863,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const connectSheetOpen = connectSheet.state !== null;
   const { handleOpenAddSkillModal: openAddSkillModal, queueSkillImportTask } = skillsImport;
   const { openBrowse: openConnectBrowse, openConfirm: openConnectConfirm, back: backConnectSheet, close: closeConnectSheet } = connectSheet;
+  useConnectToolsRequest({ projectId: activeProjectId ?? null, conversationId: activeConversationId }, openConnectBrowse);
   const handleSelectConnector = useCallback(
     (connector: Connector) => {
       routeConnectorSelection(connector, {
@@ -3876,16 +3879,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     closeConnectSheet();
     openAddSkillModal();
   }, [closeConnectSheet, openAddSkillModal]);
-  // The typed query travels to the Skills panel's Discover tab; the panel
-  // consumes it on mount (openPanelTab mounts it) or at once when already open.
-  const handleConnectSearchAllSkills = useCallback(
-    (query: string) => {
-      closeConnectSheet();
-      requestSkillsDiscovery(query);
-      openPanelTab("skills", { activate: true });
-    },
-    [closeConnectSheet, openPanelTab],
-  );
   const handleConnectConfirm = useCallback(
     async (connector: SkillConnector) => {
       const queued = await queueSkillImportTask({
@@ -6248,7 +6241,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         onSelect={handleSelectConnector}
         onBack={backConnectSheet}
         onPasteLink={handleConnectPasteLink}
-        onSearchAllSkills={handleConnectSearchAllSkills}
         onConnect={(connector) => {
           void handleConnectConfirm(connector);
         }}
@@ -6266,7 +6258,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         importOverwrite={skillsImport.importOverwrite}
         onImportOverwriteChange={skillsImport.setImportOverwrite}
         hasProject={Boolean(activeProjectId)}
-        onBrowseSkills={() => openPanelTab("skills", { activate: true })}
+        onBrowseSkills={() => guardNavigation(() => {
+          skillsImport.setAddSkillModalOpen(false);
+          openConnectBrowse();
+        })}
         onSubmitImport={() => {
           void skillsImport.handleSubmitImport({ closeModalOnSuccess: true });
         }}

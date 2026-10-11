@@ -3,6 +3,7 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ControllerProjectSummary } from "../../../../sdk/instafy";
 
 const fixture = vi.hoisted(() => ({
   projects: [
@@ -31,20 +32,30 @@ const fixture = vi.hoisted(() => ({
   switchProject: vi.fn(), createProject: vi.fn(), onSettings: vi.fn(), onNewSpace: vi.fn(),
   copyTunnelDetails: vi.fn(), showStatus: vi.fn(), refresh: vi.fn(), retry: vi.fn(),
   discoveryError: null as string | null, discoveryResolved: true, discoveryRefreshing: false, discoveryLoading: false,
+  discoveredProjects: undefined as ControllerProjectSummary[] | undefined,
+  organizationsError: false,
 }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({
   projectList: fixture.projects, activeProjectId: fixture.activeProjectId, switchProject: fixture.switchProject, createProject: fixture.createProject,
 }) }));
-vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: ({ orgId }: { orgId: string | null }) => ({
+vi.mock("../../../../projects/useMergedControllerProjects", async () => ({
+  ...await vi.importActual<typeof import("../../../../projects/useMergedControllerProjects")>("../../../../projects/useMergedControllerProjects"),
+  useMergedControllerProjects: ({ orgId }: { orgId: string | null }) => ({
   mergedProjects: fixture.projects, remoteLoading: fixture.discoveryLoading, remoteLoadedScope: fixture.discoveryResolved ? orgId : null,
   remoteDiscoveryResolved: fixture.discoveryResolved, remoteError: fixture.discoveryError,
   remoteRefreshing: fixture.discoveryRefreshing, retryRemoteProjects: fixture.retry,
+  allRemoteProjects: fixture.discoveryResolved ? fixture.discoveredProjects ?? fixture.projects.map(project => ({
+    projectId: project.id, projectName: project.name, orgId: project.orgId, orgName: project.orgName,
+  })) : null,
 }) }));
 vi.mock("../../../../sdk/instafy", async () => {
   const actual = await vi.importActual<typeof import("../../../../sdk/instafy")>("../../../../sdk/instafy");
   return { ...actual, runtimeControllerEnabled: true, controllerClient: {
     ...actual.controllerClient,
-    organizations: { ...actual.controllerClient.organizations, list: async () => fixture.orgs, listMembers: async () => [] },
+    organizations: { ...actual.controllerClient.organizations, list: async () => {
+      if (fixture.organizationsError) throw new Error("Controller unavailable");
+      return fixture.orgs;
+    }, listMembers: async () => [] },
     projects: { ...actual.controllerClient.projects, listMembers: async () => [{ userId: "teammate-id", fullName: "Teammate", email: "teammate@example.test" }] },
   } };
 });
@@ -78,6 +89,8 @@ import { StudioSearchContext } from "../StudioSearchContext";
 import { useStudioSearch } from "../useStudioSearch";
 import { recordProjectOpened } from "../../../../projects/projectRecency";
 import { usesGlobalNavigationContext } from "../../teamNavigation";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../../projects/projectAccessEvents";
+import { readCachedControllerOrgs, writeSidebarOrgSnapshot } from "../sidebarOrgSnapshot";
 
 describe("StudioSidebar organization navigation", () => {
   let container: HTMLDivElement;
@@ -172,11 +185,17 @@ describe("StudioSidebar organization navigation", () => {
       { id: "space-a", name: "Core", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: false },
       { id: "space-c", name: "Design", orgId: "org-c", orgName: "Charlie", state: null, isRemoteOnly: false },
     ];
-    fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: null }));
+    fixture.orgs = [
+      { id: "org-a", name: "Alpha", slug: "alpha", role: "builder", avatarUrl: null },
+      { id: "org-b", name: "Empty team", slug: "empty", role: "owner", avatarUrl: null },
+      { id: "org-c", name: "Charlie", slug: "charlie", role: "builder", avatarUrl: null },
+    ];
     fixture.discoveryError = null;
     fixture.discoveryResolved = true;
     fixture.discoveryRefreshing = false;
     fixture.discoveryLoading = false;
+    fixture.discoveredProjects = undefined;
+    fixture.organizationsError = false;
     container = document.createElement("div");
     portal = document.createElement("div");
     headerPortal = document.createElement("div");
@@ -190,6 +209,69 @@ describe("StudioSidebar organization navigation", () => {
     headerPortal.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("removes a deleted team from the rail and picker despite a persisted local space", async () => {
+    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs, fixture.orgs.length);
+    fixture.orgs = fixture.orgs.filter(org => org.id !== "org-c");
+    fixture.discoveredProjects = [{ projectId: "space-a", orgId: "org-a", projectName: "Core" }];
+    await render({ workspaceSwitcherOpen: true });
+
+    expect(container.querySelector('[data-testid="sidebar-team-org-c"]')).toBeNull();
+    expect(portal.querySelector('[data-testid="sidebar-org-chip-org-c"]')).toBeNull();
+    expect(readCachedControllerOrgs(fixture.userEmail).map(org => org.id)).toEqual(["org-a", "org-b"]);
+    // Reconcile navigation only; do not delete local drafts or workspace state.
+    expect(fixture.projects.some(project => project.id === "space-c")).toBe(true);
+    fixture.organizationsError = true;
+    fixture.discoveryError = "Couldn't refresh spaces.";
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(container.querySelector('[data-testid="sidebar-team-org-c"]')).toBeNull();
+  });
+
+  it("keeps a direct project guest's team outside the selected project scope", async () => {
+    fixture.orgs = fixture.orgs.filter(org => org.id !== "org-c");
+    fixture.projects = fixture.projects.filter(project => project.id !== "space-c");
+    fixture.discoveredProjects = [
+      { projectId: "space-a", orgId: "org-a", projectName: "Core" },
+      { projectId: "shared-space", orgId: "guest-team", projectName: "Shared", orgName: "Guest team" },
+    ];
+    await render({ workspaceSwitcherOpen: true });
+    expect(container.querySelector('[data-testid="sidebar-team-guest-team"]')).not.toBeNull();
+    expect(portal.querySelector('[data-testid="sidebar-org-chip-guest-team"]')).not.toBeNull();
+    await click("sidebar-org-chip-guest-team");
+    expect(portal.querySelector('[data-testid="sidebar-project-switcher-item-shared-space"]')).not.toBeNull();
+  });
+
+  it("accepts empty controller directories without resurrecting a cached team", async () => {
+    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs, fixture.orgs.length);
+    fixture.orgs = [];
+    fixture.discoveredProjects = [];
+    await render({ workspaceSwitcherOpen: true });
+    for (const orgId of ["org-a", "org-b", "org-c"]) {
+      expect(container.querySelector(`[data-testid="sidebar-team-${orgId}"]`)).toBeNull();
+      expect(portal.querySelector(`[data-testid="sidebar-org-chip-${orgId}"]`)).toBeNull();
+    }
+    expect(readCachedControllerOrgs(fixture.userEmail)).toEqual([]);
+  });
+
+  it.each(["organizations", "projects"])("retains cached teams when cold %s discovery fails", async failure => {
+    writeSidebarOrgSnapshot(fixture.userEmail, fixture.orgs, fixture.orgs.length);
+    fixture.orgs = fixture.orgs.filter(org => org.id !== "org-c");
+    fixture.organizationsError = failure === "organizations";
+    fixture.discoveryResolved = failure !== "projects";
+    fixture.discoveredProjects = [];
+    await render({ workspaceSwitcherOpen: true });
+    expect(container.querySelector('[data-testid="sidebar-team-org-c"]')).not.toBeNull();
+    expect(portal.querySelector('[data-testid="sidebar-org-chip-org-c"]')).not.toBeNull();
+  });
+
+  it.each(["focus", PROJECT_ACCESS_REFRESH_EVENT, "instafy:orgs-updated"])("reconciles removed memberships on %s", async eventName => {
+    fixture.discoveredProjects = [{ projectId: "space-a", orgId: "org-a", projectName: "Core" }];
+    await render();
+    expect(container.querySelector('[data-testid="sidebar-team-org-c"]')).not.toBeNull();
+    fixture.orgs = fixture.orgs.filter(org => org.id !== "org-c");
+    await act(async () => window.dispatchEvent(new Event(eventName)));
+    expect(container.querySelector('[data-testid="sidebar-team-org-c"]')).toBeNull();
   });
 
   it.each([false, true])("opens Chats directly without desktop recent-list UI (collapsed=%s)", async collapsed => {

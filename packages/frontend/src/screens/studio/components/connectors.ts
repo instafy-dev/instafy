@@ -106,7 +106,7 @@ export type GithubConnector = ProductConnectorBase & { kind: "github" };
 
 export type ProductConnector = SkillConnector | GithubConnector;
 
-/** "Paste a skill link": the sheet's footer action, never a row or a chip. */
+/** "Import custom skill": the sheet's footer action, never a row or a chip. */
 export type OtherConnector = ConnectorBase & { kind: "other" };
 
 export type Connector = ProductConnector | OtherConnector;
@@ -204,7 +204,7 @@ export const CONNECTORS: readonly Connector[] = [
       "FREEFINANCE_API_BASE_URL",
     ],
   },
-  { id: "other", name: "Paste a skill link", mark: Puzzle, kind: "other" },
+  { id: "other", name: "Import custom skill", mark: Puzzle, kind: "other" },
 ];
 
 export function isProductConnector(connector: Connector): connector is ProductConnector {

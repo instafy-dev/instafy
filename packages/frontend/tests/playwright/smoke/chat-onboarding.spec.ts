@@ -70,6 +70,52 @@ test.describe("Chat onboarding", () => {
     await resetRuntimeUserState(page, { source: "chat-onboarding:cleanup" }).catch(() => {});
   });
 
+  test("tool browsing keeps chat context without requesting a third-party catalog", async ({ page }) => {
+    const discoveryRequests: string[] = [];
+    page.on("request", request => {
+      if (/\/skills\/discover(?:\?|$)/.test(request.url())) discoveryRequests.push(request.url());
+    });
+    const startingUrl = page.url();
+    const userMessageCount = await page.getByTestId("chat-bubble-user").count();
+    await page.getByTestId("onboarding-getting-started").getByRole("button", { name: "More tools", exact: true }).click();
+    await page.getByTestId("connect-row-freefinance").click();
+    await page.getByTestId("connect-confirm-back").click();
+    await page.getByTestId("connect-search").fill("unlisted-tool");
+    await expect(page.getByTestId("connect-empty")).toContainText('No available tool matches "unlisted-tool".');
+    await expect(page.getByTestId("connect-search-all")).toHaveCount(0);
+    await page.getByRole("button", { name: "Import custom skill", exact: true }).click();
+    await expect(page.getByTestId("skills-add-modal")).toBeVisible();
+    await expect(page.getByTestId("connect-sheet")).not.toBeVisible();
+    await page.getByRole("button", { name: "Browse tools", exact: true }).click();
+    await expect(page.getByTestId("connect-sheet")).toBeVisible();
+    await expect(page.getByTestId("connect-search")).toHaveValue("");
+    await expect(page.getByTestId("skills-add-modal")).not.toBeVisible();
+    await expect(page).toHaveURL(startingUrl);
+    await expect(page.getByTestId("chat-bubble-user")).toHaveCount(userMessageCount);
+    expect(discoveryRequests).toEqual([]);
+  });
+
+  test("Browse tools from an import keeps the dirty-form guard and returns to the chooser", async ({ page }) => {
+    const startingUrl = page.url();
+    const userMessageCount = await page.getByTestId("chat-bubble-user").count();
+    await page.getByTestId("onboarding-getting-started").getByRole("button", { name: "More tools", exact: true }).click();
+    await page.getByTestId("connect-paste-link").click();
+    await page.getByTestId("skills-import-source").fill("./my-skill");
+    await page.getByTestId("skills-browse").click();
+    const guard = page.getByRole("dialog", { name: "Unfinished work", exact: true });
+    await expect(guard).toBeVisible();
+    await guard.getByRole("button", { name: "Keep editing", exact: true }).click();
+    await expect(page.getByTestId("skills-import-source")).toHaveValue("./my-skill");
+    await expect(page.getByTestId("connect-sheet")).not.toBeVisible();
+    await page.getByTestId("skills-browse").click();
+    await guard.getByRole("button", { name: "Discard and leave", exact: true }).click();
+    await expect(page.getByTestId("connect-sheet")).toBeVisible();
+    await expect(page.getByTestId("connect-search")).toHaveValue("");
+    await expect(page.getByTestId("skills-add-modal")).not.toBeVisible();
+    await expect(page).toHaveURL(startingUrl);
+    await expect(page.getByTestId("chat-bubble-user")).toHaveCount(userMessageCount);
+  });
+
   test("offers one row of live tools, and leaves the blank path to the composer", async ({ page }) => {
     const onboarding = page.getByTestId("onboarding-getting-started");
     await expect(onboarding).toBeVisible();

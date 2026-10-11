@@ -127,6 +127,23 @@ describe("StudioMobileContextHeader", () => {
     expect(document.querySelector('[data-testid="profile-account-sheet"]')).not.toBeNull();
   });
 
+  it("keeps account settings global and returns to the origin without switching teams", async () => {
+    const onAccountReturn = vi.fn();
+    await render({ ...props, accountOverview: true, onAccountReturn, accentColor: "teal" });
+    expect(container.querySelector("h1")?.textContent).toBe("Your settings");
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+    expect(container.querySelector('[aria-label="Team and space"]')).toBeNull();
+    expect(container.querySelector('[data-testid="home-browse-navigation"]')).toBeNull();
+    await click("account-return-navigation");
+    expect(onAccountReturn).toHaveBeenCalledOnce();
+    expect(props.onSwitchTeam).not.toHaveBeenCalled();
+    await click("studio-mobile-search-trigger");
+    expect(props.onSearch).toHaveBeenCalledOnce();
+    await render({ ...props, accountOverview: false });
+    expect(container.querySelector('[data-testid="account-return-navigation"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Team and space"]')).not.toBeNull();
+  });
+
   it("separates returning from Home from browsing teams and spaces", async () => {
     const onHomeReturn = vi.fn();
     await render({ ...props, homeOverview: true, onHomeReturn });

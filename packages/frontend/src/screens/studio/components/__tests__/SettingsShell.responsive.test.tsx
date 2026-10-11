@@ -6,6 +6,7 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SettingsShell, type SettingsCategory } from "../SettingsShell";
 import { SettingsSection } from "../SettingsSection";
+import { StudioListSection } from "../StudioListSection";
 import { useSettingsRoute } from "../../settingsRoute";
 
 const { nativeBack } = vi.hoisted(() => ({ nativeBack: vi.fn() }));
@@ -215,12 +216,38 @@ describe("SettingsShell available-pane navigation", () => {
     expect(get("other-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
   });
 
-  it("retains content headings below compact tabs", async () => {
+  it("suppresses matching content headings below compact tabs while retaining other sections", async () => {
     paneWidth = 390;
     viewportWidth = 390;
     await act(async () => root.render(<Harness initialCategory="preferences" personal sectionHeading />));
     expect(get("settings-category-nav-tabs")).not.toBeNull();
-    expect(get("current-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
+    expect(get("current-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(true);
+    expect(get("other-section")?.querySelector("h3")?.classList.contains("sr-only")).toBe(false);
+  });
+
+  it("keeps agent actions and helper text available without repeating the active compact category", async () => {
+    paneWidth = 390;
+    viewportWidth = 390;
+    const onCreate = vi.fn();
+    await act(async () => root.render(<SettingsShell title="Your AI"
+      categories={[{ id: "connections", label: "Connections" }, { id: "agents", label: "Agents" }]}
+      activeCategoryId="agents" onCategoryChange={vi.fn()}>
+      <StudioListSection title="Agents" icon={<span data-testid="agents-icon" />} description="Customize profiles and instructions."
+        actions={<button onClick={onCreate}>New agent</button>} data-testid="agents-section">
+        <p>Octo</p>
+      </StudioListSection>
+    </SettingsShell>));
+    const section = get("agents-section")!;
+    expect(section.querySelector("h2")?.classList.contains("sr-only")).toBe(true);
+    expect(section.querySelector("h2")?.hasAttribute("aria-hidden")).toBe(false);
+    expect(get("agents-icon")).toBeNull();
+    expect(section.textContent).toContain("Customize profiles and instructions.");
+    await act(async () => section.querySelector("button")!.click());
+    expect(onCreate).toHaveBeenCalledOnce();
+    await resizeViewport(1440);
+    await resizePane(1080);
+    expect(section.querySelector("h2")?.classList.contains("sr-only")).toBe(false);
+    expect(get("agents-icon")).not.toBeNull();
   });
 
   it("shows all three personal categories on a phone and selects the existing account route", async () => {

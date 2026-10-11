@@ -117,6 +117,7 @@ export function useMergedControllerProjects({
   const [discovery, setDiscovery] = useState<{
     userId: string;
     projects: ControllerProjectSummary[];
+    includesDirectMemberships: boolean;
   } | null>(null);
   const [settledDiscoveryUserId, setSettledDiscoveryUserId] = useState<string | null>(null);
   const [discoveryStatus, setDiscoveryStatus] = useState<{
@@ -181,7 +182,7 @@ export function useMergedControllerProjects({
           ? await listLegacyControllerProjects(requestController.signal)
           : result.projects;
         if (!cancelled) {
-          setDiscovery({ userId, projects });
+          setDiscovery({ userId, projects, includesDirectMemberships: result.status === "success" });
           retryAttempt = 0;
         }
       } catch (error) {
@@ -369,6 +370,13 @@ export function useMergedControllerProjects({
     () => mergeRemoteProjectSources(remoteProjects, requestedProject),
     [remoteProjects, requestedProject],
   );
+  // Organization pickers need every accessible team, including direct project
+  // memberships outside the currently selected team. Null means no successful
+  // discovery yet (or a legacy membership-only response); an empty array is
+  // an authoritative empty result. Legacy enumeration cannot exclude guests.
+  // A requested-project fallback can remain warm after a failed refresh. Do
+  // not let it override the complete directory's evidence of lost access.
+  const allRemoteProjects = discovery?.includesDirectMemberships ? accessibleProjects : null;
 
   const mergedProjects = useMemo(
     () => mergeControllerProjects(localProjects, effectiveRemoteProjects),
@@ -381,6 +389,7 @@ export function useMergedControllerProjects({
     remoteLoadedScope,
     remoteDiscoveryResolved,
     remoteProjects: effectiveRemoteProjects,
+    allRemoteProjects,
     remoteError,
     remoteRefreshing,
     retryRemoteProjects,

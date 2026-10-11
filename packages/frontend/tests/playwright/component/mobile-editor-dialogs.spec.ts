@@ -81,25 +81,25 @@ test("Skills import keeps its title and actions reachable across keyboard resize
   await source.fill("https://github.com/example/skills");
   const originalField = await source.elementHandle();
   await viewport(page, 390, 360, 20);
-  await actionsWithinViewport(page, "Add skills", "Add and start", 360, 20);
+  await actionsWithinViewport(page, "Import custom skill", "Add and start", 360, 20);
   await expect(source).toBeFocused();
   const scroller = page.getByRole("dialog").locator(".overflow-y-auto");
   expect(await scroller.evaluate(el => el.scrollHeight > el.clientHeight)).toBe(true);
   await page.getByRole("textbox", { name: "Optional skill name", exact: true }).fill("My skill");
-  await actionsWithinViewport(page, "Add skills", "Add and start", 360, 20);
+  await actionsWithinViewport(page, "Import custom skill", "Add and start", 360, 20);
   await page.setViewportSize({ width: 844, height: 390 });
   await viewport(page, 844, 260);
   expect(await source.evaluate((el, original) => el === original, originalField)).toBe(true);
   await expect(source).toHaveValue("https://github.com/example/skills");
   await expect(page.getByRole("textbox", { name: "Optional skill name", exact: true })).toHaveValue("My skill");
-  await actionsWithinViewport(page, "Add skills", "Add and start", 260);
+  await actionsWithinViewport(page, "Import custom skill", "Add and start", 260);
   await page.screenshot({ path: info.outputPath("skills-keyboard-actions.png") });
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   // A newly opened wide dialog also scrolls within the available screen.
   await viewportAfterClose(page, 844, 390);
   await page.getByRole("button", { name: "Import skills", exact: true }).click();
-  await actionsWithinViewport(page, "Add skills", "Add and start", 390);
+  await actionsWithinViewport(page, "Import custom skill", "Add and start", 390);
   expect(errors).toEqual([]);
 });
 

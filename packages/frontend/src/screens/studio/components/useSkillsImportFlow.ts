@@ -35,8 +35,8 @@ type UseSkillsImportFlowParams = {
   onOpenChat?: () => void;
 };
 
-// Every surface (Connect sheet, "Other" modal, Settings > Skills Import and a
-// catalogue Install) sends exactly one line, in place, as a new turn:
+// The Connect sheet and custom import dialogs send exactly one line,
+// in place, as a new turn:
 // `/skills import <source>[ --name <name>][ --overwrite] --start` with
 // `expectedLaneIdle: true`. The hook never creates a conversation, opens a
 // tab, switches panels or pushes a URL.

@@ -614,11 +614,10 @@ heights: 44px for narrow/touch layouts and 38px for wider fine-pointer layouts; 
 compact selects keep their existing size.
 
 On mobile, installed skill titles open the skill file directly, the enable toggle remains
-visible, and other actions live in the row menu. Skill discovery keeps search on one row
-and folds source, category and sort controls into **Filters**; closing the controls keeps
-their selections. Wider layouts retain direct row actions and visible discovery filters.
-**Import** and a catalogue **Install** send the same `/skills import ... --start` line as the
-composer, into the current chat, and keep you on the Skills panel.
+visible, and other actions live in the row menu. Skills uses a flat installed list on the
+page surface, with separators between rows. Wider layouts retain direct row actions.
+**Import custom skill** sends the same `/skills import ... --start` line as the composer,
+into the current chat, and keeps you on the Skills panel.
 
 Automations uses a flat empty state on the shared panel surface, with a labeled
 **New automation** action and a short explanation of scheduling.
@@ -647,15 +646,15 @@ drawn there, **Connect AI** opens the modal.
 
 The workspace step is four lines: the AI status line, the heading **Start with a tool you
 already use**, one wrapping row of the tools that can be picked today, and the closing line
-"Or just type what you want below." The row is outline chips of a mark and a name, GitHub
-first because it signs in with a device code and needs no key pasted, then Notion, ending in
-a **More tools** link into the Connect sheet. Every chip leads somewhere: a tool whose pack is
+"Or just type what you want below." The row is outline chips of a mark and a name: Notion,
+GitHub and FreeFinance, ending in a **More tools** link into the Connect sheet.
+Every chip leads somewhere: a tool whose pack is
 not published is not on the card at all. The card carries no action cards and no separate
 **Connect a tool** caption, and nothing on it sends a message or writes into the composer.
 
 The blank path is the composer itself, which is already on screen asking "Ask for something…":
 the closing line points at it, the send button enables on the first character, and typing folds
-the card to one row, **Import a repo**, **Notion** and **More tools**, which unfolds when the draft
+the card to one row, **Notion**, **Import a repo** and **More tools**, which unfolds when the draft
 is cleared; history and dismissal hide it as before. The collapsed row names the same tools in
 text form, in the same order, keeping the verb for the repo import.
 
@@ -676,7 +675,7 @@ existing keyboard-aware bottom safe area. The editor stays
 mounted as its draft and primary action change, and longer drafts still grow upward normally.
 
 **Connect a tool** in the composer `+` menu, next to **Import GitHub repo**, lists the
-featured tools that can be selected today (GitHub and Notion, until the Slack and Discord
+featured tools that can be selected today (Notion, GitHub and FreeFinance, until the Slack and Discord
 packs are published) and ends with **Browse all tools**; the same tools are the chip row on the
 getting-started card of an empty space, followed by a **More tools** link. Curation is list
 order in one build-time file: connections with nothing to paste come first, then the ones that
@@ -688,10 +687,10 @@ every first-party tool grouped by category (Chat and community, Docs and notes, 
 and bookkeeping, and so on), with **connected** or a region such as Austria as the row's meta.
 Tools whose skill pack is not published yet are listed only in the sheet, where they show a
 **Soon** badge and cannot be selected; the Popular row appears only once at least two of its
-tools are available. FreeFinance is available but not featured, so **More tools** is its way in.
+tools are available. FreeFinance is available and featured alongside Notion and GitHub.
 Typing filters the rows by name, keyword, category or region and hides the Popular row; when
-nothing matches, **Search all skills** opens the Skills panel's Discover tab with the same
-query. **Paste a skill link** lives in the sheet's footer. Choosing a skill opens the confirm stage, which says which skill is added
+nothing matches, the sheet shows an empty result without widening the search to external
+catalogs. **Import custom skill** lives in the sheet's footer. Choosing a skill opens the confirm stage, which says which skill is added
 and from which repo, what its setup will ask for, and where the files land
 (`.agents/skills/<skill>`), with **Back** when it was reached from the list; **Connect** then
 sends one line, `/skills import <source> --name <skill> --start`, into the current chat as a
@@ -699,7 +698,7 @@ new turn (queued behind an active reply when there is one). Nothing is sent by a
 row, a search, a Popular mark or a category row: **Connect** is the only sending control.
 GitHub is reached through its chip on the card, through **Import GitHub repo** in the menu and
 through the GitHub row in the sheet, all of which lead to the same repo import and device
-login; it installs no skill, so it never shows as connected. **Paste a skill link** opens a dialog for any GitHub repo
+login; it installs no skill, so it never shows as connected. **Import custom skill** opens a dialog for any GitHub repo
 or skill folder link, a `SKILL.md` link, or a workspace path, whose **Add and start** sends
 `/skills import <source> --start` the same way. The runtime
 copies every folder in the
@@ -720,6 +719,17 @@ and whether each is sensitive), the questions to ask, the files to write, a sche
 plain words and a validation line, and Studio supplies the import, start, secret and
 automation verbs that carry those declarations out. There is no marketplace, no plugin
 registry, and no remote code loading beyond files written into the workspace.
+
+The **Skills** page manages the same `.agents/skills` files used by Connect. Installed
+skills are its sole list, with enable/disable, file inspection and explicit custom import.
+Its primary **Connect a tool** action opens the existing chat's Connect sheet, with no
+message sent until the user confirms. The Skills page and Connect sheet do not fetch or
+advertise external skill catalogs: repository discovery does not establish compatibility
+with Instafy's setup and credential flows. The controller discovery API remains available
+to existing integrations. **Browse tools** in custom import returns to the same selected
+tool list, preserving the unfinished-import guard.
+A skill being installed or included in the selected tool list does not by itself establish
+that its credentials or setup are ready.
 
 On clients with voice input, the trailing action is the microphone for an empty draft and
 Send or Steer for a text or image draft. Recording and transcription keep the microphone

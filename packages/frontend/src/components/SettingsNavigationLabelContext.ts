@@ -1,6 +1,6 @@
 import { createContext, useContext, type ReactNode } from "react";
 
-/** Only the compact picker replaces a visible content heading. */
+/** Compact category navigation replaces a matching visible content heading. */
 export const SettingsNavigationLabelContext = createContext<string | null>(null);
 
 export function useHeadingRepeatedInSettingsNavigation(title: ReactNode): boolean {

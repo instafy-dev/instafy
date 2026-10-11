@@ -4,21 +4,27 @@ Settings pages use `SettingsShell` so their navigation follows the available con
 including when Studio has another panel open.
 
 - Wide pages show a category list beside the form.
-- Compact pages with up to three flat categories show visible tabs. Credits and Skills use
+- Compact pages with up to three flat categories show visible tabs. Credits and Your AI use
   this pattern.
 - Larger or nested category sets use one anchored picker. A parent with children opens the
   next level inside that same picker. Back returns to the parent list; selecting a destination
   closes the picker and changes the route. Browsing categories does not add history entries.
 - Escape and native Back return one level, then dismiss the picker. Keyboard focus returns
   to its trigger on dismissal and follows the selected category when the layout changes.
-- When the compact picker already names the content section, keep the matching heading
+- When the compact picker or tabs already name the content section, keep the matching heading
   for screen readers without repeating it visually. Descriptions, actions and other section
-  headings remain visible. Wide category lists and compact tabs retain meaningful section
-  headings, but do not repeat a tab label immediately below it. Skills uses one Installed
-  tab and a short explanation in its content, with a single Import action: in the empty
-  state when empty, otherwise in the page toolbar.
+  headings remain visible. Wide category lists retain the content heading beside them.
+
+Skills has a single flat installed list without category tabs or an enclosing card. Its
+primary Connect a tool action opens the same selected tools as the composer. Import custom
+skill remains a secondary action in the list header, or beside the empty state when empty;
+external catalogs are not advertised in this flow.
 
 Your settings has Profile, Appearance, Notifications and Advanced categories.
+Its header is account-wide on both desktop and mobile: **Your settings**, a return action,
+and global search, without the previous space's breadcrumb or organization tint. Back returns
+to the previous route, or Home when there is no in-app history. Team and space settings retain
+their scoped context and search.
 Appearance owns the device's System/Light/Dark theme. Theme changes apply immediately. Team and
 space colors remain in their scoped identity settings. On mobile the four categories use the
 shared anchored picker. There is no file-saving preference: every agent turn saves its files,

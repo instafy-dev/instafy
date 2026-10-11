@@ -6,19 +6,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioDesktopHeader } from "../StudioDesktopHeader";
 import { useStudioSearch } from "../useStudioSearch";
 
-function Harness({ docked = false, homeOverview = false, onHomeReturn, orgContext = true }: { orgContext?: boolean; docked?: boolean; homeOverview?: boolean; onHomeReturn?: () => void }) {
+function Harness({ docked = false, homeOverview = false, accountOverview = false, onHomeReturn, onAccountReturn, orgContext = true }: { orgContext?: boolean; docked?: boolean; homeOverview?: boolean; accountOverview?: boolean; onHomeReturn?: () => void; onAccountReturn?: () => void }) {
   const [drawerHeader, setDrawerHeader] = useState<HTMLDivElement | null>(null);
   const [context, setContext] = useState<HTMLDivElement | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const search = useStudioSearch({
-    scopeKey: "viewer:team:space", org: homeOverview ? null : { id: "team", name: "Team" },
-    space: homeOverview ? null : { id: "space", name: "Space" }, records: [], returnFocusRef: trigger,
+    scopeKey: "viewer:team:space", org: homeOverview || accountOverview ? null : { id: "team", name: "Team" },
+    space: homeOverview || accountOverview ? null : { id: "space", name: "Space" }, records: [], returnFocusRef: trigger,
   });
   return <>
-    <StudioDesktopHeader orgContext={orgContext} orgName="Workshop" accentColor="violet" homeOverview={homeOverview} onHomeReturn={onHomeReturn} contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
+    <StudioDesktopHeader orgContext={orgContext} orgName="Workshop" accentColor="violet" homeOverview={homeOverview} accountOverview={accountOverview} onHomeReturn={onHomeReturn} onAccountReturn={onAccountReturn} contextRef={setContext} drawerWidth={docked ? 280 : 0} drawerHeaderRef={setDrawerHeader} searchTriggerRef={trigger} searchOpen={search.open} onSearch={search.openSearch}>
       <button data-testid="workspace-tab">Conversation</button>
     </StudioDesktopHeader>
-    {context ? createPortal(search.open ? search.renderControl() : homeOverview ? null : <button>Choose space</button>, context) : null}
+    {context ? createPortal(search.open ? search.renderControl() : homeOverview || accountOverview ? null : <button>Choose space</button>, context) : null}
     {docked && drawerHeader ? createPortal(<button>Filter chats</button>, drawerHeader) : null}
     {search.results}
   </>;
@@ -109,6 +109,24 @@ describe("Single-row desktop search", () => {
     expect(container.querySelector('[data-testid="home-return-navigation"]')).toBeNull();
     await key({ key: "Escape" });
     expect(container.querySelector('[data-testid="home-return-navigation"]')).not.toBeNull();
+  });
+
+  it("gives account settings a global title and search while preserving the return action", async () => {
+    const onAccountReturn = vi.fn();
+    await act(async () => root.render(<Harness accountOverview docked onAccountReturn={onAccountReturn} />));
+    expect(container.querySelector("h1")?.textContent).toBe("Your settings");
+    expect(container.querySelector('[data-testid="workspace-tab"]')).toBeNull();
+    expect(container.querySelector('[data-testid="studio-desktop-drawer-header"]')).toBeNull();
+    expect(container.textContent).not.toContain("Choose space");
+    expect(container.querySelector("header")?.hasAttribute("data-org-accent")).toBe(false);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="account-return-navigation"]')!.click());
+    expect(onAccountReturn).toHaveBeenCalledOnce();
+    await act(async () => trigger().click());
+    expect(input().getAttribute("aria-label")).not.toContain("Space");
+    expect(container.querySelector("h1")).toBeNull();
+    await key({ key: "Escape" });
+    expect(container.querySelector("h1")?.textContent).toBe("Your settings");
+    expect(container.querySelector('[data-testid="account-return-navigation"]')).not.toBeNull();
   });
 
   it("hides docked pane controls while search owns the header and restores them without remounting tabs", async () => {

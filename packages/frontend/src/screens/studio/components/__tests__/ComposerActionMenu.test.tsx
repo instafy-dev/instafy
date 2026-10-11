@@ -355,7 +355,7 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-discord"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-connect-other"]')).toBeNull();
-    expect(container.textContent).not.toContain("Paste a skill link");
+    expect(container.textContent).not.toContain("Import custom skill");
     expect(container.textContent).not.toContain("Soon");
     expect(container.textContent).not.toContain("coming soon");
     expect(container.querySelector("button[disabled]")).toBeNull();

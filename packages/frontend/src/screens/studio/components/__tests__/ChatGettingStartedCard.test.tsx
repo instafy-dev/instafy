@@ -238,7 +238,7 @@ describe("ChatGettingStartedCard", () => {
     expect(container.textContent).not.toContain("coming soon");
     expect(container.querySelector('[data-testid="connect-chip-freefinance"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="connect-chip-other"]')).toBeNull();
-    expect(container.textContent).not.toContain("Paste a skill link");
+    expect(container.textContent).not.toContain("Import custom skill");
     const moreTools = strip?.querySelector<HTMLButtonElement>('[data-testid="connect-more-tools"]');
     expect(moreTools?.textContent).toBe("More tools");
     // The chips come first, the link after them.
