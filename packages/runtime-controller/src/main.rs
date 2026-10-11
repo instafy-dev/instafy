@@ -65,6 +65,7 @@ mod provider_devices;
 mod provider_identifiers;
 mod provider_requests;
 mod providers;
+mod proxy_read;
 mod rate_limit;
 mod recommendations;
 mod redaction;
@@ -218,9 +219,13 @@ async fn main() -> anyhow::Result<()> {
     let http_client = Client::builder()
         .user_agent("instafy-runtime-controller")
         .build()?;
+    // Origin and speech proxying: no total deadline, since a large file or a
+    // slow answer that keeps arriving must go on. The answer's idle timeout is
+    // applied per request (see `proxy_read`).
     let origin_proxy_client = Client::builder()
         .user_agent("instafy-runtime-controller-origin-proxy")
         .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(proxy_read::ORIGIN_PROXY_CONNECT_TIMEOUT)
         .build()?;
     let (events, redis_event_bus) = match config.redis_url.clone() {
         Some(redis_url) => {

@@ -325,7 +325,11 @@ impl TunnelBroker for SelfHostedTunnelBroker {
 
     async fn revoke_tunnel(&self, tunnel_id: &str, _metadata: Option<&JsonValue>) -> Result<()> {
         let path = format!("/tunnels/{tunnel_id}");
-        let response = self.auth(self.http.delete(self.base(&path))).send().await?;
+        let response = self
+            .auth(self.http.delete(self.base(&path)))
+            .timeout(TUNNEL_BROKER_REVOKE_TIMEOUT)
+            .send()
+            .await?;
         let status = response.status();
         let bytes = response.bytes().await?;
         if !status.is_success() {
@@ -1359,6 +1363,51 @@ async fn update_tunnel_status_record(
     Ok(runtime_tunnel_grant_from_row(&row))
 }
 
+/// How long a stop or removal waits on the tunnel broker to revoke one tunnel.
+/// The shared HTTP client has no timeout of its own; giving up leaves the
+/// grant active until it expires, as a broker error does.
+const TUNNEL_BROKER_REVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The project's grants a revocation for `runtime_id` (or, without one,
+/// `runtime_lease_id`) acts on: still active and bound to it. The SQL
+/// counterpart of the filter in [`revoke_tunnels_for_scope`], so a stop does
+/// not read the project's whole grant history.
+async fn fetch_revocable_tunnel_grants(
+    pool: &PgPool,
+    project_id: &Uuid,
+    runtime_id: Option<&Uuid>,
+    runtime_lease_id: Option<&Uuid>,
+) -> Result<Vec<RuntimeTunnelGrantRecord>, (StatusCode, Json<ApiError>)> {
+    let connection = pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let rows = match connection
+        .query(
+            "select * from runtime_tunnel_grants
+             where project_id = $1
+               and lower(btrim(status)) not in ('revoked', 'expired', 'failed')
+               and (($2::uuid is not null and runtime_id = $2)
+                    or ($2::uuid is null and runtime_lease_id = $3))
+             order by created_at desc",
+            &[project_id, &runtime_id, &runtime_lease_id],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            let code = error.as_db_error().map(|db_error| db_error.code());
+            if matches!(code, Some(&SqlState::UNDEFINED_TABLE)) {
+                return Ok(vec![]);
+            }
+            return Err(internal_error(format!(
+                "failed to query tunnel grants: {error}"
+            )));
+        }
+    };
+    Ok(rows.iter().map(runtime_tunnel_grant_from_row).collect())
+}
+
 async fn fetch_runtime_tunnel_grants(
     pool: &PgPool,
     project_id: &Uuid,
@@ -1522,7 +1571,9 @@ pub(crate) async fn revoke_tunnels_for_scope(
     if runtime_id.is_none() && runtime_lease_id.is_none() {
         return Ok(0);
     }
-    let grants = fetch_runtime_tunnel_grants(&state.pool, project_id).await?;
+    let grants =
+        fetch_revocable_tunnel_grants(&state.pool, project_id, runtime_id, runtime_lease_id)
+            .await?;
     let mut revoked = 0usize;
     for grant in grants {
         if !tunnel_status_is_active(&grant.status) {

@@ -500,11 +500,20 @@ fn waiting_on_limit_since(alias: &str, wait_started: &str) -> String {
 
 /// Queued work in `project_id` that a hosted machine there would run.
 pub(super) async fn count_waiting_jobs(state: &AppState, project_id: &Uuid) -> AnyResult<i64> {
-    let row = state
+    let connection = state
         .pool
         .get()
         .await
-        .context("failed to acquire connection to count waiting jobs")?
+        .context("failed to acquire connection to count waiting jobs")?;
+    count_waiting_jobs_on(&connection, project_id).await
+}
+
+/// [`count_waiting_jobs`] on a connection the caller already holds.
+pub(super) async fn count_waiting_jobs_on(
+    connection: &tokio_postgres::Client,
+    project_id: &Uuid,
+) -> AnyResult<i64> {
+    let row = connection
         .query_one(
             &format!(
                 "select count(*) as waiting from agent_jobs j where {}",

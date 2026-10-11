@@ -255,7 +255,8 @@ async fn proxy_speech_request_inner(
         .map_err(|error| {
             internal_error(format!("failed to read speech proxy request body: {error}"))
         })?;
-    let upstream = match builder.body(body).send().await {
+    let idle = crate::proxy_read::ORIGIN_PROXY_IDLE_TIMEOUT;
+    let upstream = match crate::proxy_read::send_within_idle(builder.body(body), idle).await {
         Ok(upstream) => upstream,
         Err(error) => {
             let error_message = error.to_string();
@@ -278,7 +279,7 @@ async fn proxy_speech_request_inner(
     let status =
         StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = upstream.headers().clone();
-    let bytes = match upstream.bytes().await {
+    let bytes = match crate::proxy_read::read_body_within_idle(upstream, idle).await {
         Ok(bytes) => bytes,
         Err(error) => {
             let error_message = error.to_string();
