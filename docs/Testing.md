@@ -103,9 +103,9 @@ Gitleaks gates without secrets or write permission. This gives release tooling
 an exact-main attestation while the pull-request lane remains base-owned and
 continues to treat candidate bytes only as unexecuted data.
 
-The three workflows that report `main`'s required checks (Public Build, npm
-Package Releases and Trusted Public Boundary) also run for `merge_group`
-`checks_requested` events. GitHub sends those only for a merge queue required
+The workflows that report `main`'s required checks (Public Build, npm
+Package Releases, Trusted Public Boundary and Controller DB Tests) also run
+for `merge_group` `checks_requested` events. GitHub sends those only for a merge queue required
 on `main`; branch protection on `main` requires one (squash merge, only
 non-failing pull requests). The
 only change pull-request and push runs see is the `pull-requests: read`
@@ -130,6 +130,25 @@ not out of the job: actions such as checkout still receive the job token by
 default, and code in any step of a hosted job can reach the runner process that
 holds it, so its read-only `contents` and `pull-requests` scopes are the actual
 limit. Select, Version, Pack and Publish never run for a group.
+
+Controller DB Tests also runs for every pull request and `merge_group` event,
+so its `Controller database tests` check reports on every pull request and
+group and `main` can require it. The workflow has no paths filter. A hosted
+`Controller database relevance` job, with read-only `contents` and no secrets,
+runs none of the code it checks out and lists which of the paths the filter used to list have
+changed: for a pull request from the merge base of its base and head to the
+head, as the filter compared them, and for a group from `merge_group.base_sha`
+to `merge_group.head_sha`. When none of them changed, the database job
+is skipped by its job-level `if:`, which GitHub reports as a passing required
+check; push and manual runs always run it. Only a successful decision of
+`relevant=false` skips it: a failed, cancelled or skipped decision still starts
+the job, whose first step then fails it, and cancelling the workflow still
+cancels a database run that has started. Merge-group runs use hosted runners
+and restore the compiler cache without saving it. Their concurrency group is
+keyed on `github.ref`, which is unique to each queued group, as in Public Build,
+so a newer group never cancels an older one. `node --test scripts/check-database-ci-routing.test.mjs`
+runs the decision step against fixture repositories and checks the job
+condition; these source tests do not prove GitHub's queue behavior.
 
 The boundary's merge-group lane is not base-owned: GitHub reads its workflow
 file from the queued group commit, which contains the pull request's changes.

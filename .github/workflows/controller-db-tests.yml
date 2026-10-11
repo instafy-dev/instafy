@@ -2,21 +2,12 @@ name: Controller DB Tests
 
 on:
   pull_request:
-    paths:
-      - "packages/runtime-controller/**"
-      - "supabase/**"
-      - "scripts/test-controller.mjs"
-      - "scripts/check-database-ci-routing.test.mjs"
-      - "scripts/supabase-stack.mjs"
-      - "scripts/lib/localSupabaseEnv.mjs"
-      - "scripts/lib/supabaseStartMode.mjs"
-      - "scripts/lib/supabaseSerialPull.mjs"
-      - "scripts/lib/supabaseImageMirror.mjs"
-      - "scripts/lib/supabaseEmailTemplateMounts.mjs"
-      - ".github/workflows/controller-db-tests.yml"
   push:
     branches:
       - main
+  merge_group:
+    types:
+      - checks_requested
   workflow_dispatch:
 
 concurrency:
@@ -27,8 +18,90 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    # Every pull request and merge group runs this workflow, so the required
+    # check below always reports. This hosted job only compares commits. It
+    # gets no secrets, runs no checked-out code and keeps the workflow's
+    # read-only contents permission.
+    name: Controller database relevance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      relevant: ${{ steps.decide.outputs.relevant }}
+
+    steps:
+      - name: Fetch history for the comparison
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: .github
+          submodules: false
+          persist-credentials: false
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
+
+      - name: Decide whether the database tests apply
+        id: decide
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The paths the pull_request trigger filtered on before this job
+          # existed. A pull request or merge group that changes none of them
+          # skips the database tests; push and manual runs always run them.
+          patterns=(
+            "packages/runtime-controller/**"
+            "supabase/**"
+            "scripts/test-controller.mjs"
+            "scripts/check-database-ci-routing.test.mjs"
+            "scripts/supabase-stack.mjs"
+            "scripts/lib/localSupabaseEnv.mjs"
+            "scripts/lib/supabaseStartMode.mjs"
+            "scripts/lib/supabaseSerialPull.mjs"
+            "scripts/lib/supabaseImageMirror.mjs"
+            "scripts/lib/supabaseEmailTemplateMounts.mjs"
+            ".github/workflows/controller-db-tests.yml"
+          )
+          if [[ "$GITHUB_EVENT_NAME" != pull_request && "$GITHUB_EVENT_NAME" != merge_group ]]; then
+            echo "A ${GITHUB_EVENT_NAME} run always runs the database tests."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for commit in "$BASE_SHA" "$HEAD_SHA"; do
+            if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]] || ! git cat-file -e "${commit}^{commit}"; then
+              echo "::error::Compared commit '${commit}' is not available."
+              exit 1
+            fi
+          done
+          pathspecs=()
+          for pattern in "${patterns[@]}"; do
+            pathspecs+=(":(glob)${pattern}")
+          done
+          # Three dots compare the head with its merge base, as the paths
+          # filter did for pull requests; a merge group's base is its parent.
+          # Without rename detection both sides of a move are listed and no
+          # file contents are needed.
+          changed="$(git diff --name-only --no-renames "${BASE_SHA}...${HEAD_SHA}" -- "${pathspecs[@]}")"
+          if [[ -n "$changed" ]]; then
+            printf 'The database tests apply. Changed paths:\n%s\n' "$changed"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No listed path changed; the database tests are skipped."
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
   controller-db-tests:
     name: Controller database tests
+    needs: changes
+    # Skipped only after a successful decision that no listed path changed;
+    # GitHub reports a job skipped by its if: as a passing required check.
+    # A failed, cancelled or skipped decision still starts this job, and its
+    # first step fails it. Cancelling the workflow still cancels a database
+    # run that has started.
+    if: ${{ !(needs.changes.result == 'success' && needs.changes.outputs.relevant == 'false') && (!cancelled() || needs.changes.result != 'success') }}
     runs-on: >-
       ${{ vars.CI_DATABASE_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -62,6 +135,18 @@ jobs:
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
 
     steps:
+      - name: Require a completed relevance decision
+        if: always()
+        shell: bash
+        env:
+          DECISION: ${{ needs.changes.result }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+        run: |
+          if [[ "$DECISION" != success || "$RELEVANT" != true ]]; then
+            echo "::error::The relevance decision ended with '${DECISION}' (relevant: '${RELEVANT}'); rerun the workflow."
+            exit 1
+          fi
+
       - name: Qualify isolated database CI runner
         if: runner.environment == 'self-hosted'
         shell: bash
