@@ -980,6 +980,60 @@ are already public. Run
 `node --test scripts/lib/supabaseImageMirror.test.mjs scripts/mirror-supabase-images.test.mjs scripts/ensure-supabase-postgres-image.test.mjs`
 for offline regression tests.
 
+## Docker Hub build image mirror
+
+Docker Hub limits anonymous pulls per source IP. The self-hosted publishers
+share one egress IP and hosted runners share IP pools, so image publication and
+the nightly image scan failed with `429 Too Many Requests` on digest-pinned base
+images, and `Set up Docker Buildx` timed out pulling the BuildKit image. Image
+builds therefore pull Docker Hub images from GHCR by the same digest, with
+Docker Hub as the fallback.
+
+- There is no lock file. `scripts/lib/dockerHubImageMirror.mjs` discovers every
+  digest-pinned Docker Hub reference from the checkout: `FROM` lines, `# syntax=`
+  frontends, image-valued `ARG` defaults and `COPY --from` images in every
+  tracked Dockerfile outside `codex/`, plus the `moby/buildkit@sha256:` pins in
+  the workflows. Other registries, `scratch` and stage names are skipped. A
+  Docker Hub reference without a digest is reported and not mirrored.
+- `.github/workflows/mirror-docker-hub-images.yml` runs only on protected `main`
+  (Dockerfile, BuildKit-pin workflow, script or workflow changes, weekly, or
+  manual dispatch; never for pull requests). It copies each
+  `docker.io/<path>@<digest>` to `ghcr.io/instafy-dev/dockerhub/<path>` with
+  `docker buildx imagetools create --prefer-index=false`, which keeps both index
+  and single-manifest digests unchanged, under the immutable tag
+  `<upstream tag>-<first 12 digest hex>` (`pinned-<hex>` without a tag). It skips
+  images whose manifest, tag and child manifests GHCR already serves, retries
+  Docker Hub rate limits with backoff, and then proves anonymously that every
+  digest, tag and child manifest resolves. The job summary lists each image's
+  state, unpinned references and skipped registries. Only `GITHUB_TOKEN` with
+  `packages: write` is used.
+- Every docker-container Buildx builder that builds images (both image scan
+  jobs and the three publishers) sets `buildkitd-config-inline` to
+  `[registry."docker.io"] mirrors = ["ghcr.io/instafy-dev/dockerhub"]`. BuildKit
+  maps `docker.io/library/rust` to `ghcr.io/instafy-dev/dockerhub/library/rust`,
+  tries the mirror first and falls back to Docker Hub when the mirror lacks an
+  image, so a missing entry is never fatal.
+- dockerd pulls the BuildKit image itself, outside that mirror. A
+  `Resolve the BuildKit image` step before each builder runs
+  `scripts/resolve-buildkit-image.mjs`, which selects
+  `ghcr.io/instafy-dev/dockerhub/moby/buildkit@<digest>` when GHCR serves that
+  digest and every child manifest anonymously within a minute, and
+  `moby/buildkit@<digest>` from Docker Hub otherwise. The workflow still chooses
+  the digest: self-hosted x86 builds keep the amd64 image, and hosted builders
+  use the pinned multi-platform BuildKit index instead of the action's unpinned
+  default. The imagetools-only manifest jobs use the docker driver and pull no
+  BuildKit image.
+
+When a base image or BuildKit digest changes, nothing else needs to change. The
+next push to `main` mirrors the new digest; until then builds fetch it from
+Docker Hub exactly as before. If the workflow reports that a package is not
+anonymously pullable, an organization owner must set that `dockerhub/<path>`
+package's visibility to Public in its package settings. Run
+`node --test scripts/lib/dockerHubImageMirror.test.mjs scripts/mirror-docker-hub-images.test.mjs scripts/check-docker-hub-mirror-workflows.test.mjs`
+for offline regression tests, and
+`node scripts/mirror-docker-hub-images.mjs plan --offline` to print the
+discovered set.
+
 ## Disposable database and auth-email CI
 
 For a clean, unlinked local stack on a connection-constrained Docker host,

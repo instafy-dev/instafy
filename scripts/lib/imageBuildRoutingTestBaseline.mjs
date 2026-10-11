@@ -129,9 +129,65 @@ export function withoutRegistryLayerCache(file, source) {
   return source;
 }
 
-// The reviewed baseline: undo the registry cache first, then the routing.
+// Test-only inverse of the Docker Hub mirror change. The BuildKit image choice
+// moved from driver-opts into a resolver step that prefers the same digest on
+// the GHCR mirror (hosted builders now pin the multi-platform index instead of
+// the action's unpinned default), every docker-container builder gained the
+// docker.io registry mirror, and the imagetools-only manifest job switched to
+// the docker driver, which needs no BuildKit image.
+const hostedBuilder = "moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea";
+const setupBuildx = (id) => `      - name: Set up Docker Buildx\n${id}        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+`;
+const resolveBuilder = (comment, selection) => `      # dockerd pulls the BuildKit image itself, outside BuildKit's registry
+      # mirror; take the pinned digest from the GHCR mirror when it serves it.
+      - name: Resolve the BuildKit image
+        id: buildkit
+        env:
+${comment}          BUILDKIT_IMAGE: \${{ ${selection} && '${amd64Builder.slice("image=".length)}' || '${hostedBuilder}' }}
+        run: node scripts/resolve-buildkit-image.mjs
+
+`;
+const mirroredBuilder = `          driver-opts: image=\${{ steps.buildkit.outputs.image }}
+          # BuildKit pulls Docker Hub images by digest from the GHCR mirror and
+          # falls back to Docker Hub for anything the mirror lacks.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+            mirrors = ["ghcr.io/instafy-dev/dockerhub"]
+`;
+const dockerHubMirrorDeltas = {
+  "publish-production-services.yml": [
+    [resolveBuilder(`          # Match the amd64 build target so an ARM Docker host uses its registered
+          # translator, not BuildKit's QEMU fallback after a failed x86 probe.
+          # Hosted builders run the native image of the multi-platform index.
+`, "runner.environment == 'self-hosted'") + setupBuildx("") + mirroredBuilder,
+    setupBuildx("") + builderDeltas["publish-production-services.yml"]],
+  ],
+  "publish-runtime-agent.yml": [
+    [resolveBuilder(`          # Only x86 targets need the amd64 BuildKit v0.32.2 image on BUILD.
+          # Keep ARM targets and hosted builders on the native image of the
+          # multi-platform index; never force ARM via QEMU.
+`, "runner.environment == 'self-hosted' && matrix.architecture == 'amd64'") + setupBuildx("        id: buildx\n") + mirroredBuilder,
+    setupBuildx("        id: buildx\n") + builderDeltas["publish-runtime-agent.yml"]],
+    [`    steps:\n      # Only imagetools runs here. The docker driver needs no BuildKit image,
+      # so this job pulls nothing from Docker Hub.
+${setupBuildx("")}          driver: docker\n`, `    steps:\n${setupBuildx("")}`],
+  ],
+};
+
+export function withoutDockerHubMirror(file, source) {
+  for (const [added, original] of dockerHubMirrorDeltas[file] ?? []) {
+    assert.equal(source.split(added).length, 2);
+    source = source.replace(added, () => original);
+  }
+  return source;
+}
+
+// The reviewed baseline: undo the Docker Hub mirror and the registry cache
+// first, then the routing.
 export function withoutImageBuildDeltas(file, source) {
-  return withoutImageBuildRouting(file, withoutRegistryLayerCache(file, source));
+  return withoutImageBuildRouting(file, withoutRegistryLayerCache(file, withoutDockerHubMirror(file, source)));
 }
 
 export function withoutImageBuildRouting(file, source) {

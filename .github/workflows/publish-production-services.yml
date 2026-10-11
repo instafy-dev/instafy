@@ -208,13 +208,27 @@ jobs:
           ref: ${{ needs.authorize.outputs.commit_sha }}
           submodules: recursive
 
+      # dockerd pulls the BuildKit image itself, outside BuildKit's registry
+      # mirror; take the pinned digest from the GHCR mirror when it serves it.
+      - name: Resolve the BuildKit image
+        id: buildkit
+        env:
+          # Match the amd64 build target so an ARM Docker host uses its registered
+          # translator, not BuildKit's QEMU fallback after a failed x86 probe.
+          # Hosted builders run the native image of the multi-platform index.
+          BUILDKIT_IMAGE: ${{ runner.environment == 'self-hosted' && 'moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528' || 'moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea' }}
+        run: node scripts/resolve-buildkit-image.mjs
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.35.0
-          # Match the amd64 build target so an ARM Docker host uses its registered
-          # translator, not BuildKit's QEMU fallback after a failed x86 probe.
-          driver-opts: ${{ runner.environment == 'self-hosted' && 'image=moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528' || '' }}
+          driver-opts: image=${{ steps.buildkit.outputs.image }}
+          # BuildKit pulls Docker Hub images by digest from the GHCR mirror and
+          # falls back to Docker Hub for anything the mirror lacks.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+            mirrors = ["ghcr.io/instafy-dev/dockerhub"]
 
       - name: Install pinned Trivy
         env:

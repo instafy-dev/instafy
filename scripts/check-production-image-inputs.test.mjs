@@ -629,6 +629,7 @@ test("no pull-request-triggered workflow can write packages, including the layer
     }
   }
   assert.deepEqual(writers, [
+    "mirror-docker-hub-images.yml",
     "mirror-supabase-images.yml",
     "publish-production-services.yml",
     "publish-runtime-agent-multiarch.yml",

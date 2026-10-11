@@ -431,7 +431,12 @@ test("the arm64 lane is a separate, hosted, exact-commit publisher bound to the 
   // GitHub-hosted runners only, the workflow token only.
   assert.deepEqual([...source.matchAll(/^    runs-on: (.+)$/gmu)].map((match) => match[1]),
     ["ubuntu-latest", "ubuntu-latest", "ubuntu-latest", "${{ matrix.runner }}", "ubuntu-latest"]);
-  assert.doesNotMatch(source, /self-hosted|vars\.|instafy-trusted-build|instafy-ci-|driver-opts|setup-qemu|binfmt|continue-on-error/u);
+  assert.doesNotMatch(source, /self-hosted|vars\.|instafy-trusted-build|instafy-ci-|setup-qemu|binfmt|continue-on-error/u);
+  // The one BuildKit override is the resolved image of the pinned multi-platform
+  // index (native arm64 on these runners); the lane never forces the amd64 image.
+  assert.deepEqual([...source.matchAll(/^ {10}driver-opts: (.+)$/gmu)].map((match) => match[1]),
+    ["image=${{ steps.buildkit.outputs.image }}"]);
+  assert.doesNotMatch(source, /040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528/u);
   assert.deepEqual([...source.matchAll(/\bsecrets\.(\w+)/gu)].map((match) => match[1]), ["GITHUB_TOKEN", "GITHUB_TOKEN"]);
   assert.deepEqual([...source.matchAll(/^    permissions:\n((?:      .+\n)+)|^    permissions: \{\}$/gmu)].map((match) => (match[1] ?? "{}").trim().split(/\n\s*/u)), [
     ["actions: read", "contents: read"], ["actions: read", "contents: read"], ["{}"],

@@ -36,6 +36,7 @@ function select(job, github = context(job.file), mode = "self-hosted", extra = {
       TRUSTED_BUILD_RUNNER_MODE: "self-hosted", CI_RUNNER_MODE: "self-hosted" }, ...extra });
   return JSON.parse(JSON.stringify(value));
 }
+const hostedBuilder = "moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea";
 const hosted = job => job.file === files[2] || job.key === "build-scan-push" ? "ubuntu-24.04" : "ubuntu-latest";
 
 test("exactly nine image jobs use the independent trusted BUILD route", () => {
@@ -157,24 +158,36 @@ test("Trivy follows the actual BUILD runner; amd64 publishes in production and a
   assert.equal((multiarch.match(/platform: linux\/amd64/gu) ?? []).length, 0);
   assert.match(multiarch, /platforms: \$\{\{ matrix\.platform \}\}/u);
   assert.match(multiarch, /^          TRIVY_ASSET: \$\{\{ matrix\.trivy_asset \}\}$/mu);
-  assert.doesNotMatch(multiarch, /TRUSTED_AMD64_BUILD_RUNNER_MODE|self-hosted|instafy-trusted-build|driver-opts|continue-on-error:/u);
+  assert.doesNotMatch(multiarch, /TRUSTED_AMD64_BUILD_RUNNER_MODE|self-hosted|instafy-trusted-build|continue-on-error:/u);
+  // Its one BuildKit override is the resolved native multi-platform index, never the amd64 image.
+  assert.deepEqual([...multiarch.matchAll(/^ {10}(driver-opts|BUILDKIT_IMAGE): (.+)$/gmu)].map((match) => match.slice(1)), [
+    ["BUILDKIT_IMAGE", hostedBuilder], ["driver-opts", "image=${{ steps.buildkit.outputs.image }}"],
+  ]);
 });
 
 test("only self-hosted x86 image builds select the pinned x86 BuildKit instead of the ARM daemon's QEMU fallback", () => {
-  const pinned = "image=moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528";
+  const pinned = "moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528";
   for (const file of files.slice(0, 2)) {
+    // The workflow selects the digest; scripts/resolve-buildkit-image.mjs only
+    // chooses the registry that serves it.
     const options = [...read(file).matchAll(/^          driver-opts: (.+)$/gmu)];
-    assert.equal(options.length, 1, "only the image-build job overrides BuildKit");
+    assert.deepEqual(options.map((match) => match[1]), ["image=${{ steps.buildkit.outputs.image }}"],
+      "only the image-build job overrides BuildKit");
+    const selections = [...read(file).matchAll(/^          BUILDKIT_IMAGE: (.+)$/gmu)];
+    assert.equal(selections.length, 1);
     const build = sections(file).find(job => job.key === (file === files[0] ? "publish" : "build-scan-push"));
-    assert.ok(build.source.includes(options[0][0]));
+    assert.ok(build.source.includes(options[0][0]) && build.source.includes(selections[0][0]));
     for (const environment of ["self-hosted", "github-hosted", "", undefined]) {
       for (const architecture of ["amd64", "arm64"]) {
-        const value = expression(options[0][1], { runner: { environment }, matrix: { architecture } });
+        const value = expression(selections[0][1], { runner: { environment }, matrix: { architecture } });
         const x86Build = file === files[0] || architecture === "amd64";
-        assert.equal(value, environment === "self-hosted" && x86Build ? pinned : "");
+        // Hosted and native builders run the multi-platform index, as the
+        // action's default did, but pinned.
+        assert.equal(value, environment === "self-hosted" && x86Build ? pinned : hostedBuilder);
       }
     }
-    assert.throws(() => reconstruct(file, read(file).replace(pinned, "image=moby/buildkit:latest")));
+    assert.throws(() => reconstruct(file, read(file).replace(pinned, "moby/buildkit:latest")));
+    assert.throws(() => reconstruct(file, read(file).replace(hostedBuilder, "moby/buildkit:buildx-stable-1")));
   }
 });
 
