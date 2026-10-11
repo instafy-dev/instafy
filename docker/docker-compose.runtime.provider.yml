@@ -42,6 +42,7 @@ services:
     mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}
     cap_drop:
       - SYS_PTRACE
+      - NET_RAW
     environment:
       RUNTIME_TYPE: ${RUNTIME_TYPE:-codex-embedded}
       RUNTIME_ID: ${RUNTIME_ID:-}

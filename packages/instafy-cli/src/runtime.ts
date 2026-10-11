@@ -609,6 +609,37 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Capabilities a local runtime container drops, matching the runtime compose files: no
+ * process inspection (SYS_PTRACE) and no raw or packet sockets (NET_RAW).
+ */
+export const RUNTIME_CONTAINER_DROPPED_CAPABILITIES = ["SYS_PTRACE", "NET_RAW"] as const;
+
+export function buildRuntimeDockerRunArgs(params: {
+  containerName: string;
+  hostBindHost: string;
+  hostPort: string;
+  workspace: string;
+  envArgs: string[];
+  image: string;
+}): string[] {
+  return [
+    "run",
+    "--detach",
+    "--name",
+    params.containerName,
+    ...RUNTIME_CONTAINER_DROPPED_CAPABILITIES.flatMap((capability) => ["--cap-drop", capability]),
+    "--add-host",
+    "host.docker.internal:host-gateway",
+    "-p",
+    `${params.hostBindHost}:${params.hostPort}:${params.hostPort}`,
+    "-v",
+    `${params.workspace}:/workspace`,
+    ...params.envArgs,
+    params.image,
+  ];
+}
+
 export async function runtimeStart(options: RuntimeStartOptions) {
   const env = { ...process.env };
   const cwd = process.cwd();
@@ -942,20 +973,14 @@ export async function runtimeStart(options: RuntimeStartOptions) {
     envArgs.push("-e", `${key}=${value}`);
   }
 
-  const runArgs = [
-    "run",
-    "--detach",
-    "--name",
+  const runArgs = buildRuntimeDockerRunArgs({
     containerName,
-    "--add-host",
-    "host.docker.internal:host-gateway",
-    "-p",
-    `${hostBindHost}:${hostPort}:${hostPort}`,
-    "-v",
-    `${workspace}:/workspace`,
-    ...envArgs,
+    hostBindHost,
+    hostPort,
+    workspace,
+    envArgs,
     image,
-  ];
+  });
 
   printStatus("Starting runtime-agent (docker):", image);
   printStatus("Space:", projectId);

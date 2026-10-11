@@ -24,10 +24,12 @@
 //! opens the origin's `/workspace/persist` and nothing else, lives a minute,
 //! and the origin exchanges it for a git token ([`authorize_persist_grant`])
 //! only after every one of those checks passes again. That token carries
-//! [`GIT_PERSIST_SCOPE`] where `git.write` was asked for: Git Edge lets it
-//! push only as a rolling save does, creating recovery refs and replacing
-//! or deleting a working slot, so it never writes a branch, `main` or
-//! anyone's recovery ref but a slot. Commits stay authored by the origin.
+//! [`GIT_PERSIST_SCOPE`] where `git.write` was asked for: Git Edge marks its
+//! pushes, and the shard hook lets them only create recovery refs and replace
+//! or delete a working slot, for any working set in the repository rather
+//! than only this folder's. Such a push never writes a branch, a tag or
+//! `main`, and never moves or deletes a recovery ref that is not a slot.
+//! Commits stay authored by the origin.
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;

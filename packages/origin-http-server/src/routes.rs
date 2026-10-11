@@ -401,8 +401,9 @@ async fn require_flush(
 /// `WORKSPACE_PERSIST_SCOPE`). It opens `/workspace/persist` and nothing
 /// else, here or at the controller, which exchanges it only while that job
 /// and its runtime generation are still current, and then for `git.persist`
-/// instead of `git.write`: a token that may push recovery refs and the
-/// folder's slot, nothing else.
+/// instead of `git.write`: a token whose pushes may only create recovery refs
+/// and replace or delete a working slot. The shard hook applies that rule to
+/// every working set in the repository, not only this folder's.
 pub const WORKSPACE_PERSIST_SCOPE: &str = "workspace.persist";
 
 /// `/workspace/persist` takes either an `fs.write` token under a live

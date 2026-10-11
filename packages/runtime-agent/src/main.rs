@@ -11,7 +11,7 @@ use codex_arg0::arg0_dispatch;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use runtime_agent::{
-    agent::RuntimeAgent, code_mode_host, config::Config, local_browser, loopback_proxy,
+    agent::RuntimeAgent, code_mode_host, config, config::Config, local_browser, loopback_proxy,
     personal_browser, process_hardening, shared_browser,
 };
 use tokio::signal;
@@ -67,6 +67,13 @@ fn main() -> anyhow::Result<()> {
     // container aborts with "thread ... has overflowed its stack"). Build our own runtime
     // with a larger stack to keep local/hosted runtimes stable.
     let _path_entry = arg0_dispatch();
+    // Hand the launch-only runtime and origin tokens to the configuration and clear them from
+    // this process's environment, so no git, tunnel or helper process spawned later inherits
+    // them. This follows `arg0_dispatch`, which may load `$CODEX_HOME/.env` into the
+    // environment, so the configuration sees the same values it did before.
+    // SAFETY: no other thread exists yet; the Tokio runtime is built on the next line.
+    unsafe { config::capture_and_scrub_launch_credentials() }
+        .context("failed to capture runtime launch credentials")?;
     let runtime = build_tokio_runtime()?;
     runtime.block_on(async move { run_runtime_agent().await })
 }

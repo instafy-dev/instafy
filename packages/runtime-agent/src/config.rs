@@ -1,12 +1,58 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
+
+use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
+
+/// Launch credentials read from the process environment before the agent
+/// removed them from it. Unset when nothing captured them (library callers and
+/// tests), in which case `Config::from_env` reads the environment directly.
+static LAUNCH_CREDENTIALS: OnceLock<Vec<(&'static str, String)>> = OnceLock::new();
+
+/// Keeps the launch credentials (`LAUNCH_CREDENTIAL_ENV_KEYS`) for
+/// [`Config::from_env`] and removes them from the process environment, so
+/// processes the agent spawns later (git, tunnels, helpers) do not inherit
+/// them. The agent then holds the runtime token in memory and renews it there.
+///
+/// `/proc/<pid>/environ` keeps showing the initial environment block; the
+/// runtime agent is non-dumpable (`process_hardening`), so this only changes
+/// what child processes inherit.
+///
+/// # Safety
+///
+/// Mutates the process environment. The caller must ensure no other thread
+/// reads or writes the environment while it runs.
+pub unsafe fn capture_and_scrub_launch_credentials() -> Result<()> {
+    let captured = LAUNCH_CREDENTIAL_ENV_KEYS
+        .iter()
+        .filter_map(|&key| std::env::var(key).ok().map(|value| (key, value)))
+        .collect();
+    LAUNCH_CREDENTIALS
+        .set(captured)
+        .map_err(|_| anyhow!("runtime launch credentials were captured twice"))?;
+    for key in LAUNCH_CREDENTIAL_ENV_KEYS {
+        // SAFETY: the caller guarantees no concurrent environment access.
+        unsafe { std::env::remove_var(key) };
+    }
+    Ok(())
+}
+
+fn launch_credential(key: &str) -> Option<String> {
+    match LAUNCH_CREDENTIALS.get() {
+        Some(captured) => captured
+            .iter()
+            .find(|(captured_key, _)| *captured_key == key)
+            .map(|(_, value)| value.clone()),
+        None => std::env::var(key).ok(),
+    }
+}
 
 fn parse_env_bool(key: &str) -> Option<bool> {
     std::env::var(key).ok().map(|raw| {
@@ -126,8 +172,7 @@ impl Config {
                 .context("failed to derive default controller JWKS URL")?,
         };
 
-        let runtime_access_token = std::env::var("RUNTIME_ACCESS_TOKEN")
-            .ok()
+        let runtime_access_token = launch_credential("RUNTIME_ACCESS_TOKEN")
             .map(|raw| raw.trim().to_string())
             .filter(|value| !value.is_empty());
         let parent_dispositions_runtime_on_shutdown =
@@ -346,8 +391,7 @@ impl Config {
                             .and_then(|raw| raw.parse::<u64>().ok())
                             .map(Duration::from_secs)
                             .unwrap_or_else(|| Duration::from_secs(60));
-                    let mut controller_internal_token = std::env::var("ORIGIN_INTERNAL_TOKEN")
-                        .ok()
+                    let mut controller_internal_token = launch_credential("ORIGIN_INTERNAL_TOKEN")
                         .map(|value| value.trim().to_string())
                         .filter(|value| !value.is_empty());
                     if controller_internal_token.is_none() {
@@ -570,8 +614,84 @@ fn detect_rathole_use_subcommands(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_local_browser_capability, normalize_lease_max_jobs};
+    use super::{
+        Config, apply_local_browser_capability, capture_and_scrub_launch_credentials,
+        normalize_lease_max_jobs,
+    };
+    use crate::model_environment::LAUNCH_CREDENTIAL_ENV_KEYS;
     use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn launch_credentials_leave_the_environment_once_the_configuration_has_them() {
+        const CHILD_MARKER: &str = "INSTAFY_LAUNCH_CREDENTIAL_SCRUB_TEST_CHILD";
+        const TEST_NAME: &str = "config::tests::launch_credentials_leave_the_environment_once_the_configuration_has_them";
+
+        // Mutating the environment would race other unit tests, so the assertions run in an
+        // isolated test process that runs only this test.
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let workspace = tempfile::tempdir().expect("create workspace root");
+            let mut child = std::process::Command::new(
+                std::env::current_exe().expect("resolve runtime-agent test executable"),
+            );
+            child.args(["--exact", TEST_NAME, "--nocapture"]);
+            child.env(CHILD_MARKER, "1");
+            for key in LAUNCH_CREDENTIAL_ENV_KEYS {
+                child.env(key, format!("launch-{key}"));
+            }
+            child
+                .env("CONTROLLER_BASE_URL", "http://127.0.0.1:9")
+                .env("SPACE_ID", Uuid::new_v4().to_string())
+                .env("WORKSPACE_DIR", workspace.path())
+                .env("ORIGIN_ENABLED", "1")
+                .env("ORIGIN_ID", Uuid::new_v4().to_string())
+                .env("RATHOLE_USE_SUBCOMMANDS", "0")
+                .env_remove("WORKSPACE_PROJECT_DIR")
+                .env_remove("CONTROLLER_JWKS_URL")
+                .env_remove("ORIGIN_JWKS_URL");
+
+            let output = child.output().expect("run isolated launch credential test");
+            assert!(
+                output.status.success(),
+                "isolated launch credential test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        // SAFETY: this isolated process runs only this test, so no other thread touches the
+        // environment.
+        unsafe { capture_and_scrub_launch_credentials() }.expect("capture launch credentials");
+        for key in LAUNCH_CREDENTIAL_ENV_KEYS {
+            assert!(
+                std::env::var_os(key).is_none(),
+                "{key} stayed in the runtime agent's environment"
+            );
+        }
+
+        let config = Config::from_env().expect("load configuration after the scrub");
+        assert_eq!(
+            config.runtime_access_token.as_deref(),
+            Some("launch-RUNTIME_ACCESS_TOKEN")
+        );
+        assert_eq!(
+            config
+                .origin
+                .as_ref()
+                .and_then(|origin| origin.controller_internal_token.as_deref()),
+            Some("launch-ORIGIN_INTERNAL_TOKEN")
+        );
+
+        // The emptied environment can never replace the captured values.
+        // SAFETY: as above.
+        assert!(unsafe { capture_and_scrub_launch_credentials() }.is_err());
+        let reloaded = Config::from_env().expect("reload configuration");
+        assert_eq!(
+            reloaded.runtime_access_token.as_deref(),
+            Some("launch-RUNTIME_ACCESS_TOKEN")
+        );
+    }
 
     #[test]
     fn lease_max_jobs_defaults_to_read_only_batch_capacity() {

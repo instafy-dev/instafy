@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRuntimeChildEnvironment } from "../src/runtime.js";
+import { buildRuntimeChildEnvironment, buildRuntimeDockerRunArgs } from "../src/runtime.js";
 
 describe("runtime child environment", () => {
   it("keeps only scoped runtime credentials and removes launcher/user credentials", () => {
@@ -72,5 +72,30 @@ describe("runtime child environment", () => {
     ]) {
       expect(child).not.toHaveProperty(key);
     }
+  });
+});
+
+describe("runtime docker launch", () => {
+  it("drops process inspection and raw socket capabilities before the image", () => {
+    const args = buildRuntimeDockerRunArgs({
+      containerName: "instafy-runtime-test",
+      hostBindHost: "127.0.0.1",
+      hostPort: "54332",
+      workspace: "/tmp/instafy-workspace",
+      envArgs: ["-e", "WORKSPACE_DIR=/workspace"],
+      image: "instafy-runtime-agent:test",
+    });
+
+    const imageIndex = args.indexOf("instafy-runtime-agent:test");
+    expect(imageIndex).toBe(args.length - 1);
+    for (const capability of ["SYS_PTRACE", "NET_RAW"]) {
+      const index = args.findIndex(
+        (arg, position) => arg === "--cap-drop" && args[position + 1] === capability,
+      );
+      expect(index, `missing --cap-drop ${capability}`).toBeGreaterThan(-1);
+      expect(index).toBeLessThan(imageIndex);
+    }
+    expect(args.slice(0, 4)).toEqual(["run", "--detach", "--name", "instafy-runtime-test"]);
+    expect(args).toContain("WORKSPACE_DIR=/workspace");
   });
 });
