@@ -1,10 +1,8 @@
 import { useRef, useState } from "react";
-import { NavArrowDown } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
-import { Button } from "../../../components/Button";
 import { DeepSeekIcon, GeminiIcon, OpenAIIcon, ZaiIcon } from "../../../components/ProviderIcons";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
-import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { FormPickerPopover, FormPickerTrigger } from "../../../components/FormPicker";
 import type { AiProviderId } from "../../../utils/aiProviderModels";
 
 type ProviderMenuOption = {
@@ -18,6 +16,8 @@ export interface ProviderMenuSelectProps {
   value: AiProviderId;
   disabled?: boolean;
   ariaLabel: string;
+  id?: string;
+  ariaLabelledBy?: string;
   onSelect: (provider: AiProviderId) => void;
   triggerTestId?: string;
   menuTestId?: string;
@@ -43,6 +43,8 @@ export function ProviderMenuSelect({
   value,
   disabled = false,
   ariaLabel,
+  id,
+  ariaLabelledBy,
   onSelect,
   triggerTestId,
   menuTestId,
@@ -56,36 +58,24 @@ export function ProviderMenuSelect({
 
   return (
     <MenuTrigger isOpen={menuOpen} onOpenChange={setMenuOpen}>
-      <Button
+      <FormPickerTrigger
         ref={triggerRef}
-        variant="outline"
-        size="sm"
-        radius="xl"
-        fullWidth
+        id={id}
         isDisabled={disabled}
-        aria-label={ariaLabel}
-        aria-haspopup="menu"
+        aria-label={ariaLabelledBy ? undefined : ariaLabel}
+        aria-labelledby={ariaLabelledBy}
         data-testid={triggerTestId}
         onPress={() => {
           if (!menuOpen) {
             setMenuOpen(true);
           }
         }}
-        className="min-h-11 sm:pointer-fine:min-h-[38px] justify-between bg-slate-50 shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]"
+        leading={providerIcon(value)}
       >
-        <span className="flex min-w-0 flex-1 items-center gap-2 truncate text-left">
-          {providerIcon(value)}
-          <span className="truncate">{label}</span>
-        </span>
-        <NavArrowDown className="text-base text-slate-400" aria-hidden="true" />
-      </Button>
-      <StudioPopover
+        {label}
+      </FormPickerTrigger>
+      <FormPickerPopover
         triggerRef={triggerRef}
-        isNonModal
-        placement="bottom start"
-        offset={6}
-        className="min-w-[var(--trigger-width)] p-2"
-        shouldCloseOnInteractOutside={() => true}
         data-testid={menuTestId}
       >
         <StudioMenu
@@ -108,7 +98,7 @@ export function ProviderMenuSelect({
             </StudioMenuItem>
           ))}
         </StudioMenu>
-      </StudioPopover>
+      </FormPickerPopover>
     </MenuTrigger>
   );
 }

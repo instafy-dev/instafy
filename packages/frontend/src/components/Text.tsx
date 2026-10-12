@@ -1,6 +1,7 @@
 import type { ComponentPropsWithoutRef, ElementType } from "react";
 import { textTones, textVariants, type TextTone, type TextVariant } from "../styles/typography";
 
+// Use variant/tone for appearance; className is for placement, wrapping and visibility.
 type TextProps<T extends ElementType> = ComponentPropsWithoutRef<T> & {
   as?: T;
   variant?: TextVariant;

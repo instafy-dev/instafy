@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { Text } from "../../../components/Text";
 import { useHeadingRepeatedInSettingsNavigation } from "../../../components/SettingsNavigationLabelContext";
+import { Surface } from "../../../components/Surface";
+import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 
 type StudioListTone = "neutral" | "attention" | "activity" | "suggestion";
 
@@ -56,14 +58,14 @@ export function StudioListSection({
           <div className="min-w-0">
             <Text
               as="h2"
-              variant="bodyStrong"
+              variant="subtitleStrong"
               tone="primary"
-              className={repeatedHeading ? "sr-only" : "truncate text-base font-semibold leading-5 tracking-[-0.015em] text-slate-900 dark:text-slate-100"}
+              className={repeatedHeading ? "sr-only" : "truncate"}
             >
               {title}
             </Text>
             {description ? (
-              <Text variant="body" tone="muted" className={repeatedHeading ? "leading-5" : "mt-0.5 leading-5"}>
+              <Text variant="bodyCompact" tone="muted" className={repeatedHeading ? undefined : "mt-0.5"}>
                 {description}
               </Text>
             ) : null}
@@ -84,18 +86,14 @@ interface StudioListSurfaceProps {
 
 export function StudioListSurface({ children, className, "data-testid": dataTestId }: StudioListSurfaceProps) {
   return (
-    <div
-      className={[
-        "min-w-0 overflow-hidden rounded-2xl border border-slate-200/70 bg-white/85 shadow-sm shadow-slate-200/40",
-        "dark:border-slate-800 dark:bg-slate-950/50 dark:shadow-black/10",
-        className,
-      ]
-        .filter(Boolean)
-        .join(" ")}
+    <Surface
+      tone="default"
+      shadow="none"
+      className={["min-w-0 overflow-hidden", className].filter(Boolean).join(" ")}
       data-testid={dataTestId}
     >
       {children}
-    </div>
+    </Surface>
   );
 }
 
@@ -106,7 +104,7 @@ interface StudioListRowProps {
 
 export function StudioListRow({ children, separated = true }: StudioListRowProps) {
   return (
-    <div className={separated ? "border-t border-slate-200/70 dark:border-slate-800" : ""}>
+    <div className={separated ? `border-t border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}` : ""}>
       {children}
     </div>
   );

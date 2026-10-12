@@ -13,7 +13,7 @@ import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
 import { LoadingStatus } from "../../../components/LoadingStatus";
-import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
@@ -319,13 +319,12 @@ function SecretModal({
     <StudioDialogModal isOpen={isOpen} onOpenChange={changeOpen}
       isDismissable={!pending} isKeyboardDismissDisabled={pending}
       dialogAriaLabel={title} data-testid="project-secret-modal"
-      modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
-      dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col">
+      layout="editor">
       <StudioDialogHeader title={title}
         description="Secrets are injected into the runtime as environment variables."
-        onClose={onClose} closeButtonDisabled={pending} closeLabel="Close" className="shrink-0" />
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{form}</div>
-      <div className="shrink-0">{actions}</div>
+        onClose={onClose} closeButtonDisabled={pending} closeLabel="Close" />
+      <StudioDialogBody scrollable padding="none">{form}</StudioDialogBody>
+      <StudioDialogFooter>{actions}</StudioDialogFooter>
     </StudioDialogModal>
   );
 }

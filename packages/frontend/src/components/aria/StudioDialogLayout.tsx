@@ -3,9 +3,6 @@ import { Xmark } from "iconoir-react";
 import { IconButton } from "../Button";
 import { Text } from "../Text";
 
-const CLOSE_BUTTON_CLASS =
-  "min-h-11 min-w-11 sm:pointer-fine:min-h-8 sm:pointer-fine:min-w-8 text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200";
-
 type StudioDialogHeaderProps = {
   title: ReactNode;
   description?: ReactNode;
@@ -36,7 +33,7 @@ export function StudioDialogHeader({
   return (
     <div
       className={[
-        "border-b border-slate-200/70 px-5 py-4 dark:border-[color:var(--color-studio-dark-divider)]",
+        "shrink-0 border-b border-slate-200/70 px-5 py-4 dark:border-[color:var(--color-studio-dark-divider)]",
         className,
       ]
         .filter(Boolean)
@@ -48,9 +45,9 @@ export function StudioDialogHeader({
           <div className="min-w-0">
             <Text
               as="h2"
-              variant="bodyStrong"
+              variant="subtitle"
               tone="primary"
-              className={["truncate text-base", titleClassName].filter(Boolean).join(" ")}
+              className={["truncate", titleClassName].filter(Boolean).join(" ")}
             >
               {title}
             </Text>
@@ -73,11 +70,11 @@ export function StudioDialogHeader({
               <IconButton
                 type="button"
                 variant="ghost"
+                tone="muted"
                 size="sm"
                 radius="full"
                 onPress={onClose}
                 aria-label={closeLabel}
-                className={CLOSE_BUTTON_CLASS}
                 isDisabled={closeButtonDisabled}
               >
                 <Xmark className="h-4 w-4" aria-hidden="true" />
@@ -93,10 +90,21 @@ export function StudioDialogHeader({
 type StudioDialogBodyProps = {
   children: ReactNode;
   className?: string;
+  scrollable?: boolean;
+  padding?: "default" | "none";
 };
 
-export function StudioDialogBody({ children, className }: StudioDialogBodyProps) {
-  return <div className={["px-5 py-4", className].filter(Boolean).join(" ")}>{children}</div>;
+export function StudioDialogBody({ children, className, scrollable = false, padding = "default" }: StudioDialogBodyProps) {
+  return <div className={[
+    padding === "default" ? "px-5 py-4" : "",
+    scrollable ? "min-h-0 flex-1 overflow-y-auto overscroll-contain" : "",
+    className,
+  ].filter(Boolean).join(" ")}>{children}</div>;
+}
+
+/** Actions remain outside the editor body's scroll area. */
+export function StudioDialogFooter({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={["shrink-0", className].filter(Boolean).join(" ")}>{children}</div>;
 }
 
 type StudioDialogSectionLabelProps = {
@@ -110,9 +118,9 @@ export function StudioDialogSectionLabel({
 }: StudioDialogSectionLabelProps) {
   return (
     <Text
-      variant="caption"
+      variant="captionStrong"
       tone="muted"
-      className={["text-xs font-semibold text-slate-500", className].filter(Boolean).join(" ")}
+      className={className}
     >
       {children}
     </Text>

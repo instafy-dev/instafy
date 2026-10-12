@@ -31,6 +31,8 @@ import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
 import { isHostedRuntime, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { Button, IconButton } from "../components/Button";
 import { ProjectAccessRecoveryBanner, StudioStartupGate } from "./StudioStartup";
+import { StudioWorkspaceAvailability } from "../workspace/StudioWorkspaceAvailability";
+import { WorkspaceAvailabilityBanner } from "../workspace/WorkspaceAvailabilityBanner";
 import { Badge } from "../components/Badge";
 import { Heading } from "../components/Heading";
 import { PageTitleInNavigationContext } from "../components/PageTitleContext";
@@ -208,7 +210,7 @@ export function StudioLayout() {
             locationSearch={location.search}
             onRestorePanelDestination={restorePanelDestination}
           >
-              <StudioLayoutInner />
+              <StudioWorkspaceAvailability><StudioLayoutInner /></StudioWorkspaceAvailability>
           </WorkspaceTabsProvider>
         </StudioStartupGate>
       </StudioDraftNavigationGuard>
@@ -1717,7 +1719,7 @@ function StudioLayoutInner() {
         showExplorer
         explorerPortalTarget={filesExplorerPortalTarget}
         explorerHeaderPortalTarget={leftDrawer === "files" ? desktopPaneHeaderTarget : null}
-        renderMobileExplorerHeader={!isLargeScreen ? header => renderMobileWorkspaceHeader(header) : undefined}
+        renderMobileExplorerHeader={!isLargeScreen ? header => renderMobileWorkspaceHeader(header, true) : undefined}
         mobileView={filesMobileView}
         onMobileViewChange={handleFilesMobileViewChange}
         onRequestOpenExplorer={handleRequestOpenFilesExplorer}
@@ -1973,8 +1975,8 @@ function StudioLayoutInner() {
     ? { title: sourceControlTitle, actions: <div ref={setMobileDrawerActionsTarget} /> }
     : undefined;
 
-  const renderMobileWorkspaceHeader = (pageHeader?: MobilePageHeader) => (
-    <StudioTopBar
+  const renderMobileWorkspaceHeader = (pageHeader?: MobilePageHeader, includeRecovery = false) => (
+    <><StudioTopBar
       contextHeaderAbove={!conversationWorkspace}
       compactMobileContext={conversationWorkspace ? {
         onSearch: search.openSearch,
@@ -1982,7 +1984,7 @@ function StudioLayoutInner() {
       } : undefined}
       mobileNavigation={mobileTopbarNavigation}
       mobilePageHeader={pageHeader}
-    />
+    />{includeRecovery ? <ProjectAccessRecoveryBanner><WorkspaceAvailabilityBanner /></ProjectAccessRecoveryBanner> : null}</>
   );
 
   if (!user) return null;
@@ -2061,7 +2063,7 @@ function StudioLayoutInner() {
               showExplorer
               explorerPortalTarget={filesExplorerPortalTarget}
               explorerHeaderPortalTarget={leftDrawer === "files" ? desktopPaneHeaderTarget : null}
-              renderMobileExplorerHeader={!isLargeScreen ? header => renderMobileWorkspaceHeader(header) : undefined}
+              renderMobileExplorerHeader={!isLargeScreen ? header => renderMobileWorkspaceHeader(header, true) : undefined}
               mobileView={filesMobileView}
               onMobileViewChange={handleFilesMobileViewChange}
               onRequestOpenExplorer={handleRequestOpenFilesExplorer}
@@ -2183,11 +2185,13 @@ function StudioLayoutInner() {
               <MobileStudioHistoryControls history={mobileHistory} />
               <h1 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{mobilePageTitle}</h1>
             </div> : null}
-            <ProjectAccessRecoveryBanner />
+            {!showMobileLeftDrawerOverlay && !(!isLargeScreen && shouldShowFilesWorkspace && filesMobileView === "tree") ? <ProjectAccessRecoveryBanner>
+              {(!homeOverview && !accountOverview) || leftDrawer === "files" || leftDrawer === "sourceControl" ? <WorkspaceAvailabilityBanner /> : null}
+            </ProjectAccessRecoveryBanner> : null}
             {/* relative: the participants drawer overlays the right edge of the
                 workspace content rather than pushing it, so it never competes
                 with the code/preview panel for width. */}
-            <div className="relative flex flex-1 min-h-0 min-w-0">
+            <div className="relative flex flex-1 min-h-0 min-w-0 outline-none" tabIndex={-1} data-testid="studio-context-workspace-focus">
               <div
                 className={
                   isLargeScreen
@@ -2295,11 +2299,11 @@ function StudioLayoutInner() {
               }}
             >
               {!conversationWorkspace ? mobileContextHeader(true) : null}
-              {leftDrawer !== "history" && leftDrawer !== "files" ? renderMobileWorkspaceHeader(mobileDrawerPageHeader) : null}
-              <div className="flex-1 min-h-0 overflow-hidden">
+              {leftDrawer !== "history" && leftDrawer !== "files" ? renderMobileWorkspaceHeader(mobileDrawerPageHeader, true) : null}
+              <div className="flex-1 min-h-0 overflow-hidden outline-none" tabIndex={-1} data-testid="studio-context-workspace-focus">
                   {leftDrawer === "history" ? (
                     <ConversationHistoryTab
-                      renderMobileHeader={(header) => renderMobileWorkspaceHeader(header)}
+                      renderMobileHeader={(header) => renderMobileWorkspaceHeader(header, true)}
                       onStartNewConversation={createFreshConversation}
                       onRequestClose={() => {
                         requestHistoryPush();

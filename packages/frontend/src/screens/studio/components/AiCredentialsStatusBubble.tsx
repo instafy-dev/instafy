@@ -700,7 +700,7 @@ export function AiCredentialsStatusBubble({
         ) : null}
       </div>
       {resolvedDetail ? (
-        <Text as="div" variant="body" tone="muted" className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
+        <Text as="div" variant="bodyRoomy" tone="muted" className="mt-2">
           {resolvedDetail}
         </Text>
       ) : null}

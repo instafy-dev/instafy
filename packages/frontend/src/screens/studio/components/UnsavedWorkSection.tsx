@@ -98,6 +98,8 @@ export function UnsavedWorkSection({
   onReloadHistory,
   onFocusFallback,
   userId = null,
+  workspaceUnavailable = false,
+  onWorkspaceReadFailure,
 }: {
   projectId: string;
   originId: string;
@@ -117,9 +119,14 @@ export function UnsavedWorkSection({
   onFocusFallback?: () => void;
   /** The viewer: entries shown here count as seen (no chat row). */
   userId?: string | null;
+  workspaceUnavailable?: boolean;
+  onWorkspaceReadFailure?: () => void;
 }) {
   const { openGitReviewTab, requestUrlPush } = useWorkspaceTabs();
-  const unsavedWork = useUnsavedWork({ projectId, originId, enabled: true, mountRefresh: "force" });
+  const unsavedWork = useUnsavedWork({ projectId, originId, enabled: !workspaceUnavailable, mountRefresh: "force" });
+  useEffect(() => {
+    if (unsavedWork.status === "error") onWorkspaceReadFailure?.();
+  }, [onWorkspaceReadFailure, unsavedWork.status]);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   // Shared with every mount: choices survive the drawer closing and reopening.
   const [conflicts, setConflicts] = useUnsavedWorkConflicts(projectId, originId);
@@ -596,7 +603,7 @@ export function UnsavedWorkSection({
     requestFocus({ kind: "section" });
   };
 
-  if (unsavedWork.status === "error") {
+  if (unsavedWork.status === "error" && !workspaceUnavailable) {
     return (
       <section className="flex flex-wrap items-center justify-between gap-2 px-1 py-1.5" data-testid="unsaved-work-error">
         <Text as="span" variant="body" tone="muted">
@@ -616,7 +623,7 @@ export function UnsavedWorkSection({
     );
   }
 
-  if (unsavedWork.status !== "ok" || entries.length === 0) {
+  if ((unsavedWork.status !== "ok" && !workspaceUnavailable) || entries.length === 0) {
     return null;
   }
 

@@ -15,11 +15,11 @@ import {
 import { Button, IconButton } from "../../../components/Button";
 import { Checkbox } from "../../../components/Checkbox";
 import { Input } from "../../../components/Input";
+import { InlineNotice } from "../../../components/InlineNotice";
+import { SegmentedControl } from "../../../components/SegmentedControl";
 import { Text } from "../../../components/Text";
 import { DrawerHeader } from "../../../components/DrawerHeader";
-import { Button as AriaButton } from "react-aria-components";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
-import { segmentedControlGroupClassName, segmentedControlOptionClassName, SEGMENTED_CONTROL_LABEL_CLASS } from "../../../components/segmentedControlStyles";
 import {
   DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_META_CLASS,
@@ -48,6 +48,7 @@ import {
   parseSavedVersionSubject,
 } from "./workspaceGitReviewShared";
 import { PROGRAMMATIC_FOCUS_CLASS, restoreLostFocus } from "./historyFocus";
+import { useWorkspaceAvailability } from "../../../workspace/WorkspaceAvailabilityProvider";
 
 const LARGE_CHANGESET_THRESHOLD = 150;
 const DIRTY_PATH_PAGE_LIMIT = 100;
@@ -126,8 +127,12 @@ export function LegacyChangesDrawer({
     projectCapabilitiesResolved,
     canWriteProject,
   } = useProject();
+  const { issue: workspaceIssue, recoveryVersion, reportFailure } = useWorkspaceAvailability();
+  const workspaceIssueRef = useRef(workspaceIssue);
+  workspaceIssueRef.current = workspaceIssue;
+  const previousRecoveryVersionRef = useRef(recoveryVersion);
   const projectWriteEnabled =
-    projectCapabilitiesResolved === true && canWriteProject === true;
+    projectCapabilitiesResolved === true && canWriteProject === true && !workspaceIssue;
   const { effectiveRuntimeId } = useRuntime();
   const { showStatus } = useStatus();
   const isLargeScreen = useStudioDesktopLayout();
@@ -153,6 +158,15 @@ export function LegacyChangesDrawer({
   const historyRef = useRef<WorkspaceGitHistory | null>(null);
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
   const [syncConflict, setSyncConflict] = useState<{ error: string | null } | null>(null);
+  const refreshScope = useMemo(() => ({ active: true, activeProjectId, effectiveRuntimeId, pageOffset, scopePrefix }),
+    [activeProjectId, effectiveRuntimeId, pageOffset, scopePrefix]);
+  const refreshRequestRef = useRef<{ scope: typeof refreshScope } | null>(null);
+  const refreshScopeRef = useRef(refreshScope);
+  refreshScopeRef.current = refreshScope;
+  useEffect(() => {
+    refreshScope.active = true;
+    return () => { refreshScope.active = false; };
+  }, [refreshScope]);
 
   const dirtyPaths = useMemo(() => status?.dirtyPaths ?? [], [status?.dirtyPaths]);
   const pathGroups = status?.pathGroups ?? [];
@@ -264,14 +278,16 @@ export function LegacyChangesDrawer({
 
   const refresh = useCallback(
     async (options?: { silent?: boolean }) => {
-      if (!activeProjectId) {
+      if (!activeProjectId || workspaceIssueRef.current) {
         return;
       }
-      if (refreshInFlightRef.current) {
+      if (refreshInFlightRef.current && refreshRequestRef.current?.scope === refreshScope) {
         await refreshInFlightRef.current;
         return;
       }
       const silent = options?.silent === true;
+      const request = { scope: refreshScope };
+      refreshRequestRef.current = request;
       const run = (async () => {
         if (!silent) {
           setLoading(true);
@@ -288,19 +304,27 @@ export function LegacyChangesDrawer({
               scope: scopePrefix,
               limit: DIRTY_PATH_PAGE_LIMIT,
               offset: pageOffset,
-            }),
+            }).catch(() => null),
             shouldFetchHistory
               ? fetchWorkspaceGitHistoryFromController({
                   projectId: activeProjectId,
                   runtimeId: effectiveRuntimeId ?? null,
                   limit: 6,
-                })
+                }).catch(() => null)
               : Promise.resolve(historyRef.current),
           ]);
+          if (!refreshScope.active || refreshScopeRef.current !== refreshScope) return;
           const previousStatus = statusRef.current;
           const previousHistory = historyRef.current;
+          const statusFailed = !next || Boolean(next.error && !next.busy);
+          const historyFailed = shouldFetchHistory && (!nextHistory || Boolean(nextHistory.error && !nextHistory.busy));
+          if (statusFailed || historyFailed) reportFailure();
+          // Keep the last snapshot and selections while the connection is checked.
+          // The shared banner owns confirmed workspace outages; real git errors remain local.
           const resolvedStatus =
-            next?.busy === true
+            statusFailed && previousStatus
+              ? { ...previousStatus, error: next?.error ?? "Couldn't refresh changes.", busy: false }
+              : next?.busy === true
               ? previousStatus
                 ? { ...previousStatus, busy: true }
                 : next
@@ -308,7 +332,9 @@ export function LegacyChangesDrawer({
                 ? { ...next, busy: false }
                 : next;
           const resolvedHistory =
-            nextHistory?.busy === true
+            historyFailed && previousHistory
+              ? { ...previousHistory, error: nextHistory?.error ?? "Couldn't refresh saved versions.", busy: false }
+              : nextHistory?.busy === true
               ? previousHistory
                 ? { ...previousHistory, busy: true }
                 : nextHistory
@@ -370,8 +396,8 @@ export function LegacyChangesDrawer({
             setSyncConflict(null);
           }
         } finally {
-          refreshInFlightRef.current = null;
-          if (!silent) {
+          if (refreshRequestRef.current === request) refreshInFlightRef.current = null;
+          if (!silent && refreshScope.active && refreshScopeRef.current === refreshScope) {
             setLoading(false);
           }
         }
@@ -379,8 +405,14 @@ export function LegacyChangesDrawer({
       refreshInFlightRef.current = run;
       await run;
     },
-    [activeProjectId, effectiveRuntimeId, pageOffset, scopePrefix],
+    [activeProjectId, effectiveRuntimeId, pageOffset, refreshScope, reportFailure, scopePrefix],
   );
+
+  useEffect(() => {
+    const previous = previousRecoveryVersionRef.current;
+    previousRecoveryVersionRef.current = recoveryVersion;
+    if (recoveryVersion > 0 && recoveryVersion !== previous) void refresh({ silent: true });
+  }, [recoveryVersion, refresh]);
 
   const waitForSavedVersionHistoryEntry = useCallback(
     async (options: { commit?: string | null; message?: string | null }) => {
@@ -1143,7 +1175,7 @@ export function LegacyChangesDrawer({
               }}
             >
               <div
-                className="flex h-5 w-5 flex-none items-center justify-center"
+                className="flex h-11 w-11 flex-none items-center justify-center sm:pointer-fine:h-5 sm:pointer-fine:w-5"
                 onPointerDown={(event) => {
                   event.stopPropagation();
                 }}
@@ -1238,7 +1270,7 @@ export function LegacyChangesDrawer({
               title="Refresh"
               data-testid="source-control-refresh"
               onPress={() => refresh({ silent: false })}
-              isDisabled={!activeProjectId || loading}
+              isDisabled={!activeProjectId || loading || Boolean(workspaceIssue)}
               className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
@@ -1267,11 +1299,11 @@ export function LegacyChangesDrawer({
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        {loading && !status ? (
+        {loading && !status && !workspaceIssue ? (
           <div className="flex h-full items-center justify-center px-6 text-center">
             <Text tone="secondary">Loading changes…</Text>
           </div>
-        ) : status && !supported ? (
+        ) : status && !supported && !status.error && !workspaceIssue ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
             <Text tone="secondary">This space is not using version tracking yet.</Text>
             <Text variant="label" tone="secondary">
@@ -1280,28 +1312,28 @@ export function LegacyChangesDrawer({
           </div>
         ) : (
           <div className="flex h-full flex-col gap-2 overflow-hidden px-4 py-4">
-            {status?.error && !workspaceBusy ? (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
-                {status.error}
-              </div>
+            {workspaceIssue && hasUsableSnapshot ? (
+              <Text variant="caption" tone="subtle" data-testid="source-control-stale-notice">
+                Showing previously loaded changes and versions.
+              </Text>
             ) : null}
-            {history?.error && !workspaceBusy ? (
-              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200">
+            {status?.error && !workspaceBusy && !workspaceIssue ? (
+              <InlineNotice tone="danger" density="comfortable" role="alert">
+                {status.error}
+              </InlineNotice>
+            ) : null}
+            {history?.error && !workspaceBusy && !workspaceIssue ? (
+              <InlineNotice tone="warning" density="comfortable" role="alert">
                 {history.error}
-              </div>
+              </InlineNotice>
             ) : null}
             {syncConflict ? (
-              <div
-                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200"
+              <InlineNotice
+                tone="warning"
+                role="status"
+                title="Conflicts detected while saving a version."
                 data-testid="source-control-conflict"
-              >
-                <div className="min-w-0">
-                  <div className="font-medium">Conflicts detected while saving a version.</div>
-                  <div className="text-xs opacity-90">
-                    Use the Assistant to follow the pinned conflict playbook.
-                  </div>
-                </div>
-                <Button
+                actions={<Button
                   variant="outline"
                   size="sm"
                   radius="xl"
@@ -1310,8 +1342,10 @@ export function LegacyChangesDrawer({
                   data-testid="source-control-resolve-conflicts"
                 >
                   Resolve conflicts
-                </Button>
-              </div>
+                </Button>}
+              >
+                Use the Assistant to follow the pinned conflict playbook.
+              </InlineNotice>
             ) : null}
             {largeChangeSet ? (
               <div
@@ -1371,7 +1405,7 @@ export function LegacyChangesDrawer({
                     data-testid="source-control-discard"
                     aria-label={discarding ? "Discarding selected changes" : "Discard selected changes"}
                     title={discarding ? "Discarding…" : "Discard selected changes"}
-                    className="text-rose-600 hover:bg-rose-50 data-[hovered]:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-500/10 dark:data-[hovered]:bg-rose-500/10"
+                    tone="danger"
                   >
                     <Trash className="h-4 w-4" aria-hidden="true" />
                   </IconButton>
@@ -1395,25 +1429,17 @@ export function LegacyChangesDrawer({
                   </div>
                   <div className="flex items-center gap-1">
                     {dirtyCount > 0 ? (
-                      <div className={`mr-1 ${segmentedControlGroupClassName()}`} role="group" aria-label="Changes view">
-                        <AriaButton
-                          onPress={() => setReviewMode("focused")}
-                          data-testid="source-control-review-mode-focused"
-                          aria-pressed={reviewMode === "focused"}
-                          className={`${segmentedControlOptionClassName(reviewMode === "focused")} min-h-7 text-xs pointer-coarse:min-h-11`}
-                        >
-                          <span className={SEGMENTED_CONTROL_LABEL_CLASS}>Files</span>
-                        </AriaButton>
-                        <AriaButton
-                          onPress={() => setReviewMode("all")}
-                          data-testid="source-control-review-mode-all"
-                          aria-pressed={reviewMode === "all"}
-                          className={`${segmentedControlOptionClassName(reviewMode === "all")} min-h-7 text-xs pointer-coarse:min-h-11`}
-                          aria-label="Preview all changes"
-                        >
-                          <span className={SEGMENTED_CONTROL_LABEL_CLASS}>All changes</span>
-                        </AriaButton>
-                      </div>
+                      <SegmentedControl
+                        aria-label="Changes view"
+                        value={reviewMode}
+                        onChange={setReviewMode}
+                        width="fit"
+                        className="mr-1"
+                        options={[
+                          { value: "focused", label: "Files", testId: "source-control-review-mode-focused" },
+                          { value: "all", label: "All changes", ariaLabel: "Preview all changes", testId: "source-control-review-mode-all" },
+                        ]}
+                      />
                     ) : null}
                     <IconButton
                       variant="ghost"
@@ -1455,7 +1481,7 @@ export function LegacyChangesDrawer({
                           <Refresh className="h-4 w-4 animate-spin" aria-hidden="true" />
                           <Text tone="secondary">Checking changes…</Text>
                         </div>
-                      ) : (
+                      ) : workspaceIssue ? null : (
                         <Text tone="secondary">{!status || status.error ? "Changes are unavailable. Connect to the workspace and refresh." : "No pending changes."}</Text>
                       )}
                     </div>

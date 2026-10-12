@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   requestConnectTools: vi.fn(),
   discover: vi.fn(),
   openImport: vi.fn(),
+  submitImport: vi.fn(),
+  importModalProps: null as null | { workspaceUnavailable?: boolean; onSubmitImport: () => void },
   read: vi.fn(),
   listAt: vi.fn(),
   readAt: vi.fn(),
@@ -19,6 +21,11 @@ const mocks = vi.hoisted(() => ({
   /** What the panel asked the versioning hook for, render by render. */
   versioningInputs: [] as Array<{ projectId?: string | null; origin?: unknown }>,
   projectId: "space-a",
+  availability: {
+    issue: null as null | { kind: "connection" | "unavailable" | "access" },
+    recoveryVersion: 0,
+    reportFailure: vi.fn(),
+  },
   runtime: {
     effectiveRuntimeId: "runtime-1",
     desktopOrigin: null as unknown,
@@ -41,6 +48,7 @@ vi.mock("../../../../workspace/useWorkspaceVersioning", () => ({
   },
 }));
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => mocks.runtime }));
+vi.mock("../../../../workspace/WorkspaceAvailabilityProvider", () => ({ useWorkspaceAvailability: () => mocks.availability }));
 vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ activeProjectId: mocks.projectId }) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 vi.mock("../../../../conversations/useConversation", () => ({
@@ -58,7 +66,10 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
 vi.mock("../connectToolRequest", () => ({ requestConnectTools: mocks.requestConnectTools }));
 vi.mock("../SettingsShell", () => ({ SettingsShell: ({ children, actions }: { children: ReactNode; actions: ReactNode }) => <div>{actions}{children}</div> }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
-vi.mock("../SkillsImportModal", () => ({ SkillsImportModal: () => null }));
+vi.mock("../SkillsImportModal", () => ({ SkillsImportModal: (props: NonNullable<typeof mocks.importModalProps>) => {
+  mocks.importModalProps = props;
+  return null;
+} }));
 vi.mock("../useSkillsImportFlow", () => ({
   useSkillsImportFlow: () => ({
     importSource: "",
@@ -71,7 +82,7 @@ vi.mock("../useSkillsImportFlow", () => ({
     addSkillModalOpen: false,
     setAddSkillModalOpen: vi.fn(),
     queueSkillImportTask: vi.fn(),
-    handleSubmitImport: vi.fn(),
+    handleSubmitImport: mocks.submitImport,
     handleOpenAddSkillModal: mocks.openImport,
   }),
 }));
@@ -88,11 +99,14 @@ describe("SkillsPanel reads", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     vi.clearAllMocks();
     mocks.versioning.mode = "legacy";
     mocks.versioning.originId = null;
     mocks.versioningInputs.length = 0;
     mocks.projectId = "space-a";
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 0;
     mocks.runtime.desktopOrigin = null;
     mocks.runtime.desktopOriginProjectId = null;
     mocks.list.mockImplementation(async ({ path }: { path: string }) =>
@@ -109,21 +123,31 @@ describe("SkillsPanel reads", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("offers one Import action next to the empty state", async () => {
+  async function openActions() {
+    await act(async () => container.querySelector<HTMLElement>('[data-testid="skills-actions"]')?.click());
+    return document.querySelector('[role="menu"]');
+  }
+
+  it("keeps custom import and restore defaults in the menu when empty", async () => {
     mocks.list.mockResolvedValue([]);
     await render();
     expect(container.querySelector('[data-testid="skills-new"]')).toBeNull();
-    expect(container.querySelector('[data-testid="skills-empty-new"]')?.textContent).toContain("Import");
-    expect(Array.from(container.querySelectorAll("button")).filter(button => button.textContent?.trim() === "Import custom skill")).toHaveLength(1);
+    const menu = await openActions();
+    expect(menu?.querySelectorAll('[data-testid="skills-new"]')).toHaveLength(1);
+    expect(menu?.querySelector('[data-testid="skills-bootstrap"]')).not.toBeNull();
+    await act(async () => menu?.querySelector<HTMLElement>('[data-testid="skills-new"]')?.click());
+    expect(mocks.openImport).toHaveBeenCalledOnce();
   });
 
   it("keeps Import available when there are installed skills", async () => {
     await render();
-    expect(container.querySelector('[data-testid="skills-new"]')?.textContent).toContain("Import");
-    expect(container.querySelector('[data-testid="skills-empty-new"]')).toBeNull();
+    const menu = await openActions();
+    expect(menu?.querySelector('[data-testid="skills-new"]')?.textContent).toContain("Import");
+    expect(menu?.querySelector('[data-testid="skills-bootstrap"]')).toBeNull();
   });
 
   it("opens the shared tool chooser in the current chat without importing anything", async () => {
@@ -139,11 +163,115 @@ describe("SkillsPanel reads", () => {
     expect(container.textContent).toContain("Installed skills");
     expect(container.querySelector('[data-testid="skills-tab-discover"]')).toBeNull();
     expect(container.querySelector('[data-testid="skills-list"]')).not.toBeNull();
-    const customImport = container.querySelector<HTMLButtonElement>('[data-testid="skills-new"]');
+    const menu = await openActions();
+    const customImport = menu?.querySelector<HTMLElement>('[data-testid="skills-new"]');
     expect(customImport?.textContent).toContain("Import custom skill");
     await act(async () => customImport?.click());
     expect(mocks.openImport).toHaveBeenCalledOnce();
     expect(mocks.requestConnectTools).not.toHaveBeenCalled();
+  });
+
+  it("defers confirmed workspace failures to the shared notice, without showing an empty skills list", async () => {
+    mocks.list.mockResolvedValue(null);
+    await render();
+    expect(mocks.availability.reportFailure).toHaveBeenCalledOnce();
+    mocks.availability.issue = { kind: "unavailable" };
+    await render();
+    expect(container.querySelector('[data-testid="skills-load-error"]')).toBeNull();
+    expect(container.textContent).not.toContain("No installed skills");
+    const menu = await openActions();
+    expect(menu?.querySelector('[data-testid="skills-new"]')?.getAttribute("aria-disabled")).toBe("true");
+    expect(menu?.querySelector('[data-testid="skills-bootstrap"]')).toBeNull();
+  });
+
+  it("retains loaded skills through an outage, disables mutations and reloads after recovery", async () => {
+    await render();
+    mocks.list.mockResolvedValue(null);
+    const menu = await openActions();
+    await act(async () => menu?.querySelector<HTMLElement>('[data-testid="skills-refresh"]')?.click());
+    mocks.availability.issue = { kind: "connection" };
+    await render();
+    expect(container.querySelector('[data-testid="skills-item-writer"]')).not.toBeNull();
+    expect(container.textContent).toContain("Showing the last loaded skills.");
+    expect(container.querySelector<HTMLInputElement>('[role="switch"]')?.disabled).toBe(true);
+    mocks.list.mockResolvedValue([]);
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 1;
+    await render();
+    expect(container.textContent).toContain("No installed skills yet.");
+    expect(container.querySelector('[data-testid="skills-load-error"]')).toBeNull();
+  });
+
+  it("does not show another space's retained skills when the new space fails", async () => {
+    await render();
+    mocks.projectId = "space-b";
+    mocks.list.mockResolvedValue(null);
+    mocks.availability.issue = { kind: "unavailable" };
+    await render();
+    expect(container.querySelector('[data-testid="skills-item-writer"]')).toBeNull();
+    expect(container.textContent).not.toContain("No installed skills");
+  });
+
+  it("guards an already-open import callback through an outage and enables it after recovery", async () => {
+    await render();
+    mocks.availability.issue = { kind: "connection" };
+    await render();
+    expect(mocks.importModalProps?.workspaceUnavailable).toBe(true);
+    await act(async () => mocks.importModalProps?.onSubmitImport());
+    expect(mocks.submitImport).not.toHaveBeenCalled();
+
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 1;
+    await render();
+    expect(mocks.importModalProps?.workspaceUnavailable).toBe(false);
+    await act(async () => mocks.importModalProps?.onSubmitImport());
+    expect(mocks.submitImport).toHaveBeenCalledExactlyOnceWith({ closeModalOnSuccess: true });
+  });
+
+  it("offers one recovery action when loading fails and does not present an empty list", async () => {
+    mocks.list.mockResolvedValue(null);
+    await render();
+    expect(container.querySelector('[data-testid="skills-load-error"]')?.textContent).toContain("Unable to list skills");
+    expect(container.textContent).not.toContain("No installed skills yet");
+    const menu = await openActions();
+    expect(menu?.querySelector('[data-testid="skills-refresh"]')).toBeNull();
+    expect(menu?.querySelector('[data-testid="skills-bootstrap"]')).toBeNull();
+    await act(async () => menu?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    const readsBeforeRetry = mocks.list.mock.calls.length;
+    await act(async () => container.querySelector<HTMLElement>('[data-testid="skills-retry"]')?.click());
+    expect(mocks.list.mock.calls.length).toBeGreaterThan(readsBeforeRetry);
+  });
+
+  it("keeps Retry focused and prevents repeat requests while recovery is pending", async () => {
+    mocks.list.mockResolvedValue(null);
+    await render();
+    let finishRetry!: (value: null) => void;
+    mocks.list.mockReturnValueOnce(new Promise<null>((resolve) => { finishRetry = resolve; }));
+    const retry = container.querySelector<HTMLButtonElement>('[data-testid="skills-retry"]')!;
+    await act(async () => { retry.focus(); retry.click(); });
+    expect(container.querySelector('[data-testid="skills-retry"]')).toBe(retry);
+    expect(document.activeElement).toBe(retry);
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    const readsWhilePending = mocks.list.mock.calls.length;
+    await act(async () => retry.click());
+    expect(mocks.list.mock.calls.length).toBe(readsWhilePending);
+    await act(async () => finishRetry(null));
+    expect(document.activeElement).toBe(retry);
+    expect(retry.getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it.each([false, true])("recovers without stealing focus from another control: focus moved %s", async (moveFocus) => {
+    mocks.list.mockResolvedValue(null);
+    await render();
+    let finishRetry!: (value: []) => void;
+    mocks.list.mockReturnValueOnce(new Promise<[]>((resolve) => { finishRetry = resolve; }));
+    const retry = container.querySelector<HTMLButtonElement>('[data-testid="skills-retry"]')!;
+    const connect = container.querySelector<HTMLButtonElement>('[data-testid="skills-connect-tool"]')!;
+    await act(async () => { retry.focus(); retry.click(); });
+    if (moveFocus) await act(async () => connect.focus());
+    await act(async () => finishRetry([]));
+    expect(container.querySelector('[data-testid="skills-retry"]')).toBeNull();
+    expect(document.activeElement).toBe(moveFocus ? connect : container.querySelector("h2"));
   });
 
   it("does not send today's requests again in legacy mode when the origin id arrives", async () => {

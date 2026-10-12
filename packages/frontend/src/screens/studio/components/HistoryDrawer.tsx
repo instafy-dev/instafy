@@ -15,6 +15,7 @@ import { useProject } from "../../../projects/useProject";
 import { useAuth } from "../../../providers/AuthProvider";
 import { controllerClient, type WorkspaceGitHistoryEntry } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
+import { useWorkspaceAvailability } from "../../../workspace/WorkspaceAvailabilityProvider";
 import { refreshUnsavedWork } from "../../../workspace/unsavedWorkStore";
 import type { ActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
 import { DesktopChangesLine } from "./DesktopChangesLine";
@@ -115,7 +116,11 @@ export function HistoryDrawer({
 }) {
   const { projectCapabilitiesResolved, canWriteProject } = useProject();
   const { user } = useAuth();
-  const canWrite = projectCapabilitiesResolved === true && canWriteProject === true;
+  const { issue: workspaceIssue, recoveryVersion, reportFailure } = useWorkspaceAvailability();
+  const workspaceIssueRef = useRef(workspaceIssue);
+  workspaceIssueRef.current = workspaceIssue;
+  const previousRecoveryVersionRef = useRef(recoveryVersion);
+  const canWrite = projectCapabilitiesResolved === true && canWriteProject === true && !workspaceIssue;
   const { activeConversationId, createConversation, setConversationDraft } = useConversations();
   const { openConversationTab, openGitReviewTab, requestUrlPush } = useWorkspaceTabs();
   const projectId = versioning.projectId;
@@ -164,7 +169,7 @@ export function HistoryDrawer({
   /** Load the first page; resolves to the newest saved version (`main`). */
   const loadHistory = useCallback(
     async (options?: { silent?: boolean; busyAttempt?: number }): Promise<string | null> => {
-      if (!ready || !projectId || !originId) {
+      if (!ready || !projectId || !originId || workspaceIssueRef.current) {
         return null;
       }
       cancelBusyRetry();
@@ -182,6 +187,7 @@ export function HistoryDrawer({
       }
       lastHistoryLoadRef.current = Date.now();
       if (!page) {
+        reportFailure();
         setHistory((previous) => ({ ...previous, status: "error", error: HISTORY_LOAD_ERROR_COPY }));
         return null;
       }
@@ -203,17 +209,18 @@ export function HistoryDrawer({
         }
         return null;
       }
-      if (!page.supported) {
-        setHistory({ status: "ok", entries: [], hasMore: false, error: null });
-        return null;
-      }
       if (page.error) {
+        reportFailure();
         setHistory((previous) => ({
           status: "error",
           entries: page.entries.length > 0 ? page.entries : previous.entries,
           hasMore: false,
           error: page.error ?? HISTORY_LOAD_ERROR_COPY,
         }));
+        return null;
+      }
+      if (!page.supported) {
+        setHistory({ status: "ok", entries: [], hasMore: false, error: null });
         return null;
       }
       setHistory({
@@ -224,7 +231,7 @@ export function HistoryDrawer({
       });
       return page.entries[0]?.commit ?? null;
     },
-    [cancelBusyRetry, originId, projectId, ready],
+    [cancelBusyRetry, originId, projectId, ready, reportFailure],
   );
 
   const loadHistoryRef = useRef(loadHistory);
@@ -261,9 +268,10 @@ export function HistoryDrawer({
   // The probe made on opening got no answer: say so where results appear.
   useEffect(() => {
     if (!ready && probeFailed) {
+      reportFailure();
       setNotice({ tone: "error", text: HISTORY_PROBE_ERROR_COPY });
     }
-  }, [originId, probeFailed, projectId, ready, setNotice]);
+  }, [originId, probeFailed, projectId, ready, reportFailure, setNotice]);
 
   // A saved version landed somewhere: reload the list once the burst settles.
   useEffect(() => {
@@ -374,12 +382,13 @@ export function HistoryDrawer({
           }
           setProbe({ running: null, failed: result === null });
           if (result === null) {
+            reportFailure();
             // A new node each time, so a second failure is announced too.
             setNotice({ tone: "error", text: HISTORY_PROBE_ERROR_COPY });
           }
         });
     },
-    [setNotice, versioning],
+    [reportFailure, setNotice, versioning],
   );
 
   // The header's Refresh reloads the whole drawer: mode, saved versions,
@@ -402,8 +411,14 @@ export function HistoryDrawer({
     });
   }, [loadHistory, originId, projectId, ready, runProbe, versioning]);
 
+  useEffect(() => {
+    const previous = previousRecoveryVersionRef.current;
+    previousRecoveryVersionRef.current = recoveryVersion;
+    if (recoveryVersion > 0 && recoveryVersion !== previous) handleRefresh();
+  }, [handleRefresh, recoveryVersion]);
+
   const handleShowMore = useCallback(async () => {
-    if (!ready || !projectId || !originId || loadingMore) {
+    if (!ready || !projectId || !originId || loadingMore || workspaceIssueRef.current) {
       return;
     }
     const seq = historySeqRef.current;
@@ -422,6 +437,7 @@ export function HistoryDrawer({
       return;
     }
     if (!page || page.error || !page.supported) {
+      if (!page || page.error) reportFailure();
       setNotice({ tone: "error", text: HISTORY_MORE_ERROR_COPY });
       return;
     }
@@ -441,7 +457,7 @@ export function HistoryDrawer({
       hasMore: page.hasMore === true,
     }));
     setNotice({ tone: "info", text: loadedMoreVersionsCopy(fresh.length) });
-  }, [history.entries, loadingMore, originId, projectId, ready, setNotice]);
+  }, [history.entries, loadingMore, originId, projectId, ready, reportFailure, setNotice]);
 
   const handleCommitted = useCallback(
     (rev: string | null) => {
@@ -582,7 +598,7 @@ export function HistoryDrawer({
               // The pressed control waits as pending (it keeps focus); a
               // native disabled button would drop it.
               isPending={ready ? refreshing : probe.running === "refresh"}
-              isDisabled={ready ? !refreshing && history.status === "loading" : probe.running === "retry"}
+              isDisabled={Boolean(workspaceIssue) || (ready ? !refreshing && history.status === "loading" : probe.running === "retry")}
               className={`max-[899px]:h-11 max-[899px]:w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <Refresh className="h-4 w-4" aria-hidden="true" />
@@ -608,7 +624,7 @@ export function HistoryDrawer({
       {/* Outside the scrolling list, so a result stays in view of the row
           (or the Show more button) that caused it. */}
       <div role="status" aria-live="polite" data-testid="history-status" className="shrink-0 px-5">
-        {notice ? (
+        {notice && !(workspaceIssue && [HISTORY_PROBE_ERROR_COPY, HISTORY_MORE_ERROR_COPY].includes(notice.text)) ? (
           <div key={notice.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5">
             <Text
               as="span"
@@ -635,7 +651,7 @@ export function HistoryDrawer({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4" data-testid="history-scroll">
-        {probeUnanswered ? (
+        {probeUnanswered && !workspaceIssue ? (
           // The message is in the status region above, and Retry is
           // described by it; Retry stays mounted (pending) while it asks, so
           // keyboard focus stays on it.
@@ -653,7 +669,7 @@ export function HistoryDrawer({
               Retry
             </Button>
           </div>
-        ) : !ready ? (
+        ) : !ready ? workspaceIssue ? null : (
           <div className="flex items-center justify-center px-2 py-10">
             <Text tone="muted">Loading history…</Text>
           </div>
@@ -665,6 +681,8 @@ export function HistoryDrawer({
                 originId={originId}
                 canWrite={canWrite}
                 disabled={actionBusy}
+                workspaceUnavailable={Boolean(workspaceIssue)}
+                onWorkspaceReadFailure={reportFailure}
                 refreshKey={statusRefreshKey}
                 onBusyChange={setActionBusy}
                 onNotice={setNotice}
@@ -683,6 +701,8 @@ export function HistoryDrawer({
                 originKind={originKind}
                 canWrite={canWrite}
                 disabled={actionBusy}
+                workspaceUnavailable={Boolean(workspaceIssue)}
+                onWorkspaceReadFailure={reportFailure}
                 headRev={entries[0]?.commit ?? null}
                 onBusyChange={setActionBusy}
                 onNotice={setNotice}
@@ -708,12 +728,17 @@ export function HistoryDrawer({
               >
                 Saved versions
               </Text>
-              {history.error ? (
+              {workspaceIssue && entries.length > 0 ? (
+                <Text variant="caption" tone="subtle" className="px-1" data-testid="history-stale-notice">
+                  Showing previously loaded versions.
+                </Text>
+              ) : null}
+              {history.error && !workspaceIssue ? (
                 <Text variant="body" tone="danger" className="px-1" data-testid="history-error">
                   {history.error}
                 </Text>
               ) : null}
-              {history.status === "loading" && entries.length === 0 ? (
+              {history.status === "loading" && entries.length === 0 && !workspaceIssue ? (
                 <Text tone="muted" className="px-1 py-3">
                   Loading saved versions…
                 </Text>
@@ -721,7 +746,7 @@ export function HistoryDrawer({
                 <Text tone="muted" className="px-1 py-3" data-testid="history-busy">
                   {HISTORY_BUSY_COPY}
                 </Text>
-              ) : entries.length === 0 && history.status === "ok" ? (
+              ) : entries.length === 0 && history.status === "ok" && !workspaceIssue ? (
                 <Text tone="muted" className="px-1 py-3" data-testid="history-empty">
                   No saved versions yet.
                 </Text>
@@ -847,6 +872,7 @@ export function HistoryDrawer({
                     radius="xl"
                     onPress={() => void handleShowMore()}
                     isPending={loadingMore}
+                    isDisabled={Boolean(workspaceIssue)}
                     data-testid="history-show-more"
                   >
                     Show more

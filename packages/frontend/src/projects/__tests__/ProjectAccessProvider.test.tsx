@@ -274,7 +274,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(probe?.getAttribute("data-write")).toBe("false");
     expect(probe?.getAttribute("data-blocked")).toBe("false");
     expect(container.querySelector('[data-testid="entry-loading-screen"]')).toBeNull();
-    expect(container.querySelector('[role="status"]')?.textContent).toContain("Couldn’t check access");
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Couldn’t check access. Retrying…");
 
     await act(async () => vi.advanceTimersByTimeAsync(4_999));
     expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);

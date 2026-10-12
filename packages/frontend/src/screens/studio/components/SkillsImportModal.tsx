@@ -2,9 +2,10 @@ import { useId } from "react";
 import { Field } from "../../../components/Field";
 import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
+import { Text } from "../../../components/Text";
 import { Spinner } from "../../../components/Spinner";
 import { Toggle } from "../../../components/Toggle";
-import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
@@ -20,6 +21,7 @@ type SkillsImportModalProps = {
   importOverwrite: boolean;
   onImportOverwriteChange: (nextSelected: boolean) => void;
   hasProject: boolean;
+  workspaceUnavailable?: boolean;
   /** Opens the shared tool chooser. The host guards and dismisses this import first. */
   onBrowseSkills?: () => void;
   onSubmitImport: () => void;
@@ -38,6 +40,7 @@ export function SkillsImportModal({
   importOverwrite,
   onImportOverwriteChange,
   hasProject,
+  workspaceUnavailable = false,
   onBrowseSkills,
   onSubmitImport,
 }: SkillsImportModalProps) {
@@ -50,6 +53,11 @@ export function SkillsImportModal({
           Paste a GitHub repo or skill folder link, a SKILL.md link, or a workspace path.
           Every skill in it installs and its setup starts in chat.
         </p>
+        {workspaceUnavailable ? (
+          <Text as="p" variant="caption" tone="muted" role="status">
+            Workspace files are unavailable. Your draft is kept; reconnect before adding this skill.
+          </Text>
+        ) : null}
         <Field label="Source" htmlFor={`${fieldId}-skills-import-source`}>
           <Input autoFocus id={`${fieldId}-skills-import-source`}
             value={importSource}
@@ -113,7 +121,7 @@ export function SkillsImportModal({
               size="sm"
               radius="xl"
               onPress={onSubmitImport}
-              isDisabled={!hasProject || importPending || !importSource.trim()}
+              isDisabled={!hasProject || workspaceUnavailable || importPending || !importSource.trim()}
               data-testid="skills-import-submit"
             >
               {importPending ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : null}
@@ -138,14 +146,13 @@ export function SkillsImportModal({
       isDismissable={!importPending}
       isKeyboardDismissDisabled={importPending}
       dialogAriaLabel="Import custom skill"
-      modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
-      dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col"
+      layout="editor"
       data-testid="skills-add-modal"
     >
       <StudioDialogHeader title="Import custom skill" onClose={() => changeOpen(false)}
-        closeLabel="Close" closeButtonDisabled={importPending} className="shrink-0" />
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{form}</div>
-      <div className="shrink-0">{actions}</div>
+        closeLabel="Close" closeButtonDisabled={importPending} />
+      <StudioDialogBody scrollable padding="none">{form}</StudioDialogBody>
+      <StudioDialogFooter>{actions}</StudioDialogFooter>
     </StudioDialogModal>
   );
 }

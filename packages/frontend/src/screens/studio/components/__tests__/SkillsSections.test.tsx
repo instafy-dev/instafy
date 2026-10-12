@@ -19,7 +19,7 @@ function installedProps(overrides: Partial<InstalledProps> = {}): InstalledProps
   return {
     hasProject: true, loading: false, skills: [skill], error: null, bootstrapPending: false,
     brokenSkillIcons: {}, togglePendingSkillId: null, uninstallPendingSkillId: null,
-    onReload: vi.fn(), onBootstrapSkills: vi.fn(), onOpenAddSkillModal: vi.fn(), onMarkSkillIconBroken: vi.fn(),
+    onReload: vi.fn(), onBootstrapSkills: vi.fn(), onConnectTool: vi.fn(), onOpenAddSkillModal: vi.fn(), onMarkSkillIconBroken: vi.fn(),
     onToggleSkill: vi.fn(), onUninstallSkill: vi.fn(), onOpenSkillFile: vi.fn(), ...overrides,
   };
 }
@@ -98,6 +98,24 @@ describe("Skills responsive controls", () => {
     expect(query<HTMLButtonElement>("skills-open-file-one")?.disabled).toBe(true);
     await click("skills-actions-one");
     expect(document.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it("keeps restore progress visible after the actions menu closes", async () => {
+    await render(<InstalledSkillsSection {...installedProps({ skills: [], bootstrapPending: true })} />);
+    expect(container.textContent).toContain("Restoring defaults…");
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    await click("skills-actions");
+    expect(query("skills-bootstrap")?.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("announces refresh progress while keeping the existing list usable", async () => {
+    const props = installedProps({ loading: true });
+    await render(<InstalledSkillsSection {...props} />);
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Refreshing skills…");
+    await click("skills-open-file-one");
+    expect(props.onOpenSkillFile).toHaveBeenCalledWith(skill);
+    await click("skills-actions");
+    expect(query("skills-refresh")?.getAttribute("aria-disabled")).toBe("true");
   });
 
 });

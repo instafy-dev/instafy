@@ -362,7 +362,7 @@ export function StudioNewChatButton({
               </div>
             ) : privateChatTargets.length === 0 ? (
               <div className="mt-4 space-y-3">
-                <Text as="p" variant="caption" tone="muted" className="text-sm leading-relaxed">
+                <Text as="p" variant="body" tone="muted">
                   Invite a teammate to unlock private chats in this space.
                 </Text>
                 {onOpenProjectSettings ? (
@@ -382,7 +382,7 @@ export function StudioNewChatButton({
               </div>
             ) : filteredPrivateChatTargets.length === 0 ? (
               <div className="mt-4 space-y-3">
-                <Text as="p" variant="caption" tone="muted" className="text-sm leading-relaxed">
+                <Text as="p" variant="body" tone="muted">
                   No teammates match that search.
                 </Text>
                 <Button

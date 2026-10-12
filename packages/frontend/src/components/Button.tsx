@@ -7,7 +7,8 @@ import {
 } from "react-aria-components";
 import { Spinner, type SpinnerSize } from "./Spinner";
 
-type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "danger";
+type ButtonVariant = "primary" | "secondary" | "outline" | "ghost" | "text" | "danger";
+type ButtonTone = "neutral" | "muted" | "danger" | "accent";
 type ButtonSize = "xs" | "sm" | "md" | "lg" | "icon";
 type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full";
 
@@ -18,28 +19,54 @@ type ButtonRadius = "none" | "md" | "lg" | "xl" | "2xl" | "full";
 const BASE =
   "inline-flex items-center justify-center gap-2 font-medium touch-manipulation [-webkit-tap-highlight-color:transparent] transition-[color,background-color,border-color,box-shadow,transform] duration-150 ease-out focus:outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-[var(--color-studio-dark-canvas)] data-[pressed]:translate-y-px data-[pressed]:scale-[0.98] data-[disabled]:pointer-events-none data-[disabled]:opacity-60 disabled:pointer-events-none disabled:opacity-60 data-[pending]:pointer-events-none";
 
-const VARIANT_CLASSES: Record<ButtonVariant, string> = {
+const FILLED_VARIANT_CLASSES = {
   primary:
     "bg-primary-600 text-white shadow-sm shadow-primary-600/20 hover:bg-primary-700 data-[hovered]:bg-primary-700 hover:shadow-md hover:shadow-primary-600/25 data-[hovered]:shadow-md data-[hovered]:shadow-primary-600/25 data-[pressed]:bg-primary-800 data-[pressed]:shadow-none",
   secondary:
     "bg-slate-100 text-slate-700 shadow-sm shadow-slate-200/60 hover:bg-slate-200/90 data-[hovered]:bg-slate-200/90 hover:shadow-md hover:shadow-slate-200/80 data-[hovered]:shadow-md data-[hovered]:shadow-slate-200/80 data-[pressed]:bg-slate-300 data-[pressed]:shadow-none dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100 dark:shadow-none dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-active)]",
-  outline:
-    "border border-slate-200 bg-white text-slate-700 shadow-sm shadow-slate-200/40 hover:border-slate-300 hover:bg-slate-50 data-[hovered]:border-slate-300 data-[hovered]:bg-slate-50 data-[pressed]:border-slate-400 data-[pressed]:bg-slate-100 data-[pressed]:shadow-none dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-100 dark:shadow-none dark:hover:border-[color:var(--color-studio-dark-active-border)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:border-[color:var(--color-studio-dark-active-border)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:border-[color:var(--color-studio-dark-active-border)] dark:data-[pressed]:bg-[var(--color-studio-dark-active)]",
-  ghost:
-    "bg-transparent text-slate-700 hover:bg-slate-100 data-[hovered]:bg-slate-100 data-[pressed]:bg-slate-200/80 data-[pressed]:text-slate-900 dark:text-slate-200 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-active)] dark:data-[pressed]:text-slate-50",
   danger:
     "bg-rose-500 text-white shadow-sm shadow-rose-500/20 hover:bg-rose-600 data-[hovered]:bg-rose-600 hover:shadow-md hover:shadow-rose-500/25 data-[hovered]:shadow-md data-[hovered]:shadow-rose-500/25 data-[pressed]:bg-rose-700 data-[pressed]:shadow-none"
 };
 
-// Coarse pointers (touch) get a 44px minimum height on the small sizes so tap
-// targets meet the accessibility guideline; fine pointers (desktop) keep the
-// compact density unchanged.
+// Quiet actions select one complete palette rather than competing with the
+// neutral variant through caller classes. Filled variants retain their palette.
+const TONE_CLASSES: Record<ButtonTone, string> = {
+  neutral: "text-slate-700 hover:text-slate-900 data-[hovered]:text-slate-900 data-[pressed]:text-slate-900 dark:text-slate-200 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 dark:data-[pressed]:text-slate-50",
+  muted: "text-slate-500 hover:text-slate-800 data-[hovered]:text-slate-800 data-[pressed]:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100 dark:data-[pressed]:text-slate-50",
+  danger: "text-rose-600 hover:text-rose-700 data-[hovered]:text-rose-700 data-[pressed]:text-rose-800 dark:text-rose-300 dark:hover:text-rose-200 dark:data-[hovered]:text-rose-200 dark:data-[pressed]:text-rose-100",
+  accent: "text-primary-600 hover:text-primary-700 data-[hovered]:text-primary-700 data-[pressed]:text-primary-800 dark:text-primary-300 dark:hover:text-primary-200 dark:data-[hovered]:text-primary-200 dark:data-[pressed]:text-primary-100",
+};
+const QUIET_SURFACE_CLASSES: Record<ButtonTone, string> = {
+  neutral: "hover:bg-slate-100 data-[hovered]:bg-slate-100 data-[pressed]:bg-slate-200/80 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-active)]",
+  muted: "hover:bg-slate-100 data-[hovered]:bg-slate-100 data-[pressed]:bg-slate-200/80 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)] dark:data-[pressed]:bg-[var(--color-studio-dark-active)]",
+  danger: "hover:bg-rose-50 data-[hovered]:bg-rose-50 data-[pressed]:bg-rose-100 dark:hover:bg-rose-500/10 dark:data-[hovered]:bg-rose-500/10 dark:data-[pressed]:bg-rose-500/20",
+  accent: "hover:bg-primary-50 data-[hovered]:bg-primary-50 data-[pressed]:bg-primary-100 dark:hover:bg-primary-400/10 dark:data-[hovered]:bg-primary-400/10 dark:data-[pressed]:bg-primary-400/20",
+};
+const OUTLINE_CLASSES = "border border-slate-200 bg-white shadow-sm shadow-slate-200/40 hover:border-slate-300 data-[hovered]:border-slate-300 data-[pressed]:border-slate-400 data-[pressed]:shadow-none dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:shadow-none dark:hover:border-[color:var(--color-studio-dark-active-border)] dark:data-[hovered]:border-[color:var(--color-studio-dark-active-border)] dark:data-[pressed]:border-[color:var(--color-studio-dark-active-border)]";
+
+function appearanceClasses(variant: ButtonVariant, tone: ButtonTone): string {
+  if (variant === "primary" || variant === "secondary" || variant === "danger") {
+    return FILLED_VARIANT_CLASSES[variant];
+  }
+  if (variant === "text") {
+    return `bg-transparent underline-offset-2 hover:underline data-[hovered]:underline ${TONE_CLASSES[tone]}`;
+  }
+  return [variant === "outline" ? OUTLINE_CLASSES : "bg-transparent", TONE_CLASSES[tone], QUIET_SURFACE_CLASSES[tone]].join(" ");
+}
+
+// The primary pointer owns density: fine pointers keep each size's compact
+// dimensions at every width; coarse pointers get a 44px target. Wrappers such
+// as form pickers can independently supply their form-control minimums.
+const TARGET_CLASSES = "pointer-coarse:min-h-11 pointer-coarse:min-w-11";
 const SIZE_CLASSES: Record<ButtonSize, string> = {
-  xs: "px-2 py-1 text-xs pointer-coarse:min-h-11",
-  sm: "px-2.5 py-1.5 text-sm pointer-coarse:min-h-11",
+  xs: "px-2 py-1 text-xs",
+  sm: "px-2.5 py-1.5 text-sm",
   md: "px-3.5 py-2 text-sm",
   lg: "px-4 py-2.5 text-base",
   icon: "p-0 text-sm"
+};
+const TEXT_SIZE_CLASSES: Record<ButtonSize, string> = {
+  xs: "p-0 text-xs", sm: "p-0 text-sm", md: "p-0 text-sm", lg: "p-0 text-base", icon: "p-0 text-sm",
 };
 
 const RADIUS_CLASSES: Record<ButtonRadius, string> = {
@@ -77,6 +104,8 @@ export type ButtonProps = Omit<AriaButtonProps, "className"> & {
   /** Leading glyph, replaced by the pending spinner while `isPending`. */
   icon?: ReactNode;
   variant?: ButtonVariant;
+  /** Palette for ghost, outline and text actions; filled variants own their tone. */
+  tone?: ButtonTone;
   size?: ButtonSize;
   radius?: ButtonRadius;
   fullWidth?: boolean;
@@ -95,6 +124,7 @@ function assignForwardedRef<T>(ref: ForwardedRef<T>, value: T | null) {
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
   {
     variant = "secondary",
+    tone = "neutral",
     size = "sm",
     radius = "lg",
     fullWidth = false,
@@ -130,8 +160,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={composeRenderProps(className, (value) =>
         [
           BASE,
-          VARIANT_CLASSES[variant],
-          SIZE_CLASSES[size],
+          appearanceClasses(variant, tone),
+          TARGET_CLASSES,
+          variant === "text" ? TEXT_SIZE_CLASSES[size] : SIZE_CLASSES[size],
           RADIUS_CLASSES[radius],
           fullWidth ? "w-full" : "",
           value
@@ -181,10 +212,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
 Button.displayName = "Button";
 
 const ICON_SIZES = {
-  xs: "h-6 w-6 text-sm pointer-coarse:min-h-11 pointer-coarse:min-w-11",
-  sm: "h-8 w-8 text-base pointer-coarse:min-h-11 pointer-coarse:min-w-11",
-  md: "h-9 w-9 text-base pointer-coarse:min-h-11 pointer-coarse:min-w-11",
-  lg: "h-10 w-10 text-lg pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+  xs: "h-6 w-6 text-sm",
+  sm: "h-8 w-8 text-base",
+  md: "h-9 w-9 text-base",
+  lg: "h-10 w-10 text-lg"
 };
 
 export type IconButtonProps = Omit<ButtonProps, "size" | "icon"> & {

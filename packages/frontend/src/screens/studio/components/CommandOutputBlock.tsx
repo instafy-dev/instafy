@@ -309,7 +309,7 @@ export function CommandOutputBlock({
               size="xs"
               radius="full"
               onPress={() => setOutputVisible((value) => !value)}
-              className="text-slate-500 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
+              tone="muted"
             >
               <NavArrowRight
                 className={`h-3.5 w-3.5 transition-transform ${outputVisible ? "rotate-90" : ""}`}
@@ -326,7 +326,7 @@ export function CommandOutputBlock({
               onPress={() => void handleCancel()}
               isDisabled={cancelPending}
               data-testid="chat-command-stop-button"
-              className="text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
+              tone="danger"
             >
               <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
@@ -337,7 +337,7 @@ export function CommandOutputBlock({
             size="xs"
             radius="full"
             onPress={() => void handleCopy()}
-            className="text-slate-500 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
+            tone="muted"
           >
             <Copy className="h-3.5 w-3.5" aria-hidden="true" />
           </IconButton>
@@ -347,7 +347,7 @@ export function CommandOutputBlock({
             size="xs"
             radius="full"
             onPress={() => setViewerOpen(true)}
-            className="text-slate-500 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
+            tone="muted"
           >
             <Eye className="h-3.5 w-3.5" aria-hidden="true" />
           </IconButton>
@@ -406,7 +406,7 @@ export function CommandOutputBlock({
                   size="sm"
                   radius="full"
                   onPress={() => void handleCopy()}
-                  className="text-slate-500 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white"
+                  tone="muted"
                 >
                   <Copy className="h-4 w-4" aria-hidden="true" />
                 </IconButton>
@@ -416,7 +416,7 @@ export function CommandOutputBlock({
                   size="sm"
                   radius="full"
                   onPress={closeViewer}
-                  className="text-slate-500 hover:text-slate-900 dark:text-slate-200 dark:hover:text-white"
+                  tone="muted"
                 >
                   <Xmark className="h-4 w-4" aria-hidden="true" />
                 </IconButton>

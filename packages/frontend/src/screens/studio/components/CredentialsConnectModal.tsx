@@ -11,6 +11,7 @@ import { NavArrowLeft } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import {
@@ -298,9 +299,9 @@ export function CredentialsConnectModal({
       ) : connectModalStep === "codex" ? (
         <div className="space-y-3" data-testid="credentials-codex-card">
           {deviceAuthError ? (
-            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200">
+            <InlineNotice tone="danger" role="alert">
               {deviceAuthError}
-            </div>
+            </InlineNotice>
           ) : null}
 
           <div className="flex flex-wrap items-center justify-between gap-2">

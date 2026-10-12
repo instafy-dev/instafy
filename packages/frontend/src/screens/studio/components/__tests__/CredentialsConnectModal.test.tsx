@@ -110,6 +110,16 @@ describe("CredentialsConnectModal", () => {
     vi.clearAllMocks();
   });
 
+  it("announces a failed connection while keeping its retry action available", async () => {
+    const props = createProps({ connectModalStep: "codex", deviceAuthError: "The connection expired. Try again." });
+    await act(async () => root.render(<CredentialsConnectModal {...props} />));
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe("The connection expired. Try again.");
+    const connect = document.querySelector<HTMLButtonElement>('[data-testid="credentials-connect-codex"]');
+    expect(connect).not.toBeNull();
+    await act(async () => connect?.click());
+    expect(props.onConnectCodex).toHaveBeenCalledOnce();
+  });
+
   it("keeps the phone key field and selection mounted while its keyboard viewport changes", async () => {
     mockDesktopWidth(false);
     const viewport = Object.assign(new EventTarget(), {

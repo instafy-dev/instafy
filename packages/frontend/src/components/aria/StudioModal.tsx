@@ -22,6 +22,11 @@ const OVERLAY_APPEARANCE_CLASSES: Record<StudioDialogAppearance, string> = {
 };
 
 export type StudioDialogBackdrop = "standard" | "opaque";
+export type StudioDialogLayout = "default" | "editor";
+
+const EDITOR_MODAL_CLASS =
+  "max-h-[calc(100dvh-max(var(--instafy-safe-area-inset-top,0px),1rem)-max(var(--instafy-safe-area-inset-bottom,0px),1rem))] overflow-hidden";
+const EDITOR_DIALOG_CLASS = "flex max-h-[inherit] min-h-0 flex-col";
 
 const MODAL_APPEARANCE_CLASSES: Record<StudioDialogAppearance, string> = {
   default:
@@ -35,6 +40,8 @@ interface StudioDialogModalProps extends ModalOverlayProps {
   onNativeBack?: () => void;
   appearance?: StudioDialogAppearance;
   backdrop?: StudioDialogBackdrop;
+  /** Bounded header/body/footer layout. Pair with a scrollable StudioDialogBody. */
+  layout?: StudioDialogLayout;
   modalClassName?: ModalOverlayProps["className"];
   modalStyle?: CSSProperties;
   dialogClassName?: string;
@@ -48,6 +55,7 @@ export function StudioDialogModal({
   onNativeBack,
   appearance = "default",
   backdrop = "standard",
+  layout = "default",
   className,
   modalClassName,
   modalStyle,
@@ -81,12 +89,12 @@ export function StudioDialogModal({
       <Modal
         style={modalStyle}
         className={composeRenderProps(modalClassName, (value) =>
-          `${MODAL_BASE} ${MODAL_APPEARANCE_CLASSES[appearance]}${value ? ` ${value}` : ""}`
+          [MODAL_BASE, MODAL_APPEARANCE_CLASSES[appearance], layout === "editor" ? EDITOR_MODAL_CLASS : "", value].filter(Boolean).join(" ")
         )}
       >
         <Dialog
           ref={dialogRef}
-          className={`outline-none${dialogClassName ? ` ${dialogClassName}` : ""}`}
+          className={["outline-none", layout === "editor" ? EDITOR_DIALOG_CLASS : "", dialogClassName].filter(Boolean).join(" ")}
           aria-label={normalizedDialogLabel}
           aria-labelledby={normalizedDialogLabelledBy}
         >

@@ -1,5 +1,49 @@
 # Settings navigation and surfaces
 
+## Shared component contracts
+
+Screens own arrangement: widths, grid/flex placement, gaps, wrapping and truncation.
+Shared components own typography, palettes, corners, interaction states and touch targets.
+Use an existing appearance prop before supplying color, padding or font overrides. Repeated
+visual overrides in two or more real consumers are a reason to improve the shared component.
+Do not rely on the order of Tailwind class strings to override a preset; generated CSS order
+determines the winner. Arbitrary layout classes remain supported.
+
+- `Button` and `IconButton` adapt to the primary pointer: fine pointers keep compact
+  sizes at every width; coarse pointers keep at least 44px targets. Resizing a desktop
+  window alone does not enlarge its buttons. `variant="text"` is the inline action treatment. Quiet actions (`ghost`, `outline`, `text`) use `tone`
+  (`neutral`, `muted`, `accent`, `danger`) for their complete normal/hover/pressed palette.
+  Filled actions keep their existing variants. Avoid nested color spans, `!text-*` workarounds
+  and locally reconstructed destructive hover states.
+- `Input` and both native/styled `Select` share medium defaults and control size tokens.
+  `Field label` plus matching `htmlFor`/control `id` also labels app-rendered selects;
+  explicit ARIA labels remain authoritative. `Checkbox` owns its interaction target
+  independently of the visible 16/20px box. Parent
+  layouts must allow that target to grow on narrow or touch screens.
+- Provider, credential and model pickers use `FormPickerTrigger` and `FormPickerPopover`.
+  Their feature-specific choices and actions remain in each picker. Connect visible field
+  labels using a trigger `id`/`htmlFor` or a label ID/`aria-labelledby`.
+- Scrolling editors use `StudioDialogModal layout="editor"`, a `StudioDialogHeader`,
+  `StudioDialogBody scrollable` and `StudioDialogFooter`. The shared shell owns viewport
+  bounds and scrolling; callers may choose width and supply their form contents. Mobile
+  full-screen editors keep their existing `ResponsiveDialogSurface` behavior.
+- Use semantic `Text` variants for compact headings and descriptions rather than adding
+  competing font-size/line-height classes. `InlineNotice` owns severity styling and accepts
+  an `actions` slot. Its `density` selects compact or comfortable copy. Shared success,
+  information, warning and danger colors come from the same semantic definitions.
+- Use `SegmentedControl` for a mutually exclusive value. Reusing its CSS on separate buttons
+  omits its radio-group and arrow-key behavior. Navigation tabs keep their navigation semantics.
+
+The local component reference at `/tests/fixtures/component-system/index.html` runs against
+the Vite dev server. It mounts production components with inert local state and no backend
+session; it is not a product route or a production build entrypoint. Use it to inspect both
+themes, widths, control states and a scrolling editor together. The component browser tests
+`component-system-reference.spec.ts` and `button-appearance-responsive.spec.ts` check rendered
+sizes, selection/focus, interaction palettes and pending states. Extend those contracts when
+adding a shared variant rather than locking a one-off screen override into a test.
+
+## Navigation
+
 Settings pages use `SettingsShell` so their navigation follows the available content width,
 including when Studio has another panel open.
 
@@ -16,9 +60,22 @@ including when Studio has another panel open.
   headings remain visible. Wide category lists retain the content heading beside them.
 
 Skills has a single flat installed list without category tabs or an enclosing card. Its
-primary Connect a tool action opens the same selected tools as the composer. Import custom
-skill remains a secondary action in the list header, or beside the empty state when empty;
-external catalogs are not advertised in this flow.
+heading and primary Connect a tool action share one toolbar; compact layouts shorten the
+visible action to Connect. The adjacent More skill actions menu contains custom import,
+refresh, and Restore defaults when the list is confirmed empty. A failed load has one
+inline Retry action instead of another refresh control. External catalogs are not
+advertised in this flow.
+
+Workspace read failures share one compact status strip beneath the space header. A failed
+Files, Skills or Changes/History read asks the shared availability owner to check the active
+file origin; only a confirmed connection, access or unavailable-origin response replaces
+the local recovery notice. Missing paths, invalid documents and operation-specific errors
+stay local. A stopped compute machine alone does not mean files are unavailable.
+The strip provides one Retry action, rechecks connection failures with bounded backoff,
+and refreshes affected read views after recovery without replaying writes. Previously
+loaded lists remain visible with a stale-data label; remote mutations pause while editor
+and creation drafts remain editable. The state is scoped to the signed-in account, space
+and file route, and never carries an outage into another space or Home/personal settings.
 
 Your settings has Profile, Appearance, Notifications and Advanced categories.
 Its header is account-wide on both desktop and mobile: **Your settings**, a return action,

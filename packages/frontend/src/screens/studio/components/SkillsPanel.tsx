@@ -1,8 +1,6 @@
 import { useActiveWorkspaceVersioning } from "../../../workspace/useActiveWorkspaceVersioning";
+import { useWorkspaceAvailability } from "../../../workspace/WorkspaceAvailabilityProvider";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Refresh } from "iconoir-react";
-import { Button, IconButton } from "../../../components/Button";
-import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { humanizeSkillName } from "../../../conversations/skillCommands";
 import { useConversation } from "../../../conversations/useConversation";
@@ -428,6 +426,7 @@ function parseSkillDocumentDetails(markdown: string): SkillDocumentDetails {
 
 export function SkillsPanel() {
   const { activeProjectId } = useProject();
+  const { issue: workspaceIssue, reportFailure, recoveryVersion } = useWorkspaceAvailability();
   const { effectiveRuntimeId } = useRuntime();
   const { showStatus } = useStatus();
   // On the stateless gateway and Desktop origins, reads and writes use the
@@ -453,6 +452,9 @@ export function SkillsPanel() {
   const guardNavigation = useStudioGuardedNavigation();
 
   const [skills, setSkills] = useState<SkillItem[]>([]);
+  const skillsScope = JSON.stringify([activeProjectId, readsVersioning, effectiveRuntimeId]);
+  const [loadedSkillsScope, setLoadedSkillsScope] = useState<string | null>(null);
+  const visibleSkills = loadedSkillsScope === skillsScope ? skills : [];
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bootstrapPending, setBootstrapPending] = useState(false);
@@ -467,7 +469,7 @@ export function SkillsPanel() {
       const directoryEntries = await workspaceReads.list(projectId, directoryPath);
 
       if (!directoryEntries) {
-        return null;
+        throw new Error(`Couldn’t read the ${directoryName} skill.`);
       }
 
       const enabledEntry = directoryEntries.find(
@@ -487,7 +489,8 @@ export function SkillsPanel() {
       const disabledPath = `${directoryPath}/${DISABLED_SKILL_FILE_NAME}`;
       const filePath = status === "enabled" ? enabledPath : disabledPath;
 
-      const content = (await workspaceReads.readText(projectId, filePath)) ?? "";
+      const content = await workspaceReads.readText(projectId, filePath);
+      if (content === null) throw new Error(`Couldn’t read the ${directoryName} skill.`);
       const parsed = parseSkillDocumentDetails(content);
       const title = parsed.headingTitle ?? parsed.frontmatterName ?? humanizeSkillName(directoryName);
       const description = parsed.summaryParagraph ?? parsed.frontmatterDescription ?? null;
@@ -520,7 +523,7 @@ export function SkillsPanel() {
     [workspaceReads],
   );
 
-  const loadSkills = useCallback(async () => {
+  const loadSkills = useCallback(async (preserveError = false) => {
     const projectId = activeProjectId?.trim() ?? "";
     if (!projectId) {
       setSkills([]);
@@ -532,7 +535,7 @@ export function SkillsPanel() {
     const currentVersion = loadVersionRef.current + 1;
     loadVersionRef.current = currentVersion;
     setLoading(true);
-    setError(null);
+    if (!preserveError) setError(null);
 
     try {
       const rootEntries = await workspaceReads.list(projectId, SKILLS_ROOT_PATH);
@@ -565,6 +568,7 @@ export function SkillsPanel() {
         });
 
       setSkills(nextSkills);
+      setLoadedSkillsScope(skillsScope);
       setError(null);
     } catch (loadError) {
       if (loadVersionRef.current !== currentVersion) {
@@ -572,18 +576,26 @@ export function SkillsPanel() {
       }
       const message =
         loadError instanceof Error ? loadError.message : "Failed to load skills.";
-      setSkills([]);
       setError(message);
+      reportFailure();
     } finally {
       if (loadVersionRef.current === currentVersion) {
         setLoading(false);
       }
     }
-  }, [activeProjectId, loadSkillFromDirectory, workspaceReads]);
+  }, [activeProjectId, loadSkillFromDirectory, workspaceReads, reportFailure, skillsScope]);
 
   useEffect(() => {
     void loadSkills();
+    return () => { loadVersionRef.current += 1; };
   }, [loadSkills]);
+
+  const previousRecoveryVersion = useRef(recoveryVersion);
+  useEffect(() => {
+    const recovered = recoveryVersion > previousRecoveryVersion.current;
+    previousRecoveryVersion.current = recoveryVersion;
+    if (recovered) void loadSkills(true);
+  }, [recoveryVersion, loadSkills]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -861,49 +873,21 @@ export function SkillsPanel() {
   };
 
   return (
-    <SettingsShell
-      testId="skills-panel"
-      title="Skills"
-      actions={
-        <div className="flex items-center gap-2">
-          <IconButton
-            variant="outline"
-            size="sm"
-            radius="full"
-            onPress={() => void loadSkills()}
-            isDisabled={!hasProject || loading}
-            data-testid="skills-refresh"
-            aria-label="Refresh skills"
-            title="Refresh skills"
-          >
-            {loading ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : <Refresh className="h-4 w-4" aria-hidden="true" />}
-          </IconButton>
-          <Button
-            variant="primary"
-            size="sm"
-            radius="xl"
-            onPress={handleConnectTool}
-            isDisabled={!hasProject}
-            data-testid="skills-connect-tool"
-          >
-            <Plus className="h-4 w-4" aria-hidden="true" />
-            Connect a tool
-          </Button>
-        </div>
-      }
-    >
+    <SettingsShell testId="skills-panel" title="Skills">
       <InstalledSkillsSection
         hasProject={hasProject}
         loading={loading}
-        skills={skills}
+        skills={visibleSkills}
         error={error}
+        workspaceUnavailable={workspaceIssue !== null}
         bootstrapPending={bootstrapPending}
         brokenSkillIcons={brokenSkillIcons}
         togglePendingSkillId={togglePendingSkillId}
         uninstallPendingSkillId={uninstallPendingSkillId}
         onReload={() => {
-          void loadSkills();
+          void loadSkills(true);
         }}
+        onConnectTool={handleConnectTool}
         onBootstrapSkills={() => {
           void handleBootstrapSkills();
         }}
@@ -935,11 +919,13 @@ export function SkillsPanel() {
         importOverwrite={importOverwrite}
         onImportOverwriteChange={setImportOverwrite}
         hasProject={hasProject}
+        workspaceUnavailable={workspaceIssue !== null}
         onBrowseSkills={() => guardNavigation(() => {
           setAddSkillModalOpen(false);
           handleConnectTool();
         })}
         onSubmitImport={() => {
+          if (workspaceIssue) return;
           void handleSubmitImport({ closeModalOnSuccess: true });
         }}
       />

@@ -1,4 +1,5 @@
-import { MoreHoriz, NavArrowRight, Plus, Puzzle, Trash } from "iconoir-react";
+import { MoreHoriz, NavArrowRight, Plus, Puzzle, Refresh, Trash } from "iconoir-react";
+import { useLayoutEffect, useRef } from "react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { LoadingStatus } from "../../../components/LoadingStatus";
@@ -28,12 +29,14 @@ type InstalledSkillsSectionProps = {
   loading: boolean;
   skills: InstalledSkillsSectionSkill[];
   error: string | null;
+  workspaceUnavailable?: boolean;
   bootstrapPending: boolean;
   brokenSkillIcons: Record<string, true>;
   togglePendingSkillId: string | null;
   uninstallPendingSkillId: string | null;
   onReload: () => void;
   onBootstrapSkills: () => void;
+  onConnectTool: () => void;
   onOpenAddSkillModal: () => void;
   onMarkSkillIconBroken: (skillId: string) => void;
   onToggleSkill: (skill: InstalledSkillsSectionSkill, enabled: boolean) => void;
@@ -46,12 +49,14 @@ export function InstalledSkillsSection({
   loading,
   skills,
   error,
+  workspaceUnavailable = false,
   bootstrapPending,
   brokenSkillIcons,
   togglePendingSkillId,
   uninstallPendingSkillId,
   onReload,
   onBootstrapSkills,
+  onConnectTool,
   onOpenAddSkillModal,
   onMarkSkillIconBroken,
   onToggleSkill,
@@ -59,69 +64,89 @@ export function InstalledSkillsSection({
   onOpenSkillFile,
 }: InstalledSkillsSectionProps) {
   const isLargeScreen = useStudioDesktopLayout();
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const retryFocused = useRef(false);
+  useLayoutEffect(() => {
+    // Successful recovery removes Retry. Keep keyboard users at this section,
+    // but never move focus if they left the control while the request ran.
+    if ((!error || workspaceUnavailable) && retryFocused.current && document.activeElement === document.body) {
+      const destination = workspaceUnavailable
+        ? document.querySelector<HTMLElement>('[data-testid="workspace-availability-retry"]')
+        : sectionRef.current?.querySelector<HTMLHeadingElement>("h2");
+      destination?.focus({ preventScroll: true });
+    }
+    if (!error || workspaceUnavailable) retryFocused.current = false;
+  }, [error, workspaceUnavailable]);
   return (
-    <section className="min-w-0 space-y-4" aria-label="Installed skills">
-      <div className="flex items-start justify-between gap-3">
-        <Text as="h2" variant="bodyStrong" tone="primary">
+    <section ref={sectionRef} className="min-w-0 space-y-4" aria-label="Installed skills">
+      <div className="flex items-center justify-between gap-2" data-testid="skills-toolbar">
+        <Text as="h2" variant="bodyStrong" tone="primary" className="min-w-0" tabIndex={-1}>
           Installed skills
         </Text>
-        {skills.length > 0 || error ? (
-          <Button variant="outline" size="sm" radius="xl" onPress={onOpenAddSkillModal}
-            isDisabled={!hasProject} className="shrink-0" data-testid="skills-new">
-            Import custom skill
+        <div className="flex shrink-0 items-center gap-1">
+          <Button variant="primary" size="sm" radius="xl" onPress={onConnectTool}
+            isDisabled={!hasProject}
+            aria-label="Connect a tool" data-testid="skills-connect-tool">
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            <span className="@min-[36rem]/settings-content:hidden">Connect</span>
+            <span className="hidden @min-[36rem]/settings-content:inline">Connect a tool</span>
           </Button>
-        ) : null}
+          <MenuTrigger>
+            <IconButton variant="ghost" size="sm" radius="lg" isDisabled={!hasProject}
+              aria-label="More skill actions" data-testid="skills-actions">
+              <MoreHoriz className="h-5 w-5" aria-hidden="true" />
+            </IconButton>
+            <StudioPopover placement="bottom end">
+              <StudioMenu aria-label="Skill actions">
+                <StudioMenuItem id="import" onAction={onOpenAddSkillModal} isDisabled={workspaceUnavailable} data-testid="skills-new">
+                  <MenuItemContent start={<Plus aria-hidden="true" />}>Import custom skill</MenuItemContent>
+                </StudioMenuItem>
+                {!error && !workspaceUnavailable ? <StudioMenuItem id="refresh" onAction={onReload} isDisabled={loading} data-testid="skills-refresh">
+                  <MenuItemContent start={<Refresh aria-hidden="true" />}>Refresh skills</MenuItemContent>
+                </StudioMenuItem> : null}
+                {!loading && !error && !workspaceUnavailable && skills.length === 0 ? <StudioMenuItem id="restore" onAction={onBootstrapSkills}
+                  isDisabled={bootstrapPending} data-testid="skills-bootstrap">
+                  Restore defaults
+                </StudioMenuItem> : null}
+              </StudioMenu>
+            </StudioPopover>
+          </MenuTrigger>
+        </div>
       </div>
       <Text variant="caption" tone="muted">
         Instructions available to the AI in this space.
       </Text>
+      {loading && skills.length > 0 && !error ? <LoadingStatus>Refreshing skills…</LoadingStatus> : null}
+      {workspaceUnavailable && skills.length > 0 ? <Text variant="caption" tone="muted">Showing the last loaded skills.</Text> : null}
 
       {!hasProject ? (
         <Text variant="caption" tone="muted">
           Select a space to manage skills.
         </Text>
-      ) : loading && skills.length === 0 ? (
-        <LoadingStatus>Loading skills…</LoadingStatus>
-      ) : error ? (
-        <div className="space-y-2">
-          <Text variant="caption" tone="muted">
+      ) : error && !workspaceUnavailable ? (
+        <div className="flex items-center gap-2" data-testid="skills-load-error">
+          <Text as="p" variant="caption" tone="muted" className="min-w-0" role="status">
             {error}
           </Text>
-          <Button variant="outline" size="sm" radius="xl" onPress={onReload}>
+          <Button variant="text" tone="muted" size="sm" radius="lg" onPress={onReload} isPending={loading}
+            onFocus={() => { retryFocused.current = true; }}
+            onBlur={(event) => { if (event.currentTarget.isConnected) retryFocused.current = false; }}
+            className="shrink-0" data-testid="skills-retry">
             Retry
           </Button>
         </div>
+      ) : workspaceUnavailable && skills.length === 0 ? null : loading && skills.length === 0 ? (
+        <LoadingStatus>Loading skills…</LoadingStatus>
       ) : skills.length === 0 ? (
         <div className="space-y-3">
           <Text variant="caption" tone="muted">
             No installed skills yet.
           </Text>
-          <Text variant="caption" tone="muted">
-            Choose Connect a tool for guided setup, or import your own skill.
-          </Text>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              radius="xl"
-              onPress={onBootstrapSkills}
-              isDisabled={bootstrapPending}
-              data-testid="skills-bootstrap"
-            >
-              {bootstrapPending ? <Spinner tone="primary" size="sm" aria-hidden="true" /> : null}
-              Restore defaults
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              radius="xl"
-              onPress={onOpenAddSkillModal}
-              data-testid="skills-empty-new"
-            >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-              Import custom skill
-            </Button>
-          </div>
+          {bootstrapPending ? <LoadingStatus>Restoring defaults…</LoadingStatus> : (
+            <Text variant="caption" tone="muted">
+              Connect a tool for guided setup, or import your own skill from the menu above.
+            </Text>
+          )}
         </div>
       ) : (
         <div className="divide-y divide-slate-200 dark:divide-slate-800" data-testid="skills-list">
@@ -163,8 +188,8 @@ export function InstalledSkillsSection({
                           onPress={() => onOpenSkillFile(skill)}
                           aria-label={`Open ${skill.title}`}
                           title="Open skill file"
-                          isDisabled={togglePendingSkillId !== null || uninstallPendingSkillId !== null}
-                          className="min-w-0 max-w-full text-left pointer-coarse:min-h-11"
+                          isDisabled={workspaceUnavailable || togglePendingSkillId !== null || uninstallPendingSkillId !== null}
+                          className="max-w-full text-left"
                           data-testid={`skills-open-file-${skill.slug}`}
                         >
                           <Text as="span" variant="bodyStrong" tone="primary" className="line-clamp-2 break-words">
@@ -184,6 +209,7 @@ export function InstalledSkillsSection({
                       isSelected={skill.status === "enabled"}
                       onChange={(nextSelected) => onToggleSkill(skill, nextSelected)}
                       isDisabled={
+                        workspaceUnavailable ||
                         uninstallPendingSkillId !== null ||
                         (togglePendingSkillId !== null && togglePendingSkillId !== skill.id)
                       }
@@ -197,8 +223,9 @@ export function InstalledSkillsSection({
                         onPress={() => onUninstallSkill(skill)}
                         aria-label={`Uninstall ${skill.title}`}
                         title="Uninstall skill"
-                        className="text-rose-500 hover:text-rose-600 data-[hovered]:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200 dark:data-[hovered]:text-rose-200"
+                        tone="danger"
                         isDisabled={
+                          workspaceUnavailable ||
                           togglePendingSkillId !== null ||
                           (uninstallPendingSkillId !== null && uninstallPendingSkillId !== skill.id)
                         }
@@ -215,7 +242,7 @@ export function InstalledSkillsSection({
                         onPress={() => onOpenSkillFile(skill)}
                         aria-label={`Open ${skill.title}`}
                         title="Open skill file"
-                        isDisabled={togglePendingSkillId !== null || uninstallPendingSkillId !== null}
+                        isDisabled={workspaceUnavailable || togglePendingSkillId !== null || uninstallPendingSkillId !== null}
                         data-testid={`skills-open-file-${skill.slug}`}
                       >
                         <NavArrowRight className="h-4 w-4" aria-hidden="true" />
@@ -241,10 +268,10 @@ export function InstalledSkillsSection({
                               if (key === "uninstall") onUninstallSkill(skill);
                             }}
                           >
-                            <StudioMenuItem id="open" textValue="Open skill file" className="pointer-coarse:min-h-11">
+                            <StudioMenuItem id="open" isDisabled={workspaceUnavailable} textValue="Open skill file">
                               <MenuItemContent start={<NavArrowRight aria-hidden="true" />}>Open skill file</MenuItemContent>
                             </StudioMenuItem>
-                            <StudioMenuItem id="uninstall" textValue="Uninstall skill" data-testid={`skills-uninstall-${skill.slug}`} className="pointer-coarse:min-h-11">
+                            <StudioMenuItem id="uninstall" isDisabled={workspaceUnavailable} textValue="Uninstall skill" data-testid={`skills-uninstall-${skill.slug}`}>
                               <MenuItemContent start={<Trash aria-hidden="true" />} textClassName="text-rose-600 dark:text-rose-400">Uninstall skill</MenuItemContent>
                             </StudioMenuItem>
                           </StudioMenu>

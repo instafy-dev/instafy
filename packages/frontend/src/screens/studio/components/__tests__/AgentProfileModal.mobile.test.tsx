@@ -72,6 +72,8 @@ describe("agent model editing on phones", () => {
     expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
     expect(document.querySelector('[role="dialog"]')!.parentElement!.style.width).toBe("390px");
     expect(document.querySelector('[data-studio-popover]')).toBeNull();
+    const modelChoices = document.querySelector('[role="listbox"]')!;
+    expect(document.getElementById(modelChoices.getAttribute("aria-labelledby")!)?.textContent).toBe("Model");
     await choose("Reasoning");
     expect(onModelChange).toHaveBeenLastCalledWith("reasoning");
     expect(document.querySelector('[role="option"][aria-selected="true"]')?.textContent).toBe("Reasoning");
@@ -175,6 +177,8 @@ describe("agent model editing on phones", () => {
     expect(document.querySelector('[role="listbox"]')).toBeNull();
     expect(document.querySelector('[role="dialog"]')!.parentElement!.style.width).toBe("");
     const trigger = document.querySelector<HTMLButtonElement>('[data-testid="agent-profile-model-select"]')!;
+    expect(trigger.labels?.[0].textContent).toBe("Model");
+    expect(document.getElementById(trigger.getAttribute("aria-labelledby")!)?.textContent).toBe("Model");
     await act(async () => trigger.click());
     expect(document.querySelector('[data-studio-popover]')).not.toBeNull();
     await typeCustom("  desktop-model  ");

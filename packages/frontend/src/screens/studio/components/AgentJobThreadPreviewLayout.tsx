@@ -82,12 +82,6 @@ const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 const COMMAND_SURFACE_CLASS =
   "rounded-xl bg-slate-950/[0.02] ring-1 ring-inset ring-slate-900/10 dark:bg-white/[0.035] dark:ring-white/[0.08]";
 const COMMAND_SURFACE_DIVIDER_CLASS = "border-t border-slate-900/10 dark:border-white/[0.08]";
-// Ghost glyphs inside the command surface: no hover or pressed circle tint,
-// the surface already carries its own hover fill.
-const COMMAND_SURFACE_GLYPH_BUTTON_CLASS =
-  "text-slate-500 opacity-100 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent data-[pressed]:bg-transparent dark:text-slate-300 dark:hover:bg-transparent dark:hover:text-slate-100 dark:data-[hovered]:bg-transparent dark:data-[pressed]:bg-transparent";
-const COMMAND_SURFACE_STOP_BUTTON_CLASS =
-  "hover:bg-transparent data-[hovered]:bg-transparent data-[pressed]:bg-transparent dark:hover:bg-transparent dark:data-[hovered]:bg-transparent dark:data-[pressed]:bg-transparent";
 // The collapsed command row may trail a short result hint ("→ 220a9ff"); a
 // longer result is not a hint, so the row stays quiet instead of truncating.
 const COMMAND_RESULT_HINT_MAX_CHARS = 24;
@@ -937,7 +931,8 @@ export function AgentJobThreadPreviewLayout({
                 onPress={handleCancelRun}
                 isDisabled={cancelRunPending}
                 data-testid="chat-command-stop-button"
-                className="ml-1 text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
+                tone="danger"
+                className="ml-1"
               >
                 <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
               </IconButton>
@@ -1019,7 +1014,8 @@ export function AgentJobThreadPreviewLayout({
                 onPress={handleCancelRun}
                 isDisabled={cancelRunPending}
                 data-testid="chat-command-stop-button"
-                className="ml-1 text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
+                tone="danger"
+                className="ml-1"
               >
                 <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
               </IconButton>
@@ -1604,15 +1600,13 @@ export function AgentJobThreadPreviewLayout({
                   {canCancelTerminalRun ? (
                     <IconButton
                       aria-label="Stop run"
-                      variant="ghost"
+                      variant={singleCompactEventIsCommand ? "text" : "ghost"}
                       size="xs"
                       radius="full"
                       onPress={handleCancelRun}
                       isDisabled={cancelRunPending}
                       data-testid="chat-command-stop-button"
-                      className={`text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200 ${
-                        singleCompactEventIsCommand ? COMMAND_SURFACE_STOP_BUTTON_CLASS : ""
-                      }`}
+                      tone="danger"
                     >
                       <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
                     </IconButton>
@@ -1620,12 +1614,12 @@ export function AgentJobThreadPreviewLayout({
                   {showCommandPanelCopy ? (
                     <IconButton
                       aria-label="Copy output"
-                      variant="ghost"
+                      variant="text"
+                      tone="muted"
                       size="xs"
                       radius="full"
                       onPress={() => void copyLatestCommandOutput()}
                       data-testid="agent-thread-command-copy-output"
-                      className={COMMAND_SURFACE_GLYPH_BUTTON_CLASS}
                     >
                       <Copy aria-hidden="true" className="h-3.5 w-3.5" />
                     </IconButton>
@@ -1636,18 +1630,15 @@ export function AgentJobThreadPreviewLayout({
                         ? "Collapse run updates"
                         : "Expand run updates"
                     }
-                    variant="ghost"
+                    variant={singleCompactEventIsCommand ? "text" : "ghost"}
+                    tone="muted"
                     size="xs"
                     radius="full"
                     onPress={singleCompactEventIsCommand ? handleToggleCommandPanel : onToggleThreadPreview}
                     className={
-                      singleCompactEventIsCommand
-                        ? COMMAND_SURFACE_GLYPH_BUTTON_CLASS
-                        : `text-slate-400 hover:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 ${
-                            isThreadPreviewExpanded
-                              ? "opacity-100"
-                              : "opacity-0 group-hover:opacity-90 group-focus-within:opacity-90"
-                          }`
+                      singleCompactEventIsCommand || isThreadPreviewExpanded
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-90 group-focus-within:opacity-90"
                     }
                   >
                     {(singleCompactEventIsCommand ? effectivePanelExpanded : isThreadPreviewExpanded) ? (

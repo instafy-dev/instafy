@@ -35,6 +35,8 @@ export function DesktopChangesLine({
   onNotice,
   onCommitted,
   onFocusFallback,
+  workspaceUnavailable = false,
+  onWorkspaceReadFailure,
 }: {
   projectId: string;
   originId: string;
@@ -48,7 +50,11 @@ export function DesktopChangesLine({
   onCommitted: (rev: string | null) => void;
   /** Focus a stable place when the line hides under the keyboard. */
   onFocusFallback?: () => void;
+  workspaceUnavailable?: boolean;
+  onWorkspaceReadFailure?: () => void;
 }) {
+  const workspaceUnavailableRef = useRef(workspaceUnavailable);
+  workspaceUnavailableRef.current = workspaceUnavailable;
   const [count, setCount] = useState<number | null>(null);
   const [statusFailed, setStatusFailed] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -63,6 +69,7 @@ export function DesktopChangesLine({
 
   /** Resolves to the count it showed, or null when this check was dropped or failed. */
   const check = useCallback(async (): Promise<number | null> => {
+    if (workspaceUnavailableRef.current) return null;
     const seq = ++checkSeqRef.current;
     const status = await controllerClient.workspace.git
       .fetchStatus({ projectId, originId, routing: "default", limit: 1 })
@@ -74,6 +81,7 @@ export function DesktopChangesLine({
       return null;
     }
     if (!status || (status.supported && status.error)) {
+      onWorkspaceReadFailure?.();
       setStatusFailed(true);
       return null;
     }
@@ -84,7 +92,7 @@ export function DesktopChangesLine({
     countRef.current = next;
     setCount(next);
     return next;
-  }, [originId, projectId]);
+  }, [onWorkspaceReadFailure, originId, projectId]);
 
   useEffect(() => {
     void check();
@@ -169,7 +177,7 @@ export function DesktopChangesLine({
   // Retry), the control that had focus is gone with the old shape: the line
   // takes it to Save as version, the error row to Retry, and a hidden line
   // to the drawer's fallback (the Saved versions heading).
-  const shape: LineShape = statusFailed ? "error" : count ? "line" : "hidden";
+  const shape: LineShape = statusFailed && !workspaceUnavailable ? "error" : count ? "line" : "hidden";
   const shapeRef = useRef<LineShape>("hidden");
   useEffect(() => {
     const previous = shapeRef.current;

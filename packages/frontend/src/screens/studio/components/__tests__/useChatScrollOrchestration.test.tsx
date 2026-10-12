@@ -163,17 +163,18 @@ function AnchorHarness({
     messages,
   });
   onController?.(controller);
+  const { setAutoScrollSuspended, shouldAutoScrollRef, scrollToBottom } = controller;
   const wasMobileAnchored = useRef(false);
   useLayoutEffect(() => {
-    controller.setAutoScrollSuspended(mobileAnchor);
+    setAutoScrollSuspended(mobileAnchor);
     if (mobileAnchor) {
       wasMobileAnchored.current = true;
     } else if (wasMobileAnchored.current) {
       wasMobileAnchored.current = false;
-      controller.shouldAutoScrollRef.current = true;
-      controller.scrollToBottom({ behavior: "auto" });
+      shouldAutoScrollRef.current = true;
+      scrollToBottom({ behavior: "auto" });
     }
-  }, [mobileAnchor, controller.setAutoScrollSuspended, controller.shouldAutoScrollRef, controller.scrollToBottom]);
+  }, [mobileAnchor, setAutoScrollSuspended, shouldAutoScrollRef, scrollToBottom]);
   useChatAutoScrollSync({
     ...controller,
     displayedMessages: messages,

@@ -1588,16 +1588,16 @@ export function IntegrationRequestEntry({
                 GitHub connected
               </Text>
               {connectedDescription ? (
-                <Text as="div" variant="caption" tone="muted" className="mt-0.5 text-sm leading-5">
+                <Text as="div" variant="bodyCompact" tone="muted" className="mt-0.5">
                   {connectedDescription}
                 </Text>
               ) : null}
               {retryError ? (
                 <Text
                   as="div"
-                  variant="caption"
-                  tone="inherit"
-                  className="mt-1 text-sm leading-5 text-rose-600 dark:text-rose-300"
+                  variant="bodyCompact"
+                  tone="danger"
+                  className="mt-1"
                   data-testid="integration-request-retry-error"
                 >
                   {retryError}

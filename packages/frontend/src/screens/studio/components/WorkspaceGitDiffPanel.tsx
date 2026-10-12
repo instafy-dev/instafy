@@ -3,6 +3,7 @@ import { GitBranch, NavArrowDown, Refresh } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Heading } from "../../../components/Heading";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { controllerClient } from "../../../sdk/instafy";
@@ -456,9 +457,9 @@ export function WorkspaceGitDiffPanel({
             <span>Preparing diff…</span>
           </div>
         ) : diffError ? (
-          <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200">
+          <InlineNotice tone="danger" density="comfortable" role="alert">
             {diffError}
-          </div>
+          </InlineNotice>
         ) : diff.trim().length === 0 ? (
           <Text tone="secondary">No diff available.</Text>
         ) : previewMode === "content" ? (

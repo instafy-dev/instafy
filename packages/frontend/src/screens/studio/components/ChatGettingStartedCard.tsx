@@ -115,14 +115,14 @@ function CollapsedActionButton({
 }) {
   return (
     <Button
-      variant="ghost"
+      variant="text"
+      tone="muted"
       size="xs"
       radius="full"
-      className="px-1 underline-offset-2 hover:underline"
       onPress={onPress}
       data-testid={testId}
     >
-      <span className="text-slate-600 dark:text-slate-300">{label}</span>
+      {label}
     </Button>
   );
 }
@@ -409,16 +409,14 @@ export function ChatGettingStartedCard({
                     <>
                       <span aria-hidden="true">·</span>
                       <Button
-                        variant="ghost"
+                        variant="text"
+                        tone="muted"
                         size="xs"
                         radius="full"
-                        className="px-1 underline-offset-2 hover:underline"
                         onPress={onChangeAiChoice}
                         data-testid="onboarding-change-ai"
                       >
-                        {/* Tone on a span: a text colour on the Button loses to the
-                            ghost variant's text-slate-700 (no tailwind-merge). */}
-                        <span className="text-slate-500 dark:text-slate-400">Change AI</span>
+                        Change AI
                       </Button>
                     </>
                   ) : null}
@@ -469,7 +467,8 @@ export function ChatGettingStartedCard({
                 size="sm"
                 radius="full"
                 onPress={() => onSelectMode("root")}
-                className="gap-1 px-2 text-slate-600 dark:text-slate-300"
+                tone="muted"
+                className="gap-1 px-2"
                 data-testid="onboarding-back-button"
               >
                 <NavArrowLeft className="h-4 w-4" aria-hidden="true" />

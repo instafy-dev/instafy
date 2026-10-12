@@ -740,17 +740,13 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(expandControls).toHaveLength(1);
     const chevron = expandControls[0];
     expect(chevron?.className).toContain("opacity-100");
+    expect(chevron?.className).toContain("bg-transparent");
     expect(chevron?.className).not.toContain("opacity-0");
     // The chevron is a glyph, not a second surface inside the surface — and
     // no hover or pressed circle tint inside the surface either.
     expect(chevron?.className).not.toContain("ring-1");
     expect(chevron?.className).not.toContain("bg-white");
     expect(chevron?.className).not.toMatch(/(^|\s)bg-(?!transparent)/);
-    expect(chevron?.className).toContain("hover:bg-transparent");
-    expect(chevron?.className).toContain("data-[hovered]:bg-transparent");
-    expect(chevron?.className).toContain("dark:hover:bg-transparent");
-    expect(chevron?.className).toContain("data-[pressed]:bg-transparent");
-    expect(chevron?.className).toContain("dark:data-[pressed]:bg-transparent");
   });
 
   function countOccurrences(haystack: string, needle: string): number {
@@ -811,12 +807,10 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(header?.getAttribute("title")).toBe(RAW_COMMAND);
     expect(container.querySelectorAll('button[aria-label="Collapse run updates"]')).toHaveLength(1);
 
-    // Copy lives in the header's trailing cluster while expanded, as a ghost glyph.
+    // Copy lives in the header's trailing cluster while expanded, as an unfilled glyph.
     const copyButton = surface?.querySelector<HTMLButtonElement>('button[aria-label="Copy output"]');
     expect(copyButton).not.toBeNull();
     expect(copyButton?.closest('[data-testid="agent-thread-single-update-row"]')).toBe(row);
-    expect(copyButton?.className).toContain("hover:bg-transparent");
-    expect(copyButton?.className).toContain("data-[hovered]:bg-transparent");
     expect(copyButton?.className).not.toContain("ring-1");
 
     // Nothing in the panel path uses the output toggle handler.
