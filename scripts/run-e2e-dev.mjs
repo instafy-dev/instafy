@@ -16,7 +16,6 @@ import net from "node:net";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
-  DEFAULT_SERVICE_RUNTIME_EMAIL,
   deleteEnvFileValue,
   DEFAULT_SUPABASE_PROJECT_URL,
   ensureServiceRuntimeUserId,
@@ -565,11 +564,9 @@ async function waitForSupabaseAdminReady(
   if (!baseUrl || !serviceRoleKey || typeof fetch !== "function") {
     return false;
   }
-  const probeEmail =
-    (process.env.SERVICE_RUNTIME_USER_EMAIL || DEFAULT_SERVICE_RUNTIME_EMAIL)
-      .trim()
-      .toLowerCase() || DEFAULT_SERVICE_RUNTIME_EMAIL;
-  const healthUrl = `${baseUrl}/auth/v1/admin/users?email=${encodeURIComponent(probeEmail)}`;
+  // A readiness probe only: the list ignores an `email` parameter, so ask for
+  // the smallest page instead of implying a lookup.
+  const healthUrl = `${baseUrl}/auth/v1/admin/users?page=1&per_page=1`;
   const headers = {
     apikey: serviceRoleKey,
     authorization: `Bearer ${serviceRoleKey}`,

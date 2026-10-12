@@ -5,8 +5,115 @@ export const DEFAULT_SERVICE_RUNTIME_EMAIL = "service-runtime@instafy.dev";
 export const DEFAULT_SUPABASE_PROJECT_URL = "http://127.0.0.1:54321";
 
 const WAIT_BETWEEN_REQUESTS_MS = 500;
+const ADMIN_USERS_PER_PAGE = 200;
+const ADMIN_USERS_MAX_PAGES = 50;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export function normalizeAdminUserEmail(value) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+/**
+ * Check one page of `GET /auth/v1/admin/users` for the user whose email is
+ * exactly `wanted` (already normalized). The admin list ignores an `email`
+ * parameter, and its `filter` matches substrings and the user-editable full
+ * name, so being listed proves nothing: only an entry's own email counts.
+ * Throws on a page without a `users` array, a matching entry without a UUID
+ * id, or two different ids with the email; it never falls back to the first
+ * listed user.
+ */
+export function matchAdminUsersPage(payload, wanted) {
+  if (!wanted) {
+    throw new Error("the service runtime email is empty");
+  }
+  const users = payload && Array.isArray(payload.users) ? payload.users : null;
+  if (!users) {
+    throw new Error("the admin user list response has no users array");
+  }
+  let match = null;
+  for (const entry of users) {
+    if (!entry || typeof entry !== "object" || normalizeAdminUserEmail(entry.email) !== wanted) {
+      continue;
+    }
+    if (typeof entry.id !== "string" || !UUID_PATTERN.test(entry.id)) {
+      throw new Error("the admin user list names the service runtime email without a valid id");
+    }
+    if (match && match.id !== entry.id) {
+      throw new Error("several admin users have the service runtime email");
+    }
+    match = entry;
+  }
+  return { listed: users.length, match };
+}
+
+/**
+ * Page through the admin user list, `perPage` users at a time and at most
+ * `maxPages` pages, for the one user whose email is exactly `email`. Resolves
+ * `{ status: "found", user }`, `{ status: "missing" }` once the whole list was
+ * read without a match, or `{ status: "unknown", reason }` for a malformed
+ * page, two holders or a list longer than the cap. Rejects when a page request
+ * fails, so a caller waiting for the stack can retry.
+ */
+export async function findAdminUserByEmail({
+  supabaseUrl,
+  headers,
+  email,
+  fetchImpl = fetch,
+  perPage = ADMIN_USERS_PER_PAGE,
+  maxPages = ADMIN_USERS_MAX_PAGES,
+}) {
+  const wanted = normalizeAdminUserEmail(email);
+  let found = null;
+  for (let page = 1; page <= maxPages; page += 1) {
+    // `filter` only narrows the list; matchAdminUsersPage decides.
+    const query = new URLSearchParams({
+      page: String(page),
+      per_page: String(perPage),
+      filter: wanted,
+    });
+    const response = await fetchImpl(`${supabaseUrl}/auth/v1/admin/users?${query}`, { headers });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`admin user list returned ${response.status} ${response.statusText} ${body}`.trim());
+    }
+    let checked;
+    try {
+      checked = matchAdminUsersPage(await response.json(), wanted);
+    } catch (error) {
+      return { status: "unknown", reason: error instanceof Error ? error.message : String(error) };
+    }
+    if (checked.match) {
+      if (found && found.id !== checked.match.id) {
+        return { status: "unknown", reason: "several admin users have the service runtime email" };
+      }
+      found = checked.match;
+    }
+    if (checked.listed < perPage) {
+      return found ? { status: "found", user: found } : { status: "missing" };
+    }
+  }
+  return {
+    status: "unknown",
+    reason: `the admin user list did not end within ${maxPages} pages of ${perPage} users`,
+  };
+}
+
+/**
+ * The user a `POST /auth/v1/admin/users` response names, accepted only when it
+ * is a single user whose email is exactly `email`.
+ */
+export function createdAdminUser(payload, email) {
+  const wanted = normalizeAdminUserEmail(email);
+  if (!wanted || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  if (normalizeAdminUserEmail(payload.email) !== wanted) {
+    return null;
+  }
+  return typeof payload.id === "string" && UUID_PATTERN.test(payload.id) ? payload : null;
+}
 
 export function setEnvFileValue(filePath, key, value) {
   if (!value) {
@@ -130,59 +237,31 @@ export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
     "content-type": "application/json",
   };
 
-  const parseUserResponse = (payload) => {
-    if (!payload || typeof payload !== "object") return null;
-    if (Array.isArray(payload.users) && payload.users.length > 0) {
-      return payload.users[0];
-    }
-    if (Array.isArray(payload) && payload.length > 0) {
-      return payload[0];
-    }
-    if (payload.id) {
-      return payload;
-    }
-    return null;
-  };
-
-  const queryUrl = `${supabaseUrl}/auth/v1/admin/users?email=${encodeURIComponent(
-    serviceEmail
-  )}`;
-
-  const fetchExistingUser = async (maxAttempts = 8) => {
+  const lookupServiceUser = async (maxAttempts) => {
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       try {
-        const response = await fetch(queryUrl, { headers });
-        if (response.ok) {
-          const payload = await response.json();
-          const record = parseUserResponse(payload);
-          if (record) {
-            return record;
-          }
-          // If the query succeeded but no user exists, stop retrying so we can
-          // create the service runtime user immediately.
-          return null;
-        } else {
-          const body = await response.text().catch(() => "");
-          console.warn(
-            `[runtime-dev] Unable to query service runtime user (attempt ${
-              attempt + 1
-            }): ${response.status} ${response.statusText} ${body}`
-          );
-        }
+        return await findAdminUserByEmail({ supabaseUrl, headers, email: serviceEmail });
       } catch (error) {
         console.warn(
-          `[runtime-dev] Error requesting service runtime user (attempt ${
+          `[runtime-dev] Unable to list users for the service runtime user (attempt ${
             attempt + 1
           }): ${error instanceof Error ? error.message : String(error)}`
         );
       }
       await sleep(WAIT_BETWEEN_REQUESTS_MS);
     }
-    return null;
+    return { status: "unknown", reason: "the admin user list stayed unavailable" };
   };
 
-  let userRecord = await fetchExistingUser();
+  const lookup = await lookupServiceUser(8);
+  if (lookup.status === "unknown") {
+    console.warn(
+      `[runtime-dev] Unable to look up service runtime user ${serviceEmail}: ${lookup.reason}. Adopting and creating no user.`
+    );
+    return null;
+  }
 
+  let userRecord = lookup.status === "found" ? lookup.user : null;
   let created = false;
   if (!userRecord) {
     const createPayload = {
@@ -202,8 +281,16 @@ export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
           console.log(
             "[runtime-dev] Service runtime user already exists; re-querying."
           );
-          userRecord = await fetchExistingUser(6);
-          created = false;
+          const retry = await lookupServiceUser(6);
+          if (retry.status !== "found") {
+            console.warn(
+              `[runtime-dev] Service runtime user ${serviceEmail} exists, but no listed user has that exact email${
+                retry.status === "unknown" ? ` (${retry.reason})` : ""
+              }. Adopting no user.`
+            );
+            return null;
+          }
+          userRecord = retry.user;
         } else {
           console.warn(
             `[runtime-dev] Failed to create service runtime user: ${response.status} ${response.statusText} ${body}`
@@ -211,8 +298,13 @@ export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
           return null;
         }
       } else {
-        const payload = await response.json();
-        userRecord = parseUserResponse(payload);
+        userRecord = createdAdminUser(await response.json(), serviceEmail);
+        if (!userRecord) {
+          console.warn(
+            `[runtime-dev] The create response did not name a user with the email ${serviceEmail}. Adopting no user.`
+          );
+          return null;
+        }
         created = true;
       }
     } catch (error) {
@@ -223,11 +315,6 @@ export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
       );
       return null;
     }
-  }
-
-  if (!userRecord?.id) {
-    console.warn("[runtime-dev] Unable to resolve service runtime user id.");
-    return null;
   }
 
   if (created) {
