@@ -981,6 +981,7 @@ impl CodexClient {
                 None
             };
             let shared_browser_shutdown_confirmation = shared_browser_cancel_signal.clone();
+            let kept_thread = KeptCodexThread::default();
             let result = if on_event.is_none() {
                 // Callback-free production runs own every input needed by execute_inner, so they
                 // can use a fresh task stack. Callback-bearing runs retain the direct path because
@@ -989,6 +990,7 @@ impl CodexClient {
                 let prompt = prompt.to_string();
                 let options = attempt_options;
                 let attempt_observation = usage_attempt.clone();
+                let attempt_kept_thread = kept_thread.clone();
                 run_on_fresh_task(async move {
                     let mut no_event_callback = None;
                     if let Some(cancel_signal) = shared_browser_cancel_signal {
@@ -1001,6 +1003,7 @@ impl CodexClient {
                                 &mut no_event_callback,
                                 options,
                                 attempt_observation,
+                                attempt_kept_thread,
                             ),
                         )
                         .await)
@@ -1012,6 +1015,7 @@ impl CodexClient {
                                 &mut no_event_callback,
                                 options,
                                 attempt_observation,
+                                attempt_kept_thread,
                             ),
                         )
                         .await
@@ -1029,6 +1033,7 @@ impl CodexClient {
                             &mut on_event,
                             attempt_options,
                             usage_attempt.clone(),
+                            kept_thread.clone(),
                         ),
                     )
                     .await)
@@ -1040,6 +1045,7 @@ impl CodexClient {
                             &mut on_event,
                             attempt_options,
                             usage_attempt.clone(),
+                            kept_thread.clone(),
                         ),
                     )
                     .await
@@ -1066,6 +1072,9 @@ impl CodexClient {
                 };
                 observation.finish(outcome);
             }
+            // Outside the run deadline: a turn that finished in time keeps its result, and a
+            // timed-out attempt still releases its thread before the retry resumes it.
+            kept_thread.shut_down().await;
             if shared_browser_shutdown_confirmation
                 .as_ref()
                 .is_some_and(|signal| !signal.shared_browser_shutdown_is_confirmed())
@@ -1147,6 +1156,7 @@ impl CodexClient {
         on_event: &mut Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
         options: CodexRunOptions,
         usage_attempt: Option<UsageAttempt>,
+        kept_thread: KeptCodexThread,
     ) -> Result<CodexRunOutput> {
         let browser_mode = options.expect_browser_session;
         let personal_browser_mode =
@@ -1737,6 +1747,9 @@ impl CodexClient {
             thread_restore_source = "ephemeral".to_string();
             new_thread.thread
         };
+        if options.persist_conversation_thread && !options.shared_browser {
+            kept_thread.keep(&conversation);
+        }
 
         let run_result = async {
             let mut aggregator =
@@ -1888,6 +1901,7 @@ impl CodexClient {
                         &conversation,
                         cancel_signal.as_ref(),
                         options.shared_browser,
+                        &kept_thread,
                     ) => event?,
                 }
             } else {
@@ -1895,6 +1909,7 @@ impl CodexClient {
                     &conversation,
                     cancel_signal.as_ref(),
                     options.shared_browser,
+                    &kept_thread,
                 )
                 .await?
             };
@@ -2099,10 +2114,6 @@ impl CodexClient {
         }
         .await;
 
-        if options.persist_conversation_thread && !options.shared_browser {
-            shut_down_kept_codex_thread(&conversation).await;
-        }
-
         if options.shared_browser {
             let Some(shutdown_confirmation) = cancel_signal.as_ref() else {
                 return Err(anyhow!(
@@ -2233,12 +2244,14 @@ async fn next_codex_event(
     conversation: &CodexThread,
     cancel_signal: Option<&JobCancelSignal>,
     require_complete_shutdown: bool,
+    kept_thread: &KeptCodexThread,
 ) -> Result<Event> {
     if let Some(signal) = cancel_signal {
         tokio::select! {
             _ = signal.cancelled() => {
                 if !require_complete_shutdown {
                     request_codex_shutdown(conversation).await;
+                    kept_thread.shutdown_already_awaited();
                 }
                 Err(anyhow!("lease lost"))
             }
@@ -2259,27 +2272,67 @@ fn codex_shutdown_timeout_seconds() -> u64 {
         .unwrap_or(DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS)
 }
 
-/// A kept conversation thread is resumed from its rollout by the next run, because every run
-/// builds its own `ThreadManager`. Codex flushes that rollout and releases the thread's writer
-/// lock only when the thread shuts down. Dropping the thread leaves that to a background task,
-/// and a follow-up run that starts first cannot resume the thread, so finish it here.
-async fn shut_down_kept_codex_thread(conversation: &CodexThread) {
-    let timeout_seconds = codex_shutdown_timeout_seconds();
-    match timeout(
-        Duration::from_secs(timeout_seconds),
-        conversation.shutdown_and_wait(),
-    )
-    .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "kept Codex thread did not shut down cleanly");
-        }
-        Err(_) => {
-            tracing::warn!(
-                timeout_seconds,
-                "kept Codex thread shutdown timed out; the next run waits for its writer"
-            );
+/// The conversation thread one attempt keeps for the conversation's next run, which resumes it
+/// from its rollout because every run builds its own `ThreadManager`. Codex flushes that rollout
+/// and releases the thread's writer lock only when the thread shuts down; dropping the thread
+/// leaves that to a background task, and a follow-up run that starts first cannot resume the
+/// thread. The attempt registers the thread here as soon as it exists, and the caller shuts it
+/// down after the attempt's run deadline, so the wait neither eats into the turn's timeout nor
+/// is skipped when the attempt times out.
+#[derive(Clone, Default)]
+struct KeptCodexThread {
+    state: Arc<std::sync::Mutex<KeptCodexThreadState>>,
+}
+
+#[derive(Default)]
+struct KeptCodexThreadState {
+    thread: Option<Arc<CodexThread>>,
+    shutdown_awaited: bool,
+}
+
+impl KeptCodexThread {
+    fn lock(&self) -> std::sync::MutexGuard<'_, KeptCodexThreadState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn keep(&self, thread: &Arc<CodexThread>) {
+        self.lock().thread = Some(Arc::clone(thread));
+    }
+
+    /// A cancellation already waited one shutdown bound for this thread; a Stop does not wait
+    /// for a second one. If that shutdown overran, the next run waits for the writer instead.
+    fn shutdown_already_awaited(&self) {
+        self.lock().shutdown_awaited = true;
+    }
+
+    async fn shut_down(&self) {
+        let thread = {
+            let mut state = self.lock();
+            let thread = state.thread.take();
+            if state.shutdown_awaited { None } else { thread }
+        };
+        let Some(thread) = thread else {
+            return;
+        };
+        let timeout_seconds = codex_shutdown_timeout_seconds();
+        match timeout(
+            Duration::from_secs(timeout_seconds),
+            thread.shutdown_and_wait(),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "kept Codex thread did not shut down cleanly");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_seconds,
+                    "kept Codex thread shutdown timed out; the next run waits for its writer"
+                );
+            }
         }
     }
 }

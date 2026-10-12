@@ -1381,10 +1381,38 @@ fn thread_writer_lock(state: &Value) -> Result<Option<fs::File>> {
     }
 }
 
+/// Raises its flag when the runtime logs that a rollout restore found the thread's writer held
+/// and will retry, so the cold-resume scenario can prove the retry ran.
+struct WriterRetryObserver(Arc<std::sync::atomic::AtomicBool>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WriterRetryObserver {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(bool);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 |= format!("{value:?}").contains("still has an active writer");
+                }
+            }
+        }
+        let mut message = Message(false);
+        event.record(&mut message);
+        if message.0 {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 /// A follow-up job can start while an earlier run of the conversation still owns the thread,
 /// for example one whose shutdown overran its bound. It must resume that same thread once the
 /// writer is released rather than start an empty one.
 async fn run_resume_after_writer_release(client: &CodexClient) -> Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    let retried = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(WriterRetryObserver(Arc::clone(&retried))),
+    )
+    .context("the isolated child installs the only tracing subscriber")?;
     let run = |state: Option<Value>| {
         client.execute_with_options(
             "Run the supplied local diagnostic and finish with its result.",
@@ -1405,14 +1433,24 @@ async fn run_resume_after_writer_release(client: &CodexClient) -> Result<()> {
         .context("a persisted thread returns its state")?;
     assert_eq!(saved["defaultThreadRestoreSource"], "new");
     let held = thread_writer_lock(&saved)?.context("the first job released its writer")?;
-    // Held well past the point where the resume is attempted, and well inside the runtime's
-    // bounded wait for the writer.
+    // Held until the runtime has been refused the thread and is waiting for its writer. The
+    // fallback bound only keeps a broken run from hanging; the assertion below then fails.
+    let retried_while_held = Arc::clone(&retried);
     let release = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(1000));
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while !retried_while_held.load(std::sync::atomic::Ordering::SeqCst)
+            && Instant::now() < give_up
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         drop(held);
     });
     let output = run(Some(saved.clone())).await?;
     release.join().expect("writer release thread");
+    assert!(
+        retried.load(std::sync::atomic::Ordering::SeqCst),
+        "the resume never met the held writer"
+    );
     assert_eq!(output.final_json["summary"], FINAL_TEXT);
     let restored = output
         .provider_conversation_state
