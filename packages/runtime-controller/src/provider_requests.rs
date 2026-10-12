@@ -901,6 +901,19 @@ async fn ensure_provider_request_tables(
     Ok(())
 }
 
+/// Where a request stood when the dispatch answered without the device's
+/// reply. A request expired with no `claimedAt` was never picked up, and a
+/// device can only claim a pending request, so nothing will run it; one with
+/// `claimedAt` was taken by a device that may still be running it.
+fn dispatched_request_state(request: &ProviderRequestRecord) -> JsonValue {
+    json!({
+      "id": request.id.to_string(),
+      "status": request.status,
+      "claimedAt": request.claimed_at.map(|value| value.to_rfc3339()),
+      "claimedByDeviceLabel": request.claimed_by_device_label,
+    })
+}
+
 fn build_tool_dispatch_response(request: &ProviderRequestRecord) -> JsonValue {
     if let Some(response) = request.response.clone() {
         return response;
@@ -910,6 +923,7 @@ fn build_tool_dispatch_response(request: &ProviderRequestRecord) -> JsonValue {
       "providerId": request.provider_id,
       "name": request.tool_name.clone().unwrap_or_default(),
       "error": request.error.clone().unwrap_or_else(|| "Provider request did not return a tool response.".to_string()),
+      "providerRequest": dispatched_request_state(request),
     })
 }
 
@@ -923,6 +937,7 @@ fn build_resource_dispatch_response(request: &ProviderRequestRecord) -> JsonValu
       "uri": request.resource_uri.clone().unwrap_or_default(),
       "exists": false,
       "error": request.error.clone().unwrap_or_else(|| "Provider request did not return a resource response.".to_string()),
+      "providerRequest": dispatched_request_state(request),
     })
 }
 
@@ -1094,7 +1109,89 @@ mod tests {
     use axum::extract::Query;
     use axum::http::Uri;
 
-    use super::{normalize_provider_id, normalize_status_filters, ListProviderRequestsQuery};
+    use chrono::{TimeZone, Utc};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::{
+        build_tool_dispatch_response, normalize_provider_id, normalize_status_filters,
+        ListProviderRequestsQuery, ProviderRequestRecord,
+    };
+
+    fn timed_out_request(
+        claimed_at: Option<chrono::DateTime<Utc>>,
+        claimed_by_device_label: Option<&str>,
+    ) -> ProviderRequestRecord {
+        let created_at = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap();
+        ProviderRequestRecord {
+            id: Uuid::parse_str("8f1d9a52-3c4b-4f8e-9a7d-2b6c1e0f5a34").unwrap(),
+            project_id: Uuid::nil(),
+            provider_id: "knosh".to_string(),
+            request_kind: "tool_call".to_string(),
+            tool_name: Some("knosh.robot.skill.look_at".to_string()),
+            resource_uri: None,
+            arguments: json!({ "azimuth_deg": 0 }),
+            status: "expired".to_string(),
+            requested_by: None,
+            claimed_by_device_id: claimed_at.map(|_| "aa:bb:cc:dd:ee:ff".to_string()),
+            claimed_by_device_label: claimed_by_device_label.map(str::to_string),
+            response: None,
+            error: Some("Timed out waiting for the provider device to respond.".to_string()),
+            created_at,
+            claimed_at,
+            completed_at: Some(created_at),
+            updated_at: created_at,
+        }
+    }
+
+    #[test]
+    fn timed_out_tool_dispatch_says_no_device_picked_the_request_up() {
+        let response = build_tool_dispatch_response(&timed_out_request(None, None));
+
+        assert_eq!(response["ok"], json!(false));
+        assert_eq!(
+            response["error"],
+            json!("Timed out waiting for the provider device to respond.")
+        );
+        assert_eq!(
+            response["providerRequest"],
+            json!({
+                "id": "8f1d9a52-3c4b-4f8e-9a7d-2b6c1e0f5a34",
+                "status": "expired",
+                "claimedAt": null,
+                "claimedByDeviceLabel": null,
+            })
+        );
+    }
+
+    #[test]
+    fn timed_out_tool_dispatch_says_which_device_had_claimed_the_request() {
+        let claimed_at = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 28).unwrap();
+        let response =
+            build_tool_dispatch_response(&timed_out_request(Some(claimed_at), Some("Knosh V1")));
+
+        assert_eq!(response["providerRequest"]["status"], json!("expired"));
+        assert_eq!(
+            response["providerRequest"]["claimedAt"],
+            json!("2026-10-12T12:00:28+00:00")
+        );
+        assert_eq!(
+            response["providerRequest"]["claimedByDeviceLabel"],
+            json!("Knosh V1")
+        );
+    }
+
+    #[test]
+    fn tool_dispatch_returns_the_device_reply_unchanged() {
+        let mut request = timed_out_request(None, None);
+        request.status = "completed".to_string();
+        request.response = Some(json!({ "ok": true, "name": "knosh.robot.skill.look_at" }));
+
+        assert_eq!(
+            build_tool_dispatch_response(&request),
+            json!({ "ok": true, "name": "knosh.robot.skill.look_at" })
+        );
+    }
 
     #[test]
     fn provider_id_accepts_instance_separator() {
