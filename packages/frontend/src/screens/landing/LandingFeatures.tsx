@@ -1,29 +1,28 @@
 import { Heading } from "../../components/Heading";
 
+// Each card says something the hero, the example window and the integration
+// row above it have not: where a space starts, where it runs, and that its
+// files keep a history.
 const FEATURES = [
   {
-    title: "A place for the whole crew",
-    description:
-      "People and agents share the same conversation, files, and preview. Invite a teammate and pick up the work together.",
+    title: "Start where you are",
+    description: "Import a GitHub repo, or start from an empty space.",
   },
   {
-    title: "Your tools. Your choice.",
-    description:
-      "Connect the AI you already use and bring your own repository. Open the studio in your browser, or take it to your desktop.",
+    title: "Our machine or yours",
+    description: "Run a space on a hosted machine, or on your own computer with the desktop app.",
   },
   {
-    title: "Real files, a clear history",
-    description:
-      "Work lives in files you control. Inspect the changes, keep what works, and return to an earlier version when you need to.",
+    title: "Real files you can rewind",
+    description: "Every change is saved as a version you can review and revert.",
   },
 ];
 
 export function LandingFeatures() {
   return (
     <section aria-labelledby="landing-features-title" className="border-t border-slate-200 py-14 dark:border-white/10 sm:py-20">
-      <p className="text-xs font-medium text-slate-500 dark:text-slate-400">A little more in sync</p>
-      <Heading id="landing-features-title" level={2} variant="section" className="mt-3 max-w-xl tracking-tight">
-        One conversation.<br />More hands on the work.
+      <Heading id="landing-features-title" level={2} variant="section" className="max-w-xl tracking-tight">
+        Hand it to an agent.<br />Decide what stays.
       </Heading>
       <div className="mt-10 grid gap-8 md:grid-cols-3 md:gap-10">
         {FEATURES.map((feature, index) => (

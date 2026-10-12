@@ -3,10 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentAvatar } from "../AgentAvatar";
+import { classTokens, expectAvatarCoinLightEdge, expectCanonicalOctoCoin } from "./octoCoinExpectations";
 
-function classTokens(element: Element | null | undefined): string[] {
-  return (element?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
-}
 
 describe("AgentAvatar", () => {
   let container: HTMLDivElement;
@@ -23,24 +21,20 @@ describe("AgentAvatar", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it.each(["sm", "md", "lg"] as const)(
-    "keeps built-in Octo a brand-ink mark on a white coin in both themes at %s",
-    async (size) => {
-      // docs/Brand.md: the Octo agent avatar is the same white coin in light and
-      // dark mode. The profile modal and AI settings used to swap it for a dark
-      // circle with a light glyph. jsdom cannot resolve dark: variants, so the
-      // coin is read from the classes.
+  it.each([
+    ["sm", "h-7"],
+    ["md", "h-9"],
+    ["lg", "h-16"],
+  ] as const)(
+    "draws built-in Octo as its coin, reversed in dark, at %s",
+    async (size, height) => {
+      // docs/Brand.md: the Octo agent avatar is the same coin everywhere (the
+      // profile modal and AI settings once drew a different dark circle).
       await act(async () =>
         root.render(<AgentAvatar agent={{ handle: "octo", avatarSeed: "octo" }} size={size} />));
       const face = container.firstElementChild;
-      const tokens = classTokens(face);
-      expect(tokens).toContain("bg-white");
-      expect(tokens).toContain("text-brand-ink");
-      expect(tokens.filter((token) => token.startsWith("dark:bg-") || token.startsWith("dark:text-")))
-        .toEqual([]);
-      const mark = face?.querySelector(".octo-mark");
-      expect(mark).not.toBeNull();
-      expect(classTokens(mark).filter((token) => token.startsWith("dark:"))).toEqual([]);
+      expectCanonicalOctoCoin(face);
+      expect(classTokens(face)).toEqual(expect.arrayContaining(["inline-flex", height]));
     },
   );
 
@@ -52,5 +46,8 @@ describe("AgentAvatar", () => {
     expect(face?.textContent).toBe("R");
     expect(face?.style.backgroundImage).toContain("linear-gradient");
     expect(classTokens(face)).not.toContain("bg-white");
+    // The same light edge as Octo's coin; no edge in dark, as before.
+    const tokens = expectAvatarCoinLightEdge(face);
+    expect(tokens.filter((token) => token.startsWith("dark:"))).toEqual([]);
   });
 });

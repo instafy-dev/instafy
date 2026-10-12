@@ -6,6 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { resolveHumanAvatarColors } from "../../../../utils/humanAvatar";
 import { resolveHumanChatIdentity } from "../chatHumanIdentity";
+import {
+  expectAvatarCoinLightEdge,
+  expectCanonicalOctoCoin,
+} from "../../../../components/__tests__/octoCoinExpectations";
 
 describe("ChatMessageAvatar", () => {
   let container: HTMLDivElement;
@@ -41,26 +45,47 @@ describe("ChatMessageAvatar", () => {
     );
   });
 
-  it("keeps the Octo coin white in both themes under any row's test id", async () => {
-    await act(async () => {
-      root.render(
-        <ChatMessageAvatar
-          kind="assistant"
-          agent={{ handle: "octo", avatarSeed: "octo" }}
-          size="xs"
-          testId="assistant-thinking-octo-compact"
-        />,
-      );
-    });
+  it.each(["2xs", "xs", "sm", "lg"] as const)(
+    "draws Octo as its coin, reversed in dark, under any row's test id at %s",
+    async (size) => {
+      await act(async () => {
+        root.render(
+          <ChatMessageAvatar
+            kind="assistant"
+            agent={{ handle: "octo", avatarSeed: "octo" }}
+            size={size}
+            testId="assistant-thinking-octo-compact"
+          />,
+        );
+      });
 
-    expect(container.querySelector('[data-testid="chat-avatar-assistant"]')).toBeNull();
-    const face = container.querySelector('[data-testid="assistant-thinking-octo-compact"]');
-    const mark = face?.querySelector(".octo-mark");
-    const coinTokens = (mark?.parentElement?.getAttribute("class") ?? "").split(/\s+/);
-    const markTokens = (mark?.getAttribute("class") ?? "").split(/\s+/);
-    expect(coinTokens).toContain("bg-white");
-    expect(markTokens).toContain("text-brand-ink");
-    expect([...coinTokens, ...markTokens].filter((token) => token.startsWith("dark:"))).toEqual([]);
+      expect(container.querySelector('[data-testid="chat-avatar-assistant"]')).toBeNull();
+      // The face is the coin itself: no grey-bordered, shadowed shell around it.
+      const face = container.querySelector('[data-testid="assistant-thinking-octo-compact"]');
+      expectCanonicalOctoCoin(face);
+    },
+  );
+
+  it.each(["2xs", "xs", "sm", "lg"] as const)(
+    "edges other agents' faces with the shared coin shadow in light and their hairline in dark at %s",
+    async (size) => {
+      await act(async () => {
+        root.render(<ChatMessageAvatar kind="assistant" agent={{ handle: "reviewer", avatarSeed: "reviewer" }} size={size} />);
+      });
+      const face = container.querySelector('[data-testid="chat-avatar-assistant"]');
+      expect(face?.hasAttribute("data-octo-coin")).toBe(false);
+      expect(face?.querySelector(".octo-mark")).toBeNull();
+      expect(face?.textContent).toBe("R");
+      const tokens = expectAvatarCoinLightEdge(face);
+      expect(tokens).toEqual(expect.arrayContaining(["dark:border", "dark:border-slate-800", "dark:shadow-sm"]));
+    },
+  );
+
+  it("edges a person's face with the shared coin shadow in light and its small shadow in dark", async () => {
+    await act(async () => root.render(<ChatMessageAvatar kind="human" seed="person-id" label="Alex Person" />));
+    const face = container.querySelector('[data-testid="chat-avatar-human"]');
+    const tokens = expectAvatarCoinLightEdge(face);
+    expect(tokens).toContain("dark:shadow-sm");
   });
 
   it("never applies Octo motion to a custom image avatar", async () => {

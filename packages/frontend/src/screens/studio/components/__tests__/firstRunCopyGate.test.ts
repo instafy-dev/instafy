@@ -69,6 +69,20 @@ const GATED_FILES = [
   resolve(components, "useChatComposerAttachments.ts"),
   resolve(components, "workspaceFileStaleMerge.ts"),
   resolve(repo, "docs/Chat-Attachments.md"),
+  // The landing hero is where a first visit starts: its copy, the example's
+  // scripted turn and the brand notes behind them.
+  resolve(frontend, "src/screens/LandingPage.tsx"),
+  resolve(frontend, "src/screens/landing/LandingHero.tsx"),
+  resolve(frontend, "src/screens/landing/LandingCub.tsx"),
+  resolve(frontend, "src/screens/landing/LandingSessionDeck.tsx"),
+  resolve(frontend, "src/screens/landing/LandingStudioWindow.tsx"),
+  resolve(frontend, "src/screens/landing/landingTurnScript.ts"),
+  resolve(repo, "docs/Brand.md"),
+  // The marketing pages around it: the shared header, the news page and the
+  // loading screen a first visit may see before any of it.
+  resolve(frontend, "src/components/MarketingHeader.tsx"),
+  resolve(frontend, "src/screens/NewsPage.tsx"),
+  resolve(frontend, "src/components/EntryLoadingScreen.tsx"),
 ];
 
 // Lines that are agent prompts, not labels: the assistant is asked politely

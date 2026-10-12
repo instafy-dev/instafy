@@ -16,11 +16,13 @@ import {
   Xmark,
 } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
+import { OctoCoin } from "../../../components/OctoCoin";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { isUuid } from "../../../conversations/conversationMessageUtils";
 import { cancelAgentJob } from "../../../services/runtimeController/jobs";
 import {
+  OCTO_AVATAR_SRC,
   resolveAgentAvatarGradient,
   resolveAgentAvatarImageSrc,
   resolveAgentAvatarText,
@@ -256,9 +258,24 @@ function BranchParticipantAvatar({ participant }: { participant: AgentThreadBran
   const avatarImageSrc = resolveAgentAvatarImageSrc(participant);
   const avatarText = resolveAgentAvatarText({ handle: participant.handle });
   const title = `@${participant.handle}`;
+  if (avatarImageSrc === OCTO_AVATAR_SRC) {
+    // Octo is its coin (OctoCoin, docs/Brand.md). The stack's 1px separator
+    // is a ring on the coin itself, in the room the padding leaves, so it
+    // draws above the coin's own avatar coin shadow: a clean white edge with
+    // the soft shadow outside it, like the other faces' white border.
+    return (
+      <span
+        className="inline-flex h-5 w-5 rounded-full p-px first:ml-0 -ml-1.5 *:ring-1 *:ring-white dark:*:ring-slate-950"
+        title={title}
+        aria-label={title}
+      >
+        <OctoCoin className="h-full w-full" />
+      </span>
+    );
+  }
   return (
     <span
-      className="inline-flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border border-white bg-slate-100 text-3xs font-semibold text-white shadow-sm first:ml-0 -ml-1.5 dark:border-slate-950 dark:bg-slate-800"
+      className="inline-flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border border-white bg-slate-100 text-3xs font-semibold text-white shadow-avatar-coin first:ml-0 -ml-1.5 dark:border-slate-950 dark:bg-slate-800 dark:shadow-sm"
       style={avatarImageSrc ? undefined : { backgroundImage: resolveAgentAvatarGradient(participant.avatarSeed ?? participant.handle) }}
       title={title}
       aria-label={title}

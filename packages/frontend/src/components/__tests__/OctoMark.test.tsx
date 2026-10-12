@@ -86,4 +86,83 @@ describe("OctoMark", () => {
       Array.from(container.querySelectorAll("path"), (path) => path.getAttribute("d")),
     ).toEqual(octoMarkGeometry.paths);
   });
+
+  // The circles in left-to-right order (by cx), whatever order the geometry
+  // lists them in.
+  function nodesLeftToRight(): SVGCircleElement[] {
+    return Array.from(container.querySelectorAll<SVGCircleElement>('[data-octo-part="node"]')).sort(
+      (a, b) => Number(a.getAttribute("cx")) - Number(b.getAttribute("cx")),
+    );
+  }
+
+  it("keeps the one-ink mark unchanged by default and for colorway ink", async () => {
+    await act(async () => {
+      root.render(<OctoMark className="h-7 w-7" />);
+    });
+    const defaultMarkup = container.innerHTML;
+    const mark = container.querySelector("svg") as SVGSVGElement;
+    expect(mark.getAttribute("class")).toBe("octo-mark h-7 w-7");
+    expect(mark.hasAttribute("data-octo-colorway")).toBe(false);
+    expect(container.querySelectorAll("circle[style]")).toHaveLength(0);
+    expect(container.querySelector("g")?.getAttribute("fill")).toBe("currentColor");
+
+    await act(async () => {
+      root.render(<OctoMark className="h-7 w-7" colorway="ink" />);
+    });
+    expect(container.innerHTML).toBe(defaultMarkup);
+  });
+
+  it("colours the crew nodes left to right from the --octo-dot variables", async () => {
+    await act(async () => {
+      root.render(<OctoMark colorway="crew" />);
+    });
+    const mark = container.querySelector("svg") as SVGSVGElement;
+    expect(mark.getAttribute("data-octo-colorway")).toBe("crew");
+    expect(mark.classList.contains("octo-mark")).toBe(true);
+    expect(mark.classList.contains("octo-mark--crew")).toBe(true);
+    expect(mark.classList.contains("octo-mark--crew-hidpi")).toBe(false);
+    expect(nodesLeftToRight().map((node) => node.style.fill)).toEqual([
+      "var(--octo-dot-1, currentColor)",
+      "var(--octo-dot-2, currentColor)",
+      "var(--octo-dot-3, currentColor)",
+      "var(--octo-dot-4, currentColor)",
+    ]);
+    // Only the nodes take colour: the body and arms stay one ink.
+    expect(container.querySelectorAll("path[style]")).toHaveLength(0);
+    expect(
+      Array.from(container.querySelectorAll("path"), (path) => path.getAttribute("d")),
+    ).toEqual(octoMarkGeometry.paths);
+  });
+
+  it("marks crew-hidpi lockups so the nodes fall back to one ink at 1x", async () => {
+    await act(async () => {
+      root.render(<OctoMark colorway="crew-hidpi" />);
+    });
+    const mark = container.querySelector("svg") as SVGSVGElement;
+    expect(mark.getAttribute("data-octo-colorway")).toBe("crew-hidpi");
+    expect(mark.classList.contains("octo-mark--crew")).toBe(true);
+    expect(mark.classList.contains("octo-mark--crew-hidpi")).toBe(true);
+    expect(nodesLeftToRight().map((node) => node.style.fill)).toEqual([
+      "var(--octo-dot-1, currentColor)",
+      "var(--octo-dot-2, currentColor)",
+      "var(--octo-dot-3, currentColor)",
+      "var(--octo-dot-4, currentColor)",
+    ]);
+  });
+
+  it.each(["ink", "crew", "crew-hidpi"] as const)(
+    "always draws four nodes, idle and thinking, for colorway %s",
+    async (colorway) => {
+      await act(async () => {
+        root.render(<OctoMark colorway={colorway} />);
+      });
+      expect(container.querySelectorAll('[data-octo-part="node"]')).toHaveLength(4);
+      await act(async () => {
+        root.render(<OctoMark colorway={colorway} motion="thinking" />);
+      });
+      expect(container.querySelectorAll('[data-octo-part="node"]')).toHaveLength(4);
+      expect(container.querySelectorAll('animateTransform[data-octo-animation="node"]')).toHaveLength(4);
+      expect(container.querySelector("svg")?.getAttribute("data-octo-animated")).toBe("true");
+    },
+  );
 });

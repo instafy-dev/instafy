@@ -28,7 +28,6 @@ vi.mock("../login/useNativeGithubAuth", () => ({
     resetNativeAuthState: vi.fn(),
   }),
 }));
-vi.mock("../landing/LandingTentacleScene", () => ({ TentacleBackdrop: () => null }));
 
 function Destination() {
   const location = useLocation();

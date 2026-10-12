@@ -5,7 +5,8 @@
     <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Instafy</title>
-    <meta name="theme-color" content="#0f172a" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#141414" />
     <script>
       (function () {
         try {
@@ -46,13 +47,20 @@
             document.documentElement.classList.remove("dark");
           }
           document.documentElement.style.colorScheme = resolvedTheme;
+          // Browser chrome follows the app's theme, not only the OS one (a
+          // chosen dark theme on a light OS): ThemeProvider keeps this in sync.
+          var themeColor = resolvedTheme === "dark" ? "#141414" : "#ffffff";
+          var themeColorMetas = document.querySelectorAll('meta[name="theme-color"]');
+          for (var i = 0; i < themeColorMetas.length; i += 1) {
+            themeColorMetas[i].setAttribute("content", themeColor);
+          }
         } catch (err) {
           // ignore early theme failures
         }
       })();
     </script>
-    <link rel="manifest" href="/manifest.webmanifest?v=3" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=3" />
+    <link rel="manifest" href="/manifest.webmanifest?v=4" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=4" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta
@@ -73,9 +81,9 @@
       content="Instafy is a chat-first AI workspace with real files, Monaco editing, and runtime control, so you can build, edit, and run code without losing control."
     />
     <meta name="twitter:image" content="/og-image.png" />
-    <link rel="icon" type="image/svg+xml" href="/icon.svg?v=3" />
-    <link rel="icon" type="image/x-icon" href="/favicon.ico?v=3" />
-    <link rel="icon" type="image/png" href="/icon-192.png?v=3" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg?v=4" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico?v=4" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png?v=4" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

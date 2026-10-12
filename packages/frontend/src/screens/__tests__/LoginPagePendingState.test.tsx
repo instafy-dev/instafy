@@ -48,7 +48,6 @@ vi.mock("../login/useNativeGithubAuth", () => ({
     };
   },
 }));
-vi.mock("../landing/LandingTentacleScene", () => ({ TentacleBackdrop: () => null }));
 
 // The login page used to report a sign-in that was leaving for the provider as
 // a success-styled box under the whole form. The pressed control now carries

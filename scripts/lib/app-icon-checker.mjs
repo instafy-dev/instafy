@@ -1,11 +1,50 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { readPngInkBounds, readPngPixel } from "./png-ink-bounds.mjs";
+import { decodeIcoEntries } from "./icon-containers.mjs";
+import {
+  countOffPalettePixels,
+  decodePng,
+  measureInkBounds,
+  measureInkRadius,
+  pixelAt,
+} from "./png-ink-bounds.mjs";
+
+const CANVAS_UNITS = 64;
 
 export function createAppIconChecker({ repoRoot, failures }) {
+  const decodedImages = new Map();
+
   function resolve(relativePath) {
     return path.join(repoRoot, relativePath);
+  }
+
+  /** Decode a PNG once per run; the checker samples some files many times. */
+  function readImage(relativePath) {
+    if (!decodedImages.has(relativePath)) {
+      decodedImages.set(relativePath, decodePng(fs.readFileSync(resolve(relativePath))));
+    }
+    return decodedImages.get(relativePath);
+  }
+
+  /**
+   * Decode an icon container (ICO or ICNS) with `decode`, reporting an
+   * unreadable or malformed file as a failure and returning no entries.
+   */
+  function readIconContainer(relativePath, decode) {
+    try {
+      return decode(fs.readFileSync(resolve(relativePath)));
+    } catch (error) {
+      failures.push(
+        `Unable to decode ${relativePath}: ${error instanceof Error ? error.message : error}`,
+      );
+      return [];
+    }
+  }
+
+  /** Decode every entry of an ICO file (embedded PNG or 32-bit DIB). */
+  function readIcoEntries(relativePath) {
+    return readIconContainer(relativePath, decodeIcoEntries);
   }
 
   function readPng(relativePath) {
@@ -105,7 +144,7 @@ export function createAppIconChecker({ repoRoot, failures }) {
 
   function readInkBounds(relativePath, options) {
     try {
-      return readPngInkBounds(resolve(relativePath), options);
+      return measureInkBounds(readImage(relativePath), options);
     } catch (error) {
       failures.push(
         `Unable to inspect optical bounds for ${relativePath}: ${
@@ -133,9 +172,11 @@ export function createAppIconChecker({ repoRoot, failures }) {
       const delta = Math.abs(bounds[dimension] - expectedInk[dimension]);
       if (delta > expectedInk.tolerance) {
         failures.push(
-          `${relativePath} Octo ink must be approximately ${expectedInk.width}x${
-            expectedInk.height
-          }px; found ${bounds.width}x${bounds.height}px.`,
+          `${relativePath} Octo ink must be approximately ${formatSvgNumber(
+            expectedInk.width,
+          )}x${formatSvgNumber(expectedInk.height)}px (±${expectedInk.tolerance}); found ${
+            bounds.width
+          }x${bounds.height}px.`,
         );
         break;
       }
@@ -182,7 +223,7 @@ export function createAppIconChecker({ repoRoot, failures }) {
   function assertPixelColor(relativePath, x, y, expected) {
     let actual;
     try {
-      actual = readPngPixel(resolve(relativePath), x, y);
+      actual = pixelAt(readImage(relativePath), x, y);
     } catch (error) {
       failures.push(
         `Unable to inspect ${relativePath} at ${x},${y}: ${
@@ -195,6 +236,146 @@ export function createAppIconChecker({ repoRoot, failures }) {
       failures.push(
         `${relativePath} pixel ${x},${y} must be rgba(${expected.join(",")}); found rgba(${actual.join(",")}).`,
       );
+    }
+  }
+
+  /**
+   * Sample the center pixel of each of the four nodes, left to right, and
+   * require the expected node color: the crew slot colors on a crew asset.
+   * `placement` is the square the 64-unit drawing is rendered into. Pass
+   * `image` for a decoded container entry; otherwise `relativePath` is read.
+   */
+  function assertNodeColors({
+    relativePath,
+    image: suppliedImage,
+    placement,
+    geometry,
+    distributionScale,
+    nodeColors,
+    minimumSide,
+    tolerance = 2,
+  }) {
+    if (minimumSide != null && placement.side < minimumSide) {
+      failures.push(
+        `${relativePath} draws crew nodes in a ${placement.side}px square; crew needs at least ${minimumSide} device px.`,
+      );
+    }
+    let image;
+    let centers;
+    try {
+      image = suppliedImage ?? readImage(relativePath);
+      centers = octoNodeCenters(geometry, { distributionScale });
+    } catch (error) {
+      failures.push(
+        `Unable to inspect ${relativePath} nodes: ${error instanceof Error ? error.message : error}`,
+      );
+      return;
+    }
+    centers.forEach((center, slot) => {
+      const x = Math.floor(placement.x + (center.x / CANVAS_UNITS) * placement.side);
+      const y = Math.floor(placement.y + (center.y / CANVAS_UNITS) * placement.side);
+      if (x >= image.width || y >= image.height) {
+        failures.push(
+          `${relativePath} is ${image.width}x${image.height}; node ${slot + 1} should be at ${x},${y}.`,
+        );
+        return;
+      }
+      const actual = pixelAt(image, x, y);
+      const expected = nodeColors[slot];
+      if (
+        actual[3] !== 255 ||
+        expected.some((channel, index) => Math.abs(channel - actual[index]) > tolerance)
+      ) {
+        failures.push(
+          `${relativePath} node ${slot + 1} (left to right) at ${x},${y} must be rgb(${expected.join(
+            ",",
+          )}); found rgba(${actual.join(",")}).`,
+        );
+      }
+    });
+  }
+
+  /**
+   * Require every pixel to be the background or a blend of it with one of
+   * `inks`. With a single ink this proves a one-ink asset: no crew node and no
+   * stray hue.
+   */
+  function assertPalette({ label, image, inks, background, reason }) {
+    if (!image) return;
+    const offPalette = countOffPalettePixels(image, { inks, background });
+    if (offPalette > 0) {
+      failures.push(`${label} must be ${reason}; found ${offPalette} off-palette pixels.`);
+    }
+  }
+
+  /**
+   * Require every visible pixel (anything distinguishable from the
+   * background) to sit within `radius` of the image center: the W3C maskable
+   * safe zone, or Android's adaptive-icon safe zone.
+   */
+  function assertInkInsideCircle({ label, image, background, radius, zone }) {
+    if (!image) return;
+    const inkRadius = measureInkRadius(image, { background });
+    if (inkRadius > radius) {
+      failures.push(
+        `${label} ink reaches ${inkRadius.toFixed(1)}px from the center; ${zone} allows ${radius.toFixed(1)}px.`,
+      );
+    }
+  }
+
+  /**
+   * At 16 px the small cut is pixel-fitted: each node is one 2 x 2 px grid
+   * cell and must be solid ink, not an antialiased grey disc.
+   */
+  function assertPixelNodes({ label, image, geometry, ink }) {
+    if (!image) return;
+    const scale = image.width / CANVAS_UNITS;
+    for (const [slot, { cx, cy, r }] of [...(geometry.circles ?? [])]
+      .sort((a, b) => a.cx - b.cx)
+      .entries()) {
+      const left = (cx - r) * scale;
+      const top = (cy - r) * scale;
+      const side = 2 * r * scale;
+      if (!Number.isInteger(left) || !Number.isInteger(top) || !Number.isInteger(side)) {
+        failures.push(`${label} node ${slot + 1} is not aligned to the pixel grid.`);
+        continue;
+      }
+      for (let y = top; y < top + side; y += 1) {
+        for (let x = left; x < left + side; x += 1) {
+          const actual = pixelAt(image, x, y);
+          if (actual[3] !== 255 || ink.some((channel, index) => channel !== actual[index])) {
+            failures.push(
+              `${label} node ${slot + 1} must be a solid ${side}x${side}px cell of rgb(${ink.join(
+                ",",
+              )}); found rgba(${actual.join(",")}) at ${x},${y}.`,
+            );
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  /** Require two same-sized PNGs to share their alpha mask (silhouette). */
+  function assertMatchingAlpha(relativePath, referencePath, message) {
+    let image;
+    let reference;
+    try {
+      image = readImage(relativePath);
+      reference = readImage(referencePath);
+    } catch (error) {
+      failures.push(`Unable to compare ${relativePath} with ${referencePath}: ${error}`);
+      return;
+    }
+    if (image.width !== reference.width || image.height !== reference.height) {
+      failures.push(message);
+      return;
+    }
+    for (let offset = 3; offset < image.pixels.length; offset += 4) {
+      if (Math.abs(image.pixels[offset] - reference.pixels[offset]) > 1) {
+        failures.push(message);
+        return;
+      }
     }
   }
 
@@ -261,13 +442,21 @@ export function createAppIconChecker({ repoRoot, failures }) {
     assertAssetRevision,
     assertCanonicalGeometry,
     assertCenteredArtwork,
+    assertInkInsideCircle,
+    assertMatchingAlpha,
     assertMatchingOpticalRatios,
+    assertNodeColors,
     assertOpticalBounds,
+    assertPalette,
     assertPixelColor,
+    assertPixelNodes,
     checkFavicon,
     expectContains,
     expectNotContains,
     parseHexColor,
+    readIconContainer,
+    readIcoEntries,
+    readImage,
     readInkBounds,
     readPng,
     readText,
@@ -275,6 +464,51 @@ export function createAppIconChecker({ repoRoot, failures }) {
   };
 }
 
+/**
+ * Every `<link>` in `html` whose rel tokens include "icon" (rel="icon",
+ * "shortcut icon", "alternate icon", in any attribute order), with its href
+ * minus any query string. These are the files a browser may pick as the tab
+ * icon; apple-touch-icon and mask-icon are other tokens and are not included.
+ */
+export function findIconLinks(html) {
+  const links = [];
+  for (const [tag] of html.matchAll(/<link\b[^>]*>/gi)) {
+    const attributes = new Map();
+    for (const match of tag.matchAll(/([^\s=/<>"']+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g)) {
+      attributes.set(match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]);
+    }
+    const rel = (attributes.get("rel") ?? "").toLowerCase().split(/\s+/);
+    if (!rel.includes("icon")) continue;
+    links.push({ tag, href: (attributes.get("href") ?? "").split(/[?#]/)[0] });
+  }
+  return links;
+}
+
 export function formatSvgNumber(value) {
   return value.toFixed(4).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/**
+ * The centers of a cut's four nodes on the 64-unit canvas, in crew-slot order
+ * (left to right by cx), after the geometry's own translate and, when given,
+ * the distribution scale about the canvas center.
+ */
+export function octoNodeCenters(geometry, { distributionScale = 1 } = {}) {
+  const transform = (geometry.transform ?? "").trim();
+  let translateX = 0;
+  let translateY = 0;
+  if (transform) {
+    const match = /^translate\((-?[\d.]+)[ ,]+(-?[\d.]+)\)$/.exec(transform);
+    if (!match) throw new Error(`unsupported geometry transform "${transform}"`);
+    translateX = Number(match[1]);
+    translateY = Number(match[2]);
+  }
+  const offset = (CANVAS_UNITS * (1 - distributionScale)) / 2;
+  return [...(geometry.circles ?? [])]
+    .sort((a, b) => a.cx - b.cx)
+    .map((circle) => ({
+      x: offset + distributionScale * (circle.cx + translateX),
+      y: offset + distributionScale * (circle.cy + translateY),
+      r: distributionScale * circle.r,
+    }));
 }

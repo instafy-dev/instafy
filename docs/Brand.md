@@ -2,7 +2,9 @@
 
 Instafy uses one Octo mark, one identity ink, and a separate interaction blue.
 The shape carries the identity; the surface determines whether the positive or
-reverse color variant is used.
+reverse color variant is used. The mark comes in two colorways: the one-ink
+system mark, and the crew mark, whose four nodes carry the crew colors on flat
+display surfaces.
 
 ## Color roles
 
@@ -14,55 +16,215 @@ reverse color variant is used.
 | Dark interaction blue | `brand-blue-dark` / dark `primary` | `#3794FF` | Buttons, links, focus, and active UI in dark mode |
 | Brand sand | `brand-sand` / `secondary` | `#D7B686` | Restrained secondary accents, not the default Octo fill |
 | Dark secondary sand | `brand-sand-dark` / dark `secondary` | `#E0C49A` | Accessible secondary accents on dark surfaces |
+| Dark canvas | `studio-dark-canvas` (`colors.canvasDark`) | `#141414` | The dark product canvas; the dark `theme-color`, the reverse native splash and its system bars |
+| Marketing paper | `--marketing-canvas` | `#F8F8F6` (dark `#141414`) | Canvas of the landing and login pages |
+| Marketing dot grid | `--marketing-grid` | `#DCDAD2` (dark `#2E2E2B`) | The 24px dot grid drawn on marketing paper |
+| Crew colors | `--crew-1` … `--crew-4` | See [Crew colors](#crew-colors) | The crew mark's nodes (the hero's ink, participant coins and pills take the same values from `landingCrew.ts`) |
 
 Brand ink is Instafy's identity color. It is not the generic dark-mode canvas
 and it is not the interaction primary. The legacy `midnight` token is only a
 compatibility alias for `brand-ink`; do not introduce another almost-navy.
-Dark product surfaces remain neutral charcoal.
+Dark product surfaces remain neutral charcoal. Brand paper stays `#FFFFFF`
+(the PWA launch background and the icon contracts depend on it); the warmer
+marketing paper is a separate canvas token for the landing and login pages.
 
-The browser/PWA `theme-color` is brand ink because it colors installed-app and
-browser chrome. It does not make brand ink the button color or the dark-mode
-page background. The shipped PWA pair is brand-ink chrome (`#0F172A`) with a
-brand-paper launch background (`#FFFFFF`).
+### Navy inside and outside the window
+
+**Inside the window, navy is only ink; outside it, Instafy wears navy.** In
+the product and on its pages, brand ink is a figure: the logo, the landing
+headline, input text. Every surface, and the chrome that frames the page, is
+brand paper or the neutral dark canvas. Outside the window, where Instafy sits
+among other apps, the same ink becomes the ground: the app icon, store art, the
+GitHub badge and the fixed favicon fallbacks are brand-ink tiles. A studio with
+no navy background is this rule working, not a sign that the tile is wrong.
+
+The browser and installed-PWA `theme-color` is therefore the page's own
+surface, never brand ink: brand paper (`#FFFFFF`) under a light color scheme
+and the dark canvas (`#141414`) under a dark one. `index.html` declares one
+`<meta name="theme-color">` per `prefers-color-scheme`, its inline theme
+script points both at the stored app theme before first paint, and
+`ThemeProvider` keeps them on the resolved theme afterwards (a chosen dark
+theme on a light OS gets the dark bar), the way it already drives the native
+status bar. The web manifest cannot vary by color scheme, so it carries the
+light pair: `theme_color` and `background_color` are both brand paper. They
+only color the install surfaces before the page's own tags take over (the
+Android PWA splash and its bar, an installed desktop window's first title
+bar), and brand paper there matches the light launch and the default theme; a
+navy `theme_color` would flash a navy bar before the page replaced it.
+
+## Crew colors
+
+Four crew colors, in slot order, left to right:
+
+| Slot | Name | Light set | Dark lift | Label on the fill |
+| --- | --- | --- | --- | --- |
+| 1 | Pink | `#FF3C9F` | `#FF3C9F` | Ink `#0F172A` |
+| 2 | Green | `#1B864B` | `#3CA063` | White |
+| 3 | Flame | `#FA5815` | `#FA5815` | Ink `#0F172A` |
+| 4 | Violet | `#814AD0` | `#A672FA` | White |
+
+Slots follow roster order with Octo skipped: on the landing, Ada is pink, Kim is
+green, the scenario's own agent is flame, and violet is the fourth crew slot.
+Octo is ink, never a crew color: its coin holds the one-ink mark (brand ink
+on a white coin edged by the shared avatar coin shadow in light, brand paper on
+a dark neutral coin in dark; see the Octo agent avatar/chip row below); its glyphs
+use brand ink, or brand paper on dark, and its cursor in the Shared Browser is the
+studio's white arrow with a brand-ink stroke (the page under it is light in both themes). An agent other than Octo wears its slot
+as a rounded square coin with its initial in the slot's label color, never as
+the Octo mark in a crew color. Participant coins, pills and cursors keep the
+light set in both themes, each with the label color above; only the crew mark's
+nodes and the hero's ink use the dark lift. The crew mark's nodes read the theme-aware
+`--crew-1` … `--crew-4` (`packages/frontend/src/styles/tailwind.css`). The
+hero's ink, which Cub draws on his own canvas, reads
+`packages/frontend/src/screens/landing/landingCrew.ts` instead (`CREW_SLOTS`,
+and `CREW_DARK_LIFT` in dark), the same file that holds the fixed fill and
+label pairs; a unit test keeps the file, the variables and the engine's own
+defaults equal. The product's own avatars keep their separate, ID-hashed
+palettes.
 
 ## Logo variants and surfaces
 
 - **Positive:** brand-ink Octo on brand-paper or a light surface.
 - **Reverse:** brand-paper Octo on brand-ink or a dark surface.
+- **Crew mark:** the positive or reverse mark whose four nodes take the crew
+  colors, slots 1 to 4 left to right, with the dark lift on dark surfaces. The
+  body and arms stay in the one ink.
+- **One-ink system mark:** every piece in the one ink. This is the default and
+  the only colorway below 28 CSS px.
+- **Small cut:** the only sanctioned redraw, for marks shown at 24 CSS px (or
+  points) and below. It is the same mark with the same lean, pixel-fitted to
+  the 16 px grid (4 units are 1 px there): one body, and the four nodes
+  separated on grid corners, each a solid 2 × 2 px cell at 16 px. It is always
+  one ink. Today it ships in the favicons (`icon.svg`, the 16 and 32 px entries
+  of `favicon.ico`, and `icon-32.png`) and the smallest desktop
+  representations (the 16 pt slots of `icon.icns`, drawn into their 12 and
+  26 px grid bodies, and the 16 and 24 px entries of `icon.ico`); in-app
+  `OctoMark` still draws the main cut at every size.
 
 Inline React marks render with `currentColor`, so every call site owns the
 contrast choice. The normal responsive treatment is
 `text-brand-ink dark:text-brand-paper`; a branded tile uses
 `bg-brand-ink text-brand-paper`.
 
+`OctoMark` takes a `colorway` prop:
+
+- `ink` (default): the one-ink system mark.
+- `crew`: crew nodes. Only on a flat surface (never over artwork, imagery or a
+  gradient) and at 40 CSS px and up. A light surface must be `#F6F6F6` or
+  lighter (white, the marketing paper), because pink and flame fall below 3:1
+  on anything darker; a dark surface must be a flat neutral dark. On slate-100
+  or any mid-tone surface, use the one-ink mark.
+- `crew-hidpi`: for 28 to 39 CSS px lockups such as the header. Crew nodes at
+  1.5 device pixels per CSS pixel and up; one ink at 1x, where a node would be a
+  3 px speck.
+
+Octo's coin, agent coins and every mark under 28 CSS px stay one ink. The nodes
+are never omitted, reordered or recolored outside the crew slots, and there is
+no dotless variant. The logo is faceless: no eyes or expression. Eyes and
+expressions belong only to Cub, the landing hero's character, who has no blush.
+
 | Surface | Shipped treatment |
 | --- | --- |
 | Light web/product UI | Positive; brand-ink on paper or transparent |
 | Dark web/product UI | Reverse; brand-paper on the neutral dark surface |
-| Octo agent avatar/chip | Positive brand-ink mark on a white circular coin in both themes |
-| iOS and Android launcher icons | Reverse; brand-paper Octo on a brand-ink tile |
-| App Store and Google Play app artwork | Reverse; brand-paper Octo on a brand-ink tile |
-| Google Play developer profile artwork | Reverse; brand-paper Octo on a brand-ink tile |
-| GitHub App and OAuth App badges | Reverse; transparent brand-paper Octo over GitHub's brand-ink circular badge background |
-| PWA regular and maskable icons | Reverse; brand-paper Octo on a brand-ink tile |
-| Desktop app | Reverse on a rounded brand-ink tile with transparent outer corners |
-| Native splash | Positive; brand-ink on brand-paper |
-| Adaptive SVG favicon | Positive or reverse according to the OS color-scheme preference |
-| Fixed ICO/PNG favicon fallback | Reverse; brand-paper Octo on a brand-ink tile |
-| Android 13+ themed icon | Monochrome Octo mask; Android chooses the user/system palette |
-| Social/OG card | Current static positive composition on a light warm surface |
+| Octo agent avatar/chip | Light: positive brand-ink mark on a white circular coin edged only by the soft avatar coin shadow (`shadow-avatar-coin`) that every avatar coin shares; no ring and no border. Dark: reverse brand-paper mark on a `#262626` coin (`--color-octo-coin-dark`) with a faint 1px ring of 22% white (`--color-octo-coin-ring-dark`) and no shadow. Always one ink. See [Octo's coin](#octos-coin) |
+| Avatar coins (people, other agents) | Light: the same soft avatar coin shadow as Octo's coin, and no grey border, ring or other shadow. Dark: unchanged; each keeps its own hairline border or small shadow. See [Every avatar coin's edge](#every-avatar-coins-edge) |
+| Landing header lockup (30px, 28px on phones) | `crew-hidpi` on the flat marketing paper; Install and News headers stay one ink |
+| Login card mark (48px) | `crew` on the opaque card (plain paper on phones and in extension embeds) |
+| iOS and Android launcher icons | Crew tile: a brand-paper body with the dark crew set on a brand-ink tile (every Android density, from mdpi's 48 px, and the iOS 1024 px icon that Xcode derives the other iOS sizes from). The round launcher and the adaptive foreground carry the same crew mark. The one iOS size under 48 px, the 20 pt@2x (40 px) notification slot, has its own one-ink tile (`AppIcon-20@2x.png`, main cut at 0.85, since iOS masks it like every other size) |
+| iOS 18+ Dark app icon | The same mark on a transparent ground, so the system's dark background shows through: a white body with the dark crew set at 1024 px (`AppIcon-Dark-512@2x.png`), one ink in the 40 px slot (`AppIcon-Dark-20@2x.png`). Same placement as the default icon |
+| iOS 18+ Tinted app icon | One ink, a fully opaque greyscale image: the white mark on black (`AppIcon-Tinted-512@2x.png`, `AppIcon-Tinted-20@2x.png`), written as RGB, never a grey color space. The system maps its luminance to the person's tint, so the nodes tint with the body and never carry crew color; its black is the darkest step of that tint, not a brand background |
+| App Store and Google Play app artwork | Crew tile: brand-paper body, dark crew set, brand-ink tile |
+| Google Play developer profile artwork | Crew tile: brand-paper body, dark crew set, brand-ink tile |
+| GitHub App and OAuth App badges | One ink, reverse; transparent brand-paper Octo over GitHub's brand-ink circular badge background. GitHub draws the badge down to 20 px, so it never takes crew |
+| PWA regular and maskable icons | Crew tile: brand-paper body, dark crew set, brand-ink tile. The maskable icons draw the mark at `0.78` instead of `0.85`, so every node, the outer pink and violet included, stays inside the W3C safe zone (a centered circle with a radius of 40% of the icon) |
+| Desktop app | Crew tile on a rounded brand-ink tile, each size drawn at its own size: one ink under 48 device px of tile and crew from 48 px. macOS uses `icon.icns`, on the macOS icon grid: the tile is the 824 px body of a 1024 px canvas with Apple's continuous corners and fully transparent margins, rounded per slot as Apple's own icons are (16 → 12, 32 → 26, 64 → 52, 128 → 102, 256 → 206, 512 → 412, 1024 → 824), so it is the same size as its neighbours in the Dock and Finder; the 16 pt slots carry the small cut in their 12 and 26 px bodies, the 32 pt slot (a 26 px body) the one-ink main cut. Windows uses `icon.ico` and Linux the 1024 px `icon.png`, both full-bleed rounded tiles (radius 22%) with transparent outer corners; the `.ico` takes the small cut in its 16 and 24 px entries and the main cut from 32 px |
+| Native splash, light (iOS launch screen, Android splash) | Crew, positive: brand-ink body with the light crew set on brand paper |
+| Native splash, dark | Crew, reverse: a white body with the dark crew set on the dark canvas (`#141414`), the same size and placement as the positive splash. iOS registers it as the Splash image set's dark appearance (`splash-dark-2732x2732*.png`); Android ships it under the night qualifier (`drawable-night` and `drawable-{land,port}-night-<density>`, since orientation outranks night mode). The Android launch theme (`values/styles.xml`, `values-night/styles.xml`) paints the Android 12+ system splash and both system bars with the generated ground (`splash_background`: brand paper, or the dark canvas under night) and sets dark bar icons on paper, light ones on the dark canvas |
+| Adaptive SVG favicon (`icon.svg`) | Small cut, one ink, full-bleed: brand ink, or brand paper under a dark OS color-scheme preference |
+| Fixed ICO/PNG favicon fallback | One ink, reverse on a brand-ink tile. `favicon.ico` 16 and 32 px and `icon-32.png` use the small cut full-bleed; the 48 px ICO entry uses the main cut at 0.85. The page offers only `icon.svg`, `favicon.ico` and `icon-32.png` as `rel="icon"`, never a crew tile |
+| Android 13+ themed icon | A dedicated one-ink layer (`ic_launcher_monochrome`), with the foreground's silhouette but never its crew colors; Android recolors it with the user/system palette |
+| Social/OG card | Static positive composition on a light warm surface; known stale (see below) |
 
-A reverse native splash is an approved future variant, but it is not currently
-generated or configured. Add generator, status-bar, and navigation-bar support
-before shipping one; do not hand-edit the derived splash PNGs.
+Generated tiles follow one size rule: a tile of at least 48 device px
+(`crewTileMinPx` in `scripts/app-icon-brand.json`, where the drawn mark is about
+40 px and each node about 4.5 px) carries the crew mark; a smaller tile carries
+the one-ink mark. The generator draws every size it ships at that size, so the
+desktop `.icns` and `.ico` representations and the iOS 20 pt@2x slot under 48
+px are one ink rather than a downscaled crew tile; on the macOS grid the
+threshold applies to the tile's body. Monochrome contexts stay one ink at every
+size: `favicon.ico`, `icon-32.png`, the GitHub badge, Octo's avatar, the
+Android themed icon and the iOS Tinted icon. Crew on a tile, on the dark canvas
+(the reverse splash) or on the system's dark background (the iOS Dark icon)
+always uses the dark set; crew on paper (the positive splash) uses the light
+set.
+
+### Octo's coin
+
+The coin is Octo's face wherever Octo appears as a participant in themed UI:
+chat and transcript avatars, the thinking and typing rows, speaker pills, the
+conversation roster, agent chips, the participants drawer, the mention picker,
+thread participant stacks, the AI settings rows, and the landing's roster and
+transcript. Every one of them renders the same component,
+`packages/frontend/src/components/OctoCoin.tsx`, which is the only place the
+coin is styled; a surface never copies its classes. In light the coin is
+white and its only edge is the shared avatar coin shadow (below), so it reads
+as a coin on a white bar, the slate-50 panel and the `#F8F8F6` paper without an
+outline; there is no ring and no border. In dark the coin is `#262626` with a
+faint inset ring of 22% white and no shadow. The coin has no border, is not
+positioned and draws no `::after`, so an overlapping stack keeps its tree
+order, and the mark fills 75% of the coin so no arm reaches the edge at any
+size used (20 to 64 CSS px) or anywhere in the thinking stroke. Where a thread
+spine runs up into the coin, the coin sits above it. A surface that overlaps
+coins (the roster, a participant stack) adds its own separator outside the
+coin. Other agents' faces, the landing's scenario agent and human avatars are
+not Octo's coin and keep their own fills, but they share its light edge.
+
+#### Every avatar coin's edge
+
+In light mode every avatar coin, Octo's, a person's (`HumanAvatar`, photo or
+initials) and another agent's (round in the studio, the landing's rounded
+square), has one edge: `shadow-avatar-coin`, a whisper of an all-round hairline
+and a soft, short drop (`--avatar-coin-shadow`: `0 0 0 1px` at 6%, `0 1px 2px`
+at 12% and `0 2px 6px -1px` at 10% of slate ink, in
+`packages/frontend/src/styles/tailwind.css`). It is a shadow, never an
+outline: no grey border, ring or `shadow-sm` on a coin in light, so a white
+coin reads on white by default and the coloured coins sit in the same family.
+The token is empty in dark, where each coin keeps the edge it had (Octo's faint
+ring; a hairline border or the small shadow on other faces); no shadow is added
+in dark.
+
+Where coins overlap (the conversation roster, a thread's participant stack),
+the white separator between faces stays, because without it the faces merge,
+and it sits above each face's shadow: a ring on the face itself in the roster
+and on Octo's coin in a participant stack, the face's own white border
+elsewhere. Each face's soft shadow then falls outside a clean white edge, the
+face after covers the one before (tree order, nothing positioned). A wrapper
+that clips (`overflow-hidden`) never sits tight around a coin unless it is the
+coin's own shell and carries the shadow itself, as the mention picker's face
+does.
+
+Static exports keep their own artwork: the favicons, `public/` icons, native
+and store art, and `packages/frontend/src/assets/octo-avatar.svg` (the
+generated white avatar file, still the identity the product resolves for
+Octo, `OCTO_AVATAR_SRC`) are unchanged by the coin. No themed product surface
+draws that file as an image any more; each one that sees it draws `OctoCoin`
+instead.
+
+The reverse native splash is generated with its positive twin and configured
+for both platforms, status and navigation bars included (see the splash rows
+above). Do not hand-edit the derived splash PNGs, the splash image set's
+`Contents.json` or the generated `splash_background.xml` colors; change the
+generator.
 
 The adaptive SVG reacts to `prefers-color-scheme`, not arbitrary custom browser
 chrome themes. Fixed fallbacks deliberately remain the high-contrast navy tile.
 
 Do not use brand ink on black/charcoal, white on white, bright interaction blue
 as the standard Octo color, or pure black as a brand background. Do not redraw,
-rotate, stretch, crop, or recolor individual pieces. The four detached nodes
-are part of the mark, not optional decoration.
+rotate, stretch, crop, or recolor individual pieces; the crew colorway is the
+one sanctioned exception, and it colors only the four nodes, in slot order. The
+four detached nodes are part of the mark, not optional decoration.
 
 ## Product motion
 
@@ -84,7 +246,7 @@ native/store artwork, headers, login forms, and inactive or historical
 transcript avatars remain static. The current live-run speaker avatar and the
 thinking row may animate. Custom agent avatars are never given Octo's motion.
 The motion must disappear under `prefers-reduced-motion: reduce`, and compact
-chat layouts show the same animated avatar, white coin included, beside the
+chat layouts show the same animated avatar, coin included, beside the
 thinking status because the avatar gutter is intentionally hidden on phones.
 
 Full-screen route and authentication loading may reuse the canonical swimming
@@ -99,34 +261,226 @@ loading indicators local to their content instead of replacing the full screen. 
 pulsing activity indicators, and status-text shimmer stop under reduced-motion preferences;
 their static label or icon remains visible. Loading text must remain legible in both themes.
 
-The landing hero keeps the tentacle artwork (paired light and dark renders of
-one composition) behind the headline, with presence cursors pinned to the arms
-in the crew colors: Ada pink, Kim green, Octo orange, and the purple agent
-whose label follows the active scenario. A cursor that would clip the scene
-edge or sit partly behind the workspace example is left out rather than
-clamped or cut. A workspace example below the headline, named by the
-scenario chips above it and by the group label Choose a workspace example, may
-use the same thinking state beside its simulated active work. Keep one scenario visible at a time and let the deck rotate gently: one
-scenario every 11 seconds, which leaves the finished turn on screen for several
-seconds before the next one starts, waiting while the pointer or focus is on the deck,
-and holding 20 seconds after a manual choice. Under
-reduced motion the deck does not rotate at all, and both rotation and the
-thinking state stop offscreen and in hidden browser tabs. Rotation must never
-move focus or shift layout. The example does not animate the header logo or
-completed output. The example is one scripted turn drawn with the studio's own
-chrome: Ada types into the composer, Octo works through its activity rail, the
-result lands inline in the conversation, in the message that produced it, and a
-teammate replies only once that message is complete; under reduced motion,
-offscreen and in hidden tabs the window shows that finished turn
-with nothing in motion.
+Cub is the landing hero's pen-drawn octopus, an illustration tier like the
+glossy tentacle artwork it replaces: he is not the logo, he never stands in for
+Octo, and the faceless logo and Octo's coin are unchanged by him (the hero's
+surfaces are under [Marketing surfaces](#marketing-surfaces)). He perches on
+the example window: on its top-right corner from 1000px, along its top edge
+on narrower desktop windows, and on its top edge beside the scenario chips on
+phones. He idles and breathes, notices the visitor once he is on screen (a
+small jig and a happy squint), follows a fine pointer with his eyes and a
+curious arm, glances at the primary entry on hover or keyboard focus, and
+glances at the new opener after a scenario pick. On a first visit the example
+holds its first turn on the opener until he has said hello, so the visitor
+sees him notice them before anything else moves; it never waits long for him
+(about three seconds for him to appear, five more for the hello) and not at
+all when he cannot draw. He never greets the visitor while he lends Octo an
+arm: if a turn is already running, the greeting waits until the arm is home
+and his eyes have rested. While Octo works he lends Octo an arm: it runs along
+the ledge and hooks onto Octo's roster coin, just under the ledge beside him,
+as the prompt is sent, taps once per step, pats twice when Octo is done and
+lets go before the teammate replies, all inside Octo's workspace run (every
+scenario's run keeps the same beats, so the arm lines up with each), which
+pops Octo's coin for the run and gives under each tap; every tap and pat lands
+on the coin as drawn. A click or tap on Cub squirts four splats of crew ink
+onto the window's ledge, in logo order (pink, green, flame, violet, with the
+dark set's green and violet lifts); the ink lands only on paper and the ledge,
+never on text, the entries, the chips, the coins or the window's controls, and
+in light mode it soaks into the paper (multiplied, the dot grid showing
+through). A set holds for about two seconds and fades, or fades early when the
+next squirt lands; a scenario change leaves it on the wall. His body takes the
+exact page and panel colors behind it, so he never shows as a blob. His idle
+arms never rest on the headline, the copy, the entries, the chips, the coins or
+the window's chrome actions; the one sanctioned contact is the lent arm's taps
+and pats on Octo's coin while Octo works. He never blocks a link or a button.
+
+Reduced motion keeps Cub on one calm frame with no turn, no pop and no ink in
+flight; a click shows the splats for a second, still. He renders with WebGL2 in
+a separately loaded chunk, imported only after the first paint and an idle
+moment, so the page never waits for him. He draws only his own region, stops
+completely offscreen, in a hidden tab and under reduced motion, and otherwise
+breathes at a low frame rate until something moves. Without WebGL2, or when
+the browser drops the context, a still of Cub sitting on the ledge takes his
+place (loaded only then) and he returns when the context does; no error is
+shown or logged. The still is captured from the landing itself
+(`packages/frontend/scripts/capture-cub-fallback.mjs`) and is regenerated with
+any change to his pose or perch; so is the layout his geometry tests run on
+(`packages/frontend/scripts/capture-cub-landing-layout.mjs`, whose `--check`
+fails when the page has drifted from it). Login shows no Cub. In a dev build of
+the frontend a small Cub button at the bottom left of the landing (`?cub-dev=1`
+opens it, `?cub-dev=0` hides it) switches theme, motion, eyes, the splash and
+click reaction, the logo's dots, a debug overlay, a scrubbed or still turn and
+the no-WebGL still for review; it never ships in a production build.
+
+A workspace example below the hero, named by the scenario chips in the hero and
+by the group label Choose a workspace example, may use the same thinking state
+beside its simulated active work. Keep one scenario visible at a time and let
+the deck rotate gently: each scenario stays for its own task, 11 seconds for a
+workspace turn and 19.4 seconds for Launch a site, which leaves the finished
+task on screen for several seconds before the next one starts, waiting while
+the pointer or focus is on the chips or the window, and holding 20 seconds after
+a manual choice. Under reduced motion the deck does not rotate at all, and both
+rotation and the thinking state stop offscreen and in hidden browser tabs.
+Rotation must never move focus or shift layout, and the first paint shows the
+beat the window starts on, never the finished turn fading out. The example does
+not animate the header logo or completed output.
+
+The example is one scripted task drawn with the studio's own chrome: one turn,
+plus the browser handoff that turn asks for when it needs one. Ada types into
+the composer (when the composer is below the fold, as on a laptop's first view,
+the task opens on the sent prompt instead, and everything from Octo's work on
+keeps its time, so Cub's hello still comes first), Octo works through its
+activity rail (a step's caption is a command's own text or the studio's
+"Calling tool…", "Updating plan…" or "Thinking…"), the result lands in the
+message that produced it and beside the conversation, and a teammate replies
+only once that message is complete. The window keeps one fixed height, like the
+studio's screen, and a conversation that outgrows it keeps its newest message in
+view the way the chat does. Under reduced motion, offscreen and in hidden tabs
+the window shows the finished task with nothing in motion.
+
+From a 1184px viewport the window is as wide as a real split: it collapses the
+rail to its 64px icons, and shows what the studio shows on a wide screen when a
+file or the browser is open beside a conversation: the views bar under the tab
+strip (Chat over the conversation, a tab per resource, Show one view at its
+right end), the conversation on the left at 45% and the resource on the right at
+55%, both full height, with the composer under the conversation only. There the
+window also fits the first view: its height is the viewport less the window's
+top and a 16px margin, between 19rem and its full 47rem, so the newest message,
+the composer and the browser's stage down to its ticker are on screen without a
+scroll (one fixed height per viewport, so no beat moves it). A rail that short
+drops Credits, then Changes, the way the studio moves secondary tools into More.
+Narrower windows show one view at a time, with Chat and the resource tabs in the
+views bar from md and as a segmented control above the composer on phones (the
+studio moves them beside the composer below a 900px app width; the landing
+switches at md). Each scenario opens with the file its task starts from
+already open beside the chat:
+
+- Close the books: the bank export. The review file lands as a created file's
+  card under the file rail (every row an added row: the studio has no table
+  preview for a CSV), and in a split Ada's click on the summary's file
+  reference (its hover tone shows first, so the file never opens on its own)
+  opens it beside the chat, as plaintext with line numbers and the referenced
+  row selected.
+- Build a feature: the router. Octo's edit lands as the Updated card with its
+  hunk, and the router beside the chat shows the new code with the change's
+  first range selected (the import on line 2), as a click on the card's
+  filename reveals it. The payment tests show as the studio shows a command:
+  their command text as the live caption, and the result in Octo's summary.
+- Launch a site: the pricing notes. Octo builds the page, starts its dev
+  server and a tunnel (Ada's prompt asks for the preview link, the consent the
+  tunnel needs), posts the preview link, and asks to continue in the browser.
+  Only Ada's press on that card opens the Shared Browser, so the press is
+  staged to be seen: the card holds long enough to read, her press goes down on
+  the button, then the button is busy (Opening browser…) while the Browser tab
+  comes first and the studio's Starting Shared Browser card shows. Her
+  continuation is sent once the session is up, and Octo's browser run asks her
+  to approve the preview's site before it may read it: the prompt opens at its
+  top with routine browsing unticked (Allow site), she scrolls it to the
+  routine browsing box and ticks it, and presses Allow routine browsing. Then
+  the page shows what the studio overlays on it: the edge glow while Octo
+  controls it, the ticker in the runtime's own words (Go to the address, the
+  page title, Scroll, Click "Choose Team"), each caption up for about a second
+  to be read, Octo's unlabeled cursor at its click (the centre of the button,
+  where the runtime clicks), and Kim's named pointer, which comes onto the page
+  once it has scrolled and moves to the plan comparison as she answers, never
+  onto the control Octo clicked. The page says only what the pricing notes
+  say, and its own selected state is neutral, so no green on it reads as Kim's.
+  In one view the press brings the browser to the front, and nothing in the
+  studio switches back to Chat on its own: once Octo is done, Ada's press goes
+  down on the Chat tab and the chat comes to the front with Octo's report and
+  Kim's reply. The finished frame (reduced motion, offscreen, hidden tabs) is
+  Kim's reply, under two seconds after Octo's click: inside the 4 seconds its
+  cursor lingers, so Octo's cursor still rests on the button it clicked and the
+  ticker, which fades after 6, still shows the click. While the task plays on,
+  the cursor fades 4 seconds after the click. Never show what the studio does
+  not do: an agent opening the browser on its own, a page that updates as files
+  are written, a device viewport switch, a visible Ready pill or a deploy.
+
+From 1184px the scenario chips sit on the entries' row, beside the buttons,
+and on a short, wide screen (from 1184px wide and up to 960px tall) the
+headline eases to 76px (64px up to 840px tall) and the window comes up a
+little. Under 800px tall, the first view a 1366x768 or 1280x720 laptop leaves
+once the browser's own chrome is drawn, the hero tightens further (a 54px
+headline, the sub copy on two lines, less room between the parts) and the
+window may shrink to 19rem, so the whole window, the browser's stage down to
+its ticker included, fits the first view down to about 650px tall. Two departures from the studio stage it for
+Cub, as in the approved hero: the conversation's roster sits in the window's
+top bar, right-aligned and level with the ledge (28px coins, 10px apart; 24px
+on phones, where the bar drops its sidebar toggle, bell and new-chat buttons so
+the chat's title reads whole beside them), stopping short of the corner on
+windows of 1000px and up to leave Cub room; and the expanded rail names each
+scenario's space plainly (Finance, Checkout, Website). Cub's arms and ink keep
+out of the conversation and the resource beside it, and his front arms hang no
+lower than they did before the views bar came under the top bar. In a dev build
+the Cub playground's Example switch (or `?deck-layout=single`) shows one view at
+every width for review.
+
+The example ships in the entry chunk every route loads, /studio and /login
+included (the router imports the landing statically). On 2026-10-10 that
+chunk was 588 kB (162 kB gzip) with the example in it, about 5 kB gzip more
+than before the split and the browser came in. Keep that cost in view: if the
+example grows again, load the window lazily behind a placeholder of its fixed
+height (its height never depends on what it draws) instead of letting it ride
+on every route.
+
+## Marketing surfaces
+
+The landing hero sits on the marketing paper (`#F8F8F6`, dark `#141414`) with
+the 24px dot grid behind the hero only; the header sits plainly on the paper,
+with no bar or blur, so its lockup (a 30px mark, 28px on phones, beside a bold
+20px wordmark, 19px on phones) can carry the crew mark. The headline is all ink. The copy, the
+entries and the scenario chips stack on the left (from 1184px the chips sit
+beside the entries), and the right of the hero stays open above the example
+window's top-right corner for Cub. The landing
+keeps the approved hero's page gutter, header included: 24px on phones, 28px
+from 768px and 40px from 1000px, so Cub's corner drape has room beside the
+window. In dark mode
+the example window's top bar takes the panel's surface (`#1D1D1D`), so the
+ledge Cub sits on reads as a slab against the page.
+
+The tentacle artwork and its presence cursors are retired. The landing's
+participants wear the crew colors in roster order (Ada pink, Kim green, the
+scenario agent flame), and Octo stays ink: its roster and transcript coins are
+the studio's own [coin](#octos-coin) (`OctoCoin`), white with the shared avatar
+coin shadow on light and reversed on dark, never a copy of it. Ada's, Kim's and
+the scenario agent's coins, in the roster, the transcript and the rail's
+profile, take the same light shadow and no grey border.
+
+The login page uses the same marketing paper, with the dot grid full-bleed
+behind its card from the `sm` breakpoint up; phones and extension embeds keep
+plain paper. The card is opaque, so no dot shows through the form, and its 48px
+mark uses the crew colorway. Login shows no character and no artwork. The
+full-screen loading handoff ("Getting things ready…") sits on the marketing
+paper too, so moving from the landing to login never flashes white.
 
 ## Scale, clear space, and wordmark
 
 Distribution exports place the canonical 64-unit drawing at `0.85` scale,
 which reserves 15% of the canvas across both axes before a platform applies its
 own mask. Keep that optical padding and keep maskable artwork inside the
-platform safe zone. Use the generated favicon at 16px; do not manually simplify
-or squeeze the mark for smaller sizes.
+platform safe zone. At `0.85` the outer nodes reach 42% of the icon's width from
+its center, past the W3C maskable safe circle (40%), so the maskable PWA icons
+use `maskableScale` (`0.78`, about 38.6%). Android adaptive foregrounds already
+stay inside their 66 dp safe circle at `0.85`.
+
+Marks shown at 24 CSS px (or points) and below use the small cut
+(`packages/frontend/src/assets/octo-mark-small.geometry.json`): a pixel-fitted
+drawing of the same mark, with the same lean, in which 4 units are 1 px at
+16 px, so the nodes are 2 × 2 px on grid corners with a clear pixel between each
+arm tip and its node. The 16 px rasters draw each node as that solid 2 × 2 px
+cell rather than an antialiased disc. It is drawn full-bleed (it already keeps
+a 4-unit margin), not at the `0.85` distribution scale. It is the only
+sanctioned redraw: never draw the main cut at 24 CSS px or below where the
+small cut ships, never show the small cut above 24 CSS px, and never squeeze or
+simplify the mark by hand.
+
+The threshold is in CSS px or points, not device pixels. A raster takes the
+small cut only when it is 32 device px or less and is shown at 24 CSS px or
+less: the 32 px favicon rasters (`favicon.ico`'s 32 px entry and `icon-32.png`)
+and the macOS 16 pt@2x slot are the 2x rendering of a 16 CSS px or 16 pt icon.
+A raster that can be shown at its own size above 24 px keeps the main cut: the
+32 px entry of the desktop `icon.ico` and the 32 pt macOS slot. The iOS 20 pt@2x
+slot also keeps the main cut, because iOS masks it like every other iOS size.
 
 For a standalone inline mark, leave at least one detached-node diameter of
 clear space around the visible artwork. When paired with the product name, use
@@ -138,17 +492,51 @@ geometry.
 ## Source of truth and generated assets
 
 The canonical Octo geometry is
-`packages/frontend/src/assets/octo-mark.geometry.json`. Distribution color,
-scale, and cache revision live in `scripts/app-icon-brand.json`.
-`OctoMark.tsx`, the icon generator, and the checker consume those sources.
-`octoMarkMotionGeometry.ts` derives transient, command-compatible thinking
-frames from that same geometry; it is not a second hand-drawn logo source.
-Generated PNG/SVG/ICO files are outputs and must not be edited by hand.
+`packages/frontend/src/assets/octo-mark.geometry.json`; its small cut is
+`packages/frontend/src/assets/octo-mark-small.geometry.json` (the same schema,
+one body path and the four nodes, no transform). Distribution color, scale,
+the maskable scale (`maskableScale`), the crew colors (`colors.crew.light` and
+`colors.crew.dark`, slots 1 to 4 left to right), the crew tile threshold
+(`crewTileMinPx`) and the cache revision live in `scripts/app-icon-brand.json`. `OctoMark.tsx`, the icon generator, and the
+checker consume those sources. The generator ranks the nodes into crew slots
+by `cx`, as `OctoMark` does. `octoMarkMotionGeometry.ts` derives transient,
+command-compatible thinking frames from the main geometry; it is not a second
+hand-drawn logo source. Generated PNG/SVG/ICO/ICNS files are outputs and must
+not be edited by hand. The generator needs macOS (AppKit and `iconutil`).
+
+`pnpm check:app-icons` runs the checker's unit tests, then the checker. Besides
+sizes, alpha and optical bounds (measured over the body ink and the node
+colors together, since the nodes are the mark's outer extremes), it samples
+every crew asset's four node centers for their slot colors in order, rejects
+any stray hue, proves the one-ink assets (favicons, the GitHub badge, the
+Android themed layer, the iOS 20 pt@2x slot) carry no crew color, tells the
+small cut from the main cut in every favicon entry, requires solid pixel nodes
+in the 16 px favicon and `.ico` entries, and requires the crew colors in
+`packages/frontend/src/styles/tailwind.css` (`--crew-1` … `--crew-4` and the
+`.dark` lift) to equal the icon config. It decodes every representation of the
+desktop `icon.icns` (PNG and ARGB) and `icon.ico` (DIB and PNG) and applies the
+same size, cut and color rules to each, on the body of the macOS grid for every
+`.icns` slot, whose margins must be fully transparent; keeps the maskable icons
+and Android adaptive foregrounds inside their circular safe zones; pins the iOS
+AppIcon catalog's six entries (two slots, each in the any, Dark and Tinted
+appearances) and the Splash image set's light and dark entries; requires the
+iOS Dark icon to paint only the white body and the dark crew set on a
+transparent ground, and the Tinted icon to be opaque, RGB, greyscale and one
+ink; requires every reverse splash to be opaque dark canvas to its corners with
+the dark crew set in the positive splash's place; checks the generated Android
+launch grounds and the light and night launch themes; pins `theme-color` to
+brand paper and the dark canvas per color scheme in `index.html`, its inline
+script and `ThemeProvider`, and to brand paper in the manifest, never brand
+ink; and treats any `<link>` whose `rel` includes `icon`, in any attribute
+order, as a favicon that must be one of the one-ink files.
 
 `packages/frontend/public/og-image.png` is the one current static social-card
 exception. It uses the positive mark and wordmark composition, is checked for
 its 1200×630 delivery shape, and should move into the generator if its artwork
-is redesigned.
+is redesigned. It is a known stale exception to the landing rules above: it
+still shows the retired tentacle artwork, an orange Octo pill and a blue
+headline line. Regenerating it (ideally with Cub) is an open owner follow-up;
+until then shared links show the old composition.
 
 After changing geometry, color treatment, or distribution scale, run:
 
@@ -172,11 +560,23 @@ existing browser or installed PWA from retaining the previous identity.
 
 iOS App Store icons must be opaque. Google Play artwork must remain 512×512
 RGBA and under 1 MiB. Android adaptive foregrounds must stay inside their
-visible viewport; themed icons are intentionally OS-recolored. Native launcher
-or desktop-icon changes require a new binary, and iOS uploads require a unique
-build number. Google Play listing and developer-profile artwork are separate
-manual console uploads today. GitHub App and OAuth App settings also require a
-manual upload of the transparent, sub-1 MiB
+visible viewport; themed icons are intentionally OS-recolored, from the
+dedicated one-ink `ic_launcher_monochrome` layer. electron-builder takes the
+generated `icon.icns` and `icon.ico` as they are, so their one-ink 16 to 32 px
+representations are what Finder, the Dock's small sizes, Explorer and the
+taskbar show; the `.ico` keeps classic 32-bit DIB entries under 256 px and one
+PNG-compressed 256 px entry. Linux builds still derive their sizes from the
+1024 px `icon.png`. On macOS 26 the system also refits legacy icons into its
+own icon shape and adds its glass treatment, so the grid mostly matters on
+macOS 11 to 15, which draw the `.icns` as it is; a full-bleed tile there was
+about 24% larger than its neighbours. The iOS catalog is the single 1024 px
+icon plus the explicit one-ink 20 pt@2x slot, each with its Dark and Tinted
+appearance; Xcode derives every other size, all of them 58 px or larger, from
+the 1024 px image of the current appearance.
+Native launcher or desktop-icon changes require a new binary, and iOS uploads
+require a unique build number. Google Play listing and developer-profile
+artwork are separate manual console uploads today. GitHub App and OAuth App
+settings also require a manual upload of the transparent, sub-1 MiB
 `packages/frontend/store/github-app-badge-logo.png` plus the badge background
 color `#0F172A`; each distinct registration must be updated separately. See
 the relevant platform's release documentation for build and upload steps.

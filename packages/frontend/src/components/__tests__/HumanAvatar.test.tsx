@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HumanAvatar, type HumanAvatarProps } from "../HumanAvatar";
+import { expectAvatarCoinLightEdge } from "./octoCoinExpectations";
 
 describe("HumanAvatar", () => {
   let container: HTMLDivElement;
@@ -46,6 +47,13 @@ describe("HumanAvatar", () => {
     expect(avatar.textContent).toBe("");
     expect(avatar.querySelector("svg")).not.toBeNull();
     expect(avatar.getAttribute("aria-hidden")).toBe("true");
+  });
+
+  it("is a coin edged by the shared avatar coin shadow in light, with no dark edge of its own", async () => {
+    const avatar = await render({ userId: "stable-user", displayName: "Alex Person", className: "h-9 w-9 text-xs" });
+    const tokens = expectAvatarCoinLightEdge(avatar);
+    expect(tokens).toEqual(expect.arrayContaining(["rounded-full", "overflow-hidden"]));
+    expect(tokens.filter((token) => /^dark:(border|shadow|ring)/.test(token))).toEqual([]);
   });
 
   it("preserves an explicit accessible photo preview and caller sizing", async () => {

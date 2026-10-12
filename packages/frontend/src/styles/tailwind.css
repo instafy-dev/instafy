@@ -55,6 +55,19 @@
   --color-studio-dark-rail-hover: rgb(255 255 255 / 0.075);
   --color-studio-dark-control-hover: rgb(255 255 255 / 0.09);
 
+  /* Octo's coin in dark mode (src/components/OctoCoin.tsx, docs/Brand.md): a
+     neutral raised coin that reads on the #141414 canvas and the #1D1D1D
+     panel, edged by a faint light ring. In light mode the coin is white and
+     its edge is the shared avatar coin shadow below. */
+  --color-octo-coin-dark: #262626;
+  --color-octo-coin-ring-dark: rgb(255 255 255 / 0.22);
+
+  /* shadow-avatar-coin: the light-mode edge of every avatar coin, Octo's,
+     people's and other agents' alike (docs/Brand.md). It reads from
+     --avatar-coin-shadow, which is empty in dark, so a coin keeps whatever
+     dark edge its own dark: classes give it. */
+  --shadow-avatar-coin: var(--avatar-coin-shadow);
+
   --color-primary-500: var(--color-brand-blue);
   --color-primary: var(--color-primary-500);
   --color-primary-50: color-mix(in oklch, var(--color-primary-500), white 94%);
@@ -130,6 +143,147 @@
   --instafy-safe-area-inset-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
 }
 
+/* Brand tokens read by CSS rules and by script (getComputedStyle), so they
+   live outside @theme where Tailwind could drop a variable no utility uses.
+   See docs/Brand.md.
+
+   Crew colours, left to right as the logo's nodes and in roster order:
+   pink, green, flame, violet. These theme-aware values colour only the logo's
+   crew nodes; dark mode lifts green and violet. The hero's ink (Cub draws it
+   on his own canvas) takes the same values from src/screens/landing/
+   landingCrew.ts (CREW_SLOTS, CREW_DARK_LIFT in dark), and participant coins
+   and pills keep its light set in both themes; unit tests keep that file and
+   these values equal. */
+:root {
+  --crew-1: #ff3c9f;
+  --crew-2: #1b864b;
+  --crew-3: #fa5815;
+  --crew-4: #814ad0;
+
+  /* Marketing paper (landing and login): a warm canvas and the 24px dot grid
+     drawn on it. Dark mode uses the studio's dark canvas. */
+  --marketing-canvas: #f8f8f6;
+  --marketing-grid: #dcdad2;
+
+  /* The avatar coin shadow (shadow-avatar-coin): a whisper of an all-round
+     hairline and a soft, short drop, so a white coin reads as a coin on a
+     white bar, the slate-50 panel and the #F8F8F6 paper, and coloured coins
+     sit in the same family. It is a shadow, never an outline. */
+  --avatar-coin-shadow: 0 0 0 1px rgb(15 23 42 / 0.06), 0 1px 2px rgb(15 23 42 / 0.12),
+    0 2px 6px -1px rgb(15 23 42 / 0.1);
+}
+
+.dark {
+  --crew-2: #3ca063;
+  --crew-4: #a672fa;
+  --marketing-canvas: #141414;
+  --marketing-grid: #2e2e2b;
+
+  /* No coin shadow in dark: each coin keeps its own dark edge. */
+  --avatar-coin-shadow: 0 0 #0000;
+}
+
+/* Crew-coloured logo nodes (OctoMark colorway="crew" | "crew-hidpi"). Each
+   node fills var(--octo-dot-N, currentColor), N counted left to right. */
+.octo-mark--crew {
+  --octo-dot-1: var(--crew-1);
+  --octo-dot-2: var(--crew-2);
+  --octo-dot-3: var(--crew-3);
+  --octo-dot-4: var(--crew-4);
+}
+
+/* crew-hidpi: a 28-39 px lockup's node is a 3 px speck at 1x, so it stays one
+   ink there and takes the crew colours only from 1.5 device pixels per CSS
+   pixel. A browser that understands neither query keeps one ink. The build's
+   CSS minifier keeps only the standard min-resolution query, so Safari before
+   16 shows one ink at 2x too: an accepted, safe fallback. */
+.octo-mark--crew.octo-mark--crew-hidpi {
+  --octo-dot-1: currentColor;
+  --octo-dot-2: currentColor;
+  --octo-dot-3: currentColor;
+  --octo-dot-4: currentColor;
+}
+
+@media (min-resolution: 1.5dppx), (-webkit-min-device-pixel-ratio: 1.5) {
+  .octo-mark--crew.octo-mark--crew-hidpi {
+    --octo-dot-1: var(--crew-1);
+    --octo-dot-2: var(--crew-2);
+    --octo-dot-3: var(--crew-3);
+    --octo-dot-4: var(--crew-4);
+  }
+}
+
+/* The marketing dot grid: a solid 1.2px dot with a soft edge every 24px, no
+   fade. Layers carrying it are decorative (aria-hidden, pointer-events none). */
+.marketing-dot-grid {
+  background-image: radial-gradient(circle, var(--marketing-grid) 1.2px, transparent 1.6px);
+  background-size: 24px 24px;
+}
+
+/* Cub, the landing hero's octopus (src/screens/landing/LandingCub.tsx). His
+   layer never takes pointer events, so the hero shows the hand cursor while
+   the pointer rests on him (his own hit test, never over a control). */
+[data-cub-hot],
+[data-cub-hot] * {
+  cursor: pointer;
+}
+
+/* Octo's roster coin pops while Octo works and gives a little under each tap
+   of Cub's arm (data-cub-pop, data-cub-press; set only while Cub draws). */
+[data-roster-coin="octo"] {
+  transition: transform 0.3s cubic-bezier(0.3, 1.5, 0.5, 1);
+}
+
+[data-roster-coin="octo"][data-cub-pop] {
+  position: relative;
+  z-index: 1;
+  transform: scale(1.16);
+}
+
+[data-roster-coin="octo"][data-cub-press] {
+  transform: scale(0.94);
+  transition-duration: 0.08s;
+}
+
+[data-roster-coin="octo"][data-cub-pop][data-cub-press] {
+  transform: scale(1.04) translateY(1px);
+  transition-duration: 0.06s;
+}
+
+/* Octo's message avatar pops once as its result lands (the landing example's
+   done beat), as in the approved hero: up with a little overshoot over 0.3 s,
+   held, and back, 0.7 s after it rose. Only while the turn plays. */
+@keyframes landing-octo-done-pop {
+  0% {
+    transform: scale(1);
+    animation-timing-function: cubic-bezier(0.3, 1.5, 0.5, 1);
+  }
+  30% {
+    transform: scale(1.12);
+  }
+  70% {
+    transform: scale(1.12);
+    animation-timing-function: cubic-bezier(0.3, 1.5, 0.5, 1);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+[data-landing-octo-pop] {
+  animation: landing-octo-done-pop 1s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-roster-coin="octo"] {
+    transition: none;
+  }
+
+  [data-landing-octo-pop] {
+    animation: none;
+  }
+}
+
 /* macOS integrated title bar: the workspace header doubles as the window's
    drag handle, because the shell's own drag region is confined to the corner
    beside the traffic lights. Everything interactive inside it has to opt back
@@ -161,6 +315,13 @@ html.dark body,
 body.dark {
   background-color: var(--color-studio-dark-canvas);
   @apply text-slate-200;
+}
+
+/* Marketing routes (useMarketingCanvas) paint the document itself in paper so
+   overscroll and rubber-band areas match the page instead of showing white. */
+html.marketing-canvas,
+html.marketing-canvas body {
+  background-color: var(--marketing-canvas);
 }
 
 /* Prevent iOS/WebKit from auto-zooming focused text-entry controls on mobile. */
@@ -209,19 +370,6 @@ body.dark {
 
 .studio-dark-scrollbar::-webkit-scrollbar-thumb:hover {
   background-color: rgb(148 163 184 / 0.55);
-}
-
-/* Gentle bob for the landing hero's presence chips and live-session card.
-   Consumed via motion-safe:animate-[landing-float_...] so reduced-motion
-   users get a still hero. */
-@keyframes landing-float {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-9px);
-  }
 }
 
 @keyframes toast-slide-in-top {

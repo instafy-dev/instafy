@@ -7,6 +7,7 @@ import { defineConfig, type Plugin } from "vitest/config";
 import { loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { buildNativeOtaChannelMarker } from "./nativeOtaChannel.js";
+import { createCheckoutTmpIgnore } from "./devWatchIgnore.js";
 import { sanitizeCodexSubscriptionAuthJson } from "./tests/playwright/utils/codexSubscriptionAuthJson.js";
 import {
   FRONTEND_FEATURE_MANIFEST_ENV,
@@ -402,7 +403,9 @@ export default defineConfig(({ mode, command }) => {
     allowedHosts: [".rt.instafy.dev"],
     watch: {
       ignored: [
-        "**/tmp/**",
+        // tmp/ relative to this checkout, never an ancestor: a worktree under
+        // <repo>/tmp/ must still watch its own sources.
+        createCheckoutTmpIgnore(join(frontendPackageRoot, "..", "..")),
         "**/test-results/**",
         "**/.playwright-artifacts*/**",
         "**/dist/**",

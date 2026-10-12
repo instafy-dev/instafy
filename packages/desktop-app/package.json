@@ -82,7 +82,7 @@
     "mac": {
       "artifactName": "instafy-${version}-mac-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
-      "icon": "assets/icon.png",
+      "icon": "assets/icon.icns",
       "binaries": [
         "Contents/Resources/runtime-agent/runtime-agent",
         "Contents/Resources/runtime-agent/codex-code-mode-host"
@@ -109,7 +109,7 @@
       ]
     },
     "win": {
-      "icon": "assets/icon.png",
+      "icon": "assets/icon.ico",
       "signExts": [
         "runtime-agent.exe",
         "codex-code-mode-host.exe"

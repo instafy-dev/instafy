@@ -153,8 +153,8 @@ export function ChatTypingRows({
         ) : compactThinkingOctoHandle !== null ? (
           // Phones hide the avatar gutter, so this is the row's only face. It
           // is the same chat face as the gutter and the posted reply header,
-          // at the header's inline size, so Octo keeps its white coin in dark
-          // mode (docs/Brand.md) instead of turning into the reverse logo mark.
+          // at the header's inline size, so Octo keeps its coin (OctoCoin,
+          // docs/Brand.md) instead of turning into the bare logo mark.
           <span className="flex flex-shrink-0 sm:hidden">
             <ChatMessageAvatar
               kind="assistant"
@@ -288,7 +288,11 @@ export function ChatTypingRows({
                   {typingAgents.slice(0, 2).map((agent, index) => (
                     <span
                       key={`typing-agent-${agent.handle}`}
-                      className={`absolute top-0 ${index === 0 ? "left-0" : "left-4"}`}
+                      data-testid="assistant-typing-stack-face"
+                      // The same separator the conversation roster paints on
+                      // each face: a thin ring in the chat surface's own
+                      // background keeps the overlapping coins apart.
+                      className={`absolute top-0 rounded-full *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)] ${index === 0 ? "left-0" : "left-4"}`}
                     >
                       <ChatMessageAvatar
                         kind="assistant"

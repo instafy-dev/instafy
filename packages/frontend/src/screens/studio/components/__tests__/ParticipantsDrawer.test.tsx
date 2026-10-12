@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ParticipantsDrawer } from "../ParticipantsDrawer";
+import { expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
 import {
   clearChatParticipants,
   publishChatParticipants,
@@ -128,7 +129,7 @@ describe("ParticipantsDrawer", () => {
     ).toBe("1 running · 2 messages queued");
   });
 
-  it("shows built-in Octo as its white coin mark, not a gradient initial", async () => {
+  it("shows built-in Octo as its coin, not a gradient initial", async () => {
     // The drawer used to draw every agent as a gradient initial, so Octo was an
     // "O" here while every other surface showed its coin (docs/Brand.md).
     await act(async () => {
@@ -139,13 +140,8 @@ describe("ParticipantsDrawer", () => {
     const octoFace = container.querySelector(
       '[data-testid="participants-agent-profile-octo"] > [aria-hidden="true"]',
     );
-    const octoTokens = (octoFace?.getAttribute("class") ?? "").split(/\s+/);
-    expect(octoFace?.querySelector(".octo-mark")).not.toBeNull();
+    expectCanonicalOctoCoin(octoFace);
     expect(octoFace?.textContent).not.toBe("O");
-    expect(octoTokens).toContain("bg-white");
-    expect(octoTokens).toContain("text-brand-ink");
-    expect(octoTokens.filter((token) => token.startsWith("dark:bg-") || token.startsWith("dark:text-")))
-      .toEqual([]);
 
     const pixelFace = container.querySelector(
       '[data-testid="participants-agent-profile-pixel"] > [aria-hidden="true"]',

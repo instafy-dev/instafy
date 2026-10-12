@@ -27,7 +27,6 @@ vi.mock("../login/useNativeGithubAuth", () => ({
     resetNativeAuthState: vi.fn(),
   }),
 }));
-vi.mock("../landing/LandingTentacleScene", () => ({ TentacleBackdrop: () => null }));
 
 function StudioDestination() {
   const location = useLocation();
@@ -108,5 +107,47 @@ describe("LoginPage entry handoff", () => {
     expect(container.querySelector('[role="status"]')).toBeNull();
     // The heading and description already say what to do; no notice repeats it.
     expect(container.querySelector('[data-testid="login-message"]')).toBeNull();
+  });
+
+  it("sits on the flat paper canvas with the dot grid and the crew logo", async () => {
+    auth.loading = false;
+    await render();
+
+    const page = container.querySelector('[data-testid="login-page"]') as HTMLElement;
+    expect(page.className).toContain("bg-[var(--marketing-canvas)]");
+    expect(page.className).not.toContain("bg-gradient");
+    // The document takes the same paper so overscroll matches the page.
+    expect(document.documentElement.classList.contains("marketing-canvas")).toBe(true);
+
+    // A full-bleed decorative grid behind the card from sm up; phones keep
+    // plain paper. No glow and no artwork remain.
+    const grid = container.querySelector('[data-testid="login-dot-grid"]') as HTMLElement;
+    expect(grid).not.toBeNull();
+    expect(grid.getAttribute("aria-hidden")).toBe("true");
+    expect(grid.classList.contains("marketing-dot-grid")).toBe(true);
+    expect(grid.classList.contains("hidden")).toBe(true);
+    expect(grid.classList.contains("sm:block")).toBe(true);
+    expect(grid.classList.contains("absolute")).toBe(true);
+    expect(grid.classList.contains("inset-0")).toBe(true);
+    expect(container.querySelector('[data-testid="login-ambient-glow"]')).toBeNull();
+    expect(container.querySelector("[class*='landing-tentacles']")).toBeNull();
+
+    // The 48px card logo sits on a flat surface, so its nodes take the crew colours.
+    const mark = container.querySelector("svg.octo-mark") as SVGSVGElement;
+    expect(mark.getAttribute("data-octo-colorway")).toBe("crew");
+    expect(mark.classList.contains("octo-mark--crew")).toBe(true);
+    expect(mark.classList.contains("octo-mark--crew-hidpi")).toBe(false);
+
+    await act(async () => root.unmount());
+    expect(document.documentElement.classList.contains("marketing-canvas")).toBe(false);
+    root = createRoot(container);
+  });
+
+  it("keeps extension embeds on plain paper without the dot grid", async () => {
+    auth.loading = false;
+    await render("/login?mode=extension");
+
+    expect(container.querySelector('[data-testid="login-page"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="login-dot-grid"]')).toBeNull();
   });
 });

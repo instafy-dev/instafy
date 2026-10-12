@@ -2,8 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { MarketingMobileNav, type MarketingMobileNavItem } from "./MarketingMobileNav";
 import { MenuIcon } from "./marketingIcons";
-import { OctoMark } from "./OctoMark";
-import { Text } from "./Text";
+import { OctoMark, type OctoMarkColorway } from "./OctoMark";
 
 // Deliberately react-aria-free: this header is in the landing page's eager
 // bundle, and importing react-aria/iconoir here drags the whole vendor-ui
@@ -27,7 +26,20 @@ function isActivePath(pathname: string, item: MarketingMobileNavItem) {
   return pathname === item.to;
 }
 
-export function MarketingHeader({ items }: { items: MarketingMobileNavItem[] }) {
+export function MarketingHeader({
+  items,
+  markColorway = "ink",
+  gutterClassName = "max-w-6xl px-6",
+}: {
+  items: MarketingMobileNavItem[];
+  /**
+   * The lockup's 30px mark (28px on phones). Opt in to "crew-hidpi" only where the header sits
+   * on a flat surface (never over artwork); see docs/Brand.md.
+   */
+  markColorway?: OctoMarkColorway;
+  /** The header's width and side padding: the page's own gutter, so the lockup lines up with its content. */
+  gutterClassName?: string;
+}) {
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -57,12 +69,12 @@ export function MarketingHeader({ items }: { items: MarketingMobileNavItem[] }) 
   }, [menuOpen]);
 
   return (
-    <header className="mx-auto flex w-full max-w-6xl items-center justify-between px-6 py-4 md:py-6">
-      <Link to="/" className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-        <OctoMark className="h-7 w-7 text-brand-ink dark:text-brand-paper" />
-        <Text as="span" variant="display" tone="primary">
-          Instafy
-        </Text>
+    <header className={`mx-auto flex w-full items-center justify-between py-4 md:py-6 ${gutterClassName}`}>
+      {/* The approved lockup: a 30px mark (28px on phones) beside a bold 20px
+          wordmark (19px on phones), so the mark leads and the name follows. */}
+      <Link to="/" className="flex shrink-0 items-center gap-2.5 whitespace-nowrap">
+        <OctoMark colorway={markColorway} className="h-7 w-7 text-brand-ink dark:text-brand-paper md:h-[30px] md:w-[30px]" />
+        <span className="text-[19px] font-bold leading-none tracking-[-0.025em] text-brand-ink dark:text-brand-paper md:text-[20px]">Instafy</span>
       </Link>
 
       <div className="ml-4 flex min-w-0 flex-1 justify-end">
