@@ -838,4 +838,57 @@ describe("local capability conversation flow", () => {
       "assistant",
     );
   });
+  it("records another device's unconfirmed result as a status turn, not an error", async () => {
+    // The phone may have moved the robot after the wait ran out, so the turn
+    // the conversation keeps must not say the action failed.
+    const responseText =
+      "Rover asked Rover Board (AA:BB:CC:DD:EE:FF) to run Look at me, but no answer came back within 30 s; it may have run, or may still run.";
+    dispatchLocalBuiltInCapabilityPromptMock.mockResolvedValue({
+      handled: true,
+      responseText,
+      metadata: {
+        kind: "local_capability_result",
+        capability: { id: "robot_embodiment", status: "unconfirmed", code: "remote_tool_unconfirmed" },
+        localCapability: { id: "robot_embodiment", status: "unconfirmed" },
+        remoteToolCall: { dispatched: true, outcome: "unconfirmed", ok: null },
+      },
+    });
+    const messages = createMessageStore({ "conversation-unconfirmed": [] });
+    const recordMessageToController = vi.fn(async () => null);
+    const onCapabilityError = vi.fn();
+
+    await runLocalCapabilityConversationFlow({
+      handle: "rover",
+      prompt: "@rover look at me",
+      conversationId: "conversation-unconfirmed",
+      displayConversationId: "conversation-unconfirmed",
+      promptMetadata: null,
+      userMessageId: "user-unconfirmed",
+      conversationMessages: [],
+      initiatedBy: "person",
+      appendMessages: messages.appendMessages,
+      updateMessage: messages.updateMessage,
+      recordMessageToController,
+      onCapabilityError,
+    });
+
+    expect(onCapabilityError).not.toHaveBeenCalled();
+    expect(recordMessageToController).toHaveBeenNthCalledWith(
+      2,
+      "conversation-unconfirmed",
+      responseText,
+      expect.objectContaining({
+        messageType: "status",
+        localCapability: { id: "robot_embodiment", status: "unconfirmed" },
+        remoteToolCall: expect.objectContaining({ outcome: "unconfirmed", ok: null }),
+      }),
+      "assistant",
+    );
+    const [shown] = messages.store.get("conversation-unconfirmed") ?? [];
+    expect(shown).toMatchObject({
+      content: responseText,
+      messageType: "status",
+      metadata: { localCapability: { status: "unconfirmed" } },
+    });
+  });
 });

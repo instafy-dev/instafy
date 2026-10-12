@@ -275,6 +275,7 @@ describe("a person's robot prompt on a device without the robot", () => {
         toolName: "rover.skill.look_at",
         arguments: { azimuth_deg: 0 },
         deviceLabel: "Rover Board (AA:BB:CC:DD:EE:FF)",
+        outcome: "completed",
         ok: true,
         error: null,
         result: { skill_id: "look_at", status: "succeeded" },
@@ -298,7 +299,154 @@ describe("a person's robot prompt on a device without the robot", () => {
     );
     expect(result.metadata).toMatchObject({
       capability: { status: "failed", code: "remote_tool_failed" },
-      remoteToolCall: { dispatched: true, ok: false },
+      remoteToolCall: { dispatched: true, outcome: "failed", ok: false },
+    });
+  });
+
+  describe("when no reply from the phone settles the call", () => {
+    const DEVICE = "Rover Board (AA:BB:CC:DD:EE:FF)";
+
+    it("does not say a call the controller stopped waiting for did not run", async () => {
+      // What an older controller returns at its deadline, with nothing about
+      // whether the phone had taken the request.
+      harness.dispatchToolCall.mockResolvedValue({
+        ok: false,
+        providerId: "rover",
+        name: "rover.skill.look_at",
+        error: "Timed out waiting for the provider device to respond.",
+        noDeviceReply: "unknown",
+      });
+      const onCapabilityEvent = vi.fn();
+
+      const result = await runPrompt("@rover look at me", { onCapabilityEvent });
+
+      expect(result.error).toBeUndefined();
+      expect(result.responseText).toBe(
+        `Rover asked ${DEVICE} to run Look at me, but no answer came back within 30 s; it may have run, or may still run.`,
+      );
+      expect(result.metadata).toMatchObject({
+        capability: { status: "unconfirmed", code: "remote_tool_unconfirmed" },
+        localCapability: { status: "unconfirmed" },
+        remoteToolCall: {
+          dispatched: true,
+          outcome: "unconfirmed",
+          ok: null,
+          error: "Timed out waiting for the provider device to respond.",
+        },
+      });
+      expect(onCapabilityEvent.mock.calls.map(([event]) => event.status)).toEqual([
+        "started",
+        "unconfirmed",
+      ]);
+    });
+
+    it("says the phone took the request when the controller reports it was claimed", async () => {
+      const request = {
+        id: "request-1",
+        status: "expired",
+        claimedAt: "2026-10-12T12:00:28.000Z",
+        claimedByDeviceLabel: "Rover Board",
+      };
+      harness.dispatchToolCall.mockResolvedValue({
+        ok: false,
+        providerId: "rover",
+        name: "rover.skill.look_at",
+        error: "Timed out waiting for the provider device to respond.",
+        noDeviceReply: "unknown",
+        request,
+      });
+
+      const result = await runPrompt("@rover look at me");
+
+      expect(result.error).toBeUndefined();
+      expect(result.responseText).toBe(
+        `Rover asked ${DEVICE} to run Look at me, but it took the request and did not report back within 30 s; it may have run, or may still run.`,
+      );
+      expect(result.metadata).toMatchObject({
+        capability: { status: "unconfirmed" },
+        remoteToolCall: { outcome: "unconfirmed", ok: null, request },
+      });
+    });
+
+    it("says a call no phone picked up before the controller expired it did not run", async () => {
+      harness.dispatchToolCall.mockResolvedValue({
+        ok: false,
+        providerId: "rover",
+        name: "rover.skill.look_at",
+        error: "Timed out waiting for the provider device to respond.",
+        noDeviceReply: "never_claimed",
+        request: { id: "request-1", status: "expired", claimedAt: null, claimedByDeviceLabel: null },
+      });
+
+      const result = await runPrompt("@rover look at me");
+
+      expect(result.error).toBe(`${DEVICE} did not pick up the request within 30 s.`);
+      expect(result.responseText).toBe(
+        `Rover asked ${DEVICE} to run Look at me, but it did not pick up the request within 30 s, so Look at me did not run.`,
+      );
+      expect(result.metadata).toMatchObject({
+        capability: { status: "failed", code: "remote_tool_not_claimed" },
+        localCapability: { status: "failed" },
+        remoteToolCall: { outcome: "not_run", ok: false },
+      });
+    });
+
+    it("does not say a call whose answer was lost did not run", async () => {
+      harness.dispatchToolCall.mockResolvedValue({
+        ok: false,
+        providerId: "rover",
+        name: "rover.skill.look_at",
+        error: "Unable to dispatch provider tool call: Failed to fetch",
+        noDeviceReply: "unknown",
+      });
+
+      const result = await runPrompt("@rover look at me");
+
+      expect(result.error).toBeUndefined();
+      expect(result.responseText).toBe(
+        `Rover asked ${DEVICE} to run Look at me, but no answer came back (Unable to dispatch provider tool call: Failed to fetch); it may have run, or may still run.`,
+      );
+      expect(result.metadata).toMatchObject({
+        capability: { status: "unconfirmed", code: "remote_tool_unconfirmed" },
+        remoteToolCall: { outcome: "unconfirmed", ok: null },
+      });
+    });
+
+    it("does not say a call did not run when the dispatch itself rejects", async () => {
+      harness.dispatchToolCall.mockRejectedValue(new Error("socket hang up"));
+
+      const result = await runPrompt("@rover look at me");
+
+      expect(result.error).toBeUndefined();
+      expect(result.responseText).toBe(
+        `Rover asked ${DEVICE} to run Look at me, but no answer came back (socket hang up); it may have run, or may still run.`,
+      );
+      expect(result.metadata).toMatchObject({
+        capability: { status: "unconfirmed", code: "remote_tool_unconfirmed" },
+        remoteToolCall: { dispatched: true, outcome: "unconfirmed", ok: null, error: "socket hang up" },
+      });
+    });
+
+    it("says a call the controller refused before queueing it did not run", async () => {
+      harness.dispatchToolCall.mockResolvedValue({
+        ok: false,
+        providerId: "rover",
+        name: "rover.skill.look_at",
+        error: "provider is not attached to this project",
+        statusCode: 400,
+        noDeviceReply: "not_queued",
+      });
+
+      const result = await runPrompt("@rover look at me");
+
+      expect(result.error).toBe("provider is not attached to this project");
+      expect(result.responseText).toBe(
+        `Rover could not ask ${DEVICE} to run Look at me: provider is not attached to this project`,
+      );
+      expect(result.metadata).toMatchObject({
+        capability: { status: "failed", code: "remote_tool_not_sent" },
+        remoteToolCall: { outcome: "not_run", ok: false },
+      });
     });
   });
 

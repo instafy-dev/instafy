@@ -150,6 +150,10 @@ export async function runLocalCapabilityConversationFlow(
     content: string,
     status: "in_progress" | "completed" | "failed",
     extraMetadata?: Record<string, unknown> | null,
+    // The result's own final status when it says more than completed or
+    // failed, such as "unconfirmed" for another device's action that no
+    // answer settled, so the shown turn matches the recorded one.
+    localCapabilityStatus: string = status,
   ) => {
     options.updateMessage(options.conversationId, assistantMessage.id, (previous) => {
       const previousMetadata = isMetadataRecord(previous.metadata) ? previous.metadata : {};
@@ -176,7 +180,7 @@ export async function runLocalCapabilityConversationFlow(
           },
           localCapability: {
             ...previousLocalCapability,
-            status,
+            status: localCapabilityStatus,
           },
         }),
       };
@@ -259,6 +263,7 @@ export async function runLocalCapabilityConversationFlow(
     assistantResponseText,
     capabilityResult.error ? "failed" : "completed",
     assistantMetadata,
+    assistantMetadata.localCapability.status,
   );
   await recordedUserMessagePromise;
 

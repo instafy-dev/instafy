@@ -1,6 +1,10 @@
 import type { BuiltInAssistantDefinition } from "@instafy/sdk/agents";
 import { getRegisteredNativeRuntimeProvider } from "../extensions/extensionCatalog";
 import { controllerClient } from "../sdk/instafy/controllerClient";
+import {
+  CONTROLLER_PROVIDER_REQUEST_TIMEOUT_ERROR,
+  type ControllerProviderToolCallEnvelope,
+} from "../services/runtimeController/providerRequests";
 import type {
   ExecuteLocalCapabilityPromptOptions,
   LocalCapabilityRouteDefinition,
@@ -14,6 +18,14 @@ import type { ProjectProviderRemoteDevice } from "./projectProviderAccess";
  * covers a poll, a Bluetooth reconnect and an action of several seconds.
  */
 export const REMOTE_TOOL_CALL_TIMEOUT_MS = 30_000;
+
+/**
+ * What became of a dispatched call: the device ran it ("completed") or
+ * reported it failed ("failed"); it never reached a device, or expired before
+ * one picked it up ("not_run"); or no answer says either way, so the device
+ * may have run it or may still run it ("unconfirmed").
+ */
+export type RemoteToolCallOutcome = "completed" | "failed" | "not_run" | "unconfirmed";
 
 export interface ExecuteRemoteToolCallOptions {
   route: LocalCapabilityRouteDefinition;
@@ -32,6 +44,11 @@ export interface ExecuteRemoteToolCallOptions {
  * device's reply into the chat result. Refuses, without dispatching, a prompt
  * the app sent on the person's behalf, a prompt the route has no remote call
  * for, and any tool id the family does not list.
+ *
+ * A call that no answer settles (the wait ran out after a device took it, or
+ * the answer was lost on the way) is reported as unconfirmed, not failed: the
+ * device may have run it, or may still run it, and the conversation must not
+ * say otherwise.
  */
 export async function executeRemoteToolCall(
   input: ExecuteRemoteToolCallOptions,
@@ -128,7 +145,7 @@ export async function executeRemoteToolCall(
   emitCapabilityEvent(capabilityEvent("started"));
   options.onStatus?.(`Asking ${deviceLabel} to run ${title}…`);
 
-  const response = await controllerClient.providerRequests
+  const response: ControllerProviderToolCallEnvelope = await controllerClient.providerRequests
     .dispatchToolCall({
       projectId,
       providerId,
@@ -137,24 +154,60 @@ export async function executeRemoteToolCall(
       timeoutMs: REMOTE_TOOL_CALL_TIMEOUT_MS,
     })
     .catch((error: unknown) => ({
-      ok: false as const,
+      // The call may have been queued before it failed, so a device may run it.
+      ok: false,
       providerId,
       name: toolName,
       value: undefined,
       error: error instanceof Error ? error.message : String(error),
+      noDeviceReply: "unknown" as const,
     }));
 
-  const ok = response.ok === true;
-  const error = ok
-    ? null
-    : response.error?.trim() || `${deviceLabel} did not report a result for ${title}.`;
-  emitCapabilityEvent(capabilityEvent(ok ? "completed" : "failed"));
+  const reportedError = response.error?.trim() || null;
+  const timeoutSeconds = Math.round(REMOTE_TOOL_CALL_TIMEOUT_MS / 1000);
+  let outcome: RemoteToolCallOutcome;
+  let responseText: string;
+  let code: string | null = null;
+  // Only a call that is known not to have run, or that the device reported as
+  // failed, is an error. One that no answer settles is not: the device may
+  // have moved, so the conversation must not say it did not.
+  let error: string | null = null;
+  if (response.ok === true) {
+    outcome = "completed";
+    responseText = `${assistantName} ran ${title} on ${deviceLabel}.`;
+  } else if (response.noDeviceReply === "unknown") {
+    outcome = "unconfirmed";
+    code = "remote_tool_unconfirmed";
+    const controllerStoppedWaiting =
+      response.request !== undefined || reportedError === CONTROLLER_PROVIDER_REQUEST_TIMEOUT_ERROR;
+    const reason = response.request?.claimedAt
+      ? `it took the request and did not report back within ${timeoutSeconds} s`
+      : controllerStoppedWaiting || !reportedError
+        ? `no answer came back within ${timeoutSeconds} s`
+        : `no answer came back (${reportedError})`;
+    responseText = `${assistantName} asked ${deviceLabel} to run ${title}, but ${reason}; it may have run, or may still run.`;
+  } else if (response.noDeviceReply === "never_claimed") {
+    outcome = "not_run";
+    code = "remote_tool_not_claimed";
+    error = `${deviceLabel} did not pick up the request within ${timeoutSeconds} s.`;
+    responseText = `${assistantName} asked ${deviceLabel} to run ${title}, but it did not pick up the request within ${timeoutSeconds} s, so ${title} did not run.`;
+  } else if (response.noDeviceReply === "not_queued") {
+    outcome = "not_run";
+    code = "remote_tool_not_sent";
+    error = reportedError ?? `The request for ${title} could not be sent.`;
+    responseText = `${assistantName} could not ask ${deviceLabel} to run ${title}: ${error}`;
+  } else {
+    outcome = "failed";
+    code = "remote_tool_failed";
+    error = reportedError ?? `${deviceLabel} did not report a result for ${title}.`;
+    responseText = `${assistantName} could not run ${title} on ${deviceLabel}: ${error}`;
+  }
+  const status = outcome === "completed" ? "completed" : outcome === "unconfirmed" ? "unconfirmed" : "failed";
+  emitCapabilityEvent(capabilityEvent(status));
 
   return {
     handled: true,
-    responseText: ok
-      ? `${assistantName} ran ${title} on ${deviceLabel}.`
-      : `${assistantName} could not run ${title} on ${deviceLabel}: ${error}`,
+    responseText,
     ...(error ? { error } : {}),
     metadata: {
       kind: "local_capability_result",
@@ -162,13 +215,13 @@ export async function executeRemoteToolCall(
       capability: {
         id: route.capabilityId,
         actionId: toolName,
-        status: ok ? "completed" : "failed",
-        ...(ok ? {} : { code: "remote_tool_failed" }),
+        status,
+        ...(code ? { code } : {}),
         providerId,
       },
       localCapability: {
         id: route.capabilityId,
-        status: ok ? "completed" : "failed",
+        status,
       },
       remoteToolCall: {
         providerId,
@@ -176,9 +229,11 @@ export async function executeRemoteToolCall(
         dispatched: true,
         toolName,
         arguments: argumentsValue,
-        ok,
-        error,
+        outcome,
+        ok: outcome === "completed" ? true : outcome === "unconfirmed" ? null : false,
+        error: outcome === "completed" ? null : (error ?? reportedError),
         result: response.value ?? null,
+        ...(response.request ? { request: response.request } : {}),
       },
       capabilityEvents,
     },

@@ -18,6 +18,11 @@ export interface ControllerJsonRequestOptions {
   headers?: HeadersInit;
   fallbackError: string;
   allowEmptyResponse?: boolean;
+  /**
+   * Adds `status` and `unanswered` to a failure, for a caller that must tell a
+   * request the controller refused from one whose answer was lost.
+   */
+  describeFailure?: boolean;
 }
 
 export type ControllerJsonRequestSuccess<T> = {
@@ -29,6 +34,18 @@ export type ControllerJsonRequestSuccess<T> = {
 export type ControllerJsonRequestFailure = {
   success: false;
   error: string;
+  /**
+   * With `describeFailure`: the HTTP status of the error response, when the
+   * controller (or a proxy) answered with one.
+   */
+  status?: number;
+  /**
+   * With `describeFailure`: the request was sent but no readable answer came
+   * back (the connection failed or dropped, or the body could not be read), so
+   * whether the controller acted on it is unknown. Absent when the request
+   * was never sent.
+   */
+  unanswered?: true;
 };
 
 export type ControllerJsonRequestResult<T> =
@@ -112,6 +129,7 @@ export async function controllerJsonRequest<T>(
           options.fallbackError,
           requestContext,
         ),
+        ...(options.describeFailure ? { status: response.status } : {}),
       };
     }
 
@@ -142,6 +160,7 @@ export async function controllerJsonRequest<T>(
     return {
       success: false,
       error: `${options.fallbackError}: ${message}`,
+      ...(options.describeFailure ? { unanswered: true as const } : {}),
     };
   }
 }

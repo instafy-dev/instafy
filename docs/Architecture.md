@@ -31,8 +31,14 @@ use, refuses any id the family does not list and any prompt that was not sent
 by a person from the chat composer, and dispatches it through the controller's
 provider-request queue (`POST /projects/:id/provider-tools/call`). The device
 holding the provider claims and completes the request, and its reply becomes
-the assistant turn recorded in the conversation. Model jobs carry no
-`provider.call` scope, so they cannot queue such requests.
+the assistant turn recorded in the conversation. When no reply settles the
+call, the turn says so rather than claiming a failure: if the controller's wait
+ends after a device claimed the request, or the answer is lost on the way, the
+device may still run it, so the turn is `unconfirmed`. Only a request the
+controller refused, or one it expired before any device claimed it (its
+timed-out reply carries `providerRequest` with no `claimedAt`), is reported as
+not run. Model jobs carry no `provider.call` scope, so they cannot queue such
+requests.
 
 ## Filesystem Model
 - Hosted workers materialize per-space workspaces under `WORKSPACE_ROOT/<project_id>`.
