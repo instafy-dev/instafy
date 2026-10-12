@@ -19,6 +19,11 @@ const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
 const SERVICE_EMAIL: &str = "controller-startup@example.test";
 const SERVICE_KEY: &str = "inert-startup-service-role";
 const SERVICE_PASSWORD: &str = "inert-startup-password-override";
+const DECOY_ID: &str = "00000000-0000-4000-8000-000000000002";
+const DECOY_EMAIL: &str = "newest-signup@example.test";
+// The page size and page cap the controller's admin user lookup uses.
+const ADMIN_PER_PAGE: usize = 200;
+const ADMIN_MAX_PAGES: usize = 50;
 // Inert fixtures, never a deployed value. Outside DEV_MODE the controller now
 // refuses to start without both.
 const USER_TOKEN_SECRET: &str = "inert-startup-user-token-secret-0123456789";
@@ -149,19 +154,68 @@ fn jwks_fixture(server: &MockServer) -> Mock<'_> {
     })
 }
 
-#[test]
-fn startup_bootstraps_an_existing_service_user_inside_tokio() {
-    let server = MockServer::start();
-    let jwks = jwks_fixture(&server);
-    let lookup = server.mock(|when, then| {
+/// One page of the admin user list as GoTrue serves it: it ignores an `email`
+/// parameter, lists newest first, and narrows only by the `filter` substring.
+/// The lookup must ask for an explicit page and page size.
+fn admin_list_page(server: &MockServer, page: u32, users: Vec<serde_json::Value>) -> Mock<'_> {
+    server.mock(|when, then| {
         when.method(GET)
             .path(ADMIN_PATH)
-            .query_param("email", SERVICE_EMAIL)
+            .query_param("page", page.to_string())
+            .query_param("per_page", ADMIN_PER_PAGE.to_string())
+            .query_param("filter", SERVICE_EMAIL)
             .header("apikey", SERVICE_KEY)
             .header("authorization", format!("Bearer {SERVICE_KEY}"));
         then.status(200)
-            .json_body(json!({ "users": [{ "id": SERVICE_ID }] }));
-    });
+            .json_body(json!({ "users": users, "aud": "authenticated" }));
+    })
+}
+
+fn service_user() -> serde_json::Value {
+    json!({ "id": SERVICE_ID, "email": SERVICE_EMAIL })
+}
+
+/// A user who signed up after the service user, so GoTrue lists them first.
+fn newer_decoy() -> serde_json::Value {
+    json!({ "id": DECOY_ID, "email": DECOY_EMAIL })
+}
+
+fn full_page_of_decoys() -> Vec<serde_json::Value> {
+    (0..ADMIN_PER_PAGE)
+        .map(|index| {
+            json!({
+                "id": format!("00000000-0000-4000-9000-{index:012}"),
+                "email": format!("decoy-{index}@example.test"),
+            })
+        })
+        .collect()
+}
+
+fn assert_bootstrapped_service_user(result: &StartupExit) {
+    assert_normal_error(result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("bootstrapped SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    assert!(result.output.contains(SERVICE_ID));
+    assert!(!result.output.contains(DECOY_ID));
+}
+
+fn assert_adopted_nobody(result: &StartupExit) {
+    assert_normal_error(result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("failed to bootstrap SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    assert!(!result
+        .output
+        .contains("bootstrapped SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    assert!(!result.output.contains(DECOY_ID));
+}
+
+#[test]
+fn startup_bootstraps_the_service_user_not_the_newest_listed_user() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let lookup = admin_list_page(&server, 1, vec![newer_decoy(), service_user()]);
     let create = server.mock(|when, then| {
         when.method(POST).path(ADMIN_PATH);
         then.status(500);
@@ -172,33 +226,52 @@ fn startup_bootstraps_an_existing_service_user_inside_tokio() {
             "  CONTROLLER-STARTUP@EXAMPLE.TEST  ",
         );
     });
-    assert_normal_error(&result, "failed to parse DATABASE_URL");
-    assert!(result
-        .output
-        .contains("bootstrapped SERVICE_RUNTIME_USER_ID via Supabase admin API"));
-    assert!(result.output.contains(SERVICE_ID));
+    assert_bootstrapped_service_user(&result);
     jwks.assert_hits(1);
     lookup.assert_hits(1);
     create.assert_hits(0);
 }
 
 #[test]
-fn startup_creates_a_missing_service_user_inside_tokio() {
+fn startup_finds_the_service_user_on_a_later_page() {
     let server = MockServer::start();
     let jwks = jwks_fixture(&server);
-    let lookup = server.mock(|when, then| {
-        when.method(GET)
-            .path(ADMIN_PATH)
-            .query_param("email", SERVICE_EMAIL);
-        then.status(200).json_body(json!({ "users": [] }));
+    let first = admin_list_page(&server, 1, full_page_of_decoys());
+    let second = admin_list_page(&server, 2, vec![service_user()]);
+    let create = server.mock(|when, then| {
+        when.method(POST).path(ADMIN_PATH);
+        then.status(500);
     });
+    let result = run_controller(&server, |_| {});
+    assert_bootstrapped_service_user(&result);
+    jwks.assert_hits(1);
+    first.assert_hits(1);
+    second.assert_hits(1);
+    create.assert_hits(0);
+}
+
+#[test]
+fn startup_creates_a_missing_service_user_instead_of_adopting_a_listed_one() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    // `filter` also matches a user-editable full name, so this decoy is what
+    // GoTrue lists for the service email when the service user is missing.
+    let lookup = admin_list_page(
+        &server,
+        1,
+        vec![json!({
+            "id": DECOY_ID,
+            "email": DECOY_EMAIL,
+            "user_metadata": { "full_name": SERVICE_EMAIL },
+        })],
+    );
     let create = server.mock(|when, then| {
         when.method(POST)
             .path(ADMIN_PATH)
             .header("apikey", SERVICE_KEY)
             .header("authorization", format!("Bearer {SERVICE_KEY}"))
             .json_body(json!({ "email": SERVICE_EMAIL, "password": SERVICE_PASSWORD, "email_confirm": true }));
-        then.status(201).json_body(json!({ "id": SERVICE_ID }));
+        then.status(201).json_body(service_user());
     });
     let result = run_controller(&server, |command| {
         command.env(
@@ -206,11 +279,23 @@ fn startup_creates_a_missing_service_user_inside_tokio() {
             format!("  {SERVICE_PASSWORD}  "),
         );
     });
-    assert_normal_error(&result, "failed to parse DATABASE_URL");
-    assert!(result
-        .output
-        .contains("bootstrapped SERVICE_RUNTIME_USER_ID via Supabase admin API"));
-    assert!(result.output.contains(SERVICE_ID));
+    assert_bootstrapped_service_user(&result);
+    jwks.assert_hits(1);
+    lookup.assert_hits(1);
+    create.assert_hits(1);
+}
+
+#[test]
+fn startup_refuses_a_create_response_for_a_different_email() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let lookup = admin_list_page(&server, 1, vec![]);
+    let create = server.mock(|when, then| {
+        when.method(POST).path(ADMIN_PATH);
+        then.status(201).json_body(newer_decoy());
+    });
+    let result = run_controller(&server, |_| {});
+    assert_adopted_nobody(&result);
     jwks.assert_hits(1);
     lookup.assert_hits(1);
     create.assert_hits(1);
@@ -260,7 +345,7 @@ fn startup_without_a_service_key_preserves_the_no_admin_fallback() {
 }
 
 #[test]
-fn startup_admin_failure_remains_a_warning_not_a_panic() {
+fn startup_admin_failure_remains_a_warning_and_creates_nobody() {
     let server = MockServer::start();
     let jwks = jwks_fixture(&server);
     let lookup = server.mock(|when, then| {
@@ -274,35 +359,73 @@ fn startup_admin_failure_remains_a_warning_not_a_panic() {
             .json_body(json!({ "error": "inert fixture failure" }));
     });
     let result = run_controller(&server, |_| {});
-    assert_normal_error(&result, "failed to parse DATABASE_URL");
-    assert!(result
-        .output
-        .contains("failed to bootstrap SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    assert_adopted_nobody(&result);
     jwks.assert_hits(1);
     lookup.assert_hits(1);
-    create.assert_hits(1);
+    // Without a finished lookup the user may exist, so nothing is created.
+    create.assert_hits(0);
+}
+
+#[test]
+fn startup_adopts_nobody_from_a_malformed_admin_list() {
+    // Shapes the old lookup accepted and took the first id from.
+    for body in [
+        json!([newer_decoy(), service_user()]),
+        json!(newer_decoy()),
+        json!({ "users": { "id": DECOY_ID, "email": SERVICE_EMAIL } }),
+    ] {
+        let server = MockServer::start();
+        let jwks = jwks_fixture(&server);
+        let lookup = server.mock(|when, then| {
+            when.method(GET).path(ADMIN_PATH);
+            then.status(200).json_body(body);
+        });
+        let create = server.mock(|when, then| {
+            when.method(POST).path(ADMIN_PATH);
+            then.status(201).json_body(newer_decoy());
+        });
+        let result = run_controller(&server, |_| {});
+        assert_adopted_nobody(&result);
+        jwks.assert_hits(1);
+        lookup.assert_hits(1);
+        create.assert_hits(0);
+    }
+}
+
+#[test]
+fn startup_adopts_nobody_when_the_admin_list_never_ends() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let pages = server.mock(|when, then| {
+        when.method(GET)
+            .path(ADMIN_PATH)
+            .query_param("per_page", ADMIN_PER_PAGE.to_string());
+        then.status(200)
+            .json_body(json!({ "users": full_page_of_decoys() }));
+    });
+    let create = server.mock(|when, then| {
+        when.method(POST).path(ADMIN_PATH);
+        then.status(500);
+    });
+    let result = run_controller(&server, |_| {});
+    assert_adopted_nobody(&result);
+    jwks.assert_hits(1);
+    pages.assert_hits(ADMIN_MAX_PAGES);
+    create.assert_hits(0);
 }
 
 #[test]
 fn startup_retries_lookup_after_a_duplicate_create_response() {
     let server = MockServer::start();
     let jwks = jwks_fixture(&server);
-    let lookup = server.mock(|when, then| {
-        when.method(GET)
-            .path(ADMIN_PATH)
-            .query_param("email", SERVICE_EMAIL);
-        then.status(200).json_body(json!({ "users": [] }));
-    });
+    let lookup = admin_list_page(&server, 1, vec![newer_decoy()]);
     let create = server.mock(|when, then| {
         when.method(POST).path(ADMIN_PATH);
         then.status(422)
             .json_body(json!({ "code": "email_exists" }));
     });
     let result = run_controller(&server, |_| {});
-    assert_normal_error(&result, "failed to parse DATABASE_URL");
-    assert!(result
-        .output
-        .contains("failed to bootstrap SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    assert_adopted_nobody(&result);
     jwks.assert_hits(1);
     lookup.assert_hits(2);
     create.assert_hits(1);
