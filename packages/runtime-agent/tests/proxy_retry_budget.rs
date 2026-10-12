@@ -282,6 +282,8 @@ async fn responses(
                 None => StatusCode::BAD_REQUEST.into_response(),
             };
         }
+        // Two jobs on one thread; the second starts while another writer still holds it.
+        "resume_waits_for_writer" => return answer(FINAL_TEXT),
         // Five jobs on one thread, 50k reported input tokens per measured turn. The second job's first step
         // reports no usage, so Codex's first count of that turn repeats the restored total.
         // The fourth job's only response reports none; the fifth reports usage before an
@@ -996,6 +998,11 @@ scenario_test!(
     7
 );
 scenario_test!(
+    cold_resume_waits_for_the_previous_writer_instead_of_replacing_the_thread,
+    "resume_waits_for_writer",
+    2
+);
+scenario_test!(
     recovery_retry_usage_rows_carry_their_attempt,
     "retry_usage",
     3
@@ -1089,6 +1096,9 @@ async fn isolated_retry_child() -> Result<()> {
     });
     if scenario == "per_turn_usage" {
         return run_per_turn_usage_jobs(&client).await;
+    }
+    if scenario == "resume_waits_for_writer" {
+        return run_resume_after_writer_release(&client).await;
     }
     let personal_browser = scenario.starts_with("personal_browser_");
     let cancel = JobCancelSignal::new();
@@ -1306,6 +1316,12 @@ async fn run_per_turn_usage_jobs(client: &CodexClient) -> Result<()> {
         let state = output
             .provider_conversation_state
             .context("a persisted thread returns its state")?;
+        // The next job resumes this thread from its rollout at once, as a queued follow-up does.
+        assert!(
+            thread_writer_lock(&state)?.is_some(),
+            "job {} returned before its kept thread released the writer",
+            index + 1
+        );
         let completed: Vec<&Value> = output
             .events
             .iter()
@@ -1341,6 +1357,69 @@ async fn run_per_turn_usage_jobs(client: &CodexClient) -> Result<()> {
             turn("rollout", 200_000)
         ]
     );
+    Ok(())
+}
+
+/// Takes the writer lock Codex holds for the state's default thread while it writes the
+/// rollout, or returns `None` while another writer still holds it.
+fn thread_writer_lock(state: &Value) -> Result<Option<fs::File>> {
+    let thread_id = state["defaultThreadId"]
+        .as_str()
+        .context("a persisted thread names its id")?;
+    let locks = Path::new(&std::env::var("CODEX_HOME")?).join("thread-writer-locks");
+    fs::create_dir_all(&locks)?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(locks.join(format!("{thread_id}.lock")))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// A follow-up job can start while an earlier run of the conversation still owns the thread,
+/// for example one whose shutdown overran its bound. It must resume that same thread once the
+/// writer is released rather than start an empty one.
+async fn run_resume_after_writer_release(client: &CodexClient) -> Result<()> {
+    let run = |state: Option<Value>| {
+        client.execute_with_options(
+            "Run the supplied local diagnostic and finish with its result.",
+            None,
+            CodexRunOptions {
+                disable_final_output_json_schema: true,
+                allow_plain_text_final_fallback: true,
+                suppress_contextual_instructions: true,
+                persist_conversation_thread: true,
+                provider_conversation_state: state,
+                ..Default::default()
+            },
+        )
+    };
+    let saved = run(None)
+        .await?
+        .provider_conversation_state
+        .context("a persisted thread returns its state")?;
+    assert_eq!(saved["defaultThreadRestoreSource"], "new");
+    let held = thread_writer_lock(&saved)?.context("the first job released its writer")?;
+    // Held well past the point where the resume is attempted, and well inside the runtime's
+    // bounded wait for the writer.
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1000));
+        drop(held);
+    });
+    let output = run(Some(saved.clone())).await?;
+    release.join().expect("writer release thread");
+    assert_eq!(output.final_json["summary"], FINAL_TEXT);
+    let restored = output
+        .provider_conversation_state
+        .context("a resumed thread returns its state")?;
+    assert_eq!(restored["defaultThreadRestoreSource"], "rollout");
+    assert_eq!(restored["defaultThreadId"], saved["defaultThreadId"]);
+    assert_eq!(restored["defaultThreadRestoreFailed"], false);
     Ok(())
 }
 

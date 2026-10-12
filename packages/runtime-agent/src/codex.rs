@@ -27,7 +27,7 @@ use codex_model_provider_info::WireApi;
 use codex_protocol::config_types::{
     EnvironmentVariablePattern, SandboxMode, ShellEnvironmentPolicy, TrustLevel, WebSearchMode,
 };
-use codex_protocol::error::Result as CodexResult;
+use codex_protocol::error::{CodexErr, CodexErrorDetails, Result as CodexResult};
 use codex_protocol::items::{AgentMessageContent, AgentMessageDelivery, TurnItem};
 use codex_protocol::models::{
     ContentItem, FunctionCallOutputBody, FunctionCallOutputContentItem, FunctionCallOutputPayload,
@@ -88,6 +88,9 @@ const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const PROXY_STREAM_MAX_RETRIES: u64 = 1;
 const DEFAULT_CODEX_RETRY_BASE_DELAY_MS: u64 = 1500;
 const DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
+const THREAD_WRITER_RELEASE_WAIT: Duration = Duration::from_secs(3);
+const THREAD_WRITER_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(25);
+const THREAD_WRITER_RETRY_MAX_DELAY: Duration = Duration::from_millis(400);
 const SHARED_BROWSER_CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
 const SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_OUTPUT_EVENT_CHARS: usize = 4096;
@@ -862,6 +865,52 @@ async fn resume_codex_thread(
     .await
 }
 
+/// Codex rejects a resume while another `ThreadManager` still owns the thread's rollout writer.
+/// That owner is normally a previous run of the same conversation whose shutdown overran its
+/// bound, so the lock is about to be released. Wait for it instead of replacing the thread,
+/// which would drop the conversation's native history.
+async fn resume_codex_thread_after_writer_release(
+    thread_manager: Arc<ThreadManager>,
+    config: &Config,
+    rollout_path: &Path,
+    auth_manager: &Arc<AuthManager>,
+) -> CodexResult<NewThread> {
+    let deadline = tokio::time::Instant::now() + THREAD_WRITER_RELEASE_WAIT;
+    let mut delay = THREAD_WRITER_RETRY_INITIAL_DELAY;
+    loop {
+        let result = resume_codex_thread(
+            Arc::clone(&thread_manager),
+            config.clone(),
+            rollout_path.to_path_buf(),
+            Arc::clone(auth_manager),
+        )
+        .await;
+        match result {
+            Err(error)
+                if is_thread_writer_conflict(&error)
+                    && tokio::time::Instant::now() + delay <= deadline =>
+            {
+                tracing::info!(
+                    delay_ms = delay.as_millis(),
+                    "Codex thread still has an active writer; retrying the rollout restore"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(THREAD_WRITER_RETRY_MAX_DELAY);
+            }
+            result => return result,
+        }
+    }
+}
+
+/// Codex reports a held writer lock only as `InvalidRequest` text (`codex-rollout`
+/// `writer_lock.rs`). The cold-resume regression test fails if that wording changes.
+fn is_thread_writer_conflict(error: &CodexErr) -> bool {
+    matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message) if message.ends_with("already has an active writer")
+    )
+}
+
 impl CodexClient {
     pub fn new(config: CodexConfig) -> Self {
         Self { config }
@@ -1580,11 +1629,11 @@ impl CodexClient {
                         );
                         if let Some(rollout_path) = active_rollout_path.clone() {
                             if rollout_path.exists() {
-                                match resume_codex_thread(
+                                match resume_codex_thread_after_writer_release(
                                     Arc::clone(&thread_manager),
-                                    config.clone(),
-                                    rollout_path.clone(),
-                                    auth_manager.clone(),
+                                    &config,
+                                    &rollout_path,
+                                    &auth_manager,
                                 )
                                 .await
                                 {
@@ -2050,6 +2099,10 @@ impl CodexClient {
         }
         .await;
 
+        if options.persist_conversation_thread && !options.shared_browser {
+            shut_down_kept_codex_thread(&conversation).await;
+        }
+
         if options.shared_browser {
             let Some(shutdown_confirmation) = cancel_signal.as_ref() else {
                 return Err(anyhow!(
@@ -2199,11 +2252,40 @@ async fn next_codex_event(
     }
 }
 
-async fn request_codex_shutdown(conversation: &CodexThread) {
-    let timeout_seconds = optional_env("CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS")
+fn codex_shutdown_timeout_seconds() -> u64 {
+    optional_env("CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS")
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS);
+        .unwrap_or(DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS)
+}
+
+/// A kept conversation thread is resumed from its rollout by the next run, because every run
+/// builds its own `ThreadManager`. Codex flushes that rollout and releases the thread's writer
+/// lock only when the thread shuts down. Dropping the thread leaves that to a background task,
+/// and a follow-up run that starts first cannot resume the thread, so finish it here.
+async fn shut_down_kept_codex_thread(conversation: &CodexThread) {
+    let timeout_seconds = codex_shutdown_timeout_seconds();
+    match timeout(
+        Duration::from_secs(timeout_seconds),
+        conversation.shutdown_and_wait(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "kept Codex thread did not shut down cleanly");
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_seconds,
+                "kept Codex thread shutdown timed out; the next run waits for its writer"
+            );
+        }
+    }
+}
+
+async fn request_codex_shutdown(conversation: &CodexThread) {
+    let timeout_seconds = codex_shutdown_timeout_seconds();
     match timeout(Duration::from_secs(timeout_seconds), async {
         conversation.submit(Op::Shutdown).await?;
         loop {
