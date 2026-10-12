@@ -245,17 +245,41 @@ function createConversationRoutingMetadataPatch(userId, { assistantEnabled = fal
   };
 }
 
-function normalizeSupabaseAdminUser(payload) {
-  if (!payload || typeof payload !== 'object') {
-    return null;
+// The admin user list ignores `?email=` and lists newest first, so only a user
+// whose own email is exactly the smoke email may get the smoke password.
+// `filter` just narrows the pages. Null when no such user is listed or the
+// list cannot be read; the caller then creates the user, which never touches
+// anyone else.
+async function findLocalSmokeUserId(baseUrl, headers, normalizedEmail) {
+  const perPage = 200;
+  for (let page = 1; page <= 50; page += 1) {
+    const query = new URLSearchParams({
+      page: String(page),
+      per_page: String(perPage),
+      filter: normalizedEmail,
+    });
+    const response = await fetch(`${baseUrl}/auth/v1/admin/users?${query}`, { headers }).catch(() => null);
+    if (!response?.ok) {
+      return null;
+    }
+    const payload = await response.json().catch(() => null);
+    if (!Array.isArray(payload?.users)) {
+      return null;
+    }
+    const match = payload.users.find(
+      (entry) =>
+        typeof entry?.id === 'string' &&
+        typeof entry.email === 'string' &&
+        entry.email.trim().toLowerCase() === normalizedEmail,
+    );
+    if (match) {
+      return match.id;
+    }
+    if (payload.users.length < perPage) {
+      return null;
+    }
   }
-  if (Array.isArray(payload.users)) {
-    return payload.users.find((entry) => entry && typeof entry.id === 'string') ?? null;
-  }
-  if (Array.isArray(payload)) {
-    return payload.find((entry) => entry && typeof entry.id === 'string') ?? null;
-  }
-  return typeof payload.id === 'string' ? payload : null;
+  return null;
 }
 
 async function ensureLocalSmokeUser() {
@@ -269,33 +293,29 @@ async function ensureLocalSmokeUser() {
     'content-type': 'application/json',
   };
   const normalizedEmail = email.trim().toLowerCase();
-  const queryUrl = `${localSupabaseUrl.replace(/\/$/, '')}/auth/v1/admin/users?email=${encodeURIComponent(normalizedEmail)}`;
+  const baseUrl = localSupabaseUrl.replace(/\/$/, '');
 
-  const existingResponse = await fetch(queryUrl, { headers }).catch(() => null);
-  if (existingResponse?.ok) {
-    const existingPayload = await existingResponse.json().catch(() => null);
-    const existingUser = normalizeSupabaseAdminUser(existingPayload);
-    if (existingUser?.id) {
-      const updateResponse = await fetch(
-        `${localSupabaseUrl.replace(/\/$/, '')}/auth/v1/admin/users/${encodeURIComponent(existingUser.id)}`,
-        {
-          method: 'PUT',
-          headers,
-          body: JSON.stringify({
-            password,
-            email_confirm: true,
-          }),
-        },
-      );
-      if (!updateResponse.ok) {
-        const detail = await updateResponse.text().catch(() => '');
-        throw new Error(`Unable to refresh local smoke user password: ${updateResponse.status} ${detail}`);
-      }
-      return;
+  const existingUserId = await findLocalSmokeUserId(baseUrl, headers, normalizedEmail);
+  if (existingUserId) {
+    const updateResponse = await fetch(
+      `${baseUrl}/auth/v1/admin/users/${encodeURIComponent(existingUserId)}`,
+      {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({
+          password,
+          email_confirm: true,
+        }),
+      },
+    );
+    if (!updateResponse.ok) {
+      const detail = await updateResponse.text().catch(() => '');
+      throw new Error(`Unable to refresh local smoke user password: ${updateResponse.status} ${detail}`);
     }
+    return;
   }
 
-  const createResponse = await fetch(`${localSupabaseUrl.replace(/\/$/, '')}/auth/v1/admin/users`, {
+  const createResponse = await fetch(`${baseUrl}/auth/v1/admin/users`, {
     method: 'POST',
     headers,
     body: JSON.stringify({

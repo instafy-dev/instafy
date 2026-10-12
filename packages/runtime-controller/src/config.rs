@@ -313,32 +313,172 @@ fn parse_browser_profile_persist_project_ids(raw: &str) -> anyhow::Result<Vec<Uu
     Ok(project_ids)
 }
 
-fn extract_supabase_admin_user_id(payload: &JsonValue) -> Option<Uuid> {
-    let extract_id_from_entry = |entry: &JsonValue| {
-        entry
-            .as_object()
-            .and_then(|map| map.get("id"))
+/// Users asked for per page when the service runtime user is looked up in the
+/// Supabase admin user list.
+const ADMIN_USER_LOOKUP_PER_PAGE: usize = 200;
+/// Pages that lookup reads before it gives up without a decision. With the
+/// `filter` hint a lookup is normally one short page.
+const ADMIN_USER_LOOKUP_MAX_PAGES: u32 = 50;
+
+/// An email as the service runtime user lookups compare it: trimmed and
+/// ASCII-lowercased, the way `SERVICE_RUNTIME_USER_EMAIL` is read.
+fn normalized_admin_user_email(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
+}
+
+/// One page of `GET /auth/v1/admin/users`, checked against the service
+/// runtime user's email.
+#[derive(Debug, PartialEq, Eq)]
+struct AdminUsersPage {
+    /// How many users the page listed, matching or not. A page shorter than
+    /// the page size asked for is the last one.
+    listed: usize,
+    /// The id of the listed user whose email is exactly the wanted one.
+    matched: Option<Uuid>,
+}
+
+/// Find the user whose `email` equals `wanted` (already normalized) on one
+/// page of the admin user list.
+///
+/// GoTrue's list endpoint ignores an `email` parameter, and its `filter`
+/// parameter is a substring match that also searches the user-editable
+/// `full_name`, so a listed user proves nothing by being listed. Only an
+/// entry's own `email` counts. A page with no `users` array, an entry with
+/// the wanted email but no valid id, or two different ids with that email
+/// is an error, never a pick.
+fn match_admin_users_page(payload: &JsonValue, wanted: &str) -> Result<AdminUsersPage, String> {
+    if wanted.is_empty() {
+        return Err("the service runtime email is empty".to_string());
+    }
+    let users = payload
+        .get("users")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "the admin user list response has no users array".to_string())?;
+    let mut matched = None;
+    for entry in users {
+        let Some(email) = entry.get("email").and_then(JsonValue::as_str) else {
+            continue;
+        };
+        if normalized_admin_user_email(email) != wanted {
+            continue;
+        }
+        let id = entry
+            .get("id")
             .and_then(JsonValue::as_str)
             .and_then(|raw| Uuid::parse_str(raw.trim()).ok())
-    };
-
-    if let Some(users) = payload.get("users").and_then(JsonValue::as_array) {
-        for entry in users {
-            if let Some(id) = extract_id_from_entry(entry) {
-                return Some(id);
+            .ok_or_else(|| {
+                "the admin user list names the service runtime email without a valid id".to_string()
+            })?;
+        match matched {
+            None => matched = Some(id),
+            Some(existing) if existing == id => {}
+            Some(_) => {
+                return Err("several admin users have the service runtime email".to_string());
             }
         }
     }
+    Ok(AdminUsersPage {
+        listed: users.len(),
+        matched,
+    })
+}
 
-    if let Some(array) = payload.as_array() {
-        for entry in array {
-            if let Some(id) = extract_id_from_entry(entry) {
-                return Some(id);
+/// What a lookup of the service runtime user in the admin user list decided.
+#[derive(Debug, PartialEq, Eq)]
+enum AdminUserLookup {
+    /// Exactly one user has the email.
+    Found(Uuid),
+    /// The list was read to its end and no user has the email.
+    NotFound,
+    /// No decision: a page could not be read or was malformed, the email
+    /// belongs to more than one user, or the list did not end within the
+    /// page cap. Nobody may be adopted and nobody should be created.
+    Unknown(String),
+}
+
+/// Page through the admin user list, `per_page` users at a time and at most
+/// `max_pages` pages, for the one user whose email is exactly `wanted`.
+/// `fetch_page` returns the parsed body of the given 1-based page.
+fn find_admin_user_by_email(
+    wanted: &str,
+    per_page: usize,
+    max_pages: u32,
+    mut fetch_page: impl FnMut(u32) -> Result<JsonValue, String>,
+) -> AdminUserLookup {
+    if per_page == 0 {
+        return AdminUserLookup::Unknown("the admin user page size is zero".to_string());
+    }
+    let mut found = None;
+    for page in 1..=max_pages {
+        let checked = fetch_page(page).and_then(|payload| match_admin_users_page(&payload, wanted));
+        let checked = match checked {
+            Ok(checked) => checked,
+            Err(reason) => return AdminUserLookup::Unknown(reason),
+        };
+        if let Some(id) = checked.matched {
+            match found {
+                None => found = Some(id),
+                // A signup between two pages shifts the list, so a user can
+                // appear on two pages in a row.
+                Some(existing) if existing == id => {}
+                Some(_) => {
+                    return AdminUserLookup::Unknown(
+                        "several admin users have the service runtime email".to_string(),
+                    );
+                }
             }
         }
+        if checked.listed < per_page {
+            return found.map_or(AdminUserLookup::NotFound, AdminUserLookup::Found);
+        }
     }
+    AdminUserLookup::Unknown(format!(
+        "the admin user list did not end within {max_pages} pages of {per_page} users"
+    ))
+}
 
-    extract_id_from_entry(payload)
+/// The id a `POST /auth/v1/admin/users` response names, accepted only when the
+/// response is a single user whose email is exactly `wanted`.
+fn created_admin_user_id(payload: &JsonValue, wanted: &str) -> Option<Uuid> {
+    if wanted.is_empty() {
+        return None;
+    }
+    let user = payload.as_object()?;
+    let email = user.get("email")?.as_str()?;
+    if normalized_admin_user_email(email) != wanted {
+        return None;
+    }
+    Uuid::parse_str(user.get("id")?.as_str()?.trim()).ok()
+}
+
+fn fetch_admin_users_page(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    service_role_key: &str,
+    filter: &str,
+    page: u32,
+) -> Result<JsonValue, String> {
+    let page = page.to_string();
+    let per_page = ADMIN_USER_LOOKUP_PER_PAGE.to_string();
+    let response = client
+        .get(format!("{base}/auth/v1/admin/users"))
+        .query(&[
+            ("page", page.as_str()),
+            ("per_page", per_page.as_str()),
+            // Only narrows the list; match_admin_users_page decides.
+            ("filter", filter),
+        ])
+        .header("apikey", service_role_key)
+        .bearer_auth(service_role_key)
+        .send()
+        .map_err(|error| format!("the admin user list request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("the admin user list returned {status}"));
+    }
+    response
+        .json::<JsonValue>()
+        .map_err(|error| format!("the admin user list response is not JSON: {error}"))
 }
 
 fn generate_service_runtime_password() -> String {
@@ -350,6 +490,11 @@ fn generate_service_runtime_password() -> String {
     format!("Instafy-{suffix}!")
 }
 
+/// Resolve the service runtime user through the Supabase admin API: the one
+/// user whose email is exactly `email` (ignoring case and surrounding
+/// spaces), or a user created with that email when the whole list shows none.
+/// When the list cannot be read to a decision this returns `None` rather than
+/// adopt or create anyone; callers then fall back to the database lookup.
 pub(crate) fn ensure_service_runtime_user_id_via_supabase(
     supabase_project_url: &str,
     service_role_key: &str,
@@ -357,7 +502,8 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
     password_override: Option<&str>,
 ) -> Option<Uuid> {
     let base = supabase_project_url.trim().trim_end_matches('/');
-    if base.is_empty() || service_role_key.trim().is_empty() || email.trim().is_empty() {
+    let wanted = normalized_admin_user_email(email);
+    if base.is_empty() || service_role_key.trim().is_empty() || wanted.is_empty() {
         return None;
     }
 
@@ -375,33 +521,30 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
         }
     };
 
-    let query_url = format!(
-        "{}/auth/v1/admin/users?email={}",
-        base,
-        urlencoding::encode(email.trim())
-    );
+    let lookup = || {
+        find_admin_user_by_email(
+            &wanted,
+            ADMIN_USER_LOOKUP_PER_PAGE,
+            ADMIN_USER_LOOKUP_MAX_PAGES,
+            |page| fetch_admin_users_page(&client, base, service_role_key, &wanted, page),
+        )
+    };
 
-    let query = client
-        .get(&query_url)
-        .header("apikey", service_role_key)
-        .bearer_auth(service_role_key)
-        .send();
-
-    if let Ok(response) = query {
-        if response.status().is_success() {
-            match response.json::<JsonValue>() {
-                Ok(payload) => {
-                    if let Some(id) = extract_supabase_admin_user_id(&payload) {
-                        return Some(id);
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        ?error,
-                        "failed to parse Supabase admin user lookup response"
-                    );
-                }
-            }
+    match lookup() {
+        AdminUserLookup::Found(id) => {
+            info!(
+                service_runtime_user_id = %id,
+                "found the service runtime user by its exact email"
+            );
+            return Some(id);
+        }
+        AdminUserLookup::NotFound => {}
+        AdminUserLookup::Unknown(reason) => {
+            warn!(
+                %reason,
+                "could not look up the service runtime user by email via Supabase admin API; adopting and creating no user"
+            );
+            return None;
         }
     }
 
@@ -412,7 +555,7 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
         .map(|value| value.to_string())
         .unwrap_or_else(generate_service_runtime_password);
     let create_payload = serde_json::json!({
-        "email": email.trim(),
+        "email": wanted,
         "password": password,
         "email_confirm": true,
     });
@@ -426,7 +569,19 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
 
     match created {
         Ok(response) if response.status().is_success() => match response.json::<JsonValue>() {
-            Ok(payload) => extract_supabase_admin_user_id(&payload),
+            Ok(payload) => {
+                let id = created_admin_user_id(&payload, &wanted);
+                match id {
+                    Some(id) => info!(
+                        service_runtime_user_id = %id,
+                        "created the service runtime user via Supabase admin API"
+                    ),
+                    None => warn!(
+                        "Supabase admin user create response did not name a user with the service runtime email"
+                    ),
+                }
+                id
+            }
             Err(error) => {
                 warn!(
                     ?error,
@@ -440,17 +595,25 @@ pub(crate) fn ensure_service_runtime_user_id_via_supabase(
             let body = response.text().unwrap_or_default();
             if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY && body.contains("email_exists")
             {
-                let retry = client
-                    .get(&query_url)
-                    .header("apikey", service_role_key)
-                    .bearer_auth(service_role_key)
-                    .send();
-                if let Ok(retry_response) = retry {
-                    if retry_response.status().is_success() {
-                        if let Ok(payload) = retry_response.json::<JsonValue>() {
-                            return extract_supabase_admin_user_id(&payload);
-                        }
+                // Most likely created since the first lookup. Only an exact
+                // match is adopted; an email stored in a case the
+                // case-sensitive `filter` misses stays unresolved here and is
+                // left to the database lookup.
+                match lookup() {
+                    AdminUserLookup::Found(id) => {
+                        info!(
+                            service_runtime_user_id = %id,
+                            "found the service runtime user by its exact email"
+                        );
+                        return Some(id);
                     }
+                    AdminUserLookup::NotFound => warn!(
+                        "Supabase admin API reports the service runtime email exists, but no listed user has it exactly"
+                    ),
+                    AdminUserLookup::Unknown(reason) => warn!(
+                        %reason,
+                        "could not look up the service runtime user by email via Supabase admin API; adopting no user"
+                    ),
                 }
             }
 
@@ -1566,11 +1729,13 @@ impl StripeConfig {
 #[cfg(test)]
 mod tests {
     use super::{
-        database_pool_size_from_values, jwks_on_demand_interval_seconds,
-        managed_ai_decline_waiver_units, normalize_public_app_url,
+        created_admin_user_id, database_pool_size_from_values, find_admin_user_by_email,
+        jwks_on_demand_interval_seconds, managed_ai_decline_waiver_units, match_admin_users_page,
+        normalize_public_app_url, normalized_admin_user_email,
         parse_browser_profile_persist_project_ids, published_development_key_warning,
         resolve_credential_encryption_key, resolve_credential_key_ring, resolve_user_token_secret,
-        working_state_saves_enabled, CredentialEncryptionKey, DEV_USER_TOKEN_SECRET,
+        working_state_saves_enabled, AdminUserLookup, AdminUsersPage, CredentialEncryptionKey,
+        DEV_USER_TOKEN_SECRET,
     };
     use crate::credential_keys::{
         credential_key_id, CredentialKeySlot, MAX_PREVIOUS_CREDENTIAL_KEYS,
@@ -1993,5 +2158,279 @@ mod tests {
                 "expected {value:?} to be rejected"
             );
         }
+    }
+
+    const SERVICE_EMAIL: &str = "service-runtime@example.test";
+    const SERVICE_ID: &str = "00000000-0000-4000-8000-0000000000aa";
+    const DECOY_ID: &str = "00000000-0000-4000-8000-0000000000bb";
+    const OTHER_ID: &str = "00000000-0000-4000-8000-0000000000cc";
+
+    fn uuid(raw: &str) -> Uuid {
+        Uuid::parse_str(raw).expect("fixture uuid")
+    }
+
+    /// Serve `pages` (1-based) to `find_admin_user_by_email`, recording which
+    /// pages it asked for.
+    fn lookup_over_pages(
+        wanted: &str,
+        per_page: usize,
+        max_pages: u32,
+        pages: &[serde_json::Value],
+    ) -> (AdminUserLookup, Vec<u32>) {
+        let mut requested = Vec::new();
+        let result = find_admin_user_by_email(wanted, per_page, max_pages, |page| {
+            requested.push(page);
+            pages
+                .get(page as usize - 1)
+                .cloned()
+                .ok_or_else(|| format!("no fixture for page {page}"))
+        });
+        (result, requested)
+    }
+
+    #[test]
+    fn admin_user_page_never_takes_the_first_listed_user() {
+        // GoTrue ignores `?email=` and lists newest first, so the first entry
+        // is whoever signed up last.
+        let payload = serde_json::json!({ "users": [
+            { "id": DECOY_ID, "email": "newest-signup@example.test" },
+            { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+        ]});
+        assert_eq!(
+            match_admin_users_page(&payload, SERVICE_EMAIL),
+            Ok(AdminUsersPage {
+                listed: 2,
+                matched: Some(uuid(SERVICE_ID)),
+            })
+        );
+    }
+
+    #[test]
+    fn admin_user_page_without_the_email_matches_nobody() {
+        for payload in [
+            serde_json::json!({ "users": [] }),
+            serde_json::json!({ "users": [
+                { "id": DECOY_ID, "email": "someone@example.test" },
+                { "id": OTHER_ID, "email": "someone-else@example.test" },
+            ]}),
+        ] {
+            let checked = match_admin_users_page(&payload, SERVICE_EMAIL).expect("valid page");
+            assert_eq!(checked.matched, None, "{payload}");
+        }
+    }
+
+    #[test]
+    fn admin_user_page_matches_email_not_full_name_or_substrings() {
+        // `filter` also searches `full_name`, which any user can set, and
+        // matches substrings, so these are all listed for the service email.
+        let payload = serde_json::json!({ "users": [
+            { "id": DECOY_ID, "email": "decoy@example.test",
+              "user_metadata": { "full_name": SERVICE_EMAIL } },
+            { "id": OTHER_ID, "email": format!("x{SERVICE_EMAIL}") },
+            { "id": OTHER_ID, "email": format!("{SERVICE_EMAIL}.evil") },
+            { "id": DECOY_ID, "phone": "15550100", "email": "" },
+            { "id": DECOY_ID, "email": null },
+            { "id": DECOY_ID, "email": 7 },
+            { "id": DECOY_ID },
+            "not-a-user",
+        ]});
+        let checked = match_admin_users_page(&payload, SERVICE_EMAIL).expect("valid page");
+        assert_eq!(checked.matched, None);
+        assert_eq!(checked.listed, 8);
+    }
+
+    #[test]
+    fn admin_user_email_match_ignores_case_and_surrounding_spaces() {
+        let wanted = normalized_admin_user_email("  Service-Runtime@Example.TEST \n");
+        assert_eq!(wanted, SERVICE_EMAIL);
+        let payload = serde_json::json!({ "users": [
+            { "id": format!(" {SERVICE_ID} "), "email": " SERVICE-RUNTIME@example.test " },
+        ]});
+        assert_eq!(
+            match_admin_users_page(&payload, &wanted).map(|page| page.matched),
+            Ok(Some(uuid(SERVICE_ID)))
+        );
+    }
+
+    #[test]
+    fn admin_user_page_refuses_malformed_or_ambiguous_payloads() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({ "users": null }),
+            serde_json::json!({ "users": { "id": SERVICE_ID, "email": SERVICE_EMAIL } }),
+            // A bare array or a single user object is not a list response.
+            serde_json::json!([{ "id": SERVICE_ID, "email": SERVICE_EMAIL }]),
+            serde_json::json!({ "id": SERVICE_ID, "email": SERVICE_EMAIL }),
+            serde_json::json!("users"),
+            serde_json::json!({ "users": [{ "id": "not-a-uuid", "email": SERVICE_EMAIL }] }),
+            serde_json::json!({ "users": [{ "email": SERVICE_EMAIL }] }),
+            serde_json::json!({ "users": [
+                { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+                { "id": OTHER_ID, "email": SERVICE_EMAIL.to_uppercase() },
+            ]}),
+        ] {
+            assert!(
+                match_admin_users_page(&payload, SERVICE_EMAIL).is_err(),
+                "expected {payload} to be refused"
+            );
+        }
+        // The same user twice on one page is still one user.
+        let repeated = serde_json::json!({ "users": [
+            { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+            { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+        ]});
+        assert_eq!(
+            match_admin_users_page(&repeated, SERVICE_EMAIL).map(|page| page.matched),
+            Ok(Some(uuid(SERVICE_ID)))
+        );
+    }
+
+    #[test]
+    fn admin_user_page_refuses_an_empty_wanted_email() {
+        // Phone-only users list `"email": ""`; an empty wanted email must not
+        // match them.
+        let payload = serde_json::json!({ "users": [{ "id": DECOY_ID, "email": "" }] });
+        assert!(match_admin_users_page(&payload, "").is_err());
+        let (result, requested) = lookup_over_pages("", 200, 50, &[payload]);
+        assert!(matches!(result, AdminUserLookup::Unknown(_)), "{result:?}");
+        assert_eq!(requested, vec![1]);
+    }
+
+    #[test]
+    fn admin_user_lookup_finds_the_service_user_on_a_later_page() {
+        let pages = [
+            serde_json::json!({ "users": [
+                { "id": DECOY_ID, "email": "a@example.test" },
+                { "id": OTHER_ID, "email": "b@example.test" },
+            ]}),
+            serde_json::json!({ "users": [
+                { "id": DECOY_ID, "email": "c@example.test" },
+                { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+            ]}),
+            serde_json::json!({ "users": [{ "id": OTHER_ID, "email": "d@example.test" }] }),
+        ];
+        let (result, requested) = lookup_over_pages(SERVICE_EMAIL, 2, 50, &pages);
+        assert_eq!(result, AdminUserLookup::Found(uuid(SERVICE_ID)));
+        // Read to the short last page, so a second holder would be caught.
+        assert_eq!(requested, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn admin_user_lookup_without_a_match_picks_nobody() {
+        let pages = [
+            serde_json::json!({ "users": [
+                { "id": DECOY_ID, "email": "a@example.test" },
+                { "id": OTHER_ID, "email": "b@example.test" },
+            ]}),
+            serde_json::json!({ "users": [{ "id": DECOY_ID, "email": "c@example.test" }] }),
+        ];
+        let (result, requested) = lookup_over_pages(SERVICE_EMAIL, 2, 50, &pages);
+        assert_eq!(result, AdminUserLookup::NotFound);
+        assert_eq!(requested, vec![1, 2]);
+
+        let (result, requested) =
+            lookup_over_pages(SERVICE_EMAIL, 2, 50, &[serde_json::json!({ "users": [] })]);
+        assert_eq!(result, AdminUserLookup::NotFound);
+        assert_eq!(requested, vec![1]);
+    }
+
+    #[test]
+    fn admin_user_lookup_gives_up_at_the_page_cap() {
+        let full = serde_json::json!({ "users": [
+            { "id": DECOY_ID, "email": "a@example.test" },
+            { "id": OTHER_ID, "email": "b@example.test" },
+        ]});
+        let pages = vec![full; 4];
+        let (result, requested) = lookup_over_pages(SERVICE_EMAIL, 2, 3, &pages);
+        assert!(matches!(result, AdminUserLookup::Unknown(_)), "{result:?}");
+        assert_eq!(requested, vec![1, 2, 3]);
+
+        // A match before the cap does not survive an unfinished list either:
+        // a second holder could be on the pages it never read.
+        let mut pages = pages;
+        pages[0] = serde_json::json!({ "users": [
+            { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+            { "id": OTHER_ID, "email": "b@example.test" },
+        ]});
+        let (result, _) = lookup_over_pages(SERVICE_EMAIL, 2, 3, &pages);
+        assert!(matches!(result, AdminUserLookup::Unknown(_)), "{result:?}");
+    }
+
+    #[test]
+    fn admin_user_lookup_stops_on_a_failed_or_malformed_page() {
+        let first = serde_json::json!({ "users": [
+            { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+            { "id": OTHER_ID, "email": "b@example.test" },
+        ]});
+        // Page 2 has no fixture, so fetching it fails.
+        let (result, requested) =
+            lookup_over_pages(SERVICE_EMAIL, 2, 50, std::slice::from_ref(&first));
+        assert!(matches!(result, AdminUserLookup::Unknown(_)), "{result:?}");
+        assert_eq!(requested, vec![1, 2]);
+
+        let (result, requested) = lookup_over_pages(
+            SERVICE_EMAIL,
+            2,
+            50,
+            &[first, serde_json::json!({ "error": "unexpected" })],
+        );
+        assert!(matches!(result, AdminUserLookup::Unknown(_)), "{result:?}");
+        assert_eq!(requested, vec![1, 2]);
+
+        let (result, requested) = lookup_over_pages(SERVICE_EMAIL, 0, 50, &[]);
+        assert!(matches!(result, AdminUserLookup::Unknown(_)), "{result:?}");
+        assert!(requested.is_empty());
+    }
+
+    #[test]
+    fn admin_user_lookup_refuses_two_holders_on_different_pages() {
+        let pages = [
+            serde_json::json!({ "users": [
+                { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+                { "id": DECOY_ID, "email": "a@example.test" },
+            ]}),
+            serde_json::json!({ "users": [{ "id": OTHER_ID, "email": SERVICE_EMAIL }] }),
+        ];
+        let (result, _) = lookup_over_pages(SERVICE_EMAIL, 2, 50, &pages);
+        assert!(matches!(result, AdminUserLookup::Unknown(_)), "{result:?}");
+
+        // A signup between pages can repeat the same user; that is one user.
+        let pages = [
+            serde_json::json!({ "users": [
+                { "id": DECOY_ID, "email": "a@example.test" },
+                { "id": SERVICE_ID, "email": SERVICE_EMAIL },
+            ]}),
+            serde_json::json!({ "users": [{ "id": SERVICE_ID, "email": SERVICE_EMAIL }] }),
+        ];
+        let (result, _) = lookup_over_pages(SERVICE_EMAIL, 2, 50, &pages);
+        assert_eq!(result, AdminUserLookup::Found(uuid(SERVICE_ID)));
+    }
+
+    #[test]
+    fn created_admin_user_must_carry_the_service_email() {
+        assert_eq!(
+            created_admin_user_id(
+                &serde_json::json!({ "id": SERVICE_ID, "email": "Service-Runtime@Example.test" }),
+                SERVICE_EMAIL,
+            ),
+            Some(uuid(SERVICE_ID))
+        );
+        for payload in [
+            serde_json::json!({ "id": SERVICE_ID }),
+            serde_json::json!({ "id": SERVICE_ID, "email": "someone@example.test" }),
+            serde_json::json!({ "id": "not-a-uuid", "email": SERVICE_EMAIL }),
+            serde_json::json!({ "users": [{ "id": SERVICE_ID, "email": SERVICE_EMAIL }] }),
+            serde_json::json!([{ "id": SERVICE_ID, "email": SERVICE_EMAIL }]),
+        ] {
+            assert_eq!(
+                created_admin_user_id(&payload, SERVICE_EMAIL),
+                None,
+                "expected {payload} to be refused"
+            );
+        }
+        assert_eq!(
+            created_admin_user_id(&serde_json::json!({ "id": SERVICE_ID, "email": "" }), ""),
+            None
+        );
     }
 }

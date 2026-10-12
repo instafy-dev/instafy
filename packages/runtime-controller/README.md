@@ -419,6 +419,14 @@ user through the Supabase admin API. `SERVICE_RUNTIME_USER_EMAIL` selects that
 identity (default `service-runtime@instafy.dev`); `SERVICE_RUNTIME_USER_PASSWORD`
 optionally supplies the password used only when creating it.
 
+The admin user list ignores an `email` parameter, so the lookup pages through it
+(200 users a page, at most 50 pages) and accepts only the one user whose email
+equals `SERVICE_RUNTIME_USER_EMAIL`, ignoring case and surrounding spaces. It
+creates the user only when the whole list shows none, and accepts the created id
+only when the response carries that email. If a page cannot be read, the list
+does not end within the cap, or two users have the email, startup adopts and
+creates no one and logs a warning.
+
 Configuration loading performs blocking HTTP calls, so async startup runs it on
 a blocking worker before initializing the database pool. An explicit service
 UUID skips admin bootstrap. Without an admin key, or if bootstrap fails, the

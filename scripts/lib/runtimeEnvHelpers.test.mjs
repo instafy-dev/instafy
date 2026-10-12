@@ -4,9 +4,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  createdAdminUser,
   DEFAULT_SERVICE_RUNTIME_EMAIL,
   deleteEnvFileValue,
   ensureServiceRuntimeUserId,
+  findAdminUserByEmail,
+  matchAdminUsersPage,
+  normalizeAdminUserEmail,
   recordedProviderCheckoutRoot,
   recordProviderCheckoutRoot,
   relocateRuntimeCheckouts,
@@ -56,9 +60,26 @@ test("deleteEnvFileValue removes a stale key without changing neighboring values
   assert.equal(fs.readFileSync(envPath, "utf-8"), "KEEP=before\nKEEP_AFTER=after\n");
 });
 
-test("ensureServiceRuntimeUserId returns existing user without creating", async (t) => {
+const SERVICE_ID = "00000000-0000-4000-8000-0000000000aa";
+const DECOY_ID = "00000000-0000-4000-8000-0000000000bb";
+const OTHER_ID = "00000000-0000-4000-8000-0000000000cc";
+
+const jsonResponse = (body, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+
+/**
+ * Serve the admin user list the way GoTrue does: it ignores `email`, lists
+ * newest first, and answers the `page` parameter with that (1-based) body
+ * from `pages`. A request without `page` gets page 1, as GoTrue answers it,
+ * so the old `?email=` lookup sees every user rather than an empty list.
+ * POSTs go to `onCreate`. Records every call.
+ */
+const fakeAdminApi = (t, { pages = [], onCreate } = {}) => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
-  const fetchCalls = [];
+  const calls = [];
   const { restore } = captureFetch();
   t.after(() => {
     restore();
@@ -66,57 +87,233 @@ test("ensureServiceRuntimeUserId returns existing user without creating", async 
     delete process.env.SERVICE_RUNTIME_USER_EMAIL;
   });
   global.fetch = async (url, options = {}) => {
-    fetchCalls.push({ url, method: options.method || "GET" });
-    return new Response(
-      JSON.stringify({ users: [{ id: "user-123", email: DEFAULT_SERVICE_RUNTIME_EMAIL }] }),
-      { status: 200, headers: { "content-type": "application/json" } }
-    );
+    const method = options.method || "GET";
+    calls.push({ url, method, body: options.body });
+    if (method === "POST") {
+      assert.ok(onCreate, "unexpected create");
+      return onCreate(JSON.parse(options.body));
+    }
+    const page = Number(new URL(url).searchParams.get("page") ?? "1");
+    return jsonResponse(pages[page - 1] ?? { users: [] });
   };
+  return calls;
+};
+
+const decoyPage = (count) =>
+  Array.from({ length: count }, (_, index) => ({
+    id: `00000000-0000-4000-9000-${String(index).padStart(12, "0")}`,
+    email: `decoy-${index}@example.test`,
+  }));
+
+test("ensureServiceRuntimeUserId takes the exact email match, not the newest listed user", async (t) => {
+  const calls = fakeAdminApi(t, {
+    pages: [
+      {
+        users: [
+          { id: DECOY_ID, email: "newest-signup@example.test" },
+          { id: SERVICE_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL },
+        ],
+      },
+    ],
+  });
 
   const result = await ensureServiceRuntimeUserId({ SUPABASE_URL: "http://supabase.local" });
-  assert.deepEqual(result, {
-    id: "user-123",
-    email: DEFAULT_SERVICE_RUNTIME_EMAIL,
-  });
-  assert.equal(fetchCalls.length, 1);
-  assert.match(fetchCalls[0].url, /auth\/v1\/admin\/users\?email=/);
+  assert.deepEqual(result, { id: SERVICE_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL });
+  assert.equal(calls.length, 1);
+  const query = new URL(calls[0].url).searchParams;
+  assert.equal(query.get("page"), "1");
+  assert.equal(query.get("per_page"), "200");
+  assert.equal(query.get("filter"), DEFAULT_SERVICE_RUNTIME_EMAIL);
+  assert.equal(query.has("email"), false);
 });
 
-test("ensureServiceRuntimeUserId creates user when none exists", async (t) => {
-  process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
-  const fetchCalls = [];
-  const { restore } = captureFetch();
-  t.after(() => {
-    restore();
-    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
-    delete process.env.SERVICE_RUNTIME_USER_EMAIL;
+test("ensureServiceRuntimeUserId finds the service user on a later page", async (t) => {
+  const calls = fakeAdminApi(t, {
+    pages: [
+      { users: decoyPage(200) },
+      { users: [{ id: SERVICE_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL }] },
+    ],
   });
-  let callCount = 0;
-  global.fetch = async (url, options = {}) => {
-    callCount += 1;
-    fetchCalls.push({ url, method: options.method || "GET" });
-    if (callCount === 1) {
-      return new Response(JSON.stringify({ users: [] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    assert.equal(options.method, "POST");
-    const body = JSON.parse(options.body);
-    assert.equal(body.email, DEFAULT_SERVICE_RUNTIME_EMAIL);
-    return new Response(JSON.stringify({ id: "created-456", email: body.email }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
-  };
 
   const result = await ensureServiceRuntimeUserId({ SUPABASE_URL: "http://supabase.local" });
-  assert.deepEqual(result, {
-    id: "created-456",
-    email: DEFAULT_SERVICE_RUNTIME_EMAIL,
+  assert.deepEqual(result, { id: SERVICE_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL });
+  assert.deepEqual(
+    calls.map((call) => [call.method, new URL(call.url).searchParams.get("page")]),
+    [
+      ["GET", "1"],
+      ["GET", "2"],
+    ]
+  );
+});
+
+test("ensureServiceRuntimeUserId creates the user instead of adopting a listed one", async (t) => {
+  // `filter` also matches a user-editable full name, so this decoy is what
+  // the list returns for the service email when the service user is missing.
+  const calls = fakeAdminApi(t, {
+    pages: [
+      {
+        users: [
+          {
+            id: DECOY_ID,
+            email: "decoy@example.test",
+            user_metadata: { full_name: DEFAULT_SERVICE_RUNTIME_EMAIL },
+          },
+        ],
+      },
+    ],
+    onCreate: (body) => {
+      assert.equal(body.email, DEFAULT_SERVICE_RUNTIME_EMAIL);
+      return jsonResponse({ id: SERVICE_ID, email: body.email });
+    },
   });
-  assert.equal(fetchCalls.length, 2);
-  assert.equal(fetchCalls[1].method, "POST");
+
+  const result = await ensureServiceRuntimeUserId({ SUPABASE_URL: "http://supabase.local" });
+  assert.deepEqual(result, { id: SERVICE_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL });
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ["GET", "POST"]
+  );
+});
+
+test("ensureServiceRuntimeUserId matches the configured email ignoring case and spaces", async (t) => {
+  fakeAdminApi(t, {
+    pages: [
+      {
+        users: [
+          { id: DECOY_ID, email: "decoy@example.test" },
+          { id: SERVICE_ID, email: " Service-Runtime@Example.TEST " },
+        ],
+      },
+    ],
+  });
+  process.env.SERVICE_RUNTIME_USER_EMAIL = "  SERVICE-RUNTIME@example.test ";
+
+  const result = await ensureServiceRuntimeUserId({ SUPABASE_URL: "http://supabase.local" });
+  assert.deepEqual(result, { id: SERVICE_ID, email: "service-runtime@example.test" });
+});
+
+test("ensureServiceRuntimeUserId refuses a create response for another email", async (t) => {
+  fakeAdminApi(t, {
+    pages: [{ users: [] }],
+    onCreate: () => jsonResponse({ id: DECOY_ID, email: "someone@example.test" }),
+  });
+
+  const result = await ensureServiceRuntimeUserId({ SUPABASE_URL: "http://supabase.local" });
+  assert.equal(result, null);
+});
+
+test("ensureServiceRuntimeUserId adopts nobody when the email exists but is not listed exactly", async (t) => {
+  const calls = fakeAdminApi(t, {
+    pages: [{ users: [{ id: DECOY_ID, email: "decoy@example.test" }] }],
+    onCreate: () => jsonResponse({ code: "email_exists" }, 422),
+  });
+
+  const result = await ensureServiceRuntimeUserId({ SUPABASE_URL: "http://supabase.local" });
+  assert.equal(result, null);
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ["GET", "POST", "GET"]
+  );
+});
+
+test("ensureServiceRuntimeUserId adopts and creates nobody from a malformed list", async (t) => {
+  const pages = [];
+  const calls = fakeAdminApi(t, { pages });
+  for (const body of [
+    // Shapes the old lookup accepted and took the first id from.
+    [{ id: DECOY_ID, email: "decoy@example.test" }],
+    { id: DECOY_ID, email: "decoy@example.test" },
+    {
+      users: [
+        { id: SERVICE_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL },
+        { id: OTHER_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL },
+      ],
+    },
+  ]) {
+    pages[0] = body;
+    calls.length = 0;
+    const result = await ensureServiceRuntimeUserId({ SUPABASE_URL: "http://supabase.local" });
+    assert.equal(result, null, JSON.stringify(body));
+    assert.deepEqual(
+      calls.map((call) => call.method),
+      ["GET"]
+    );
+  }
+});
+
+test("findAdminUserByEmail gives up at the page cap instead of guessing", async () => {
+  const requested = [];
+  const result = await findAdminUserByEmail({
+    supabaseUrl: "http://supabase.local",
+    headers: {},
+    email: DEFAULT_SERVICE_RUNTIME_EMAIL,
+    perPage: 2,
+    maxPages: 3,
+    fetchImpl: async (url) => {
+      requested.push(new URL(url).searchParams.get("page"));
+      return jsonResponse({ users: decoyPage(2) });
+    },
+  });
+  assert.equal(result.status, "unknown");
+  assert.deepEqual(requested, ["1", "2", "3"]);
+});
+
+test("findAdminUserByEmail reads to the end and reports a missing user", async () => {
+  const pages = [decoyPage(2), [{ id: OTHER_ID, email: "other@example.test" }]];
+  const result = await findAdminUserByEmail({
+    supabaseUrl: "http://supabase.local",
+    headers: {},
+    email: DEFAULT_SERVICE_RUNTIME_EMAIL,
+    perPage: 2,
+    fetchImpl: async (url) =>
+      jsonResponse({ users: pages[Number(new URL(url).searchParams.get("page")) - 1] }),
+  });
+  assert.deepEqual(result, { status: "missing" });
+});
+
+test("findAdminUserByEmail rejects a failed page so callers can retry", async () => {
+  await assert.rejects(
+    findAdminUserByEmail({
+      supabaseUrl: "http://supabase.local",
+      headers: {},
+      email: DEFAULT_SERVICE_RUNTIME_EMAIL,
+      fetchImpl: async () => jsonResponse({ error: "unavailable" }, 503),
+    }),
+    /503/
+  );
+});
+
+test("matchAdminUsersPage counts only an entry's own exact email", () => {
+  const wanted = normalizeAdminUserEmail(` ${DEFAULT_SERVICE_RUNTIME_EMAIL.toUpperCase()} `);
+  assert.equal(wanted, DEFAULT_SERVICE_RUNTIME_EMAIL);
+  const page = matchAdminUsersPage(
+    {
+      users: [
+        { id: DECOY_ID, email: "decoy@example.test", user_metadata: { full_name: wanted } },
+        { id: DECOY_ID, email: `x${wanted}` },
+        { id: DECOY_ID, email: "" },
+        { id: DECOY_ID },
+        null,
+      ],
+    },
+    wanted
+  );
+  assert.deepEqual(page, { listed: 5, match: null });
+  assert.throws(() => matchAdminUsersPage({ users: [{ id: DECOY_ID, email: "" }] }, ""));
+  assert.throws(() => matchAdminUsersPage({ users: [{ id: "not-a-uuid", email: wanted }] }, wanted));
+  assert.throws(() => matchAdminUsersPage({}, wanted));
+});
+
+test("createdAdminUser accepts only a single user with the email", () => {
+  const user = { id: SERVICE_ID, email: DEFAULT_SERVICE_RUNTIME_EMAIL };
+  assert.equal(createdAdminUser(user, DEFAULT_SERVICE_RUNTIME_EMAIL), user);
+  assert.equal(createdAdminUser({ id: SERVICE_ID }, DEFAULT_SERVICE_RUNTIME_EMAIL), null);
+  assert.equal(createdAdminUser({ users: [user] }, DEFAULT_SERVICE_RUNTIME_EMAIL), null);
+  assert.equal(createdAdminUser([user], DEFAULT_SERVICE_RUNTIME_EMAIL), null);
+  assert.equal(
+    createdAdminUser({ id: "created-456", email: DEFAULT_SERVICE_RUNTIME_EMAIL }, DEFAULT_SERVICE_RUNTIME_EMAIL),
+    null
+  );
 });
 
 test("ensureServiceRuntimeUserId returns null when service role key missing", async () => {
