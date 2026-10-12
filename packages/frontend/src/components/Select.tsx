@@ -4,6 +4,7 @@ import {
   forwardRef,
   isValidElement,
   useCallback,
+  useContext,
   useMemo,
   useState,
   type ReactElement,
@@ -17,8 +18,18 @@ import {
   type Key,
 } from "react-aria-components";
 import { ControlChevron } from "./ControlChevron";
+import { FieldLabelContext } from "./Field";
 import { StudioListBox, StudioListBoxItem } from "./aria/StudioListBox";
 import { StudioPopover } from "./aria/StudioPopover";
+import {
+  CONTROL_DEFAULT_SIZE,
+  CONTROL_SIZE_CLASSES,
+  CONTROL_RADIUS_CLASSES,
+  CONTROL_TONE_CLASSES,
+  CONTROL_TRIGGER_BASE,
+  type ControlSize,
+  type ControlRadius,
+} from "./controlStyles";
 
 // The one value picker. It keeps the shape every call site already uses, a
 // native-looking element with <option> children and an onChange that hands
@@ -32,45 +43,16 @@ import { StudioPopover } from "./aria/StudioPopover";
 // phone-width twin in ProjectPickerPanel, where a touch device's own wheel
 // picker beats anything we draw.
 
-type ControlSize = "xs" | "sm" | "md" | "lg";
-type ControlRadius = "md" | "lg" | "xl" | "2xl" | "full";
 type ControlTone = "default" | "muted";
 
 const BASE =
   "min-w-0 appearance-none border text-midnight outline-none transition pointer-coarse:min-h-11 focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:border-primary-400 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 dark:text-slate-100 dark:disabled:bg-[var(--color-studio-dark-active)] dark:disabled:text-slate-500";
-
-// The trigger is a button, so the disabled styling reads react-aria's data
-// attribute rather than the :disabled pseudo-class the native element gets.
-const TRIGGER_BASE =
-  "min-w-0 flex items-center border text-left text-midnight outline-none transition pointer-coarse:min-h-11 data-[focus-visible]:ring-2 data-[focus-visible]:ring-primary-400/40 data-[focus-visible]:border-primary-400 data-[disabled]:cursor-not-allowed data-[disabled]:bg-slate-100 data-[disabled]:text-slate-400 dark:text-slate-100 dark:data-[disabled]:bg-[var(--color-studio-dark-active)] dark:data-[disabled]:text-slate-500";
-
-const SIZE_CLASSES: Record<ControlSize, string> = {
-  xs: "px-2.5 py-1 text-base sm:text-xs",
-  sm: "px-3 py-1.5 text-base sm:text-sm",
-  md: "min-h-11 px-3 py-2 text-base sm:text-sm sm:pointer-fine:min-h-[38px]",
-  lg: "px-4 py-2.5 text-base",
-};
 
 const ICON_PADDING: Record<ControlSize, string> = {
   xs: "pr-8",
   sm: "pr-9",
   md: "pr-10",
   lg: "pr-11",
-};
-
-const RADIUS_CLASSES: Record<ControlRadius, string> = {
-  md: "rounded-md",
-  lg: "rounded-lg",
-  xl: "rounded-xl",
-  "2xl": "rounded-2xl",
-  full: "rounded-full",
-};
-
-const TONE_CLASSES: Record<ControlTone, string> = {
-  default:
-    "border-slate-200 bg-white dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)]",
-  muted:
-    "border-slate-200 bg-slate-50 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]",
 };
 
 export type SelectProps = Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "size"> & {
@@ -135,7 +117,7 @@ function collectOptions(children: ReactNode): OptionSpec[] {
 
 function NativeSelect(
   {
-    size = "md",
+    size = CONTROL_DEFAULT_SIZE,
     radius = "xl",
     tone = "default",
     fullWidth = true,
@@ -153,7 +135,7 @@ function NativeSelect(
     <div className={["relative min-w-0", fullWidth ? "w-full" : "w-fit", className].filter(Boolean).join(" ")}>
       <select
         ref={ref}
-        className={[BASE, SIZE_CLASSES[size], ICON_PADDING[size], RADIUS_CLASSES[radius], TONE_CLASSES[tone], "w-full", selectClassName]
+        className={[BASE, CONTROL_SIZE_CLASSES[size], ICON_PADDING[size], CONTROL_RADIUS_CLASSES[radius], CONTROL_TONE_CLASSES[tone], "w-full", selectClassName]
           .filter(Boolean)
           .join(" ")}
         {...props}
@@ -166,14 +148,21 @@ function NativeSelect(
 }
 
 export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select(props, ref) {
+  const fieldLabel = useContext(FieldLabelContext);
+  const labelledProps = {
+    ...props,
+    "aria-labelledby": props["aria-labelledby"] ?? (
+      !props["aria-label"] && props.id === fieldLabel?.controlId ? fieldLabel?.labelId : undefined
+    ),
+  };
   if (props.native) {
-    return NativeSelect(props, ref);
+    return NativeSelect(labelledProps, ref);
   }
-  return <StyledSelect {...props} />;
+  return <StyledSelect {...labelledProps} />;
 });
 
 function StyledSelect({
-  size = "sm",
+  size = CONTROL_DEFAULT_SIZE,
   radius = "xl",
   tone = "default",
   fullWidth = true,
@@ -262,7 +251,7 @@ function StyledSelect({
         data-value={current}
         {...passthrough}
         className={composeRenderProps(selectClassName, (extra) =>
-          [TRIGGER_BASE, SIZE_CLASSES[size], ICON_PADDING[size], RADIUS_CLASSES[radius], TONE_CLASSES[tone], "w-full", extra]
+          [CONTROL_TRIGGER_BASE, CONTROL_SIZE_CLASSES[size], ICON_PADDING[size], CONTROL_RADIUS_CLASSES[radius], CONTROL_TONE_CLASSES[tone], "w-full", extra]
             .filter(Boolean)
             .join(" "),
         )}

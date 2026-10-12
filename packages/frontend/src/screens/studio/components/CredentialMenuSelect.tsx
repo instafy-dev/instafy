@@ -1,8 +1,6 @@
 import { useRef, useState } from "react";
-import { NavArrowDown } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
-import { Button } from "../../../components/Button";
-import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { FormPickerPopover, FormPickerTrigger } from "../../../components/FormPicker";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import type { ControllerCredentialListItem } from "../../../sdk/instafy";
 import { formatCredentialOptionLabel } from "../../../utils/credentialFormatting";
@@ -15,6 +13,8 @@ export interface CredentialMenuSelectProps {
   accountDefaultLabel?: string;
   placeholder?: string;
   ariaLabel: string;
+  id?: string;
+  ariaLabelledBy?: string;
   onSelect: (credentialId: string | null) => void;
   onConnectNew: () => void;
   triggerTestId?: string;
@@ -29,6 +29,8 @@ export function CredentialMenuSelect({
   accountDefaultLabel = "Use account default",
   placeholder = "Select credential",
   ariaLabel,
+  id,
+  ariaLabelledBy,
   onSelect,
   onConnectNew,
   triggerTestId,
@@ -55,33 +57,23 @@ export function CredentialMenuSelect({
 
   return (
     <MenuTrigger isOpen={menuOpen} onOpenChange={setMenuOpen}>
-      <Button
+      <FormPickerTrigger
         ref={triggerRef}
-        variant="outline"
-        size="sm"
-        radius="xl"
-        fullWidth
+        id={id}
         isDisabled={disabled}
-        aria-label={ariaLabel}
-        aria-haspopup="menu"
+        aria-label={ariaLabelledBy ? undefined : ariaLabel}
+        aria-labelledby={ariaLabelledBy}
         data-testid={triggerTestId}
         onPress={() => {
           if (!menuOpen) {
             setMenuOpen(true);
           }
         }}
-        className="min-h-11 sm:pointer-fine:min-h-[38px] justify-between bg-slate-50 shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]"
       >
-        <span className="min-w-0 flex-1 truncate text-left">{label}</span>
-        <NavArrowDown className="text-base text-slate-400" aria-hidden="true" />
-      </Button>
-      <StudioPopover
+        {label}
+      </FormPickerTrigger>
+      <FormPickerPopover
         triggerRef={triggerRef}
-        isNonModal
-        placement="bottom start"
-        offset={6}
-        className="min-w-[var(--trigger-width)] p-2"
-        shouldCloseOnInteractOutside={() => true}
         data-testid={menuTestId}
       >
         <StudioMenu
@@ -114,7 +106,7 @@ export function CredentialMenuSelect({
           <StudioMenuSeparator />
           <StudioMenuItem id="__connect__">Connect new credential…</StudioMenuItem>
         </StudioMenu>
-      </StudioPopover>
+      </FormPickerPopover>
     </MenuTrigger>
   );
 }

@@ -7,11 +7,13 @@ import type {
 import {
   controllerBaseUrl,
   normalizeOriginEndpointForClient,
+  readControllerApiError,
   readControllerError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 import { logControllerRequestError } from "./logging";
+import type { OriginError } from "./originErrors";
 
 export type LocalWorkspaceEventKind =
   | "local_workspace.registered"
@@ -152,6 +154,7 @@ export interface RequestOriginAccessTokenParams {
   accessToken?: string | null;
   forceRefresh?: boolean;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface OriginAccessTokenResponse {
@@ -163,6 +166,10 @@ export interface OriginAccessTokenResponse {
   scopes: string[];
   leaseId?: string | null;
 }
+
+export type OriginAccessTokenResult =
+  | { ok: true; token: OriginAccessTokenResponse }
+  | { ok: false; error: OriginError };
 
 type OriginAccessTokenCacheEntry = {
   value: OriginAccessTokenResponse;
@@ -177,7 +184,7 @@ const ORIGIN_ACCESS_TOKEN_REQUEST_TIMEOUT_MS = 20_000;
 const originAccessTokenCache = new Map<string, OriginAccessTokenCacheEntry>();
 const originAccessTokenInFlight = new Map<
   string,
-  Promise<OriginAccessTokenResponse | null>
+  Promise<OriginAccessTokenResult>
 >();
 
 function buildControllerOriginProxyEndpoint(
@@ -435,8 +442,19 @@ export async function fetchOriginSummaryResult(
 export async function requestOriginAccessToken(
   params: RequestOriginAccessTokenParams,
 ): Promise<OriginAccessTokenResponse | null> {
+  const result = await requestOriginAccessTokenResult(params);
+  return result.ok ? result.token : null;
+}
+
+/** Preserve controller failure status/code for shared availability checks. */
+export async function requestOriginAccessTokenResult(
+  params: RequestOriginAccessTokenParams,
+): Promise<OriginAccessTokenResult> {
   if (!runtimeControllerEnabled) {
-    return null;
+    return {
+      ok: false,
+      error: { status: 0, code: "controller_disabled", message: "controller is disabled", routeUnavailable: false },
+    };
   }
 
   const { projectId, scopes } = params;
@@ -453,8 +471,13 @@ export async function requestOriginAccessToken(
   );
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
-    return null;
+    return {
+      ok: false,
+      error: { status: 401, code: "session_unavailable", message: "authentication is required", routeUnavailable: false },
+    };
   }
+
+  params.signal?.throwIfAborted();
 
   const cacheKey = shouldCacheOriginAccessToken(params)
     ? buildOriginAccessTokenCacheKey({
@@ -473,7 +496,7 @@ export async function requestOriginAccessToken(
     typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
       ? params.timeoutMs
       : ORIGIN_ACCESS_TOKEN_REQUEST_TIMEOUT_MS;
-  const inFlightKey = cacheKey ? `${cacheKey}|timeout:${requestTimeoutMs}` : null;
+  const inFlightKey = cacheKey && !params.signal ? `${cacheKey}|timeout:${requestTimeoutMs}` : null;
 
   if (cacheKey && params.forceRefresh !== true) {
     const cached = originAccessTokenCache.get(cacheKey);
@@ -485,7 +508,7 @@ export async function requestOriginAccessToken(
         0,
         Math.floor((cached.expiresAtMs - Date.now()) / 1000),
       );
-      return { ...cached.value, expiresIn: remainingSeconds };
+      return { ok: true, token: { ...cached.value, expiresIn: remainingSeconds } };
     }
 
     const inFlight = inFlightKey ? originAccessTokenInFlight.get(inFlightKey) : null;
@@ -522,39 +545,46 @@ export async function requestOriginAccessToken(
     body.browserSessionId = params.browserSessionId;
   }
 
-  const run = async (): Promise<OriginAccessTokenResponse | null> => {
-    try {
-      const abortController =
-        typeof AbortController === "function" ? new AbortController() : null;
-      const timeoutHandle =
-        abortController !== null
-          ? setTimeout(() => {
-              abortController.abort();
-            }, requestTimeoutMs)
-          : null;
+  const run = async (): Promise<OriginAccessTokenResult> => {
+    let fetching = false;
+    const abortController =
+      typeof AbortController === "function" ? new AbortController() : null;
+    const abortRequest = () => abortController?.abort();
+    params.signal?.addEventListener("abort", abortRequest, { once: true });
+    const timeoutHandle =
+      abortController !== null
+        ? setTimeout(() => {
+            abortController.abort();
+          }, requestTimeoutMs)
+        : null;
 
+    try {
+      params.signal?.throwIfAborted();
+      fetching = true;
       const response = await fetch(`${requestContext.baseUrl}/access_token`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
         signal: abortController?.signal,
-      }).finally(() => {
-        if (timeoutHandle !== null) {
-          clearTimeout(timeoutHandle);
-        }
       });
+      fetching = false;
 
-      if (response.status === 404) {
-        return null;
-      }
       if (!response.ok) {
-        throw new Error(
-          await readControllerError(
-            response,
-            "request origin access token failed",
-            requestContext,
-          ),
+        // Preserve the controller's normal 401 handling as well as its typed error.
+        const failure = await readControllerApiError(
+          response,
+          "request origin access token failed",
+          requestContext,
         );
+        return {
+          ok: false,
+          error: {
+            status: failure.status,
+            code: failure.code ?? undefined,
+            message: failure.message,
+            routeUnavailable: false,
+          },
+        };
       }
 
       const payload = (await response.json()) as Record<string, unknown>;
@@ -611,16 +641,21 @@ export async function requestOriginAccessToken(
         });
       }
 
-      return value;
-    } catch (error) {
-      const message =
-        error instanceof Error && error.name === "AbortError"
-          ? `request origin access token timed out after ${requestTimeoutMs}ms`
-          : error instanceof Error
-            ? error.message
-            : String(error);
-      console.warn("[runtime-controller] requestOriginAccessToken error:", message);
-      return null;
+      return { ok: true, token: value };
+    } catch {
+      const timedOut = abortController?.signal.aborted === true;
+      return {
+        ok: false,
+        error: {
+          status: 0,
+          code: timedOut ? "timeout" : fetching ? "network_error" : "invalid_response",
+          message: timedOut ? "origin access request timed out" : "origin access request failed",
+          routeUnavailable: false,
+        },
+      };
+    } finally {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+      params.signal?.removeEventListener("abort", abortRequest);
     }
   };
 

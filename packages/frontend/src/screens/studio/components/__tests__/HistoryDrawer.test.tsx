@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActiveWorkspaceVersioning } from "../../../../workspace/useActiveWorkspaceVersioning";
 
 const mocks = vi.hoisted(() => ({
+  availability: { issue: null as null | { kind: "connection" }, recoveryVersion: 0, reportFailure: vi.fn() },
   fetchHistory: vi.fn(),
   fetchStatus: vi.fn(),
   revertCommit: vi.fn(),
@@ -23,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   probe: vi.fn(),
   project: { activeProjectId: "project-1", projectCapabilitiesResolved: true, canWriteProject: true },
 }));
+
+vi.mock("../../../../workspace/WorkspaceAvailabilityProvider", () => ({ useWorkspaceAvailability: () => mocks.availability }));
 
 vi.mock("../../../../projects/useProject", () => ({
   useProject: () => mocks.project,
@@ -137,6 +140,9 @@ describe("HistoryDrawer", () => {
         mock.mockReset();
       }
     });
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 0;
+    mocks.availability.reportFailure.mockReset();
     mocks.project = { activeProjectId: "project-1", projectCapabilitiesResolved: true, canWriteProject: true };
     mocks.createConversation.mockReturnValue({ localId: "conversation-new" });
     mocks.fetchHistory.mockResolvedValue(page([historyEntry(1)]));
@@ -166,6 +172,42 @@ describe("HistoryDrawer", () => {
     );
     await flush();
   }
+
+  it("keeps saved versions on a shared outage, pauses Revert, and reloads reads after recovery", async () => {
+    await render();
+    mocks.fetchHistory.mockResolvedValue(null);
+    await act(async () => q<HTMLButtonElement>(container, "source-control-refresh")?.click());
+    await flush();
+    expect(mocks.availability.reportFailure).toHaveBeenCalled();
+    mocks.availability.issue = { kind: "connection" };
+    await render();
+    expect(q(container, "history-error")).toBeNull();
+    expect(q(container, "history-stale-notice")).not.toBeNull();
+    expect(q(container, "source-control-history-review")).not.toBeNull();
+    await expandFirst();
+    expect(q<HTMLButtonElement>(container, "source-control-history-revert")?.disabled).toBe(true);
+    const calls = mocks.fetchHistory.mock.calls.length;
+    mocks.fetchHistory.mockResolvedValue(page([historyEntry(2)]));
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 1;
+    await render();
+    expect(mocks.fetchHistory.mock.calls.length).toBe(calls + 1);
+    expect(q(container, "history-stale-notice")).toBeNull();
+    expect(mocks.revertCommit).not.toHaveBeenCalled();
+  });
+
+  it("does not duplicate a shared outage with history, unsaved-work, or desktop Retry rows", async () => {
+    mocks.fetchHistory.mockResolvedValue(null);
+    mocks.fetchStatus.mockResolvedValue(null);
+    mocks.fetchRecovery.mockResolvedValue(null);
+    await render(desktop());
+    mocks.availability.issue = { kind: "connection" };
+    await render(desktop());
+    expect(q(container, "history-error")).toBeNull();
+    expect(q(container, "unsaved-work-error")).toBeNull();
+    expect(q(container, "desktop-changes-error")).toBeNull();
+    expect(mocks.availability.reportFailure).toHaveBeenCalled();
+  });
 
   async function expandFirst() {
     await act(async () => q<HTMLButtonElement>(container, "source-control-history-toggle")?.click());

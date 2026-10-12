@@ -7,6 +7,7 @@ import { HistoryControls } from "../../../components/HistoryControls";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
+import { InlineNotice } from "../../../components/InlineNotice";
 import { DRAWER_ICON_BUTTON_TONE_CLASS, LIST_ROW_SURFACE_BASE, LIST_ROW_FOCUS_RING, listRowSurfaceToneClassName } from "../../../components/listRowStyles";
 import type { MobilePageHeader } from "./MobileStudioNavigationHeader";
 import { FilesExplorerToolbar } from "./FilesExplorerToolbar";
@@ -26,6 +27,7 @@ import {
 } from "../../../sdk/instafy";
 import type { CodeFile } from "../../../types";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
+import { useWorkspaceAvailability } from "../../../workspace/WorkspaceAvailabilityProvider";
 import { useTouchLikeInput } from "../../../hooks/useTouchLikeInput";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import {
@@ -460,6 +462,8 @@ export function FilesPanel({
   const workspaceOwnerKey = getStudioWorkspaceOwnerKey({ effectiveRuntimeId, localWorkspace, desktopOrigin });
   const { showStatus } = useStatus();
   const { activeProjectId, projectCapabilitiesResolved, canWriteProject } = useProject();
+  const { issue: workspaceIssue } = useWorkspaceAvailability();
+  const workspaceWritesBlocked = workspaceIssue !== null;
   const projectWriteDisabled =
     projectCapabilitiesResolved === false || canWriteProject === false;
   // How the default origin keeps versions. Legacy (the stateful gateway, or
@@ -760,7 +764,7 @@ export function FilesPanel({
   activeFileRef.current = activeFile;
   // Writes need a ready runtime in legacy mode; in the versioned modes they
   // go to the default origin, so they need that origin and write access.
-  const writeReady = versioned ? originAvailable : runtimeReady;
+  const writeReady = !workspaceWritesBlocked && (versioned ? originAvailable : runtimeReady);
 
   const presentWriteFailure = useCallback(
     (copy: SaveCopy, retry: () => void) => {
@@ -818,11 +822,11 @@ export function FilesPanel({
               return buffer ? ownRevisions.latest(activeProjectId, buffer) : null;
             },
             discardBuffers,
-            writeReady: !projectWriteDisabled && originAvailable,
+            writeReady: !projectWriteDisabled && !workspaceWritesBlocked && originAvailable,
             onWriteFailure: presentWriteFailure,
           }
         : null,
-    [activeProjectId, discardBuffers, originAvailable, ownRevisions, presentWriteFailure, projectWriteDisabled, versioned],
+    [activeProjectId, discardBuffers, originAvailable, ownRevisions, presentWriteFailure, projectWriteDisabled, versioned, workspaceWritesBlocked],
   );
   const dirtyFileIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -890,7 +894,7 @@ export function FilesPanel({
     workspaceOwnerId: previewOwnerId,
     workspaceOwnerKey,
     onDirectoryEntriesLoaded,
-    readOnly: projectWriteDisabled,
+    readOnly: projectWriteDisabled || workspaceWritesBlocked,
     versioning: filesVersioning,
     versionedOptions: treeVersionedOptions,
   });
@@ -1323,6 +1327,7 @@ export function FilesPanel({
     setMobileView,
     clearExplorerMenu: () => setExplorerMenu(null),
     readOnly: projectWriteDisabled,
+    writesBlocked: workspaceWritesBlocked,
     versioning: filesVersioning,
     versionedOptions: createVersionedOptions,
   });
@@ -1421,6 +1426,7 @@ export function FilesPanel({
     if (!runtimeReady) {
       throw new Error("Runtime not ready yet.");
     }
+    if (workspaceWritesBlocked) throw new Error("Workspace is unavailable. Your edits are kept here.");
     if (projectWriteDisabled) {
       throw new Error("This space is read-only. Ask an admin for edit access.");
     }
@@ -1473,6 +1479,7 @@ export function FilesPanel({
     getPendingActiveFileContent,
     runtimeReady,
     projectWriteDisabled,
+    workspaceWritesBlocked,
     setDirectoryEntries,
     updateWorkspace,
   ]);
@@ -1497,7 +1504,7 @@ export function FilesPanel({
   }, [filesVersioning.originId]);
 
   const handleSaveDraft = useCallback(async () => {
-    if (!activeProjectId || !activeFile || projectWriteDisabled) {
+    if (!activeProjectId || !activeFile || projectWriteDisabled || workspaceWritesBlocked) {
       return;
     }
     const pendingContent = getPendingActiveFileContent() ?? activeFile.modified;
@@ -1527,13 +1534,14 @@ export function FilesPanel({
     noteLegacySave,
     refreshActiveFileVersionStatus,
     projectWriteDisabled,
+    workspaceWritesBlocked,
     saveMode,
     showStatus,
     writeActiveFileToWorkspace,
   ]);
 
   const handleSaveVersion = useCallback(async () => {
-    if (!activeProjectId || !activeFile || projectWriteDisabled) {
+    if (!activeProjectId || !activeFile || projectWriteDisabled || workspaceWritesBlocked) {
       return;
     }
     if (saveMode) {
@@ -1618,6 +1626,7 @@ export function FilesPanel({
     noteLegacySave,
     openChanges,
     projectWriteDisabled,
+    workspaceWritesBlocked,
     saveMode,
     showStatus,
     writeActiveFileToWorkspace
@@ -1627,7 +1636,7 @@ export function FilesPanel({
     enabled: versioned,
     versioning: filesVersioning,
     activeProjectId,
-    readOnly: projectWriteDisabled,
+    readOnly: projectWriteDisabled || workspaceWritesBlocked,
     originAvailable,
     // Only once History has listed Unsaved work for this origin.
     unsavedWorkVisible: versioningState.recovery === "supported",
@@ -1723,10 +1732,11 @@ export function FilesPanel({
   const activePath = viewerState.entry?.path ?? activeFile?.path ?? null;
 
   const rootDirectoryStatus = directoryStatus[normalizedRootPath];
-  const showRootDirectoryErrorCard = workspaceBrowseReady && rootDirectoryStatus === "error";
+  const showRootDirectoryErrorCard = !workspaceIssue && workspaceBrowseReady && rootDirectoryStatus === "error";
   const rootEntries = explorerEntries[normalizedRootPath] ?? [];
   const rootLoadingLabel = getDirectoryLoadingLabel(normalizedRootPath);
   const showCenteredRootLoading =
+    !workspaceIssue &&
     !showRootDirectoryErrorCard &&
     !normalizedSearch &&
     rootEntries.length === 0 &&
@@ -1828,17 +1838,11 @@ export function FilesPanel({
       {explorerToolbar}
 
       {showRootDirectoryErrorCard ? (
-        <Card
-          tone="muted"
-          radius="2xl"
-          shadow="none"
-          padding="sm"
-          className="mt-2 border border-rose-200/60 bg-rose-50/70 dark:border-rose-500/30 dark:bg-rose-500/10"
-        >
-          <Text variant="caption" tone="subtle" className="text-xxs">
-            Unable to load files right now. Retrying in the background. You can retry now, or switch back to chat.
-          </Text>
-          <div className="mt-2 flex flex-wrap gap-2">
+        <InlineNotice
+          tone="danger"
+          role="alert"
+          className="mt-2"
+          actions={<>
             <Button
               onPress={() => void loadDirectory(normalizedRootPath, { force: true })}
               variant="outline"
@@ -1855,18 +1859,27 @@ export function FilesPanel({
             >
               Back to Assistant
             </Button>
-          </div>
-        </Card>
+          </>}
+        >
+          Unable to load files right now. Retrying in the background. You can retry now, or switch back to chat.
+        </InlineNotice>
       ) : null}
 
-      {projectWriteDisabled ? (
-        <div
-          className="mt-2 rounded-xl border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-100"
+      {workspaceIssue && rootEntries.length > 0 ? (
+        <Text variant="caption" tone="subtle" className="mt-2" data-testid="files-stale-notice">
+          Showing previously loaded files.
+        </Text>
+      ) : null}
+
+      {projectWriteDisabled && !workspaceIssue ? (
+        <InlineNotice
+          tone="warning"
+          className="mt-2"
           data-testid="files-read-only-notice"
           role="status"
         >
           Read-only. You can browse files, but you can’t edit, create, or delete them.
-        </div>
+        </InlineNotice>
       ) : null}
 
       <div
@@ -2047,10 +2060,11 @@ export function FilesPanel({
                     <div className={`my-1 h-px bg-slate-200 ${DARK_DIVIDER_CLASS}`} />
                     <Button
                       variant="ghost"
+                      tone="danger"
                       size="sm"
                       radius="lg"
                       fullWidth
-                      className="justify-start gap-2 text-rose-600 hover:bg-rose-50 data-[hovered]:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-500/10 dark:data-[hovered]:bg-rose-500/10"
+                      className="justify-start gap-2"
                       onPress={() => {
                         const deleteTarget = explorerMenu.deleteEntry;
                         setExplorerMenu(null);
@@ -2205,7 +2219,7 @@ export function FilesPanel({
                       void handleSave();
                     }
                   }}
-                  isDisabled={projectWriteDisabled || !originAvailable}
+                  isDisabled={projectWriteDisabled || workspaceWritesBlocked || !originAvailable}
                   variant="primary"
                   size="sm"
                   radius="full"
@@ -2224,7 +2238,7 @@ export function FilesPanel({
                 <>
                   <IconButton
                     onPress={handleSaveDraft}
-                    isDisabled={projectWriteDisabled || activeFile.modified === activeFile.generated}
+                    isDisabled={projectWriteDisabled || workspaceWritesBlocked || activeFile.modified === activeFile.generated}
                     variant="outline"
                     size="sm"
                     radius="full"
@@ -2242,7 +2256,7 @@ export function FilesPanel({
                   <IconButton
                     onPress={handleSaveVersion}
                     isDisabled={
-                      projectWriteDisabled ||
+                      projectWriteDisabled || workspaceWritesBlocked ||
                       (activeFile.modified === activeFile.generated && activeFileHasVersionChanges === false)
                     }
                     variant="primary"
@@ -2284,6 +2298,7 @@ export function FilesPanel({
       mobileView,
       originAvailable,
       projectWriteDisabled,
+      workspaceWritesBlocked,
       showExplorerInline,
       activeFileHasVersionChanges,
       saveMode,

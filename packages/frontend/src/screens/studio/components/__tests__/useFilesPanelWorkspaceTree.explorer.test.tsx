@@ -6,7 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ControllerWorkspaceEntry } from "../../../../sdk/instafy";
 import { useFilesPanelWorkspaceTree } from "../useFilesPanelWorkspaceTree";
 
-const { list } = vi.hoisted(() => ({ list: vi.fn() }));
+const { list, availability } = vi.hoisted(() => ({ list: vi.fn(), availability: {
+  issue: null as null | { kind: "connection" | "unavailable" | "access" },
+  recoveryVersion: 0, reportFailure: vi.fn(),
+} }));
+vi.mock("../../../../workspace/WorkspaceAvailabilityProvider", () => ({ useWorkspaceAvailability: () => availability }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { core: { enabled: true }, workspace: { files: { list } } } }));
 vi.mock("../../../../components/Button", () => ({
   Button: ({ children, onPress, "aria-label": label }: { children: ReactNode; onPress?: () => void; "aria-label"?: string }) => (
@@ -47,6 +51,8 @@ describe("Files explorer folders and loading copy", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.resetAllMocks();
+    availability.issue = null;
+    availability.recoveryVersion = 0;
     vi.useFakeTimers();
     statusPath = "";
     list.mockResolvedValue([]);
@@ -71,6 +77,46 @@ describe("Files explorer folders and loading copy", () => {
     container.remove();
     vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("keeps loaded folders and the editor draft during a shared outage, then reloads only listings", async () => {
+    list.mockImplementation(async ({ path }) => path === "docs" ? [file("docs/notes.md")] : [folder("docs")]);
+    await render();
+    await act(async () => current.toggleDirectory(folder("docs")));
+    options.setViewerStateRef.current = vi.fn();
+    options.activeFileDraftRef.current = { fileId: "docs/notes.md", value: "unsaved edits" };
+    list.mockClear();
+    availability.issue = { kind: "connection" };
+    await render();
+    await act(async () => current.loadDirectory("", { force: true }));
+    expect(list).not.toHaveBeenCalled();
+    expect(current.directoryEntries.docs).toEqual([file("docs/notes.md")]);
+    expect(statusText()).toBe("");
+    expect(retryButton()).toBeNull();
+
+    availability.issue = null;
+    availability.recoveryVersion = 1;
+    await render();
+    expect(list.mock.calls.map(([params]) => params.path ?? "")).toEqual(["", "docs"]);
+    expect(options.activeFileDraftRef.current.value).toBe("unsaved edits");
+    expect(options.setViewerStateRef.current).not.toHaveBeenCalled();
+    await render();
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks the shared probe about a failed root listing but keeps child failures local", async () => {
+    list.mockResolvedValue(null);
+    await render();
+    expect(availability.reportFailure).toHaveBeenCalledOnce();
+    availability.reportFailure.mockClear();
+    await act(async () => current.loadDirectory("missing", { force: true }));
+    expect(availability.reportFailure).not.toHaveBeenCalled();
+  });
+
+  it("checks shared availability when the displayed root is a scoped folder", async () => {
+    list.mockResolvedValue(null);
+    await render({ normalizedRootPath: "docs" });
+    expect(availability.reportFailure).toHaveBeenCalledOnce();
   });
 
   describe("loading copy", () => {

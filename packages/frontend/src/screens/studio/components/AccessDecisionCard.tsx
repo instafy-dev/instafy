@@ -68,11 +68,11 @@ export function AccessDecisionContent({
         </div>
       ) : null}
       <div className="min-w-0 flex-1">
-        <Text as="div" variant="bodyStrong" tone="primary" className="text-lg text-slate-950 dark:text-white">
+        <Text as="div" variant="titleCompact" tone="primary">
           {title}
         </Text>
         {description ? (
-          <Text as="div" variant="body" tone="muted" className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">
+          <Text as="div" variant="bodyRoomy" tone="muted" className="mt-1">
             {description}
           </Text>
         ) : null}

@@ -10,7 +10,7 @@ import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
-import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { MobileFocusDialog } from "../../../components/aria/MobileFocusDialog";
@@ -136,7 +136,7 @@ export function AgentProfileModal({
     disabled={!dirty || (handleRequired && !handle.trim()) || Array.from(bio).length > PROFILE_BIO_MAX_LENGTH}
     onSave={onSave} onCancel={onClose} saveTestId="agent-profile-save" />;
   const form = (
-      <div className={isDesktop ? "min-h-0 flex-1 overflow-y-auto px-5 py-4" : "px-4 py-4"}>
+      <div className="px-4 py-4 sm:px-5">
         <SettingsFormLayout>
           <SettingsIdentityRow>
             <IdentityPhotoButton
@@ -194,8 +194,10 @@ export function AgentProfileModal({
               </Field>
             ) : null}
             {showProviderPicker && providerId ? (
-              <Field label="Provider">
+              <Field label="Provider" labelId="agent-profile-provider-label" htmlFor="agent-profile-provider">
                 <ProviderMenuSelect
+                  id="agent-profile-provider"
+                  ariaLabelledBy="agent-profile-provider-label"
                   value={providerId}
                   options={providerOptions ?? []}
                   disabled={pending}
@@ -210,8 +212,10 @@ export function AgentProfileModal({
             ) : null}
 
             {showCredentialPicker ? (
-              <Field label="Credential">
+              <Field label="Credential" labelId="agent-profile-credential-label" htmlFor="agent-profile-credential">
                 <CredentialMenuSelect
+                  id="agent-profile-credential"
+                  ariaLabelledBy="agent-profile-credential-label"
                   value={credentialId}
                   credentials={credentials ?? []}
                   disabled={pending}
@@ -233,8 +237,10 @@ export function AgentProfileModal({
             ) : null}
 
             {showModelPicker ? (
-              <Field label="Model">
+              <Field label="Model" labelId="agent-profile-model-label" htmlFor={isDesktop ? "agent-profile-model" : undefined}>
                 <ModelMenuSelect
+                  id="agent-profile-model"
+                  ariaLabelledBy="agent-profile-model-label"
                   presentation={isDesktop ? "menu" : "inline"}
                   value={modelId}
                   options={modelOptions ?? []}
@@ -289,8 +295,7 @@ export function AgentProfileModal({
       isDismissable={!pending}
       isKeyboardDismissDisabled={pending}
       dialogAriaLabel={title}
-      modalClassName="max-h-[calc(100dvh-2rem)] overflow-hidden"
-      dialogClassName="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col"
+      layout="editor"
       data-testid="agent-profile-modal"
     >
       <StudioDialogHeader
@@ -299,10 +304,9 @@ export function AgentProfileModal({
         onClose={onClose}
         closeButtonDisabled={pending}
         closeLabel="Close"
-        className="shrink-0"
       />
-      {form}
-      <div className="shrink-0 px-5 pb-4">{actions}</div>
+      <StudioDialogBody scrollable padding="none">{form}</StudioDialogBody>
+      <StudioDialogFooter className="px-5 pb-4">{actions}</StudioDialogFooter>
     </StudioDialogModal>
   );
 }

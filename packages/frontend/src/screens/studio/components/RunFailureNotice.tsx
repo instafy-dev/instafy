@@ -61,16 +61,6 @@ export function useRunFailureRetry(): RunFailureRetryContextValue | null {
   return useContext(RunFailureRetryContext);
 }
 
-// Touch-sized hit area on phones and tablets, the compact desktop height from
-// lg up (the same pair the profile popover's "Try again" uses).
-const ACTION_HIT_AREA_CLASS = "min-h-11 lg:min-h-9";
-// Text-button look on the ghost variant. Its own text colour is emitted later
-// in the stylesheet than these shades, so they need the important modifier
-// (the same override ToggleIconButton uses). Leading the row, the label lines
-// up with the sentence above instead of its padding.
-const QUIET_ACTION_CLASS =
-  "px-2 first:-ml-2 !text-slate-500 hover:!text-slate-800 data-[hovered]:!text-slate-800 dark:!text-slate-400 dark:hover:!text-slate-100 dark:data-[hovered]:!text-slate-100";
-
 /** Where focus goes once a pressed control leaves the card's actions row. */
 type FocusHandOff = { to: "details"; sawPending: boolean } | { to: "retry" };
 
@@ -253,7 +243,6 @@ export function RunFailureMessageBody({
             radius="xl"
             data-testid="run-failure-connect-ai"
             onPress={onConnectAi}
-            className={ACTION_HIT_AREA_CLASS}
           >
             Connect AI
           </Button>
@@ -264,7 +253,8 @@ export function RunFailureMessageBody({
             {cancelAutoRetry ? (
               <Button
                 ref={cancelButtonRef}
-                variant="ghost"
+                variant="text"
+                tone="muted"
                 size="xs"
                 radius="xl"
                 data-testid="run-failure-auto-retry-cancel"
@@ -277,7 +267,6 @@ export function RunFailureMessageBody({
                     cancelFocusedRef.current = focused;
                   }
                 }}
-                className={`${ACTION_HIT_AREA_CLASS} ${QUIET_ACTION_CLASS}`}
               >
                 Cancel
               </Button>
@@ -294,7 +283,6 @@ export function RunFailureMessageBody({
             onPress={handleRetry}
             isPending={retryPending}
             isDisabled={otherRetryInFlight}
-            className={ACTION_HIT_AREA_CLASS}
           >
             Try again
           </Button>
@@ -310,13 +298,13 @@ export function RunFailureMessageBody({
         ) : null}
         <Button
           ref={detailsButtonRef}
-          variant="ghost"
+          variant="text"
+          tone="muted"
           size="xs"
           radius="xl"
           data-testid="run-failure-details-toggle"
           onPress={() => setDetailsOpen((current) => !current)}
           aria-expanded={detailsOpen}
-          className={`${ACTION_HIT_AREA_CLASS} ${QUIET_ACTION_CLASS}`}
         >
           Details
         </Button>

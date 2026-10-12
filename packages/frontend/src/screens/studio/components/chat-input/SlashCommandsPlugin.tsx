@@ -138,7 +138,7 @@ function SlashCommandsMenu({
             {option.command}
           </span>
           <span className="min-w-0 flex-1">
-            <Text as="span" variant="caption" tone="muted" className="block text-sm leading-5">
+            <Text as="span" variant="bodyCompact" tone="muted" className="block">
               {option.description}
             </Text>
           </span>

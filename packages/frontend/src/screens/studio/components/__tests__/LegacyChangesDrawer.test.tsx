@@ -5,6 +5,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  availability: { issue: null as null | { kind: "connection" }, recoveryVersion: 0, reportFailure: vi.fn() },
+  canWrite: true,
+  projectId: "project-1",
   fetchHistory: vi.fn(),
   fetchStatus: vi.fn(),
   revertCommit: vi.fn(),
@@ -13,11 +16,13 @@ const mocks = vi.hoisted(() => ({
   syncToRemote: vi.fn(),
 }));
 
+vi.mock("../../../../workspace/WorkspaceAvailabilityProvider", () => ({ useWorkspaceAvailability: () => mocks.availability }));
+
 vi.mock("../../../../projects/useProject", () => ({
   useProject: () => ({
-    activeProjectId: "project-1",
+    activeProjectId: mocks.projectId,
     projectCapabilitiesResolved: true,
-    canWriteProject: false,
+    canWriteProject: mocks.canWrite,
   }),
 }));
 
@@ -93,7 +98,12 @@ describe("LegacyChangesDrawer project access", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
-    Object.values(mocks).forEach((mock) => mock.mockReset());
+    Object.values(mocks).forEach((mock) => { if (typeof mock === "function") mock.mockReset(); });
+    mocks.canWrite = false;
+    mocks.projectId = "project-1";
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 0;
+    mocks.availability.reportFailure.mockReset();
     mocks.fetchStatus.mockResolvedValue({
       supported: true,
       dirtyCount: 1,
@@ -136,14 +146,51 @@ describe("LegacyChangesDrawer project access", () => {
     const desktop = width >= 900;
     expect(container.querySelector('[data-testid="source-control-review-layout"]') !== null).toBe(desktop);
     expect(container.querySelector('[data-testid="source-control-diff-sheet"]') !== null).toBe(!desktop);
-    const focused = container.querySelector<HTMLButtonElement>('[data-testid="source-control-review-mode-focused"]');
-    const all = container.querySelector<HTMLButtonElement>('[data-testid="source-control-review-mode-all"]');
-    expect(focused?.getAttribute("aria-pressed")).toBe("true");
-    await act(async () => all?.click());
-    expect(all?.getAttribute("aria-pressed")).toBe("true");
-    expect(focused?.getAttribute("aria-pressed")).toBe("false");
+    const focused = container.querySelector<HTMLInputElement>('[data-testid="source-control-review-mode-focused"] input[type="radio"]')!;
+    const all = container.querySelector<HTMLInputElement>('[data-testid="source-control-review-mode-all"] input[type="radio"]')!;
+    expect(container.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe("Changes view");
+    expect(focused.checked).toBe(true);
+    await act(async () => container.querySelector<HTMLLabelElement>('[data-testid="source-control-review-mode-all"]')?.click());
+    expect(all.checked).toBe(true);
+    expect(focused.checked).toBe(false);
     expect(container.querySelector('[data-testid="source-control-rolling-diff-preview"]') !== null).toBe(desktop);
     expect(container.querySelector('[data-testid="source-control-rolling-diff-sheet"]') !== null).toBe(!desktop);
+  });
+
+  it("selects the adjacent review mode with arrow keys and retains one tab stop", async () => {
+    Object.defineProperty(window, "innerWidth", { value: 1280, configurable: true });
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    await flushAsyncWork();
+    const focused = container.querySelector<HTMLInputElement>('input[type="radio"][value="focused"]')!;
+    const all = container.querySelector<HTMLInputElement>('input[type="radio"][value="all"]')!;
+    await act(async () => focused.focus());
+    await act(async () => focused.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true })));
+    expect(all.checked).toBe(true);
+    expect(document.activeElement).toBe(all);
+    expect(all.tabIndex).toBe(0);
+    expect(focused.tabIndex).toBe(-1);
+    expect(container.querySelector('[data-testid="source-control-rolling-diff-preview"]')).not.toBeNull();
+    await act(async () => all.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true })));
+    expect(focused.checked).toBe(true);
+    expect(document.activeElement).toBe(focused);
+    expect(container.querySelector('[data-testid="source-control-rolling-diff-preview"]')).toBeNull();
+  });
+
+  it("announces local read failures but suppresses them when the shared outage owns recovery", async () => {
+    mocks.fetchStatus.mockResolvedValue({
+      supported: true, dirtyCount: 1, dirtyPaths: [{ path: "src/app.ts", code: "M" }],
+      busy: false, error: "Unable to inspect this path.",
+    });
+    mocks.fetchHistory.mockResolvedValue({ supported: true, entries: [], busy: false, error: "Invalid saved history." });
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    await flushAsyncWork();
+    expect([...container.querySelectorAll('[role="alert"]')].map(notice => notice.textContent))
+      .toEqual(["Unable to inspect this path.", "Invalid saved history."]);
+    mocks.availability.issue = { kind: "connection" };
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).toContain("src/app.ts");
+    expect(container.querySelector('[data-testid="source-control-stale-notice"]')).not.toBeNull();
   });
 
   it.each([390, 1280])("places Changes controls in the top row only on desktop (%ipx)", async (width) => {
@@ -183,6 +230,56 @@ describe("LegacyChangesDrawer project access", () => {
     await flushAsyncWork();
     expect(container.querySelector('[data-testid="source-control-commit-message"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="source-control-select-all"]')).not.toBeNull();
+  });
+
+  it("retains changes through an outage, disables writes and refreshes after shared recovery", async () => {
+    mocks.canWrite = true;
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    await flushAsyncWork();
+    mocks.fetchStatus.mockResolvedValue(null);
+    mocks.fetchHistory.mockResolvedValue(null);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="source-control-refresh"]')?.click());
+    await flushAsyncWork();
+    expect(mocks.availability.reportFailure).toHaveBeenCalled();
+    expect(container.textContent).toContain("src/app.ts");
+    mocks.availability.issue = { kind: "connection" };
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    expect(container.querySelector('[data-testid="source-control-stale-notice"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("Couldn't refresh changes.");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="source-control-sync"]')?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('[aria-label="Discard changes for src/app.ts"]')?.disabled).toBe(true);
+    const calls = mocks.fetchStatus.mock.calls.length;
+    mocks.fetchStatus.mockResolvedValue({ supported: true, dirtyCount: 0, dirtyPaths: [], busy: false });
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 1;
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    await flushAsyncWork();
+    expect(mocks.fetchStatus.mock.calls.length).toBe(calls + 1);
+    expect(container.textContent).toContain("No pending changes.");
+    expect(mocks.syncToRemote).not.toHaveBeenCalled();
+  });
+
+  it("does not publish an old space's failed status into the new space or report its outage", async () => {
+    let resolveOld!: (value: null) => void;
+    const old = new Promise<null>((resolve) => { resolveOld = resolve; });
+    mocks.fetchStatus.mockImplementation(({ projectId }) => projectId === "project-1"
+      ? old : Promise.resolve({ supported: true, dirtyCount: 0, dirtyPaths: [], busy: false }));
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    mocks.projectId = "project-2";
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    await flushAsyncWork();
+    expect(container.textContent).toContain("No pending changes.");
+    await act(async () => resolveOld(null));
+    expect(container.textContent).toContain("No pending changes.");
+    expect(mocks.availability.reportFailure).not.toHaveBeenCalled();
+  });
+
+  it("leaves the shared strip as the only outage notice for an empty Changes view", async () => {
+    mocks.availability.issue = { kind: "connection" };
+    await act(async () => root.render(<LegacyChangesDrawer />));
+    expect(container.textContent).not.toContain("Changes are unavailable");
+    expect(container.textContent).not.toContain("No pending changes.");
+    expect(mocks.fetchStatus).not.toHaveBeenCalled();
   });
 
   it("does not report a clean workspace when status is unavailable", async () => {

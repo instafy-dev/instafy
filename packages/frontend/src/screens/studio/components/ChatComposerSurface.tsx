@@ -1146,7 +1146,7 @@ export function ChatComposerSurface({
                         radius="full"
                         size="xs"
                         onClick={toggleGoalDetails}
-                        className="text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+                        tone="muted"
                       >
                         <NavArrowDown
                           className={`h-4 w-4 transition-transform ${goalDetailsExpanded ? "rotate-180" : ""}`}
@@ -1164,7 +1164,7 @@ export function ChatComposerSurface({
                         size="xs"
                         onClick={onPauseGoal}
                         isDisabled={mutationDisabled}
-                        className="text-slate-500 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+                        tone="muted"
                       >
                         <Pause className="h-4 w-4" aria-hidden="true" />
                       </IconButton>
@@ -1178,7 +1178,7 @@ export function ChatComposerSurface({
                         size="xs"
                         onClick={onResumeGoal}
                         isDisabled={mutationDisabled}
-                        className="text-primary-700 hover:bg-primary-50 dark:text-primary-200 dark:hover:bg-primary-400/10"
+                        tone="accent"
                       >
                         <Play className="h-4 w-4" aria-hidden="true" />
                       </IconButton>
@@ -1192,7 +1192,7 @@ export function ChatComposerSurface({
                       size="xs"
                       onClick={onClearGoal}
                       isDisabled={mutationDisabled}
-                      className="text-slate-500 hover:bg-rose-50 hover:text-rose-700 dark:text-slate-400 dark:hover:bg-rose-950/30 dark:hover:text-rose-200"
+                      tone="danger"
                     >
                       <Xmark className="h-4 w-4" aria-hidden="true" />
                     </IconButton>

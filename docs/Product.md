@@ -731,8 +731,8 @@ question until the section is done. An opener the runtime answered without the m
 an unknown skill name, a failed import or a chat with no AI connected, starts no setup.
 `/skills start <name>` runs that section again for one installed skill, and `/skills` is listed in the typed `/` menu
 and in **Commands**. The product list is a fixed, first-party list built into Studio, and
-**Import** and **Install** in Settings > Skills send the same line into the current chat
-without leaving Settings. Skills are files distributed as public repos and URLs; a skill's
+**Import custom skill** in Skills sends the same line into the current chat after the user
+confirms **Add and start**, without leaving Skills. Skills are files distributed as public repos and URLs; a skill's
 `SKILL.md` is platform-neutral and only declares what it needs (environment variable names
 and whether each is sensitive), the questions to ask, the files to write, a schedule in
 plain words and a validation line, and Studio supplies the import, start, secret and

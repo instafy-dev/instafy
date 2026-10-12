@@ -65,6 +65,8 @@ type UseFilesPanelCreateEntriesOptions = {
   setMobileView: Dispatch<SetStateAction<"tree" | "viewer">>;
   clearExplorerMenu: () => void;
   readOnly?: boolean;
+  /** Pause remote creates without dropping the name being edited. */
+  writesBlocked?: boolean;
   versioning?: FilesVersioning;
   versionedOptions?: FilesCreateVersionedOptions | null;
 };
@@ -91,6 +93,7 @@ export function useFilesPanelCreateEntries({
   setMobileView,
   clearExplorerMenu,
   readOnly = false,
+  writesBlocked = false,
   versioning = LEGACY_FILES_VERSIONING,
   versionedOptions = null,
 }: UseFilesPanelCreateEntriesOptions) {
@@ -148,7 +151,7 @@ export function useFilesPanelCreateEntries({
 
   const handleStartCreateFile = useCallback(
     async (parentPath: string) => {
-      if (readOnly) {
+      if (readOnly || writesBlocked) {
         return;
       }
       const normalizedParent = normalizePath(parentPath);
@@ -178,6 +181,7 @@ export function useFilesPanelCreateEntries({
       setMobileView,
       setSearchTerm,
       readOnly,
+      writesBlocked,
     ],
   );
 
@@ -186,7 +190,7 @@ export function useFilesPanelCreateEntries({
   }, []);
 
   const handleCommitCreateFile = useCallback(async () => {
-    if (readOnly || !activeProjectId || !createFileState || createFileState.busy) {
+    if (readOnly || writesBlocked || !activeProjectId || !createFileState || createFileState.busy) {
       return;
     }
     const draft = createFileState.draft.trim();
@@ -290,6 +294,7 @@ export function useFilesPanelCreateEntries({
   }, [
     activeProjectId,
     readOnly,
+    writesBlocked,
     createFileState,
     effectiveRuntimeId,
     ensureEntryVisible,
@@ -308,7 +313,7 @@ export function useFilesPanelCreateEntries({
 
   const handleStartCreateFolder = useCallback(
     async (parentPath: string) => {
-      if (readOnly) {
+      if (readOnly || writesBlocked) {
         return;
       }
       const normalizedParent = normalizePath(parentPath);
@@ -338,6 +343,7 @@ export function useFilesPanelCreateEntries({
       setMobileView,
       setSearchTerm,
       readOnly,
+      writesBlocked,
     ],
   );
 
@@ -346,7 +352,7 @@ export function useFilesPanelCreateEntries({
   }, []);
 
   const handleCommitCreateFolder = useCallback(async () => {
-    if (readOnly || !activeProjectId || !createFolderState || createFolderState.busy) {
+    if (readOnly || writesBlocked || !activeProjectId || !createFolderState || createFolderState.busy) {
       return;
     }
     const draft = createFolderState.draft.trim();
@@ -465,6 +471,7 @@ export function useFilesPanelCreateEntries({
   }, [
     activeProjectId,
     readOnly,
+    writesBlocked,
     createFolderState,
     effectiveRuntimeId,
     emptyDirectoryPlaceholder,

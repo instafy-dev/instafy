@@ -182,6 +182,7 @@ test.describe("Skills command", () => {
     await writeWorkspaceFile(page, skillPath, skillContent, { projectId });
 
     await openSkillsPanel(page);
+    await page.getByTestId("skills-actions").click();
     await page.getByTestId("skills-refresh").click();
 
     const skillCard = page.getByTestId(`skills-item-${skillSlug}`);

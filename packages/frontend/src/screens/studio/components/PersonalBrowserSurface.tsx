@@ -507,7 +507,6 @@ export function PersonalBrowserSurface({
                   data-testid="personal-browser-routine-approval"
                   isDisabled={humanInputLocked}
                   onChange={(checked) => model.setPreferredApprovalMode(checked ? "routine" : "ask")}
-                  className="min-h-8 pointer-coarse:min-h-11"
                 />
                 <span className="text-slate-500 dark:text-slate-400">
                   {model.status?.tabControlActive

@@ -95,17 +95,14 @@ export function ConnectChipStrip({
       {showMoreTools ? (
         <li className="flex">
           <Button
-            variant="ghost"
+            variant="text"
+            tone="muted"
             size="xs"
             radius="full"
-            className="px-2 underline-offset-2 hover:underline"
             onPress={onMoreTools}
             data-testid="connect-more-tools"
           >
-            {/* The lighter tone sits on a span: Button joins classes without
-                tailwind-merge, so a text colour on the Button itself loses to
-                the ghost variant's text-slate-700 in light mode. */}
-            <span className="text-slate-500 dark:text-slate-400">More tools</span>
+            More tools
           </Button>
         </li>
       ) : null}

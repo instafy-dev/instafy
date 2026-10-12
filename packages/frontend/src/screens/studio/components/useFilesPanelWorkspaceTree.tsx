@@ -22,6 +22,7 @@ import {
 } from "./filesVersioning";
 import { describeSaveFailure, SAVE_COPY, type SaveCopy } from "./versioningCopy";
 import { gitBlobOid } from "../../../utils/gitBlobOid";
+import { useWorkspaceAvailability } from "../../../workspace/WorkspaceAvailabilityProvider";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -188,6 +189,10 @@ export function useFilesPanelWorkspaceTree({
   versioning = LEGACY_FILES_VERSIONING,
   versionedOptions = null,
 }: UseFilesPanelWorkspaceTreeParams) {
+  const { issue: workspaceIssue, recoveryVersion, reportFailure } = useWorkspaceAvailability();
+  const workspaceIssueRef = useRef(workspaceIssue);
+  workspaceIssueRef.current = workspaceIssue;
+  const previousRecoveryVersionRef = useRef(recoveryVersion);
   const versioned = isVersionedFilesMode(versioning) && versionedOptions !== null;
   const versionedMode = versioned ? versioning.mode : "legacy";
   const pinnedOriginId = versioned ? versioning.originId : null;
@@ -348,6 +353,7 @@ export function useFilesPanelWorkspaceTree({
       const normalizedPath = normalizePath(path);
       const existing = directoryEntriesRef.current[normalizedPath];
       const status = directoryStatusRef.current[normalizedPath];
+      if (workspaceIssueRef.current) return existing ?? null;
 
       if (!options?.force && (existing || status === "loading")) {
         return existing ?? null;
@@ -421,6 +427,9 @@ export function useFilesPanelWorkspaceTree({
       }
 
       if (!entries) {
+        // An empty root response may mean the origin is unavailable. The
+        // shared probe decides; a missing child folder is still a local error.
+        if (normalizedPath === normalizedRootPath) reportFailure();
         const attempts = (directoryAttemptsRef.current[normalizedPath] ?? 0) + 1;
         directoryAttemptsRef.current[normalizedPath] = attempts;
         const delays = [500, 1500, 4000, 8000, 12000, 16000];
@@ -471,8 +480,8 @@ export function useFilesPanelWorkspaceTree({
       removeAbortListener();
       return sorted;
     },
-    [activeProjectId, effectiveRuntimeId, normalizePath, onDirectoryEntriesLoaded, pinnedOriginId, requestScope, sortEntries,
-      versioned, workspaceBrowseReady],
+    [activeProjectId, effectiveRuntimeId, normalizePath, normalizedRootPath, onDirectoryEntriesLoaded, pinnedOriginId, requestScope, sortEntries,
+      reportFailure, versioned, workspaceBrowseReady],
   );
   loadDirectoryRef.current = loadDirectory;
 
@@ -550,6 +559,15 @@ export function useFilesPanelWorkspaceTree({
       console.warn("[files-panel] failed to load directory:", error);
     });
   }, [activeProjectId, reloadTree, workspaceBrowseReady]);
+
+  useEffect(() => {
+    const previous = previousRecoveryVersionRef.current;
+    previousRecoveryVersionRef.current = recoveryVersion;
+    if (recoveryVersion > 0 && recoveryVersion !== previous) {
+      // Reload listings only: never replace an open editor or replay a write.
+      void reloadTree({ syncMode: "background" });
+    }
+  }, [recoveryVersion, reloadTree]);
 
   useEffect(() => {
     const wasRuntimeReady = previousRuntimeReadyRef.current;
@@ -1171,6 +1189,7 @@ export function useFilesPanelWorkspaceTree({
   const renderDirectoryStatus = useCallback(
     (path: string): ReactNode => {
       const status = directoryStatus[path];
+      if (workspaceIssue && path === normalizedRootPath) return null;
       if (status === "error") {
         const isRoot = path === normalizedRootPath;
         const folderName = path.split("/").filter(Boolean).pop() ?? path;
@@ -1180,10 +1199,10 @@ export function useFilesPanelWorkspaceTree({
             <Button
               onPress={() => void loadDirectory(path, { force: true })}
               aria-label={isRoot ? "Retry opening your files" : `Retry opening ${folderName}`}
-              variant="ghost"
+              variant="text"
+              tone="muted"
               size="xs"
               radius="full"
-              className="px-0 text-rose-500 hover:bg-transparent hover:underline data-[hovered]:bg-transparent"
             >
               Retry
             </Button>
@@ -1200,7 +1219,7 @@ export function useFilesPanelWorkspaceTree({
       }
       return null;
     },
-    [directoryStatus, getDirectoryLoadingLabel, loadDirectory, normalizedRootPath, workspaceBrowseReady],
+    [directoryStatus, getDirectoryLoadingLabel, loadDirectory, normalizedRootPath, workspaceBrowseReady, workspaceIssue],
   );
 
   const resolveCreateEntryParentPath = useCallback(() => {

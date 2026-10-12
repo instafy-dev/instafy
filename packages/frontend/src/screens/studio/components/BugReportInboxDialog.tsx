@@ -668,7 +668,7 @@ export function BugReportInboxDialog({
                         aria-pressed={selected}
                       >
                         <Card
-                          tone={selected ? "success" : "default"}
+                          tone={selected ? "info" : "default"}
                           radius="2xl"
                           shadow="none"
                           padding="sm"
@@ -855,7 +855,7 @@ export function BugReportInboxDialog({
 
                   <ol className="space-y-3" aria-live="polite" data-testid="support-message-timeline">
                     <li className="flex justify-end">
-                      <Card tone="success" radius="2xl" shadow="none" padding="sm" className="max-w-[92%] sm:max-w-[80%]">
+                      <Card tone="info" radius="2xl" shadow="none" padding="sm" className="max-w-[92%] sm:max-w-[80%]">
                         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
                           <Text variant="caption" tone="secondary">You · Original report</Text>
                           <Text variant="caption" tone="muted">{formatBugReportTimestamp(selectedReport.createdAt)}</Text>
@@ -880,7 +880,7 @@ export function BugReportInboxDialog({
                         }
                       >
                         <Card
-                          tone={message.authorType === "customer" ? "success" : message.authorType === "system" ? "muted" : "default"}
+                          tone={message.authorType === "customer" ? "info" : message.authorType === "system" ? "muted" : "default"}
                           radius="2xl"
                           shadow="none"
                           padding="sm"

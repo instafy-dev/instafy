@@ -30,7 +30,7 @@ describe("useFilesPanelCreateEntries read-only guard", () => {
   const ensureEntryVisible = vi.fn();
   const focusEditorWhenReady = vi.fn();
 
-  function Harness({ readOnly }: { readOnly: boolean }) {
+  function Harness({ readOnly, writesBlocked = false }: { readOnly: boolean; writesBlocked?: boolean }) {
     latest = useFilesPanelCreateEntries({
       activeProjectId: "project-1",
       effectiveRuntimeId: "runtime-1",
@@ -53,6 +53,7 @@ describe("useFilesPanelCreateEntries read-only guard", () => {
       setMobileView: vi.fn(),
       clearExplorerMenu: vi.fn(),
       readOnly,
+      writesBlocked,
     });
     return null;
   }
@@ -78,6 +79,26 @@ describe("useFilesPanelCreateEntries read-only guard", () => {
     await act(async () => root.unmount());
     document.body.innerHTML = "";
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it.each(["file", "folder"])("keeps a %s name during a connection outage without replaying its create", async (kind) => {
+    await act(async () => root.render(<Harness readOnly={false} />));
+    await act(async () => {
+      if (kind === "file") latest?.setCreateFileState({ parentPath: "", draft: "notes.md", busy: false });
+      else latest?.setCreateFolderState({ parentPath: "", draft: "notes", busy: false });
+    });
+    await act(async () => root.render(<Harness readOnly={false} writesBlocked />));
+    await act(async () => {
+      if (kind === "file") await latest?.handleCommitCreateFile();
+      else await latest?.handleCommitCreateFolder();
+    });
+    expect(kind === "file" ? latest?.createFileState?.draft : latest?.createFolderState?.draft)
+      .toBe(kind === "file" ? "notes.md" : "notes");
+    expect(mocks.write).not.toHaveBeenCalled();
+    await act(async () => root.render(<Harness readOnly={false} />));
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(kind === "file" ? latest?.createFileState?.draft : latest?.createFolderState?.draft)
+      .toBe(kind === "file" ? "notes.md" : "notes");
   });
 
   it("does not even open a create draft for a viewer", async () => {

@@ -4,8 +4,8 @@ import { Check } from "iconoir-react";
 type CheckboxSize = "sm" | "md";
 
 const WRAPPER_BASE =
-  "group flex items-start gap-2 text-slate-700 dark:text-slate-200";
-const BOX_BASE = "relative mt-0.5 shrink-0";
+  "group flex min-h-11 min-w-11 gap-2 text-slate-700 dark:text-slate-200 sm:pointer-fine:min-h-0 sm:pointer-fine:min-w-0";
+const BOX_BASE = "relative shrink-0";
 const INPUT_BASE =
   "peer flex items-center justify-center rounded border transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-950";
 const LABEL_BASE = "font-medium";
@@ -48,6 +48,7 @@ export function Checkbox({
   ...props
 }: CheckboxProps) {
   const labelNode = label ?? children;
+  const hasText = Boolean(labelNode || description);
   const fallbackId = useId();
   const resolvedId = id ?? fallbackId;
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -76,13 +77,15 @@ export function Checkbox({
     <label
       className={[
         WRAPPER_BASE,
+        // The label owns the touch target; the visible checkbox stays compact.
+        hasText ? "items-start py-3 sm:pointer-fine:py-0" : "items-center justify-center",
         isDisabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
         className
       ]
         .filter(Boolean)
         .join(" ")}
     >
-      <span className={BOX_BASE}>
+      <span className={[BOX_BASE, hasText ? "mt-0.5" : ""].filter(Boolean).join(" ")}>
         <input
           {...props}
           id={resolvedId}
@@ -113,7 +116,7 @@ export function Checkbox({
           />
         )}
       </span>
-      {labelNode || description ? (
+      {hasText ? (
         <span className="flex flex-col gap-0.5">
           {labelNode ? (
             <span className={`${LABEL_BASE} ${SIZE_CLASSES[size].text}`}>{labelNode}</span>

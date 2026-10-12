@@ -838,10 +838,10 @@ export function LoginPage() {
               <Button
                 onPress={handleEditEmail}
                 isDisabled={submitting}
-                variant="ghost"
+                variant="text"
+                tone="accent"
                 size="xs"
                 radius="full"
-                className="!bg-transparent px-0 py-0 text-xs font-semibold text-primary-600 hover:!bg-transparent hover:text-primary-700 data-[hovered]:!bg-transparent dark:text-primary-300 dark:hover:text-primary-200"
               >
                 Edit
               </Button>
@@ -895,10 +895,10 @@ export function LoginPage() {
                   onPress={handleForgotPassword}
                   isPending={pendingControl === "forgot"}
                   isDisabled={isBlocked("forgot")}
-                  variant="ghost"
-                  size="xs"
+                  variant="text"
+                  tone="accent"
+                  size="sm"
                   radius="full"
-                  className="!bg-transparent px-0 py-0 text-sm font-semibold text-primary-600 hover:!bg-transparent hover:text-primary-700 data-[hovered]:!bg-transparent dark:text-primary-300 dark:hover:text-primary-200"
                 >
                   Forgot password?
                 </Button>
@@ -981,11 +981,11 @@ export function LoginPage() {
             onPress={handleResendOtp}
             isPending={pendingControl === "resend"}
             isDisabled={isBlocked("resend")}
-            variant="ghost"
+            variant="text"
+            tone="neutral"
             size="sm"
             radius="full"
             fullWidth
-            className="!bg-transparent text-sm font-semibold text-slate-700 hover:!bg-transparent hover:text-slate-900 dark:text-slate-200 dark:hover:text-slate-50"
           >
             Resend email
           </Button>

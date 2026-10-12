@@ -1,7 +1,7 @@
 import { composeRenderProps } from "react-aria-components";
 import { IconButton, type IconButtonProps } from "./Button";
 
-export type ToggleIconButtonProps = Omit<IconButtonProps, "variant"> & {
+export type ToggleIconButtonProps = Omit<IconButtonProps, "variant" | "tone"> & {
   isSelected: boolean;
   /**
    * "chip" is the toolbar toggle: a ringed, filled control that reads as a

@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { StudioDialogModal } from "../StudioModal";
+import { StudioDialogBody, StudioDialogFooter, StudioDialogHeader } from "../StudioDialogLayout";
 
 describe("StudioDialogModal appearances", () => {
   let container: HTMLDivElement;
@@ -88,5 +89,26 @@ describe("StudioDialogModal appearances", () => {
     expect(overlay?.className).toContain("bg-zinc-950");
     expect(overlay?.className).not.toContain("bg-zinc-950/70");
     expect(overlay?.className).not.toContain("backdrop-blur-sm");
+  });
+
+  it("bounds an editor and keeps its header and footer outside the scrolling body", async () => {
+    await act(async () => root.render(
+      <StudioDialogModal isOpen layout="editor" dialogAriaLabel="Edit profile">
+        <StudioDialogHeader title="Edit profile" />
+        <StudioDialogBody scrollable padding="none"><input aria-label="Name" defaultValue="Draft" /></StudioDialogBody>
+        <StudioDialogFooter><button>Save</button></StudioDialogFooter>
+      </StudioDialogModal>,
+    ));
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const [header, body, footer] = [...dialog.children];
+    expect(dialog.parentElement!.className).toContain("100dvh-max(var(--instafy-safe-area-inset-top,0px),1rem)");
+    expect(dialog.classList.contains("max-h-[inherit]")).toBe(true);
+    expect(header.classList.contains("shrink-0")).toBe(true);
+    expect(footer.classList.contains("shrink-0")).toBe(true);
+    expect(body.classList.contains("overflow-y-auto")).toBe(true);
+    expect(body.classList.contains("min-h-0")).toBe(true);
+    expect(body.classList.contains("px-5")).toBe(false);
+    expect(body.querySelector("input")?.value).toBe("Draft");
+    expect(footer.querySelector("button")?.textContent).toBe("Save");
   });
 });

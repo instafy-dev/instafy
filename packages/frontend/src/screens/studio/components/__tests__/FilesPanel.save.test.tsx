@@ -17,6 +17,7 @@ const REV_3 = "3".repeat(40);
 const BLOB_A = "a".repeat(40);
 
 const mocks = vi.hoisted(() => ({
+  availability: { issue: null as null | { kind: "connection" }, recoveryVersion: 0, reportFailure: vi.fn() },
   list: vi.fn(),
   listAt: vi.fn(),
   read: vi.fn(),
@@ -46,6 +47,8 @@ const mocks = vi.hoisted(() => ({
   tabs: { openFileTab: vi.fn(), openPanelTab: vi.fn(), requestUrlPush: vi.fn() },
   editorCommands: [] as Array<{ keybinding: number; handler: () => void }>,
 }));
+
+vi.mock("../../../../workspace/WorkspaceAvailabilityProvider", () => ({ useWorkspaceAvailability: () => mocks.availability }));
 
 vi.mock("@monaco-editor/react", async () => {
   const React = await import("react");
@@ -216,6 +219,8 @@ describe("FilesPanel one Save", () => {
       result.then(forget, forget);
       return result;
     });
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 0;
     mocks.versioning.mode = "stateless";
     mocks.versioning.originId = "origin-1";
     mocks.versioning.recovery = "unknown";
@@ -247,6 +252,31 @@ describe("FilesPanel one Save", () => {
     window.removeEventListener("instafy:workspace-file-stale", onStale);
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("keeps drafts and loaded files during an outage, blocks Save and refreshes reads after recovery", async () => {
+    await render([buffer()]);
+    await settle();
+    const loaded = mocks.listAt.mock.calls.length;
+    mocks.availability.issue = { kind: "connection" };
+    await render([buffer()]);
+    expect(query("files-stale-notice")).not.toBeNull();
+    expect(query("files-entry-README-md")).not.toBeNull();
+    expect(saveUnavailable()).toBe(true);
+    await edit("offline edit");
+    await pressSave();
+    expect(file()?.modified).toBe("offline edit");
+    expect(mocks.saveChanges).not.toHaveBeenCalled();
+    expect(mocks.listAt).toHaveBeenCalledTimes(loaded);
+
+    mocks.availability.issue = null;
+    mocks.availability.recoveryVersion = 1;
+    await render([buffer()]);
+    await settle();
+    expect(mocks.listAt.mock.calls.length).toBeGreaterThan(loaded);
+    expect(file()?.modified).toBe("offline edit");
+    expect(mocks.saveChanges).not.toHaveBeenCalled();
+    expect(saveUnavailable()).toBe(false);
   });
 
   it("renders one Save and no draft button, enabled only with unsaved edits", async () => {

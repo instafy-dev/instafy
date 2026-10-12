@@ -1,7 +1,8 @@
 import type { HTMLAttributes } from "react";
 import { DARK_FLOATING_RAISED_BG_CLASS, DARK_FLOATING_SURFACE_CLASS, DARK_FLOATING_SHADOW_CLASS } from "../theme/darkSurfaces";
+import { SEMANTIC_TONE_CLASSES, type SemanticTone } from "../theme/semanticTones";
 
-type SurfaceTone = "default" | "floating" | "muted" | "subtle" | "raised" | "success" | "warning" | "danger";
+type SurfaceTone = "default" | "floating" | "muted" | "subtle" | "raised" | SemanticTone;
 type SurfaceRadius = "none" | "lg" | "xl" | "2xl" | "3xl";
 type SurfaceShadow = "none" | "sm" | "md" | "lg";
 
@@ -19,9 +20,10 @@ const TONE_CLASSES: Record<SurfaceTone, string> = {
   // the fill sits above the popover and the border disappears; light keeps its
   // border because white-on-white has no usable background delta.
   raised: `border-slate-200/70 bg-slate-50/70 dark:border-transparent ${DARK_FLOATING_RAISED_BG_CLASS}`,
-  success: "border-primary-200/80 bg-primary-50/80 dark:border-primary-500/40 dark:bg-primary-500/10",
-  warning: "border-secondary-200/80 bg-secondary-50/80 dark:border-secondary-500/40 dark:bg-secondary-500/10",
-  danger: "border-rose-200/80 bg-rose-50/80 dark:border-rose-500/40 dark:bg-rose-500/10",
+  info: SEMANTIC_TONE_CLASSES.info.surface,
+  success: SEMANTIC_TONE_CLASSES.success.surface,
+  warning: SEMANTIC_TONE_CLASSES.warning.surface,
+  danger: SEMANTIC_TONE_CLASSES.danger.surface,
 };
 
 const RADIUS_CLASSES: Record<SurfaceRadius, string> = {

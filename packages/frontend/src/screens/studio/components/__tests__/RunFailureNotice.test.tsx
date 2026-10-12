@@ -111,9 +111,8 @@ describe("RunFailureMessageBody", () => {
     expect(details?.textContent).toBe("Details");
     for (const button of [retry, details]) {
       const classes = button?.className.split(/\s+/) ?? [];
-      // 44 px on phones and tablets, 36 px from lg up.
-      expect(classes).toContain("min-h-11");
-      expect(classes).toContain("lg:min-h-9");
+      // Use the shared Button target policy, including wide touch screens.
+      expect(classes).toContain("pointer-coarse:min-h-11");
       expect(classes).not.toContain("text-xxs");
     }
     // A regular small secondary button, not the 11 px pill.
@@ -130,7 +129,7 @@ describe("RunFailureMessageBody", () => {
     await render(contextValue({ onConnectAi }), needsAi);
 
     const connect = query("run-failure-connect-ai");
-    expect(connect?.className.split(/\s+/)).toContain("min-h-11");
+    expect(connect?.className.split(/\s+/)).toContain("pointer-coarse:min-h-11");
     expect(query("run-failure-retry")).toBeNull();
     await act(async () => {
       connect?.click();
@@ -306,7 +305,7 @@ describe("RunFailureMessageBody", () => {
       const cancel = query("run-failure-auto-retry-cancel");
       expect(cancel?.textContent).toBe("Cancel");
       expect(cancel?.getAttribute("aria-label")).toBe("Cancel automatic retry");
-      expect(cancel?.className.split(/\s+/)).toContain("min-h-11");
+      expect(cancel?.className.split(/\s+/)).toContain("pointer-coarse:min-h-11");
       await act(async () => {
         cancel?.click();
       });

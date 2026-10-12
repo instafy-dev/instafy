@@ -313,16 +313,14 @@ function BrowseStage({
       )}
       <div className={FOOTER_CLASS}>
         <Button
-          variant="ghost"
+          variant="text"
+          tone="muted"
           size="sm"
           radius="xl"
-          className="-ml-2.5 underline-offset-2 hover:underline"
           onPress={onPasteLink}
           data-testid="connect-paste-link"
         >
-          {/* Tone on a span: a text colour on the Button loses to the ghost
-              variant's text-slate-700 (no tailwind-merge). */}
-          <span className="text-slate-500 dark:text-slate-400">Import custom skill</span>
+          Import custom skill
         </Button>
         <Button
           variant="outline"
