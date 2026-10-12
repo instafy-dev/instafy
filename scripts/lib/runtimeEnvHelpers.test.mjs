@@ -73,7 +73,9 @@ const jsonResponse = (body, status = 200) =>
 /**
  * Serve the admin user list the way GoTrue does: it ignores `email`, lists
  * newest first, and answers the `page` parameter with that (1-based) body
- * from `pages`. POSTs go to `onCreate`. Records every call.
+ * from `pages`. A request without `page` gets page 1, as GoTrue answers it,
+ * so the old `?email=` lookup sees every user rather than an empty list.
+ * POSTs go to `onCreate`. Records every call.
  */
 const fakeAdminApi = (t, { pages = [], onCreate } = {}) => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "service-role";
@@ -91,7 +93,7 @@ const fakeAdminApi = (t, { pages = [], onCreate } = {}) => {
       assert.ok(onCreate, "unexpected create");
       return onCreate(JSON.parse(options.body));
     }
-    const page = Number(new URL(url).searchParams.get("page"));
+    const page = Number(new URL(url).searchParams.get("page") ?? "1");
     return jsonResponse(pages[page - 1] ?? { users: [] });
   };
   return calls;
@@ -176,7 +178,12 @@ test("ensureServiceRuntimeUserId creates the user instead of adopting a listed o
 test("ensureServiceRuntimeUserId matches the configured email ignoring case and spaces", async (t) => {
   fakeAdminApi(t, {
     pages: [
-      { users: [{ id: SERVICE_ID, email: " Service-Runtime@Example.TEST " }] },
+      {
+        users: [
+          { id: DECOY_ID, email: "decoy@example.test" },
+          { id: SERVICE_ID, email: " Service-Runtime@Example.TEST " },
+        ],
+      },
     ],
   });
   process.env.SERVICE_RUNTIME_USER_EMAIL = "  SERVICE-RUNTIME@example.test ";
