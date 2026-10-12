@@ -24,7 +24,9 @@ const MAX_STACK_AVATARS = 5;
  * Styling is deliberately ambient: a bare, transparent avatar stack (no panel,
  * border, shadow or blur) so it reads as passive information with a control
  * affordance. Each avatar carries a thin ring painted in the chat surface's
- * own background to separate overlapping faces.
+ * own background to separate overlapping faces. The ring sits on the face
+ * itself, above the face's own avatar coin shadow (light mode), so the
+ * separator stays clean white and the soft shadow falls outside it.
  */
 export function ConversationRoster({
   agents,
@@ -103,7 +105,7 @@ export function ConversationRoster({
         {visibleStackEntries.map((entry) => (
           <span
             key={entry.key}
-            className="rounded-full ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]"
+            className="rounded-full *:ring-1 *:ring-white dark:*:ring-[var(--color-studio-dark-panel)]"
           >
             {entry.avatar}
           </span>

@@ -388,7 +388,7 @@ private hosts/networks, browser-exposed service-role names, token prefixes,
 symlinks, Git LFS indirection, unexpected Git index modes, unknown or repinned
 submodules, invalid UTF-8, and every unknown binary/archive. The policy
 allowlists exactly 16 inert environment templates, the reviewed Codex gitlink
-object, and 45 binary path/SHA-256 pairs. Marker matching covers paths, ordinary
+object, and 74 binary path/SHA-256 pairs. Marker matching covers paths, ordinary
 UTF-8, common UTF-16/UTF-32 layouts, and bounded recursive URL, Base64, and hex
 decoding for the private product marker.
 

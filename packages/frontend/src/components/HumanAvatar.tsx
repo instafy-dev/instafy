@@ -11,7 +11,12 @@ export interface HumanAvatarProps {
   "data-testid"?: string;
 }
 
-/** A person's photo or stable identity fallback. Surrounding controls own their accessible name. */
+/**
+ * A person's photo or stable identity fallback. Surrounding controls own their accessible name.
+ * In light mode its edge is the avatar coin shadow every avatar coin shares
+ * (docs/Brand.md); in dark that shadow is empty, so a caller adds only its
+ * own dark: edge, never a light border or shadow.
+ */
 export function HumanAvatar({ userId, displayName, avatarUrl, photoAlt = "", className, "data-testid": testId }: HumanAvatarProps) {
   const photo = avatarUrl?.trim();
   const initials = resolveHumanAvatarInitials(displayName);
@@ -22,7 +27,7 @@ export function HumanAvatar({ userId, displayName, avatarUrl, photoAlt = "", cla
       data-testid={testId}
       data-human-avatar=""
       className={[
-        "inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full font-semibold bg-[var(--human-avatar-background)] text-[var(--human-avatar-foreground)] dark:bg-[var(--human-avatar-dark-background)] dark:text-[var(--human-avatar-dark-foreground)]",
+        "inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full font-semibold shadow-avatar-coin bg-[var(--human-avatar-background)] text-[var(--human-avatar-foreground)] dark:bg-[var(--human-avatar-dark-background)] dark:text-[var(--human-avatar-dark-foreground)]",
         className ?? "h-8 w-8 text-xs",
       ].join(" ")}
       style={{

@@ -1,12 +1,19 @@
 {
-  "cacheRevision": 3,
+  "cacheRevision": 4,
   "distributionScale": 0.85,
+  "maskableScale": 0.78,
+  "crewTileMinPx": 48,
   "colors": {
     "ink": "#0f172a",
     "paper": "#ffffff",
+    "canvasDark": "#141414",
     "interaction": "#007acc",
     "interactionDark": "#3794ff",
     "sand": "#d7b686",
-    "sandDark": "#e0c49a"
+    "sandDark": "#e0c49a",
+    "crew": {
+      "light": ["#ff3c9f", "#1b864b", "#fa5815", "#814ad0"],
+      "dark": ["#ff3c9f", "#3ca063", "#fa5815", "#a672fa"]
+    }
   }
 }

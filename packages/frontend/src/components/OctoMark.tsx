@@ -16,6 +16,37 @@ export {
 
 export type OctoMarkMotion = "idle" | "thinking";
 
+/**
+ * How the four detached nodes are coloured. The body is always one ink
+ * (currentColor).
+ * - `ink`: every node in the mark's current color (the system mark).
+ * - `crew`: nodes in the crew colours, left to right, from the `--crew-N`
+ *   tokens (dark mode lifts green and violet). Flat surfaces only, at 40 CSS px
+ *   and up.
+ * - `crew-hidpi`: crew at 1.5 device pixels per CSS pixel and up, one ink at
+ *   1x, for 28-39 px header lockups whose nodes would be specks at 1x.
+ * There is deliberately no dotless option: the nodes are part of the mark.
+ * Octo's coin and every mark under 28 px stay `ink`.
+ */
+export type OctoMarkColorway = "ink" | "crew" | "crew-hidpi";
+
+// Each node's crew slot, ranked by its x position so slot 1 is always the
+// leftmost node whatever order the geometry lists the circles in.
+const NODE_CREW_SLOTS: readonly number[] = (() => {
+  const order = octoMarkGeometry.circles
+    .map((circle, index) => ({ cx: circle.cx, index }))
+    .sort((a, b) => a.cx - b.cx);
+  const slots = new Array<number>(order.length);
+  order.forEach((entry, rank) => {
+    slots[entry.index] = rank + 1;
+  });
+  return slots;
+})();
+
+const NODE_CREW_STYLES = NODE_CREW_SLOTS.map((slot) => ({
+  fill: `var(--octo-dot-${slot}, currentColor)`,
+}));
+
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 const MOTION_DURATION = "3s";
 const MOTION_KEY_TIMES = "0;0.18;0.34;0.46;0.57;0.72;0.88;1";
@@ -144,15 +175,18 @@ function getOctoMotionValues(): OctoMotionValues {
 /** The canonical Instafy Octo mark, rendered in the caller's current color. */
 export function OctoMark({
   className,
+  colorway = "ink",
   motion = "idle",
   scrollReactive = false,
   title,
 }: {
   className?: string;
+  colorway?: OctoMarkColorway;
   motion?: OctoMarkMotion;
   scrollReactive?: boolean;
   title?: string;
 }) {
+  const crew = colorway === "crew" || colorway === "crew-hidpi";
   const svgRef = useRef<SVGSVGElement>(null);
   const prefersReducedMotion = usePrefersReducedMotion(
     motion === "thinking" || scrollReactive,
@@ -198,7 +232,15 @@ export function OctoMark({
     <svg
       ref={svgRef}
       viewBox={octoMarkGeometry.viewBox}
-      className={["octo-mark", className].filter(Boolean).join(" ")}
+      className={[
+        "octo-mark",
+        crew ? "octo-mark--crew" : null,
+        colorway === "crew-hidpi" ? "octo-mark--crew-hidpi" : null,
+        className,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      data-octo-colorway={crew ? colorway : undefined}
       data-octo-motion={motion}
       data-octo-animated={shouldAnimate ? "true" : "false"}
       data-octo-limb-driver={
@@ -320,6 +362,7 @@ export function OctoMark({
               cx={circle.cx}
               cy={circle.cy}
               r={circle.r}
+              style={crew ? NODE_CREW_STYLES[index] : undefined}
               transform={
                 !motionValues && scrollActive
                   ? `translate(${formatOctoMotionCoordinate(

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { HumanAvatar } from "../../../../components/HumanAvatar";
+import { OctoCoin } from "../../../../components/OctoCoin";
 import { LexicalTypeaheadMenuPlugin, MenuOption, useBasicTypeaheadTriggerMatch } from "@lexical/react/LexicalTypeaheadMenuPlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import { useLexicalTextEntity } from "@lexical/react/useLexicalTextEntity";
@@ -9,6 +10,7 @@ import { $createTextNode, $insertNodes, $isTextNode, type TextNode } from "lexic
 import type { AssistantMentionToken } from "../../../../conversations/assistantMentions";
 import { Text } from "../../../../components/Text";
 import {
+  OCTO_AVATAR_SRC,
   resolveAgentAvatarGradient,
   resolveAgentAvatarImageSrc,
   resolveAgentAvatarText,
@@ -79,6 +81,72 @@ class AssistantMentionOption extends MenuOption {
     this.handle = config.kind === "user" ? config.handle : null;
     this.displayName = config.kind === "user" ? config.displayName : null;
   }
+}
+
+// A face's edge is the shared avatar coin shadow in light (docs/Brand.md) and
+// a hairline border with a small shadow in dark.
+const MENTION_FACE_SHELL_CLASS =
+  "flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-white text-3xs font-semibold text-slate-700 shadow-avatar-coin dark:border dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:shadow-sm";
+
+function MentionOptionImage({ src }: { src: string }) {
+  return <img src={src} alt="" className="h-full w-full object-cover" decoding="async" draggable={false} />;
+}
+
+/** An option's 24px face. Octo is its coin (OctoCoin, docs/Brand.md), never the static avatar file. */
+export function MentionOptionFace({
+  option,
+  agentProfilesByHandle,
+}: {
+  option: Pick<AssistantMentionOption, "kind" | "token" | "label" | "userId" | "displayName">;
+  agentProfilesByHandle: Map<string, MentionAgentProfile>;
+}) {
+  if (option.kind === "user") {
+    return (
+      <span className={MENTION_FACE_SHELL_CLASS}>
+        <HumanAvatar userId={option.userId} displayName={option.displayName} className="h-full w-full text-3xs" />
+      </span>
+    );
+  }
+  const normalizedHandle = option.kind === "agent" ? normalizeAgentHandle(option.token) : null;
+  const profile = normalizedHandle ? agentProfilesByHandle.get(normalizedHandle) ?? null : null;
+  const imageSrc =
+    option.kind === "assistant"
+      ? resolveAgentAvatarImageSrc({ handle: option.token })
+      : profile
+        ? resolveAgentAvatarImageSrc(profile)
+        : resolveAgentAvatarImageSrc({ handle: normalizedHandle });
+  if (imageSrc === OCTO_AVATAR_SRC) {
+    return <OctoCoin className="h-6 w-6" />;
+  }
+  if (option.kind === "assistant") {
+    return (
+      <span className={MENTION_FACE_SHELL_CLASS}>
+        {imageSrc ? <MentionOptionImage src={imageSrc} /> : option.label.trim().slice(0, 1).toUpperCase() || "@"}
+      </span>
+    );
+  }
+  return (
+    <span className={MENTION_FACE_SHELL_CLASS}>
+      {imageSrc ? (
+        <MentionOptionImage src={imageSrc} />
+      ) : (
+        <span
+          aria-hidden="true"
+          className="inline-flex h-full w-full items-center justify-center text-3xs font-semibold text-white"
+          style={{
+            backgroundImage: resolveAgentAvatarGradient(
+              profile?.avatarSeed?.trim() || profile?.handle?.trim() || option.token,
+            ),
+          }}
+        >
+          {resolveAgentAvatarText({
+            handle: profile?.handle ?? option.token,
+            displayName: profile?.displayName ?? option.label,
+          })}
+        </span>
+      )}
+    </span>
+  );
 }
 
 type AssistantMentionsMenuProps = {
@@ -363,61 +431,7 @@ function AssistantMentionsMenu({
           onClick={() => selectOptionAndCleanUp(option)}
           onMouseEnter={() => setHighlightedIndex(index)}
         >
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-white text-3xs font-semibold text-slate-700 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-            {(() => {
-              if (option.kind === "assistant") {
-                const imageSrc = resolveAgentAvatarImageSrc({ handle: option.token });
-                return (
-                  imageSrc ? (
-                    <img
-                      src={imageSrc}
-                      alt=""
-                      className="h-full w-full object-cover"
-                      decoding="async"
-                      draggable={false}
-                    />
-                  ) : (
-                    option.label.trim().slice(0, 1).toUpperCase() || "@"
-                  )
-                );
-              }
-              if (option.kind === "agent") {
-                const normalizedHandle = normalizeAgentHandle(option.token);
-                const profile = normalizedHandle ? agentProfilesByHandle.get(normalizedHandle) ?? null : null;
-                const imageSrc = profile
-                  ? resolveAgentAvatarImageSrc(profile)
-                  : resolveAgentAvatarImageSrc({ handle: normalizedHandle });
-                if (imageSrc) {
-                  return (
-                    <img
-                      src={imageSrc}
-                      alt=""
-                      className="h-full w-full object-cover"
-                      decoding="async"
-                      draggable={false}
-                    />
-                  );
-                }
-                return (
-                  <span
-                    aria-hidden="true"
-                    className="inline-flex h-full w-full items-center justify-center text-3xs font-semibold text-white"
-                    style={{
-                      backgroundImage: resolveAgentAvatarGradient(
-                        profile?.avatarSeed?.trim() || profile?.handle?.trim() || option.token,
-                      ),
-                    }}
-                  >
-                    {resolveAgentAvatarText({
-                      handle: profile?.handle ?? option.token,
-                      displayName: profile?.displayName ?? option.label,
-                    })}
-                  </span>
-                );
-              }
-              return <HumanAvatar userId={option.userId} displayName={option.displayName} className="h-full w-full text-3xs" />;
-            })()}
-          </span>
+          <MentionOptionFace option={option} agentProfilesByHandle={agentProfilesByHandle} />
           <span className="min-w-0 flex-1">
             <span className="flex min-w-0 items-center gap-2">
               <span className="inline-flex shrink-0 items-center rounded-full border border-slate-300/80 bg-slate-200/70 px-2 py-0.5 text-[13px] font-semibold leading-none text-slate-800 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100">

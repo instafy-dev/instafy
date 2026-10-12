@@ -3,11 +3,13 @@
 // Tailwind's scanner sees them. Where a studio string carries a cool-slate
 // dark border or background (slate-700/800 borders, slate-900/950 fills) the
 // same-tier darkSurfaces helper is substituted and the comment says so.
-// Crew colours are inline styles at the call sites, never classes.
+// Crew colours are inline styles at the call sites (landingCrew.ts), never
+// classes, and so are the label colours that read on them.
 
 import {
   DARK_ACTIVE_BG_CLASS,
   DARK_CANVAS_CLASS,
+  DARK_DIVIDER_BORDER_CLASS,
   DARK_DIVIDER_CLASS,
   DARK_PANEL_BG_CLASS,
   DARK_PANEL_BORDER_CLASS,
@@ -19,16 +21,30 @@ import {
 } from "../../theme/darkSurfaces";
 
 // ---------------------------------------------------------------------------
-// Focus ring (landing-only): the deck's own controls sit on the dark landing
-// canvas, so their ring offset matches that canvas rather than a panel.
+// Focus ring (landing-only): the example's own controls (the chips and the
+// join link) sit on the landing's paper canvas, so their ring offset matches
+// that canvas in both themes rather than a panel.
 
-export const CANVAS_RING_OFFSET = "dark:focus-visible:ring-offset-[var(--color-studio-dark-canvas)]";
+export const CANVAS_RING_OFFSET = "focus-visible:ring-offset-[var(--marketing-canvas)]";
 
 // ---------------------------------------------------------------------------
 // Frame and workspace surface
 
 // StudioLayout.tsx:1987 (canvas) with the landing card's own radius and shadow.
-export const FRAME = `relative flex overflow-hidden rounded-2xl border border-slate-200/70 bg-slate-50 text-left shadow-card-lg md:min-h-[44rem] ${DARK_CANVAS_CLASS} ${DARK_PANEL_BORDER_CLASS} dark:shadow-studio-dark-panel`;
+// Landing-only: the shadow's negative spread keeps the paper above the top
+// edge exactly --marketing-canvas, the colour Cub's body is filled with where
+// he sits on the ledge (a soft halo there would show his outline as a lighter
+// patch). It is the approved hero's window shadow. The window has a fixed
+// height, like the studio's screen: a longer conversation scrolls inside it
+// (TurnColumn keeps the newest message in view, as the chat does), so no
+// scenario or beat ever changes the page's layout. From 1184px (the split) it
+// fits the first view: the viewport less its top in the document
+// (--landing-deck-top, landingDeckLayout.ts useLandingDeckFit) and a 16px
+// margin, between 19rem and the full 47rem (74rem is 1184px, written in rem
+// so it sorts after md), so the conversation's newest
+// message, the composer and the browser's stage down to its ticker are on
+// screen without a scroll, down to a 1366x768 laptop's 657px first view.
+export const FRAME = `group/deck relative flex h-[52rem] overflow-hidden rounded-2xl border border-slate-200/70 bg-slate-50 text-left shadow-[0_1px_0_rgba(15,23,42,0.03),0_2px_6px_-2px_rgba(15,23,42,0.06),0_36px_80px_-40px_rgba(15,23,42,0.3)] md:h-[47rem] min-[74rem]:h-[clamp(19rem,calc(100svh_-_var(--landing-deck-top,29rem)_-_1rem),47rem)] ${DARK_CANVAS_CLASS} ${DARK_PANEL_BORDER_CLASS} dark:shadow-studio-dark-panel`;
 
 // StudioLayout.tsx:1947 workspace surface (tab strip + panel).
 export const WORKSPACE = `flex min-w-0 flex-1 flex-col overflow-hidden bg-white text-slate-700 shadow-sm ${DARK_PANEL_BG_CLASS} dark:text-slate-200`;
@@ -95,17 +111,40 @@ export const RAIL_FOOTER = "flex shrink-0 flex-col gap-3 pt-6";
 export const RAIL_FOOTER_COLLAPSED = "flex shrink-0 flex-col items-center gap-3 pt-6";
 export const PROFILE_ROW = "inline-flex w-full items-center justify-start gap-3 rounded-lg px-2.5 py-1.5 text-left text-sm font-medium text-slate-700 dark:text-slate-200";
 // StudioSidebarAccountSection.tsx:56-58 avatarShellClassName("h-9 w-9"); the
-// neutral bg-slate-50/text-slate-700 give way to the crew pink and white so
-// Ada keeps one colour everywhere in the example (inline style at the call site).
-export const PROFILE_AVATAR = `relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border border-slate-200 text-sm font-medium text-white ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
+// neutral bg-slate-50/text-slate-700 give way to Ada's crew pink and its ink
+// label so Ada keeps one colour everywhere in the example (inline style at the
+// call site). Its edge is the coin's (AVATAR_SHELL): the avatar coin shadow in
+// light, the raised-control border in dark.
+export const PROFILE_AVATAR = `relative flex h-9 w-9 items-center justify-center overflow-hidden rounded-full text-sm font-medium shadow-avatar-coin dark:border ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
 // StudioSidebarAccountSection.tsx:246-262 collapsed profile (IconButton ghost sm lg).
 export const PROFILE_INITIAL_COLLAPSED = "inline-flex h-8 w-8 items-center justify-center rounded-lg text-sm font-medium text-slate-700 dark:text-slate-200";
 
 // ---------------------------------------------------------------------------
 // Tab strip (WorkspaceTabs.tsx) and phone bar (StudioTopBar.tsx)
 
-// WorkspaceTabs.tsx:636-650 strip and its baseline span.
-export const TAB_STRIP = `relative hidden md:flex max-w-full flex-none items-end gap-2 bg-white pr-2 pb-0 pt-0 ${DARK_CANVAS_CLASS}`;
+// The window's top bar row (landing-only): the tab strip (md+) or the phone
+// bar, with the roster laid over its right end the way the approved hero puts
+// the roster in the window's first row, level with the ledge Cub sits on. The
+// bar keeps a spacer where the roster lies (--roster-w wide), and from 1000px
+// (LANDING_CUB_LAYOUT.cornerMinWidth) the roster stops --roster-end short of
+// the window's right end: the room Cub's front arms and corner drape hang in,
+// 2.1 perch units (u = clamp(48px, 5.5vw, 84px), the engine's desktop perch
+// size), so Octo's coin sits left of him and his lent arm is a short hook.
+// --cub-perch names the room the bar left (header or corner) and Cub reads it
+// (cub/landingCub.ts), so his perch follows this media query, never the
+// host's own width, which a classic scrollbar makes narrower than the
+// viewport the query sees. landingCub.test.ts keeps these numbers equal to
+// the engine's.
+export const TOP_BAR =
+  "relative flex-none [--roster-w:114px] [--roster-end:16px] [--cub-perch:header] md:[--roster-w:142px] min-[1000px]:[--roster-end:calc(2.1*clamp(48px,5.5vw,84px))] min-[1000px]:[--cub-perch:corner]";
+
+// WorkspaceTabs.tsx:636-650 strip and its baseline span. Landing-only:
+// isolate keeps the strip's own z-indexes (the active tab, the actions slot)
+// inside the strip, so they never rise into the hero's stacking context above
+// the hero's creature layer (see LandingHero.tsx); and in dark the strip takes
+// the panel's surface instead of the canvas, so the window's top band reads as
+// one slab under Cub rather than as open page.
+export const TAB_STRIP = `relative isolate hidden md:flex max-w-full flex-none items-end gap-2 bg-white pr-2 pb-0 pt-0 ${DARK_PANEL_BG_CLASS}`;
 export const TAB_BASELINE = `pointer-events-none absolute inset-x-0 bottom-0 z-0 h-px bg-slate-200/70 ${DARK_DIVIDER_CLASS}`;
 // WorkspaceTabs.tsx:58-79 (base + active fused-white) and 916-930 (first tab
 // flush: no top-left radius, transparent left border). Spans need none of
@@ -121,37 +160,65 @@ export const TAB_ACTION = "inline-flex h-[48px] w-12 flex-none items-center just
 export const TAB_ACTIONS = "relative z-20 ml-2 flex flex-none items-center self-end pl-2.5";
 // useNotificationCenter.tsx:151-152 bell (IconButton ghost full h-10 w-10).
 export const TAB_BELL = "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-slate-500 dark:text-slate-300";
+// Landing-only: where the roster lies over the strip's right end (TOP_BAR).
+export const TAB_ROSTER_SPACE = "flex-none self-stretch w-[calc(var(--roster-w)+var(--roster-end)-4px)]";
 
-// StudioTopBar.tsx:521 phone grid.
-export const PHONE_BAR = `grid md:hidden grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 bg-white px-4 py-2 ${DARK_CANVAS_CLASS}`;
-// StudioTopBar.tsx:526-537 round toggle (IconButton ghost full md).
-export const PHONE_ROUND_ACTION = "inline-flex h-10 w-10 items-center justify-center rounded-full text-slate-600 dark:text-slate-200";
+// StudioTopBar.tsx:521 phone grid; dark takes the panel's surface like the
+// tab strip. Landing-only: the sidebar toggle, the bell and "+" give their
+// room to the title and the roster, as in the approved hero's phone layout
+// (the title, then the roster).
+export const PHONE_BAR = `grid md:hidden grid-cols-[minmax(0,1fr)_auto] items-center gap-2 bg-white px-4 py-2 ${DARK_PANEL_BG_CLASS}`;
+export const PHONE_ROSTER_SPACE = "h-10 w-[var(--roster-w)]";
 // StudioTopBar.tsx:50 COMPACT_TAB_SELECTOR_CLASS (Button ghost xs full).
 export const PHONE_PILL = "inline-flex h-10 min-w-0 max-w-full items-center gap-2 rounded-xl bg-slate-100 px-2.5 text-xs font-semibold text-slate-950 dark:bg-white/[0.06] dark:text-slate-50";
 
 // ---------------------------------------------------------------------------
 // Roster and transcript
 
-// ConversationRoster.tsx:92-103.
-export const ROSTER_ROW = "flex-none px-3 pt-2 sm:px-4";
-export const ROSTER_HANDLE = "flex items-center gap-1 px-1 py-0.5";
-export const ROSTER_STACK = "flex items-center -space-x-1.5";
+// ConversationRoster.tsx:92-103, moved into the window's top bar row
+// (TOP_BAR) and spaced like the approved hero's roster: 28px coins 10px apart
+// (24px, 6px apart on phones), never overlapping. In the tab strip the coins
+// sit level with the bell (their top 14px under the ledge), so the hook Cub
+// lends Octo has room to curl. Landing-only: z-[4] lifts the (transparent)
+// roster above the hero's creature layer at z-[3], so the coins always draw on
+// top of the arm that reaches for them. No ancestor up to the hero may create
+// a stacking context, or the lift stops there.
+export const ROSTER =
+  "pointer-events-none absolute right-[var(--roster-end)] top-0 z-[4] flex h-14 items-center gap-1.5 md:h-12 md:items-end md:gap-2.5 md:pb-1.5";
+// The ring is a 1px separator in the bar's own colour, not an outline: on the
+// bar it does not show, and where Cub's arm passes behind a coin it keeps a
+// sliver of bar between them. The coin's avatar coin shadow draws over it.
 export const ROSTER_RING = "rounded-full ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]";
+// The scenario agent's coin is a rounded square (AVATAR_SHELL_AGENT); its ring follows it.
+export const ROSTER_RING_AGENT = "rounded-[30%] ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]";
 
-// ChatTranscriptViewport.tsx:82-90 without the scrollbar.
-export const TRANSCRIPT = "relative flex min-h-0 flex-1 flex-col overflow-hidden px-3 pb-2 pt-2 sm:px-4";
+// ChatTranscriptViewport.tsx:82-90 without the scrollbar. Landing-only:
+// isolate keeps the transcript's own z-indexes below the hero's creature
+// layer; and with the roster moved up into the top bar, the conversation
+// starts 16px under that bar rather than 8px under a roster row.
+export const TRANSCRIPT = "relative isolate flex min-h-0 flex-1 flex-col overflow-hidden px-3 pb-2 pt-4 sm:px-4";
+// The transcript's scroll (landing-only): the column moves up as the newest
+// message lands, the way the chat stays pinned to its bottom
+// (browserSessionLayout.ts shouldPinChatMessagesToBottom). Instant on the
+// first paint and on a scenario change, eased afterwards.
+export const TRANSCRIPT_SCROLL = "transition-transform duration-0 ease-out group-data-[deck-settled]/deck:duration-500 motion-reduce:transition-none";
 
-// ChatMessageAvatar.tsx:96-140 wrapper; dark cool-slate border (700/800) replaced by
-// the raised-control border tier. Humans fill with the crew hex inline.
-export const AVATAR_SHELL = `flex shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 shadow-sm ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
+// ChatMessageAvatar.tsx wrapper: in light the coin's only edge is the avatar
+// coin shadow every coin shares, Octo's included (docs/Brand.md); in dark a
+// hairline border, the cool-slate border (700/800) replaced by the
+// raised-control border tier, and the small shadow. Humans fill with their
+// crew colour inline, label colour included.
+export const AVATAR_SHELL = `flex shrink-0 items-center justify-center overflow-hidden rounded-full shadow-avatar-coin dark:border dark:shadow-sm ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
+// An agent other than Octo: the same coin as a rounded square (the prototype's
+// roster), crew fill and initial inline; the shadow follows the square.
+export const AVATAR_SHELL_AGENT = `flex shrink-0 items-center justify-center overflow-hidden rounded-[30%] shadow-avatar-coin dark:border dark:shadow-sm ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
 export const AVATAR_2XS = "h-6 w-6 text-xxs";
+// The roster's coins (the approved hero's 28px, 11.5px initials; 24px on phones).
+export const AVATAR_ROSTER = "h-6 w-6 text-xxs md:h-7 md:w-7 md:text-[11.5px]";
 export const AVATAR_SM = "h-8 w-8 text-xs";
-export const AVATAR_HUMAN = "font-semibold text-white";
-// ChatMessageAvatar.tsx:140-149 the canonical Octo: white coin in both themes (Brand.md:42).
-export const OCTO_COIN = "flex h-full w-full items-center justify-center bg-white";
-export const OCTO_MARK = "h-[85%] w-[85%] text-brand-ink";
-// The scenario agent inherits its purple from the wrapper's inline color.
-export const OCTO_MARK_TINTED = "h-[85%] w-[85%]";
+export const AVATAR_HUMAN = "font-semibold";
+// Octo's coin is not copied here: the landing renders the studio's own
+// OctoCoin (src/components/OctoCoin.tsx), sized by AVATAR_ROSTER / AVATAR_SM.
 
 // AssistantSpeakerIdentityPill.tsx:100-138 and chatHumanIdentity.tsx:52-75.
 export const SPEAKER_LABEL = "inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400";
@@ -175,9 +242,14 @@ export const TYPING_LINE_TEXT = "instafy-status-sweep min-w-0 max-w-full text-xs
 // stays overflow-visible. Every wide child (diff card, code block, captions)
 // clips or truncates itself, so nothing can escape sideways.
 export const THREAD_ROOT = "w-full min-w-0 max-w-2xl text-sm text-slate-700 dark:text-slate-200";
+// AgentJobThreadPreviewLayout.tsx agent-job-thread-avatar: Octo's coin sits
+// above the thread spine that runs up into it, so the spine never cuts the
+// coin's edge.
+export const THREAD_AVATAR = "relative z-10";
 export const THREAD_BODY = "relative flex flex-col";
 export const THREAD_SPINE_LEFT = "-30px";
-export const THREAD_SPINE_MAIN = "pointer-events-none absolute left-[var(--thread-spine-left)] transition-opacity duration-200 ease-out motion-reduce:transition-none";
+export const THREAD_SPINE_MAIN =
+  "pointer-events-none absolute left-[var(--thread-spine-left)] transition-opacity duration-0 ease-out group-data-[deck-settled]/deck:duration-200 motion-reduce:transition-none";
 export const THREAD_SPINE_NOTCH = "pointer-events-none absolute top-0 h-full left-[var(--thread-spine-left)]";
 // AgentJobThreadPreviewLayout.tsx:1385-1395 the compact rail row.
 export const RAIL_ROW = "group relative py-1";
@@ -190,23 +262,32 @@ export const RAIL_CHIP = `inline-flex h-6 w-6 items-center justify-center rounde
 export const RAIL_CHIP_INITIAL = "text-3xs font-semibold";
 // AgentJobThreadPreviewLayout.tsx:878-910 the caption row under the rail.
 export const CAPTION_SECTION = "relative py-1";
-export const CAPTION_ROW = "flex min-w-0 items-center gap-1.5 pl-1 text-xs text-slate-600 dark:text-slate-400";
+// Landing-only min-h-6: every caption row is as tall as a command's (its Stop
+// is 24px), so the pinned transcript never bobs as the steps alternate.
+export const CAPTION_ROW = "flex min-h-6 min-w-0 items-center gap-1.5 pl-1 text-xs text-slate-600 dark:text-slate-400";
 export const CAPTION_TEXT = "instafy-status-sweep min-w-0 truncate";
 // AgentJobThreadPreviewLayout.tsx:686-693 owner badge; dark cool-slate border and background (700/80, 900/70) replaced by the raised-control tier.
 export const OWNER_BADGE = `inline-flex max-w-28 flex-none items-center rounded-full border border-slate-200/70 bg-white/70 px-1.5 py-0.5 text-xxs font-semibold leading-none text-slate-600 ${DARK_RAISED_CONTROL_CLASS} dark:text-slate-300`;
-// AgentJobThreadPreviewLayout.tsx:896-908 the rose Stop (IconButton ghost xs full).
-export const STOP_GLYPH = "ml-1 inline-flex h-6 w-6 items-center justify-center rounded-full text-rose-500 dark:text-rose-300";
 // AgentJobThreadPreviewLayout.tsx:1626-1650 the completed summary section.
 export const SUMMARY_SECTION = "relative pt-2 pb-0";
 export const SUMMARY_STACK = "space-y-1.5";
 // ChatMessageContent.tsx:1790 container and 1859-1873 paragraph measure.
 export const MESSAGE_CONTENT = "text-sm leading-relaxed break-words [overflow-wrap:anywhere]";
 export const MESSAGE_PARAGRAPH = "text-sm leading-relaxed max-w-[70ch] whitespace-pre-wrap break-words [overflow-wrap:anywhere]";
-// ChatMessageContent.tsx:137-140 CODE_BLOCK_CLASS. The studio block scrolls
-// sideways (overflow-x-auto whitespace-pre); this copy wraps instead, because
-// Chromium turns an overflowing scroller into a keyboard tab stop and nothing
-// inside the window may take focus. Desktop widths never wrap.
-export const CODE_BLOCK_CLASS = "block max-w-full whitespace-pre-wrap [overflow-wrap:anywhere] rounded-lg bg-slate-950/[0.035] px-3 py-3 font-mono text-[0.85em] leading-normal text-slate-700 dark:bg-white/[0.055] dark:text-slate-200";
+// ChatMessageContent.tsx:134-137 INLINE_CODE_TOKEN_CLASS.
+export const INLINE_CODE = "inline rounded bg-slate-950/[0.025] px-[0.2em] py-[0.04em] font-mono text-[0.92em] leading-[1.18] text-slate-700 [box-decoration-break:clone] align-baseline dark:bg-white/[0.035] dark:text-slate-200";
+// ChatMessageContent.tsx:167-170 WORKSPACE_FILE_REFERENCE_TOKEN_CLASS, its
+// folder (1204) and name (1208) spans. HOVER is its hover tone, which the
+// reference wears on the beat Ada opens it.
+export const FILE_REFERENCE = "inline-flex min-w-0 max-w-[14rem] items-center overflow-hidden rounded-[0.34rem] bg-primary-50/70 px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-primary-700 ring-1 ring-inset ring-primary-200/80 shadow-[inset_0_-1px_0_rgba(0,122,204,0.08)] align-baseline sm:max-w-[24rem] dark:bg-primary-300/10 dark:text-primary-200 dark:ring-primary-300/20 dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.035)]";
+export const FILE_REFERENCE_HOVER = "bg-primary-100/80 text-primary-800 dark:bg-primary-300/15 dark:text-primary-100";
+export const FILE_REFERENCE_FOLDER = "min-w-0 truncate text-slate-600 dark:text-slate-400";
+export const FILE_REFERENCE_NAME = "min-w-0 max-w-full flex-none truncate";
+// ChatMessageContent.tsx:1664-1672 a link (an unknown host whose label already
+// names it). Landing-only: it wraps as a whole onto its own line where it fits
+// (the studio's break-all would split the preview URL mid-word in the split's
+// chat column).
+export const MESSAGE_LINK = "[overflow-wrap:anywhere] text-primary-600 underline underline-offset-2 dark:text-primary-300";
 // AgentJobThreadPreviewLayout.tsx:1728-1736 the end stub.
 export const END_STUB = "relative h-4";
 
@@ -229,8 +310,9 @@ export const FILE_RAIL_DIVIDER = "mx-0.5 h-4 w-px shrink-0 self-center bg-slate-
 // ChatFileChangeList.tsx:909-1030 the diff card.
 export const DIFF_CARD = "mt-2 overflow-hidden rounded-xl border border-slate-200/70 bg-white/75 shadow-sm shadow-slate-900/5 dark:border-white/[0.08] dark:bg-white/[0.035] dark:shadow-none";
 export const DIFF_CARD_HEADER = "flex items-center justify-between gap-3 px-3 py-1.5";
-// ChatFileChangeList.tsx:39-44 resolveChangeMeta("changed").
+// ChatFileChangeList.tsx:39-44 resolveChangeMeta("changed") and 50-57 ("created").
 export const DIFF_BADGE_UPDATED = "shrink-0 rounded-full border border-secondary-200/80 bg-secondary-50/80 px-2 py-0.5 text-3xs font-medium text-secondary-700 dark:border-secondary-400/25 dark:bg-secondary-400/[0.07] dark:text-secondary-200/85";
+export const DIFF_BADGE_CREATED = "shrink-0 rounded-full border border-primary-200/80 bg-primary-50/80 px-2 py-0.5 text-3xs font-medium text-primary-700 dark:border-primary-400/25 dark:bg-primary-400/[0.07] dark:text-primary-200/85";
 export const DIFF_FILENAME = "min-w-0 truncate font-mono text-xs text-slate-700 dark:text-slate-300";
 export const DIFF_GLYPHS = "flex shrink-0 items-center gap-1 text-slate-400 dark:text-slate-500";
 export const DIFF_BODY = "border-t border-slate-200/70 bg-slate-50/80 font-mono text-xs dark:border-white/[0.07] dark:bg-white/[0.02]";
@@ -245,31 +327,181 @@ export const DIFF_ROW = "px-2 text-[0.65rem] sm:px-3 sm:text-xs py-0.5 whitespac
 export const PEER_TYPING_ROW = "flex items-center gap-2";
 
 // ---------------------------------------------------------------------------
-// Docked browser (BrowserSessionModal.tsx:2967, SharedBrowserChrome.tsx:243,
-// BrowserChromeShell.tsx:14-50, ActionTicker.tsx)
+// Conversation views and the resource pane (ConversationSurfaceLayout.tsx,
+// ConversationWorkspaceViews.tsx, ResizablePanels.tsx, ChatPanel.tsx resource
+// surface). A file or the Shared Browser opens beside the chat: side by side
+// when the panel is at least 1024px wide (the split default, the resource at
+// 55%), one view at a time with Chat and resource tabs below that.
 
-// BrowserSessionModal.tsx:2967 docked wrapper; dark cool-slate border and
-// background (800/950) replaced by the panel tier. The studio centres the dock
-// over the composer; here it sits inside Octo's message, so it starts at the
-// message gutter like the diff card instead of floating in the middle.
-export const DOCK_WRAPPER = `w-full max-w-[24rem] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl ${DARK_PANEL_SURFACE_CLASS}`;
-// The docked stage keeps DOCKED_BROWSER_ASPECT_RATIO (16:9). A website stays
-// light in both themes: it is a rendered site, not app chrome.
-export const DOCK_STAGE = "relative aspect-video w-full overflow-hidden bg-white text-slate-900";
-// SharedBrowserChrome.tsx:227-233 navigation glyphs (IconButton ghost full sm).
-export const DOCK_NAV_GLYPH = "inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 dark:text-slate-400";
-// SharedBrowserChrome.tsx:243 address input as a span; dark cool-slate background (950) replaced by the raised-control tier.
-export const ADDRESS_FIELD = `relative block h-8 w-full min-w-0 rounded-full border border-slate-200 bg-white pl-3 pr-9 text-xs leading-8 text-slate-800 shadow-inner ${DARK_RAISED_CONTROL_CLASS} dark:text-slate-100`;
+/** conversationSurfaces.ts DEFAULT_CONVERSATION_SURFACES: the resource takes 55% of a split. */
+export const SPLIT_RESOURCE_RATIO = 0.55;
+
+// ConversationSurfaceLayout.tsx:57 the views bar (header presentation): its
+// tabs are min-h-11 (44px) over a 1px border, 45px in all.
+export const VIEWS_BAR = `hidden md:flex min-w-0 shrink-0 items-center border-b border-slate-200/70 bg-white ${DARK_DIVIDER_BORDER_CLASS} ${DARK_PANEL_BG_CLASS}`;
+// Landing-only: Cub's floor (TurnColumn's data-cub-anchor="floor") sits that
+// 45px higher from md, where the views bar comes between the top bar and the
+// conversation, so his front arms hang to where they did before it.
+export const VIEWS_BAR_FLOOR_LIFT = "md:-top-[45px]";
+// :59 the chat toolbar over the chat column of a split (its roster lives in
+// the window's top bar on the landing, docs/Brand.md).
+export const VIEWS_CHAT_TOOLBAR = "flex min-w-0 shrink-0 items-center gap-1.5 px-4 text-xs text-slate-500 dark:text-slate-400";
+// :76 a tab's wrapper, selected or not.
+export const VIEWS_TAB_WRAP = "flex min-w-0 shrink-0 items-center";
+export const VIEWS_TAB_SELECTED = "text-slate-900 dark:text-slate-100";
+export const VIEWS_TAB_IDLE = "text-slate-500 dark:text-slate-400";
+// :83 the header tab (hover dress dropped: spans) and its primary underline when selected.
+export const VIEWS_TAB = "relative flex min-h-11 min-w-0 max-w-52 items-center gap-1.5 px-3 text-xs after:pointer-events-none after:absolute after:inset-x-3 after:bottom-0 after:h-[1.5px] after:rounded-full";
+export const VIEWS_TAB_UNDERLINE = "after:bg-primary-600 dark:after:bg-primary-400";
+// TabPresentation.tsx TabLabel.
+export const VIEWS_TAB_LABEL = "min-w-0 flex-1 truncate";
+// Ada's press going down on a view tab (one view, the Chat tab once Octo is
+// done in the browser): the studio's pressed tone for a ghost control
+// (Button.tsx ghost data-[pressed]), which reads on the segmented control's
+// grey as well as on the views bar's white.
+export const VIEWS_TAB_PRESSED = "bg-slate-200/80 text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50";
+// TabPresentation.tsx TabCloseButton (IconButton ghost xs full) with mr-1 text-inherit.
+export const VIEWS_TAB_CLOSE = "mr-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-inherit";
+// :88 Show one view (IconButton ghost sm, radius none, mx-1) at the bar's far right.
+export const VIEWS_SPLIT_TOGGLE = "mx-1 ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center text-slate-700 dark:text-slate-200";
+// ConversationWorkspaceViews.tsx:48 the Browser tab's attention while a site
+// approval waits: plain amber text after the label (TabLabel's children).
+export const VIEWS_APPROVE_BADGE = "text-amber-600";
+// :57, :76 and :83 in the composer presentation (phones, beside the composer):
+// a segmented control. Dark cool-slate fills (800/80, 700) are replaced by
+// the raised-control and active tiers.
+export const VIEWS_SEGMENTED = `mb-2 flex md:hidden min-w-0 items-center gap-1 rounded-2xl bg-slate-100/90 p-1 ${DARK_RAISED_CONTROL_BG_CLASS}`;
+export const VIEWS_SEGMENT = "flex min-w-0 flex-1 items-center rounded-xl";
+export const VIEWS_SEGMENT_SELECTED = `bg-white text-slate-900 shadow-sm ${DARK_ACTIVE_BG_CLASS} dark:text-slate-100`;
+export const VIEWS_SEGMENT_TAB = "relative flex min-h-11 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl px-2 text-sm";
+export const VIEWS_SEGMENT_TAB_SELECTED = "font-medium text-primary-700 dark:text-primary-300";
+
+// ResizablePanels.tsx:38 the split's 1px handle.
+export const SPLIT_DIVIDER = `w-px shrink-0 self-stretch bg-slate-200 ${DARK_DIVIDER_CLASS}`;
+// ChatPanel.tsx:5915-5961 the resource pane (a full-height column in a split,
+// the whole view area in one view).
+// The call site positions it (a column of the split, or over the transcript).
+export const RESOURCE_PANE = `flex min-h-0 min-w-0 flex-col overflow-hidden bg-white ${DARK_PANEL_BG_CLASS}`;
+
+// FilesPanel.tsx:2113 the editor header when embedded beside the chat (the
+// title is screen-reader only, so only the controls show): Undo and Redo
+// (HistoryControls.tsx, IconButton ghost sm full), Preview for Markdown
+// (Button outline sm full, min-w-[6.5rem]) and Save (IconButton primary sm full).
+export const FILE_HEADER = `flex shrink-0 items-center justify-end gap-1.5 border-b border-slate-200/70 px-4 py-2.5 sm:gap-2 ${DARK_DIVIDER_BORDER_CLASS}`;
+export const FILE_HEADER_HISTORY = "inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 dark:text-slate-300";
+export const FILE_HEADER_PREVIEW = `inline-flex h-8 min-w-[6.5rem] items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-2.5 text-sm font-medium text-slate-700 shadow-sm shadow-slate-200/40 ${DARK_RAISED_CONTROL_CLASS} dark:text-slate-100 dark:shadow-none`;
+export const FILE_HEADER_SAVE = "inline-flex h-8 w-8 items-center justify-center rounded-full bg-primary-600 text-white shadow-sm shadow-primary-600/20";
+// The Monaco editor in the studio's themes (monacoThemes.ts vscode-light-modern
+// and vscode-dark-modern: background, foreground, line numbers, selection)
+// with FilesPanel's options (14px mono, no minimap, line numbers except for
+// Markdown and text).
+export const EDITOR = "relative min-h-0 flex-1 overflow-hidden bg-white pt-1 font-mono text-[14px] leading-[19px] text-[#1f2328] dark:bg-[#1f1f1f] dark:text-[#d4d4d4]";
+export const EDITOR_LINE = "flex h-[19px] whitespace-pre";
+export const EDITOR_GUTTER = "w-[64px] shrink-0 select-none pr-[26px] text-right text-[#8c959f] dark:text-[#858585]";
+export const EDITOR_GUTTER_ACTIVE = "text-[#24292f] dark:text-[#c6c6c6]";
+// Without line numbers Monaco keeps a narrow left margin.
+export const EDITOR_GUTTER_NONE = "w-[26px] shrink-0";
+export const EDITOR_SELECTION = "bg-[#add6ff] dark:bg-[#264f78]";
+export const EDITOR_TOKEN = {
+  plain: "",
+  keyword: "text-[#0000ff] dark:text-[#569cd6]",
+  string: "text-[#a31515] dark:text-[#ce9178]",
+  type: "text-[#267f99] dark:text-[#4ec9b0]",
+} as const;
+
+// BrowserChromeShell (compact) with the Shared Browser's toolbar pieces:
+// BrowserTransportSelector's compact location button (PersonalBrowserSurface.tsx,
+// Button ghost icon h-10 w-11), BrowserAddressField (AddressInput xs full,
+// the Go button's NavArrowRight), the compact participants button
+// (SharedBrowserCollaborationControls.tsx:216-237, one 20px avatar and +N)
+// and Browser options (SharedBrowserSessionControl.tsx, IconButton ghost sm full).
+export const BROWSER_LOCATION = "inline-flex h-10 w-11 shrink-0 items-center justify-center gap-0.5 rounded-lg text-slate-700 dark:text-slate-200";
+// BrowserAddressField as a span; dark cool-slate background (950) replaced by the raised-control tier.
+export const ADDRESS_FIELD = `relative block h-8 w-full min-w-0 truncate rounded-full border border-slate-200 bg-white pl-3 pr-9 text-xs leading-[30px] text-slate-800 shadow-inner ${DARK_RAISED_CONTROL_CLASS} dark:text-slate-100`;
+export const ADDRESS_PLACEHOLDER = "text-slate-400 dark:text-slate-500";
 export const ADDRESS_GO = "absolute right-1 top-1 inline-flex h-6 w-6 items-center justify-center rounded-full text-slate-400";
-// BrowserChromeShell.tsx:14-50 BrowserStatusPill classes as a plain span (no role=status).
-export const STATUS_PILL = "inline-flex h-7 shrink-0 items-center gap-1 rounded-full border px-2 text-xxs font-medium";
-export const STATUS_PILL_READY = "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
-// dark cool-slate border and background (700, 900/70) replaced by the raised-control tier.
-export const STATUS_PILL_STARTING = `border-slate-300/80 bg-slate-100/80 text-slate-600 ${DARK_RAISED_CONTROL_CLASS} dark:text-slate-300`;
-// ActionTicker.tsx overlay and pill (bg-slate-900/80 in both themes, as the real ticker).
+export const BROWSER_PARTICIPANTS = "relative inline-flex min-h-10 min-w-10 shrink-0 items-center justify-center rounded-full px-1.5";
+export const BROWSER_PARTICIPANT_STACK = "flex shrink-0 items-center -space-x-1.5";
+// The avatar's 2px ring takes the toolbar's colour (dark cool-slate 900 replaced by the soft panel tier).
+export const BROWSER_PARTICIPANT = "inline-flex h-5 w-5 items-center justify-center rounded-full border-2 border-slate-50 text-[9px] font-semibold dark:border-[color:var(--color-studio-dark-panel-soft)]";
+export const BROWSER_PARTICIPANT_MORE = "inline-flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-slate-50 bg-slate-600 px-1 text-[9px] font-semibold text-white dark:border-[color:var(--color-studio-dark-panel-soft)]";
+export const BROWSER_OPTIONS = "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-700 dark:text-slate-200";
+// BrowserSessionModal.tsx:2669 the routine-browsing status row, which wraps
+// rather than truncates (dark cool-slate border 800 replaced by the divider
+// tier). Landing-only: it opens and closes with a height transition, so the
+// stage under it slides rather than jumps when the turn ends.
+export const BROWSER_ROUTINE_COLLAPSE = "grid shrink-0 transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none";
+export const BROWSER_ROUTINE_ROW = `border-b border-slate-200 px-3 py-1 text-xs text-slate-500 ${DARK_DIVIDER_BORDER_CLASS} dark:text-slate-400`;
+// BrowserSessionModal.tsx:2335 the viewport: black under a live page, slate
+// while the session starts (dark cool-slate 950 replaced by the canvas tier).
+export const BROWSER_VIEWPORT = "relative min-h-0 flex-1 overflow-hidden";
+export const BROWSER_VIEWPORT_STARTING = `bg-slate-100 ${DARK_CANVAS_CLASS}`;
+export const BROWSER_VIEWPORT_LIVE = "bg-black";
+// :2855-2941 the starting card.
+export const BROWSER_STATE_WRAP = "pointer-events-none absolute inset-0 flex items-center justify-center p-6";
+export const BROWSER_STATE_CARD = `w-full max-w-md rounded-2xl border border-slate-200 bg-white p-4 text-left text-sm text-slate-700 shadow-xl ${DARK_PANEL_SURFACE_CLASS} dark:text-slate-200`;
+// The page is a rendered website: light in both themes.
+export const BROWSER_PAGE = "absolute inset-0 overflow-hidden bg-white text-slate-900";
+export const BROWSER_PAGE_SCROLL = "transition-transform duration-500 ease-out motion-reduce:transition-none";
+
+// BrowserCursorOverlay.tsx:160-190 Octo's cursor (no name: the agent's
+// pointer is an unlabeled white arrow with an emerald ripple at each click)
+// and SharedBrowserParticipantPointers.tsx:95-127 a teammate's named pointer.
+export const POINTER_PATH = "M4 2.5 L4 15.5 L7.7 12.2 L10.1 17.4 L12.3 16.3 L9.9 11.2 L14.6 11.2 Z";
+export const POINTER_LAYER = "pointer-events-none absolute inset-0 overflow-hidden";
+export const AI_CURSOR = "absolute transition-[left,top,opacity] duration-300 ease-out motion-reduce:transition-none";
+export const AI_CURSOR_RIPPLE = "absolute left-0 top-0 h-[22px] w-[22px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-400/40 motion-safe:animate-ping";
+export const POINTER_SVG = "relative -translate-x-[3px] -translate-y-[2px] drop-shadow-[0_1px_2px_rgba(0,0,0,0.55)]";
+// The studio moves a teammate's pointer in 75 ms linear steps as positions
+// arrive (at most every 50 ms); one eased glide stands in for that stream.
+export const PARTICIPANT_POINTER = "absolute transition-[left,top,opacity] duration-700 ease-out motion-reduce:transition-none";
+export const PARTICIPANT_LABEL = "absolute left-3 top-3 max-w-32 truncate rounded-full px-2 py-0.5 text-[10px] font-semibold shadow-sm";
+
+// ActionTicker.tsx overlay and pill (bg-slate-900/80 in both themes, as the real ticker) and its dots by action type.
 export const TICKER_OVERLAY = "pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center p-2";
 export const TICKER_PILL = "flex max-w-[92%] items-center gap-2 rounded-full border border-white/10 bg-slate-900/80 px-3 py-1 text-xxs font-medium text-slate-100 shadow-sm backdrop-blur-sm";
-export const TICKER_DOT = "h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400";
+export const TICKER_DOT = "h-1.5 w-1.5 shrink-0 rounded-full";
+export const TICKER_DOT_TONE = {
+  navigate: "bg-sky-400",
+  nav_result: "bg-sky-400",
+  click: "bg-emerald-400",
+  scroll: "bg-slate-400",
+} as const;
+
+// SharedBrowserApprovalPrompt.tsx:79-215 the site approval over the stage
+// (dark cool-slate 700/900/950 replaced by the panel, raised-control and
+// canvas tiers; the scrim never scrolls, so it holds no tab stop).
+export const APPROVAL_SCRIM = "absolute inset-0 z-30 flex items-end justify-center overflow-hidden bg-slate-950/60 p-2 backdrop-blur-[2px] sm:items-center sm:p-4";
+export const APPROVAL_SHEET = `flex max-h-full w-full max-w-md flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-4 shadow-2xl sm:p-5 ${DARK_PANEL_SURFACE_CLASS}`;
+// :113 the content area. The studio's scrolls (overflow-y-auto); the landing's
+// is drawn scrolled (APPROVAL_CONTENT_SCROLL, eased as Ada scrolls it to the
+// routine browsing box) and never user-scrollable, so it holds no tab stop.
+// Landing-only: where the content is still cut off below, it fades out at the
+// cut (APPROVAL_CONTENT_CUT) instead of slicing a line.
+export const APPROVAL_CONTENT = "min-h-0 overflow-hidden";
+export const APPROVAL_CONTENT_CUT = "[mask-image:linear-gradient(to_bottom,#000_calc(100%-1rem),transparent)]";
+export const APPROVAL_CONTENT_SCROLL = "transition-transform duration-500 ease-in-out motion-reduce:transition-none";
+export const APPROVAL_LOCK = "flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary-50 text-primary-700 dark:bg-primary-500/15 dark:text-primary-300";
+export const APPROVAL_SITE = `mt-4 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 ${DARK_RAISED_CONTROL_BORDER_CLASS} ${DARK_CANVAS_CLASS}`;
+export const APPROVAL_SITE_TEXT = "mt-0.5 break-all font-mono text-xs font-medium text-slate-800 dark:text-slate-100";
+export const APPROVAL_ROUTINE = `mt-3 flex items-start gap-2 rounded-xl border border-slate-200 p-3 text-xs leading-snug ${DARK_RAISED_CONTROL_BORDER_CLASS}`;
+// A native checkbox, drawn.
+export const APPROVAL_CHECKBOX = "mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border transition-colors duration-150 motion-reduce:transition-none";
+export const APPROVAL_CHECKBOX_OFF = "border-slate-400 bg-white dark:border-slate-500 dark:bg-transparent";
+export const APPROVAL_CHECKBOX_ON = "border-primary-600 bg-primary-600 text-white";
+export const APPROVAL_ACTIONS = "mt-4 flex shrink-0 flex-col gap-2 min-[420px]:flex-row min-[420px]:justify-end";
+
+// Button.tsx at sm, radius full: secondary (Deny) and primary.
+export const BUTTON_SECONDARY = "inline-flex w-full items-center justify-center gap-2 rounded-full bg-slate-100 px-2.5 py-1.5 text-sm font-medium text-slate-700 shadow-sm shadow-slate-200/60 min-[420px]:w-auto dark:bg-[var(--color-studio-dark-active)] dark:text-slate-100 dark:shadow-none";
+export const BUTTON_PRIMARY = "inline-flex items-center justify-center gap-2 rounded-full bg-primary-600 px-2.5 py-1.5 text-sm font-medium text-white shadow-sm shadow-primary-600/20 transition-[background-color,box-shadow,transform] duration-150 ease-out motion-reduce:transition-none";
+// Button.tsx data-[pressed] on the primary tone: Ada's press going down.
+export const BUTTON_PRIMARY_PRESSED = "translate-y-px scale-[0.98] bg-primary-800 shadow-none";
+// Button.tsx data-[disabled] (a busy action is disabled).
+export const BUTTON_DISABLED = "opacity-60";
+
+// ChatActionCard.tsx:41-90 (Surface default, 2xl, sm shadow) as the
+// "Continue in browser" request renders it (runtime-agent browser_request.rs).
+export const ACTION_CARD = "max-w-[min(80%,42rem)] px-3 py-2.5 text-sm text-slate-700 dark:text-slate-200";
 
 // ---------------------------------------------------------------------------
 // Composer (ChatComposerSurface.tsx:1301-1370, chatComposerAffordances.ts:77-80,
@@ -300,7 +532,12 @@ export const CARET = "ml-px inline-block h-4 w-px translate-y-[3px] bg-slate-900
 // because reveals share grid cells: a grid item's automatic minimum is its
 // min-content width, and the mono diff and code blocks would otherwise widen
 // the whole transcript past the frame on a phone.
-export const REVEAL_BASE = "min-w-0 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none";
+// The fade takes time only once the window has painted (data-deck-settled on
+// the frame, group/deck): until then its duration is 0, so the first paint
+// shows the beat it starts on outright, never the finished turn fading out
+// behind it.
+export const REVEAL_BASE =
+  "min-w-0 transition-[opacity,transform] duration-0 ease-out group-data-[deck-settled]/deck:duration-200 motion-reduce:transition-none";
 export const REVEAL_SHOWN = "opacity-100 translate-y-0";
 export const REVEAL_HIDDEN = "opacity-0 translate-y-1";
 export const REVEAL_SLIDE_SHOWN = "opacity-100 translate-x-0";

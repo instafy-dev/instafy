@@ -236,3 +236,91 @@ describe("ThemeProvider native system bars", () => {
     expect(addAppListenerMock).not.toHaveBeenCalled();
   });
 });
+
+describe("ThemeProvider browser theme-color", () => {
+  let metas: HTMLMetaElement[] = [];
+
+  function themeColors() {
+    return metas.map((meta) => [meta.media, meta.getAttribute("content")]);
+  }
+
+  async function renderWebTheme(mode: "system" | "light" | "dark") {
+    isNativePlatformMock.mockReturnValue(false);
+    window.localStorage.setItem("instafy.themeMode", mode);
+    await act(async () => {
+      root.render(<ThemeProvider>{null}</ThemeProvider>);
+    });
+  }
+
+  beforeEach(() => {
+    // index.html ships one tag per color scheme: paper for light, the dark canvas for dark.
+    metas = [
+      ["(prefers-color-scheme: light)", "#ffffff"],
+      ["(prefers-color-scheme: dark)", "#141414"],
+    ].map(([media, content]) => {
+      const meta = document.createElement("meta");
+      meta.name = "theme-color";
+      meta.media = media;
+      meta.content = content;
+      document.head.appendChild(meta);
+      return meta;
+    });
+  });
+
+  afterEach(() => {
+    for (const meta of metas) meta.remove();
+    metas = [];
+  });
+
+  it("paints the browser chrome with brand paper for a chosen light theme on a dark OS", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => matchMedia(true)),
+    });
+    await renderWebTheme("light");
+
+    expect(themeColors()).toEqual([
+      ["(prefers-color-scheme: light)", "#ffffff"],
+      ["(prefers-color-scheme: dark)", "#ffffff"],
+    ]);
+  });
+
+  it("paints the browser chrome with the dark canvas for a chosen dark theme on a light OS", async () => {
+    await renderWebTheme("dark");
+
+    expect(themeColors()).toEqual([
+      ["(prefers-color-scheme: light)", "#141414"],
+      ["(prefers-color-scheme: dark)", "#141414"],
+    ]);
+  });
+
+  it("follows the OS color scheme in system mode, never brand ink", async () => {
+    let prefersDark = false;
+    let notifyThemeChange: (() => void) | undefined;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        get matches() {
+          return prefersDark;
+        },
+        media: "(prefers-color-scheme: dark)",
+        onchange: null,
+        addEventListener: (_type: string, listener: () => void) => {
+          notifyThemeChange = listener;
+        },
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    await renderWebTheme("system");
+    expect(metas.map((meta) => meta.content)).toEqual(["#ffffff", "#ffffff"]);
+
+    prefersDark = true;
+    await act(async () => notifyThemeChange?.());
+
+    expect(metas.map((meta) => meta.content)).toEqual(["#141414", "#141414"]);
+    expect(metas.map((meta) => meta.content)).not.toContain("#0f172a");
+  });
+});

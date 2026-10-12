@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { OctoMark } from "../../../components/OctoMark";
+import { OctoCoin } from "../../../components/OctoCoin";
 import { HumanAvatar } from "../../../components/HumanAvatar";
 import {
   OCTO_AVATAR_SRC,
@@ -99,12 +99,11 @@ export function ChatMessageAvatar({
     kind === "assistant" && assistantAvatarImageSrc === OCTO_AVATAR_SRC;
   const testId =
     testIdOverride ?? (kind === "assistant" ? "chat-avatar-assistant" : "chat-avatar-human");
-  const wrapperClass =
-    kind === "assistant"
-      ? usesAssistantImageAvatar
-        ? "border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
-        : "border-slate-200 text-white dark:border-slate-800"
-      : "border-slate-200 text-white dark:border-slate-800";
+  // Light: no border, only the avatar coin shadow (below). Dark keeps its
+  // hairline border and small shadow.
+  const wrapperClass = usesAssistantImageAvatar
+    ? "bg-white dark:border-slate-700 dark:bg-slate-900"
+    : "text-white dark:border-slate-800";
 
   const gradientStyle = useMemo(() => {
     if (kind !== "assistant" || usesAssistantImageAvatar || !agentIdentity) {
@@ -126,38 +125,45 @@ export function ChatMessageAvatar({
   const textClassName = size === "lg" ? "text-sm" : size === "2xs" ? "text-xxs" : "text-xs";
 
   if (kind === "human") {
+    // HumanAvatar draws the shared avatar coin shadow in light; dark keeps
+    // the small shadow these faces always had.
     return <HumanAvatar userId={seed} displayName={label} avatarUrl={avatarUrl}
-      data-testid={testId} className={`${sizeClassName} ${textClassName} shadow-sm`} />;
+      data-testid={testId} className={`${sizeClassName} ${textClassName} dark:shadow-sm`} />;
+  }
+
+  // Octo is its coin (OctoCoin, docs/Brand.md): the coin draws its own edge
+  // (the shared avatar coin shadow in light, its faint ring in dark), so it
+  // takes none of the shell's dark border or shadow below.
+  if (usesCanonicalOctoAvatar) {
+    return (
+      <OctoCoin
+        testId={testId}
+        className={sizeClassName}
+        motion={motion}
+        scrollReactive={scrollReactive}
+      />
+    );
   }
 
   return (
     <div
       data-testid={testId}
       aria-hidden="true"
-      className={`flex ${sizeClassName} shrink-0 items-center justify-center overflow-hidden rounded-full border shadow-sm ${wrapperClass}`}
+      className={`flex ${sizeClassName} shrink-0 items-center justify-center overflow-hidden rounded-full shadow-avatar-coin dark:border dark:shadow-sm ${wrapperClass}`}
       style={gradientStyle}
     >
-      {usesCanonicalOctoAvatar ? (
-          <span className="flex h-full w-full items-center justify-center bg-white">
-            <OctoMark
-              className="h-[85%] w-[85%] text-brand-ink"
-              motion={motion}
-              scrollReactive={scrollReactive}
-              title="Octo"
-            />
-          </span>
-        ) : usesAssistantImageAvatar && assistantAvatarImageSrc ? (
-          <img
-            src={assistantAvatarImageSrc}
-            alt=""
-            className="h-full w-full object-cover"
-            decoding="async"
-            draggable={false}
-          />
-        ) : (
-          <span className={`${textClassName} font-semibold`}>
-            {resolveAgentAvatarText({ handle: agentIdentity?.handle ?? "agent" })}
-          </span>
+      {usesAssistantImageAvatar && assistantAvatarImageSrc ? (
+        <img
+          src={assistantAvatarImageSrc}
+          alt=""
+          className="h-full w-full object-cover"
+          decoding="async"
+          draggable={false}
+        />
+      ) : (
+        <span className={`${textClassName} font-semibold`}>
+          {resolveAgentAvatarText({ handle: agentIdentity?.handle ?? "agent" })}
+        </span>
       )}
     </div>
   );

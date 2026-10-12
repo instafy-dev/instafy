@@ -32,7 +32,7 @@ function describeSubscribeError(error: unknown) {
   if (code === "42501") {
     return "Newsletter storage is locked down right now.";
   }
-  return "Something went wrong. Please try again in a moment.";
+  return "Something went wrong. Try again in a moment.";
 }
 
 export function NewsPage() {
@@ -233,8 +233,15 @@ export function NewsPage() {
             <section id="latest" className="w-full">
               <div className="max-w-3xl">
                 <div className="flex items-center gap-2.5">
-                  <svg aria-hidden="true" className="h-4 w-4 shrink-0" viewBox="0 0 18 20">
-                    <path d="M2 1 L16 10 L9 11.5 L7 19 Z" fill="#f5960a" stroke="#ffffff" strokeWidth="1.5" />
+                  {/* Octo's cursor. Octo is ink, never a crew colour; a plain
+                      heading glyph on a flat page, so it needs no outline. */}
+                  <svg
+                    aria-hidden="true"
+                    data-testid="news-octo-cursor"
+                    className="h-4 w-4 shrink-0 text-brand-ink dark:text-brand-paper"
+                    viewBox="0 0 18 20"
+                  >
+                    <path d="M2 1 L16 10 L9 11.5 L7 19 Z" fill="currentColor" />
                   </svg>
                   <Heading level={2} variant="section">
                     Latest posts

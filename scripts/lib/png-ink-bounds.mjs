@@ -7,20 +7,27 @@ const PNG_SIGNATURE = "89504e470d0a1a0a";
  * Return the inclusive pixel bounds of artwork matching a color in an 8-bit,
  * non-interlaced PNG. Pixels are composited over the supplied background and
  * matched along the background-to-ink blend line, so antialiased opaque and
- * alpha edges produce the same optical bounds.
+ * alpha edges produce the same optical bounds. Pass `inks` (one RGB triple per
+ * artwork color, for example a white body plus four crew nodes) to measure
+ * artwork drawn in several colors; a pixel counts when it sits on any of those
+ * blend lines.
  */
-export function readPngInkBounds(
-  filePath,
+export function readPngInkBounds(filePath, options = {}) {
+  return measureInkBounds(decodePng(fs.readFileSync(filePath)), options);
+}
+
+/** The same measurement as readPngInkBounds, on an already decoded image. */
+export function measureInkBounds(
+  { width, height, pixels },
   {
     ink = [15, 23, 42],
+    inks = [ink],
     background = [255, 255, 255],
     minimumCoverage = 0.5,
     maximumBlendError = 20,
   } = {},
 ) {
-  const { width, height, pixels } = decodePng(fs.readFileSync(filePath));
-  const direction = ink.map((channel, index) => channel - background[index]);
-  const directionLengthSquared = direction.reduce((sum, channel) => sum + channel * channel, 0);
+  const matches = createBlendMatcher(inks, background, minimumCoverage, maximumBlendError);
   let minX = width;
   let minY = height;
   let maxX = -1;
@@ -28,27 +35,7 @@ export function readPngInkBounds(
 
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      const offset = (y * width + x) * 4;
-      const alpha = pixels[offset + 3] / 255;
-      const composited = [0, 1, 2].map(
-        (channel) => pixels[offset + channel] * alpha + background[channel] * (1 - alpha),
-      );
-      const relative = composited.map((channel, index) => channel - background[index]);
-      const coverage = relative.reduce(
-        (sum, channel, index) => sum + channel * direction[index],
-        0,
-      ) / directionLengthSquared;
-      if (coverage < minimumCoverage) continue;
-
-      const clampedCoverage = Math.min(1, coverage);
-      const blendError = Math.sqrt(
-        composited.reduce((sum, channel, index) => {
-          const expected = background[index] + direction[index] * clampedCoverage;
-          return sum + (channel - expected) ** 2;
-        }, 0),
-      );
-      if (blendError > maximumBlendError) continue;
-
+      if (!matches(pixels, (y * width + x) * 4)) continue;
       minX = Math.min(minX, x);
       minY = Math.min(minY, y);
       maxX = Math.max(maxX, x);
@@ -71,9 +58,148 @@ export function readPngInkBounds(
   };
 }
 
+/**
+ * Return the largest distance from (`centerX`, `centerY`) to the center of
+ * any pixel that differs from the background, composited over it, by more
+ * than `minimumDistance` (RGB Euclidean), or 0 when there is none. It is
+ * ink-agnostic and counts faint antialiased edges, so the result bounds
+ * everything a circular mask could clip.
+ */
+export function measureInkRadius(
+  { width, height, pixels },
+  { background, centerX = width / 2, centerY = height / 2, minimumDistance = 16 },
+) {
+  const [backgroundR, backgroundG, backgroundB] = background;
+  const minimumDistanceSquared = minimumDistance * minimumDistance;
+  let radius = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      const alpha = pixels[offset + 3] / 255;
+      const dr = (pixels[offset] - backgroundR) * alpha;
+      const dg = (pixels[offset + 1] - backgroundG) * alpha;
+      const db = (pixels[offset + 2] - backgroundB) * alpha;
+      if (dr * dr + dg * dg + db * db <= minimumDistanceSquared) continue;
+      radius = Math.max(radius, Math.hypot(x + 0.5 - centerX, y + 0.5 - centerY));
+    }
+  }
+  return radius;
+}
+
+/**
+ * Count pixels whose color is neither the background nor a blend of the
+ * background with one of `inks`. A one-ink asset passes `inks: [ink]` and
+ * expects zero: any crew-colored node, or any other stray hue, shows up here.
+ */
+export function countOffPalettePixels(
+  { width, height, pixels },
+  { inks, background, maximumBlendError = 24 },
+) {
+  // With no coverage floor the blend error is the distance to the
+  // background-to-ink segment, so the background itself is on the palette.
+  const onPalette = createBlendMatcher(inks, background, -Infinity, maximumBlendError);
+  let count = 0;
+  for (let offset = 0; offset < width * height * 4; offset += 4) {
+    if (!onPalette(pixels, offset)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Build a predicate for one RGBA pixel: composite it over `background`, then
+ * accept it when, for any ink, its projection on the background-to-ink line
+ * reaches `minimumCoverage` and it lies within `maximumBlendError` of the
+ * clamped blend.
+ */
+function createBlendMatcher(inks, background, minimumCoverage, maximumBlendError) {
+  const [backgroundR, backgroundG, backgroundB] = background;
+  const lines = inks.map(([r, g, b]) => {
+    const dr = r - backgroundR;
+    const dg = g - backgroundG;
+    const db = b - backgroundB;
+    return { dr, dg, db, lengthSquared: dr * dr + dg * dg + db * db };
+  });
+  const maximumErrorSquared = maximumBlendError * maximumBlendError;
+  return (pixels, offset) => {
+    const alpha = pixels[offset + 3] / 255;
+    const relativeR = (pixels[offset] - backgroundR) * alpha;
+    const relativeG = (pixels[offset + 1] - backgroundG) * alpha;
+    const relativeB = (pixels[offset + 2] - backgroundB) * alpha;
+    for (const { dr, dg, db, lengthSquared } of lines) {
+      const coverage = lengthSquared === 0
+        ? 0
+        : (relativeR * dr + relativeG * dg + relativeB * db) / lengthSquared;
+      if (coverage < minimumCoverage) continue;
+      const clamped = Math.max(0, Math.min(1, coverage));
+      const errorR = relativeR - dr * clamped;
+      const errorG = relativeG - dg * clamped;
+      const errorB = relativeB - db * clamped;
+      if (errorR * errorR + errorG * errorG + errorB * errorB <= maximumErrorSquared) return true;
+    }
+    return false;
+  };
+}
+
 /** Return one decoded RGBA pixel from an 8-bit, non-interlaced PNG. */
+/**
+ * Count pixels whose red, green and blue differ: a greyscale image (the iOS
+ * Tinted icon, which the system tints by luminance) has none.
+ */
+export function countNonGreyscalePixels({ width, height, pixels }) {
+  let count = 0;
+  for (let offset = 0; offset < width * height * 4; offset += 4) {
+    if (pixels[offset] !== pixels[offset + 1] || pixels[offset + 1] !== pixels[offset + 2]) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/**
+ * Count visible pixels (alpha at least `minimumAlpha`) whose color is not one
+ * of `inks` within `tolerance` (RGB Euclidean, straight alpha). Artwork drawn
+ * on a transparent ground (the iOS Dark icon) has none: its only paint is the
+ * mark, so the system's own background shows everywhere else. Faint edge
+ * pixels below `minimumAlpha` are skipped, since PNG's straight alpha rounds
+ * their color.
+ */
+export function countOffInkVisiblePixels(
+  { width, height, pixels },
+  { inks, minimumAlpha = 32, tolerance = 24 },
+) {
+  const toleranceSquared = tolerance * tolerance;
+  let count = 0;
+  for (let offset = 0; offset < width * height * 4; offset += 4) {
+    if (pixels[offset + 3] < minimumAlpha) continue;
+    const onInk = inks.some(([r, g, b]) => {
+      const dr = pixels[offset] - r;
+      const dg = pixels[offset + 1] - g;
+      const db = pixels[offset + 2] - b;
+      return dr * dr + dg * dg + db * db <= toleranceSquared;
+    });
+    if (!onInk) count += 1;
+  }
+  return count;
+}
+
+/** Count pixels in `image` with any alpha outside the box [x0, x1) x [y0, y1). */
+export function countVisiblePixelsOutside({ width, height, pixels }, { x0, y0, x1, y1 }) {
+  let count = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (x >= x0 && x < x1 && y >= y0 && y < y1) continue;
+      if (pixels[(y * width + x) * 4 + 3] !== 0) count += 1;
+    }
+  }
+  return count;
+}
+
 export function readPngPixel(filePath, x, y) {
-  const { width, height, pixels } = decodePng(fs.readFileSync(filePath));
+  return pixelAt(decodePng(fs.readFileSync(filePath)), x, y);
+}
+
+/** Return one RGBA pixel of an already decoded image. */
+export function pixelAt({ width, height, pixels }, x, y) {
   if (
     !Number.isInteger(x) ||
     !Number.isInteger(y) ||
@@ -88,7 +214,8 @@ export function readPngPixel(filePath, x, y) {
   return Array.from(pixels.subarray(offset, offset + 4));
 }
 
-function decodePng(contents) {
+/** Decode an 8-bit, non-interlaced PNG buffer into RGBA pixels. */
+export function decodePng(contents) {
   if (contents.length < 33 || contents.subarray(0, 8).toString("hex") !== PNG_SIGNATURE) {
     throw new Error("not a PNG");
   }

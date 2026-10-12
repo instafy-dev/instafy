@@ -4,19 +4,52 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createAppIconChecker, formatSvgNumber } from "./lib/app-icon-checker.mjs";
+import {
+  createAppIconChecker,
+  findIconLinks,
+  formatSvgNumber,
+} from "./lib/app-icon-checker.mjs";
 import {
   ADAPTIVE_ICON_PATHS,
+  ANDROID_LAUNCH_THEME_CONTRACTS,
+  ANDROID_SPLASH_BACKGROUND_PATHS,
+  DESKTOP_BUILD_ICONS,
+  DESKTOP_ICNS_CONTRACTS,
+  DESKTOP_ICNS_PATH,
+  DESKTOP_ICO_CONTRACTS,
+  DESKTOP_ICO_PATH,
+  FAVICON_ENTRY_CONTRACTS,
+  FAVICON_LINK_PATHS,
   GITHUB_BADGE_ICON_PATHS,
   GOOGLE_PLAY_ICON_PATHS,
+  IOS_APP_ICON_IMAGES,
+  IOS_DARK_ICON_PATH,
+  IOS_DARK_NOTIFICATION_ICON_PATH,
+  IOS_NOTIFICATION_ICON_PATH,
+  IOS_SPLASH_IMAGES,
+  IOS_TINTED_NOTIFICATION_ICON_PATH,
   PNG_ASSET_CONTRACTS,
+  PNG_FAVICON_TARGET,
   STALE_ASSET_PATHS,
+  createCrewNodeTargets,
+  createCrewTokenContracts,
+  createOneInkTargets,
   createOpticalIconTargets,
   createRasterColorSamples,
   createRevisionedAssetContracts,
   createSplashTargets,
   createThemeTokenContracts,
+  expectedTileInk,
+  macGridBody,
 } from "./lib/app-icon-contracts.mjs";
+import { decodeIcnsEntries } from "./lib/icon-containers.mjs";
+import {
+  countNonGreyscalePixels,
+  countOffInkVisiblePixels,
+  countVisiblePixelsOutside,
+  measureInkBounds,
+  pixelAt,
+} from "./lib/png-ink-bounds.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const failures = [];
@@ -24,13 +57,21 @@ const {
   assertAssetRevision,
   assertCanonicalGeometry,
   assertCenteredArtwork,
+  assertInkInsideCircle,
+  assertMatchingAlpha,
   assertMatchingOpticalRatios,
+  assertNodeColors,
   assertOpticalBounds,
+  assertPalette,
   assertPixelColor,
+  assertPixelNodes,
   checkFavicon,
   expectContains,
   expectNotContains,
   parseHexColor,
+  readIconContainer,
+  readIcoEntries,
+  readImage,
   readInkBounds,
   readPng,
   readText,
@@ -41,6 +82,30 @@ const brandConfig = JSON.parse(readText(brandConfigPath) || "{}");
 const ICON_CACHE_REVISION = String(brandConfig.cacheRevision ?? "");
 const BRAND_NAVY = parseHexColor(brandConfig.colors?.ink, `${brandConfigPath} colors.ink`);
 const BRAND_WHITE = parseHexColor(brandConfig.colors?.paper, `${brandConfigPath} colors.paper`);
+const CANVAS_DARK = parseHexColor(
+  brandConfig.colors?.canvasDark,
+  `${brandConfigPath} colors.canvasDark`,
+);
+const CREW_TILE_MIN_PX = brandConfig.crewTileMinPx;
+const crewSets = {};
+for (const theme of ["light", "dark"]) {
+  const values = brandConfig.colors?.crew?.[theme];
+  if (!Array.isArray(values) || values.length !== 4) {
+    failures.push(
+      `${brandConfigPath} colors.crew.${theme} must list the four crew colors, left to right.`,
+    );
+  }
+  crewSets[theme] = (Array.isArray(values) ? values : []).map((value, index) =>
+    parseHexColor(value, `${brandConfigPath} colors.crew.${theme}[${index}]`),
+  );
+}
+const palette = {
+  navy: BRAND_NAVY,
+  white: BRAND_WHITE,
+  canvasDark: CANVAS_DARK,
+  crewLight: crewSets.light,
+  crewDark: crewSets.dark,
+};
 
 if (!/^\d+$/.test(ICON_CACHE_REVISION) || Number(ICON_CACHE_REVISION) < 1) {
   failures.push(`${brandConfigPath} cacheRevision must be a positive integer.`);
@@ -51,6 +116,45 @@ if (
   brandConfig.distributionScale > 1
 ) {
   failures.push(`${brandConfigPath} distributionScale must be in (0, 1].`);
+}
+if (
+  typeof brandConfig.maskableScale !== "number" ||
+  brandConfig.maskableScale <= 0 ||
+  !(brandConfig.maskableScale < brandConfig.distributionScale)
+) {
+  failures.push(`${brandConfigPath} maskableScale must be positive and below distributionScale.`);
+}
+if (!Number.isInteger(CREW_TILE_MIN_PX) || CREW_TILE_MIN_PX < 1) {
+  failures.push(`${brandConfigPath} crewTileMinPx must be a positive integer (device px).`);
+}
+
+const geometryPath = "packages/frontend/src/assets/octo-mark.geometry.json";
+const geometry = JSON.parse(readText(geometryPath) || "{}");
+if (geometry.viewBox !== "0 0 64 64" || geometry.transform !== "translate(-1.3 -1.7)") {
+  failures.push(`${geometryPath} must retain the established Octopus Merge coordinate system.`);
+}
+if (geometry.paths?.length !== 5 || geometry.circles?.length !== 4) {
+  failures.push(`${geometryPath} must contain the five canonical paths and four detached nodes.`);
+}
+
+// The small cut: a pixel-fitted redraw of the same mark for 24 CSS px and
+// below. It keeps the 64-unit canvas, needs no transform and keeps all four
+// nodes, each at least 2 px wide at 16 px (4 units are 1 px there).
+const smallGeometryPath = "packages/frontend/src/assets/octo-mark-small.geometry.json";
+const smallGeometry = JSON.parse(readText(smallGeometryPath) || "{}");
+if (smallGeometry.viewBox !== "0 0 64 64" || smallGeometry.transform !== "") {
+  failures.push(`${smallGeometryPath} must use the 64-unit canvas with no transform.`);
+}
+if (!(smallGeometry.paths?.length >= 1) || smallGeometry.circles?.length !== 4) {
+  failures.push(`${smallGeometryPath} must contain the body and all four detached nodes.`);
+}
+for (const { cx, cy, r } of smallGeometry.circles ?? []) {
+  if (!(r >= 4) || cx - r < 0 || cx + r > 64 || cy - r < 0 || cy + r > 64) {
+    failures.push(
+      `${smallGeometryPath} nodes must keep a radius of at least 4 units and stay inside the canvas.`,
+    );
+    break;
+  }
 }
 
 const pngs = PNG_ASSET_CONTRACTS;
@@ -73,43 +177,183 @@ for (const [relativePath, expectedWidth, expectedHeight, expectedAlpha, expected
   }
 }
 
-const rasterColorSamples = createRasterColorSamples(BRAND_NAVY, BRAND_WHITE);
+const rasterColorSamples = createRasterColorSamples(BRAND_NAVY, BRAND_WHITE, CANVAS_DARK);
 
 for (const [relativePath, x, y, expected] of rasterColorSamples) {
   assertPixelColor(relativePath, x, y, expected);
 }
 
-const opticalIconTargets = createOpticalIconTargets(BRAND_NAVY, BRAND_WHITE);
+// Crew nodes sit at the mark's left, right and bottom extremes, so every
+// bounds read counts the body ink and the node colors together.
+const inksOf = (target) => [target.ink, ...(target.nodeColors ?? [])];
+
+const opticalIconTargets = createOpticalIconTargets(palette);
 
 const opticalBounds = opticalIconTargets.map((target) => ({
   ...target,
   bounds: readInkBounds(target.relativePath, {
-    ink: target.ink,
+    inks: inksOf(target),
     background: target.background,
   }),
 }));
 for (const target of opticalBounds) {
   assertOpticalBounds(target);
   assertCenteredArtwork(target);
+  if (target.safeCircle) {
+    let image;
+    try {
+      image = readImage(target.relativePath);
+    } catch {
+      continue; // readInkBounds above already reported the unreadable file.
+    }
+    assertInkInsideCircle({
+      label: target.relativePath,
+      image,
+      background: target.background,
+      radius: target.safeCircle.radiusRatio * image.width,
+      zone: target.safeCircle.zone,
+    });
+  }
 }
-const opticalReference = opticalBounds[0];
-for (const target of opticalBounds.slice(1)) {
-  assertMatchingOpticalRatios(opticalReference, target);
+// Each optical group shares its first target's ink ratios: the tiles at the
+// distribution scale, and the maskable tiles at maskableScale.
+const opticalReferences = new Map();
+for (const target of opticalBounds) {
+  const group = target.opticalGroup ?? "tile";
+  if (!opticalReferences.has(group)) {
+    opticalReferences.set(group, target);
+    continue;
+  }
+  assertMatchingOpticalRatios(opticalReferences.get(group), target);
 }
 
-const splashTargets = createSplashTargets(BRAND_NAVY, BRAND_WHITE);
+const splashTargets = createSplashTargets(palette);
 
 for (const target of splashTargets) {
   const inspected = {
     ...target,
     bounds: readInkBounds(target.relativePath, {
-      ink: target.ink,
+      inks: inksOf(target),
       background: target.background,
     }),
   };
   assertOpticalBounds(inspected);
   assertCenteredArtwork(inspected);
 }
+
+// Crew assets: each node, left to right, carries its crew slot color, and the
+// tile is large enough for crew (crewTileMinPx device px).
+for (const target of createCrewNodeTargets(palette, {
+  distributionScale: brandConfig.distributionScale,
+  maskableScale: brandConfig.maskableScale,
+})) {
+  assertNodeColors({
+    ...target,
+    geometry,
+    distributionScale: brandConfig.distributionScale,
+    minimumSide: CREW_TILE_MIN_PX,
+  });
+}
+
+// A crew asset holds only its background, the body ink and the four node
+// colors (and their antialiased blends): no stray hue, no wrong crew set.
+for (const target of [...opticalIconTargets, ...splashTargets]) {
+  if (!target.nodeColors) continue;
+  let image;
+  try {
+    image = readImage(target.relativePath);
+  } catch {
+    continue; // readInkBounds above already reported the unreadable file.
+  }
+  assertPalette({
+    label: target.relativePath,
+    image,
+    inks: inksOf(target),
+    background: target.background,
+    reason: "the body ink plus its crew nodes",
+  });
+}
+
+// One-ink assets: favicon tiles, the GitHub badge and the Android themed layer.
+for (const target of createOneInkTargets(palette)) {
+  let image;
+  try {
+    image = readImage(target.relativePath);
+  } catch (error) {
+    failures.push(
+      `Unable to read ${target.relativePath}: ${error instanceof Error ? error.message : error}`,
+    );
+    continue;
+  }
+  assertPalette({
+    label: target.relativePath,
+    image,
+    inks: [target.ink],
+    background: target.background,
+    reason: target.reason,
+  });
+  if (target.greyscale) {
+    const colored = countNonGreyscalePixels(image);
+    if (colored > 0) {
+      failures.push(
+        `${target.relativePath} must be greyscale (the system tints it by luminance); found ${colored} colored pixels.`,
+      );
+    }
+  }
+  if (target.transparentGround) {
+    assertTransparentGround(target.relativePath, image, [target.ink]);
+  }
+  if (target.matchesAlphaOf) {
+    assertMatchingAlpha(
+      target.relativePath,
+      target.matchesAlphaOf,
+      `${target.relativePath} must share the silhouette (alpha mask) of ${target.matchesAlphaOf}.`,
+    );
+  }
+}
+
+/**
+ * The iOS Dark icon paints only the mark: transparent corners and ground, and
+ * every visible pixel is the white body or a crew color, so the system's own
+ * dark background shows through.
+ */
+function assertTransparentGround(label, image, inks) {
+  const offInk = countOffInkVisiblePixels(image, { inks });
+  if (offInk > 0) {
+    failures.push(
+      `${label} must paint only the mark on a transparent ground; found ${offInk} visible pixels of another color.`,
+    );
+  }
+  const corners = [
+    [0, 0],
+    [image.width - 1, 0],
+    [0, image.height - 1],
+    [image.width - 1, image.height - 1],
+  ];
+  if (corners.some(([x, y]) => pixelAt(image, x, y)[3] !== 0)) {
+    failures.push(`${label} must keep a fully transparent ground (its corners are not).`);
+  }
+}
+
+{
+  let image;
+  try {
+    image = readImage(IOS_DARK_ICON_PATH);
+  } catch {
+    image = null; // The PNG contracts above report a missing file.
+  }
+  if (image) assertTransparentGround(IOS_DARK_ICON_PATH, image, [BRAND_WHITE, ...palette.crewDark]);
+}
+
+const pngFavicon = {
+  ...PNG_FAVICON_TARGET,
+  bounds: readInkBounds(PNG_FAVICON_TARGET.relativePath, {
+    ink: BRAND_WHITE,
+    background: BRAND_NAVY,
+  }),
+};
+assertOpticalBounds(pngFavicon);
+assertCenteredArtwork(pngFavicon);
 
 for (const relativePath of GOOGLE_PLAY_ICON_PATHS) {
   const absolutePath = resolve(relativePath);
@@ -137,22 +381,23 @@ expectContains(
   "The favicon must reverse to brand paper on dark browser chrome.",
 );
 
-const geometryPath = "packages/frontend/src/assets/octo-mark.geometry.json";
-const geometry = JSON.parse(readText(geometryPath) || "{}");
-if (geometry.viewBox !== "0 0 64 64" || geometry.transform !== "translate(-1.3 -1.7)") {
-  failures.push(`${geometryPath} must retain the established Octopus Merge coordinate system.`);
-}
-if (geometry.paths?.length !== 5 || geometry.circles?.length !== 4) {
-  failures.push(`${geometryPath} must contain the five canonical paths and four detached nodes.`);
-}
+// icon.svg is drawn at 16 CSS px: the small cut, one ink, full-bleed.
+assertCanonicalGeometry(canonicalSvg, smallGeometry, "packages/frontend/public/icon.svg");
 expectContains(
   canonicalSvg,
-  `transform="translate(${formatSvgNumber(32 * (1 - brandConfig.distributionScale))} ${formatSvgNumber(
-    32 * (1 - brandConfig.distributionScale),
-  )}) scale(${formatSvgNumber(brandConfig.distributionScale)})"`,
-  "The distribution icon must keep the shared 15% optical padding.",
+  '<g class="octo-ink">',
+  "The adaptive favicon must draw the small cut full-bleed in one ink, with no transform.",
 );
-assertCanonicalGeometry(canonicalSvg, geometry, "packages/frontend/public/icon.svg");
+expectNotContains(
+  canonicalSvg,
+  "scale(",
+  "The adaptive favicon is pixel-fitted full-bleed; it must not take the distribution scale.",
+);
+expectNotContains(
+  canonicalSvg,
+  geometry.paths?.[0] ?? "main-cut-path",
+  "The adaptive favicon must not draw the main cut; marks at 24 CSS px and below use the small cut.",
+);
 expectNotContains(
   canonicalSvg,
   "M15 22.5 C15 12 22 5 32 5",
@@ -171,6 +416,31 @@ expectContains(
   `fill="${brandConfig.colors?.ink}"`,
   "The in-product Octo avatar must use the positive brand-ink lockup.",
 );
+expectContains(
+  avatarSvg,
+  `transform="translate(${formatSvgNumber(32 * (1 - brandConfig.distributionScale))} ${formatSvgNumber(
+    32 * (1 - brandConfig.distributionScale),
+  )}) scale(${formatSvgNumber(brandConfig.distributionScale)})"`,
+  "The Octo avatar must keep the shared 15% optical padding of the main cut.",
+);
+// Octo's coin is one participant and the favicon is a monochrome context:
+// neither SVG may carry a crew color.
+const crewHexes = [
+  ...(brandConfig.colors?.crew?.light ?? []),
+  ...(brandConfig.colors?.crew?.dark ?? []),
+];
+for (const [svgPath, svg] of [
+  [avatarSvgPath, avatarSvg],
+  ["packages/frontend/public/icon.svg", canonicalSvg],
+]) {
+  for (const hex of crewHexes) {
+    expectNotContains(
+      svg.toLowerCase(),
+      hex.toLowerCase(),
+      `${svgPath} must stay one ink; found crew color ${hex}.`,
+    );
+  }
+}
 assertCanonicalGeometry(avatarSvg, geometry, avatarSvgPath);
 
 const octoMarkComponent = readText("packages/frontend/src/components/OctoMark.tsx");
@@ -193,12 +463,26 @@ expectNotContains(
   "#0f1a2a",
   "Do not restore the retired near-duplicate midnight color; use brand ink.",
 );
+const themeBlocks = new Map();
+for (const match of themeStyles.matchAll(/(?:^|\n)(:root|\.dark) \{([^}]*)\}/g)) {
+  themeBlocks.set(match[1], `${themeBlocks.get(match[1]) ?? ""}${match[2]}`);
+}
+for (const [selector, token, value] of createCrewTokenContracts(brandConfig.colors?.crew)) {
+  expectContains(
+    themeBlocks.get(selector) ?? "",
+    `${token}: ${value};`,
+    `tailwind.css ${selector} ${token} must equal the icon crew color ${value} (${brandConfigPath}).`,
+  );
+}
 
+// Inside the window navy is only ink: the browser and PWA chrome take the
+// page's own surface. The manifest cannot vary by color scheme, so it holds
+// the light (default) launch pair; the page's per-scheme meta takes over.
 const manifest = readText("packages/frontend/public/manifest.webmanifest");
 expectContains(
   manifest,
-  `"theme_color": "${brandConfig.colors?.ink}"`,
-  "The PWA theme color must use Instafy navy.",
+  `"theme_color": "${brandConfig.colors?.paper}"`,
+  "The PWA theme color must be brand paper, the launch surface it frames.",
 );
 expectContains(
   manifest,
@@ -208,10 +492,62 @@ expectContains(
 expectContains(manifest, '"purpose": "maskable"', "The PWA manifest must expose maskable icons.");
 
 const frontendIndex = readText("packages/frontend/index.html");
+const themeColorMetas = [...frontendIndex.matchAll(/<meta\b[^>]*\bname="theme-color"[^>]*>/gi)].map(
+  ([tag]) => tag,
+);
+const expectedThemeColorMetas = [
+  `<meta name="theme-color" media="(prefers-color-scheme: light)" content="${brandConfig.colors?.paper}" />`,
+  `<meta name="theme-color" media="(prefers-color-scheme: dark)" content="${brandConfig.colors?.canvasDark}" />`,
+];
+if (themeColorMetas.join("\n") !== expectedThemeColorMetas.join("\n")) {
+  failures.push(
+    `packages/frontend/index.html must declare exactly one theme-color per color scheme: brand paper in light and the dark canvas in dark; found ${
+      themeColorMetas.join(" ") || "none"
+    }.`,
+  );
+}
 expectContains(
   frontendIndex,
-  `<meta name="theme-color" content="${brandConfig.colors?.ink}" />`,
-  "The browser theme color must use Instafy navy.",
+  `var themeColor = resolvedTheme === "dark" ? "${brandConfig.colors?.canvasDark}" : "${brandConfig.colors?.paper}";`,
+  "index.html must apply the stored app theme to every theme-color tag before first paint.",
+);
+const themeProviderPath = "packages/frontend/src/theme/ThemeProvider.tsx";
+const browserThemeColor = /const BROWSER_THEME_COLOR = \{\s*light: "([^"]+)",\s*dark: "([^"]+)",?\s*\}/.exec(
+  readText(themeProviderPath),
+);
+if (
+  browserThemeColor?.[1] !== brandConfig.colors?.paper ||
+  browserThemeColor?.[2] !== brandConfig.colors?.canvasDark
+) {
+  failures.push(
+    `${themeProviderPath} BROWSER_THEME_COLOR must sync theme-color to brand paper (light) and the dark canvas (dark).`,
+  );
+}
+for (const [label, content] of [
+  ["packages/frontend/index.html", themeColorMetas.join("\n")],
+  ["packages/frontend/public/manifest.webmanifest", manifest],
+]) {
+  expectNotContains(
+    content.toLowerCase(),
+    `"${brandConfig.colors?.ink}"`,
+    `${label} must not paint browser or PWA chrome brand ink; inside the window navy is only ink.`,
+  );
+}
+// Any rel token "icon" (rel="icon", "shortcut icon", "alternate icon", in any
+// attribute order) lets a browser pick the file for the tab.
+for (const { href } of findIconLinks(frontendIndex)) {
+  if (!FAVICON_LINK_PATHS.includes(href)) {
+    failures.push(
+      `packages/frontend/index.html offers ${href || "a link without href"} as a favicon; use one of ${FAVICON_LINK_PATHS.join(
+        ", ",
+      )}.`,
+    );
+  }
+}
+expectContains(
+  frontendIndex,
+  '<link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png?v=',
+  "The PNG favicon fallback must be the one-ink 32px small-cut tile.",
 );
 
 const serviceWorker = readText("packages/frontend/public/sw.js");
@@ -229,24 +565,221 @@ for (const [relativePath, content, assetPaths] of createRevisionedAssetContracts
   assertAssetRevision(relativePath, content, assetPaths, ICON_CACHE_REVISION);
 }
 
-checkFavicon("packages/frontend/public/favicon.ico", [16, 32, 48]);
-
-const desktopPackage = JSON.parse(readText("packages/desktop-app/package.json") || "{}");
-for (const platform of ["mac", "linux", "win"]) {
-  const icon = desktopPackage.build?.[platform]?.icon;
-  if (icon !== "assets/icon.png") {
-    failures.push(`packages/desktop-app/package.json build.${platform}.icon must use assets/icon.png.`);
+const faviconPath = "packages/frontend/public/favicon.ico";
+checkFavicon(faviconPath, FAVICON_ENTRY_CONTRACTS.map(({ size }) => size));
+const faviconEntries = readIcoEntries(faviconPath);
+for (const contract of FAVICON_ENTRY_CONTRACTS) {
+  const entry = faviconEntries.find(({ size }) => size === contract.size);
+  if (!entry) continue;
+  const label = `${faviconPath} ${contract.size}px entry`;
+  assertPalette({
+    label,
+    image: entry.image,
+    inks: [BRAND_WHITE],
+    background: BRAND_NAVY,
+    reason: "one ink (favicon.ico is a monochrome context)",
+  });
+  // The small cut fills 56 of 64 units full-bleed; the main cut at the
+  // distribution scale is markedly smaller, so the ink box tells them apart.
+  assertOpticalBounds({
+    relativePath: label,
+    viewport: { x: 0, y: 0, width: contract.size, height: contract.size },
+    expectedInk: contract.expectedInk,
+    artworkLabel: `one-ink ${contract.cut}-cut Octo`,
+    bounds: measureInkBounds(entry.image, { ink: BRAND_WHITE, background: BRAND_NAVY }),
+  });
+  if (contract.pixelNodes) {
+    assertPixelNodes({ label, image: entry.image, geometry: smallGeometry, ink: BRAND_WHITE });
   }
 }
 
-const iosAppIconContents = readText(
-  "packages/frontend/ios/App/App/Assets.xcassets/AppIcon.appiconset/Contents.json",
-);
-expectContains(
-  iosAppIconContents,
-  '"filename" : "AppIcon-512@2x.png"',
-  "The iOS AppIcon catalog must consume the generated 1024px icon.",
-);
+// Desktop: electron-builder takes icon.icns (macOS) and icon.ico (Windows) as
+// they are, so their small representations are what users see at 16-32 px.
+const desktopPackage = JSON.parse(readText("packages/desktop-app/package.json") || "{}");
+for (const [platform, expectedIcon] of Object.entries(DESKTOP_BUILD_ICONS)) {
+  const icon = desktopPackage.build?.[platform]?.icon;
+  if (icon !== expectedIcon) {
+    failures.push(
+      `packages/desktop-app/package.json build.${platform}.icon must use ${expectedIcon}; found ${icon}.`,
+    );
+  }
+}
+
+/**
+ * One desktop representation: size, treatment, cut, nodes and the rounded
+ * tile. A `grid` representation (macOS) draws the tile as the body of the
+ * macOS icon grid, so every rule applies to that body and its margins must be
+ * fully transparent.
+ */
+function checkDesktopRepresentation(label, image, { side, cut, crew, grid = false }) {
+  if (image.width !== side || image.height !== side) {
+    failures.push(`${label} must be ${side}x${side}; found ${image.width}x${image.height}.`);
+    return;
+  }
+  const { inset, body } = grid ? macGridBody(side) : { inset: 0, body: side };
+  if (grid) {
+    const outside = countVisiblePixelsOutside(image, {
+      x0: inset,
+      y0: inset,
+      x1: inset + body,
+      y1: inset + body,
+    });
+    if (outside > 0) {
+      failures.push(
+        `${label} must keep the macOS grid's ${inset}px margins transparent around its ${body}px body; found ${outside} visible pixels.`,
+      );
+    }
+    // The body fills its box: opaque at the middle of each edge. (Its color
+    // is the palette check's job; in a 12 px body the small cut's dome
+    // reaches the top edge pixel.)
+    const middle = Math.floor(side / 2);
+    for (const [x, y] of [
+      [middle, inset],
+      [middle, inset + body - 1],
+      [inset, middle],
+      [inset + body - 1, middle],
+    ]) {
+      const actual = pixelAt(image, x, y);
+      if (actual[3] !== 255) {
+        failures.push(
+          `${label} must fill its ${body}px grid body to the edges; found rgba(${actual.join(",")}) at ${x},${y}.`,
+        );
+        break;
+      }
+    }
+  }
+  const expectsCrew = cut === "main" && body >= CREW_TILE_MIN_PX;
+  if (crew !== expectsCrew) {
+    failures.push(
+      `${label}: the contract must give crew to main-cut representations of at least ${CREW_TILE_MIN_PX} device px only.`,
+    );
+  }
+  const inks = crew ? [BRAND_WHITE, ...palette.crewDark] : [BRAND_WHITE];
+  assertPalette({
+    label,
+    image,
+    inks,
+    background: BRAND_NAVY,
+    reason: crew
+      ? "the white body plus the dark crew nodes"
+      : `one ink (under the ${CREW_TILE_MIN_PX} device px crew threshold)`,
+  });
+  const viewport = { x: inset, y: inset, width: body, height: body };
+  const bounds = measureInkBounds(image, { inks, background: BRAND_NAVY });
+  const target = {
+    relativePath: label,
+    viewport,
+    expectedInk: expectedTileInk(body, cut),
+    artworkLabel: `${crew ? "crew" : "one-ink"} ${cut}-cut Octo`,
+    bounds,
+  };
+  assertOpticalBounds(target);
+  assertCenteredArtwork(target);
+  if (crew) {
+    assertNodeColors({
+      relativePath: label,
+      image,
+      placement: { x: inset, y: inset, side: body },
+      geometry,
+      distributionScale: brandConfig.distributionScale,
+      nodeColors: palette.crewDark,
+      minimumSide: CREW_TILE_MIN_PX,
+    });
+  }
+  if (cut === "small" && body === 16) {
+    assertPixelNodes({ label, image, geometry: smallGeometry, ink: BRAND_WHITE });
+  }
+  // The desktop tile is a rounded rect: its corners stay transparent (on the
+  // grid, the body's own corner pixel is mostly outside its rounded corner).
+  if (pixelAt(image, inset, inset)[3] >= (grid ? 128 : 1)) {
+    failures.push(`${label} must keep the rounded tile's transparent corners.`);
+  }
+}
+
+const icnsEntries = readIconContainer(DESKTOP_ICNS_PATH, decodeIcnsEntries);
+const icnsTypes = icnsEntries.map(({ type }) => type).sort();
+const expectedIcnsTypes = DESKTOP_ICNS_CONTRACTS.map(({ type }) => type).sort();
+if (icnsEntries.length > 0 && icnsTypes.join(",") !== expectedIcnsTypes.join(",")) {
+  failures.push(
+    `${DESKTOP_ICNS_PATH} must contain exactly ${expectedIcnsTypes.join("/")}; found ${icnsTypes.join("/")}.`,
+  );
+}
+for (const contract of DESKTOP_ICNS_CONTRACTS) {
+  const entry = icnsEntries.find(({ type }) => type === contract.type);
+  if (!entry) continue;
+  const label = `${DESKTOP_ICNS_PATH} ${contract.type} (${contract.side}px)`;
+  checkDesktopRepresentation(label, entry.image, contract);
+}
+
+const icoEntries = readIcoEntries(DESKTOP_ICO_PATH);
+const icoSides = icoEntries.map(({ size }) => size);
+const expectedIcoSides = DESKTOP_ICO_CONTRACTS.map(({ side }) => side);
+if (icoEntries.length > 0 && icoSides.join(",") !== expectedIcoSides.join(",")) {
+  failures.push(
+    `${DESKTOP_ICO_PATH} must contain ${expectedIcoSides.join("/")}px entries; found ${icoSides.join("/")}.`,
+  );
+}
+for (const contract of DESKTOP_ICO_CONTRACTS) {
+  const entry = icoEntries.find(({ size }) => size === contract.side);
+  if (!entry) continue;
+  const label = `${DESKTOP_ICO_PATH} ${contract.side}px entry`;
+  if (entry.format !== contract.format || entry.bitCount !== 32) {
+    failures.push(
+      `${label} must be a 32-bit ${contract.format === "png" ? "PNG" : "DIB (BMP)"} entry; classic DIB entries under 256 px keep NSIS and rcedit compatible.`,
+    );
+  }
+  checkDesktopRepresentation(label, entry.image, contract);
+}
+
+const iosAppIconContentsPath =
+  "packages/frontend/ios/App/App/Assets.xcassets/AppIcon.appiconset/Contents.json";
+let iosAppIconImages = null;
+try {
+  iosAppIconImages = JSON.parse(readText(iosAppIconContentsPath) || "{}").images;
+} catch (error) {
+  failures.push(`${iosAppIconContentsPath} is not valid JSON: ${error}`);
+}
+if (iosAppIconImages && canonicalJson(iosAppIconImages) !== canonicalJson(IOS_APP_ICON_IMAGES)) {
+  failures.push(
+    `${iosAppIconContentsPath} must list exactly the generated 1024px crew icon and the one-ink 20pt@2x slot, each in the any, Dark and Tinted appearances.`,
+  );
+}
+const iosSplashContentsPath =
+  "packages/frontend/ios/App/App/Assets.xcassets/Splash.imageset/Contents.json";
+let iosSplashImages = null;
+try {
+  iosSplashImages = JSON.parse(readText(iosSplashContentsPath) || "{}").images;
+} catch (error) {
+  failures.push(`${iosSplashContentsPath} is not valid JSON: ${error}`);
+}
+if (iosSplashImages && canonicalJson(iosSplashImages) !== canonicalJson(IOS_SPLASH_IMAGES)) {
+  failures.push(
+    `${iosSplashContentsPath} must list the positive splash and its reverse (dark appearance) twin at 1x, 2x and 3x.`,
+  );
+}
+// The 40 px slot in every appearance: iOS masks it like every other size, so
+// it keeps the main cut, one ink, centered like the default slot.
+for (const [relativePath, background] of [
+  [IOS_NOTIFICATION_ICON_PATH, BRAND_NAVY],
+  [IOS_DARK_NOTIFICATION_ICON_PATH, CANVAS_DARK],
+  [IOS_TINTED_NOTIFICATION_ICON_PATH, [0, 0, 0]],
+]) {
+  let image;
+  try {
+    image = readImage(relativePath);
+  } catch {
+    continue; // The PNG contracts above report a missing file.
+  }
+  const target = {
+    relativePath,
+    viewport: { x: 0, y: 0, width: 40, height: 40 },
+    expectedInk: expectedTileInk(40, "main"),
+    artworkLabel: "one-ink main-cut Octo",
+    bounds: measureInkBounds(image, { ink: BRAND_WHITE, background }),
+  };
+  assertOpticalBounds(target);
+  assertCenteredArtwork(target);
+}
 const iosProject = readText("packages/frontend/ios/App/App.xcodeproj/project.pbxproj");
 expectContains(
   iosProject,
@@ -270,8 +803,13 @@ for (const relativePath of ADAPTIVE_ICON_PATHS) {
   const adaptiveIcon = readText(relativePath);
   expectContains(
     adaptiveIcon,
-    '<monochrome android:drawable="@mipmap/ic_launcher_foreground"/>',
-    `${relativePath} must expose the Android 13 themed-icon layer.`,
+    '<foreground android:drawable="@mipmap/ic_launcher_foreground"/>',
+    `${relativePath} must use the generated crew foreground layer.`,
+  );
+  expectContains(
+    adaptiveIcon,
+    '<monochrome android:drawable="@mipmap/ic_launcher_monochrome"/>',
+    `${relativePath} must expose the one-ink Android 13 themed-icon layer, never the crew foreground.`,
   );
 }
 
@@ -284,10 +822,43 @@ expectContains(
   "Android adaptive icons must use the brand-navy reverse tile.",
 );
 
+// The reverse splash's launch window: the generated ground, and the launch
+// theme that paints it under the system splash and both system bars.
+for (const [theme, relativePath] of Object.entries(ANDROID_SPLASH_BACKGROUND_PATHS)) {
+  const hex = theme === "dark" ? brandConfig.colors?.canvasDark : brandConfig.colors?.paper;
+  expectContains(
+    readText(relativePath),
+    `<color name="splash_background">${hex?.toUpperCase()}</color>`,
+    `${relativePath} must hold the ${theme} launch ground ${hex}.`,
+  );
+}
+for (const { relativePath, items } of ANDROID_LAUNCH_THEME_CONTRACTS) {
+  const launchTheme =
+    /<style name="AppTheme\.NoActionBarLaunch" parent="Theme\.SplashScreen">([\s\S]*?)<\/style>/.exec(
+      readText(relativePath),
+    )?.[1] ?? "";
+  for (const item of items) {
+    expectContains(
+      launchTheme,
+      item,
+      `${relativePath} AppTheme.NoActionBarLaunch must contain ${item}.`,
+    );
+  }
+}
+
 for (const stalePath of STALE_ASSET_PATHS) {
   if (fs.existsSync(resolve(stalePath))) {
     failures.push(`${stalePath} is retired artwork and must not be restored.`);
   }
+}
+
+/** JSON with object keys sorted, so key order never decides a comparison. */
+function canonicalJson(value) {
+  return JSON.stringify(value, (_key, item) =>
+    item && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b)))
+      : item,
+  );
 }
 
 if (failures.length > 0) {

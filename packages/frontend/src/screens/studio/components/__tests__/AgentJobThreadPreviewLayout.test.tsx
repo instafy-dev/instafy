@@ -9,6 +9,11 @@ import {
   mergeAndSortMessages,
 } from "../../../../conversations/conversationMessageUtils";
 import { cancelAgentJob } from "../../../../services/runtimeController/jobs";
+import {
+  classTokens,
+  expectAvatarCoinLightEdge,
+  expectCanonicalOctoCoin,
+} from "../../../../components/__tests__/octoCoinExpectations";
 import type { ChatMessage } from "../../types";
 import {
   AgentJobThreadPreviewLayout,
@@ -2601,7 +2606,21 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[data-testid="agent-thread-branch-row"]')?.textContent).toContain(
       "Preview cleanup smoke",
     );
-    expect(container.querySelector('[aria-label="Participants: @octo, @ben"]')).not.toBeNull();
+    const participantStack = container.querySelector('[aria-label="Participants: @octo, @ben"]');
+    expect(participantStack).not.toBeNull();
+    // Octo is its coin (OctoCoin), never the static avatar file as an <img>.
+    expect(participantStack?.querySelector("img")).toBeNull();
+    expectCanonicalOctoCoin(participantStack?.querySelector('[aria-label="@octo"] > [data-octo-coin]'));
+    expect(participantStack?.querySelector('[aria-label="@ben"]')?.textContent).toBe("B");
+    // Every face carries the shared coin shadow outside a clean white
+    // separator: Ben's face as its own white border, Octo's as a ring on the
+    // coin that draws above the coin's shadow. Neither slot is positioned, so
+    // tree order decides the overlap.
+    const octoSlot = participantStack?.querySelector('[aria-label="@octo"]');
+    expect(classTokens(octoSlot)).toEqual(expect.arrayContaining(["p-px", "*:ring-1", "*:ring-white", "dark:*:ring-slate-950"]));
+    expect(classTokens(octoSlot).filter((token) => /^(border|shadow|relative|absolute|z-)/.test(token))).toEqual([]);
+    const benTokens = expectAvatarCoinLightEdge(participantStack?.querySelector('[aria-label="@ben"]'), ["border", "border-white"]);
+    expect(benTokens).toEqual(expect.arrayContaining(["dark:border-slate-950", "dark:shadow-sm"]));
     const hiddenActivityIndicator = container.querySelector(
       '[aria-label="3 child thread updates"]',
     ) as HTMLElement | null;

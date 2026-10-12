@@ -34,8 +34,8 @@ import {
   upsertRememberedAccount,
 } from "./login/rememberedAccounts";
 import { theme } from "../styles/theme";
+import { useMarketingCanvas } from "../theme/useMarketingCanvas";
 import { applyPageMeta } from "../utils/seo";
-import { TentacleBackdrop } from "./landing/LandingTentacleScene";
 
 type LoginIntent = "login" | "signup";
 
@@ -165,6 +165,9 @@ export function LoginPage() {
     }
   }, [location.search]);
   const isExtensionEmbed = embedMode.startsWith("extension");
+  // The document takes the same paper canvas as the page, so overscroll
+  // matches it in both themes.
+  useMarketingCanvas();
   const isNativeApp = Capacitor.isNativePlatform();
   const showBackToLanding = computeShowBackToLanding({ isNativeApp, isExtensionEmbed });
   const recoveryMode = useMemo(
@@ -1183,7 +1186,9 @@ export function LoginPage() {
   const renderBody = () => (
     <div>
       <div className="text-center">
-        <OctoMark className="mx-auto mb-5 h-12 w-12 text-brand-ink dark:text-brand-paper" />
+        {/* 48px on a flat surface (the opaque card, or the plain paper on
+            phones and in extension embeds), so the nodes take the crew colours. */}
+        <OctoMark colorway="crew" className="mx-auto mb-5 h-12 w-12 text-brand-ink dark:text-brand-paper" />
         <Heading level={1} variant="section" className="tracking-tight">
           {stepTitle}
         </Heading>
@@ -1205,28 +1210,19 @@ export function LoginPage() {
 
   return (
     <div
-      className="relative isolate min-h-screen min-h-[100dvh] w-full overflow-x-hidden bg-gradient-to-br from-slate-100 via-white to-slate-50 text-slate-900 dark:bg-none dark:bg-[var(--color-studio-dark-canvas)] dark:text-slate-100"
+      className="relative isolate min-h-screen min-h-[100dvh] w-full overflow-x-hidden bg-[var(--marketing-canvas)] text-slate-900 dark:text-slate-100"
       data-testid="login-page"
     >
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-0 hidden overflow-hidden sm:block"
-        data-testid="login-ambient-glow"
-      >
-        <div className="absolute left-1/2 top-1/2 h-[560px] w-[560px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary-400/10 blur-3xl dark:bg-primary-500/10" />
-      </div>
-
       {!isExtensionEmbed ? (
-        // Quiet version of the landing scene: arms frame the edges while the
-        // form sits in the artwork's clear center. sm+ widths only, dimmed so
-        // the form keeps the focus. Extension embeds stay plain; the web and
-        // desktop-shell surfaces both get the scene in both themes.
+        // The landing's paper and dot grid, full-bleed behind the card at sm+
+        // widths. Phones keep plain paper so the form reads cleanly, and
+        // extension embeds stay plain; the web and desktop-shell surfaces both
+        // get the grid in both themes.
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-0 hidden overflow-hidden opacity-70 sm:block"
-        >
-          <TentacleBackdrop fadeBottom={false} />
-        </div>
+          data-testid="login-dot-grid"
+          className="marketing-dot-grid pointer-events-none absolute inset-0 z-0 hidden sm:block"
+        />
       ) : null}
 
       <div
@@ -1241,13 +1237,11 @@ export function LoginPage() {
           <section
             className={[
               "w-full p-0",
-              // The card carves a bounded region out of an unbounded canvas.
-              // The desktop shell used to skip it because a plain window was
-              // already that region, but the tentacle backdrop reintroduced
-              // the unbounded canvas there, so every backdrop surface gets
-              // the card again. Extension embeds are narrow, plain panels and
-              // never reach the sm: card styles.
-              "sm:rounded-[32px] sm:border sm:border-white/70 sm:bg-white/90 sm:shadow-[0_18px_60px_rgba(15,23,42,0.12)] sm:dark:border-slate-800/80 sm:dark:bg-slate-950/70 sm:dark:shadow-[0_18px_60px_rgba(0,0,0,0.5)]",
+              // The card carves a bounded region out of the dot-grid canvas.
+              // It is opaque, so no dot shows through the form and the logo
+              // sits on a flat surface. Extension embeds are narrow, plain
+              // panels and never reach the sm: card styles.
+              "sm:rounded-[32px] sm:border sm:border-slate-200/70 sm:bg-white sm:shadow-[0_18px_60px_rgba(15,23,42,0.12)] sm:dark:border-[color:var(--color-studio-dark-panel-border)] sm:dark:bg-[var(--color-studio-dark-panel)] sm:dark:shadow-[0_18px_60px_rgba(0,0,0,0.5)]",
               isExtensionEmbed ? "sm:p-6" : "sm:p-8 sm:[@media(max-height:740px)]:p-6",
             ].join(" ")}
           >

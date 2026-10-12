@@ -4,6 +4,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConversationRoster } from "../ConversationRoster";
+import {
+  classTokens,
+  expectAvatarCoinLightEdge,
+} from "../../../../components/__tests__/octoCoinExpectations";
 import { setParticipantsDrawerOpen } from "../chatParticipantsStore";
 import type {
   ConversationRosterAgent,
@@ -72,6 +76,23 @@ describe("ConversationRoster", () => {
     expect(stackedAvatars?.[0]?.getAttribute("data-testid")).toBe("chat-avatar-human");
     expect(stackedAvatars?.[2]?.getAttribute("data-testid")).toBe("chat-avatar-assistant");
     expect(container.querySelector('[data-testid="conversation-roster-overflow"]')).toBeNull();
+  });
+
+  it("separates overlapping faces with a ring on each face, above its coin shadow", async () => {
+    await renderRoster([human("user-peer", "Ada")], [agent("octo", "Octo", "octo"), agent("reviewer", "Reviewer", "reviewer")]);
+    const slots = Array.from(container.querySelector('[data-testid="conversation-roster"] > span')?.children ?? []);
+    expect(slots).toHaveLength(3);
+    for (const slot of slots) {
+      // The separator ring is painted on the face (*:), so it composes above
+      // the face's own avatar coin shadow instead of under it, and the slot
+      // stays unpositioned so tree order decides the overlap.
+      expect(classTokens(slot)).toEqual(
+        expect.arrayContaining(["rounded-full", "*:ring-1", "*:ring-white", "dark:*:ring-[var(--color-studio-dark-panel)]"]),
+      );
+      expect(classTokens(slot).filter((token) => /^(relative|absolute|z-|ring-|shadow-)/.test(token))).toEqual([]);
+      expectAvatarCoinLightEdge(slot.firstElementChild);
+    }
+    expect(slots[1]?.firstElementChild?.hasAttribute("data-octo-coin")).toBe(true);
   });
 
   it("collapses members past five into a +N overflow", async () => {

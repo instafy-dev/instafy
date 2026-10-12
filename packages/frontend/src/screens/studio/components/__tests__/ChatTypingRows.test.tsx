@@ -8,29 +8,15 @@ import type { ChatMessage } from "../../types";
 import { ChatMessageAvatar } from "../ChatMessageAvatar";
 import { ChatTypingRows } from "../ChatTypingRows";
 import { resolveTypingIndicatorState } from "../typingIndicatorState";
+import { expectCanonicalOctoCoin } from "../../../../components/__tests__/octoCoinExpectations";
 
-function classTokens(element: Element): string[] {
-  return (element.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
-}
-
-// jsdom cannot resolve Tailwind's dark: variants, so the white coin is read
-// from the classes: the mark is inked brand-ink on a bg-white surface inside
-// the face, and nothing between the mark and that face swaps either color
-// for dark mode (docs/Brand.md keeps the Octo coin white in both themes).
-function expectWhiteOctoCoin(face: Element | null) {
+// The face is Octo's coin (OctoCoin, docs/Brand.md): white with the shared
+// avatar coin shadow in light, reversed in dark, one ink. jsdom cannot resolve dark: variants, so the coin
+// is read from its classes (octoCoinExpectations).
+function expectOctoCoinFace(face: Element | null) {
   expect(face).toBeInstanceOf(Element);
-  const mark = face!.querySelector(".octo-mark");
-  expect(mark).not.toBeNull();
-  const ink = mark!.closest('[class~="text-brand-ink"]');
-  const coin = mark!.closest('[class~="bg-white"]');
-  expect(ink && face!.contains(ink)).toBe(true);
-  expect(coin && face!.contains(coin)).toBe(true);
-  for (let node: Element | null = mark; node && node !== face!.parentElement; node = node.parentElement) {
-    expect(classTokens(node).filter((token) => token.startsWith("dark:text-"))).toEqual([]);
-  }
-  for (let node: Element | null = mark; node && node !== coin!.parentElement; node = node.parentElement) {
-    expect(classTokens(node).filter((token) => token.startsWith("dark:bg-"))).toEqual([]);
-  }
+  const coin = face!.matches("[data-octo-coin]") ? face : face!.querySelector("[data-octo-coin]");
+  return expectCanonicalOctoCoin(coin);
 }
 
 describe("ChatTypingRows", () => {
@@ -226,6 +212,15 @@ describe("ChatTypingRows", () => {
     const boundary = container.querySelector('[data-testid="chat-speaker-boundary"]');
     expect(boundary?.getAttribute("data-chat-speaker-kind")).toBe("boundary");
     expect(container.querySelector('[data-testid="chat-speaker-marker"]')).toBeNull();
+    // The two overlapping faces keep the roster's separator ring, painted in
+    // the chat surface's own background, so the coins never merge.
+    const faces = Array.from(container.querySelectorAll('[data-testid="assistant-typing-stack-face"]'));
+    expect(faces).toHaveLength(2);
+    for (const face of faces) {
+      expect(face.className.split(/\s+/)).toEqual(
+        expect.arrayContaining(["rounded-full", "*:ring-1", "*:ring-white", "dark:*:ring-[var(--color-studio-dark-panel)]"]),
+      );
+    }
   });
 
   it("animates only the Octo run that is actually in progress in a multi-agent row", async () => {
@@ -305,11 +300,10 @@ describe("ChatTypingRows", () => {
     expect(container.querySelector('[data-testid="assistant-thinking-octo-compact"]')).toBeNull();
   });
 
-  it("draws the phone-only thinking Octo as the same white coin as its chat face", async () => {
+  it("draws the phone-only thinking Octo as the same coin as its chat face", async () => {
     // Below sm the avatar gutter is hidden and this indicator is the row's
-    // only face. It used to be the bare reverse logo mark, so in dark mode a
-    // white glyph with no coin stood where the reply header then showed the
-    // white Octo coin.
+    // only face. It used to be the bare reverse logo mark, a glyph with no
+    // coin where the reply header then showed Octo's coin.
     await act(async () => {
       root.render(
         <ChatTypingRows
@@ -340,21 +334,21 @@ describe("ChatTypingRows", () => {
 
     const compact = container.querySelector('[data-testid="assistant-thinking-octo-compact"]');
     const gutter = container.querySelector('[data-testid="chat-avatar-assistant"]');
-    expectWhiteOctoCoin(compact);
-    expectWhiteOctoCoin(gutter);
-    const compactMark = compact?.querySelector(".octo-mark");
-    // The same coin surface as the gutter face, not a lookalike.
-    expect(compactMark?.parentElement?.getAttribute("class")).toBe(
-      gutter?.querySelector(".octo-mark")?.parentElement?.getAttribute("class"),
-    );
+    const compactMark = expectOctoCoinFace(compact);
+    const gutterMark = expectOctoCoinFace(gutter);
+    // The same coin as the gutter face, not a lookalike: only the size differs.
+    const withoutSize = (element: Element | null | undefined) =>
+      (element?.getAttribute("class") ?? "").split(/\s+/).filter((token) => !/^[hw]-\d+$/.test(token));
+    expect(withoutSize(compactMark.parentElement)).toEqual(withoutSize(gutterMark.parentElement));
+    expect(compactMark.getAttribute("class")).toBe(gutterMark.getAttribute("class"));
     expect(compact?.closest(".sm\\:hidden")).not.toBeNull();
-    expect(compactMark?.getAttribute("data-octo-motion")).toBe("thinking");
-    expect(compactMark?.getAttribute("data-octo-scroll-reactive")).toBe("true");
+    expect(compactMark.getAttribute("data-octo-motion")).toBe("thinking");
+    expect(compactMark.getAttribute("data-octo-scroll-reactive")).toBe("true");
     // The gutter keeps the only chat-avatar-assistant selector on the row.
     expect(container.querySelectorAll('[data-testid="chat-avatar-assistant"]')).toHaveLength(1);
   });
 
-  it("gives the thinking Octo of a multi-agent row the same white coin", async () => {
+  it("gives the thinking Octo of a multi-agent row the same coin", async () => {
     await act(async () => {
       root.render(
         <ChatTypingRows
@@ -379,7 +373,7 @@ describe("ChatTypingRows", () => {
       );
     });
 
-    expectWhiteOctoCoin(container.querySelector('[data-testid="assistant-thinking-octo-compact"]'));
+    expectOctoCoinFace(container.querySelector('[data-testid="assistant-thinking-octo-compact"]'));
   });
 
   it("keeps workspace startup visibly owned by the assistant avatar", async () => {

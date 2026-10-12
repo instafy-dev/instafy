@@ -9,6 +9,23 @@ const NATIVE_STATUS_BAR_BACKGROUND = {
   light: "#ffffff",
   dark: "#181818",
 } satisfies Record<ResolvedTheme, string>;
+/**
+ * The browser and installed-PWA chrome (`<meta name="theme-color">`): brand
+ * paper in light and the dark canvas in dark, so the bar above the page is
+ * the page's own surface. index.html declares one tag per color scheme and
+ * its inline script applies the stored theme before first paint; this keeps
+ * both tags on the app's resolved theme when it differs from the OS one.
+ */
+const BROWSER_THEME_COLOR = {
+  light: "#ffffff",
+  dark: "#141414",
+} satisfies Record<ResolvedTheme, string>;
+
+function syncBrowserThemeColor(theme: ResolvedTheme) {
+  for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+    meta.setAttribute("content", BROWSER_THEME_COLOR[theme]);
+  }
+}
 
 interface ThemeContextValue {
   themeMode: ThemeMode;
@@ -80,6 +97,7 @@ function applyResolvedTheme(theme: ResolvedTheme) {
     }
     document.documentElement.classList.toggle("dark", theme === "dark");
     document.documentElement.style.colorScheme = theme;
+    syncBrowserThemeColor(theme);
     if (Capacitor.isNativePlatform()) {
       void import("@capacitor/status-bar")
         .then(({ StatusBar, Style }) =>

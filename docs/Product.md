@@ -9,20 +9,23 @@ Entry links go to Studio, which checks authentication before downloading the wor
 visitors see **Open Studio**; signed-out visitors see **Get started** and are sent through login
 with their destination preserved. Opening the public homepage itself does not require signing in.
 
-Login offers separate **Create account** and password sign-in paths. Creating an account sends
-an email verification code immediately. After verification, users can set a password or choose
-**Skip for now** to keep using email codes. Both actions return to the original destination;
-password setup never requires another recovery email. Codes work across browsers and devices and
-follow the auth server's code length. A password mismatch offers the same account-neutral guidance for everyone, with email
-code sign-in as the primary alternative. Existing users can also use that code path. Password
-recovery remains available through **Forgot password?**. Returning users who use **Create account**
-can also set a password after verifying their email. Reloading during the optional password step
-continues the already authenticated session without requiring a password.
+Login sits on the same warm paper as the landing page, with the dot grid behind its card on wider
+screens and plain paper on phones. Login offers separate **Create account** and password sign-in
+paths. Creating an account sends an email verification code immediately. After verification, users
+can set a password or choose **Skip for now** to keep using email codes. Both actions return to the
+original destination; password setup never requires another recovery email. Codes work across
+browsers and devices and follow the auth server's code length. A password mismatch offers the same
+account-neutral guidance for everyone, with email code sign-in as the primary alternative. Existing
+users can also use that code path. Password recovery remains available through
+**Forgot password?**. Returning users who use **Create account** can also set a password after verifying
+their email. Reloading during the optional password step continues the already authenticated
+session without requiring a password.
 
-Pending route and authentication handoffs use a neutral full-screen loading surface: one Octo
-swimming above “Getting things ready…”, without a wordmark. The canonical animation stops for
-reduced-motion preferences, and the loading surface disappears once the destination or login
-form is ready. Login forms keep their static Octo mark.
+Pending route and authentication handoffs use a neutral full-screen loading surface on the same
+warm paper (dark: the studio's dark canvas): one Octo swimming above “Getting things ready…”,
+without a wordmark. The canonical animation stops for reduced-motion preferences, and the loading
+surface disappears once the destination or login form is ready. Login forms keep their static Octo
+mark.
 
 Studio keeps that same loading surface while resolving the initial space, so entry does not
 flash a second loading card. A stalled space-access lookup times out, keeps write capabilities
@@ -61,22 +64,38 @@ cached rows. Secret and guest directories withhold protected records after a fai
 and show Retry rather than an empty-state claim. Switching account or space isolates loading
 results and closes space-specific editors.
 
-The hero sits on the tentacle artwork with its crew presence cursors (Ada, Kim, Octo, and the
-purple agent label that follows the active scenario), fading into the page below. Cursors that
-would sit partly behind the example card are left out at that viewport size. The landing
-workspace is an example that never creates a real session and carries no control of its own:
-the chips above it name the three scenarios, the link below it offers to start a session of
-your own, and assistive tech reads the chips as a group called Choose a workspace example.
-Its three scenarios advance on their own every 11 seconds, so each finished turn rests on screen for several seconds first. Rotation waits while the pointer is
-over the example or focus is inside it, holds for 20 seconds after a visitor picks a scenario,
-and never runs under reduced motion, offscreen, or in a hidden browser tab. Picking a scenario
-always works, and rotation never moves focus or shifts the layout. Octo's existing thinking
-animation appears only beside the example's active work and stops under reduced motion,
-offscreen, and in hidden browser tabs. Header marks remain static. The conversation reads from the top of the window down, so a scenario starts
-directly under the roster and any unused space rests above the composer. Each scenario plays one
-scripted turn inside the example window (a prompt typed and sent, Octo's run, the files or browser
-page landing inline in Octo's own message, then a teammate's reply) and then rests on the finished frame, which is also what
-visitors see under reduced motion, offscreen and in hidden tabs.
+The hero sits on warm paper with a dot grid: the headline, the entries and the scenario chips stack
+on the left, and Cub, a pen-drawn octopus, perches on the example window's top-right corner (on its
+top edge on narrow windows and phones). He loads after the page has painted, notices the visitor
+before the example's first turn starts, lends Octo an arm while Octo works (a short hook from the
+window's ledge onto Octo's coin in the roster beside him), squirts crew ink onto the window's ledge
+when clicked or tapped, and, apart from the lent arm's taps on Octo's coin, never rests on the
+copy, the entries, the chips, the roster or the window's controls. Under reduced motion he stays on one calm frame, and without WebGL a still of him takes
+his place. The header sits plainly on the paper. The landing workspace is an example that never
+creates a real session and carries no control of its own: the chips in the hero name the three
+scenarios and control the example below, the link below it offers to start a session of your own,
+and assistive tech reads the chips as a group called Choose a workspace example. Its three
+scenarios advance on their own, each after its own task (11 seconds, or 19.4 for launching a
+site), so each finished task rests on screen for several seconds first. Rotation waits while the
+pointer is over the chips or the example or focus is inside either, holds for 20 seconds after a
+visitor picks a scenario, and never runs under reduced motion, offscreen, or in a hidden browser
+tab. Picking a scenario always works, and rotation never moves focus or shifts the layout. Octo's
+existing thinking animation appears only beside the example's active work and stops under reduced
+motion, offscreen, and in hidden browser tabs. Header marks remain static. The roster sits in the
+window's top bar. The window keeps one height (from 1184px wide, the height that fits it in the
+first view, so its work happens on screen); a conversation starts directly under the views
+and, once it outgrows the window, keeps its newest message in view as the chat does. On wide
+screens the window shows the conversation with a file or the Shared Browser beside it, as the
+studio does when one is open; narrower windows show one view at a time. The expanded rail names
+each scenario's space plainly (Finance, Checkout, Website). Each scenario plays one scripted task
+inside the example window (a prompt typed and sent, Octo's run, its result landing in Octo's own
+message and beside the conversation, then a teammate's reply; with the composer below the fold
+the task opens on the sent prompt). Launching a site adds the browser handoff the studio really
+uses: Octo posts the preview link and asks to continue in the browser, Ada's press opens the
+Shared Browser beside the chat, she ticks routine browsing and approves the preview's site, and
+Octo clicks through the page while Kim's pointer is on it; where one view shows the browser, Ada
+then taps Chat to read Octo's report and Kim's reply. The example then rests on the finished
+frame, which is also what visitors see under reduced motion, offscreen and in hidden tabs.
 
 ## Studio Surface
 - **Assistant**: conversational control of the workspace, runs, and file changes.

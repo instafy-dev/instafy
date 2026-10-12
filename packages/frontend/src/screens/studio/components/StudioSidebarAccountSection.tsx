@@ -335,7 +335,9 @@ export function StudioSidebarAccountSection({
             variant="ghost"
             size={collapsedSidebarDensity === "dense" ? "xs" : "sm"}
             radius="lg"
-            className="relative overflow-hidden"
+            // Not overflow-hidden: the avatar fills the button and clips
+            // itself, and clipping here would cut its coin shadow to a square.
+            className="relative"
             data-testid="sidebar-profile-menu"
             aria-haspopup="dialog"
             aria-label="Open profile menu"

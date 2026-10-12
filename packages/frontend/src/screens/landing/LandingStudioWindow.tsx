@@ -1,8 +1,7 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Bell,
   ChatLines,
-  CheckCircle,
   ClipboardCheck,
   Coins,
   Eye,
@@ -10,12 +9,10 @@ import {
   Menu,
   Microphone,
   MoreHoriz,
-  NavArrowLeft,
   NavArrowRight,
   OpenNewWindow,
   Page,
   Plus,
-  Refresh,
   Send,
   SidebarCollapse,
   SidebarExpand,
@@ -26,31 +23,39 @@ import {
 } from "iconoir-react";
 import { ChatsIcon, HomeIcon } from "../../components/AppIcons";
 import { ControlChevron } from "../../components/ControlChevron";
-import { OctoMark, type OctoMarkMotion } from "../../components/OctoMark";
+import { OctoCoin } from "../../components/OctoCoin";
+import type { OctoMarkMotion } from "../../components/OctoMark";
 import { Spinner } from "../../components/Spinner";
 import { Surface } from "../../components/Surface";
 import { Text } from "../../components/Text";
 import { getUnifiedDiffRowClass } from "../../utils/unifiedDiff";
-import { BrowserChromeShell } from "../studio/components/BrowserChromeShell";
 import { ChatActivityBubble } from "../studio/components/ChatActivityBubble";
 import { ChatBubbleRow } from "../studio/components/ChatBubbleRow";
 import { CHAT_COLUMN_CLASS_NAME, ChatColumn } from "../studio/components/ChatColumn";
 import { SidebarOrgDeck } from "../studio/components/SidebarOrgDeck";
 import { ThreadSpine } from "../studio/components/ThreadSpine";
+import { LANDING_CREW, type CrewColor } from "./landingCrew";
 import * as chrome from "./landingStudioChrome";
 import {
   BEAT,
   TYPEWRITER_TICK_MS,
   TYPEWRITER_TICKS,
+  beatIndex,
+  beatReached,
+  browserContinuation,
+  type MessagePart,
   type SessionScenario,
+  type TurnBeatId,
   type TurnFile,
+  type TurnStep,
   type TurnStepKind,
 } from "./landingTurnScript";
 
-// Crew colours, one per actor, as inline styles (Tailwind never sees them).
-const ADA_COLOR = "#e93d82";
-const KIM_COLOR = "#8cb93b";
-const AGENT_COLOR = "#7c4dd8";
+// Crew colours, one per participant in roster order, as inline styles
+// (Tailwind never sees them). Octo has no crew colour: it stays ink.
+const ADA = LANDING_CREW.ada;
+const KIM = LANDING_CREW.kim;
+const AGENT = LANDING_CREW.agent;
 
 const FORMA_TEAM = { key: "forma", name: "Forma", avatarUrl: null };
 
@@ -83,47 +88,62 @@ function Reveal({
   );
 }
 
-// ChatMessageAvatar.tsx:96-140 for a human: the crew hex stands in for the
-// seeded gradient so Ada and Kim keep one colour across the whole page.
-function CrewAvatar({ initial, color, size }: { initial: string; color: string; size: "2xs" | "sm" }) {
+type AvatarSize = "2xs" | "sm" | "roster";
+const AVATAR_SIZE: Record<AvatarSize, string> = { "2xs": chrome.AVATAR_2XS, sm: chrome.AVATAR_SM, roster: chrome.AVATAR_ROSTER };
+
+// ChatMessageAvatar.tsx:102-166 for a human: the crew colour stands in for the
+// app's muted ID-hashed palette so Ada and Kim keep one colour across the whole
+// page, with the label colour that reads on that fill. An agent other than
+// Octo is the same coin as a rounded square (docs/Brand.md): its crew fill and
+// its initial, never Octo's mark in a crew colour.
+function CrewAvatar({
+  initial,
+  crew,
+  size,
+  agent = false,
+}: {
+  initial: string;
+  crew: CrewColor;
+  size: AvatarSize;
+  agent?: boolean;
+}) {
   return (
     <span
       aria-hidden="true"
-      className={`${chrome.AVATAR_SHELL} ${size === "2xs" ? chrome.AVATAR_2XS : chrome.AVATAR_SM} ${chrome.AVATAR_HUMAN}`}
-      style={{ backgroundColor: color }}
+      data-crew-fill={crew.fill}
+      className={`${agent ? chrome.AVATAR_SHELL_AGENT : chrome.AVATAR_SHELL} ${AVATAR_SIZE[size]} ${chrome.AVATAR_HUMAN}`}
+      style={{ backgroundColor: crew.fill, color: crew.on }}
     >
       {initial}
     </span>
   );
 }
 
-// ChatMessageAvatar.tsx:140-149: the brand-ink mark on a white coin in both
-// themes. A tinted wrapper turns the mark into the scenario agent (always
-// idle: custom agents never get Octo's motion).
+// ChatMessageAvatar.tsx's Octo face: the studio's own coin component
+// (OctoCoin), not a copy of its classes, so the landing's Octo is the app's.
+// Octo is ink, never a crew colour, and its coin mark stays one ink.
 function OctoAvatar({
   size,
   motion = "idle",
-  tint,
   title = "Octo",
   testId,
+  pop = false,
 }: {
-  size: "2xs" | "sm";
+  size: AvatarSize;
   motion?: OctoMarkMotion;
-  tint?: string;
   title?: string;
   testId?: string;
+  /** Pops once as Octo's result lands (tailwind.css, data-landing-octo-pop). */
+  pop?: boolean;
 }) {
   return (
-    <span
-      aria-hidden="true"
-      data-testid={testId}
-      className={`${chrome.AVATAR_SHELL} ${size === "2xs" ? chrome.AVATAR_2XS : chrome.AVATAR_SM} bg-white`}
-      style={tint ? { color: tint } : undefined}
-    >
-      <span className={chrome.OCTO_COIN}>
-        <OctoMark className={tint ? chrome.OCTO_MARK_TINTED : chrome.OCTO_MARK} motion={motion} title={title} />
-      </span>
-    </span>
+    <OctoCoin
+      testId={testId}
+      data-landing-octo-pop={pop ? "" : undefined}
+      className={AVATAR_SIZE[size]}
+      motion={motion}
+      title={title}
+    />
   );
 }
 
@@ -209,13 +229,16 @@ export function RailExpanded({
   scenarios,
   active,
   runLive,
+  split = false,
 }: {
   scenarios: SessionScenario[];
   active: number;
   runLive: boolean;
+  /** The window shows a side-by-side split, which needs the collapsed rail. */
+  split?: boolean;
 }) {
   return (
-    <nav aria-hidden="true" data-testid="landing-rail" className={`hidden lg:flex w-56 ${chrome.RAIL_SURFACE}`}>
+    <nav aria-hidden="true" data-testid="landing-rail" className={`${split ? "hidden" : "hidden lg:flex"} w-56 ${chrome.RAIL_SURFACE}`}>
       <ul className={chrome.RAIL_LIST}>
         <ExpandedRow shell={<SidebarCollapse className="text-base" aria-hidden="true" />} label="Collapse" />
         <ExpandedRow shell={<HomeIcon className="h-6 w-6" />} label="Home" />
@@ -227,7 +250,7 @@ export function RailExpanded({
             <span className={chrome.RAIL_TEAM_LABEL}>
               <span className="min-w-0 flex-1">
                 <Text as="span" variant="bodyStrong" tone="primary" className="block truncate text-sm">
-                  Launch week
+                  {scenarios[active].space}
                 </Text>
                 <Text as="span" variant="caption" tone="muted" className="block truncate">
                   Forma
@@ -257,7 +280,7 @@ export function RailExpanded({
       </ul>
       <div className={chrome.RAIL_FOOTER}>
         <span className={chrome.PROFILE_ROW}>
-          <span className={chrome.PROFILE_AVATAR} style={{ backgroundColor: ADA_COLOR }}>
+          <span className={chrome.PROFILE_AVATAR} style={{ backgroundColor: ADA.fill, color: ADA.on }}>
             A
           </span>
           <span className="min-w-0 flex-1">
@@ -274,9 +297,9 @@ export function RailExpanded({
   );
 }
 
-function CollapsedRow({ active = false, children }: { active?: boolean; children: ReactNode }) {
+function CollapsedRow({ active = false, className, children }: { active?: boolean; className?: string; children: ReactNode }) {
   return (
-    <li className="flex justify-center">
+    <li className={`flex justify-center${className ? ` ${className}` : ""}`}>
       <span className={chrome.ROW_COLLAPSED}>
         <span className={`${chrome.SHELL_COLLAPSED} ${active ? chrome.SHELL_COLLAPSED_ACTIVE : chrome.SHELL_INACTIVE}`}>{children}</span>
       </span>
@@ -284,11 +307,22 @@ function CollapsedRow({ active = false, children }: { active?: boolean; children
   );
 }
 
-// StudioSidebar.tsx between md and lg: the 64px icon rail at compact density
-// (the frame is under 760px tall), with the blue Chats tile active.
-export function RailCollapsed() {
+// StudioSidebar.tsx collapsed: the 64px icon rail at compact density (the
+// frame is under 760px tall), with the blue Chats tile active. The studio
+// shows it between md and lg, and wherever its sidebar is collapsed: the
+// window collapses it to give a side-by-side split its 1024px. A window that
+// fits a short first view is too short for every row: the studio then moves
+// its secondary tools into More (StudioSidebar.tsx secondaryRowCapacity), so
+// Credits, then Changes, leave the rail as the rail's own height requires
+// (a size container query on the rail's content box: row i's icon needs
+// 44i + 84px of it, the footer included).
+export function RailCollapsed({ split = false }: { split?: boolean }) {
   return (
-    <nav aria-hidden="true" className={`hidden md:flex lg:hidden w-[4rem] ${chrome.RAIL_SURFACE}`}>
+    <nav
+      aria-hidden="true"
+      data-testid="landing-rail-collapsed"
+      className={`${split ? "hidden md:flex" : "hidden md:flex lg:hidden"} w-[4rem] [container-type:size] ${chrome.RAIL_SURFACE}`}
+    >
       <ul className={chrome.RAIL_LIST}>
         <CollapsedRow>
           <SidebarExpand className="text-base" aria-hidden="true" />
@@ -309,10 +343,10 @@ export function RailCollapsed() {
         <CollapsedRow>
           <Page className="text-base" aria-hidden="true" />
         </CollapsedRow>
-        <CollapsedRow>
+        <CollapsedRow className="[@container(max-height:347px)]:hidden">
           <GitBranch className="text-base" aria-hidden="true" />
         </CollapsedRow>
-        <CollapsedRow>
+        <CollapsedRow className="[@container(max-height:391px)]:hidden">
           <Coins className="text-base" aria-hidden="true" />
         </CollapsedRow>
         <CollapsedRow>
@@ -333,10 +367,10 @@ export function RailCollapsed() {
 // is the real state), the new-chat "+", then the bell and tab menu.
 export function MiniTabStrip({ title }: { title: ReactNode }) {
   return (
-    <div aria-hidden="true" className={chrome.TAB_STRIP}>
+    <div aria-hidden="true" data-testid="landing-tab-strip" data-cub-anchor="topbar" className={chrome.TAB_STRIP}>
       <span className={chrome.TAB_BASELINE} />
       <div className="relative flex min-w-0 flex-1 items-end">
-        <span className={chrome.TAB_ACTIVE}>
+        <span className={chrome.TAB_ACTIVE} data-cub-anchor="title">
           <span className={chrome.TAB_CONTENT}>
             <ChatLines className="h-5 w-5" aria-hidden="true" />
             {title}
@@ -345,43 +379,38 @@ export function MiniTabStrip({ title }: { title: ReactNode }) {
             <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
           </span>
         </span>
-        <span className={chrome.TAB_ACTION}>
+        <span className={chrome.TAB_ACTION} data-cub-anchor="action">
           <Plus className="h-[18px] w-[18px]" aria-hidden="true" />
         </span>
       </div>
       <div className={chrome.TAB_ACTIONS}>
-        <span className={chrome.TAB_BELL}>
+        <span className={chrome.TAB_BELL} data-cub-anchor="action">
           <Bell className="h-5 w-5" aria-hidden="true" />
         </span>
-        <span className={chrome.TAB_ACTION}>
+        <span className={chrome.TAB_ACTION} data-cub-anchor="action">
           <MoreHoriz className="h-5 w-5" aria-hidden="true" />
         </span>
       </div>
+      {/* The roster lies over the strip's right end (RosterStack). */}
+      <span className={chrome.TAB_ROSTER_SPACE} />
     </div>
   );
 }
 
-// StudioTopBar.tsx:521-560 below md: toggle, the pill tab, bell and "+".
+// StudioTopBar.tsx:521-560 below md: the pill tab. The sidebar toggle, the
+// bell and "+" make way for the roster, which lies over the bar's right end
+// (RosterStack), as in the approved hero's phone layout (the title, then the
+// roster): on a 360 px phone the chat's title then reads whole.
 export function MiniPhoneBar({ title }: { title: ReactNode }) {
   return (
-    <div aria-hidden="true" className={chrome.PHONE_BAR}>
-      <span className={chrome.PHONE_ROUND_ACTION}>
-        <SidebarExpand className="h-5 w-5" aria-hidden="true" />
-      </span>
+    <div aria-hidden="true" data-testid="landing-phone-bar" data-cub-anchor="topbar" data-cub-layout="phone" className={chrome.PHONE_BAR}>
       <div className="flex min-w-0 justify-start">
-        <span className={chrome.PHONE_PILL}>
+        <span className={chrome.PHONE_PILL} data-cub-anchor="title">
           <ChatLines className="h-4 w-4 shrink-0" aria-hidden="true" />
           {title}
         </span>
       </div>
-      <div className="flex items-center">
-        <span className={chrome.PHONE_ROUND_ACTION}>
-          <Bell className="h-5 w-5" aria-hidden="true" />
-        </span>
-        <span className={chrome.PHONE_ROUND_ACTION}>
-          <Plus className="h-5 w-5" aria-hidden="true" />
-        </span>
-      </div>
+      <span className={chrome.PHONE_ROSTER_SPACE} />
     </div>
   );
 }
@@ -390,33 +419,33 @@ export function MiniPhoneBar({ title }: { title: ReactNode }) {
 // Roster
 
 // ChatPanel.tsx:5561-5575 + ConversationRoster.tsx:92-103: humans first, then
-// agents. The scenario agent's slot is laid out from the first frame and
-// slides in at step4.
+// agents, laid over the right end of the window's top bar (chrome.TOP_BAR):
+// the row Cub's ledge belongs to, so Octo's coin sits just under the ledge,
+// left of him. The scenario agent's slot is laid out from the first frame and
+// slides in at step4. Each coin names its participant in data-roster-coin so
+// the hero can find Octo's coin and the others without reaching into classes.
 export function RosterStack({ scenario, agentVisible }: { scenario: SessionScenario; agentVisible: boolean }) {
   return (
-    <div aria-hidden="true" className={chrome.ROSTER_ROW}>
-      <ChatColumn className="flex items-center justify-end gap-2">
-        <span className={chrome.ROSTER_HANDLE}>
-          <span className={chrome.ROSTER_STACK}>
-            <span className={chrome.ROSTER_RING}>
-              <CrewAvatar initial="A" color={ADA_COLOR} size="2xs" />
-            </span>
-            <span className={chrome.ROSTER_RING}>
-              <CrewAvatar initial="K" color={KIM_COLOR} size="2xs" />
-            </span>
-            <span className={chrome.ROSTER_RING}>
-              <OctoAvatar size="2xs" />
-            </span>
-            <span
-              data-testid="landing-roster-agent"
-              data-beat-visible={agentVisible ? "true" : "false"}
-              className={`${chrome.ROSTER_RING} ${chrome.REVEAL_BASE} ${agentVisible ? chrome.REVEAL_SLIDE_SHOWN : chrome.REVEAL_SLIDE_HIDDEN}`}
-            >
-              <OctoAvatar size="2xs" tint={AGENT_COLOR} title={scenario.presenceAgent} />
-            </span>
-          </span>
-        </span>
-      </ChatColumn>
+    <div aria-hidden="true" data-testid="landing-roster" className={chrome.ROSTER}>
+      <span data-roster-coin="ada" data-cub-anchor="coin" className={chrome.ROSTER_RING}>
+        <CrewAvatar initial="A" crew={ADA} size="roster" />
+      </span>
+      <span data-roster-coin="kim" data-cub-anchor="coin" className={chrome.ROSTER_RING}>
+        <CrewAvatar initial="K" crew={KIM} size="roster" />
+      </span>
+      <span data-roster-coin="octo" data-testid="landing-roster-octo" data-cub-anchor="coin" className={chrome.ROSTER_RING}>
+        <OctoAvatar size="roster" />
+      </span>
+      <span
+        data-roster-coin="agent"
+        data-testid="landing-roster-agent"
+        data-cub-anchor="coin"
+        data-beat-visible={agentVisible ? "true" : "false"}
+        data-agent-name={scenario.presenceAgent}
+        className={`${chrome.ROSTER_RING_AGENT} ${chrome.REVEAL_BASE} ${agentVisible ? chrome.REVEAL_SLIDE_SHOWN : chrome.REVEAL_SLIDE_HIDDEN}`}
+      >
+        <CrewAvatar initial={scenario.presenceAgent.charAt(0)} crew={AGENT} size="roster" agent />
+      </span>
     </div>
   );
 }
@@ -474,6 +503,7 @@ function FileRail({
           <span
             key={file.path}
             data-testid={withTestIds ? "landing-file-chip" : undefined}
+            data-cub-anchor="file"
             className={file.active && artifactOpen ? chrome.CHIP_FILE_ACTIVE : chrome.CHIP_FILE}
             title={file.path}
           >
@@ -482,27 +512,37 @@ function FileRail({
           </span>
         ))}
         <span className={chrome.FILE_RAIL_DIVIDER} aria-hidden="true" />
-        <span className={chrome.ACTION_CHIP}>
-          <Eye className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
-          <span>Review changes</span>
-        </span>
-        <span className={chrome.ACTION_CHIP}>
-          <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
-          <span>Undo</span>
+        {/* Landing-only: the two actions wrap together, so a narrow column
+            never leaves Undo alone on a line. */}
+        <span className="inline-flex max-w-full items-center gap-x-1.5">
+          <span className={chrome.ACTION_CHIP}>
+            <Eye className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+            <span>Review changes</span>
+          </span>
+          <span className={chrome.ACTION_CHIP}>
+            <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+            <span>Undo</span>
+          </span>
         </span>
       </div>
     </div>
   );
 }
 
-// ChatFileChangeList.tsx:909-1030: the open file card under the rail.
-function DiffCard({ scenario, withTestIds }: { scenario: SessionScenario; withTestIds: boolean }) {
+// ChatFileChangeList.tsx:909-1030: the open file card under the rail. A
+// created file wears the Created badge and lists every line as an added row
+// (there is no table preview, even for a .csv); an edit wears Updated and
+// shows its hunk.
+function FileCard({ scenario, withTestIds }: { scenario: SessionScenario; withTestIds: boolean }) {
   const activeFile = scenario.files.find((file) => file.active) ?? scenario.files[0];
+  const card = scenario.card!;
   return (
-    <div className={chrome.DIFF_CARD} data-testid={withTestIds ? "landing-diff-card" : undefined}>
+    <div className={chrome.DIFF_CARD} data-testid={withTestIds ? "landing-diff-card" : undefined} data-change={card.change}>
       <div className={chrome.DIFF_CARD_HEADER}>
         <div className="flex min-w-0 items-center gap-2">
-          <span className={chrome.DIFF_BADGE_UPDATED}>Updated</span>
+          <span className={card.change === "created" ? chrome.DIFF_BADGE_CREATED : chrome.DIFF_BADGE_UPDATED}>
+            {card.change === "created" ? "Created" : "Updated"}
+          </span>
           <span className={chrome.DIFF_FILENAME}>{basename(activeFile.path)}</span>
         </div>
         <div className={chrome.DIFF_GLYPHS}>
@@ -511,13 +551,13 @@ function DiffCard({ scenario, withTestIds }: { scenario: SessionScenario; withTe
         </div>
       </div>
       <div className={chrome.DIFF_BODY}>
-        {(scenario.diffRows ?? []).map((row, index) => (
+        {card.rows.map((row, index) => (
           <div
             key={index}
             data-testid={withTestIds ? "landing-diff-row" : undefined}
             className={`${chrome.DIFF_ROW} ${getUnifiedDiffRowClass({ ...row, oldLine: null, newLine: null })}`}
           >
-            {row.text.length > 0 ? row.text : "\u00a0"}
+            {row.text.length > 0 ? row.text : " "}
           </div>
         ))}
       </div>
@@ -525,140 +565,91 @@ function DiffCard({ scenario, withTestIds }: { scenario: SessionScenario; withTe
   );
 }
 
-// BrowserStatusPill (BrowserChromeShell.tsx:14-50) as a plain span. The
-// spinner only turns while the dock is on screen; before that a blank of the
-// same size holds the pill's width, so the toolbar row never changes height
-// when the dock fades in.
-function StatusPillReplica({ state, spinning }: { state: "ready" | "starting"; spinning: boolean }) {
-  return state === "ready" ? (
-    <span className={`${chrome.STATUS_PILL} ${chrome.STATUS_PILL_READY}`}>
-      <CheckCircle className="h-3.5 w-3.5" aria-hidden="true" />
-      <span>Ready</span>
-    </span>
-  ) : (
-    <span className={`${chrome.STATUS_PILL} ${chrome.STATUS_PILL_STARTING}`}>
-      {spinning ? (
-        <Spinner aria-hidden="true" tone="slate" size="xs" />
-      ) : (
-        <span className="inline-block h-3 w-3 shrink-0" aria-hidden="true" />
-      )}
-      <span>Starting…</span>
-    </span>
-  );
-}
-
-// A static rendering of the pricing page the site scenario publishes. The dock
-// keeps the real 16:9 stage at every width, so the page takes a size step on a
-// phone (where the stage is about 270 x 152) the way a screencast would scale,
-// rather than overflowing the stage and being clipped.
-function PricingPage() {
+// ChatMessageContent.tsx renders a message's prose with its inline code, its
+// workspace file reference chips (folder, then name and line) and its links.
+// The reference wears its hover tone (it has no other pressed state) from just
+// before Ada's click opens it beside the chat.
+function MessageParts({ parts, referenceOpen, withTestIds }: { parts: readonly MessagePart[]; referenceOpen: boolean; withTestIds: boolean }) {
   return (
-    <div className="px-3 pt-2.5 sm:px-5 sm:pt-4">
-      <p className="text-3xs font-semibold uppercase tracking-[0.12em] text-slate-500 sm:text-xxs">Forma</p>
-      <p className="mt-1 text-sm font-semibold leading-tight sm:text-lg">Room for your next idea.</p>
-      <p className="mt-0.5 text-3xs text-slate-500 sm:text-xs">Simple plans. Space to grow.</p>
-      <div className="mt-2 grid grid-cols-2 gap-1.5 sm:mt-3 sm:gap-2">
-        <div className="rounded-lg border border-slate-200 p-2 sm:p-2.5">
-          <p className="text-3xs font-medium text-slate-600 sm:text-xs">Starter</p>
-          <p className="mt-0.5 text-sm font-semibold leading-5 sm:mt-1 sm:text-lg sm:leading-6">$19</p>
-          <p className="text-3xs text-slate-500 sm:text-xxs">per month</p>
-        </div>
-        <div className="rounded-lg border border-primary-500 p-2 ring-1 ring-primary-500/30 sm:p-2.5">
-          <p className="text-3xs font-medium text-slate-600 sm:text-xs">Team</p>
-          <p className="mt-0.5 text-sm font-semibold leading-5 sm:mt-1 sm:text-lg sm:leading-6">$49</p>
-          <p className="text-3xs text-slate-500 sm:text-xxs">per month</p>
-        </div>
-      </div>
-    </div>
+    <>
+      {parts.map((part, index) => {
+        if (typeof part === "string") return <Fragment key={index}>{part}</Fragment>;
+        if ("code" in part) {
+          return (
+            <code key={index} className={chrome.INLINE_CODE}>
+              {part.code}
+            </code>
+          );
+        }
+        if ("file" in part) {
+          const slash = part.file.lastIndexOf("/");
+          return (
+            <span
+              key={index}
+              data-testid={withTestIds ? "landing-file-reference" : undefined}
+              data-open={referenceOpen ? "true" : "false"}
+              className={`${chrome.FILE_REFERENCE}${referenceOpen ? ` ${chrome.FILE_REFERENCE_HOVER}` : ""}`}
+            >
+              <span className="flex min-w-0 max-w-full items-baseline">
+                {slash >= 0 ? <span className={chrome.FILE_REFERENCE_FOLDER}>{part.file.slice(0, slash + 1)}</span> : null}
+                <span className={chrome.FILE_REFERENCE_NAME}>
+                  {part.file.slice(slash + 1)}
+                  {part.line ? `:${part.line}` : ""}
+                </span>
+              </span>
+            </span>
+          );
+        }
+        return (
+          <span key={index} className={chrome.MESSAGE_LINK} data-testid={withTestIds ? "landing-message-link" : undefined}>
+            {part.link}
+          </span>
+        );
+      })}
+    </>
   );
 }
 
-// ChatBrowserDock.tsx:40-60 mounts the docked BrowserSessionModal directly
-// above the composer; this is that dock with the pricing page in its stage.
-function BrowserDock({
-  visible,
-  beat,
+// ChatActionCard.tsx as the runtime's browser request draws it
+// (runtime-agent/src/jobs/browser_request.rs): Ada's press goes down on the
+// button (Button.tsx's pressed state), then while it opens the browser the
+// button is busy ("Opening browser…", a spinner, disabled); once the
+// continuation is sent it is itself again.
+function BrowserRequestCard({
+  pressed,
+  busy,
   playing,
   withTestIds,
 }: {
-  visible: boolean;
-  beat: number;
+  pressed: boolean;
+  busy: boolean;
   playing: boolean;
   withTestIds: boolean;
 }) {
-  // The dock lands with the other artifacts, already Ready, so Octo's message
-  // is complete before Kim reacts to it. The ticker runs for that one beat and
-  // Kim's cursor glides onto the page just as Kim starts typing about it.
-  const ready = beat >= BEAT.ARTIFACT;
-  const glided = beat >= BEAT.KIM_TYPING;
-  const ticker = playing && beat >= BEAT.ARTIFACT && beat < BEAT.KIM_TYPING;
-  const navGlyph = "h-4 w-4";
   return (
-    <Reveal visible={visible} className="relative z-30 mt-2.5" testId={withTestIds ? "landing-browser-dock" : undefined}>
-      <div className={chrome.DOCK_WRAPPER}>
-        <div aria-hidden="true">
-          <BrowserChromeShell
-            label="Shared browser"
-            navigation={
-              <>
-                <span className={chrome.DOCK_NAV_GLYPH}>
-                  <NavArrowLeft className={navGlyph} aria-hidden="true" />
-                </span>
-                <span className={chrome.DOCK_NAV_GLYPH}>
-                  <NavArrowRight className={navGlyph} aria-hidden="true" />
-                </span>
-                <span className={chrome.DOCK_NAV_GLYPH}>
-                  <Refresh className={navGlyph} aria-hidden="true" />
-                </span>
-              </>
-            }
-            address={
-              <span className={chrome.ADDRESS_FIELD}>
-                forma.site/pricing
-                <span className={chrome.ADDRESS_GO}>
-                  <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
-                </span>
-              </span>
-            }
-            status={<StatusPillReplica state={ready ? "ready" : "starting"} spinning={visible} />}
-          />
-        </div>
-        {/* The real dock shows a remote screencast with no DOM text, so the
-            stand-in page is hidden from assistive tech the same way. */}
-        <div aria-hidden="true" className={chrome.DOCK_STAGE}>
-          {ready ? <PricingPage /> : <div className="absolute inset-0 bg-slate-50" />}
-          {/* Kim's cursor inside the shared browser (pre-#245 landing cursor, crew green). */}
-          <span
-            aria-hidden="true"
-            className="absolute flex flex-col items-start transition-transform duration-500 ease-out motion-reduce:transition-none"
-            // Parked low and left, under the Starter card, and anchored to the
-            // stage's floor so the label always has room: over the price block
-            // the arrow and the green pill sat across "$49" and "per month".
-            style={{ left: "30%", bottom: "4%", transform: glided ? "translate(0,0)" : "translate(-40px,-28px)" }}
-          >
-            <svg className="h-4 w-4" viewBox="0 0 18 20">
-              <path d="M2 1 L16 10 L9 11.5 L7 19 Z" fill={KIM_COLOR} stroke="#ffffff" strokeWidth="1.5" />
-            </svg>
-            <span className="mt-0.5 rounded-full px-1.5 py-0.5 text-3xs font-semibold text-white" style={{ backgroundColor: KIM_COLOR }}>
-              Kim
-            </span>
-          </span>
-          {ticker ? (
-            <div aria-hidden="true" className={chrome.TICKER_OVERLAY}>
-              <span className={chrome.TICKER_PILL}>
-                <span className={chrome.TICKER_DOT} />
-                Opened forma.site
-              </span>
-            </div>
-          ) : null}
-        </div>
+    <Surface tone="default" radius="2xl" shadow="sm" className={chrome.ACTION_CARD} data-testid={withTestIds ? "landing-browser-request" : undefined}>
+      <div className="space-y-1">
+        <Text as="div" variant="bodyStrong" tone="primary">
+          Continue in browser
+        </Text>
+        <Text as="div" variant="caption" tone="muted" className="leading-snug">
+          Open your browser and let the AI continue this task there.
+        </Text>
       </div>
-    </Reveal>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span
+          data-testid={withTestIds ? "landing-browser-request-button" : undefined}
+          data-busy={busy ? "true" : "false"}
+          data-pressed={pressed ? "true" : "false"}
+          className={`${chrome.BUTTON_PRIMARY}${pressed ? ` ${chrome.BUTTON_PRIMARY_PRESSED}` : ""}${busy ? ` ${chrome.BUTTON_DISABLED}` : ""}`}
+        >
+          {busy && playing ? <Spinner aria-hidden="true" tone="primary" size="sm" /> : null}
+          {busy ? "Opening browser…" : "Open browser and continue"}
+        </span>
+      </div>
+    </Surface>
   );
 }
-
-// ---------------------------------------------------------------------------
-// The turn
 
 const THREAD_ROOT_STYLE = {
   paddingLeft: 4,
@@ -673,46 +664,98 @@ function TeammateMessage({ text }: { text: string }) {
   );
 }
 
-// One scripted turn for one scenario, drawn for a beat. When playing is false
-// the beat is END and nothing transient exists in the DOM.
-export function TurnColumn({
-  scenario,
+interface RunTestIds {
+  avatar: string;
+  thread: string;
+  typing: string;
+  rail: string;
+  chip: string;
+  spinner: string;
+  caption: string;
+  owner: string;
+  summary: string;
+}
+
+const RUN_TEST_IDS: RunTestIds = {
+  avatar: "landing-octo-working",
+  thread: "landing-octo-thread",
+  typing: "landing-typing-line",
+  rail: "landing-run-rail",
+  chip: "landing-run-chip",
+  spinner: "landing-run-spinner",
+  caption: "landing-run-caption",
+  owner: "landing-owner-badge",
+  summary: "landing-summary",
+};
+
+const BROWSE_TEST_IDS: RunTestIds = {
+  avatar: "landing-browse-working",
+  thread: "landing-browse-thread",
+  typing: "landing-browse-typing",
+  rail: "landing-browse-rail",
+  chip: "landing-browse-chip",
+  spinner: "landing-browse-spinner",
+  caption: "landing-browse-caption",
+  owner: "landing-browse-owner",
+  summary: "landing-browse-summary",
+};
+
+/**
+ * One of Octo's runs, the agent job thread preview in its compact form (the
+ * chat column is always under 760px, threadPreviewHelpers.tsx): the typing
+ * line, the activity rail with one chip per step and the live step's caption,
+ * then the summary and whatever the run left (sections), joined by the spine.
+ */
+function OctoRun({
+  steps,
+  stepBeats,
+  thinkingBeat,
+  doneBeat,
   beat,
   playing,
-  withTestIds = false,
+  summary,
+  sections,
+  completeBeat,
+  ids,
+  withTestIds,
+  messageAnchor,
 }: {
-  scenario: SessionScenario;
+  steps: readonly TurnStep[];
+  /** The beat each step's chip lands on. */
+  stepBeats: readonly number[];
+  thinkingBeat: number;
+  doneBeat: number;
   beat: number;
   playing: boolean;
-  withTestIds?: boolean;
+  summary: ReactNode;
+  sections?: ReactNode;
+  /** The beat the run's last section is drawn on (the spine waits for it). */
+  completeBeat: number;
+  ids: RunTestIds;
+  withTestIds: boolean;
+  /** Cub's eyes follow this message (data-cub-anchor="octo-message"). */
+  messageAnchor?: boolean;
 }) {
-  const site = scenario.id === "site";
-  const done = beat >= BEAT.DONE;
-  const runLive = playing && beat >= BEAT.THINKING && !done;
+  const done = beat >= doneBeat;
+  const started = beat >= thinkingBeat;
+  const runLive = playing && started && !done;
   const octoMotion: OctoMarkMotion = runLive ? "thinking" : "idle";
-  const liveStepIndex = playing && beat >= BEAT.STEP1 && !done ? beat - BEAT.STEP1 : -1;
-  const liveStep = liveStepIndex >= 0 ? scenario.steps[liveStepIndex] : null;
-  const commandLive = liveStep?.kind === "command";
-  const visibleChips = Math.max(0, Math.min(scenario.steps.length, beat - BEAT.STEP1 + 1));
+  const visibleChips = stepBeats.filter((at) => beat >= at).length;
   const newestChip = visibleChips - 1;
-  const showTypingLine = playing && beat >= BEAT.THINKING && beat < BEAT.STEP1;
-  const showKimTyping = playing && beat >= BEAT.KIM_TYPING && beat < BEAT.REPLY;
-  const countsLoading = playing && beat < BEAT.COUNTS;
-  const artifactOpen = beat >= BEAT.ARTIFACT;
-  // The last section of Octo's message: the diff card, the docked browser, or,
-  // for a scenario whose artifact is the code block inside the summary, the
-  // file rail. The bridging spine waits for it (see below).
-  const threadComplete = scenario.diffRows || site ? artifactOpen : beat >= BEAT.FILES;
+  const liveStep = playing && !done && visibleChips > 0 ? steps[newestChip] : null;
+  const commandLive = liveStep?.kind === "command";
+  const showTypingLine = runLive && visibleChips === 0;
+  const threadComplete = beat >= completeBeat;
   const testId = (name: string) => (withTestIds ? name : undefined);
   const renderChips = (from: number, to: number) =>
-    scenario.steps.slice(from, to).map((step, offset) => {
+    steps.slice(from, to).map((step, offset) => {
       const index = from + offset;
       const shown = index < visibleChips;
       const live = playing && shown && index === newestChip && !done && !commandLive;
       return (
         <span
           key={index}
-          data-testid={testId("landing-run-chip")}
+          data-testid={testId(ids.chip)}
           className={[
             chrome.RAIL_CHIP,
             playing && shown ? "instafy-compact-event-pill" : "",
@@ -728,211 +771,353 @@ export function TurnColumn({
     });
 
   return (
-    <div className="flex flex-col">
-      <ChatColumn className="space-y-2.5">
-        {/* Row 1: Kim's opener (a teammate: flat text, never a bubble). */}
-        <ChatBubbleRow
-          align="left"
-          avatar={<CrewAvatar initial="K" color={KIM_COLOR} size="sm" />}
-          speakerIdentity={<SpeakerLabel name="Kim" time="4m ago" />}
-          speakerMarker={null}
-        >
-          <TeammateMessage text={scenario.opener} />
-        </ChatBubbleRow>
+    <ChatBubbleRow
+      align="left"
+      avatar={
+        <Reveal visible={started} className={chrome.THREAD_AVATAR}>
+          <OctoAvatar size="sm" motion={octoMotion} pop={playing && done} testId={testId(ids.avatar)} />
+        </Reveal>
+      }
+      speakerIdentity={
+        <Reveal visible={started}>
+          <SpeakerLabel name="octo" time="now" />
+        </Reveal>
+      }
+      speakerMarker={null}
+    >
+      <div className={chrome.THREAD_ROOT} style={THREAD_ROOT_STYLE}>
+        <div className={chrome.THREAD_BODY} data-testid={testId(ids.thread)} data-cub-anchor={messageAnchor ? "octo-message" : undefined}>
+          {/* The rail row and the live caption each draw their own
+              full-height stem, so while the run is live the line ends at the
+              caption. The bridging spine that joins summary, file rail and
+              artifact spans the body's full height, which is already the
+              run's final height, so it waits for the last section to be
+              drawn; otherwise it would run on down through the sections
+              still laid out invisibly below. */}
+          <ThreadSpine
+            tone="primary"
+            className={`${chrome.THREAD_SPINE_MAIN} ${threadComplete ? "opacity-100" : "opacity-0"}`}
+            style={{ top: "32px", bottom: "16px" }}
+          />
 
-        {/* Row 2: Ada's own message. The app never labels your own message. */}
-        <ChatBubbleRow align="right" avatar={null} speakerMarker={null}>
-          {/* The wrapper spans the column so the bubble's 92% cap resolves
-              against it, exactly as the bare bubble does in the app. */}
-          <Reveal visible={beat >= BEAT.OWN} className="flex w-full justify-end">
-            <div data-testid={testId("landing-own-message")} className={chrome.OWN_BUBBLE}>
-              {scenario.prompt}
-            </div>
-          </Reveal>
-        </ChatBubbleRow>
-
-        {/* Row 3: Octo's run, the agent job thread preview. The app shows no
-            assistant row until Octo starts, so the avatar fades in with its
-            label (the slot is a fixed 32px box, so nothing moves). */}
-        <ChatBubbleRow
-          align="left"
-          avatar={
-            <Reveal visible={beat >= BEAT.THINKING}>
-              <OctoAvatar size="sm" motion={octoMotion} testId={testId("landing-octo-working")} />
-            </Reveal>
-          }
-          speakerIdentity={
-            <Reveal visible={beat >= BEAT.THINKING}>
-              <SpeakerLabel name="octo" time="now" />
-            </Reveal>
-          }
-          speakerMarker={null}
-        >
-          <div className={chrome.THREAD_ROOT} style={THREAD_ROOT_STYLE}>
-            <div className={chrome.THREAD_BODY} data-testid={testId("landing-octo-thread")}>
-              {/* The rail row and the live caption each draw their own
-                  full-height stem, so while the run is live the line ends at
-                  the caption. The bridging spine that joins summary, file
-                  rail and artifact spans the body's full height, which is
-                  already the turn's final height, so it waits for the last
-                  section to be drawn; otherwise it would run on down through
-                  the sections still laid out invisibly below. */}
-              <ThreadSpine
-                tone="primary"
-                className={`${chrome.THREAD_SPINE_MAIN} ${threadComplete ? "opacity-100" : "opacity-0"}`}
-                style={{ top: "32px", bottom: "16px" }}
-              />
-
-              {/* Slot A: the typing line, then the chip rail in the same cell. */}
-              <div className="grid min-w-0">
-                {showTypingLine ? (
-                  <div aria-hidden="true" className={`[grid-area:1/1] min-w-0 ${chrome.TYPING_LINE}`} data-testid={testId("landing-typing-line")}>
-                    <span className={chrome.TYPING_LINE_TEXT} data-sweep-text="Thinking…">
-                      Thinking…
-                    </span>
-                  </div>
-                ) : null}
-                <Reveal visible={beat >= BEAT.STEP1} className="[grid-area:1/1]">
-                  <div aria-hidden="true" className={chrome.RAIL_ROW}>
-                    <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 16, maskLine: true }]} />
-                    <div className={chrome.RAIL_ROW_INNER}>
-                      <div className={chrome.RAIL_ROW_TRACK}>
-                        {/* The rail is drawn in three parts so the in-flight
-                            spinner sits immediately after the last drawn chip,
-                            the way the studio's own rail appends it, while the
-                            chips still to come keep their width in reserve
-                            behind it. One extra reserved slot stands in for the
-                            spinner, so the rail is the same width at every beat
-                            whether or not a command is in flight. Chips arrive
-                            one at a time here, so none of them carries the
-                            studio's cascade delay: the newest chip and the
-                            spinner beside it appear together. */}
-                        <div className={chrome.RAIL_CHIPS} data-testid={testId("landing-run-rail")}>
-                          {renderChips(0, visibleChips)}
-                          {commandLive ? (
-                            <span
-                              data-testid={testId("landing-run-spinner")}
-                              className={`${chrome.RAIL_CHIP} instafy-compact-event-pill instafy-compact-event-pill-live`}
-                            >
-                              <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
-                            </span>
-                          ) : (
-                            <span className={`${chrome.RAIL_CHIP} invisible`} aria-hidden="true" />
-                          )}
-                          {renderChips(visibleChips, scenario.steps.length)}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </Reveal>
+          {/* Slot A: the typing line, then the chip rail in the same cell. */}
+          <div className="grid min-w-0">
+            {showTypingLine ? (
+              <div aria-hidden="true" data-pin="" className={`[grid-area:1/1] min-w-0 ${chrome.TYPING_LINE}`} data-testid={testId(ids.typing)}>
+                <span className={chrome.TYPING_LINE_TEXT} data-sweep-text="Thinking…">
+                  Thinking…
+                </span>
               </div>
-
-              {/* Slot B: the live caption, then the summary in the same cell. */}
-              <div className="grid min-w-0 items-start">
-                {liveStep ? (
-                  <div aria-hidden="true" className={`[grid-area:1/1] min-w-0 ${chrome.CAPTION_SECTION}`}>
-                    <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
-                    <div className={chrome.CAPTION_ROW}>
-                      {liveStep.ownerHandle ? (
-                        <span className={chrome.OWNER_BADGE} data-testid={testId("landing-owner-badge")}>
-                          {liveStep.ownerHandle}
+            ) : null}
+            <Reveal visible={visibleChips > 0} className="[grid-area:1/1]">
+              <div aria-hidden="true" className={chrome.RAIL_ROW}>
+                <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 16, maskLine: true }]} />
+                <div className={chrome.RAIL_ROW_INNER}>
+                  <div className={chrome.RAIL_ROW_TRACK}>
+                    {/* The rail is drawn in three parts so the in-flight
+                        spinner sits immediately after the last drawn chip, the
+                        way the studio's own rail appends it, while the chips
+                        still to come keep their width in reserve behind it.
+                        One extra reserved slot stands in for the spinner, so
+                        the rail is the same width at every beat whether or not
+                        a command is in flight. Chips arrive one at a time here,
+                        so none of them carries the studio's cascade delay: the
+                        newest chip and the spinner beside it appear together. */}
+                    <div className={chrome.RAIL_CHIPS} data-testid={testId(ids.rail)}>
+                      {renderChips(0, visibleChips)}
+                      {commandLive ? (
+                        <span
+                          data-testid={testId(ids.spinner)}
+                          className={`${chrome.RAIL_CHIP} instafy-compact-event-pill instafy-compact-event-pill-live`}
+                        >
+                          <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
                         </span>
-                      ) : null}
-                      <span className={chrome.CAPTION_TEXT} data-sweep-text={liveStep.caption} data-testid={testId("landing-run-caption")}>
-                        {liveStep.caption}
-                      </span>
-                      {liveStep.kind === "command" ? (
-                        <span className={chrome.STOP_GLYPH} data-testid={testId("landing-run-stop")}>
-                          <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
-                        </span>
-                      ) : null}
+                      ) : (
+                        <span className={`${chrome.RAIL_CHIP} invisible`} aria-hidden="true" />
+                      )}
+                      {renderChips(visibleChips, steps.length)}
                     </div>
-                  </div>
-                ) : null}
-                <Reveal visible={done} className="[grid-area:1/1]" testId={testId("landing-summary")}>
-                  <div className={chrome.SUMMARY_SECTION}>
-                    <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
-                    <div className="min-w-0">
-                      <div className={chrome.SUMMARY_STACK}>
-                        <div className={chrome.MESSAGE_CONTENT}>
-                          <p className={chrome.MESSAGE_PARAGRAPH}>{scenario.summary}</p>
-                          {scenario.codeLines ? (
-                            <pre className={`mt-2 ${chrome.CODE_BLOCK_CLASS}`} data-testid={testId("landing-code-block")}>
-                              <code>{scenario.codeLines.join("\n")}</code>
-                            </pre>
-                          ) : null}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </Reveal>
-              </div>
-
-              {/* The file rail and, for code, the open diff card. */}
-              <Reveal visible={beat >= BEAT.FILES}>
-                <div className="relative pt-1">
-                  <div className="min-w-0">
-                    <FileRail
-                      files={scenario.files}
-                      railLabel={scenario.railLabel}
-                      loading={countsLoading}
-                      artifactOpen={artifactOpen}
-                      withTestIds={withTestIds}
-                    />
                   </div>
                 </div>
-              </Reveal>
-              {scenario.diffRows ? (
-                <Reveal visible={artifactOpen}>
-                  <DiffCard scenario={scenario} withTestIds={withTestIds} />
-                </Reveal>
-              ) : null}
-              {/* The app docks the shared browser above the composer; in a card
-                  read from the top the page belongs in the message that opened
-                  it, in the slot the diff card takes, on the same artifact beat
-                  and before Kim replies to it. */}
-              {site ? <BrowserDock visible={artifactOpen} beat={beat} playing={playing} withTestIds={withTestIds} /> : null}
-
-              {/* The closing stub sits at the foot of the body, which is already
-                  the turn's final height, so like the bridging spine it waits
-                  for the last section rather than hanging in empty space. */}
-              <Reveal visible={threadComplete}>
-                <div className={chrome.END_STUB}>
-                  <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} segments={[{ topPx: -1, heightPx: 6 }]} />
-                </div>
-              </Reveal>
-            </div>
+              </div>
+            </Reveal>
           </div>
-        </ChatBubbleRow>
 
-        {/* Row 4, slot C: Kim typing, then Kim's reply in the same cell. */}
-        <div className="grid min-w-0">
-          {showKimTyping ? (
-            <div aria-hidden="true" className={`[grid-area:1/1] min-w-0 ${chrome.PEER_TYPING_ROW}`}>
-              <CrewAvatar initial="K" color={KIM_COLOR} size="sm" />
-              <ChatActivityBubble
-                aria-live="off"
-                testId="landing-kim-typing"
-                width="peer"
-                density="comfortable"
-                dotSize="md"
-                surfaceTone="default"
-                label="Kim is typing…"
-              />
+          {/* Slot B: the live caption, then the summary in the same cell. */}
+          <div className="grid min-w-0 items-start">
+            {liveStep ? (
+              <div aria-hidden="true" data-pin="" className={`[grid-area:1/1] min-w-0 ${chrome.CAPTION_SECTION}`}>
+                <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
+                <div className={chrome.CAPTION_ROW}>
+                  {liveStep.ownerHandle ? (
+                    <span className={chrome.OWNER_BADGE} data-testid={testId(ids.owner)}>
+                      {liveStep.ownerHandle}
+                    </span>
+                  ) : null}
+                  <span className={chrome.CAPTION_TEXT} data-sweep-text={liveStep.caption} data-testid={testId(ids.caption)}>
+                    {liveStep.caption}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+            <Reveal visible={done} className="[grid-area:1/1]" testId={testId(ids.summary)}>
+              <div className={chrome.SUMMARY_SECTION}>
+                <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} notches={[{ offsetPx: 9, maskLine: true }]} />
+                <div className="min-w-0">
+                  <div className={chrome.SUMMARY_STACK}>
+                    <div className={chrome.MESSAGE_CONTENT}>
+                      <p className={chrome.MESSAGE_PARAGRAPH}>{summary}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Reveal>
+          </div>
+
+          {sections}
+
+          {/* The closing stub sits at the foot of the body, which is already
+              the run's final height, so like the bridging spine it waits for
+              the last section rather than hanging in empty space. */}
+          <Reveal visible={threadComplete}>
+            <div className={chrome.END_STUB}>
+              <ThreadSpine tone="primary" className={chrome.THREAD_SPINE_NOTCH} segments={[{ topPx: -1, heightPx: 6 }]} />
             </div>
-          ) : null}
-          <Reveal visible={beat >= BEAT.REPLY} className="[grid-area:1/1]" testId={testId("landing-kim-reply")}>
-            <ChatBubbleRow
-              align="left"
-              avatar={<CrewAvatar initial="K" color={KIM_COLOR} size="sm" />}
-              speakerIdentity={<SpeakerLabel name="Kim" time="now" />}
-              speakerMarker={null}
-            >
-              <TeammateMessage text={scenario.reply} />
-            </ChatBubbleRow>
           </Reveal>
         </div>
-      </ChatColumn>
+      </div>
+    </ChatBubbleRow>
+  );
+}
+
+/**
+ * How far the transcript column has scrolled so its newest drawn content sits
+ * at the bottom of the transcript, the way the chat stays pinned to its newest
+ * message: nothing while everything fits.
+ */
+export function transcriptScrollOffset(contentBottom: number, viewportHeight: number): number {
+  return Math.max(0, Math.round(contentBottom - viewportHeight));
+}
+
+/**
+ * Keeps the active scenario's newest message in view (TRANSCRIPT_SCROLL).
+ * Every row is laid out at its final size from the first paint, so the
+ * newest drawn content is the lowest element that is shown at this beat.
+ */
+function useTranscriptScroll(active: boolean, beat: number) {
+  const columnRef = useRef<HTMLDivElement | null>(null);
+  const [offset, setOffset] = useState(0);
+  useLayoutEffect(() => {
+    const column = columnRef.current;
+    const viewport = column?.closest<HTMLElement>("[data-transcript-viewport]");
+    if (!column || !viewport || !active) {
+      setOffset(0);
+      return;
+    }
+    const update = () => {
+      const top = column.getBoundingClientRect().top;
+      let bottom = 0;
+      column.querySelectorAll<HTMLElement>('[data-beat-visible="true"], [data-pin]').forEach((node) => {
+        // A reveal inside a hidden one is not shown yet.
+        if (node.parentElement?.closest('[data-beat-visible="false"]')) return;
+        bottom = Math.max(bottom, node.getBoundingClientRect().bottom - top);
+      });
+      const style = getComputedStyle(viewport);
+      const height = viewport.clientHeight - parseFloat(style.paddingTop || "0") - parseFloat(style.paddingBottom || "0");
+      const next = transcriptScrollOffset(bottom, height);
+      setOffset((current) => (current === next ? current : next));
+    };
+    update();
+    if (typeof ResizeObserver !== "function") return;
+    // The transcript's size, and the column's own (a web font swapping in
+    // rewraps every message).
+    const observer = new ResizeObserver(update);
+    observer.observe(viewport);
+    observer.observe(column);
+    return () => observer.disconnect();
+  }, [active, beat]);
+  return { columnRef, offset: active ? offset : 0 };
+}
+
+// One scripted task for one scenario, drawn for a beat. When playing is false
+// the beat is the scenario's last and nothing transient exists in the DOM.
+export function TurnColumn({
+  scenario,
+  beat,
+  playing,
+  withTestIds = false,
+  split = true,
+}: {
+  scenario: SessionScenario;
+  beat: number;
+  playing: boolean;
+  withTestIds?: boolean;
+  /**
+   * The window shows a split: only there does Ada click the summary's file
+   * reference to open the result beside the chat (one view keeps the chat in
+   * front, with the result in its inline card).
+   */
+  split?: boolean;
+}) {
+  const at = (id: TurnBeatId) => beatReached(scenario, beat, id);
+  const index = (id: TurnBeatId) => beatIndex(scenario, id);
+  const browser = scenario.browser;
+  const artifactOpen = beat >= BEAT.ARTIFACT;
+  const countsLoading = playing && beat < BEAT.COUNTS;
+  const showKimTyping = playing && at("kimTyping") && !at("reply");
+  const testId = (name: string) => (withTestIds ? name : undefined);
+  const { columnRef, offset } = useTranscriptScroll(withTestIds, beat);
+  // The run's last section: the file card, the browser request, or, for a
+  // scenario whose result is only its files, the file rail.
+  const runOneComplete = scenario.card || browser ? BEAT.ARTIFACT : BEAT.FILES;
+  // Ada's pointer is on the reference from the counts beat, 400 ms before her
+  // click opens the file on the artifact beat, so the file never opens on its
+  // own.
+  const fileReferenceOpen = split && beat >= BEAT.COUNTS && !!scenario.pane.artifact && !scenario.pane.artifact.sameTab;
+
+  return (
+    <div className="relative flex flex-col">
+      {/* Cub's floor, which his front arms hang to: 16px under the window's
+          top bar, where the conversation began before the views bar (45px,
+          md+) came between them, so his arms stay in the top bar's band and
+          off the views. It never moves with the transcript's scroll. */}
+      <div aria-hidden="true" data-cub-anchor="floor" className={`pointer-events-none absolute inset-x-0 top-0 h-[50px] ${chrome.VIEWS_BAR_FLOOR_LIFT}`} />
+      <div ref={columnRef} data-testid={testId("landing-transcript-column")} data-scroll={offset} className={chrome.TRANSCRIPT_SCROLL} style={offset ? { transform: `translateY(-${offset}px)` } : undefined}>
+        <ChatColumn className="space-y-2.5">
+          {/* Row 1: Kim's opener (a teammate: flat text, never a bubble). */}
+          <div data-pin="">
+            <ChatBubbleRow
+              align="left"
+              avatar={<CrewAvatar initial="K" crew={KIM} size="sm" />}
+              speakerIdentity={<SpeakerLabel name="Kim" time="4m ago" />}
+              speakerMarker={null}
+              testId={testId("landing-opener")}
+            >
+              <TeammateMessage text={scenario.opener} />
+            </ChatBubbleRow>
+          </div>
+
+          {/* Row 2: Ada's own message. The app never labels your own message. */}
+          <ChatBubbleRow align="right" avatar={null} speakerMarker={null}>
+            {/* The wrapper spans the column so the bubble's 92% cap resolves
+                against it, exactly as the bare bubble does in the app. */}
+            <Reveal visible={beat >= BEAT.OWN} className="flex w-full justify-end">
+              <div data-testid={testId("landing-own-message")} data-cub-anchor="own" className={chrome.OWN_BUBBLE}>
+                {scenario.prompt}
+              </div>
+            </Reveal>
+          </ChatBubbleRow>
+
+          {/* Row 3: Octo's run, the agent job thread preview. The app shows no
+              assistant row until Octo starts, so the avatar fades in with its
+              label (the slot is a fixed 32px box, so nothing moves). */}
+          <OctoRun
+            steps={scenario.steps}
+            stepBeats={[BEAT.STEP1, BEAT.STEP2, BEAT.STEP3, BEAT.STEP4, BEAT.STEP5]}
+            thinkingBeat={BEAT.THINKING}
+            doneBeat={BEAT.DONE}
+            beat={beat}
+            playing={playing}
+            summary={<MessageParts parts={scenario.summaryParts} referenceOpen={fileReferenceOpen} withTestIds={withTestIds} />}
+            completeBeat={runOneComplete}
+            ids={RUN_TEST_IDS}
+            withTestIds={withTestIds}
+            messageAnchor
+            sections={
+              <>
+                {/* The file rail and, for an artifact, its open card or the browser request. */}
+                <Reveal visible={beat >= BEAT.FILES}>
+                  <div className="relative pt-1">
+                    <div className="min-w-0">
+                      <FileRail
+                        files={scenario.files}
+                        railLabel={scenario.railLabel}
+                        loading={countsLoading}
+                        artifactOpen={artifactOpen}
+                        withTestIds={withTestIds}
+                      />
+                    </div>
+                  </div>
+                </Reveal>
+                {scenario.card ? (
+                  <Reveal visible={artifactOpen}>
+                    <FileCard scenario={scenario} withTestIds={withTestIds} />
+                  </Reveal>
+                ) : null}
+                {browser ? (
+                  <Reveal visible={artifactOpen} className="mt-2.5">
+                    <BrowserRequestCard
+                      pressed={at("tap") && !at("press")}
+                      busy={at("press") && !at("handoff")}
+                      playing={playing}
+                      withTestIds={withTestIds}
+                    />
+                  </Reveal>
+                ) : null}
+              </>
+            }
+          />
+
+          {browser ? (
+            <>
+              {/* Row 4: the continuation Ada's press sends as her own message
+                  (browserRequestContinuation), which starts the browser turn. */}
+              <ChatBubbleRow align="right" avatar={null} speakerMarker={null}>
+                <Reveal visible={at("handoff")} className="flex w-full justify-end">
+                  <div data-testid={testId("landing-continuation")} className={`${chrome.OWN_BUBBLE} whitespace-pre-wrap`}>
+                    {browserContinuation(browser.task)}
+                  </div>
+                </Reveal>
+              </ChatBubbleRow>
+
+              {/* Row 5: Octo's browser run. Every Shared Browser step is a
+                  tool call, so its rail shows tool chips captioned "Calling
+                  tool…"; what Octo does on the page is captioned in the
+                  browser beside the chat. */}
+              <OctoRun
+                steps={browser.steps}
+                stepBeats={[index("approve"), index("loaded"), index("scroll"), index("click")]}
+                thinkingBeat={index("browse")}
+                doneBeat={index("browseDone")}
+                beat={beat}
+                playing={playing}
+                summary={browser.summary}
+                completeBeat={index("browseDone")}
+                ids={BROWSE_TEST_IDS}
+                withTestIds={withTestIds}
+              />
+            </>
+          ) : null}
+
+          {/* Last row, one cell: Kim typing, then Kim's reply. */}
+          <div className="grid min-w-0">
+            {showKimTyping ? (
+              <div aria-hidden="true" data-pin="" className={`[grid-area:1/1] min-w-0 ${chrome.PEER_TYPING_ROW}`}>
+                <CrewAvatar initial="K" crew={KIM} size="sm" />
+                <ChatActivityBubble
+                  aria-live="off"
+                  testId="landing-kim-typing"
+                  width="peer"
+                  density="comfortable"
+                  dotSize="md"
+                  surfaceTone="default"
+                  label="Kim is typing…"
+                />
+              </div>
+            ) : null}
+            <Reveal visible={at("reply")} className="[grid-area:1/1]" testId={testId("landing-kim-reply")}>
+              <ChatBubbleRow
+                align="left"
+                avatar={<CrewAvatar initial="K" crew={KIM} size="sm" />}
+                speakerIdentity={<SpeakerLabel name="Kim" time="now" />}
+                speakerMarker={null}
+              >
+                <TeammateMessage text={scenario.reply} />
+              </ChatBubbleRow>
+            </Reveal>
+          </div>
+        </ChatColumn>
+      </div>
     </div>
   );
 }
@@ -977,13 +1162,25 @@ function TypedPrompt({ text, typing, held }: { text: string; typing: boolean; he
 
 // ChatComposerSurface.tsx:1301-1370 at rest: "+" and the mic, the placeholder
 // "Ask for something…", and Send taking the mic's slot while a draft exists.
-export function MiniComposer({ prompt, beat, playing }: { prompt: string; beat: number; playing: boolean }) {
+// On phones the conversation's views sit above it (viewNavigation, 1345).
+export function MiniComposer({
+  prompt,
+  beat,
+  playing,
+  viewNavigation,
+}: {
+  prompt: string;
+  beat: number;
+  playing: boolean;
+  viewNavigation?: ReactNode;
+}) {
   const typing = playing && beat === BEAT.TYPING;
   const held = playing && beat === BEAT.SEND;
   const draft = typing || held;
   return (
-    <div aria-hidden="true" className={chrome.COMPOSER_WRAP}>
-      <div className={CHAT_COLUMN_CLASS_NAME}>
+    <div aria-hidden="true" data-landing-composer="" className={chrome.COMPOSER_WRAP}>
+      {viewNavigation ? <div className={CHAT_COLUMN_CLASS_NAME}>{viewNavigation}</div> : null}
+      <div className={CHAT_COLUMN_CLASS_NAME} data-cub-anchor="composer">
         <Surface tone="default" radius="3xl" shadow="none" className={chrome.COMPOSER_SURFACE}>
           <div className={chrome.COMPOSER_ROW}>
             <div className={chrome.COMPOSER_LEADING}>

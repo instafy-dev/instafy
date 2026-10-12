@@ -552,7 +552,7 @@ test("invalid UTF-8 and every unknown binary or archive fail closed", () => {
   );
 });
 
-test("the canonical policy approves all 47 reviewed binary assets", () => {
+test("the canonical policy approves all 74 reviewed binary assets", () => {
   const policy = loadPublicBoundaryPolicy(PUBLIC_BOUNDARY_POLICY_PATH);
   assert.equal(policy.schemaVersion, 2);
   assert.equal(policy.approvedEnvironmentTemplates.size, 16);
@@ -560,8 +560,8 @@ test("the canonical policy approves all 47 reviewed binary assets", () => {
     [...policy.approvedGitlinks],
     [["codex", "e4fee99d8f9c3b1923fa569ba2d3ceba230c0923"]],
   );
-  assert.equal(policy.binaryAssetCount, 47);
-  assert.equal(policy.binarySha256.size, 47);
+  assert.equal(policy.binaryAssetCount, 74);
+  assert.equal(policy.binarySha256.size, 74);
   assert.deepEqual(
     findPublicBoundaryViolations({
       root: repositoryRoot,
