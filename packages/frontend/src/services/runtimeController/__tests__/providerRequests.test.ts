@@ -57,8 +57,8 @@ describe("listControllerProviderRequests", () => {
 describe("dispatchControllerProviderToolCall", () => {
   const params = {
     projectId: "project-1",
-    providerId: "knosh",
-    name: "knosh.robot.skill.look_at",
+    providerId: "example-robot",
+    name: "example.robot.skill.look_at",
     argumentsValue: { azimuth_deg: 0 },
     timeoutMs: 30_000,
   };
@@ -88,8 +88,8 @@ describe("dispatchControllerProviderToolCall", () => {
   it("passes the device's own reply through as it is, success or failure", async () => {
     stubControllerAnswer(200, {
       ok: true,
-      providerId: "knosh",
-      name: "knosh.robot.skill.look_at",
+      providerId: "example-robot",
+      name: "example.robot.skill.look_at",
       value: { status: "succeeded" },
     });
     const succeeded = await dispatchControllerProviderToolCall(params);
@@ -98,8 +98,8 @@ describe("dispatchControllerProviderToolCall", () => {
 
     stubControllerAnswer(200, {
       ok: false,
-      providerId: "knosh",
-      name: "knosh.robot.skill.look_at",
+      providerId: "example-robot",
+      name: "example.robot.skill.look_at",
       error: "look_at blocked: the robot is stowed",
     });
     const failed = await dispatchControllerProviderToolCall(params);
@@ -111,8 +111,8 @@ describe("dispatchControllerProviderToolCall", () => {
   it("reads a request no device picked up before the controller expired it as never claimed", async () => {
     stubControllerAnswer(200, {
       ok: false,
-      providerId: "knosh",
-      name: "knosh.robot.skill.look_at",
+      providerId: "example-robot",
+      name: "example.robot.skill.look_at",
       error: "Timed out waiting for the provider device to respond.",
       providerRequest: { id: "request-1", status: "expired" },
     });
@@ -127,28 +127,28 @@ describe("dispatchControllerProviderToolCall", () => {
   it("reads a request a device claimed and did not finish in time as unknown", async () => {
     stubControllerAnswer(200, {
       ok: false,
-      providerId: "knosh",
-      name: "knosh.robot.skill.look_at",
+      providerId: "example-robot",
+      name: "example.robot.skill.look_at",
       error: "Timed out waiting for the provider device to respond.",
       providerRequest: {
         id: "request-1",
         status: "expired",
         claimedAt: "2026-10-12T12:00:28Z",
-        claimedByDeviceLabel: "Knosh V1",
+        claimedByDeviceLabel: "Robot V1",
       },
     });
 
     await expect(dispatchControllerProviderToolCall(params)).resolves.toMatchObject({
       noDeviceReply: "unknown",
-      request: { status: "expired", claimedAt: "2026-10-12T12:00:28Z", claimedByDeviceLabel: "Knosh V1" },
+      request: { status: "expired", claimedAt: "2026-10-12T12:00:28Z", claimedByDeviceLabel: "Robot V1" },
     });
   });
 
   it("reads an older controller's timeout, which says nothing about a claim, as unknown", async () => {
     stubControllerAnswer(200, {
       ok: false,
-      providerId: "knosh",
-      name: "knosh.robot.skill.look_at",
+      providerId: "example-robot",
+      name: "example.robot.skill.look_at",
       error: "Timed out waiting for the provider device to respond.",
     });
 

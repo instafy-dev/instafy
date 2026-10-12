@@ -1126,9 +1126,9 @@ mod tests {
         ProviderRequestRecord {
             id: Uuid::parse_str("8f1d9a52-3c4b-4f8e-9a7d-2b6c1e0f5a34").unwrap(),
             project_id: Uuid::nil(),
-            provider_id: "knosh".to_string(),
+            provider_id: "example-robot".to_string(),
             request_kind: "tool_call".to_string(),
-            tool_name: Some("knosh.robot.skill.look_at".to_string()),
+            tool_name: Some("example.robot.skill.look_at".to_string()),
             resource_uri: None,
             arguments: json!({ "azimuth_deg": 0 }),
             status: "expired".to_string(),
@@ -1168,7 +1168,7 @@ mod tests {
     fn timed_out_tool_dispatch_says_which_device_had_claimed_the_request() {
         let claimed_at = Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 28).unwrap();
         let response =
-            build_tool_dispatch_response(&timed_out_request(Some(claimed_at), Some("Knosh V1")));
+            build_tool_dispatch_response(&timed_out_request(Some(claimed_at), Some("Robot V1")));
 
         assert_eq!(response["providerRequest"]["status"], json!("expired"));
         assert_eq!(
@@ -1177,7 +1177,7 @@ mod tests {
         );
         assert_eq!(
             response["providerRequest"]["claimedByDeviceLabel"],
-            json!("Knosh V1")
+            json!("Robot V1")
         );
     }
 
@@ -1185,11 +1185,11 @@ mod tests {
     fn tool_dispatch_returns_the_device_reply_unchanged() {
         let mut request = timed_out_request(None, None);
         request.status = "completed".to_string();
-        request.response = Some(json!({ "ok": true, "name": "knosh.robot.skill.look_at" }));
+        request.response = Some(json!({ "ok": true, "name": "example.robot.skill.look_at" }));
 
         assert_eq!(
             build_tool_dispatch_response(&request),
-            json!({ "ok": true, "name": "knosh.robot.skill.look_at" })
+            json!({ "ok": true, "name": "example.robot.skill.look_at" })
         );
     }
 
