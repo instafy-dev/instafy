@@ -438,6 +438,36 @@ describe("useConversationSubmitFlow group participation", () => {
     expect(sendPromptToControllerMock).not.toHaveBeenCalled();
   });
 
+  it("tells the local capability flow who sent the prompt", async () => {
+    // Only a person's own send may ask another device to act; the flow is told
+    // exactly what the composer said and assumes nothing when it said nothing.
+    resolveLocalCapabilityHandleMock.mockReturnValue("octo");
+    resolveParticipationMock.mockResolvedValue({
+      decision: "respond",
+      domain: "technical",
+      reason: "camera_request",
+      confidence: 99,
+      participantCount: 2,
+      policySkillPath: ".agents/skills/instafy-group-participation/SKILL.md",
+    });
+
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "Take a photo of this device.", {
+        initiatedBy: "person",
+      });
+    });
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "Take another photo of this device.");
+    });
+
+    expect(runLocalCapabilityConversationFlowMock).toHaveBeenCalledTimes(2);
+    expect(runLocalCapabilityConversationFlowMock.mock.calls[0]?.[0]).toMatchObject({
+      prompt: "Take a photo of this device.",
+      initiatedBy: "person",
+    });
+    expect(runLocalCapabilityConversationFlowMock.mock.calls[1]?.[0]?.initiatedBy).toBeUndefined();
+  });
+
   it("defers resolver outages to the controller without local AI side effects", async () => {
     resolveParticipationMock.mockResolvedValue(null);
     resolveLocalCapabilityHandleMock.mockReturnValue("octo");

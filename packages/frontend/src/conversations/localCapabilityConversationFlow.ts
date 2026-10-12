@@ -11,6 +11,7 @@ import {
   deriveLocalCapabilityPromptMetadataPatch,
   type LocalCapabilityStatusValue,
 } from "../capabilities/localCapabilityRuntime";
+import type { LocalCapabilityPromptInitiator } from "../capabilities/localCapabilityContributions";
 import {
   isMetadataRecord,
   mergeLocalCapabilityMetadata,
@@ -41,6 +42,8 @@ export interface RunLocalCapabilityConversationFlowOptions {
   promptMetadata: Record<string, unknown> | null;
   userMessageId: string;
   conversationMessages: ChatMessage[];
+  /** "person" only for a message someone sent from the chat composer. */
+  initiatedBy?: LocalCapabilityPromptInitiator;
   appendMessages: AppendConversationMessages;
   updateMessage: UpdateConversationMessage;
   recordMessageToController: RecordConversationMessage;
@@ -187,6 +190,7 @@ export async function runLocalCapabilityConversationFlow(
     conversationId: options.conversationId,
     projectId: options.projectId ?? null,
     conversationMessages: options.conversationMessages,
+    initiatedBy: options.initiatedBy,
     onStatus: (statusUpdate) => {
       const normalizedStatusUpdate = normalizeLocalCapabilityStatusUpdate(statusUpdate);
       updateAssistantCapabilityMessage(

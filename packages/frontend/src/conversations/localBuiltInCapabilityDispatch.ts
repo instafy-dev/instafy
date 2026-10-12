@@ -4,7 +4,10 @@ import {
   type LocalCapabilityStatusValue,
   type LocalCapabilityRuntimeResult,
 } from "../capabilities/localCapabilityRuntime";
-import type { LocalCapabilityConversationMessage } from "../capabilities/localCapabilityContributions";
+import type {
+  LocalCapabilityConversationMessage,
+  LocalCapabilityPromptInitiator,
+} from "../capabilities/localCapabilityContributions";
 
 export type LocalBuiltInCapabilityDispatchResult = LocalCapabilityRuntimeResult;
 
@@ -14,6 +17,7 @@ export interface DispatchLocalBuiltInCapabilityPromptOptions {
   conversationId: string;
   projectId?: string | null;
   conversationMessages?: readonly LocalCapabilityConversationMessage[];
+  initiatedBy?: LocalCapabilityPromptInitiator;
   onStatus?: (status: LocalCapabilityStatusValue) => void;
   onCapabilityEvent?: (event: Record<string, unknown>) => void;
 }
@@ -33,6 +37,7 @@ export async function dispatchLocalBuiltInCapabilityPrompt(
     runtimeMode: "conversation_local_capability",
     learningMode: "conversation_learning_session",
     conversationMessages: options.conversationMessages,
+    initiatedBy: options.initiatedBy,
     onStatus: options.onStatus,
     onCapabilityEvent: options.onCapabilityEvent,
   });

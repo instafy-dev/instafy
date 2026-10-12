@@ -9,6 +9,7 @@ import {
 } from "./localProviderHostClient";
 import { resolveExtensionFamilyId } from "../providers/extensionProviderId";
 import {
+  listProviderRemoteToolIds,
   providerSupportsRemoteNativeExtension,
   resolveCurrentClientNativeRuntimeProvider,
   resolveCurrentClientNativeRuntimeProviderForCapability,
@@ -59,6 +60,16 @@ export interface ProjectProviderAccessResolution {
   status?: string | null;
   reason?: string | null;
   unavailableReason?: "attached_on_other_device" | "not_discoverable" | null;
+  /**
+   * Set when the provider is reached through the device it is attached on,
+   * not this one: requests go through the controller's provider-request queue.
+   */
+  remoteDevice?: ProjectProviderRemoteDevice | null;
+}
+
+export interface ProjectProviderRemoteDevice {
+  label: string;
+  selectedDevice: ProjectProviderSelectedDevice | null;
 }
 
 export interface ProjectCapabilityProviderAccessResolution extends ProjectProviderAccessResolution {
@@ -759,6 +770,23 @@ function providerIsDiscoverable(provider: LocalProviderSummary): boolean {
   return provider.discoverable !== false;
 }
 
+/**
+ * True when the integration's saved device was set up from a phone platform
+ * this client is not, so that phone holds the device's link (a browser or
+ * Desktop window cannot hold a phone's Bluetooth connection). A phone that has
+ * its own saved selection for this integration holds it itself.
+ */
+function savedSelectionIsHeldOnAnotherPlatform(
+  integration: ControllerProjectIntegration,
+): boolean {
+  const currentPlatform = getCurrentNativeMobilePlatform();
+  if (currentPlatform && getProjectProviderSelectedDevice(integration)) {
+    return false;
+  }
+  const savedPlatform = getProjectProviderStoredSelectedDevice(integration)?.nativePlatform ?? null;
+  return savedPlatform !== null && savedPlatform !== currentPlatform;
+}
+
 export async function resolveProjectProviderAccess(
   options: ResolveProjectProviderAccessOptions,
   listProjectIntegrations: ListProjectIntegrationsLoader = controllerClient.integrations.listForProject,
@@ -1018,9 +1046,21 @@ export async function resolveProjectCapabilityProviderAccess(
 
   const undiscoveredAttachedProvider = preferredAttachedIntegration;
   if (undiscoveredAttachedProvider) {
-    const nativeFallbackProvider = await resolveCurrentClientNativeRuntimeProvider(
-      undiscoveredAttachedProvider.provider,
-    );
+    const selectedDevice = getProjectProviderStoredSelectedDevice(undiscoveredAttachedProvider);
+    const attachedOnOtherDevice =
+      undiscoveredAttachedProvider.connectionType.trim().toLowerCase() === "native_runtime" &&
+      selectedDevice !== null;
+    const remoteToolIds = listProviderRemoteToolIds(undiscoveredAttachedProvider.provider);
+    // A family that can be driven from another device goes to the phone its
+    // saved selection names, even where this client has a transport of its
+    // own for the family: only one device can hold the link.
+    const heldOnAnotherPlatform =
+      attachedOnOtherDevice &&
+      remoteToolIds.length > 0 &&
+      savedSelectionIsHeldOnAnotherPlatform(undiscoveredAttachedProvider);
+    const nativeFallbackProvider = heldOnAnotherPlatform
+      ? null
+      : await resolveCurrentClientNativeRuntimeProvider(undiscoveredAttachedProvider.provider);
     if (
       nativeFallbackProvider &&
       (!capabilityId || providerSupportsCapability(nativeFallbackProvider, capabilityId))
@@ -1038,25 +1078,35 @@ export async function resolveProjectCapabilityProviderAccess(
       };
     }
 
-    const selectedDevice = getProjectProviderStoredSelectedDevice(undiscoveredAttachedProvider);
-    const attachedOnOtherDevice =
-      undiscoveredAttachedProvider.connectionType.trim().toLowerCase() === "native_runtime" &&
-      selectedDevice !== null;
-
     if (
       attachedOnOtherDevice &&
-      providerSupportsRemoteNativeExtension(undiscoveredAttachedProvider.provider)
+      (providerSupportsRemoteNativeExtension(undiscoveredAttachedProvider.provider) ||
+        remoteToolIds.length > 0)
     ) {
+      // The same project policy as a local use: the assistant must be on the
+      // integration's allow list and the capability attached.
+      const access = await resolveProjectProviderAccess(
+        {
+          ...options,
+          providerId: undiscoveredAttachedProvider.provider,
+        },
+        listProjectIntegrations,
+      );
+      if (!access.allowed) {
+        return {
+          ...access,
+          provider: null,
+        };
+      }
+      const deviceLabel = formatProjectProviderSelectedDeviceLabel(selectedDevice);
       return {
-        providerId: undiscoveredAttachedProvider.provider,
+        ...access,
         provider: null,
-        allowed: true,
-        source: "project_integration",
-        integrationId: undiscoveredAttachedProvider.id,
-        status: undiscoveredAttachedProvider.status,
-        reason: `Provider ${undiscoveredAttachedProvider.provider} is attached on ${formatProjectProviderSelectedDeviceLabel(
+        reason: `Provider ${undiscoveredAttachedProvider.provider} is attached on ${deviceLabel} and can be reached remotely while that device keeps this space open in Instafy.`,
+        remoteDevice: {
+          label: deviceLabel,
           selectedDevice,
-        )} and can be reached remotely while that device keeps this space open in Instafy.`,
+        },
       };
     }
 

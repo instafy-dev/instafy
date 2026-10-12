@@ -44,6 +44,8 @@ import {
 } from "./projectProviderAccess";
 import { controllerClient } from "../sdk/instafy";
 import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
+import { listProviderRemoteToolIds } from "../extensions/nativeRuntimeProviderRegistry";
+import { executeRemoteToolCall } from "./localCapabilityRemoteToolCall";
 import type {
   ExecuteLocalCapabilityPromptOptions,
   LocalCapabilityRouteDefinition,
@@ -1190,6 +1192,23 @@ export async function executeLocalCapabilityPrompt(
           providerAccess,
         },
       };
+    }
+    // A family that lists remote tool ids is driven from here only through
+    // the device it is attached on. A family without them (the camera)
+    // reaches that device from inside its own route.
+    const remoteToolIds = providerAccess.remoteDevice
+      ? listProviderRemoteToolIds(providerAccess.providerId)
+      : [];
+    if (providerAccess.remoteDevice && remoteToolIds.length > 0) {
+      return executeRemoteToolCall({
+        route,
+        options,
+        assistantDefinition,
+        conversationState,
+        providerId: providerAccess.providerId,
+        remoteDevice: providerAccess.remoteDevice,
+        remoteToolIds,
+      });
     }
     resolvedProviderId = providerAccess.providerId;
     resolvedProvider = providerAccess.provider;

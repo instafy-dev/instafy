@@ -775,4 +775,67 @@ describe("local capability conversation flow", () => {
       ]),
     );
   });
+
+  it("forwards who sent the prompt and records both turns of another device's result", async () => {
+    // A person typed a robot prompt on a device without the robot: the result
+    // comes back from the phone that ran it, and both turns land in the
+    // conversation the same way a local result does.
+    dispatchLocalBuiltInCapabilityPromptMock.mockResolvedValue({
+      handled: true,
+      responseText: "Rover ran Look at me on Rover Board (AA:BB:CC:DD:EE:FF).",
+      metadata: {
+        kind: "local_capability_result",
+        localCapability: { id: "robot_embodiment", status: "completed" },
+        remoteToolCall: {
+          providerId: "rover",
+          deviceLabel: "Rover Board (AA:BB:CC:DD:EE:FF)",
+          dispatched: true,
+          toolName: "rover.skill.look_at",
+          ok: true,
+        },
+      },
+    });
+    const messages = createMessageStore({ "conversation-remote": [] });
+    const recordMessageToController = vi.fn(async () => null);
+
+    const result = await runLocalCapabilityConversationFlow({
+      handle: "rover",
+      prompt: "@rover look at me",
+      conversationId: "conversation-remote",
+      displayConversationId: "conversation-remote",
+      promptMetadata: null,
+      userMessageId: "user-remote",
+      conversationMessages: [],
+      initiatedBy: "person",
+      appendMessages: messages.appendMessages,
+      updateMessage: messages.updateMessage,
+      recordMessageToController,
+    });
+
+    expect(result.handled).toBe(true);
+    expect(dispatchLocalBuiltInCapabilityPromptMock).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "@rover look at me", initiatedBy: "person" }),
+    );
+    expect(recordMessageToController).toHaveBeenCalledTimes(2);
+    expect(recordMessageToController).toHaveBeenNthCalledWith(
+      1,
+      "conversation-remote",
+      "@rover look at me",
+      null,
+      "user",
+    );
+    expect(recordMessageToController).toHaveBeenNthCalledWith(
+      2,
+      "conversation-remote",
+      "Rover ran Look at me on Rover Board (AA:BB:CC:DD:EE:FF).",
+      expect.objectContaining({
+        localCapability: { id: "robot_embodiment", status: "completed" },
+        remoteToolCall: expect.objectContaining({
+          toolName: "rover.skill.look_at",
+          ok: true,
+        }),
+      }),
+      "assistant",
+    );
+  });
 });

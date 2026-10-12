@@ -974,6 +974,7 @@ export function useConversationSubmitFlow({
               promptMetadata,
               userMessageId: userMessage.id,
               conversationMessages: targetConversation.messages,
+              initiatedBy: options?.initiatedBy,
               appendMessages,
               updateMessage,
               recordMessageToController: (conversationId, content, metadata, role) =>

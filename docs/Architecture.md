@@ -22,6 +22,18 @@ and branded UI stay in the integration package, while the application depends
 only on the generic feature API. This is deliberately a trusted build-time
 plugin seam, not a runtime marketplace or arbitrary remote-code loader.
 
+A native runtime family can list `remoteToolIds`: the exact provider tool ids
+that a person's chat prompt on a device without the provider may ask of the
+device it is attached on (for example a browser asking the phone that holds a
+board's Bluetooth link). The sending client maps the prompt to one call with
+the route's `resolveRemoteToolCall`, applies the same project policy as a local
+use, refuses any id the family does not list and any prompt that was not sent
+by a person from the chat composer, and dispatches it through the controller's
+provider-request queue (`POST /projects/:id/provider-tools/call`). The device
+holding the provider claims and completes the request, and its reply becomes
+the assistant turn recorded in the conversation. Model jobs carry no
+`provider.call` scope, so they cannot queue such requests.
+
 ## Filesystem Model
 - Hosted workers materialize per-space workspaces under `WORKSPACE_ROOT/<project_id>`.
 - The hosted workspace gateway (the controller's `HOSTED_ORIGIN_ENDPOINT`) keeps no working

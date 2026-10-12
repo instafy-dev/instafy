@@ -416,6 +416,8 @@ describe("useChatSubmitFlow sends made for the person", () => {
     expect(payload?.message).not.toBe(RETRY_PROMPT);
     expect(payload?.message).toContain('"Pricing" page');
     expect(payload?.automatic).toBe(false);
+    // A typed send is the person's own, so it may ask another device to act.
+    expect(payload?.initiatedBy).toBe("person");
   });
 
   it("leaves the composer, the typing state and the browser alone for an automatic send", async () => {
@@ -453,6 +455,7 @@ describe("useChatSubmitFlow sends made for the person", () => {
       imageFiles: [],
       runtimeOverride: null,
       automatic: true,
+      initiatedBy: "app",
     });
     expect(payload?.metadata).toMatchObject({ retryOfMessageId: "failure-1" });
     expect(payload?.metadata).not.toHaveProperty("browserTransport");

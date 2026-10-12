@@ -796,6 +796,7 @@ export function useChatSubmitFlow({
       runtimeOverride: submitRuntimeOverride,
       expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
       automatic,
+      initiatedBy: automatic ? "app" : "person",
     });
     if (!sent) {
       // An attachment upload failed and the draft is back in the composer: it

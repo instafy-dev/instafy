@@ -86,6 +86,48 @@ describe("useChatSubmitDispatch", () => {
       }),
     );
   });
+  it.each([
+    ["a send the person made", { initiatedBy: "person" as const }, "person"],
+    ["an automatic send, even one marked as the person's", { initiatedBy: "person" as const, automatic: true }, "app"],
+    ["a send that does not say who made it", {}, "app"],
+  ])("marks %s for the submit flow", async (_label, payloadOverrides, expected) => {
+    // Only a person's own send may ask another device to act, so anything
+    // that is not marked as theirs reaches the submit flow as the app's.
+    const onSubmit = vi.fn(async () => undefined);
+    const options: HookOptions = {
+      activeConversationId: "conversation-1",
+      removeSentImageAttachments: vi.fn(),
+      focusInput: vi.fn(),
+      isChatInputFocused: vi.fn(() => false),
+      latestInputValueRef: { current: "@rover look at me" },
+      mentionableAgentHandles: ["octo"],
+      onInputChange: vi.fn(),
+      onSubmit,
+      scrollToBottom: vi.fn(),
+      setSendingAttachment: vi.fn(),
+      shouldAutoScrollRef: { current: false },
+    };
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => {
+      root.render(<Harness options={options} resultRef={resultRef} />);
+    });
+
+    await act(async () => {
+      await resultRef.current?.performSubmit({
+        message: "@rover look at me",
+        editorState: null,
+        imageFiles: [],
+        ...payloadOverrides,
+      });
+    });
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      "conversation-1",
+      "@rover look at me",
+      expect.objectContaining({ initiatedBy: expected }),
+    );
+  });
+
   it("leaves the composer, staged images, focus and scroll alone for an automatic send", async () => {
     // A failed run's automatic retry fires while the person may be writing the
     // next message (with a screenshot attached) or reading further up.

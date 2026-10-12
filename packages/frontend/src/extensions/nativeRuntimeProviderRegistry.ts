@@ -136,6 +136,11 @@ export function providerSupportsRemoteNativeExtension(providerId?: string | null
   );
 }
 
+export function listProviderRemoteToolIds(providerId?: string | null): readonly string[] {
+  const toolIds = resolveNativeRuntimeFamilyRegistration({ providerId })?.remoteToolIds ?? [];
+  return toolIds.filter((toolId) => typeof toolId === "string" && toolId.trim().length > 0);
+}
+
 export function getNativeRuntimeFallbackProvider(
   providerId: string,
 ): LocalProviderSummary | null {

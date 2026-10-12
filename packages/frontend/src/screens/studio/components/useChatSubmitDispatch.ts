@@ -16,6 +16,11 @@ export type ChatSubmitDispatchPayload = {
    * its staged attachments, focus and the scroll position are left as they are.
    */
   automatic?: boolean;
+  /**
+   * "person" only for a message someone sent from the composer. Left unset,
+   * the send counts as the app's and cannot ask another device to act.
+   */
+  initiatedBy?: "person" | "app";
 };
 
 type UseChatSubmitDispatchOptions = {
@@ -153,6 +158,8 @@ export function useChatSubmitDispatch({
             metadata: payload.metadata ?? null,
             runtimeOverride: payload.runtimeOverride ?? null,
             expectedLaneIdle: payload.expectedLaneIdle,
+            initiatedBy:
+              payload.initiatedBy === "person" && payload.automatic !== true ? "person" : "app",
           });
         } catch (error) {
           // The submit flow has already said why in plain copy.

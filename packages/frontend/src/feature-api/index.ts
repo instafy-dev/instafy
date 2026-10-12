@@ -48,6 +48,8 @@ export type { LocalProviderSummary } from "../capabilities/localProviderHostClie
 export type {
   LocalCapabilityArtifactRegistration,
   LocalCapabilityConversationMessage,
+  LocalCapabilityPromptInitiator,
+  LocalCapabilityRemoteToolCall,
   LocalCapabilityRouteDefinition,
   LocalCapabilityRouteExecuteOptions,
   LocalCapabilityRouteMatcherOptions,

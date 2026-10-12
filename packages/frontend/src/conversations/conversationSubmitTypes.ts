@@ -38,6 +38,12 @@ export interface SubmitConversationOptions {
   requireDispatch?: boolean;
   /** Local-only scope fence, rechecked after preflight immediately before send. */
   assertDispatchCurrent?: () => void;
+  /**
+   * "person" when someone sent this from the chat composer; anything else the
+   * app sends is "app" or unset. Only a person's message may ask another
+   * device to act (local capability prompts routed to a remote device).
+   */
+  initiatedBy?: "person" | "app";
 }
 
 export interface UseConversationSubmitFlowArgs {
