@@ -21,7 +21,6 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 use subtle::ConstantTimeEq;
-use tokio::time::Duration as TokioDuration;
 use tokio_postgres::{GenericClient, Row, Transaction};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as TungMessage};
@@ -1257,7 +1256,9 @@ pub(crate) const ORIGIN_PRESENCE_OFFLINE_THRESHOLD_SECONDS: i64 =
 pub(crate) fn spawn_origin_presence_housekeeping(state: &AppState) {
     let state_clone = state.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(TokioDuration::from_secs(10));
+        let mut ticker = crate::background_loops::staggered_interval(
+            crate::background_loops::ORIGIN_PRESENCE_SWEEP,
+        );
         loop {
             ticker.tick().await;
             if let Err(error) = sweep_stale_origin_presence(&state_clone).await {

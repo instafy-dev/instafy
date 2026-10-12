@@ -21,6 +21,7 @@ mod ai_metering;
 mod auth;
 mod author_identity;
 mod automations;
+mod background_loops;
 mod billing;
 mod browser_profile;
 mod browser_shares;
@@ -34,6 +35,7 @@ mod credential_keys;
 mod credential_rotation;
 mod credentials;
 mod credits;
+mod db_pool_headers;
 mod desktop_updates;
 mod dev;
 mod device_auth;
@@ -333,7 +335,8 @@ async fn main() -> anyhow::Result<()> {
 
     let idle_state = state.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(10));
+        let mut ticker =
+            background_loops::staggered_interval(background_loops::IDLE_ACTIVITY_SWEEP);
         loop {
             ticker.tick().await;
             if let Err(error) = runtime::sweep_idle_activity(&idle_state).await {
@@ -348,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
     // short retention; lifecycle fencing evidence is retained by its pruner.
     let retention_state = state.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        let mut ticker = background_loops::staggered_interval(background_loops::RETENTION_PRUNE);
         loop {
             ticker.tick().await;
             if let Err(error) = runtime::prune_expired_runtime_events(&retention_state).await {
@@ -362,7 +365,8 @@ async fn main() -> anyhow::Result<()> {
 
     let billing_state = state.clone();
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut ticker =
+            background_loops::staggered_interval(background_loops::HOSTED_RUNTIME_CREDIT_SWEEP);
         let mut transient_failure_started_at = None;
         loop {
             ticker.tick().await;
@@ -411,7 +415,10 @@ async fn main() -> anyhow::Result<()> {
             "/healthz",
             get(|State(state): State<AppState>| async move {
                 let mut headers = HeaderMap::new();
-                let pool_state = state.pool.state();
+                let pool_snapshot = db_pool_headers::DbPoolSnapshot::new(
+                    state.config.database_pool_size,
+                    &state.pool.state(),
+                );
                 headers.insert(
                     "x-instafy-has-service-runtime-user-id",
                     HeaderValue::from_static(if state.config.service_runtime_user_id.is_some() {
@@ -451,27 +458,7 @@ async fn main() -> anyhow::Result<()> {
                 // to canonical (rolling saves) apart from one that does not.
                 let (name, value) = origins::workspace_persist::working_state_header(&state.config);
                 headers.insert(name, value);
-                if let Ok(value) =
-                    HeaderValue::from_str(&state.config.database_pool_size.to_string())
-                {
-                    headers.insert("x-instafy-db-pool-size", value);
-                }
-                if let Ok(value) = HeaderValue::from_str(&pool_state.connections.to_string()) {
-                    headers.insert("x-instafy-db-pool-connections", value);
-                }
-                if let Ok(value) = HeaderValue::from_str(&pool_state.idle_connections.to_string()) {
-                    headers.insert("x-instafy-db-pool-idle", value);
-                }
-                if let Ok(value) =
-                    HeaderValue::from_str(&pool_state.statistics.get_waited.to_string())
-                {
-                    headers.insert("x-instafy-db-pool-get-waited", value);
-                }
-                if let Ok(value) =
-                    HeaderValue::from_str(&pool_state.statistics.get_timed_out.to_string())
-                {
-                    headers.insert("x-instafy-db-pool-get-timed-out", value);
-                }
+                db_pool_headers::insert_db_pool_headers(&mut headers, &pool_snapshot);
                 (StatusCode::OK, headers)
             }),
         )

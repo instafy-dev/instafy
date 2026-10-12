@@ -29,7 +29,6 @@ use crate::state::ControllerEvent;
 use crate::{bad_request, ensure_project_access, internal_error, not_found, ApiError, AppState};
 
 const SEND_QUEUE_CLAIM_RECLAIM_AFTER: Duration = Duration::from_secs(10 * 60);
-const SEND_QUEUE_RECOVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const SEND_QUEUE_RECOVERY_BATCH_SIZE: i64 = 20;
 const SEND_QUEUE_RETRY_GRACE: Duration = Duration::from_millis(100);
 
@@ -1115,13 +1114,15 @@ pub(crate) fn spawn_send_queue_drain(state: AppState, conversation_id: Uuid) {
 }
 
 /// Recover durable queue work after controller restarts. The first interval
-/// tick runs immediately, batches are cursor-bounded, and the database claim
-/// lock remains authoritative when multiple controller processes scan the same
-/// rows.
+/// tick runs immediately (offset 0 in `background_loops`), batches are
+/// cursor-bounded, and the database claim lock remains authoritative when
+/// multiple controller processes scan the same rows.
 pub(crate) fn spawn_send_queue_recovery_sweep(state: AppState) {
     tokio::spawn(async move {
         let mut cursor = None;
-        let mut ticker = tokio::time::interval(SEND_QUEUE_RECOVERY_SWEEP_INTERVAL);
+        let mut ticker = crate::background_loops::staggered_interval(
+            crate::background_loops::SEND_QUEUE_RECOVERY,
+        );
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
