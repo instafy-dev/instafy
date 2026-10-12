@@ -2,10 +2,14 @@
 //!
 //! All counters come from bb8 and reset when the controller restarts. A get
 //! is either direct (an idle connection was free), waited (it queued for
-//! one) or timed out. `get-wait-micros` is bb8's total time spent queuing, in
-//! microseconds, for waited and timed-out gets (bb8 0.8
-//! `Statistics::get_wait_time`), so the average wait is
-//! `get-wait-micros / (get-waited + get-timed-out)`.
+//! one, including while a new connection opened) or timed out.
+//! `get-wait-micros` is bb8's approximate total wait for waited and timed-out
+//! gets, in microseconds (bb8 0.8 `Statistics::get_wait_time`). It is a lower
+//! bound: bb8 restarts a get's timer each time it has to queue again and
+//! records nothing for a get its caller dropped. It includes opening a new
+//! connection and the checkout test. The average wait between two samples is
+//! the delta of `get-wait-micros` over the delta of
+//! `get-waited + get-timed-out`.
 
 use axum::http::{HeaderMap, HeaderValue};
 

@@ -4,11 +4,17 @@
 //! `tokio::time::interval`, they all tick at boot and then stay in step for
 //! the life of the process, so every 10 s five of them, and every 30 s seven,
 //! asked a pool of four at the same instant. Each loop now starts at its own
-//! offset from this one table, chosen so that no two loops tick in the same
-//! second (period 5 s and 10 s loops take a fixed second of every ten; the
-//! slower ones use the seconds left over). A tick that overruns its period
-//! can still shift a loop with the `Delay` missed-tick behavior. The table is
-//! checked by the tests at the bottom of this file.
+//! offset from this one table, chosen so that no two loops start a tick in
+//! the same second (period 5 s and 10 s loops take a fixed second of every
+//! ten; the slower ones use the seconds left over). The bound is on tick
+//! starts: a slow tick can still overlap the next loop's. A tick handled more
+//! than 5 ms late, or one that overruns its period, re-phases a loop with the
+//! `Delay` missed-tick behavior. The table is checked by the tests at the
+//! bottom of this file.
+//!
+//! A new periodic loop that uses the pool must take its schedule from a
+//! constant here that is also listed in `DATABASE_LOOPS`; the tests only see
+//! that array.
 
 use std::time::Duration;
 
@@ -44,7 +50,8 @@ pub(crate) const HOSTED_RUNTIME_CREDIT_SWEEP: LoopSchedule =
     schedule("hosted_runtime_credit_sweep", 60, 9);
 pub(crate) const RETENTION_PRUNE: LoopSchedule = schedule("retention_prune", 300, 19);
 
-/// Every periodic loop that uses the database pool.
+/// Every periodic loop that uses the database pool. Each schedule constant
+/// above must appear here exactly once.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const DATABASE_LOOPS: [LoopSchedule; 9] = [
     SEND_QUEUE_RECOVERY,
