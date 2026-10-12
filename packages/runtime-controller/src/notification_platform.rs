@@ -662,7 +662,9 @@ async fn save_preferences(
 
 pub(crate) fn spawn_worker(state: AppState) {
     tokio::spawn(async move {
-        let mut ticks = tokio::time::interval(Duration::from_secs(5));
+        let mut ticks = crate::background_loops::staggered_interval(
+            crate::background_loops::NOTIFICATION_WORKER,
+        );
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticks.tick().await;

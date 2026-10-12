@@ -1,5 +1,4 @@
 use std::str::FromStr;
-use std::time::Duration;
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -47,7 +46,6 @@ const RESULT_VISIBILITY_TEAM: &str = "team";
 // which the conversation list gate exposes to anyone with project access.
 const CONVERSATION_VISIBILITY_PRIVATE: &str = "private";
 const CONVERSATION_VISIBILITY_PUBLIC: &str = "public";
-const AUTOMATION_SCHEDULER_TICK_SECONDS: u64 = 30;
 const AUTOMATION_SCHEDULER_LOCK_SECONDS: i64 = 10 * 60;
 const AUTOMATION_SCHEDULER_BATCH_SIZE: i64 = 10;
 
@@ -572,8 +570,9 @@ pub(crate) fn spawn_automation_scheduler(state: AppState) {
     // automation's launch. Neither loop starts model work for a reminder.
     let reminder_state = state.clone();
     tokio::spawn(async move {
-        let mut ticker =
-            tokio::time::interval(Duration::from_secs(AUTOMATION_SCHEDULER_TICK_SECONDS));
+        let mut ticker = crate::background_loops::staggered_interval(
+            crate::background_loops::RECOMMENDATION_REMINDERS,
+        );
         loop {
             ticker.tick().await;
             if let Err(error) = crate::recommendations::deliver_due_reminders(&reminder_state).await
@@ -583,8 +582,9 @@ pub(crate) fn spawn_automation_scheduler(state: AppState) {
         }
     });
     tokio::spawn(async move {
-        let mut ticker =
-            tokio::time::interval(Duration::from_secs(AUTOMATION_SCHEDULER_TICK_SECONDS));
+        let mut ticker = crate::background_loops::staggered_interval(
+            crate::background_loops::AUTOMATION_SCHEDULER,
+        );
         loop {
             ticker.tick().await;
             if let Err(error) = automation_scheduler_tick(&state).await {

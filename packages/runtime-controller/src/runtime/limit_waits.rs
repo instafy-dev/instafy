@@ -55,7 +55,6 @@ use super::lease::RuntimeLeaseScope;
 /// Error code of the organization-limit refusal (`hosted_runtime_limit_refusal`).
 pub(crate) const RUNTIME_LIMIT_REACHED_CODE: &str = "runtime_limit_reached";
 
-const SWEEP_INTERVAL: Duration = Duration::from_secs(10);
 /// A recorded request larger than this is stored without its metadata. The
 /// frontend's is a few hundred bytes; this only bounds a hostile caller.
 const MAX_RECORDED_REQUEST_BYTES: usize = 16 * 1024;
@@ -555,7 +554,9 @@ pub(crate) struct LimitWaitSweepReport {
 pub(crate) fn spawn_hosted_runtime_limit_wait_sweep(state: AppState) {
     tokio::spawn(async move {
         let policy = LimitWaitPolicy::default();
-        let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+        let mut ticker = crate::background_loops::staggered_interval(
+            crate::background_loops::RUNTIME_LIMIT_WAIT_SWEEP,
+        );
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
