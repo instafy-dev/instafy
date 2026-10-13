@@ -145,25 +145,20 @@ pub(crate) fn reset_hosted_runtime_credit_sweep_pool_pressure(
 /// One tick of the idle sweep. Its steps run in this order, and the first
 /// that fails ends the tick; the next tick runs every step again.
 ///
-/// The steps run their queries on one pool connection ([`TickConnection`]),
-/// so a tick with nothing to do takes one checkout. A step that finds work
-/// gives the connection back before any action that takes its own (a lease
-/// release, a stop, a publish that reads the run), and the next step's query
-/// checks out again; what a step does on the tick's connection alone (the
-/// drain recovery's update, the expiry transactions) needs no release. The
-/// tick never holds its connection while an action waits for another, so it
-/// never holds more connections than its steps did when each took its own,
-/// and a pool of one still works.
+/// The lease releases for the projects the in-memory activity tracker found
+/// idle run first, each on connections of its own, before the tick checks
+/// anything out, so such a project adds only its release's own checkouts.
+/// The steps after them run their queries on one pool connection
+/// ([`TickConnection`]), so a tick with nothing to do takes one checkout. A
+/// step that finds work gives the connection back before any action that
+/// takes its own (a stop, a publish that reads the run), and the next step's
+/// query checks out again; what a step does on the tick's connection alone
+/// (the drain recovery's update, the expiry transactions) needs no release.
+/// The tick never holds its connection while an action waits for another, so
+/// it never holds more connections than its steps did when each took its
+/// own, and a pool of one still works.
 pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
-    let mut tick = TickConnection::new(&state.pool);
-    resume_expired_runtime_drains(&mut tick).await?;
-    let candidates = state.runtime_activity.idle_candidates().await;
-    if !candidates.is_empty() {
-        // Each lease release takes its own connection.
-        tick.release();
-    }
-
-    for (project_id, entry) in candidates {
+    for (project_id, entry) in state.runtime_activity.idle_candidates().await {
         let released = release_leases_for_project(
             state,
             &project_id,
@@ -182,6 +177,8 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
         }
     }
 
+    let mut tick = TickConnection::new(&state.pool);
+    resume_expired_runtime_drains(&mut tick).await?;
     auto_stop_orphan_requested_runtimes(state, &mut tick).await?;
     auto_stop_stuck_requested_runtimes(state, &mut tick).await?;
     auto_stop_stale_runtimes(state, &mut tick).await?;

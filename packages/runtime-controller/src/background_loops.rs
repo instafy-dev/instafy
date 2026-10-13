@@ -96,9 +96,9 @@ pub(crate) fn staggered_interval(schedule: LoopSchedule) -> Interval {
 /// timeout, and with any pool it would hold two slots where the steps alone
 /// held one. A step therefore calls [`TickConnection::release`] before an
 /// action that takes its own connection (a stop, a publish that reads a run,
-/// a lease release), and the next query checks out again. Work a step does
-/// only on this connection, such as a transaction it opens on it, needs no
-/// release.
+/// a claimed limit wait's launch), and the next query checks out again. Work
+/// a step does only on this connection, such as a transaction it opens on it,
+/// needs no release.
 pub(crate) struct TickConnection<'p> {
     pool: &'p PgPool,
     held: Option<bb8::PooledConnection<'p, PgConnectionManager>>,

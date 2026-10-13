@@ -1,7 +1,8 @@
 //! The idle sweep tick on the migrated database: how many pool checkouts a
-//! tick with nothing to do takes, and that a tick on a pool of one still acts
-//! on every step that finds work, so no step holds the tick's connection
-//! while its action waits for another.
+//! tick with nothing to do takes, how many a project the activity tracker
+//! holds adds, and that a tick on a pool of one still acts on every step that
+//! finds work, so no step holds the tick's connection while its action waits
+//! for another.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -68,6 +69,61 @@ async fn an_idle_sweep_tick_takes_one_pool_checkout() -> anyhow::Result<()> {
                 "tick {tick} gave its connection back"
             );
         }
+        Ok(())
+    })
+    .await
+}
+
+/// A project the in-memory activity tracker holds comes up for a lease
+/// release every idle TTL, and the sweep re-arms it when nothing was
+/// released. Its release takes a checkout of its own and the rest of the
+/// tick still shares one, so each such project costs one checkout, as it did
+/// when every step took its own.
+#[tokio::test]
+async fn a_sweep_tick_with_a_tracked_project_takes_one_checkout_more() -> anyhow::Result<()> {
+    with_empty_tables(&SWEEP_TABLES, |pool| async move {
+        let state = build_test_state(
+            pool.clone(),
+            build_app_config(
+                test_origin_private_key(),
+                test_origin_public_key(),
+                "idle-sweep-tick-tracked-project",
+            ),
+        );
+        let project_id = Uuid::new_v4();
+        state
+            .runtime_activity
+            .mark_active(
+                project_id,
+                Some(30),
+                Some(Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await;
+
+        let before = pool_gets(&pool);
+        crate::runtime::sweep_idle_activity(&state).await?;
+        assert_eq!(
+            pool_gets(&pool) - before,
+            2,
+            "the lease release takes one checkout and the rest of the tick one"
+        );
+        let pool_state = pool.state();
+        assert_eq!(
+            pool_state.idle_connections, pool_state.connections,
+            "the tick gave its connection back"
+        );
+        assert!(
+            state.runtime_activity.idle_candidates().await.is_empty(),
+            "the sweep re-armed the project it found nothing to release for"
+        );
+
+        let before = pool_gets(&pool);
+        crate::runtime::sweep_idle_activity(&state).await?;
+        assert_eq!(
+            pool_gets(&pool) - before,
+            1,
+            "a re-armed project costs nothing until its TTL runs out again"
+        );
         Ok(())
     })
     .await
