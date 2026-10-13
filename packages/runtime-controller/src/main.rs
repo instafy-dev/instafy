@@ -91,6 +91,8 @@ mod tests_chat_attachment_lease;
 #[cfg(test)]
 mod tests_chat_attachment_policies;
 #[cfg(test)]
+mod tests_idle_lease_poll;
+#[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]
 mod tests_managed_credential;
