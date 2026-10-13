@@ -23,11 +23,6 @@ export function socialCardImageUrl(contents) {
   return `/og-image.png?sha=${digest}`;
 }
 
-/** Every og-image URL in `text` (quoted, any query). */
-export function findSocialCardUrls(text) {
-  return [...text.matchAll(/["'](\/og-image\.png(?:\?[^"']*)?)["']/g)].map((match) => match[1]);
-}
-
 /** Rewrites every og-image URL in `text` to `url`. */
 export function replaceSocialCardUrls(text, url) {
   return text.replace(/(["'])\/og-image\.png(?:\?[^"']*)?\1/g, (_match, quote) => `${quote}${url}${quote}`);

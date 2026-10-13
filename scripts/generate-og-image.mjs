@@ -42,14 +42,22 @@ const templateDir = path.join(repoRoot, "scripts/og-image");
 const frontendDir = path.join(repoRoot, "packages/frontend");
 const requireFromFrontend = createRequire(path.join(frontendDir, "package.json"));
 
-const args = process.argv.slice(2);
-const option = (name) => {
-  const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : undefined;
-};
-const outArg = option("--out");
-const query = option("--query") ?? "";
-const outPath = path.resolve(repoRoot, outArg ?? SOCIAL_CARD_PATH);
+// Only `--out <png>` and `--query <k=v&...>`: anything else (a typo, `--out=...`,
+// a flag without its value) stops here rather than falling through to
+// overwriting the committed card.
+const options = {};
+for (const args = process.argv.slice(2); args.length; ) {
+  const name = args.shift();
+  const value = args.shift();
+  if ((name !== "--out" && name !== "--query") || value === undefined || value.startsWith("--")) {
+    console.error(`[generate-og-image] usage: [--out <png>] [--query "<k=v&...>"]; got ${name}`);
+    process.exit(1);
+  }
+  options[name] = value;
+}
+const outArg = options["--out"];
+const query = options["--query"] ?? "";
+const outPath = outArg ? path.resolve(process.cwd(), outArg) : path.join(repoRoot, SOCIAL_CARD_PATH);
 const updateReferences = !outArg;
 if (updateReferences && query) {
   console.error("[generate-og-image] --query is for review renders; pass --out as well.");

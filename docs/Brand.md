@@ -553,10 +553,13 @@ order and he looks at them with both eyes open. The splats are the engine's own
 (its keep-outs keep them off the lockup, the domain, the headline and the sub
 copy); none are drawn by hand. A 2 px warm hairline frames the card so it keeps
 an edge on white feeds.
-Its mark is about 27 CSS px tall in a 500 px wide unfurl, which the high-density
-screens that show unfurls draw at 1.5 to 2 device pixels per CSS pixel, the
-`crew-hidpi` rule. The square crops some chat apps take cut the lockup and
-Cub; every page asks for `summary_large_image`, so X keeps the full card.
+Its mark box is 80 px on the card, about 33 CSS px in a 500 px wide unfurl,
+which the high-density screens that show unfurls draw at 1.5 to 2 device pixels
+per CSS pixel: the `crew-hidpi` rule. Smaller previews (Slack and iMessage at
+300 to 360 px) take the box below 28 CSS px; the card keeps its crew dots there
+as an accepted exception, since it is one raster for every size. The square
+crops some chat apps take cut the lockup and Cub; every page asks for
+`summary_large_image`, so X keeps the full card.
 
 Fonts come from the pinned `@fontsource/inter` devDependency and the script is
 bundled from the frontend's sources, so nothing is fetched and two runs on one
@@ -566,8 +569,11 @@ The generator also points every reference at the card's content-versioned URL
 older card: the two meta tags in `packages/frontend/index.html` and
 `SOCIAL_CARD_IMAGE` in `packages/frontend/src/utils/seo.ts`, which every page
 passes to `applyPageMeta`. `pnpm check:app-icons` checks the card's 1200×630
-RGB shape and that every reference matches the committed file, and fails on
-any other source that spells the path. Regenerate the card with any change to
+RGB shape. The frontend unit suite (`src/utils/__tests__/socialCard.test.ts`,
+run on every pull request) checks that both meta tags and `SOCIAL_CARD_IMAGE`
+match the committed file and that no other frontend source (`src/` and
+`hosted/`) spells the path. The headline and sub copy in
+`scripts/og-image/card.html` repeat `LandingHero.tsx`. Regenerate the card with any change to
 the mark, the crew colors, the hero copy, or Cub's drawing or perch; its new
 digest needs the public boundary policy's approval like every binary asset.
 

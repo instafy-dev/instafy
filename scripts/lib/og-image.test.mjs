@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   encodeOpaqueRgbPng,
-  findSocialCardUrls,
   replaceSocialCardUrls,
   socialCardImageUrl,
 } from "./og-image.mjs";
@@ -61,13 +60,15 @@ test("socialCardImageUrl versions the card by its content", () => {
   assert.doesNotMatch(url, /\?v=/);
 });
 
-test("findSocialCardUrls and replaceSocialCardUrls cover both quote styles and any query", () => {
-  const html = `<meta property="og:image" content="/og-image.png" />\n<meta name="twitter:image" content="/og-image.png?sha=000000000000" />`;
-  const ts = `export const SOCIAL_CARD_IMAGE = '/og-image.png?v=3';`;
-  assert.deepEqual(findSocialCardUrls(html), ["/og-image.png", "/og-image.png?sha=000000000000"]);
-  assert.deepEqual(findSocialCardUrls(ts), ["/og-image.png?v=3"]);
+test("replaceSocialCardUrls rewrites every quoted card URL, any query, and nothing else", () => {
   const url = "/og-image.png?sha=abcdefabcdef";
-  assert.deepEqual(findSocialCardUrls(replaceSocialCardUrls(html, url)), [url, url]);
+  const html = `<meta property="og:image" content="/og-image.png" />\n<meta name="twitter:image" content="/og-image.png?sha=000000000000" />`;
+  assert.equal(
+    replaceSocialCardUrls(html, url),
+    `<meta property="og:image" content="${url}" />\n<meta name="twitter:image" content="${url}" />`,
+  );
+  const ts = `export const SOCIAL_CARD_IMAGE = '/og-image.png?v=3';`;
   assert.equal(replaceSocialCardUrls(ts, url), `export const SOCIAL_CARD_IMAGE = '${url}';`);
-  assert.deepEqual(findSocialCardUrls(`"/other/og-image.png" "/og-image.pngx"`), []);
+  const unrelated = `"/other/og-image.png" "/og-image.pngx"`;
+  assert.equal(replaceSocialCardUrls(unrelated, url), unrelated);
 });
