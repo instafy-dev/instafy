@@ -43,6 +43,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/dispatch-prompt` | Main entrypoint for conversations and module runs on an authorized existing project. Only service-role callers may bootstrap a missing project. Returns `{ runId, promptId, ... }`. |
 | POST | `/projects/:id/conversations/blank` | Creates a conversation. Private chats accept `initialParticipantUserIds` and return the IDs committed atomically with the conversation. |
 | POST | `/conversations/:id/messages/record` | Records a user or assistant message; human metadata may include canonical `mentionedUserIds`. |
+| POST | `/conversations/:id/stop` | Human-only, project-write and conversation-access checked. Accepts `{jobIds: UUID[]}` (1–100 exact IDs); atomically cancels selected queued/leased jobs and returns `{ok, canceledJobIds, canceledRunIds, alreadyFinishedJobIds}`. Foreign/missing IDs reject the entire request. |
 | POST | `/progress-callback` | Receives build/job progress (ephemeral JWT). Broadcasts progress events and updates runs. |
 | GET | `/events` | SSE stream; filters by `projectId`, `sessionId`, `conversationId`, `runId`, or `kinds`. |
 | GET | `/runs` | List runs for a project/session. |
@@ -60,6 +61,19 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/operator/credential-encryption/reencrypt` | Service-role only. Rewrites stored secrets still under a previous key with the primary key. |
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
+
+Conversation Stop acknowledges committed controller cancellation, not executor shutdown.
+Runtimes observe lease loss on heartbeat or rejected output, then request local shutdown;
+an in-flight tool may take longer to exit, and completed side effects are not rolled back.
+Terminal jobs are safe no-ops. The endpoint never broadens its supplied job snapshot and
+does not automatically drain already queued user messages. If it selects every live worker
+of a plan group, the same transaction persists checkpoint suppression in its trusted
+`run_cancellation` notice; later completions and sweeps check that intent under the group's
+checkpoint lock. A lead checkpoint committed before Stop acquired that lock is separate
+work outside the snapshot. Existing interrupt/cancel routes retain their prior behavior.
+The notice records `details.actorUserId`, `agentHandles`, per-job `agents`, `jobIds`,
+`runIds`, and `stopRequested`. Run snapshots expose reserved `metadata.initiatingUserId`
+derived from the initiating job's controller-authored user ID, never caller metadata.
 
 ### Invalidation signals on `/events`
 

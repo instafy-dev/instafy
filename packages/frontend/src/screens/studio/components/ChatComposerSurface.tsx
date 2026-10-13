@@ -38,6 +38,9 @@ import {
 } from "../../../theme/darkSurfaces";
 import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
+import { ChatComposerRunActions, resolveComposerRunStopPlacement } from "./ChatComposerRunActions";
+import { ChatRunStopFeedback } from "./ChatRunStopControl";
+import type { ChatRunStopController } from "./useChatRunStop";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
 import { CHAT_INPUT_CONTROL_HEIGHT_CLASS } from "./chat-input/chatInputGrowth";
@@ -147,6 +150,7 @@ type ChatComposerSurfaceProps = {
   accessNotice?: string | null;
   accessChecking?: boolean;
   silenceHintProps?: ComponentProps<typeof OctoSilenceHint> | null;
+  composerRunStopController?: ChatRunStopController | null;
 };
 
 // The access check is a pending state, not a warning: neutral, quiet, with the
@@ -277,6 +281,7 @@ export function ChatComposerSurface({
   accessNotice = null,
   accessChecking = false,
   silenceHintProps = null,
+  composerRunStopController = null,
 }: ChatComposerSurfaceProps) {
   const [draftExpanded, setDraftExpanded] = useState(false);
   useEffect(() => setDraftExpanded(false), [chatInputProps.draftKey]);
@@ -379,6 +384,22 @@ export function ChatComposerSurface({
   // its pointer-owning DOM node before release.
   const showInlineVoiceAction =
     voiceInputAvailable && (!composerHasUsablePayload || voiceCaptureInProgress);
+  const runStopActionProps = {
+    controller: composerRunStopController,
+    hasUsablePayload: composerHasUsablePayload,
+    voiceCaptureInProgress: Boolean(voiceCaptureInProgress),
+    mutationDisabled: mutationDisabled || accessChecking,
+    actionClassName: composerGhostActionClass,
+    iconClassName: composerActionIconClass,
+  };
+  const runStopPlacement = resolveComposerRunStopPlacement(runStopActionProps);
+  const runStopPrimaryStatus = composerRunStopController?.phase === "stopping"
+    ? "Requesting stop…"
+    : composerRunStopController?.phase === "requested"
+      ? "Stop requested."
+      : composerRunStopController?.phase === "error"
+        ? "Stop was not confirmed. Retry is available."
+        : "A reply is in progress. Stop is available, or press Escape.";
   const modifierPreviewBaseAvailable =
     !showVoicePrimaryAction &&
     composerHasUsablePayload &&
@@ -876,7 +897,7 @@ export function ChatComposerSurface({
       uploadImageUnavailableReason={imageUploadUnavailableReason}
       onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
       onStartVoiceInput={
-        voiceInputAvailable && !showInlineVoiceAction && voiceConversationActionStripProps.onVoiceTap
+        voiceInputAvailable && (!showInlineVoiceAction || runStopPlacement === "primary") && voiceConversationActionStripProps.onVoiceTap
           ? handleMenuDictationStart
           : undefined
       }
@@ -1369,7 +1390,9 @@ export function ChatComposerSurface({
                 className="sr-only"
                 data-testid="chat-primary-action-status"
               >
-                {showInlineVoiceAction
+                {runStopPlacement === "primary"
+                  ? runStopPrimaryStatus
+                  : showInlineVoiceAction
                   ? voiceCaptureInProgress
                     ? ""
                     : "Voice input is available. Type a message to send."
@@ -1417,11 +1440,14 @@ export function ChatComposerSurface({
                     data-testid="chat-composer-trailing-controls"
                   >
                     {compactNavigationLayout ? actionMenuNode : null}
-                    {voiceStripNode}
-                    {renderSendButton()}
+                    <ChatComposerRunActions {...runStopActionProps}
+                      primaryAction={<>{voiceStripNode}{renderSendButton()}</>} />
                   </div>
                 ) : null}
               </div>
+              {composerRunStopController && runStopPlacement !== "hidden" ? (
+                <ChatRunStopFeedback controller={composerRunStopController} />
+              ) : null}
               <input
                 ref={imageInputRef}
                 type="file"
@@ -1528,13 +1554,14 @@ export function ChatComposerSurface({
                         </Text>
                       </div>
                       <div className="flex flex-none items-center gap-1.5 sm:gap-2">
-                        <VoiceConversationActionStrip
-                          {...voiceConversationActionStripProps}
-                          {...voiceStripDressProps}
-                          voiceInteractionMode={effectiveVoiceInteractionMode}
-                          onVoicePressStart={handleDirectVoicePressStart}
-                          showVoiceRepliesToggle={false}
-                        />
+                        <ChatComposerRunActions {...runStopActionProps} voiceCaptureInProgress
+                          primaryAction={<VoiceConversationActionStrip
+                            {...voiceConversationActionStripProps}
+                            {...voiceStripDressProps}
+                            voiceInteractionMode={effectiveVoiceInteractionMode}
+                            onVoicePressStart={handleDirectVoicePressStart}
+                            showVoiceRepliesToggle={false}
+                          />} />
                       </div>
                     </div>
                   </div>

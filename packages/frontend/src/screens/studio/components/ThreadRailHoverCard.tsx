@@ -237,6 +237,7 @@ export function ThreadRailChipButton({
     // surface answers the keyboard.
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         closeCardRef.current();
       }
     };

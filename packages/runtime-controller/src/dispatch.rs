@@ -5331,12 +5331,19 @@ async fn progress_callback(
             .await
             .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
         match runs::load_run_snapshot(client, &run_id).await {
-            Ok(Some(snapshot)) => (
-                snapshot.project_id,
-                snapshot.session_id,
-                snapshot.conversation_id,
-                runs::run_snapshot_to_json(&snapshot),
-            ),
+            Ok(Some(snapshot)) => {
+                // A callback can outlive its job's lease. Once Stop is
+                // committed, percent-derived progress must not revive it.
+                if snapshot.status == "canceled" {
+                    return Ok(Json(ProgressCallbackResponse { ok: true }));
+                }
+                (
+                    snapshot.project_id,
+                    snapshot.session_id,
+                    snapshot.conversation_id,
+                    runs::run_snapshot_to_json(&snapshot),
+                )
+            }
             Ok(None) => (None, None, None, JsonValue::Null),
             Err(error) => return Err(error),
         }

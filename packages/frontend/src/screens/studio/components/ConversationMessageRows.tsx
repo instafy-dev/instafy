@@ -226,7 +226,7 @@ export function ConversationMessageRows({
   onOpenImage?: (src: string, alt: string) => void;
   onRequestActions: (messageId: string, anchorRect: DOMRect | null) => void;
   onRequestActionsAtPoint: (messageId: string, clientX: number, clientY: number) => void;
-  onCancelTerminalCommand: (() => void | Promise<void>) | null;
+  onCancelTerminalCommand?: (() => void | Promise<void>) | null;
   onMessageContextMenu: (event: ReactMouseEvent<HTMLDivElement>, messageId: string) => void;
 }) {
   useEffect(() => {

@@ -8,7 +8,6 @@ import {
   mapControllerMessageToChat,
   mergeAndSortMessages,
 } from "../../../../conversations/conversationMessageUtils";
-import { cancelAgentJob } from "../../../../services/runtimeController/jobs";
 import {
   classTokens,
   expectAvatarCoinLightEdge,
@@ -37,9 +36,6 @@ vi.mock("../../../../runtime/useRuntime", () => ({
 }));
 
 vi.mock("../../../../services/runtimeController/jobs", () => ({
-  cancelAgentJob: vi.fn(() =>
-    Promise.resolve({ ok: true, canceledRunIds: ["run-1"], canceledJobIds: ["job-1"] }),
-  ),
   cancelPlanGroup: vi.fn(() =>
     Promise.resolve({ ok: true, canceledRunIds: ["run-1"], canceledJobIds: ["job-1"] }),
   ),
@@ -190,7 +186,6 @@ describe("AgentJobThreadPreviewLayout", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    vi.mocked(cancelAgentJob).mockClear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -905,7 +900,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(countOccurrences(surface?.textContent ?? "", COMMAND_LABEL)).toBe(1);
   });
 
-  it("streams live output into the expanded panel body and keeps the stop control", async () => {
+  it("streams live output into the expanded panel without a transcript stop control", async () => {
     await act(async () => {
       root.render(
         <AgentJobThreadPreviewLayout
@@ -927,7 +922,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(body?.querySelector('[data-testid="chat-command-output"]')?.getAttribute("data-streaming")).toBe(
       "true",
     );
-    expect(surface?.querySelectorAll('[data-testid="chat-command-stop-button"]')).toHaveLength(1);
+    expect(surface?.querySelector('button[aria-label*="Stop"], [data-testid="chat-command-stop-button"]')).toBeNull();
     expect(surface?.textContent).not.toContain("bash -lc");
     expect(countOccurrences(surface?.textContent ?? "", COMMAND_LABEL)).toBe(1);
     // Streaming output is not a nested card either.
@@ -1036,7 +1031,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('button[aria-label="Copy output"]')).toBeNull();
   });
 
-  it("auto-expands the collapsed panel while the command streams, with one stop control in the document", async () => {
+  it("auto-expands the collapsed panel while the command streams without adding a stop control", async () => {
     const onToggleThreadPreview = vi.fn();
     await act(async () => {
       root.render(
@@ -1061,10 +1056,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(body?.closest('[data-testid="agent-thread-command-surface"]')).toBe(surface);
     expect(body?.textContent).toContain("example-user");
     expect(body?.querySelector('[data-testid="chat-command-output"]')?.getAttribute("data-streaming")).toBe("true");
-    expect(container.querySelectorAll('[data-testid="chat-command-stop-button"]')).toHaveLength(1);
-    expect(container.querySelector('[data-testid="chat-command-stop-button"]')?.getAttribute("aria-label")).toBe(
-      "Stop run",
-    );
+    expect(container.querySelector('button[aria-label*="Stop"], [data-testid="chat-command-stop-button"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="chat-command-output"]')).toHaveLength(1);
     expect(container.textContent).not.toContain("bash -lc");
     expect(countOccurrences(container.textContent ?? "", COMMAND_LABEL)).toBe(1);
@@ -1091,7 +1083,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       "true",
     );
     expect(container.querySelector('[data-testid="agent-thread-command-panel-status"]')?.textContent).toBe("Running…");
-    expect(container.querySelectorAll('[data-testid="chat-command-stop-button"]')).toHaveLength(1);
+    expect(container.querySelector('button[aria-label*="Stop"], [data-testid="chat-command-stop-button"]')).toBeNull();
     expect(countOccurrences(container.textContent ?? "", COMMAND_LABEL)).toBe(1);
     expect(container.textContent).not.toContain("Running command…");
   });
@@ -1419,173 +1411,47 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[data-testid="agent-thread-preview-header"]')).toBeNull();
   });
 
-  it("cancels only the previewed job when the entry has a job id", async () => {
-    const onCancelRun = vi.fn();
-    await act(async () => {
-      root.render(
-        <AgentJobThreadPreviewLayout
-          {...createProps({
-            isCompleted: false,
-            isRunning: true,
-            isThreadUnresolved: true,
-            canCancelTerminalRun: true,
-            showCollapsedCompactRailStatus: true,
-            compactRailStatusText: "Running command…",
-            finalSummaryMessage: null,
-            showSummaryBody: false,
-            onCancelRun,
-          })}
-        />,
-      );
-    });
-
-    const stopButton = container.querySelector(
-      '[data-testid="chat-command-stop-button"]',
-    ) as HTMLButtonElement | null;
-    expect(stopButton).not.toBeNull();
-    await act(async () => {
-      stopButton?.click();
-    });
-
-    expect(cancelAgentJob).toHaveBeenCalledTimes(1);
-    expect(cancelAgentJob).toHaveBeenCalledWith(JOB_ID, "Agent job cancelled by user");
-    expect(onCancelRun).not.toHaveBeenCalled();
+  it("keeps completed summaries compact without a transcript stop control", async () => {
+    await act(async () => root.render(<AgentJobThreadPreviewLayout {...createProps({
+      isCompleted: true, isRunning: false, isThreadUnresolved: false,
+      finalSummaryMessage: createMessage({ id: "summary", content: "Completed step." }),
+      finalSpineTone: "primary",
+      canCancelTerminalRun: true, onCancelRun: vi.fn(), onCancelTerminalCommand: vi.fn(),
+    })} />));
+    expect(container.textContent).toContain("Completed step.");
+    expect(container.querySelector('button[aria-label*="Stop"], [data-testid="chat-command-stop-button"]')).toBeNull();
   });
 
-  it("falls back to the conversation interrupt when the entry has no job id", async () => {
-    const onCancelRun = vi.fn();
-    await act(async () => {
-      root.render(
-        <AgentJobThreadPreviewLayout
-          {...createProps({
-            message: createMessage({
-              metadata: {
-                messageType: "agent_job_thread",
-                threadLocalId: "thread-local",
-                agent: { handle: "octo" },
-              },
-            }),
-            isCompleted: false,
-            isRunning: true,
-            isThreadUnresolved: true,
-            canCancelTerminalRun: true,
-            showCollapsedCompactRailStatus: true,
-            compactRailStatusText: "Running command…",
-            finalSummaryMessage: null,
-            showSummaryBody: false,
-            onCancelRun,
-          })}
-        />,
-      );
-    });
-
-    const stopButton = container.querySelector(
-      '[data-testid="chat-command-stop-button"]',
-    ) as HTMLButtonElement | null;
-    expect(stopButton).not.toBeNull();
-    await act(async () => {
-      stopButton?.click();
-    });
-
-    expect(onCancelRun).toHaveBeenCalledTimes(1);
-    expect(cancelAgentJob).not.toHaveBeenCalled();
+  it("keeps single-command and caption rows free of cancel actions when presentation flags overlap", async () => {
+    await act(async () => root.render(<AgentJobThreadPreviewLayout {...createCommandRunProps({
+      showCollapsedCompactRailStatus: true, compactRailStatusText: "Checking command output…",
+      isThreadPreviewExpanded: true, showLiveCommandOutput: true,
+      canCancelTerminalRun: true, onCancelRun: vi.fn(), onCancelTerminalCommand: vi.fn(),
+      latestCommandExecution: { command: RAW_COMMAND, output: "example-user\n", status: "running" },
+    })} />));
+    expect(container.querySelector('[data-testid="agent-thread-single-update-row"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label*="Stop"], [data-testid="chat-command-stop-button"]')).toBeNull();
   });
 
-  async function renderCancelableRun(
-    onCancelRun: () => void,
-    messageOverrides?: Partial<ChatMessage>,
-  ): Promise<HTMLButtonElement | null> {
-    await act(async () => {
-      root.render(
-        <AgentJobThreadPreviewLayout
-          {...createProps({
-            message: createMessage(messageOverrides),
-            isCompleted: false,
-            isRunning: true,
-            isThreadUnresolved: true,
-            canCancelTerminalRun: true,
-            showCollapsedCompactRailStatus: true,
-            compactRailStatusText: "Running command…",
-            finalSummaryMessage: null,
-            showSummaryBody: false,
-            onCancelRun,
-          })}
-        />,
-      );
-    });
-    return container.querySelector(
-      '[data-testid="chat-command-stop-button"]',
-    ) as HTMLButtonElement | null;
-  }
-
-  it("skips the per-job cancel when the extracted id is not a plausible job id", async () => {
-    const onCancelRun = vi.fn();
-    const stopButton = await renderCancelableRun(onCancelRun, {
-      metadata: {
-        messageType: "agent_job_thread",
-        jobId: `thread:${JOB_ID}`,
-        threadLocalId: "thread-local",
-        agent: { handle: "octo" },
-      },
-    });
-
-    expect(stopButton).not.toBeNull();
-    await act(async () => {
-      stopButton?.click();
-    });
-
-    expect(cancelAgentJob).not.toHaveBeenCalled();
-    expect(onCancelRun).toHaveBeenCalledTimes(1);
-  });
-
-  it("falls back to the conversation interrupt when the per-job cancel throws", async () => {
-    vi.mocked(cancelAgentJob).mockRejectedValueOnce(new Error("job cancel failed"));
-    const onCancelRun = vi.fn();
-    const stopButton = await renderCancelableRun(onCancelRun);
-
-    expect(stopButton).not.toBeNull();
-    await act(async () => {
-      stopButton?.click();
-    });
-
-    expect(cancelAgentJob).toHaveBeenCalledTimes(1);
-    expect(onCancelRun).toHaveBeenCalledTimes(1);
-    expect(stopButton?.disabled).toBe(false);
-  });
-
-  it("falls back to the conversation interrupt when the per-job cancel is unavailable", async () => {
-    vi.mocked(cancelAgentJob).mockResolvedValueOnce(null);
-    const onCancelRun = vi.fn();
-    const stopButton = await renderCancelableRun(onCancelRun);
-
-    expect(stopButton).not.toBeNull();
-    await act(async () => {
-      stopButton?.click();
-    });
-
-    expect(cancelAgentJob).toHaveBeenCalledTimes(1);
-    expect(onCancelRun).toHaveBeenCalledTimes(1);
-    expect(stopButton?.disabled).toBe(false);
-  });
-
-  it("falls back to the conversation interrupt when the per-job cancel matches nothing", async () => {
-    vi.mocked(cancelAgentJob).mockResolvedValueOnce({
-      ok: true,
-      canceledRunIds: [],
-      canceledJobIds: [],
-    });
-    const onCancelRun = vi.fn();
-    const stopButton = await renderCancelableRun(onCancelRun);
-
-    expect(stopButton).not.toBeNull();
-    await act(async () => {
-      stopButton?.click();
-    });
-
-    expect(cancelAgentJob).toHaveBeenCalledTimes(1);
-    expect(onCancelRun).toHaveBeenCalledTimes(1);
-    expect(stopButton?.disabled).toBe(false);
-  });
+  it.each([false, true])(
+    "never renders a caption cancel action with expanded=%s, even with legacy cancel props",
+    async (isThreadPreviewExpanded) => {
+      const onCancelRun = vi.fn();
+      const onCancelTerminalCommand = vi.fn();
+      const props = createProps({
+        isCompleted: false, isRunning: true, isThreadUnresolved: true,
+        isThreadPreviewExpanded,
+        canCancelTerminalRun: true, onCancelRun, onCancelTerminalCommand,
+        compactRailStatusText: "Running command…", showCollapsedCompactRailStatus: true,
+        finalSummaryMessage: null, showSummaryBody: false,
+      });
+      await act(async () => root.render(<AgentJobThreadPreviewLayout {...props} />));
+      expect(container.querySelector('[data-testid="chat-run-stop-button"]')).toBeNull();
+      expect(container.querySelector('[data-testid="chat-command-stop-button"]')).toBeNull();
+      expect(onCancelRun).not.toHaveBeenCalled();
+      expect(onCancelTerminalCommand).not.toHaveBeenCalled();
+    },
+  );
 
   it("marks failed completed run traces with an explicit terminal status", async () => {
     await act(async () => {

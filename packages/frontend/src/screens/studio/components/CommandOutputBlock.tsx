@@ -114,20 +114,17 @@ export function CommandOutputBlock({
   defaultOutputVisible = true,
   subtle = false,
   bodyOnly = false,
-  onCancel = null,
 }: CommandOutputBlockProps) {
   const normalized = useMemo(() => normalizeCommandOutputText(output), [output]);
   const commandText = typeof command === "string" ? command.trim() : "";
   const statusNormalized = typeof status === "string" ? status.trim().toLowerCase() : "";
   const isRunning = RUNNING_STATUSES.has(statusNormalized);
-  // One status subscription for the block: copy and cancel both report
-  // through it.
+  // Copy and its feedback share the block’s status subscription.
   const { showStatus } = useStatus();
   const handleCopy = useCallback(() => copyCommandOutput(normalized, showStatus), [normalized, showStatus]);
 
   const [viewerOpen, setViewerOpen] = useState(false);
   const [outputVisible, setOutputVisible] = useState(collapsible ? defaultOutputVisible : true);
-  const [cancelPending, setCancelPending] = useState(false);
   const [showAllLines, setShowAllLines] = useState(false);
   const closeViewer = () => setViewerOpen(false);
 
@@ -148,29 +145,13 @@ export function CommandOutputBlock({
     }
     const handleKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         closeViewer();
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
   }, [viewerOpen]);
-
-  const canCancel = isRunning && typeof onCancel === "function";
-
-  const handleCancel = async () => {
-    if (!onCancel || cancelPending) {
-      return;
-    }
-    setCancelPending(true);
-    try {
-      await onCancel();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to stop the command.";
-      showStatus(message, "error", 3500);
-    } finally {
-      setCancelPending(false);
-    }
-  };
 
   const collapsedWindow = useMemo(() => buildCollapsedWindow(normalized), [normalized]);
   const lines = useMemo(() => (normalized ? normalized.split("\n") : []), [normalized]);
@@ -315,20 +296,6 @@ export function CommandOutputBlock({
                 className={`h-3.5 w-3.5 transition-transform ${outputVisible ? "rotate-90" : ""}`}
                 aria-hidden="true"
               />
-            </IconButton>
-          ) : null}
-          {canCancel ? (
-            <IconButton
-              aria-label="Stop command"
-              variant="ghost"
-              size="xs"
-              radius="full"
-              onPress={() => void handleCancel()}
-              isDisabled={cancelPending}
-              data-testid="chat-command-stop-button"
-              tone="danger"
-            >
-              <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
           ) : null}
           <IconButton

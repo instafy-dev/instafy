@@ -1,3 +1,4 @@
+import { ChatRunStopNotice } from "./ChatRunStopNotice";
 import {
   type ClipboardEvent as ReactClipboardEvent,
   type MouseEvent,
@@ -719,7 +720,7 @@ function ControllerConversationNoticeEntry({
       workspaceStarting,
       workspaceStartingSince,
     });
-  const spineTone: ThreadSpineTone = isRuntimeAlert ? "warning" : "danger";
+  const spineTone: ThreadSpineTone = "warning";
   const label = resolveControllerConversationNoticeLabel(message);
   const noticeClassName = isRuntimeAlert
     ? "border-secondary-200/80 bg-secondary-50/80 text-secondary-900 shadow-sm dark:border-secondary-400/25 dark:bg-secondary-500/10 dark:text-secondary-100"
@@ -748,12 +749,12 @@ function ControllerConversationNoticeEntry({
       onContextMenu={onContextMenu}
       onClickCapture={onClickCapture}
     >
-      <ThreadSpine
+      {isRuntimeAlert ? <ThreadSpine
         tone={spineTone}
         className={`pointer-events-none absolute top-0 h-full ${CHAT_LEFT_SPINE_OFFSET_CLASS}`}
         notches={[{ maskLine: true }]}
-      />
-      {superseded ? (
+      /> : null}
+      {!isRuntimeAlert ? <ChatRunStopNotice message={message} /> : superseded ? (
         <div
           className={`${CHAT_BUBBLE_MAX_WIDTH.notice} px-1 py-0.5 text-xs text-slate-500 dark:text-slate-400`}
           data-runtime-alert-superseded="true"

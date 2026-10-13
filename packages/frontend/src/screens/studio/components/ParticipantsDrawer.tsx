@@ -562,7 +562,10 @@ export function ParticipantsDrawer({
   // Escape without also dropping the drawer.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) onClose();
+      if (event.key === "Escape" && !event.defaultPrevented) {
+        event.preventDefault();
+        onClose();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

@@ -39,6 +39,8 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "mobile-thumb-navigation.spec.ts",
   "notification-preferences.spec.ts",
   "organization-rail-reorder.spec.ts",
+  "run-icon-rail.spec.ts",
+  "run-stop-control.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
   "shared-browser-focused-editable.spec.ts",

@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatComposerSurface } from "../ChatComposerSurface";
+import type { ChatRunStopController } from "../useChatRunStop";
 import { ConversationSurfaceTabs } from "../../../../workspace/ConversationSurfaceLayout";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "../ChatColumn";
 import { deriveChatVoiceComposerViewState } from "../chatVoiceComposerViewState";
@@ -282,6 +283,17 @@ function createBlockedGoalProps(): Partial<ComponentProps<typeof ChatComposerSur
   };
 }
 
+function createRunStopController(overrides: Partial<ChatRunStopController> = {}): ChatRunStopController {
+  const target = { jobId: "job-1", runId: "run-1", agentHandle: "octo", agentDisplayName: "Octo", initiatingUserId: "viewer" };
+  return {
+    visible: true, phase: "idle", feedbackId: "stop-feedback", targets: [target],
+    groups: [{ handle: "octo", label: "Octo", targets: [target] }],
+    error: null, confirmationTargets: null,
+    requestStop: vi.fn(), confirmStop: vi.fn(), dismissConfirmation: vi.fn(), retry: vi.fn(),
+    ...overrides,
+  };
+}
+
 const touchSendAnchor = {
   left: 268,
   top: 568,
@@ -349,6 +361,112 @@ describe("ChatComposerSurface", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("uses one icon Stop for an empty live composer without submitting, losing dictation, or remounting its editor", async () => {
+    const controller = createRunStopController();
+    const onSubmit = vi.fn((event) => event.preventDefault());
+    const onVoiceTap = vi.fn();
+    const props = createProps({ composerRunStopController: controller, onSubmit,
+      voiceConversationActionStripProps: { onVoiceTap } as never });
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    const input = container.querySelector('[data-testid="chat-input"]');
+    const stop = container.querySelector<HTMLButtonElement>('[data-testid="chat-run-stop-button"]')!;
+    expect(stop.getAttribute("aria-label")).toBe("Stop");
+    expect(stop.title).toBe("Stop (Esc)");
+    expect(stop.type).toBe("button");
+    expect(stop.textContent).toBe("");
+    expect(stop.querySelector("svg rect")).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid="chat-run-stop-button"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="chat-send-button"]')).toBeNull();
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent).toContain("Stop is available");
+    await act(async () => stop.click());
+    expect(controller.requestStop).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Dictate message"]')!.click());
+    expect(onVoiceTap).toHaveBeenCalledOnce();
+    await act(async () => root.render(<ChatComposerSurface {...props}
+      chatInputProps={{ ...props.chatInputProps, value: "A follow-up" }} />));
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    expect(container.querySelector('[data-testid="chat-send-button"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid="chat-run-stop-button"]')).toHaveLength(1);
+  });
+
+  it("keeps Send beside Stop for an attachment-only draft even while Send is disabled", async () => {
+    const props = createProps({ composerRunStopController: createRunStopController(), sendButtonDisabled: true,
+      imageAttachments: [{ id: "image-1", previewUrl: "data:image/png;base64,AA==", file: new File(["image"], "photo.png") }] as never });
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    const controls = container.querySelector('[data-testid="chat-composer-trailing-controls"]')!;
+    const stop = controls.querySelector('[data-testid="chat-run-stop-button"]')!;
+    const send = controls.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]')!;
+    expect(send.disabled).toBe(true);
+    expect(stop.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await act(async () => root.render(<ChatComposerSurface {...props} imageAttachments={[]}
+      chatInputProps={{ ...props.chatInputProps, value: "  \n " }} />));
+    expect(container.querySelector('[data-testid="chat-send-button"]')).toBeNull();
+    expect(container.querySelectorAll('[data-testid="chat-run-stop-button"]')).toHaveLength(1);
+  });
+
+  it.each(["voiceActionActive", "voiceStarting", "voiceListening", "voiceTranscribing"])(
+    "preserves the voice action node with %s when a run starts and a transcript arrives", async (signal) => {
+      const props = createProps({ voiceConversationActionStripProps: {
+        voiceInteractionMode: "hold", [signal]: true,
+      } as never });
+      await act(async () => root.render(<ChatComposerSurface {...props} />));
+      const microphone = container.querySelector('[data-testid="mock-voice-action-strip"]');
+      expect(microphone).not.toBeNull();
+      await act(async () => root.render(<ChatComposerSurface {...props}
+        composerRunStopController={createRunStopController()}
+        chatInputProps={{ ...props.chatInputProps, value: "Partial transcript" }} />));
+      expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).toBe(microphone);
+      expect(container.querySelectorAll('[data-testid="chat-run-stop-button"]')).toHaveLength(1);
+      expect(container.querySelector('[data-testid="chat-send-button"]')).toBeNull();
+    },
+  );
+
+  it("puts one Stop beside expanded voice controls without replacing recording", async () => {
+    const props = createProps({ showVoiceStatus: true, voiceStatusMessage: "Listening…",
+      voiceConversationActionStripProps: { voiceInteractionMode: "tap", voiceListening: true } as never });
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    const microphone = container.querySelector('[data-testid="mock-voice-action-strip"]');
+    await act(async () => root.render(<ChatComposerSurface {...props} composerRunStopController={createRunStopController()} />));
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).toBe(microphone);
+    expect(container.querySelector('[data-testid="chat-voice-active-strip"] [data-testid="chat-run-stop-button"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid="chat-run-stop-button"]')).toHaveLength(1);
+  });
+
+  it.each([
+    { controller: createRunStopController({ visible: false }), mutationDisabled: false, accessChecking: false },
+    { controller: createRunStopController(), mutationDisabled: true, accessChecking: false },
+    { controller: createRunStopController(), mutationDisabled: false, accessChecking: true },
+  ])("hides Stop when unavailable or composer access is blocked: %#", async ({ controller, mutationDisabled, accessChecking }) => {
+    await act(async () => root.render(<ChatComposerSurface {...createProps({ composerRunStopController: controller, mutationDisabled, accessChecking })} />));
+    expect(container.querySelector('[data-testid="chat-run-stop-button"]')).toBeNull();
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).not.toBeNull();
+  });
+
+  it("keeps pending, requested and retry feedback inside the composer without visible button text", async () => {
+    const controller = createRunStopController({ phase: "stopping" });
+    const props = createProps({ composerRunStopController: controller });
+    await act(async () => root.render(<ChatComposerSurface {...props} />));
+    expect(container.querySelector('[data-testid="chat-run-stop-button"]')?.getAttribute("aria-label")).toBe("Stopping…");
+    expect(container.querySelector('[data-testid="chat-run-stop-button"]')?.hasAttribute("data-pending")).toBe(true);
+    await act(async () => root.render(<ChatComposerSurface {...props} composerRunStopController={{ ...controller, phase: "requested" }} />));
+    const requested = container.querySelector<HTMLButtonElement>('[data-testid="chat-run-stop-button"]')!;
+    expect(requested.disabled).toBe(true);
+    expect(requested.getAttribute("aria-label")).toBe("Stop requested");
+    expect(requested.querySelector("svg rect")).not.toBeNull();
+    const failed = { ...controller, phase: "error" as const, error: "The stop request timed out. The agent may still be working." };
+    await act(async () => root.render(<ChatComposerSurface {...props} composerRunStopController={failed} />));
+    const retry = container.querySelector<HTMLButtonElement>('[data-testid="chat-run-stop-button"]')!;
+    const feedback = container.querySelector('[data-testid="chat-run-stop-error"]')!;
+    expect(retry.getAttribute("aria-label")).toBe("Retry stop");
+    expect(retry.textContent).toBe("");
+    expect(feedback.closest("form")).not.toBeNull();
+    expect(retry.getAttribute("aria-describedby")).toBe(feedback.id);
+    await act(async () => retry.click());
+    expect(controller.retry).toHaveBeenCalledOnce();
   });
 
   it("keeps view navigation reachable above the input without submitting or replacing the composer", async () => {

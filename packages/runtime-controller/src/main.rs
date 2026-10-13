@@ -30,6 +30,7 @@ mod bug_reports;
 mod chat_attachments;
 mod config;
 mod connection_limit;
+mod conversation_stop;
 mod conversations;
 mod credential_keys;
 mod credential_rotation;
