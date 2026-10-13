@@ -64,7 +64,9 @@ const {
   assertOpticalBounds,
   assertPalette,
   assertPixelColor,
-  assertPixelNodes,
+  assertNodesInked,
+  assertMatchesFullBleedReference,
+  assertFullBleedTransform,
   checkFavicon,
   expectContains,
   expectNotContains,
@@ -137,24 +139,14 @@ if (geometry.paths?.length !== 5 || geometry.circles?.length !== 4) {
   failures.push(`${geometryPath} must contain the five canonical paths and four detached nodes.`);
 }
 
-// The small cut: a pixel-fitted redraw of the same mark for 24 CSS px and
-// below. It keeps the 64-unit canvas, needs no transform and keeps all four
-// nodes, each at least 2 px wide at 16 px (4 units are 1 px there).
-const smallGeometryPath = "packages/frontend/src/assets/octo-mark-small.geometry.json";
-const smallGeometry = JSON.parse(readText(smallGeometryPath) || "{}");
-if (smallGeometry.viewBox !== "0 0 64 64" || smallGeometry.transform !== "") {
-  failures.push(`${smallGeometryPath} must use the 64-unit canvas with no transform.`);
-}
-if (!(smallGeometry.paths?.length >= 1) || smallGeometry.circles?.length !== 4) {
-  failures.push(`${smallGeometryPath} must contain the body and all four detached nodes.`);
-}
-for (const { cx, cy, r } of smallGeometry.circles ?? []) {
-  if (!(r >= 4) || cx - r < 0 || cx + r > 64 || cy - r < 0 || cy + r > 64) {
-    failures.push(
-      `${smallGeometryPath} nodes must keep a radius of at least 4 units and stay inside the canvas.`,
-    );
-    break;
-  }
+/**
+ * A full-bleed one-ink raster (32 device px or less): every node reads as a
+ * dot, and the drawing is the main cut itself, matched pixel for pixel
+ * against its reference raster.
+ */
+function checkFullBleedRaster(target) {
+  assertNodesInked(target);
+  assertMatchesFullBleedReference(target);
 }
 
 const pngs = PNG_ASSET_CONTRACTS;
@@ -354,6 +346,22 @@ const pngFavicon = {
 };
 assertOpticalBounds(pngFavicon);
 assertCenteredArtwork(pngFavicon);
+{
+  let image;
+  try {
+    image = readImage(PNG_FAVICON_TARGET.relativePath);
+  } catch {
+    image = null; // readInkBounds above already reported the unreadable file.
+  }
+  checkFullBleedRaster({
+    label: PNG_FAVICON_TARGET.relativePath,
+    image,
+    placement: { x: 0, y: 0, side: 32 },
+    geometry,
+    ink: BRAND_WHITE,
+    background: BRAND_NAVY,
+  });
+}
 
 for (const relativePath of GOOGLE_PLAY_ICON_PATHS) {
   const absolutePath = resolve(relativePath);
@@ -381,22 +389,14 @@ expectContains(
   "The favicon must reverse to brand paper on dark browser chrome.",
 );
 
-// icon.svg is drawn at 16 CSS px: the small cut, one ink, full-bleed.
-assertCanonicalGeometry(canonicalSvg, smallGeometry, "packages/frontend/public/icon.svg");
-expectContains(
-  canonicalSvg,
-  '<g class="octo-ink">',
-  "The adaptive favicon must draw the small cut full-bleed in one ink, with no transform.",
-);
+// icon.svg is drawn at 16 CSS px: the main cut (one logo at every size), one
+// ink, full-bleed in a single group.
+assertCanonicalGeometry(canonicalSvg, geometry, "packages/frontend/public/icon.svg");
+assertFullBleedTransform(canonicalSvg, geometry, "packages/frontend/public/icon.svg");
 expectNotContains(
   canonicalSvg,
-  "scale(",
-  "The adaptive favicon is pixel-fitted full-bleed; it must not take the distribution scale.",
-);
-expectNotContains(
-  canonicalSvg,
-  geometry.paths?.[0] ?? "main-cut-path",
-  "The adaptive favicon must not draw the main cut; marks at 24 CSS px and below use the small cut.",
+  "<rect",
+  "The adaptive favicon draws the nodes as the logo's circles, never as pixel squares.",
 );
 expectNotContains(
   canonicalSvg,
@@ -547,7 +547,7 @@ for (const { href } of findIconLinks(frontendIndex)) {
 expectContains(
   frontendIndex,
   '<link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png?v=',
-  "The PNG favicon fallback must be the one-ink 32px small-cut tile.",
+  "The PNG favicon fallback must be the one-ink 32px full-bleed tile.",
 );
 
 const serviceWorker = readText("packages/frontend/public/sw.js");
@@ -579,17 +579,26 @@ for (const contract of FAVICON_ENTRY_CONTRACTS) {
     background: BRAND_NAVY,
     reason: "one ink (favicon.ico is a monochrome context)",
   });
-  // The small cut fills 56 of 64 units full-bleed; the main cut at the
-  // distribution scale is markedly smaller, so the ink box tells them apart.
-  assertOpticalBounds({
+  // Full-bleed, the mark fills 56 of 64 units; at the distribution scale it
+  // is markedly smaller, so the ink box tells the two fits apart.
+  const target = {
     relativePath: label,
     viewport: { x: 0, y: 0, width: contract.size, height: contract.size },
     expectedInk: contract.expectedInk,
-    artworkLabel: `one-ink ${contract.cut}-cut Octo`,
+    artworkLabel: `one-ink ${contract.fit} Octo`,
     bounds: measureInkBounds(entry.image, { ink: BRAND_WHITE, background: BRAND_NAVY }),
-  });
-  if (contract.pixelNodes) {
-    assertPixelNodes({ label, image: entry.image, geometry: smallGeometry, ink: BRAND_WHITE });
+  };
+  assertOpticalBounds(target);
+  assertCenteredArtwork(target);
+  if (contract.fit === "full-bleed") {
+    checkFullBleedRaster({
+      label,
+      image: entry.image,
+      placement: { x: 0, y: 0, side: contract.size },
+      geometry,
+      ink: BRAND_WHITE,
+      background: BRAND_NAVY,
+    });
   }
 }
 
@@ -606,12 +615,12 @@ for (const [platform, expectedIcon] of Object.entries(DESKTOP_BUILD_ICONS)) {
 }
 
 /**
- * One desktop representation: size, treatment, cut, nodes and the rounded
+ * One desktop representation: size, treatment, fit, nodes and the rounded
  * tile. A `grid` representation (macOS) draws the tile as the body of the
  * macOS icon grid, so every rule applies to that body and its margins must be
  * fully transparent.
  */
-function checkDesktopRepresentation(label, image, { side, cut, crew, grid = false }) {
+function checkDesktopRepresentation(label, image, { side, fit, crew, grid = false }) {
   if (image.width !== side || image.height !== side) {
     failures.push(`${label} must be ${side}x${side}; found ${image.width}x${image.height}.`);
     return;
@@ -630,8 +639,8 @@ function checkDesktopRepresentation(label, image, { side, cut, crew, grid = fals
       );
     }
     // The body fills its box: opaque at the middle of each edge. (Its color
-    // is the palette check's job; in a 12 px body the small cut's dome
-    // reaches the top edge pixel.)
+    // is the palette check's job; in a 12 px body the full-bleed mark's dome
+    // reaches into the top edge pixel.)
     const middle = Math.floor(side / 2);
     for (const [x, y] of [
       [middle, inset],
@@ -648,11 +657,14 @@ function checkDesktopRepresentation(label, image, { side, cut, crew, grid = fals
       }
     }
   }
-  const expectsCrew = cut === "main" && body >= CREW_TILE_MIN_PX;
+  const expectsCrew = fit === "distribution" && body >= CREW_TILE_MIN_PX;
   if (crew !== expectsCrew) {
     failures.push(
-      `${label}: the contract must give crew to main-cut representations of at least ${CREW_TILE_MIN_PX} device px only.`,
+      `${label}: the contract must give crew to distribution-scale representations of at least ${CREW_TILE_MIN_PX} device px only.`,
     );
+  }
+  if (fit === "full-bleed" && side > 32) {
+    failures.push(`${label}: only representations of 32 device px or less draw the mark full-bleed.`);
   }
   const inks = crew ? [BRAND_WHITE, ...palette.crewDark] : [BRAND_WHITE];
   assertPalette({
@@ -669,8 +681,8 @@ function checkDesktopRepresentation(label, image, { side, cut, crew, grid = fals
   const target = {
     relativePath: label,
     viewport,
-    expectedInk: expectedTileInk(body, cut),
-    artworkLabel: `${crew ? "crew" : "one-ink"} ${cut}-cut Octo`,
+    expectedInk: expectedTileInk(body, fit),
+    artworkLabel: `${crew ? "crew" : "one-ink"} ${fit} Octo`,
     bounds,
   };
   assertOpticalBounds(target);
@@ -686,8 +698,15 @@ function checkDesktopRepresentation(label, image, { side, cut, crew, grid = fals
       minimumSide: CREW_TILE_MIN_PX,
     });
   }
-  if (cut === "small" && body === 16) {
-    assertPixelNodes({ label, image, geometry: smallGeometry, ink: BRAND_WHITE });
+  if (fit === "full-bleed") {
+    checkFullBleedRaster({
+      label,
+      image,
+      placement: { x: inset, y: inset, side: body },
+      geometry,
+      ink: BRAND_WHITE,
+      background: BRAND_NAVY,
+    });
   }
   // The desktop tile is a rounded rect: its corners stay transparent (on the
   // grid, the body's own corner pixel is mostly outside its rounded corner).
@@ -758,7 +777,7 @@ if (iosSplashImages && canonicalJson(iosSplashImages) !== canonicalJson(IOS_SPLA
   );
 }
 // The 40 px slot in every appearance: iOS masks it like every other size, so
-// it keeps the main cut, one ink, centered like the default slot.
+// it keeps the distribution scale, one ink, centered like the default slot.
 for (const [relativePath, background] of [
   [IOS_NOTIFICATION_ICON_PATH, BRAND_NAVY],
   [IOS_DARK_NOTIFICATION_ICON_PATH, CANVAS_DARK],
@@ -773,8 +792,8 @@ for (const [relativePath, background] of [
   const target = {
     relativePath,
     viewport: { x: 0, y: 0, width: 40, height: 40 },
-    expectedInk: expectedTileInk(40, "main"),
-    artworkLabel: "one-ink main-cut Octo",
+    expectedInk: expectedTileInk(40, "distribution"),
+    artworkLabel: "one-ink Octo",
     bounds: measureInkBounds(image, { ink: BRAND_WHITE, background }),
   };
   assertOpticalBounds(target);

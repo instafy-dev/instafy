@@ -5,14 +5,26 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 
-import { findIconLinks, octoNodeCenters } from "./app-icon-checker.mjs";
+import {
+  compareToFullBleedReference,
+  findIconLinks,
+  FULL_BLEED_MARGIN,
+  FULL_BLEED_REFERENCE_TOLERANCE,
+  fullBleedFit,
+  octoInkBox,
+  octoNodeCenters,
+  rasterizeFullBleedCoverage,
+} from "./app-icon-checker.mjs";
 import {
   androidNightDirectory,
   createCrewNodeTargets,
   createCrewTokenContracts,
   DESKTOP_ICNS_CONTRACTS,
   DESKTOP_ICO_CONTRACTS,
+  expectedTileInk,
   FAVICON_ENTRY_CONTRACTS,
+  PNG_FAVICON_TARGET,
+  STALE_ASSET_PATHS,
   IOS_APP_ICON_IMAGES,
   IOS_SPLASH_IMAGES,
   macGridBody,
@@ -135,8 +147,8 @@ test("node centers follow crew slots left to right through the transforms", () =
   assert.equal(Number(centers[0].y.toFixed(4)), 47.861);
   assert.equal(Number(centers[0].r.toFixed(4)), 2.975);
 
-  const small = octoNodeCenters({ transform: "", circles: [{ cx: 8, cy: 52, r: 4 }] });
-  assert.deepEqual(small, [{ x: 8, y: 52, r: 4 }]);
+  const untransformed = octoNodeCenters({ transform: "", circles: [{ cx: 8, cy: 52, r: 4 }] });
+  assert.deepEqual(untransformed, [{ x: 8, y: 52, r: 4 }]);
   assert.throws(() => octoNodeCenters({ transform: "rotate(5)", circles: [] }), /unsupported/);
 });
 
@@ -144,12 +156,6 @@ test("the shipped geometry and brand config keep the crew contracts consistent",
   const brand = JSON.parse(fs.readFileSync(path.join(repoRoot, "scripts/app-icon-brand.json"), "utf8"));
   const geometry = JSON.parse(
     fs.readFileSync(path.join(repoRoot, "packages/frontend/src/assets/octo-mark.geometry.json"), "utf8"),
-  );
-  const small = JSON.parse(
-    fs.readFileSync(
-      path.join(repoRoot, "packages/frontend/src/assets/octo-mark-small.geometry.json"),
-      "utf8",
-    ),
   );
 
   // Every crew asset is at least the crew threshold, and each node is wide
@@ -165,14 +171,23 @@ test("the shipped geometry and brand config keep the crew contracts consistent",
     assert.ok((nodeRadius / 64) * placement.side > Math.SQRT2, `${relativePath} nodes are too small`);
   }
 
-  // The small cut keeps the main cut's node order and fills 56 of 64 units,
-  // which is what the favicon entry contracts expect.
-  assert.equal(small.circles.length, 4);
-  const xs = small.circles.flatMap(({ cx, r }) => [cx - r, cx + r]);
-  assert.equal(Math.max(...xs) - Math.min(...xs), 56);
-  for (const { size, cut, expectedInk } of FAVICON_ENTRY_CONTRACTS) {
-    if (cut === "small") assert.equal(expectedInk.width, (56 / 64) * size);
+  // Full-bleed, the main cut's ink box is 56 of 64 units tall, which is what
+  // the favicon and full-bleed desktop contracts expect.
+  const box = octoInkBox(geometry);
+  const fit = fullBleedFit(geometry);
+  assert.equal(Number((fit.scale * box.height).toFixed(6)), 64 - 2 * FULL_BLEED_MARGIN);
+  for (const { size, fit: entryFit, expectedInk } of FAVICON_ENTRY_CONTRACTS) {
+    if (entryFit !== "full-bleed") continue;
+    assert.ok(Math.abs(expectedInk.height - (56 / 64) * size) < 1e-9, `${size}px height`);
+    assert.ok(
+      Math.abs(expectedInk.width - ((fit.scale * box.width) / 64) * size) < 0.01 * size,
+      `${size}px width`,
+    );
   }
+  assert.deepEqual(
+    [PNG_FAVICON_TARGET.expectedInk.width, PNG_FAVICON_TARGET.expectedInk.height],
+    [expectedTileInk(32, "full-bleed").width, expectedTileInk(32, "full-bleed").height],
+  );
 
   // Dark-mode overrides are emitted only for the lifted slots (green, violet).
   assert.deepEqual(
@@ -184,15 +199,129 @@ test("the shipped geometry and brand config keep the crew contracts consistent",
   );
 });
 
+test("the full-bleed fit scales the main cut's own ink box to 56 units tall and centers it", () => {
+  const geometry = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "packages/frontend/src/assets/octo-mark.geometry.json"), "utf8"),
+  );
+  // The nodes are the left, right and bottom extremes; the dome is the top.
+  const box = octoInkBox(geometry);
+  assert.deepEqual(
+    [box.minX, box.maxX, box.minY, box.maxY].map((value) => Number(value.toFixed(2))),
+    [8.75, 57.84, 8, 59.86],
+  );
+  // Curve bounds, not control points: a hump whose control points rise to
+  // y = 0 only reaches y = 1.
+  const hump = octoInkBox({ paths: ["M0 4 C0 0 4 0 4 4 Z"], circles: [] });
+  assert.deepEqual([hump.minX, hump.maxX, hump.minY, hump.maxY], [0, 4, 1, 4]);
+  assert.throws(() => octoInkBox({ paths: ["M0 0 Q1 1 2 2"], circles: [] }), /unsupported/);
+
+  const fit = fullBleedFit(geometry);
+  const top = fit.y + fit.scale * box.minY;
+  const bottom = fit.y + fit.scale * box.maxY;
+  const left = fit.x + fit.scale * box.minX;
+  const right = fit.x + fit.scale * box.maxX;
+  assert.ok(Math.abs(top - FULL_BLEED_MARGIN) < 1e-9 && Math.abs(64 - bottom - FULL_BLEED_MARGIN) < 1e-9);
+  assert.ok(Math.abs(left - (64 - right)) < 1e-9, "centered horizontally");
+  assert.ok(right - left < 56, "the height is the longer side");
+  // The nodes keep their order and the same lean, just larger.
+  const centers = octoNodeCenters(geometry, { fullBleed: true });
+  assert.deepEqual(
+    centers.map(({ x }) => Math.round(x)),
+    [...geometry.circles].sort((a, b) => a.cx - b.cx).map(({ cx }) => Math.round(fit.x + fit.scale * cx)),
+  );
+  assert.ok(centers.every(({ r }) => Math.abs(r - 3.5 * fit.scale) < 1e-9));
+});
+
+test("the full-bleed reference raster fills the fitted shape and nothing else", () => {
+  // A 10-unit square fits full-bleed as a 56-unit square at 4..60; at 64 px a
+  // unit is a pixel, so the raster is exactly that square.
+  const square = { paths: ["M0 0 L10 0 L10 10 L0 10 Z"], circles: [] };
+  const coverage = rasterizeFullBleedCoverage(square, 64);
+  assert.equal(Math.round(coverage.reduce((sum, value) => sum + value, 0)), 56 * 56);
+  assert.equal(coverage[3 * 64 + 3], 0);
+  assert.equal(coverage[4 * 64 + 4], 1);
+  assert.equal(coverage[59 * 64 + 59], 1);
+  assert.equal(coverage[60 * 64 + 60], 0);
+  // A node is a disc: about pi r^2 of a 56-unit (diameter) circle.
+  const disc = rasterizeFullBleedCoverage({ paths: [], circles: [{ cx: 0, cy: 0, r: 1 }] }, 64);
+  const area = disc.reduce((sum, value) => sum + value, 0);
+  assert.ok(Math.abs(area - Math.PI * 28 * 28) < 2, `disc area ${area}`);
+});
+
+/**
+ * The retired small cut as origin/main (38dd2188) shipped it in icon.ico's 16
+ * and 24 px entries: each pixel's coverage from brand ink to paper, 0-255, row
+ * by row. It fills nearly the same ink box as the main cut full-bleed, so only
+ * a per-pixel comparison tells them apart.
+ */
+const RETIRED_SMALL_CUT_ICO = {
+  16: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAIa/09K8hAAAAAAAAAAAAE+b/////5hMAAAAAAAAAAID///////9+AAAAAAAAABTk////////3A8AAAAAAAC3///////////HCQAAAABD/7y8/5mZ/8SB/IgAAAAAouwSlf0dBtDHAGzqAAAAAOCBAMa8AABJ+gEH4QEAAAH9LgDragAABuECAAAAAAAB4QQC/ikAAAAAAAD//wAAAAAAAeEDAAAA//8A//8AAP//AAAAAAAAAP//AAAAAAD//wD//wAAAAAAAAAAAAAAAAAA//8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+  24: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB014eE0HAAAAAAAAAAAAAAAAAAAAAABL5v/////mSwAAAAAAAAAAAAAAAAAAAEv8/////////EsAAAAAAAAAAAAAAAAACeb//////////+YJAAAAAAAAAAAAAAAAVf////////////9VAAAAAAAAAAAAAAACwv////////////+wAAAAAAAAAAAAAACJ////////////////hAAAAAAAAAAAAD/+/////////////////3MAAAAAAAAAAMj//aj3//+SnP///YjY//suAAAAAAAANP//eQC//+wJA8L/8QQLt/+oAAAAAAAAhv/TAwDs/44AACD0/z8ADebvAAAAAAAAxP9aAB7//zAAAACG/3QAAI/+AgAAAAAA7fIJAEf/2QAAAAAp/4cAACFeAAAAAAAD/7QAAGj/jAAAAAAB3GAAAAAAAAAAAAAD/ocAAH7/SwAAAAAAAAAAACPb2yMAAAAAXiAAAIb/GgAAAAAAI3MjAHP//3MAAAAAAAAAAGDcAQAAAAAA2//bACPb2yMAACPb2yMAAAAAAAAAAAAA2//bAAAAAAAAAHP//3MAI3MjAAAAAAAAI3MjAAAAAAAAACPb2yMA2//bAAAAAAAAAAAAAAAAAAAAAAAAAAAA2//bAAAAAAAAAAAAAAAAAAAAAAAAAAAAI3MjAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+};
+
+test("full-bleed rasters must be the main cut: the retired small cut and a shifted mark fail", () => {
+  const geometry = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "packages/frontend/src/assets/octo-mark.geometry.json"), "utf8"),
+  );
+  const { meanError, maxError } = FULL_BLEED_REFERENCE_TOLERANCE;
+  const within = ({ meanError: mean, maxError: max }) => mean <= meanError && max <= maxError;
+  const tile = (side, coverageAt) => {
+    const tileImage = image(side, side, [...NAVY, 255]);
+    for (let y = 0; y < side; y += 1) {
+      for (let x = 0; x < side; x += 1) tileImage.set(x, y, [...blend(NAVY, WHITE, coverageAt(x, y)), 255]);
+    }
+    return tileImage;
+  };
+  const compare = (tileImage) =>
+    compareToFullBleedReference(tileImage, {
+      placement: { x: 0, y: 0, side: tileImage.width },
+      geometry,
+      ink: WHITE,
+      background: NAVY,
+    });
+
+  for (const side of [16, 24]) {
+    const reference = rasterizeFullBleedCoverage(geometry, side);
+    const at = (x, y) => (x >= 0 && y >= 0 && x < side && y < side ? reference[y * side + x] : 0);
+    assert.ok(within(compare(tile(side, at))), `${side}px reference`);
+    // One pixel off center is not the same drawing.
+    assert.ok(!within(compare(tile(side, (x, y) => at(x - 1, y)))), `${side}px shifted right`);
+    assert.ok(!within(compare(tile(side, (x, y) => at(x, y - 1)))), `${side}px shifted down`);
+
+    const retired = Buffer.from(RETIRED_SMALL_CUT_ICO[side], "base64");
+    assert.equal(retired.length, side * side);
+    const result = compare(tile(side, (x, y) => retired[y * side + x] / 255));
+    assert.ok(result.meanError > meanError, `${side}px small cut mean ${result.meanError}`);
+    assert.ok(result.maxError > maxError, `${side}px small cut max ${result.maxError}`);
+  }
+
+  // The shipped full-bleed entries pass.
+  const shipped = [
+    ...decodeIcoEntries(fs.readFileSync(path.join(repoRoot, "packages/desktop-app/assets/icon.ico"))),
+    ...decodeIcoEntries(fs.readFileSync(path.join(repoRoot, "packages/frontend/public/favicon.ico"))),
+  ].filter(({ size }) => size <= 24);
+  assert.equal(shipped.length, 3);
+  for (const { size, image: entry } of shipped) {
+    assert.ok(within(compare(entry)), `shipped ${size}px entry`);
+  }
+});
+
+test("the retired small cut stays deleted", () => {
+  assert.ok(STALE_ASSET_PATHS.includes("packages/frontend/src/assets/octo-mark-small.geometry.json"));
+  assert.ok(
+    !fs.existsSync(path.join(repoRoot, "packages/frontend/src/assets/octo-mark-small.geometry.json")),
+  );
+});
+
 test("every rel token 'icon' is a favicon candidate, in any attribute order", () => {
   const html = `
-    <link rel="icon" type="image/svg+xml" href="/icon.svg?v=4" />
-    <link type="image/png" rel="icon" href="/icon-192.png?v=4" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg?v=5" />
+    <link type="image/png" rel="icon" href="/icon-192.png?v=5" />
     <link rel="shortcut icon" href='/legacy.ico'>
     <LINK REL="Alternate Icon" HREF=/alt.png>
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=4" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=5" />
     <link rel="mask-icon" href="/mask.svg" />
-    <link rel="manifest" href="/manifest.webmanifest?v=4" />`;
+    <link rel="manifest" href="/manifest.webmanifest?v=5" />`;
   assert.deepEqual(
     findIconLinks(html).map(({ href }) => href),
     ["/icon.svg", "/icon-192.png", "/legacy.ico", "/alt.png"],
@@ -306,21 +435,27 @@ test("the maskable scale keeps every node inside the W3C safe circle", () => {
   assert.ok(reach(brand.maskableScale) <= 0.39 * 64, "maskable nodes must clear the safe circle");
 });
 
-test("desktop representations take crew only from the crew threshold, the small cut only at 32 px or less", () => {
+test("desktop representations take crew only from the crew threshold, full-bleed only at 32 px or less", () => {
   const brand = JSON.parse(fs.readFileSync(path.join(repoRoot, "scripts/app-icon-brand.json"), "utf8"));
-  for (const { side, cut, crew, grid } of [...DESKTOP_ICNS_CONTRACTS, ...DESKTOP_ICO_CONTRACTS]) {
+  const fits = new Set(["full-bleed", "distribution"]);
+  for (const { side, fit, crew, grid } of [...DESKTOP_ICNS_CONTRACTS, ...DESKTOP_ICO_CONTRACTS]) {
+    assert.ok(fits.has(fit), `${side}px fit ${fit}`);
     // On the macOS grid the tile is the body, so the threshold applies to it.
     const tile = grid ? macGridBody(side).body : side;
-    assert.equal(crew, cut === "main" && tile >= brand.crewTileMinPx, `${side}px ${cut}`);
-    if (cut === "small") assert.ok(side <= 32, `${side}px small cut`);
+    assert.equal(crew, fit === "distribution" && tile >= brand.crewTileMinPx, `${side}px ${fit}`);
+    if (fit === "full-bleed") assert.ok(side <= 32, `${side}px full-bleed`);
   }
-  // Every 16 px desktop representation is the pixel-fitted small cut.
+  // Every 16 px representation, desktop and favicon, draws the mark full-bleed.
   assert.ok(
     [...DESKTOP_ICNS_CONTRACTS, ...DESKTOP_ICO_CONTRACTS]
       .filter(({ side }) => side === 16)
-      .every(({ cut }) => cut === "small"),
+      .every(({ fit }) => fit === "full-bleed"),
   );
-  assert.ok(FAVICON_ENTRY_CONTRACTS.find(({ size }) => size === 16).pixelNodes);
+  assert.equal(FAVICON_ENTRY_CONTRACTS.find(({ size }) => size === 16).fit, "full-bleed");
+  for (const { size, fit } of FAVICON_ENTRY_CONTRACTS) {
+    assert.ok(fits.has(fit), `${size}px favicon fit ${fit}`);
+    if (fit === "full-bleed") assert.ok(size <= 32, `${size}px favicon full-bleed`);
+  }
 });
 
 test("the macOS grid body matches Apple's own icons at every icns slot", () => {
