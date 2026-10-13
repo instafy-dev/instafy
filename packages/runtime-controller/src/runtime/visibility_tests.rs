@@ -279,7 +279,10 @@ async fn desktop_owner_can_fence_and_resume_exact_private_runtime() -> anyhow::R
         .await?;
     drop(connection);
 
-    super::sweeps::resume_expired_runtime_drains(&state).await?;
+    super::sweeps::resume_expired_runtime_drains(
+        &mut crate::background_loops::TickConnection::new(&state.pool),
+    )
+    .await?;
     let connection = pool.get().await?;
     let fenced = connection
         .query_one(
@@ -301,7 +304,10 @@ async fn desktop_owner_can_fence_and_resume_exact_private_runtime() -> anyhow::R
 
     // Conversely, a detached runtime that kept heartbeating after Electron
     // disappeared should recover automatically once the fence expires.
-    super::sweeps::resume_expired_runtime_drains(&state).await?;
+    super::sweeps::resume_expired_runtime_drains(
+        &mut crate::background_loops::TickConnection::new(&state.pool),
+    )
+    .await?;
     let connection = pool.get().await?;
     let recovered = connection
         .query_one(

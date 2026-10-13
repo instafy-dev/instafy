@@ -729,7 +729,14 @@ async fn a_space_claimed_by_another_controller_is_not_retried_twice() -> anyhow:
             fixture.make_due(*project_id).await?;
         }
         // Replica A has claimed every due space and is still working on them.
-        let claimed_by_a = claim_due_waits(&fixture.state, &policy(), 3, &[], &[]).await?;
+        let claimed_by_a = claim_due_waits(
+            &mut TickConnection::new(&fixture.state.pool),
+            &policy(),
+            3,
+            &[],
+            &[],
+        )
+        .await?;
         assert_eq!(claimed_by_a.len(), 3);
 
         // Replica B, on its own pool, must leave them alone.
@@ -1409,6 +1416,34 @@ async fn giving_up_refunds_the_managed_ai_reserve_of_a_message_that_never_ran() 
     }
 }
 
+/// A tick with no wait to prune or claim runs the prune and the claim on one
+/// pool checkout, where each took its own.
+#[tokio::test]
+async fn an_idle_limit_wait_tick_takes_one_pool_checkout() -> anyhow::Result<()> {
+    crate::tests::with_empty_tables(&["hosted_runtime_limit_waits"], |pool| async move {
+        let state = crate::tests::build_test_state(
+            pool.clone(),
+            crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "limit-wait-idle-tick",
+            ),
+        );
+        for tick in 1..=2 {
+            let before = crate::tests::pool_gets(&pool);
+            let report = sweep_hosted_runtime_limit_waits(&state, &policy()).await?;
+            assert_eq!(report, LimitWaitSweepReport::default());
+            assert_eq!(
+                crate::tests::pool_gets(&pool) - before,
+                1,
+                "idle tick {tick} takes one checkout"
+            );
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// The retry must not hold a pool slot while the launch it replays waits on
 /// the provider. The launch itself pins exactly one (its row guard across
 /// `/runtime/ensure`, see `slow_provider_ensure_pins_at_most_one_pool_connection`),
@@ -1782,7 +1817,11 @@ async fn requeued_work_in_a_waiting_space_is_given_up_by_the_limit_wait_and_refu
             .await?;
         drop(connection);
 
-        crate::runtime::sweeps::expire_stale_requeued_jobs(&fixture.state).await?;
+        crate::runtime::sweeps::expire_stale_requeued_jobs(
+            &fixture.state,
+            &mut crate::background_loops::TickConnection::new(&fixture.state.pool),
+        )
+        .await?;
         let job_status: String = fixture
             .pool
             .get()
@@ -1907,7 +1946,11 @@ async fn requeued_work_the_limit_wait_does_not_cover_still_expires() -> anyhow::
         }
         drop(connection);
 
-        crate::runtime::sweeps::expire_stale_requeued_jobs(&fixture.state).await?;
+        crate::runtime::sweeps::expire_stale_requeued_jobs(
+            &fixture.state,
+            &mut crate::background_loops::TickConnection::new(&fixture.state.pool),
+        )
+        .await?;
         let (status, outcome, error_message) = fixture.job_state(pinned_to_desktop).await?;
         assert_eq!(
             status, "failed",
@@ -2181,7 +2224,13 @@ async fn a_claim_skips_a_row_another_replica_is_claiming() -> anyhow::Result<()>
             .await?;
         let claimed = tokio::time::timeout(
             Duration::from_secs(5),
-            claim_due_waits(&fixture.state, &policy(), 8, &[], &[]),
+            claim_due_waits(
+                &mut TickConnection::new(&fixture.state.pool),
+                &policy(),
+                8,
+                &[],
+                &[],
+            ),
         )
         .await
         .expect("a claim waited on a row another replica was claiming")?;
@@ -2237,7 +2286,14 @@ async fn concurrent_claims_from_several_replicas_never_share_a_space() -> anyhow
                 let barrier = barrier.clone();
                 tasks.push(crate::tests::spawn_aborting(async move {
                     barrier.wait().await;
-                    claim_due_waits(&replica, &policy(), 8, &[], &[]).await
+                    claim_due_waits(
+                        &mut TickConnection::new(&replica.pool),
+                        &policy(),
+                        8,
+                        &[],
+                        &[],
+                    )
+                    .await
                 }));
             }
             let mut all = Vec::new();
@@ -2286,11 +2342,17 @@ async fn a_give_up_leaves_work_a_launch_just_took_over() -> anyhow::Result<()> {
             .await?;
         drop(connection);
 
-        let claim = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("the overdue space should be claimed"))?;
+        let claim = claim_due_waits(
+            &mut TickConnection::new(&fixture.state.pool),
+            &policy(),
+            1,
+            &[],
+            &[],
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("the overdue space should be claimed"))?;
 
         // The user's own ensure got a machine for the space in the meantime.
         let runtime_id = hosted_runtime_id(&fixture.pool, waiting).await?;
@@ -2529,8 +2591,22 @@ async fn give_ups_come_first_and_organizations_take_turns() -> anyhow::Result<()
         drop(connection);
 
         let order = [
-            claim_due_waits(&fixture.state, &policy(), 1, &[], &[]).await?,
-            claim_due_waits(&fixture.state, &policy(), 1, &[overdue], &[fixture.org_id]).await?,
+            claim_due_waits(
+                &mut TickConnection::new(&fixture.state.pool),
+                &policy(),
+                1,
+                &[],
+                &[],
+            )
+            .await?,
+            claim_due_waits(
+                &mut TickConnection::new(&fixture.state.pool),
+                &policy(),
+                1,
+                &[overdue],
+                &[fixture.org_id],
+            )
+            .await?,
         ];
         let order: Vec<Uuid> = order
             .iter()
@@ -2558,11 +2634,17 @@ async fn a_lapsed_claim_cannot_touch_the_claim_that_replaced_it() -> anyhow::Res
         fixture.queue_job(waiting).await?;
         fixture.make_due(waiting).await?;
 
-        let mut lapsed = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("the due space should be claimed"))?;
+        let mut lapsed = claim_due_waits(
+            &mut TickConnection::new(&fixture.state.pool),
+            &policy(),
+            1,
+            &[],
+            &[],
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("the due space should be claimed"))?;
         fixture
             .pool
             .get()
@@ -2584,11 +2666,17 @@ async fn a_lapsed_claim_cannot_touch_the_claim_that_replaced_it() -> anyhow::Res
             )
             .await?
             .get("claimed_until");
-        let current = claim_due_waits(&fixture.state, &policy(), 1, &[], &[])
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("a lapsed claim is claimable again"))?;
+        let current = claim_due_waits(
+            &mut TickConnection::new(&fixture.state.pool),
+            &policy(),
+            1,
+            &[],
+            &[],
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("a lapsed claim is claimable again"))?;
         assert!(current.claim_token > lapsed_token);
 
         // The lapsed controller's retry now finishes: refused on the limit

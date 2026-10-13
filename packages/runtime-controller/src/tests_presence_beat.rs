@@ -10,8 +10,8 @@ use uuid::Uuid;
 
 use crate::config::{PgPool, RuntimeProviderConfig};
 use crate::tests::{
-    build_app_config, build_test_state, require_origin_test_pool, test_origin_private_key,
-    test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
+    build_app_config, build_test_state, pool_gets, require_origin_test_pool,
+    test_origin_private_key, test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
 };
 use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
 use crate::{origins, AppState};
@@ -169,12 +169,6 @@ async fn beat(
     let body: JsonValue =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
     Ok((status, body))
-}
-
-/// Every checkout from `pool` so far.
-fn pool_gets(pool: &PgPool) -> u64 {
-    let statistics = pool.state().statistics;
-    statistics.get_direct + statistics.get_waited + statistics.get_timed_out
 }
 
 async fn presence_status(pool: &PgPool, origin_id: &Uuid) -> anyhow::Result<(String, i64)> {

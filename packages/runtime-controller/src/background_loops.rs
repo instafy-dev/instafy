@@ -15,10 +15,16 @@
 //! A new periodic loop that uses the pool must take its schedule from a
 //! constant here that is also listed in `DATABASE_LOOPS`; the tests only see
 //! that array.
+//!
+//! A tick that runs several queries in a row can share one checkout between
+//! them through [`TickConnection`].
 
 use std::time::Duration;
 
+use anyhow::Context;
 use tokio::time::{Instant, Interval};
+
+use crate::config::{PgConnectionManager, PgPool};
 
 /// How often a background loop ticks and how long after boot it first does.
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +81,55 @@ pub(crate) fn staggered_interval(schedule: LoopSchedule) -> Interval {
         "background loop scheduled"
     );
     tokio::time::interval_at(Instant::now() + schedule.offset, schedule.period)
+}
+
+/// One pool connection that a loop tick checks out at its first query and
+/// keeps for the queries after it, until the tick releases it or ends.
+///
+/// Every checkout costs a ping (the pool tests a connection before handing it
+/// out), so a tick whose steps each took their own connection paid one ping
+/// per step even when no step found anything to do. Steps that share this
+/// connection pay one per tick.
+///
+/// The connection must never be held while anything waits for another pool
+/// connection: with a pool of one that wait could only end in the checkout
+/// timeout, and with any pool it would hold two slots where the steps alone
+/// held one. A step therefore calls [`TickConnection::release`] before an
+/// action that takes its own connection (a stop, a publish that reads a run,
+/// a claimed limit wait's launch), and the next query checks out again. Work
+/// a step does only on this connection, such as a transaction it opens on it,
+/// needs no release.
+pub(crate) struct TickConnection<'p> {
+    pool: &'p PgPool,
+    held: Option<bb8::PooledConnection<'p, PgConnectionManager>>,
+}
+
+impl<'p> TickConnection<'p> {
+    /// A tick that has not checked anything out yet.
+    pub(crate) fn new(pool: &'p PgPool) -> Self {
+        Self { pool, held: None }
+    }
+
+    /// The held connection, checked out first if the tick holds none. A
+    /// failed checkout carries `context`, which names the step that needed
+    /// the connection.
+    pub(crate) async fn client(
+        &mut self,
+        context: &'static str,
+    ) -> anyhow::Result<&mut tokio_postgres::Client> {
+        if self.held.is_none() {
+            self.held = Some(self.pool.get().await.context(context)?);
+        }
+        Ok(self
+            .held
+            .as_deref_mut()
+            .expect("the connection was checked out above"))
+    }
+
+    /// Give the connection back to the pool, if the tick holds one.
+    pub(crate) fn release(&mut self) {
+        self.held = None;
+    }
 }
 
 #[cfg(test)]
@@ -161,5 +216,86 @@ mod tests {
 
         let instants: HashSet<_> = ticks.iter().map(|(at, _)| *at).collect();
         assert_eq!(instants.len(), ticks.len(), "two loops tick at one instant");
+    }
+}
+
+#[cfg(test)]
+mod tick_connection_tests {
+    use std::time::Duration;
+
+    use bb8_postgres::PostgresConnectionManager;
+
+    use super::TickConnection;
+    use crate::tests::{pool_gets, require_origin_test_pool};
+
+    /// A tick checks out at its first query, keeps that connection for every
+    /// query after it, and checks out again only after a release.
+    #[tokio::test]
+    async fn a_tick_checks_out_once_until_it_releases() -> anyhow::Result<()> {
+        let pool = require_origin_test_pool("a_tick_checks_out_once_until_it_releases").await?;
+        let start = pool_gets(&pool);
+        let all_idle = |pool: &crate::config::PgPool| {
+            let state = pool.state();
+            state.idle_connections == state.connections
+        };
+
+        let mut tick = TickConnection::new(&pool);
+        assert_eq!(pool_gets(&pool), start, "no query, no checkout");
+        for step in ["first step", "second step", "third step"] {
+            tick.client(step).await?.query_one("select 1", &[]).await?;
+        }
+        assert_eq!(pool_gets(&pool) - start, 1);
+        assert!(!all_idle(&pool), "the tick holds its connection");
+
+        tick.release();
+        assert!(all_idle(&pool), "a release gives the connection back");
+        tick.client("after a release")
+            .await?
+            .query_one("select 1", &[])
+            .await?;
+        assert_eq!(pool_gets(&pool) - start, 2);
+
+        drop(tick);
+        assert!(
+            all_idle(&pool),
+            "a tick that ends gives its connection back"
+        );
+        Ok(())
+    }
+
+    /// A failed checkout reports the step that needed the connection, as
+    /// each step's own checkout did.
+    #[tokio::test]
+    async fn a_failed_tick_checkout_names_its_step() -> anyhow::Result<()> {
+        drop(require_origin_test_pool("a_failed_tick_checkout_names_its_step").await?);
+        let manager = PostgresConnectionManager::new_from_stringlike(
+            std::env::var("TEST_DATABASE_URL")?,
+            crate::config::database_tls(),
+        )?;
+        let pool = bb8::Pool::builder()
+            .max_size(1)
+            .connection_timeout(Duration::from_millis(200))
+            .build(manager)
+            .await?;
+        let held = pool.get().await?;
+
+        let mut tick = TickConnection::new(&pool);
+        let error = tick
+            .client("failed to acquire connection for the step")
+            .await
+            .err()
+            .expect("the only connection is checked out");
+        assert_eq!(
+            error.to_string(),
+            "failed to acquire connection for the step"
+        );
+        assert!(
+            format!("{error:#}")
+                .to_ascii_lowercase()
+                .contains("timed out in bb8"),
+            "{error:#}"
+        );
+        drop(held);
+        Ok(())
     }
 }
