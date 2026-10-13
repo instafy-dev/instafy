@@ -1,7 +1,8 @@
 // The social card's script, bundled by scripts/generate-og-image.mjs (Vite,
 // production mode) into card.js. It draws the real Octo mark from its canonical
 // geometry, lays the card out, and mounts the shipping Cub engine with the
-// landing's own theme, perch tuning and timeline for one deterministic frame.
+// landing's own theme, perch tuning and timeline for one deterministic frame:
+// a still, or (ink) a live moment on the fake clock the generator steps.
 // Query parameters override the layout numbers below for review renders only.
 
 import octoMarkGeometry from "@frontend-src/assets/octo-mark.geometry.json";
@@ -16,8 +17,10 @@ const LAYOUT = {
   gx: 64,
   /** Where the hero's dot grid starts under the flat header band. */
   gridTop: 148,
-  /** The window's top edge: the ledge Cub sits on. */
-  ledge: 494,
+  /** The headline block's top. */
+  copyTop: 148,
+  /** The window's top edge: the ledge Cub sits on and his ink lands on. */
+  ledge: 568,
   /** The window's right end: Cub's corner. */
   winR: 1088,
   /** The roster's right end lies this many perch units left of the corner. */
@@ -26,8 +29,19 @@ const LAYOUT = {
   u: 112,
   /** Cub's pen width. */
   lineWidth: 2.9,
-  /** Cub's sim time (s): an idle frame with both front arms on the ledge, eyes open. */
+  /** Still frames only (ink: 0): Cub's sim time (s), an idle frame with both front arms on the ledge, eyes open. */
   t: 9,
+  /** 1: the window's top bar with the conversation title and the roster; 0: a plain slab, the ledge alone. */
+  bar: 0,
+  /**
+   * 1: Cub's crew ink instead of the still frame. He runs live on the
+   * generator's fake clock, is booped `settle` s after he boots and is shot
+   * `inkMs` ms later (these catch the four splats landed, his squint over and
+   * his eyes on the ink). `settle` also seeds the splats' shapes.
+   */
+  ink: 1,
+  settle: 7,
+  inkMs: 1250,
 };
 
 const query = new URLSearchParams(location.search);
@@ -77,12 +91,35 @@ function markInkLeft() {
   return left / Number(octoMarkGeometry.viewBox.split(/\s+/)[2]);
 }
 
+/**
+ * Resolves once a resize and an intersection observer made after Cub's have
+ * reported, so his own first reports are in. They arrive on a real frame, not
+ * on the fake clock an ink card runs on: one landing mid-run would reschedule
+ * his frames.
+ */
+function observersReported(element) {
+  return Promise.all(
+    [ResizeObserver, IntersectionObserver].map(
+      (Observer) =>
+        new Promise((resolve) => {
+          const observer = new Observer(() => {
+            observer.disconnect();
+            resolve();
+          });
+          observer.observe(element);
+        }),
+    ),
+  );
+}
+
 async function main() {
   const root = document.documentElement.style;
   root.setProperty("--gx", `${P.gx}px`);
   root.setProperty("--grid-top", `${P.gridTop}px`);
+  root.setProperty("--copy-top", `${P.copyTop}px`);
   root.setProperty("--ledge", `${P.ledge}px`);
   root.setProperty("--win-w", `${P.winR - P.gx}px`);
+  document.getElementById("card").dataset.bar = String(P.bar);
 
   drawMark(document.getElementById("lockup-mark"), true);
   drawMark(document.getElementById("coin-mark"), false);
@@ -137,6 +174,7 @@ async function main() {
     textLines.push({ x: r.left - origin.left, y: r.top - origin.top, w: r.width, h: r.height });
   }
   const win = rect(document.getElementById("win"));
+  // A slab hides the bar but keeps its height, so Cub's front arms hang as deep.
   const bar = rect(document.getElementById("topbar"));
   const below = { x: win.x + 24, y: bar.y + bar.h + 16, w: win.w - 48, h: 40 };
   const anchors = {
@@ -146,10 +184,11 @@ async function main() {
     panel: win,
     transcript: { x: win.x + 16, y: bar.y + bar.h, w: win.w - 32, h: win.h - bar.h },
     floor: below,
-    titleRow: rect(document.getElementById("tab")),
+    titleRow: P.bar ? rect(document.getElementById("tab")) : { x: win.x, y: win.y, w: 0, h: 0 },
     composer: below,
-    coins: [...roster.children].map(rect),
-    octoCoin: 2,
+    // A slab keeps only Octo's coin, unseen: the engine's reach target.
+    coins: P.bar ? [...roster.children].map(rect) : [rect(roster.children[2])],
+    octoCoin: P.bar ? 2 : 0,
     textLines,
     cta: null,
     keepOut: [rect(lockup), rect(domain)],
@@ -160,7 +199,10 @@ async function main() {
     poi: { title: rect(h1) },
   };
 
-  const status = await new Promise((resolve) => {
+  // The page runs on the generator's fake clock, paused until Cub is mounted;
+  // an ink card notes when he booted, the time its boop is counted from.
+  let bootAt = null;
+  const booted = new Promise((resolve) => {
     const handle = createCub(layer, {
       anchors,
       theme: LANDING_CUB_THEME.light,
@@ -169,20 +211,26 @@ async function main() {
       lineWidth: P.lineWidth,
       zIndex: 3,
       eyes: true,
-      clickInk: false,
+      clickInk: !!P.ink,
       notice: false,
-      still: { t: P.t, td: null },
+      still: P.ink ? null : { t: P.t, td: null },
       dprCap: { desktop: 2, mobile: 2 },
       onStatus: (next) => {
-        if (next !== "wait") resolve(next);
+        if (next === "wait") return;
+        bootAt = performance.now();
+        resolve(next);
       },
     });
     window.__cub = handle;
     setTimeout(() => resolve("timeout"), 15000);
   });
+  await observersReported(layer);
+  document.body.dataset.mounted = "1";
+  const status = await booted;
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   const state = window.__cub.getState();
-  window.__card = { status, mode: state.mode, u: state.u, bx: state.bx, anchors };
+  const ink = P.ink ? { bootAt, settle: P.settle, inkMs: P.inkMs } : null;
+  window.__card = { status, mode: state.mode, u: state.u, bx: state.bx, anchors, ink };
   document.body.dataset.ready = status === "on" ? "1" : "err";
 }
 

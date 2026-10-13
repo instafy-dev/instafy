@@ -8,13 +8,17 @@
 //
 //   pnpm generate:og-image                     # write the card and update its URL
 //   node scripts/generate-og-image.mjs --out /tmp/card.png [--query "t=7&u=104"]
+//   node scripts/generate-og-image.mjs --out /tmp/ink.png --query "ink=1&settle=7&inkMs=1250"
 //
 // With --out the card goes to that path only and no reference is touched;
 // --query passes review overrides to the template (see card-entry.js LAYOUT).
 // Everything is served locally from the repo and node_modules (Inter from the
-// pinned @fontsource/inter); any other request is blocked. The output is
+// pinned @fontsource/inter); any other request is blocked. The page runs on a
+// paused fake clock the generator steps, so an ink card (Cub live, booped, his
+// crew ink on the ledge) is as repeatable as the still one. The output is
 // deterministic for a given Chromium build: equal pixels give equal bytes.
 
+import { Buffer } from "node:buffer";
 import fs from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
@@ -53,6 +57,9 @@ if (updateReferences && query) {
 }
 
 const FONT_WEIGHTS = [400, 500, 600, 700, 800];
+/** The page's fake clock starts here, paused; BOOT_MS of it takes Cub through his boot and the card's first frames. */
+const CLOCK_ORIGIN = Date.UTC(2026, 0, 1);
+const BOOT_MS = 100;
 const fontsDir = path.join(path.dirname(requireFromFrontend.resolve("@fontsource/inter/package.json")), "files");
 
 async function bundleCardScript() {
@@ -112,15 +119,24 @@ async function render(origin) {
     await context.route("**/*", (route) =>
       route.request().url().startsWith(`${origin}/`) ? route.continue() : route.abort(),
     );
+    // The page's timers, frames and clock are fake and paused: they move only
+    // as far as runFor steps them, so a live Cub (an ink card) draws the same
+    // frame on every run.
+    await context.clock.install({ time: CLOCK_ORIGIN });
+    await context.clock.pauseAt(CLOCK_ORIGIN);
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("requestfailed", (request) => errors.push(`blocked or failed: ${request.url()}`));
     await page.goto(`${origin}/card.html${query ? `?${query}` : ""}`, { waitUntil: "load" });
+    await page.waitForSelector("body[data-mounted], body[data-ready]", { timeout: 60_000 });
+    await page.clock.runFor(BOOT_MS);
     await page.waitForSelector("body[data-ready]", { timeout: 60_000 });
     const info = await page.evaluate(() => ({
       ready: document.body.dataset.ready,
-      card: window.__card ? { status: window.__card.status, mode: window.__card.mode, u: window.__card.u } : null,
+      card: window.__card
+        ? { status: window.__card.status, mode: window.__card.mode, u: window.__card.u, ink: window.__card.ink }
+        : null,
       error: window.__cardError ?? null,
       fonts: [...document.fonts].filter((font) => font.status === "loaded").length,
     }));
@@ -128,6 +144,18 @@ async function render(origin) {
       throw new Error(`the card did not render: ${JSON.stringify(info)} ${errors.join("; ")}`);
     }
     if (info.card?.mode !== "corner") throw new Error(`Cub must take the corner perch; got ${info.card?.mode}`);
+    const ink = info.card.ink;
+    if (ink) {
+      // Boop him `settle` s after he booted, then stop the clock `inkMs` later.
+      const now = await page.evaluate(() => performance.now());
+      await page.clock.runFor(Math.max(0, Math.round(ink.bootAt + ink.settle * 1000 - now)));
+      await page.evaluate(() => window.__cub.boop());
+      await page.clock.runFor(ink.inkMs);
+      const state = await page.evaluate(() => window.__cub.getState());
+      if (state.ink !== 1) {
+        throw new Error(`the boop must leave one set of ink (is there room on the ledge?): ${JSON.stringify(state)}`);
+      }
+    }
     const png = await page.screenshot({
       clip: { x: 0, y: 0, width: SOCIAL_CARD_WIDTH, height: SOCIAL_CARD_HEIGHT },
       animations: "disabled",
@@ -164,8 +192,10 @@ const card = encodeOpaqueRgbPng(image);
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(outPath, card);
 const url = socialCardImageUrl(card);
+const { ink } = rendered.info.card;
+const inkNote = ink ? `, ink ${ink.inkMs} ms after a boop at ${ink.settle} s` : "";
 console.log(
-  `[generate-og-image] wrote ${path.relative(repoRoot, outPath)} (${card.length} bytes, Cub ${rendered.info.card.mode} u ${rendered.info.card.u}, ${rendered.info.fonts} font faces)`,
+  `[generate-og-image] wrote ${path.relative(repoRoot, outPath)} (${card.length} bytes, Cub ${rendered.info.card.mode} u ${rendered.info.card.u}${inkNote}, ${rendered.info.fonts} font faces)`,
 );
 
 if (updateReferences) {

@@ -4,7 +4,7 @@
  * scripts/generate-og-image.mjs rewrites the query (and index.html's copy)
  * whenever it regenerates the card; pnpm check:app-icons verifies both.
  */
-export const SOCIAL_CARD_IMAGE = "/og-image.png?sha=a6657f52f814";
+export const SOCIAL_CARD_IMAGE = "/og-image.png?sha=9002ba1ee3dd";
 
 export type PageMeta = {
   title: string;

@@ -144,7 +144,7 @@ expressions belong only to Cub, the landing hero's character, who has no blush.
 | Adaptive SVG favicon (`icon.svg`) | Small cut, one ink, full-bleed: brand ink, or brand paper under a dark OS color-scheme preference |
 | Fixed ICO/PNG favicon fallback | One ink, reverse on a brand-ink tile. `favicon.ico` 16 and 32 px and `icon-32.png` use the small cut full-bleed; the 48 px ICO entry uses the main cut at 0.85. The page offers only `icon.svg`, `favicon.ico` and `icon-32.png` as `rel="icon"`, never a crew tile |
 | Android 13+ themed icon | A dedicated one-ink layer (`ic_launcher_monochrome`), with the foreground's silhouette but never its crew colors; Android recolors it with the user/system palette |
-| Social/OG card | The landing hero, cropped: a `crew` header lockup on flat marketing paper, the dot grid, the headline and sub copy, and the studio window with Cub on its corner; generated (see [Source of truth and generated assets](#source-of-truth-and-generated-assets)) |
+| Social/OG card | The landing hero, cropped: a `crew` header lockup on flat marketing paper, the dot grid, the headline and sub copy, and the window's ledge with Cub on its corner looking at his crew ink; generated (see [Source of truth and generated assets](#source-of-truth-and-generated-assets)) |
 
 Generated tiles follow one size rule: a tile of at least 48 device px
 (`crewTileMinPx` in `scripts/app-icon-brand.json`, where the drawn mark is about
@@ -542,13 +542,17 @@ header band and the hero's dot grid below it; the header lockup in the `crew`
 colorway, drawn from the canonical geometry at 80 px with a 50 px `Instafy`
 wordmark, and `instafy.dev` in slate on the wordmark's baseline at the right;
 the all-ink headline and the sub copy, whose first glyphs share one optical
-left edge with the mark's leftmost node; and the studio window cut to its top
-bar (the conversation title and the roster in crew order: Ada pink, Kim green,
-Octo's ink coin, the scenario agent's flame square) running off the bottom
-edge, with Cub on its corner. Cub is drawn by the shipping engine with the
-landing's theme, perch tuning and timeline, one still idle frame with both
-front arms on the ledge, clear of the coins and the copy; the card shows no
-ink. A 2 px warm hairline frames the card so it keeps an edge on white feeds.
+left edge with the mark's leftmost node; and the studio window reduced to a
+plain white slab, its ledge, running off the bottom edge, with Cub on its
+corner and his crew ink on the ledge. The ink is the card's color: in a feed it
+is what catches the eye, so the window gives up its title and roster to leave
+it room. Cub is drawn by the shipping engine with the landing's theme, perch
+tuning and timeline, run live on the generator's paused fake clock: booped 7 s
+after he boots and shot 1.25 s later, when the four splats have landed in logo
+order and he looks at them with both eyes open. The splats are the engine's own
+(its keep-outs keep them off the lockup, the domain, the headline and the sub
+copy); none are drawn by hand. A 2 px warm hairline frames the card so it keeps
+an edge on white feeds.
 Its mark is about 27 CSS px tall in a 500 px wide unfurl, which the high-density
 screens that show unfurls draw at 1.5 to 2 device pixels per CSS pixel, the
 `crew-hidpi` rule. The square crops some chat apps take cut the lockup and
