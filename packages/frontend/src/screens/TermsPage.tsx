@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Heading } from "../components/Heading";
 import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 
 const LAST_UPDATED = "January 10, 2026";
 const CONTACT_EMAIL = "contact@instafy.dev";
@@ -13,7 +13,7 @@ export function TermsPage() {
       title: "Terms of Use · Instafy",
       description:
         "These Terms of Use govern access to Instafy, a chat-first AI space for editing real files.",
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, []);
 

@@ -143,7 +143,7 @@ import {
   executeGithubProjectImport,
   formatGithubImportSuccessMessage,
 } from "./studio/components/githubImport";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 import { isPersonalOrgName } from "../org/orgNaming";
 import { buildStudioViewportStyle, shouldHideContextWhileTyping } from "./studioViewport";
 import { useStudioViewportState } from "./useStudioViewportState";
@@ -688,7 +688,7 @@ function StudioLayoutInner() {
     applyPageMeta({
       title: projectName ? `${projectName} · Instafy` : "Instafy",
       description: "Chat with Octo, edit files, and manage your space in Instafy.",
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, [activeProjectName]);
 

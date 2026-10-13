@@ -133,7 +133,9 @@ export const PNG_ASSET_CONTRACTS = [
   [IOS_DARK_NOTIFICATION_ICON_PATH, 40, 40, true, 6],
   [IOS_TINTED_ICON_PATH, 1024, 1024, false, 2],
   [IOS_TINTED_NOTIFICATION_ICON_PATH, 40, 40, false, 2],
-  ["packages/frontend/public/og-image.png", 1200, 630, true],
+  // The social card is opaque RGB: some unfurlers composite a transparent
+  // card on black. scripts/generate-og-image.mjs writes it.
+  ["packages/frontend/public/og-image.png", 1200, 630, false, 2],
   ...androidDensities.flatMap(([density, launcher, foreground]) => {
     const directory = `packages/frontend/android/app/src/main/res/mipmap-${density}`;
     return [

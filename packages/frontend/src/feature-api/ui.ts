@@ -14,7 +14,7 @@ export { Toggle } from "../components/Toggle";
 export { useConversation } from "../conversations/useConversation";
 export { useProject } from "../projects/useProject";
 export { useStatus } from "../status/useStatus";
-export { applyPageMeta } from "../utils/seo";
+export { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 export { useWorkspaceTabs } from "../workspace/WorkspaceTabsProvider";
 export { StandaloneStudioProviders } from "../screens/routes/StudioProviders";
 export {
