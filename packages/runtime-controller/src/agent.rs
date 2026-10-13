@@ -788,19 +788,29 @@ pub(crate) async fn agent_lease(
             .set(runtime_id, resources)
             .await;
     }
+    // One checkout serves the whole poll: the preference check below, the
+    // idle check and, when there may be work, the leasing transaction.
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
     let mut allow_untargeted_jobs = true;
     if let Some(preference) = state.runtime_preferences.get(&project_id).await {
         if let Some(preferred_runtime_id) = preference.runtime_id {
-            let preference_is_project_shareable =
-                workspace::fetch_runtime_candidate(&state.pool, &project_id, &preferred_runtime_id)
-                    .await?
-                    .is_some_and(|candidate| {
-                        !runtime::runtime_is_private_self_hosted(
-                            &state,
-                            &candidate.provider,
-                            &candidate.capabilities,
-                        )
-                    });
+            let preference_is_project_shareable = workspace::fetch_runtime_candidate_with_client(
+                &*connection,
+                &project_id,
+                &preferred_runtime_id,
+            )
+            .await?
+            .is_some_and(|candidate| {
+                !runtime::runtime_is_private_self_hosted(
+                    &state,
+                    &candidate.provider,
+                    &candidate.capabilities,
+                )
+            });
             if preference_is_project_shareable && runtime_id != preferred_runtime_id {
                 publish_controller_event(
                     &state.events,
@@ -856,11 +866,6 @@ pub(crate) async fn agent_lease(
         max_jobs = 1;
     }
 
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
     if idle_lease_poll_finds_no_work(
         &state,
         &connection,

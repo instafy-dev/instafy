@@ -370,3 +370,40 @@ async fn an_idle_lease_poll_keeps_every_refusal() -> anyhow::Result<()> {
     })
     .await
 }
+
+/// A project with a pinned runtime checks the pin on the poll's own
+/// connection: an idle poll from another runtime still takes one checkout,
+/// and that runtime's leases stay restricted to jobs that target it.
+#[tokio::test]
+async fn a_pinned_runtime_preference_is_checked_on_the_poll_connection() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("a_pinned_runtime_preference_is_checked").await?;
+    let project_id = Uuid::new_v4();
+    let fixture = SharedDbFixture {
+        projects: vec![project_id],
+        ..SharedDbFixture::default()
+    };
+    with_shared_db_fixture(fixture, async {
+        seed_project(&pool, &project_id).await?;
+        let preferred = add_runtime(&pool, &project_id, Some(5)).await?;
+        let other = add_runtime(&pool, &project_id, Some(5)).await?;
+        let state = build_test_state(pool.clone(), hosted_config("idle-lease-poll-preference"));
+        state
+            .runtime_preferences
+            .set(project_id, Some(preferred), Some("test".to_string()), None)
+            .await;
+
+        let gets_before = pool_gets(&pool);
+        let (status, body) = lease(&state, &project_id, &other, None).await?;
+        assert_eq!((status, body), (StatusCode::OK, json!({ "jobs": [] })));
+        assert_eq!(pool_gets(&pool) - gets_before, 1);
+
+        let job_id = queue_job(&pool, &project_id, None, json!({})).await?;
+        let (status, body) = lease(&state, &project_id, &other, None).await?;
+        assert_eq!((status, body), (StatusCode::OK, json!({ "jobs": [] })));
+        let (status, body) = lease(&state, &project_id, &preferred, None).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(leased_job_ids(&body), vec![job_id.to_string()]);
+        Ok(())
+    })
+    .await
+}
