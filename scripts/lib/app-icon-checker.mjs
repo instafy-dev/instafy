@@ -174,9 +174,7 @@ export function createAppIconChecker({ repoRoot, failures }) {
         failures.push(
           `${relativePath} Octo ink must be approximately ${formatSvgNumber(
             expectedInk.width,
-          )}x${formatSvgNumber(expectedInk.height)}px (±${expectedInk.tolerance}); found ${
-            bounds.width
-          }x${bounds.height}px.`,
+          )}x${formatSvgNumber(expectedInk.height)}px (±${expectedInk.tolerance}); found ${+bounds.width.toFixed(1)}x${+bounds.height.toFixed(1)}px.`,
         );
         break;
       }
@@ -340,6 +338,12 @@ export function createAppIconChecker({ repoRoot, failures }) {
     minimumCoverage = 0.5,
   }) {
     if (!image) return;
+    if (image.width < placement.x + placement.side || image.height < placement.y + placement.side) {
+      failures.push(
+        `${label} is ${image.width}x${image.height}px, too small for its ${placement.side}px mark at ${placement.x},${placement.y}.`,
+      );
+      return;
+    }
     let centers;
     try {
       centers = octoNodeCenters(geometry, { fullBleed: true });

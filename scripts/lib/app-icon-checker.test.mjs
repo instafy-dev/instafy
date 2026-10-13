@@ -249,9 +249,9 @@ test("the full-bleed reference raster fills the fitted shape and nothing else", 
 });
 
 /**
- * The retired small cut as origin/main (38dd2188) shipped it in icon.ico's 16
- * and 24 px entries: each pixel's coverage from brand ink to paper, 0-255, row
- * by row. It fills nearly the same ink box as the main cut full-bleed, so only
+ * The retired small cut as commit 38dd2188 shipped it in icon.ico's 16 and
+ * 24 px entries: each pixel's red-channel coverage from brand ink to paper,
+ * 0-255, row by row. It fills nearly the same ink box as the main cut full-bleed, so only
  * a per-pixel comparison tells them apart.
  */
 const RETIRED_SMALL_CUT_ICO = {

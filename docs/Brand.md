@@ -524,8 +524,8 @@ Android themed layer, the iOS 20 pt@2x slot) carry no crew color, requires
 that geometry's own ink box, tells full-bleed from the distribution scale by
 the ink box in every favicon entry, requires every node of each full-bleed
 raster to read as ink (its center pixel at least half ink) and the raster
-itself to match a reference rendering of the canonical geometry pixel for
-pixel (which a redraw of nearly the same ink box, or a mark one pixel off
+itself to match a reference rendering of the canonical geometry per pixel, within a
+tolerance (which a redraw of nearly the same ink box, or a mark one pixel off
 center, fails), and requires the crew colors in
 `packages/frontend/src/styles/tailwind.css` (`--crew-1` … `--crew-4` and the
 `.dark` lift) to equal the icon config. It decodes every representation of the

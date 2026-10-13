@@ -141,8 +141,8 @@ if (geometry.paths?.length !== 5 || geometry.circles?.length !== 4) {
 
 /**
  * A full-bleed one-ink raster (32 device px or less): every node reads as a
- * dot, and the drawing is the main cut itself, matched pixel for pixel
- * against its reference raster.
+ * dot, and the drawing is the main cut itself, matched per pixel, within a
+ * tolerance, against its reference raster.
  */
 function checkFullBleedRaster(target) {
   assertNodesInked(target);
@@ -393,6 +393,16 @@ expectContains(
 // ink, full-bleed in a single group.
 assertCanonicalGeometry(canonicalSvg, geometry, "packages/frontend/public/icon.svg");
 assertFullBleedTransform(canonicalSvg, geometry, "packages/frontend/public/icon.svg");
+{
+  // Nothing but the logo: exactly its paths and nodes, no extra shape.
+  const pathCount = (canonicalSvg.match(/<path\b/g) ?? []).length;
+  const circleCount = (canonicalSvg.match(/<circle\b/g) ?? []).length;
+  if (pathCount !== geometry.paths.length || circleCount !== geometry.circles.length) {
+    failures.push(
+      `packages/frontend/public/icon.svg must draw exactly the canonical ${geometry.paths.length} paths and ${geometry.circles.length} nodes; found ${pathCount} paths and ${circleCount} circles.`,
+    );
+  }
+}
 expectNotContains(
   canonicalSvg,
   "<rect",
