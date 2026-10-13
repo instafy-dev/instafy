@@ -91,7 +91,7 @@ expectContains(
 expectContains(
   capacitorConfig,
   'backgroundColor: "#ffffff"',
-  `${relative(paths.capacitorConfig)} must use a light initial status-bar background`,
+  `${relative(paths.capacitorConfig)} must use a light initial status-bar background (MainActivity swaps in the dark pair under a night system theme)`,
 );
 expectContains(
   capacitorConfig,
@@ -101,7 +101,7 @@ expectContains(
 expectContains(
   capacitorConfig,
   'style: "LIGHT"',
-  `${relative(paths.capacitorConfig)} must use dark initial status-bar icons`,
+  `${relative(paths.capacitorConfig)} must use dark initial status-bar icons on the light initial background`,
 );
 
 const nativeAuth = read(paths.nativeAuth);
@@ -192,6 +192,16 @@ expectContains(
   mainActivity,
   "registerPlugin(InstafyAuthBridgePlugin.class);",
   `${relative(paths.mainActivity)} must register the native auth bridge plugin`,
+);
+expectContains(
+  mainActivity,
+  'statusBar.put("backgroundColor", DARK_STATUS_BAR_BACKGROUND);',
+  `${relative(paths.mainActivity)} must start the native status bar dark under a night system theme, before ThemeProvider runs`,
+);
+expectContains(
+  mainActivity,
+  "webView.setBackgroundColor(getColor(R.color.splash_background));",
+  `${relative(paths.mainActivity)} must paint the WebView with the launch canvas so a dark launch never flashes white`,
 );
 expectContains(
   mainActivity,
