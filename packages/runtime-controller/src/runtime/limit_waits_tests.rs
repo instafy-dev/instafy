@@ -1782,7 +1782,11 @@ async fn requeued_work_in_a_waiting_space_is_given_up_by_the_limit_wait_and_refu
             .await?;
         drop(connection);
 
-        crate::runtime::sweeps::expire_stale_requeued_jobs(&fixture.state).await?;
+        crate::runtime::sweeps::expire_stale_requeued_jobs(
+            &fixture.state,
+            &mut crate::background_loops::TickConnection::new(&fixture.state.pool),
+        )
+        .await?;
         let job_status: String = fixture
             .pool
             .get()
@@ -1907,7 +1911,11 @@ async fn requeued_work_the_limit_wait_does_not_cover_still_expires() -> anyhow::
         }
         drop(connection);
 
-        crate::runtime::sweeps::expire_stale_requeued_jobs(&fixture.state).await?;
+        crate::runtime::sweeps::expire_stale_requeued_jobs(
+            &fixture.state,
+            &mut crate::background_loops::TickConnection::new(&fixture.state.pool),
+        )
+        .await?;
         let (status, outcome, error_message) = fixture.job_state(pinned_to_desktop).await?;
         assert_eq!(
             status, "failed",

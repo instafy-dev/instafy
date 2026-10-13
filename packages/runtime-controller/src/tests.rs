@@ -2234,6 +2234,63 @@ pub(crate) async fn with_shared_db_fixture(
     }
 }
 
+/// Run `body` with a pool on the shared test database whose connections see
+/// empty copies of `tables`, made in a schema of their own that is dropped
+/// once `body` ends, however it ends. Every other table is the real one.
+///
+/// A background loop whose candidate queries all start from those tables
+/// finds nothing to do through this pool, whatever rows earlier tests, or
+/// earlier runs against a long-lived local database, left in the real ones.
+/// That is how a test counts what a loop costs when it is idle.
+pub(crate) async fn with_empty_tables<F, Fut>(tables: &[&str], body: F) -> anyhow::Result<()>
+where
+    F: FnOnce(PgPool) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    use futures_util::FutureExt;
+
+    // Creates the shared schema the copies are made from.
+    drop(require_origin_test_pool("with_empty_tables").await?);
+    let url = std::env::var("TEST_DATABASE_URL").context("with_empty_tables")?;
+    let schema = format!("empty_tables_{}", Uuid::new_v4().simple());
+    let (client, connection) = tokio_postgres::connect(&url, NoTls).await?;
+    let driver = tokio::spawn(connection);
+    let mut statements = vec![format!("create schema {schema}")];
+    for table in tables {
+        statements.push(format!(
+            "create table {schema}.{table} (like public.{table} including defaults)"
+        ));
+    }
+    client.batch_execute(&statements.join("; ")).await?;
+
+    let mut config: tokio_postgres::Config = url.parse()?;
+    config.options(&format!("-c search_path={schema},public,extensions"));
+    let pool = bb8::Pool::builder()
+        .max_size(2)
+        .build(PostgresConnectionManager::new(
+            config,
+            crate::config::database_tls(),
+        ))
+        .await;
+    let outcome = match pool {
+        Ok(pool) => {
+            std::panic::AssertUnwindSafe(body(pool))
+                .catch_unwind()
+                .await
+        }
+        Err(error) => Ok(Err(error.into())),
+    };
+    let cleanup = client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await;
+    drop(client);
+    let _ = driver.await;
+    match outcome {
+        Ok(result) => result.and(cleanup.map_err(anyhow::Error::from)),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
 async fn delete_shared_db_fixture(fixture: &SharedDbFixture) -> anyhow::Result<()> {
     if fixture.organizations.is_empty() && fixture.projects.is_empty() {
         return Ok(());
