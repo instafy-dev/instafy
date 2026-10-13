@@ -806,21 +806,19 @@ async fn the_fence_stops_starts_and_sweeps_but_not_the_drain() -> anyhow::Result
     result
 }
 
-/// No controller bills a generation an earlier drain woke only to flush a
-/// checkout, from the moment its start was marked (before its lease
-/// existed) to its stop; a start marker only covers launches within minutes
-/// of it, and the space's other runtimes are billed as before. No controller
-/// writes these marks any more: the exclusion stays while a mark younger
-/// than the event retention may exist.
+/// The credit sweep bills every live hosted generation whatever the
+/// runtime's events say. No drain wakes a runtime any more, so neither a
+/// mark an earlier drain left nor a drain stop that skipped the runtime
+/// keeps a live generation from being billed.
 #[tokio::test]
-async fn the_credit_sweep_never_bills_a_drain_wake() -> anyhow::Result<()> {
+async fn the_credit_sweep_bills_every_live_generation_whatever_its_events() -> anyhow::Result<()> {
     let pool = crate::tests::require_origin_test_pool("runtime drain billing test").await?;
     let org_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
-    let woken = (Uuid::new_v4(), Uuid::new_v4());
-    let starting = (Uuid::new_v4(), Uuid::new_v4());
-    let long_ago = (Uuid::new_v4(), Uuid::new_v4());
-    let billed = (Uuid::new_v4(), Uuid::new_v4());
+    let marked_started = (Uuid::new_v4(), Uuid::new_v4());
+    let marked_starting = (Uuid::new_v4(), Uuid::new_v4());
+    let drain_skipped = (Uuid::new_v4(), Uuid::new_v4());
+    let plain = (Uuid::new_v4(), Uuid::new_v4());
     let fixture = SharedDbFixture {
         organizations: vec![org_id],
         projects: vec![project_id],
@@ -847,7 +845,7 @@ async fn the_credit_sweep_never_bills_a_drain_wake() -> anyhow::Result<()> {
                 &[&org_id],
             )
             .await?;
-        for (runtime, lease) in [woken, starting, long_ago, billed] {
+        for (runtime, lease) in [marked_started, marked_starting, drain_skipped, plain] {
             connection
                 .execute(
                     "insert into runtimes (id, project_id, provider, status, idle_ttl_seconds)
@@ -870,34 +868,43 @@ async fn the_credit_sweep_never_bills_a_drain_wake() -> anyhow::Result<()> {
                 )
                 .await?;
         }
+        // Marks an earlier drain wrote around a generation it woke: one
+        // naming the active lease, one written a moment before the launch.
         connection
             .execute(
                 "insert into runtime_events (runtime_id, project_id, kind, data)
                  values ($1, $2, 'pool_retirement_flush_wake', $3)",
                 &[
-                    &woken.0,
+                    &marked_started.0,
                     &project_id,
-                    &json!({ "phase": "started", "runtimeLeaseId": woken.1 }),
+                    &json!({ "phase": "started", "runtimeLeaseId": marked_started.1 }),
                 ],
             )
             .await?;
-        // Marked a moment before its lease was requested: the launch is
-        // still under way.
         connection
             .execute(
                 "insert into runtime_events (runtime_id, project_id, kind, data, created_at)
                  values ($1, $2, 'pool_retirement_flush_wake', '{\"phase\":\"starting\"}',
                          now() - interval '5 seconds')",
-                &[&starting.0, &project_id],
+                &[&marked_starting.0, &project_id],
             )
             .await?;
-        // A start marker from long ago covers no later launch.
+        // A drain stop that named another generation left this one running.
         connection
             .execute(
-                "insert into runtime_events (runtime_id, project_id, kind, data, created_at)
-                 values ($1, $2, 'pool_retirement_flush_wake', '{\"phase\":\"starting\"}',
-                         now() - interval '10 minutes')",
-                &[&long_ago.0, &project_id],
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values ($1, $2, 'pool_retirement_drain', $3)",
+                &[
+                    &drain_skipped.0,
+                    &project_id,
+                    &json!({
+                        "action": "pool_retirement_drain",
+                        "runtimeLeaseId": Uuid::new_v4(),
+                        "statusChanged": false,
+                        "skipReason": "runtime_lease_mismatch",
+                        "flushStatus": "skipped",
+                    }),
+                ],
             )
             .await?;
         drop(connection);
@@ -926,16 +933,22 @@ async fn the_credit_sweep_never_bills_a_drain_wake() -> anyhow::Result<()> {
             .get()
             .await?
             .query(
-                "select metadata ->> 'runtimeId' from org_credit_ledger
+                "select metadata ->> 'runtimeId', metadata ->> 'runtimeLeaseId'
+                 from org_credit_ledger
                  where org_id = $1 and reason = 'hosted_runtime'",
                 &[&org_id],
             )
             .await?;
-        let mut runtimes: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
-        runtimes.sort();
-        let mut expected = vec![long_ago.0.to_string(), billed.0.to_string()];
+        let mut billed: Vec<(String, String)> =
+            rows.iter().map(|row| (row.get(0), row.get(1))).collect();
+        billed.sort();
+        let mut expected: Vec<(String, String)> =
+            [marked_started, marked_starting, drain_skipped, plain]
+                .iter()
+                .map(|(runtime, lease)| (runtime.to_string(), lease.to_string()))
+                .collect();
         expected.sort();
-        assert_eq!(runtimes, expected, "only ordinary launches are billed");
+        assert_eq!(billed, expected, "every live generation is billed once");
         Ok(())
     })
     .await
