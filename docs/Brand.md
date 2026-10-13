@@ -213,7 +213,12 @@ instead.
 
 The reverse native splash is generated with its positive twin and configured
 for both platforms, status and navigation bars included (see the splash rows
-above). Do not hand-edit the derived splash PNGs, the splash image set's
+above). On Android the dark launch also carries through to the first page
+paint: `MainActivity` paints the WebView with `splash_background` and, under a
+night system theme, hands the StatusBar plugin `ThemeProvider`'s dark bar
+(`#181818`, light icons) in place of the light pair in `capacitor.config.ts`,
+so no white bar or white WebView appears before `ThemeProvider` runs. Do not
+hand-edit the derived splash PNGs, the splash image set's
 `Contents.json` or the generated `splash_background.xml` colors; change the
 generator.
 
