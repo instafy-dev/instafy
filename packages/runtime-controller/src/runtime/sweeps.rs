@@ -1600,6 +1600,24 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
                 continue;
             }
         };
+        // With the default ten-minute bucket, nine passes in ten land in a
+        // bucket an earlier pass already billed. The burn would find that
+        // ledger row and write nothing, after a transaction and three balance
+        // reads whose result this sweep does not use; one read of the same
+        // row skips all of it. A failed read leaves the decision to the burn.
+        match hosted_runtime_bucket_billed(&burn_connection, &org_id, &project_id, &idempotency_key)
+            .await
+        {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    runtime_id = %runtime_id,
+                    %error,
+                    "failed to check hosted runtime billing bucket"
+                );
+            }
+        }
         let transaction = match burn_connection.transaction().await {
             Ok(tx) => tx,
             Err(error) => {
@@ -1668,6 +1686,24 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
     publish_credits_updated_for_orgs(state, burned_org_ids).await;
 
     Ok(())
+}
+
+/// Whether the ledger already holds the burn for `idempotency_key`: the row
+/// [`process_credit_burn`] looks for before it burns, and writes when it does.
+async fn hosted_runtime_bucket_billed(
+    client: &tokio_postgres::Client,
+    org_id: &Uuid,
+    project_id: &Uuid,
+    idempotency_key: &str,
+) -> AnyResult<bool> {
+    Ok(client
+        .query_opt(
+            "select 1 from org_credit_ledger where org_id = $1 and project_id = $2 and idempotency_key = $3 limit 1",
+            &[org_id, project_id, &idempotency_key],
+        )
+        .await
+        .context("failed to check hosted runtime billing bucket")?
+        .is_some())
 }
 
 /// One `credits.updated` per org after a sweep's writes have committed.
