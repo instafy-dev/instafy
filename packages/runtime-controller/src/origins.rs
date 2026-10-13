@@ -93,8 +93,55 @@ fn browser_webrtc_proxy_policy(
     ))
 }
 
+/// A pool connection that a request checks out at its first read and keeps
+/// for every read after it. A request refused before it reads anything takes
+/// no connection at all.
+struct RequestConnection<'p> {
+    pool: &'p PgPool,
+    connection: Option<bb8::PooledConnection<'p, crate::config::PgConnectionManager>>,
+}
+
+impl<'p> RequestConnection<'p> {
+    fn new(pool: &'p PgPool) -> Self {
+        Self {
+            pool,
+            connection: None,
+        }
+    }
+
+    async fn client(
+        &mut self,
+    ) -> std::result::Result<&tokio_postgres::Client, bb8::RunError<tokio_postgres::Error>> {
+        if self.connection.is_none() {
+            self.connection = Some(self.pool.get().await?);
+        }
+        Ok(self
+            .connection
+            .as_deref()
+            .expect("the connection was checked out above"))
+    }
+}
+
 async fn authorize_origin_request(
     state: &AppState,
+    headers: &HeaderMap,
+    project_id: &Uuid,
+    required_scopes: &[&str],
+) -> Result<AccessTokenClaims, (StatusCode, Json<ApiError>)> {
+    authorize_origin_request_on(
+        state,
+        &mut RequestConnection::new(&state.pool),
+        headers,
+        project_id,
+        required_scopes,
+    )
+    .await
+}
+
+/// [`authorize_origin_request`], reading through the request's `db`.
+async fn authorize_origin_request_on(
+    state: &AppState,
+    db: &mut RequestConnection<'_>,
     headers: &HeaderMap,
     project_id: &Uuid,
     required_scopes: &[&str],
@@ -121,7 +168,7 @@ async fn authorize_origin_request(
         let capability = required_scopes
             .first()
             .ok_or_else(|| unauthorized("origin capability is required"))?;
-        authorize_runtime_capability(state, &context, project_id, capability).await?;
+        authorize_runtime_capability_on(state, db, &context, project_id, capability).await?;
         return Ok(claims);
     }
 
@@ -398,7 +445,7 @@ async fn authorize_origin_registration_binding(
 }
 
 async fn authorize_registered_origin_identity(
-    state: &AppState,
+    db: &mut RequestConnection<'_>,
     claims: &AccessTokenClaims,
     project_id: &Uuid,
     origin_id: &Uuid,
@@ -406,10 +453,10 @@ async fn authorize_registered_origin_identity(
 ) -> Result<OriginClaimBinding, (StatusCode, Json<ApiError>)> {
     let binding = validate_origin_identity_claims(claims, project_id, origin_id)?;
     if let Some(runtime_id) = binding.runtime_id {
-        let connection =
-            state.pool.get().await.map_err(|error| {
-                internal_error(format!("failed to acquire connection: {error}"))
-            })?;
+        let connection = db
+            .client()
+            .await
+            .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
         let matches = connection
             .query_opt(
                 "select id
@@ -504,6 +551,24 @@ async fn authorize_runtime_capability(
     project_id: &Uuid,
     capability: &str,
 ) -> Result<RuntimeCapabilityContext, (StatusCode, Json<ApiError>)> {
+    authorize_runtime_capability_on(
+        state,
+        &mut RequestConnection::new(&state.pool),
+        context,
+        project_id,
+        capability,
+    )
+    .await
+}
+
+/// [`authorize_runtime_capability`], reading through the request's `db`.
+async fn authorize_runtime_capability_on(
+    state: &AppState,
+    db: &mut RequestConnection<'_>,
+    context: &RequestContext,
+    project_id: &Uuid,
+    capability: &str,
+) -> Result<RuntimeCapabilityContext, (StatusCode, Json<ApiError>)> {
     let claims = context
         .scoped_claims
         .as_ref()
@@ -533,9 +598,8 @@ async fn authorize_runtime_capability(
         return Err(unauthorized("runtime token audience mismatch"));
     }
 
-    let connection = state
-        .pool
-        .get()
+    let connection = db
+        .client()
         .await
         .map_err(|error| internal_error(format!("failed to validate runtime: {error}")))?;
     let row = connection
@@ -1843,8 +1907,14 @@ pub(crate) async fn load_origin_by_id(
         .get()
         .await
         .context("failed to acquire connection for load_origin_by_id")?;
+    load_origin_by_id_with(&connection, origin_id).await
+}
 
-    let row = connection
+async fn load_origin_by_id_with(
+    client: &tokio_postgres::Client,
+    origin_id: &Uuid,
+) -> Result<Option<WorkspaceOriginRecord>> {
+    let row = client
         .query_opt(
             "select *
              from workspace_origins
@@ -1862,6 +1932,22 @@ pub(crate) async fn load_origin_by_id(
 
 async fn ensure_origin_mutation_binding(
     pool: &PgPool,
+    claims: &AccessTokenClaims,
+    project_id: &Uuid,
+    origin_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    ensure_origin_mutation_binding_on(
+        &mut RequestConnection::new(pool),
+        claims,
+        project_id,
+        origin_id,
+    )
+    .await
+}
+
+/// [`ensure_origin_mutation_binding`], reading through the request's `db`.
+async fn ensure_origin_mutation_binding_on(
+    db: &mut RequestConnection<'_>,
     claims: &AccessTokenClaims,
     project_id: &Uuid,
     origin_id: &Uuid,
@@ -1888,8 +1974,8 @@ async fn ensure_origin_mutation_binding(
             Uuid::parse_str(value).map_err(|_| unauthorized("runtime token lease scope is invalid"))
         })
         .transpose()?;
-    let connection = pool
-        .get()
+    let connection = db
+        .client()
         .await
         .map_err(|error| internal_error(format!("failed to validate origin binding: {error}")))?;
     let bound = connection
@@ -2712,6 +2798,7 @@ async fn upsert_workspace_origin_with_client(
     origin_from_row(&row)
 }
 
+#[cfg(test)]
 #[instrument(skip(pool, metadata))]
 pub(crate) async fn record_presence_heartbeat(
     pool: &PgPool,
@@ -2722,14 +2809,33 @@ pub(crate) async fn record_presence_heartbeat(
     region: Option<&str>,
     metadata: Option<&JsonValue>,
 ) -> Result<OriginPresenceRecord> {
-    let metadata_param = metadata.cloned();
-
     let connection = pool
         .get()
         .await
         .context("failed to acquire connection for record_presence_heartbeat")?;
+    record_presence_heartbeat_with(
+        &connection,
+        origin_id,
+        project_id,
+        status,
+        latency_ms,
+        region,
+        metadata,
+    )
+    .await
+}
 
-    let row = connection
+async fn record_presence_heartbeat_with(
+    client: &tokio_postgres::Client,
+    origin_id: &Uuid,
+    project_id: &Uuid,
+    status: OriginPresenceStatus,
+    latency_ms: Option<i32>,
+    region: Option<&str>,
+    metadata: Option<&JsonValue>,
+) -> Result<OriginPresenceRecord> {
+    let metadata_param = metadata.cloned();
+    let row = client
         .query_one(
             "insert into origin_presence (origin_id, project_id, status, last_heartbeat, latency_ms, region, metadata)
              values ($1, $2, $3, now(), $4, $5, $6)
@@ -6173,14 +6279,17 @@ async fn post_presence_beat(
         .ok_or_else(|| bad_request("projectId is required"))?;
     let origin_id = parse_optional_uuid_param(Some(body.origin_id), "originId")?
         .ok_or_else(|| bad_request("originId is required"))?;
+    // Every read of a beat goes through one checkout, taken at its first read.
+    let mut db = RequestConnection::new(&state.pool);
     let claims =
-        authorize_origin_request(&state, &headers, &project_id, &["origin.presence"]).await?;
+        authorize_origin_request_on(&state, &mut db, &headers, &project_id, &["origin.presence"])
+            .await?;
 
     let status_str = body.status.unwrap_or_else(|| "online".to_string());
     let status = OriginPresenceStatus::from_str(status_str.to_lowercase().as_str())
         .map_err(|_| bad_request("invalid presence status"))?;
     authorize_registered_origin_identity(
-        &state,
+        &mut db,
         &claims,
         &project_id,
         &origin_id,
@@ -6190,6 +6299,7 @@ async fn post_presence_beat(
 
     handle_presence_beat(
         &state,
+        &mut db,
         project_id,
         origin_id,
         status,
@@ -6222,14 +6332,17 @@ async fn post_presence_beat_project(
         .ok_or_else(|| bad_request("projectId is required"))?;
     let origin_id = parse_optional_uuid_param(Some(body.origin_id), "originId")?
         .ok_or_else(|| bad_request("originId is required"))?;
+    // Every read of a beat goes through one checkout, taken at its first read.
+    let mut db = RequestConnection::new(&state.pool);
     let claims =
-        authorize_origin_request(&state, &headers, &project_id, &["origin.presence"]).await?;
+        authorize_origin_request_on(&state, &mut db, &headers, &project_id, &["origin.presence"])
+            .await?;
 
     let status_str = body.status.unwrap_or_else(|| "online".to_string());
     let status = OriginPresenceStatus::from_str(status_str.to_lowercase().as_str())
         .map_err(|_| bad_request("invalid presence status"))?;
     authorize_registered_origin_identity(
-        &state,
+        &mut db,
         &claims,
         &project_id,
         &origin_id,
@@ -6239,6 +6352,7 @@ async fn post_presence_beat_project(
 
     handle_presence_beat(
         &state,
+        &mut db,
         project_id,
         origin_id,
         status,
@@ -6252,6 +6366,7 @@ async fn post_presence_beat_project(
 
 async fn handle_presence_beat(
     state: &AppState,
+    db: &mut RequestConnection<'_>,
     project_id: Uuid,
     origin_id: Uuid,
     status: OriginPresenceStatus,
@@ -6260,7 +6375,11 @@ async fn handle_presence_beat(
     metadata: Option<JsonValue>,
     claims: AccessTokenClaims,
 ) -> Result<Json<PresenceBeatResponse>, (StatusCode, Json<ApiError>)> {
-    let origin = load_origin_by_id(&state.pool, &origin_id)
+    let client = db
+        .client()
+        .await
+        .map_err(|error| internal_error(format!("failed to load origin: {error}")))?;
+    let origin = load_origin_by_id_with(client, &origin_id)
         .await
         .map_err(|error| internal_error(format!("failed to load origin: {error}")))?;
 
@@ -6271,10 +6390,14 @@ async fn handle_presence_beat(
     if origin.project_id != project_id {
         return Err(bad_request("origin/project mismatch"));
     }
-    ensure_origin_mutation_binding(&state.pool, &claims, &project_id, &origin_id).await?;
+    ensure_origin_mutation_binding_on(db, &claims, &project_id, &origin_id).await?;
 
-    let presence = record_presence_heartbeat(
-        &state.pool,
+    let client = db
+        .client()
+        .await
+        .map_err(|error| internal_error(format!("failed to record presence: {error}")))?;
+    let presence = record_presence_heartbeat_with(
+        client,
         &origin_id,
         &project_id,
         status,
