@@ -444,47 +444,115 @@ async fn authorize_origin_registration_binding(
     Ok(binding)
 }
 
-async fn authorize_registered_origin_identity(
+/// A presence beat's two checks of its origin instance, read in one
+/// statement before the beat loads the origin:
+///
+/// - an instance of the token's runtime (and of its generation, when the token
+///   names one) holds the origin, a released one too for an offline beat.
+///   Refused here, with 401, as the beat always refused it;
+/// - an unreleased instance of exactly the token's generation holds it.
+///   Refused by [`PresenceInstanceCheck::ensure_bound`] with 403 after the beat
+///   loaded the origin, where the beat always refused it.
+async fn check_presence_origin_instance(
     db: &mut RequestConnection<'_>,
     claims: &AccessTokenClaims,
     project_id: &Uuid,
     origin_id: &Uuid,
     allow_released: bool,
-) -> Result<OriginClaimBinding, (StatusCode, Json<ApiError>)> {
+) -> Result<PresenceInstanceCheck, (StatusCode, Json<ApiError>)> {
     let binding = validate_origin_identity_claims(claims, project_id, origin_id)?;
-    if let Some(runtime_id) = binding.runtime_id {
-        let connection = db
-            .client()
-            .await
-            .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
-        let matches = connection
-            .query_opt(
-                "select id
-                 from origin_instances
-                 where project_id = $1 and runtime_id = $2 and origin_id = $3
-                   and (status <> 'released' or $5)
-                   and ($4::uuid is null or lease_id = $4)
-                 limit 1",
-                &[
-                    project_id,
-                    &runtime_id,
-                    origin_id,
-                    &binding.lease_id,
-                    &allow_released,
-                ],
-            )
-            .await
-            .map_err(|error| {
-                internal_error(format!(
-                    "failed to validate registered origin identity: {error}"
-                ))
-            })?
-            .is_some();
-        if !matches {
-            return Err(unauthorized("origin is not assigned to token runtime"));
-        }
+    let mutation_scope = origin_mutation_scope(claims, origin_id);
+    let Some(runtime_id) = binding.runtime_id else {
+        return Ok(PresenceInstanceCheck {
+            mutation_scope,
+            bound: None,
+        });
+    };
+    let (bound_runtime_id, bound_lease_id) = match &mutation_scope {
+        Ok((runtime_id, lease_id)) => (Some(*runtime_id), *lease_id),
+        Err(_) => (None, None),
+    };
+    let connection = db
+        .client()
+        .await
+        .map_err(|error| internal_error(format!("failed to acquire connection: {error}")))?;
+    let row = connection
+        .query_one(
+            "select
+                 exists (
+                     select 1
+                     from origin_instances
+                     where project_id = $1 and runtime_id = $2 and origin_id = $3
+                       and (status <> 'released' or $5)
+                       and ($4::uuid is null or lease_id = $4)
+                 ) as assigned,
+                 exists (
+                     select 1
+                     from origin_instances
+                     where project_id = $1
+                       and runtime_id = $6
+                       and lease_id is not distinct from $7
+                       and origin_id = $3
+                       and status <> 'released'
+                 ) as bound",
+            &[
+                project_id,
+                &runtime_id,
+                origin_id,
+                &binding.lease_id,
+                &allow_released,
+                &bound_runtime_id,
+                &bound_lease_id,
+            ],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to validate registered origin identity: {error}"
+            ))
+        })?;
+    if !row.get::<_, bool>("assigned") {
+        return Err(unauthorized("origin is not assigned to token runtime"));
     }
-    Ok(binding)
+    Ok(PresenceInstanceCheck {
+        mutation_scope,
+        bound: bound_runtime_id.map(|_| row.get::<_, bool>("bound")),
+    })
+}
+
+/// What [`check_presence_origin_instance`] leaves for the beat to refuse
+/// after it loaded the origin.
+struct PresenceInstanceCheck {
+    /// The token's runtime generation, or the refusal
+    /// [`ensure_origin_mutation_binding`] gives a token without a usable one.
+    mutation_scope: Result<(Uuid, Option<Uuid>), (StatusCode, Json<ApiError>)>,
+    /// Whether an unreleased instance of exactly that generation holds the
+    /// origin, when it was read with the assignment.
+    bound: Option<bool>,
+}
+
+impl PresenceInstanceCheck {
+    /// [`ensure_origin_mutation_binding`] for a beat, from the read the beat
+    /// already made when it could make it.
+    async fn ensure_bound(
+        self,
+        db: &mut RequestConnection<'_>,
+        project_id: &Uuid,
+        origin_id: &Uuid,
+    ) -> Result<(), (StatusCode, Json<ApiError>)> {
+        let (runtime_id, lease_id) = self.mutation_scope?;
+        let bound = match self.bound {
+            Some(bound) => bound,
+            None => {
+                origin_bound_to_generation(db, project_id, &runtime_id, &lease_id, origin_id)
+                    .await?
+            }
+        };
+        if !bound {
+            return Err(forbidden("origin is not bound to this runtime generation"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -1936,22 +2004,27 @@ async fn ensure_origin_mutation_binding(
     project_id: &Uuid,
     origin_id: &Uuid,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
-    ensure_origin_mutation_binding_on(
+    let (runtime_id, lease_id) = origin_mutation_scope(claims, origin_id)?;
+    if !origin_bound_to_generation(
         &mut RequestConnection::new(pool),
-        claims,
         project_id,
+        &runtime_id,
+        &lease_id,
         origin_id,
     )
-    .await
+    .await?
+    {
+        return Err(forbidden("origin is not bound to this runtime generation"));
+    }
+    Ok(())
 }
 
-/// [`ensure_origin_mutation_binding`], reading through the request's `db`.
-async fn ensure_origin_mutation_binding_on(
-    db: &mut RequestConnection<'_>,
+/// The runtime generation an origin mutation token speaks for: its runtime
+/// and its lease, if it names one.
+fn origin_mutation_scope(
     claims: &AccessTokenClaims,
-    project_id: &Uuid,
     origin_id: &Uuid,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<(Uuid, Option<Uuid>), (StatusCode, Json<ApiError>)> {
     let expected_origin_id = origin_id.to_string();
     if claims
         .origin_id
@@ -1974,6 +2047,18 @@ async fn ensure_origin_mutation_binding_on(
             Uuid::parse_str(value).map_err(|_| unauthorized("runtime token lease scope is invalid"))
         })
         .transpose()?;
+    Ok((runtime_id, lease_id))
+}
+
+/// Whether an unreleased instance of exactly this runtime generation holds
+/// the origin.
+async fn origin_bound_to_generation(
+    db: &mut RequestConnection<'_>,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    lease_id: &Option<Uuid>,
+    origin_id: &Uuid,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
     let connection = db
         .client()
         .await
@@ -1988,14 +2073,11 @@ async fn ensure_origin_mutation_binding_on(
                and origin_id = $4
                and status <> 'released'
              limit 1",
-            &[project_id, &runtime_id, &lease_id, origin_id],
+            &[project_id, runtime_id, lease_id, origin_id],
         )
         .await
         .map_err(|error| internal_error(format!("failed to validate origin binding: {error}")))?;
-    if bound.is_none() {
-        return Err(forbidden("origin is not bound to this runtime generation"));
-    }
-    Ok(())
+    Ok(bound.is_some())
 }
 
 #[instrument(skip(pool))]
@@ -6288,7 +6370,7 @@ async fn post_presence_beat(
     let status_str = body.status.unwrap_or_else(|| "online".to_string());
     let status = OriginPresenceStatus::from_str(status_str.to_lowercase().as_str())
         .map_err(|_| bad_request("invalid presence status"))?;
-    authorize_registered_origin_identity(
+    let instance = check_presence_origin_instance(
         &mut db,
         &claims,
         &project_id,
@@ -6300,13 +6382,13 @@ async fn post_presence_beat(
     handle_presence_beat(
         &state,
         &mut db,
+        instance,
         project_id,
         origin_id,
         status,
         body.latency_ms,
         body.region,
         body.metadata,
-        claims,
     )
     .await
 }
@@ -6341,7 +6423,7 @@ async fn post_presence_beat_project(
     let status_str = body.status.unwrap_or_else(|| "online".to_string());
     let status = OriginPresenceStatus::from_str(status_str.to_lowercase().as_str())
         .map_err(|_| bad_request("invalid presence status"))?;
-    authorize_registered_origin_identity(
+    let instance = check_presence_origin_instance(
         &mut db,
         &claims,
         &project_id,
@@ -6353,13 +6435,13 @@ async fn post_presence_beat_project(
     handle_presence_beat(
         &state,
         &mut db,
+        instance,
         project_id,
         origin_id,
         status,
         body.latency_ms,
         body.region,
         body.metadata,
-        claims,
     )
     .await
 }
@@ -6367,13 +6449,13 @@ async fn post_presence_beat_project(
 async fn handle_presence_beat(
     state: &AppState,
     db: &mut RequestConnection<'_>,
+    instance: PresenceInstanceCheck,
     project_id: Uuid,
     origin_id: Uuid,
     status: OriginPresenceStatus,
     latency_ms: Option<i32>,
     region: Option<String>,
     metadata: Option<JsonValue>,
-    claims: AccessTokenClaims,
 ) -> Result<Json<PresenceBeatResponse>, (StatusCode, Json<ApiError>)> {
     let client = db
         .client()
@@ -6390,7 +6472,7 @@ async fn handle_presence_beat(
     if origin.project_id != project_id {
         return Err(bad_request("origin/project mismatch"));
     }
-    ensure_origin_mutation_binding_on(db, &claims, &project_id, &origin_id).await?;
+    instance.ensure_bound(db, &project_id, &origin_id).await?;
 
     let client = db
         .client()
