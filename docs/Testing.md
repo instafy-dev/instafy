@@ -1341,8 +1341,9 @@ runners; each test still has a 30-second limit, with no retries or skips allowed
 
 The settings component cases mount production Notifications and segmented controls.
 They cover phone and desktop switch alignment, disclosure, single-channel preference
-updates, and 44px targets for narrow screens or touch pointers. Radio choices also
-exercise real keyboard focus, arrow-key selection and touch activation. Their HTTP
+updates, and pointer-aware segmented control sizing: compact options for mouse input
+at every width and at least 44px targets for touch pointers. Radio choices also exercise
+real keyboard focus, arrow-key selection and touch activation. Their HTTP
 responses are disposable fixtures; they do not prove operating-system push delivery.
 
 | Lane | What it proves | Local requirements |

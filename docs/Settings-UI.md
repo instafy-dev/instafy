@@ -33,6 +33,9 @@ determines the winner. Arbitrary layout classes remain supported.
   information, warning and danger colors come from the same semantic definitions.
 - Use `SegmentedControl` for a mutually exclusive value. Reusing its CSS on separate buttons
   omits its radio-group and arrow-key behavior. Navigation tabs keep their navigation semantics.
+  Like action buttons, segment sizing follows the primary pointer rather than the viewport:
+  fine pointers keep compact 28px (`xs`) or 36px (`sm`) options at any width; coarse pointers
+  get at least 44px targets. The group's surrounding padding adds 8px to its total height.
 
 The local component reference at `/tests/fixtures/component-system/index.html` runs against
 the Vite dev server. It mounts production components with inert local state and no backend

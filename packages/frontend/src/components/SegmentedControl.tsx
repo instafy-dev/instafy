@@ -74,8 +74,8 @@ export function SegmentedControl<T extends string>({
               className={[
                 segmentedControlOptionClassName(isSelected, tone),
                 width === "fill" ? "flex-1" : "flex-auto",
-                size === "xs" ? "min-h-11 text-xs sm:pointer-fine:min-h-7" : "min-h-11 text-sm sm:pointer-fine:min-h-9",
-                "min-w-11 sm:pointer-fine:min-w-0",
+                size === "xs" ? "min-h-7 text-xs" : "min-h-9 text-sm",
+                "pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                 "cursor-pointer",
               ].join(" ")}
             >

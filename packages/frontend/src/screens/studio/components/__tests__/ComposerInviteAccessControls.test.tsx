@@ -50,8 +50,8 @@ describe("ComposerInviteRoleToggle", () => {
     expect(edit?.querySelector("input")?.type).toBe("radio");
     expect(read?.querySelector("input")?.checked).toBe(true);
     expect(edit?.querySelector("input")?.checked).toBe(false);
-    expect(read?.classList.contains("min-h-11")).toBe(true);
-    expect(read?.classList.contains("sm:pointer-fine:min-h-9")).toBe(true);
+    expect(read?.classList.contains("min-h-9")).toBe(true);
+    expect(read?.classList.contains("pointer-coarse:min-h-11")).toBe(true);
     expect(read?.className).toContain("bg-[rgba(255,255,255,0.12)]");
 
     await act(async () => edit?.click());
