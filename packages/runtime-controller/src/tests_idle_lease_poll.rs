@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::config::{AppConfig, PgPool, RuntimeProviderConfig};
 use crate::tests::{
-    build_app_config, build_test_state, require_origin_test_pool, test_origin_private_key,
-    test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
+    build_app_config, build_test_state, pool_gets, require_origin_test_pool,
+    test_origin_private_key, test_origin_public_key, with_shared_db_fixture, SharedDbFixture,
 };
 use crate::{agent, AppState};
 
@@ -128,12 +128,6 @@ async fn runtime_stamps(
         )
         .await?;
     Ok((row.get("last_seen_at"), row.get("updated_at")))
-}
-
-/// Every checkout from `pool` so far.
-fn pool_gets(pool: &PgPool) -> u64 {
-    let statistics = pool.state().statistics;
-    statistics.get_direct + statistics.get_waited + statistics.get_timed_out
 }
 
 /// One lease poll as `runtime_id`, signed for `lease_id`, answered within

@@ -2157,6 +2157,13 @@ async fn setup_origin_test_pool_with_max_size(max_size: u32) -> anyhow::Result<O
     Ok(Some(pool))
 }
 
+/// Every checkout from `pool` so far, whether it was handed out at once,
+/// after a wait, or timed out.
+pub(crate) fn pool_gets(pool: &PgPool) -> u64 {
+    let statistics = pool.state().statistics;
+    statistics.get_direct + statistics.get_waited + statistics.get_timed_out
+}
+
 pub(crate) async fn require_origin_test_pool(test_name: &str) -> anyhow::Result<PgPool> {
     setup_origin_test_pool().await?.ok_or_else(|| {
         anyhow::anyhow!(
