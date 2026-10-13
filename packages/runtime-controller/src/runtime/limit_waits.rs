@@ -48,6 +48,7 @@ use tokio_postgres::types::Json as PgJson;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::background_loops::TickConnection;
 use crate::{publish_controller_event, ApiError, AppState};
 
 use super::lease::RuntimeLeaseScope;
@@ -577,12 +578,19 @@ pub(crate) fn spawn_hosted_runtime_limit_wait_sweep(state: AppState) {
 /// handled, so a claim's lease covers one ensure however slow the rest of the
 /// batch is, and a space is handled at most once per tick. Give-ups are
 /// claimed first, and organizations take turns (see the module comment).
+///
+/// The prune and the claims run on one pool connection ([`TickConnection`]),
+/// so a tick with nothing to claim takes one checkout. Handling a claim
+/// takes connections of its own (and may wait on a provider launch), so the
+/// tick gives its connection back before it handles one, and the next claim
+/// checks out again.
 pub(crate) async fn sweep_hosted_runtime_limit_waits(
     state: &AppState,
     policy: &LimitWaitPolicy,
 ) -> AnyResult<LimitWaitSweepReport> {
     let mut report = LimitWaitSweepReport::default();
-    let pruned = match prune_finished_waits(state, policy).await {
+    let mut tick = TickConnection::new(&state.pool);
+    let pruned = match prune_finished_waits(&mut tick, policy).await {
         Ok(pruned) => pruned,
         Err(error) => {
             if error
@@ -599,13 +607,14 @@ pub(crate) async fn sweep_hosted_runtime_limit_waits(
     let mut handled: Vec<Uuid> = Vec::new();
     let mut handled_orgs: Vec<Uuid> = Vec::new();
     while (handled.len() as i64) < policy.batch_size {
-        let Some(claim) = claim_due_waits(state, policy, 1, &handled, &handled_orgs)
+        let Some(claim) = claim_due_waits(&mut tick, policy, 1, &handled, &handled_orgs)
             .await?
             .into_iter()
             .next()
         else {
             break;
         };
+        tick.release();
         let project_id = claim.project_id;
         let claim_token = claim.claim_token;
         handled.push(project_id);
@@ -630,13 +639,13 @@ pub(crate) async fn sweep_hosted_runtime_limit_waits(
 /// had no waiting work and no refusal for the whole give-up window. A refusal
 /// can land a moment before dispatch queues the job it was for, so an empty
 /// wait is not dropped straight away.
-async fn prune_finished_waits(state: &AppState, policy: &LimitWaitPolicy) -> AnyResult<usize> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for hosted runtime limit waits")?;
-    let deleted = connection
+async fn prune_finished_waits(
+    tick: &mut TickConnection<'_>,
+    policy: &LimitWaitPolicy,
+) -> AnyResult<usize> {
+    let deleted = tick
+        .client("failed to acquire connection for hosted runtime limit waits")
+        .await?
         .execute(
             &format!(
                 "delete from hosted_runtime_limit_waits w
@@ -675,18 +684,15 @@ async fn prune_finished_waits(state: &AppState, policy: &LimitWaitPolicy) -> Any
 /// the row away from every other controller until this one releases it or the
 /// lease expires.
 async fn claim_due_waits(
-    state: &AppState,
+    tick: &mut TickConnection<'_>,
     policy: &LimitWaitPolicy,
     limit: i64,
     exclude: &[Uuid],
     handled_orgs: &[Uuid],
 ) -> AnyResult<Vec<ClaimedWait>> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for hosted runtime limit waits")?;
-    let rows = connection
+    let rows = tick
+        .client("failed to acquire connection for hosted runtime limit waits")
+        .await?
         .query(
             &format!(
                 "with candidates as (
