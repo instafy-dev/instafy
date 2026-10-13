@@ -15,6 +15,11 @@ use origin_http_server::config::{
 use origin_http_server::hosted::HostedGatewayConfig;
 use origin_http_server::server::OriginHttpServer;
 
+// Returning from `main` drops the runtime, which waits for blocking work
+// still running: a mirror fetch, a cache sweep, or the git command of a
+// request the stop no longer waits for. That is deliberate. Such work is
+// not cut short, and the supervisor's stop timeout bounds the wait, as
+// `docker stop` does at ten seconds.
 #[tokio::main]
 async fn main() {
     if let Err(error) = real_main().await {

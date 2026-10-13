@@ -56,8 +56,10 @@ const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a stop lets requests already in progress finish once the
 /// listener has closed. It stays under Docker's default ten-second stop
-/// timeout, so `docker stop` ends in a clean exit rather than SIGKILL;
-/// anything still open then (a long download, a stalled upload) is closed.
+/// timeout; anything still open then (a long download, a stalled upload)
+/// gets no answer. Git work a request already started on a blocking thread
+/// is not cut short: the binary waits for it before it exits, and the
+/// supervisor's stop timeout bounds that wait.
 const SHUTDOWN_DRAIN_LIMIT: Duration = Duration::from_secs(8);
 
 pub(crate) fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
