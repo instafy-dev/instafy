@@ -51,6 +51,10 @@ By default it binds to `127.0.0.1:8080`. Adjust by setting `CODEX_PROXY_ADDR`:
 CODEX_PROXY_ADDR=0.0.0.0:9000 cargo run --bin proxy
 ```
 
+The proxy stops on SIGTERM (what `docker stop` sends) or Ctrl-C: it stops taking connections,
+lets the requests in progress finish for up to eight seconds (a model stream still open then is
+cut), and exits with status 0.
+
 ### Testing the proxy with curl
 
 ```bash

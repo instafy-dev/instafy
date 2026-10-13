@@ -163,6 +163,10 @@ and `deleted`. A refused push updates no ref and sends no event.
 - Put **Git Edge** behind a normal L7 load balancer (`<git-host>` → many `git-edge`).
 - `git-edge` is **stateless**, so any LB strategy works (round-robin is fine).
 - `git-edge` routes each request to the correct shard using only the URL path (no stickiness required).
+- `git-edge` stops on SIGTERM (what `docker stop` sends) or SIGINT: it stops taking connections,
+  lets the requests it is proxying finish for up to eight seconds, under Docker's default
+  ten-second stop timeout, and exits with status 0. Restart instances one at a time so the others
+  take new requests.
 
 ### Sharding
 - Each repo belongs to exactly one primary shard: `{project_id → shard_id}`.
@@ -352,6 +356,12 @@ and exits with status 1.
 
 Run the gateway with an init as PID 1 (`docker run --init`, or `init: true` in Compose, as
 `docker/docker-compose.runtime.yml` does), so any process the server leaves behind is reaped.
+
+The gateway stops on SIGTERM, which `docker stop` sends, the same way as on SIGINT: it stops
+taking connections, lets the requests in progress finish for up to eight seconds, and exits with
+status 0. That fits inside Docker's default ten-second stop timeout. A stop that kills at once
+(`docker rm -f`, `docker kill`) skips it and cuts every request in progress. Requests that arrive
+while the gateway is down still fail unless another gateway can take them.
 
 ### Mirror cache
 
