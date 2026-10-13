@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -1033,8 +1033,16 @@ fn build_proxy_instructions(
     segments.join("\n")
 }
 
+/// How long a stop lets requests in progress finish once the listener has
+/// closed. It stays under Docker's default ten-second stop timeout, so
+/// `docker stop` ends in a clean exit rather than SIGKILL; a model stream
+/// still open then is cut, as the kill would have cut it.
+const SHUTDOWN_DRAIN_LIMIT: Duration = Duration::from_secs(8);
+
+/// Serves until SIGTERM (what `docker stop` sends) or SIGINT (Ctrl-C).
 pub async fn run_proxy(addr: SocketAddr, credentials: Option<Credentials>) -> Result<()> {
-    run_proxy_with_shutdown(addr, credentials, shutdown_signal()).await
+    let stop = stop_signal().context("failed to install the stop signal handlers")?;
+    run_proxy_with_shutdown(addr, credentials, stop).await
 }
 
 pub async fn run_proxy_with_shutdown<Fut>(
@@ -1107,12 +1115,44 @@ where
 
     println!("codex proxy listening on http://{}", listener.local_addr()?);
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown)
+    serve_until(listener, app, shutdown, SHUTDOWN_DRAIN_LIMIT)
         .await
-        .context("proxy server encountered an error")?;
+        .context("proxy server encountered an error")
+}
 
-    Ok(())
+/// Serves `app` until `shutdown` resolves, then closes the listener and
+/// lets the requests in progress finish for at most `drain_limit`.
+async fn serve_until<Fut>(
+    listener: TcpListener,
+    app: Router,
+    shutdown: Fut,
+    drain_limit: Duration,
+) -> std::io::Result<()>
+where
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = stopping.send(());
+        })
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => return result,
+        _ = stopped => {}
+    }
+    match tokio::time::timeout(drain_limit, server).await {
+        Ok(result) => result,
+        Err(_) => {
+            eprintln!(
+                "[proxy] requests were still open after {}s; exiting without them",
+                drain_limit.as_secs_f32()
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn healthz(State(state): State<ProxyState>) -> impl IntoResponse {
@@ -3278,10 +3318,31 @@ fn number_to_u64(value: &Value) -> Option<u64> {
     None
 }
 
-async fn shutdown_signal() {
-    if let Err(err) = tokio::signal::ctrl_c().await {
-        eprintln!("failed to listen for shutdown signal: {}", err);
-    }
+/// Resolves on SIGTERM, which `docker stop` and most supervisors send, or
+/// on SIGINT (Ctrl-C). Both handlers are in place when this returns, so a
+/// stop sent while the proxy starts still counts.
+#[cfg(unix)]
+fn stop_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        let name = tokio::select! {
+            _ = terminate.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        };
+        eprintln!("[proxy] {name} received; finishing requests in progress");
+    })
+}
+
+#[cfg(windows)]
+fn stop_signal() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        ctrl_c.recv().await;
+        eprintln!("[proxy] Ctrl-C received; finishing requests in progress");
+    })
 }
 
 #[cfg(test)]
@@ -3291,6 +3352,58 @@ mod audio_tests;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Once stopped the proxy takes no new connections, and it waits for a
+    /// request in progress (a model stream, say) only up to the drain limit.
+    #[tokio::test]
+    async fn a_stop_waits_for_a_stalled_request_only_up_to_the_drain_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (started, mut handling) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/stall",
+            get(move || {
+                let started = started.clone();
+                async move {
+                    let _ = started.send(());
+                    std::future::pending::<&'static str>().await
+                }
+            }),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let limit = Duration::from_millis(300);
+        let served = tokio::spawn(serve_until(
+            listener,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            limit,
+        ));
+        let client = tokio::spawn(reqwest::get(format!("http://{addr}/stall")));
+        handling
+            .recv()
+            .await
+            .expect("the request reached its handler");
+
+        let begun = std::time::Instant::now();
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), served)
+            .await
+            .expect("the stop waited past its drain limit")
+            .unwrap()
+            .unwrap();
+        assert!(
+            begun.elapsed() >= limit,
+            "the stop did not wait for the request in progress: {:?}",
+            begun.elapsed()
+        );
+        assert!(
+            tokio::net::TcpStream::connect(addr).await.is_err(),
+            "the proxy still takes connections after the stop"
+        );
+        client.abort();
+    }
 
     #[test]
     fn parse_chat_completion_with_history() {
