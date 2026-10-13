@@ -44,6 +44,12 @@ import {
 } from "./lib/app-icon-contracts.mjs";
 import { decodeIcnsEntries } from "./lib/icon-containers.mjs";
 import {
+  SOCIAL_CARD_PATH,
+  SOCIAL_CARD_REFERENCES,
+  findSocialCardUrls,
+  socialCardImageUrl,
+} from "./lib/og-image.mjs";
+import {
   countNonGreyscalePixels,
   countOffInkVisiblePixels,
   countVisiblePixelsOutside,
@@ -843,6 +849,53 @@ for (const { relativePath, items } of ANDROID_LAUNCH_THEME_CONTRACTS) {
       item,
       `${relativePath} AppTheme.NoActionBarLaunch must contain ${item}.`,
     );
+  }
+}
+
+// The social card: every reference uses the card's content-versioned URL
+// (scripts/generate-og-image.mjs rewrites them), and pages take it from
+// SOCIAL_CARD_IMAGE in src/utils/seo.ts rather than spelling the path.
+{
+  let expectedUrl = null;
+  try {
+    expectedUrl = socialCardImageUrl(fs.readFileSync(resolve(SOCIAL_CARD_PATH)));
+  } catch (error) {
+    failures.push(`Unable to read ${SOCIAL_CARD_PATH}: ${error instanceof Error ? error.message : error}`);
+  }
+  const expectedCounts = { "packages/frontend/index.html": 2, "packages/frontend/src/utils/seo.ts": 1 };
+  for (const relativePath of SOCIAL_CARD_REFERENCES) {
+    const urls = findSocialCardUrls(readText(relativePath));
+    if (urls.length !== expectedCounts[relativePath]) {
+      failures.push(
+        `${relativePath} must reference the social card ${expectedCounts[relativePath]} time(s); found ${urls.length}.`,
+      );
+    }
+    for (const url of urls) {
+      if (expectedUrl && url !== expectedUrl) {
+        failures.push(
+          `${relativePath} references ${url}; the current card is ${expectedUrl} (run pnpm generate:og-image).`,
+        );
+      }
+    }
+  }
+  for (const directory of ["packages/frontend/src", "packages/frontend/hosted"]) {
+    const pending = [resolve(directory)];
+    while (pending.length) {
+      const current = pending.pop();
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const absolutePath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          if (entry.name !== "node_modules") pending.push(absolutePath);
+          continue;
+        }
+        if (!/\.(ts|tsx|js|jsx|mjs)$/.test(entry.name)) continue;
+        const relativePath = path.relative(repoRoot, absolutePath).split(path.sep).join("/");
+        if (SOCIAL_CARD_REFERENCES.includes(relativePath)) continue;
+        if (findSocialCardUrls(fs.readFileSync(absolutePath, "utf8")).length) {
+          failures.push(`${relativePath} spells the social card's path; use SOCIAL_CARD_IMAGE from src/utils/seo.ts.`);
+        }
+      }
+    }
   }
 }
 

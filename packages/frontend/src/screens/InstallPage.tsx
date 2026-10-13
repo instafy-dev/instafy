@@ -10,7 +10,7 @@ import { AppStoreIcon } from "../components/IntegrationIcons";
 import { useAuth } from "../providers/AuthProvider";
 import { theme } from "../styles/theme";
 import { useDesktopReleaseLookup } from "../updates/useDesktopReleaseLookup";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 import { DesktopDownloadActions } from "./install/DesktopDownloadActions";
 
 const HERO_DESCRIPTION = "Pick a surface and keep building in the same repo.";
@@ -41,7 +41,7 @@ export function InstallPage() {
     applyPageMeta({
       title: "Install Instafy",
       description: HERO_DESCRIPTION,
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, []);
 

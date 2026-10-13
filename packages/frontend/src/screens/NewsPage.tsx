@@ -10,7 +10,7 @@ import { Text } from "../components/Text";
 import { hasSupabaseConfig, supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
 import { theme } from "../styles/theme";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 import { formatNewsDate, newsPosts } from "./news/newsPosts";
 
 function isPlausibleEmail(value: string) {
@@ -49,7 +49,7 @@ export function NewsPage() {
     applyPageMeta({
       title: "News & Updates · Instafy",
       description: heroDescription,
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, [heroDescription]);
 

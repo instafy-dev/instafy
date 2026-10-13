@@ -35,7 +35,7 @@ import {
 } from "./login/rememberedAccounts";
 import { theme } from "../styles/theme";
 import { useMarketingCanvas } from "../theme/useMarketingCanvas";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 
 type LoginIntent = "login" | "signup";
 
@@ -321,7 +321,7 @@ export function LoginPage() {
           ? "Create Account · Instafy"
           : "Log In · Instafy",
       description: "Sign in to Instafy and continue working in your project workspace.",
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, [intent, recoveryMode]);
 

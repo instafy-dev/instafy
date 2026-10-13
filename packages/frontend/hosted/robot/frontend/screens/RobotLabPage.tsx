@@ -78,7 +78,7 @@ import { useStatus } from "@instafy/frontend/feature-api/ui";
 import {
   ensureProjectProviderCapability,
 } from "@instafy/frontend/feature-api/runtime";
-import { applyPageMeta, useWorkspaceTabs } from "@instafy/frontend/feature-api/ui";
+import { SOCIAL_CARD_IMAGE, applyPageMeta, useWorkspaceTabs } from "@instafy/frontend/feature-api/ui";
 import { RobotEventTapeSection } from "./robot-lab/RobotEventTapeSection";
 import { RobotCommandDebuggerSection } from "./robot-lab/RobotCommandDebuggerSection";
 import { RobotLearnDraftSection } from "./robot-lab/RobotLearnDraftSection";
@@ -530,7 +530,7 @@ export function RobotLabPage() {
       title: "Robot Lab · Instafy",
       description:
         "Scratch simulation surface for connecting Instafy to the Knosh virtual robot and BLE emulator.",
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, []);
 
