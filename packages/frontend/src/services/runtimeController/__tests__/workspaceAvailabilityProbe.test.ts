@@ -186,11 +186,16 @@ describe("typed origin token requests", () => {
   });
 
   it("keeps cached success compatible with nullable callers", async () => {
+    // A cached grant reports the seconds it has left, so pin the clock: one elapsed millisecond turns 300 into 299.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     const fetchMock = vi.fn().mockResolvedValue(grant());
     vi.stubGlobal("fetch", fetchMock);
     const first = await requestOriginAccessToken({ ...tokenParams, forceRefresh: true });
-    expect(first).toMatchObject({ originId: "origin-1", token: "scoped-origin-grant" });
+    expect(first).toMatchObject({ originId: "origin-1", token: "scoped-origin-grant", expiresIn: 300 });
     expect(await requestOriginAccessToken(tokenParams)).toEqual(first);
+    vi.setSystemTime(new Date("2026-01-01T00:00:01.500Z"));
+    expect(await requestOriginAccessToken(tokenParams)).toEqual({ ...first, expiresIn: 298 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
