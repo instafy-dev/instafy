@@ -54,6 +54,12 @@ pub const CLEAN_STOP_MARKER: &str = ".instafy/.git/instafy-stopped-clean";
 /// How long a shutdown waits for a rolling save to let the workspace go.
 const SHUTDOWN_LOCK_WAIT: Duration = Duration::from_secs(10);
 
+/// How long a stop lets requests already in progress finish once the
+/// listener has closed. It stays under Docker's default ten-second stop
+/// timeout, so `docker stop` ends in a clean exit rather than SIGKILL;
+/// anything still open then (a long download, a stalled upload) is closed.
+const SHUTDOWN_DRAIN_LIMIT: Duration = Duration::from_secs(8);
+
 pub(crate) fn clear_clean_stop_marker(workspace_root: &std::path::Path) {
     match crate::workspace_fs::WorkspaceDir::open(workspace_root)
         .and_then(|workspace| workspace.remove(CLEAN_STOP_MARKER))
@@ -118,6 +124,8 @@ pub struct OriginHttpServer {
     hosted: Option<Arc<HostedGatewayConfig>>,
     /// The gateway's cache sweeper, stopped with the server.
     sweeper: Option<JoinHandle<()>>,
+    /// [`SHUTDOWN_DRAIN_LIMIT`]; tests shorten it.
+    drain_limit: Duration,
 }
 
 pub struct ServerStart {
@@ -221,6 +229,7 @@ impl OriginHttpServer {
             state: None,
             hosted,
             sweeper: None,
+            drain_limit: SHUTDOWN_DRAIN_LIMIT,
         })
     }
 
@@ -584,9 +593,7 @@ impl OriginHttpServer {
         }
 
         if let Some(handle) = self.server_handle.take() {
-            if let Err(error) = handle.await {
-                warn!(?error, "origin HTTP server task join failed");
-            }
+            finish_serving(handle, self.drain_limit).await;
         }
 
         if let Some(tx) = self.presence_tx.take() {
@@ -837,6 +844,24 @@ impl OriginHttpServer {
 
     pub fn presence_metadata_handle(&self) -> Arc<RwLock<JsonValue>> {
         self.presence_metadata.clone()
+    }
+}
+
+/// Waits for the server task, which ends once the connections it had when
+/// the listener closed are done, for at most `limit`. A connection still
+/// open then is left to close with the process: the task stops waiting for
+/// it, so a stop never waits past `limit` for a slow client.
+async fn finish_serving(mut handle: JoinHandle<()>, limit: Duration) {
+    match time::timeout(limit, &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(?error, "origin HTTP server task join failed"),
+        Err(_) => {
+            warn!(
+                limit_ms = limit.as_millis() as u64,
+                "requests were still open at the shutdown drain limit; no longer waiting for them"
+            );
+            handle.abort();
+        }
     }
 }
 
@@ -1353,5 +1378,42 @@ mod hosted_start_tests {
         assert!(format!("{error:#}").contains(".legacy"), "{error:#}");
         assert!(server.address.is_none(), "nothing was bound");
         assert!(root.join(&space).join("draft.md").is_file());
+    }
+
+    /// A stop waits for a request in progress only up to the drain limit,
+    /// so an upload that never finishes cannot hold the process open until
+    /// its supervisor kills it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stop_waits_for_a_stalled_request_only_up_to_the_drain_limit() {
+        use tokio::io::AsyncWriteExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = OriginHttpServer::new(gateway_config(dir.path())).unwrap();
+        let limit = Duration::from_millis(300);
+        server.drain_limit = limit;
+        let start = server.start().await.unwrap();
+
+        // The body's second byte never comes, so the request stays open.
+        let mut stalled = tokio::net::TcpStream::connect(start.address).await.unwrap();
+        stalled
+            .write_all(
+                b"POST /apply/status HTTP/1.1\r\nhost: origin\r\n\
+                  content-type: application/json\r\ncontent-length: 2\r\n\r\n{",
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let begun = std::time::Instant::now();
+        time::timeout(Duration::from_secs(5), server.stop())
+            .await
+            .expect("the stop waited past its drain limit")
+            .unwrap();
+        assert!(
+            begun.elapsed() >= limit,
+            "the stop did not wait for the request in progress: {:?}",
+            begun.elapsed()
+        );
+        drop(stalled);
     }
 }
