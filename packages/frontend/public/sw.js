@@ -1,6 +1,6 @@
 /* eslint-disable no-restricted-globals */
 
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v5";
 const STATIC_CACHE_NAME = `instafy-static-${CACHE_VERSION}`;
 const CACHE_PREFIX = "instafy-static-";
 const APP_SHELL_URL = "/index.html";
@@ -8,16 +8,16 @@ const SW_PUSH_DEBUG_EVENT = "instafy:sw-push-debug";
 
 const PRECACHE_URLS = [
   APP_SHELL_URL,
-  "/manifest.webmanifest?v=4",
-  "/favicon.ico?v=4",
-  "/icon.svg?v=4",
-  "/icon-32.png?v=4",
-  "/apple-touch-icon.png?v=4",
-  "/icon-192.png?v=4",
-  "/icon-512.png?v=4",
-  "/icon-maskable-192.png?v=4",
-  "/icon-maskable-512.png?v=4",
-  "/icon.png?v=4",
+  "/manifest.webmanifest?v=5",
+  "/favicon.ico?v=5",
+  "/icon.svg?v=5",
+  "/icon-32.png?v=5",
+  "/apple-touch-icon.png?v=5",
+  "/icon-192.png?v=5",
+  "/icon-512.png?v=5",
+  "/icon-maskable-192.png?v=5",
+  "/icon-maskable-512.png?v=5",
+  "/icon.png?v=5",
 ];
 
 async function broadcastPushDebug(payload) {

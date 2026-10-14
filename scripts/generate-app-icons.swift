@@ -6,10 +6,10 @@ import ImageIO
 import QuartzCore
 import UniformTypeIdentifiers
 
-// Keep octo-mark.geometry.json as the single source for Octo's curves and nodes,
-// and octo-mark-small.geometry.json as the source of its small cut (the
-// pixel-fitted drawing for marks shown at 24 CSS px or points and below: the
-// favicons and the smallest desktop representations; see MarkCut).
+// Keep octo-mark.geometry.json as the single source for Octo's curves and nodes:
+// one logo at every size. Marks shown at 24 CSS px or points and below (the
+// favicons and the smallest desktop representations) draw the same geometry
+// full-bleed rather than at the distribution scale; see MarkFit.
 // This script derives the browser SVG, in-product avatar, and every native raster
 // while preserving each platform's alpha channel, safe zone, and background.
 //
@@ -75,11 +75,6 @@ let geometry = try JSONDecoder().decode(
   OctoGeometry.self,
   from: Data(contentsOf: geometryURL)
 )
-let smallGeometryURL = url("packages/frontend/src/assets/octo-mark-small.geometry.json")
-let smallGeometry = try JSONDecoder().decode(
-  OctoGeometry.self,
-  from: Data(contentsOf: smallGeometryURL)
-)
 let brandConfigURL = url("scripts/app-icon-brand.json")
 let brandConfig = try JSONDecoder().decode(
   AppIconBrandConfig.self,
@@ -87,12 +82,6 @@ let brandConfig = try JSONDecoder().decode(
 )
 guard geometry.paths.count == 5, geometry.circles.count == 4 else {
   fputs("Canonical Octo geometry must contain five paths and four nodes.\n", stderr)
-  exit(1)
-}
-guard smallGeometry.viewBox == geometry.viewBox,
-      !smallGeometry.paths.isEmpty,
-      smallGeometry.circles.count == 4 else {
-  fputs("The small cut must share the 64-unit viewBox and keep all four nodes.\n", stderr)
   exit(1)
 }
 guard brandConfig.cacheRevision > 0,
@@ -179,25 +168,99 @@ func xmlEscaped(_ value: String) -> String {
     .replacingOccurrences(of: ">", with: "&gt;")
 }
 
-/// Draw one cut of the mark as a 64-unit SVG. `distributed` places the drawing
-/// at the shared distribution scale (the main cut's optical padding); the
-/// small cut is pixel-fitted and drawn full-bleed. `nodeColors` (crew slots
-/// 1-4) fills the nodes; without it every piece takes the one ink.
-/// `pixelNodes` draws each node as its bounding square: only for the small cut
-/// at 16 px, where a node is exactly one 2 x 2 px grid cell and a circle would
-/// antialias to grey.
+/// The mark's ink box in its own path coordinates (before the geometry's
+/// transform): the tight bounds of the body paths' curves, not their control
+/// points, together with the four nodes, which are its left, right and bottom
+/// extremes. The paths use absolute M, L, C and Z commands only.
+func inkBox(of geometry: OctoGeometry) throws -> CGRect {
+  let token = try NSRegularExpression(
+    pattern: "[A-Za-z]|-?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?"
+  )
+  var box = CGRect.null
+  for pathData in geometry.paths {
+    let tokens = token
+      .matches(in: pathData, range: NSRange(pathData.startIndex..., in: pathData))
+      .map { String(pathData[Range($0.range, in: pathData)!]) }
+    let path = CGMutablePath()
+    var index = 0
+    func point() throws -> CGPoint {
+      guard index + 1 < tokens.count,
+            let x = Double(tokens[index]),
+            let y = Double(tokens[index + 1]) else {
+        throw NSError(
+          domain: "InstafyIconGenerator",
+          code: 12,
+          userInfo: [NSLocalizedDescriptionKey: "Malformed Octo path data: \(pathData)"]
+        )
+      }
+      index += 2
+      return CGPoint(x: x, y: y)
+    }
+    var command = ""
+    while index < tokens.count {
+      if Double(tokens[index]) == nil {
+        command = tokens[index]
+        index += 1
+      }
+      switch command {
+      case "M": path.move(to: try point()); command = "L"
+      case "L": path.addLine(to: try point())
+      case "C":
+        let control1 = try point()
+        let control2 = try point()
+        path.addCurve(to: try point(), control1: control1, control2: control2)
+      case "Z", "z": path.closeSubpath(); command = ""
+      default:
+        throw NSError(
+          domain: "InstafyIconGenerator",
+          code: 13,
+          userInfo: [NSLocalizedDescriptionKey: "Unsupported Octo path command \(command)"]
+        )
+      }
+    }
+    box = box.union(path.boundingBoxOfPath)
+  }
+  for circle in geometry.circles {
+    box = box.union(
+      CGRect(x: circle.cx - circle.r, y: circle.cy - circle.r, width: 2 * circle.r, height: 2 * circle.r)
+    )
+  }
+  return box
+}
+
+/// The full-bleed fit: the ink box scaled so its longer side (the height)
+/// spans the 64-unit canvas less a 4-unit margin, and centered. Centering the
+/// box absorbs the geometry's own translate, so one transform places the
+/// paths directly.
+let fullBleedMargin = 4.0
+let markInkBox = try inkBox(of: geometry)
+let fullBleedScale = (canvasSide - 2 * fullBleedMargin) / Double(max(markInkBox.width, markInkBox.height))
+let fullBleedOffsetX = canvasSide / 2 - fullBleedScale * Double(markInkBox.midX)
+let fullBleedOffsetY = canvasSide / 2 - fullBleedScale * Double(markInkBox.midY)
+
+enum MarkFit {
+  /// The shared distribution scale: the mark's optical padding on every tile,
+  /// launcher, store and splash asset.
+  case distribution
+  /// Full-bleed and always one ink: only for a mark shown at 24 CSS px (or
+  /// points) or less, drawn in 32 device px or less: the adaptive favicon, a
+  /// 16 CSS px tab at 1x and 2x, a 16 pt macOS slot, a 16 or 24 px Windows
+  /// entry.
+  case fullBleed
+}
+
+/// Draw the mark as a 64-unit SVG at `fit`. `nodeColors` (crew slots 1-4)
+/// fills the nodes; without it every piece takes the one ink.
 func makeOctoSvg(
   ariaLabel: String,
-  cut: OctoGeometry = geometry,
-  distributed: Bool = true,
+  fit: MarkFit = .distribution,
   backgroundColor: String? = nil,
   inkColor: String = brandNavyHex,
   darkModeInkColor: String? = nil,
-  nodeColors: [String]? = nil,
-  pixelNodes: Bool = false
+  nodeColors: [String]? = nil
 ) -> String {
   var lines = [
-    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"\(cut.viewBox)\" width=\"64\" height=\"64\" role=\"img\" aria-label=\"\(xmlEscaped(ariaLabel))\">",
+    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"\(geometry.viewBox)\" width=\"64\" height=\"64\" role=\"img\" aria-label=\"\(xmlEscaped(ariaLabel))\">",
   ]
   if let darkModeInkColor {
     lines += [
@@ -211,6 +274,7 @@ func makeOctoSvg(
     lines.append("  <circle cx=\"32\" cy=\"32\" r=\"32\" fill=\"\(backgroundColor)\"/>")
   }
   var indent = "  "
+  let distributed = fit == .distribution
   if distributed {
     lines.append(
       "  <g transform=\"translate(\(svgNumber(distributionOffset)) \(svgNumber(distributionOffset))) scale(\(svgNumber(distributionScale)))\">"
@@ -220,25 +284,26 @@ func makeOctoSvg(
   let inkAttribute = darkModeInkColor == nil
     ? "fill=\"\(inkColor)\""
     : "class=\"octo-ink\""
-  let transformAttribute = cut.transform.isEmpty
-    ? ""
-    : " transform=\"\(xmlEscaped(cut.transform))\""
+  let transformAttribute: String
+  switch fit {
+  case .distribution:
+    transformAttribute = geometry.transform.isEmpty
+      ? ""
+      : " transform=\"\(xmlEscaped(geometry.transform))\""
+  case .fullBleed:
+    transformAttribute =
+      " transform=\"translate(\(svgNumber(fullBleedOffsetX)) \(svgNumber(fullBleedOffsetY))) scale(\(svgNumber(fullBleedScale)))\""
+  }
   lines.append("\(indent)<g \(inkAttribute)\(transformAttribute)>")
-  for path in cut.paths {
+  for path in geometry.paths {
     lines.append("\(indent)  <path d=\"\(xmlEscaped(path))\"/>")
   }
-  let slots = crewSlots(of: cut)
-  for (index, circle) in cut.circles.enumerated() {
+  let slots = crewSlots(of: geometry)
+  for (index, circle) in geometry.circles.enumerated() {
     let fill = nodeColors.map { " fill=\"\($0[slots[index]])\"" } ?? ""
-    if pixelNodes {
-      lines.append(
-        "\(indent)  <rect x=\"\(svgNumber(circle.cx - circle.r))\" y=\"\(svgNumber(circle.cy - circle.r))\" width=\"\(svgNumber(2 * circle.r))\" height=\"\(svgNumber(2 * circle.r))\"\(fill)/>"
-      )
-    } else {
-      lines.append(
-        "\(indent)  <circle cx=\"\(svgNumber(circle.cx))\" cy=\"\(svgNumber(circle.cy))\" r=\"\(svgNumber(circle.r))\"\(fill)/>"
-      )
-    }
+    lines.append(
+      "\(indent)  <circle cx=\"\(svgNumber(circle.cx))\" cy=\"\(svgNumber(circle.cy))\" r=\"\(svgNumber(circle.r))\"\(fill)/>"
+    )
   }
   lines.append("\(indent)</g>")
   if distributed { lines.append("  </g>") }
@@ -246,14 +311,13 @@ func makeOctoSvg(
   return lines.joined(separator: "\n") + "\n"
 }
 
-// The adaptive favicon is drawn at 16 CSS px, so it takes the small cut,
-// full-bleed and one ink (navy, white under a dark color scheme).
+// The adaptive favicon is drawn at 16 CSS px, so it takes the mark full-bleed
+// and one ink (navy, white under a dark color scheme).
 let sourceURL = url("packages/frontend/public/icon.svg")
 let avatarURL = url("packages/frontend/src/assets/octo-avatar.svg")
 try makeOctoSvg(
   ariaLabel: "Instafy",
-  cut: smallGeometry,
-  distributed: false,
+  fit: .fullBleed,
   darkModeInkColor: brandWhiteHex
 )
   .write(to: sourceURL, atomically: true, encoding: .utf8)
@@ -292,26 +356,14 @@ let crewTileOcto = rasterSource(
 let crewPaperOcto = rasterSource(
   makeOctoSvg(ariaLabel: "Instafy crew raster source", nodeColors: crewLightHexes)
 )
-// Small cut, one ink, reverse and full-bleed: tiles shown at 24 CSS px or less.
-let smallWhiteOcto = rasterSource(
+// One ink, reverse and full-bleed: tiles shown at 24 CSS px or less.
+let fullBleedWhiteOcto = rasterSource(
   makeOctoSvg(
-    ariaLabel: "Instafy small cut raster source",
-    cut: smallGeometry,
-    distributed: false,
+    ariaLabel: "Instafy full-bleed raster source",
+    fit: .fullBleed,
     inkColor: brandWhiteHex
   )
 )
-// The same at exactly 16 px, where each node is one solid 2 x 2 px grid cell.
-let smallWhitePixelOcto = rasterSource(
-  makeOctoSvg(
-    ariaLabel: "Instafy 16 px small cut raster source",
-    cut: smallGeometry,
-    distributed: false,
-    inkColor: brandWhiteHex,
-    pixelNodes: true
-  )
-)
-let pixelFitSide = 16
 
 /// Crew nodes on a tile need room to read as color: a tile of at least
 /// crewTileMinPx device pixels (the drawn mark is then about 40 px). Below it
@@ -320,26 +372,16 @@ func tileOcto(side: CGFloat) -> NSImage {
   side >= CGFloat(brandConfig.crewTileMinPx) ? crewTileOcto : whiteOcto
 }
 
-enum MarkCut {
-  /// The canonical drawing at the distribution scale.
-  case main
-  /// The pixel-fitted small cut, full-bleed and always one ink. Only for a
-  /// raster of 32 device px or less that is shown at 24 CSS px (or points) or
-  /// less: a 16 CSS px tab at 1x and 2x, a 16 pt macOS slot, a 16 or 24 px
-  /// Windows entry.
-  case small
-}
-
-/// The mark on a brand-ink tile of `devicePx` pixels. The small cut is one ink
-/// with solid pixel nodes at 16 px. The main cut takes crew nodes from
-/// crewTileMinPx device px up; `crew: false` keeps a monochrome context
-/// (favicon.ico) one ink at any size.
-func drawTileMark(in canvas: NSRect, devicePx: Int, cut: MarkCut, crew: Bool = true) {
-  switch cut {
-  case .small:
-    precondition(devicePx <= 32, "the small cut is only drawn at 32 device px or less")
-    drawOcto(devicePx == pixelFitSide ? smallWhitePixelOcto : smallWhiteOcto, in: canvas)
-  case .main:
+/// The mark on a brand-ink tile of `devicePx` pixels. Full-bleed is one ink.
+/// At the distribution scale the mark takes crew nodes from crewTileMinPx
+/// device px up; `crew: false` keeps a monochrome context (favicon.ico) one
+/// ink at any size.
+func drawTileMark(in canvas: NSRect, devicePx: Int, fit: MarkFit, crew: Bool = true) {
+  switch fit {
+  case .fullBleed:
+    precondition(devicePx <= 32, "the full-bleed mark is only drawn at 32 device px or less")
+    drawOcto(fullBleedWhiteOcto, in: canvas)
+  case .distribution:
     drawOcto(crew ? tileOcto(side: CGFloat(devicePx)) : whiteOcto, in: canvas)
   }
 }
@@ -499,16 +541,16 @@ func renderMaskableSquare(_ relativePath: String, size: Int) throws {
 
 /// A one-ink square tile on brand ink for a monochrome context (favicons) or a
 /// tile under the crew threshold (the iOS 20 pt@2x slot).
-func oneInkSquareTile(size: Int, cut: MarkCut, opaque: Bool) throws -> CGImage {
+func oneInkSquareTile(size: Int, fit: MarkFit, opaque: Bool) throws -> CGImage {
   try renderImage(width: size, height: size, opaque: opaque) { canvas in
     brandNavy.setFill()
     canvas.fill()
-    drawTileMark(in: canvas, devicePx: size, cut: cut, crew: false)
+    drawTileMark(in: canvas, devicePx: size, fit: fit, crew: false)
   }
 }
 
 /// The desktop tile: brand ink in a rounded rect with transparent corners.
-func desktopTile(size: Int, cut: MarkCut) throws -> CGImage {
+func desktopTile(size: Int, fit: MarkFit) throws -> CGImage {
   try renderImage(width: size, height: size, opaque: false) { canvas in
     brandNavy.setFill()
     NSBezierPath(
@@ -516,7 +558,7 @@ func desktopTile(size: Int, cut: MarkCut) throws -> CGImage {
       xRadius: canvas.width * 0.22,
       yRadius: canvas.height * 0.22
     ).fill()
-    drawTileMark(in: canvas, devicePx: size, cut: cut)
+    drawTileMark(in: canvas, devicePx: size, fit: fit)
   }
 }
 
@@ -535,10 +577,10 @@ func macGridBody(side: Int) -> (inset: Int, body: Int) {
 let macCornerRatio = 185.4 / 824.0
 
 /// The macOS desktop tile: the brand-ink body on the icon grid with Apple's
-/// continuous corners and transparent margins. Crew and cut follow the body's
-/// own device px, so the 16 pt slots (12 and 26 px bodies) keep the one-ink
-/// small cut and the 32 pt slot (a 26 px body) stays one ink.
-func macDesktopTile(size: Int, cut: MarkCut) throws -> CGImage {
+/// continuous corners and transparent margins. Crew follows the body's own
+/// device px, so the 16 pt slots (12 and 26 px bodies) keep the one-ink
+/// full-bleed mark and the 32 pt slot (a 26 px body) stays one ink.
+func macDesktopTile(size: Int, fit: MarkFit) throws -> CGImage {
   let (inset, body) = macGridBody(side: size)
   return try renderImage(width: size, height: size, opaque: false) { _ in
     guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -555,7 +597,7 @@ func macDesktopTile(size: Int, cut: MarkCut) throws -> CGImage {
     drawTileMark(
       in: NSRect(x: inset, y: inset, width: body, height: body),
       devicePx: body,
-      cut: cut
+      fit: fit
     )
   }
 }
@@ -667,34 +709,36 @@ func renderGitHubBadgeLogo(_ relativePath: String, size: Int) throws {
 
 // The desktop icon set. Each representation is drawn at its own size rather
 // than downscaled from the 1024 px tile, so the ones under crewTileMinPx device
-// px stay one ink and the 16 pt and 16/24 px ones take the small cut.
+// px stay one ink and the 16 pt and 16/24 px ones draw the mark full-bleed.
 // icon.icns (macOS) sits on the macOS icon grid; icon.ico (Windows) and
 // icon.png (1024, the Linux icon and the reference raster) stay full-bleed.
 let desktopIconPNGPath = "packages/desktop-app/assets/icon.png"
 let desktopIcnsPath = "packages/desktop-app/assets/icon.icns"
 let desktopIcoPath = "packages/desktop-app/assets/icon.ico"
-// macOS iconset slots: the file name, its pixel side and its cut. Both 16 pt
-// slots (16 px, and 32 px at 2x) take the small cut; 32 pt at 1x is the main cut.
-let desktopIcnsSlots: [(name: String, devicePx: Int, cut: MarkCut)] = [
-  ("icon_16x16", 16, .small),
-  ("icon_16x16@2x", 32, .small),
-  ("icon_32x32", 32, .main),
-  ("icon_32x32@2x", 64, .main),
-  ("icon_128x128", 128, .main),
-  ("icon_128x128@2x", 256, .main),
-  ("icon_256x256", 256, .main),
-  ("icon_256x256@2x", 512, .main),
-  ("icon_512x512", 512, .main),
-  ("icon_512x512@2x", 1024, .main),
+// macOS iconset slots: the file name, its pixel side and its fit. Both 16 pt
+// slots (16 px, and 32 px at 2x) draw the mark full-bleed; 32 pt at 1x keeps
+// the distribution scale.
+let desktopIcnsSlots: [(name: String, devicePx: Int, fit: MarkFit)] = [
+  ("icon_16x16", 16, .fullBleed),
+  ("icon_16x16@2x", 32, .fullBleed),
+  ("icon_32x32", 32, .distribution),
+  ("icon_32x32@2x", 64, .distribution),
+  ("icon_128x128", 128, .distribution),
+  ("icon_128x128@2x", 256, .distribution),
+  ("icon_256x256", 256, .distribution),
+  ("icon_256x256@2x", 512, .distribution),
+  ("icon_512x512", 512, .distribution),
+  ("icon_512x512@2x", 1024, .distribution),
 ]
 // Windows picks an ICO entry by device pixels, so a 32 px entry can be shown at
-// 32 px on a 1x display: only the 16 and 24 px entries take the small cut.
-let desktopIcoEntries: [(size: Int, cut: MarkCut)] = [
-  (16, .small), (24, .small), (32, .main), (48, .main), (64, .main), (128, .main), (256, .main),
+// 32 px on a 1x display: only the 16 and 24 px entries draw the mark full-bleed.
+let desktopIcoEntries: [(size: Int, fit: MarkFit)] = [
+  (16, .fullBleed), (24, .fullBleed), (32, .distribution), (48, .distribution),
+  (64, .distribution), (128, .distribution), (256, .distribution),
 ]
 
 func renderDesktopIcons() throws {
-  try writePNG(try desktopTile(size: 1024, cut: .main), to: url(desktopIconPNGPath))
+  try writePNG(try desktopTile(size: 1024, fit: .distribution), to: url(desktopIconPNGPath))
 
   let temporaryDirectory = fileManager.temporaryDirectory
     .appendingPathComponent("instafy-desktop-icon-\(UUID().uuidString)", isDirectory: true)
@@ -703,7 +747,7 @@ func renderDesktopIcons() throws {
   defer { try? fileManager.removeItem(at: temporaryDirectory) }
   for slot in desktopIcnsSlots {
     try writePNG(
-      try macDesktopTile(size: slot.devicePx, cut: slot.cut),
+      try macDesktopTile(size: slot.devicePx, fit: slot.fit),
       to: iconset.appendingPathComponent("\(slot.name).png"),
       logOutput: false
     )
@@ -724,7 +768,7 @@ func renderDesktopIcons() throws {
 
   // Classic layout: DIB entries under 256 px and one PNG-compressed 256 px entry.
   let icoEntries = try desktopIcoEntries.map { entry -> (size: Int, payload: Data) in
-    let image = try desktopTile(size: entry.size, cut: entry.cut)
+    let image = try desktopTile(size: entry.size, fit: entry.fit)
     return (entry.size, entry.size >= 256 ? try pngData(image) : try dibData(image))
   }
   try makeIco(icoEntries).write(to: url(desktopIcoPath), options: .atomic)
@@ -733,11 +777,10 @@ func renderDesktopIcons() throws {
 
 func renderFavicon() throws {
   // favicon.ico is a monochrome context: one ink in every entry. The 16 and 32
-  // entries serve a 16 CSS px tab at 1x and 2x, so they take the small cut (the
-  // 16 px entry with solid pixel nodes); the 48 entry keeps the main cut at the
-  // distribution scale.
-  let entries = try [(16, MarkCut.small), (32, .small), (48, .main)].map { size, cut in
-    (size: size, payload: try pngData(try oneInkSquareTile(size: size, cut: cut, opaque: false)))
+  // entries serve a 16 CSS px tab at 1x and 2x, so they draw the mark
+  // full-bleed; the 48 entry keeps the distribution scale.
+  let entries = try [(16, MarkFit.fullBleed), (32, .fullBleed), (48, .distribution)].map { size, fit in
+    (size: size, payload: try pngData(try oneInkSquareTile(size: size, fit: fit, opaque: false)))
   }
   try makeIco(entries).write(to: url("packages/frontend/public/favicon.ico"), options: .atomic)
   print("wrote packages/frontend/public/favicon.ico")
@@ -881,9 +924,9 @@ try renderReverseSquare("packages/frontend/public/icon-512.png", size: 512, opaq
 try renderReverseSquare("packages/frontend/public/icon.png", size: 1024, opaque: true)
 try renderFavicon()
 // The PNG favicon fallback for browsers that skip icon.svg: the same one-ink
-// small-cut tile as favicon.ico's 32 px entry, never a downscaled crew tile.
+// full-bleed tile as favicon.ico's 32 px entry, never a downscaled crew tile.
 try writePNG(
-  try oneInkSquareTile(size: 32, cut: .small, opaque: true),
+  try oneInkSquareTile(size: 32, fit: .fullBleed, opaque: true),
   to: url("packages/frontend/public/icon-32.png")
 )
 try renderReverseSquare("packages/frontend/public/apple-touch-icon.png", size: 180, opaque: true)
@@ -906,8 +949,8 @@ try renderDesktopIcons()
 // Apple receives the App Store icon from this opaque asset in the native build.
 // Xcode derives every other size from it except the one slot under the crew
 // threshold: 20 pt@2x (40 px, notifications), which gets its own one-ink tile.
-// iOS masks it like every other size, so it keeps the main cut at the
-// distribution scale; a full-bleed small cut would crowd the corner mask.
+// iOS masks it like every other size, so it keeps the distribution scale; a
+// full-bleed mark would crowd the corner mask.
 try renderReverseSquare(
   "packages/frontend/ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png",
   size: 1024,
@@ -915,7 +958,7 @@ try renderReverseSquare(
 )
 let iosAppIconDirectory = "packages/frontend/ios/App/App/Assets.xcassets/AppIcon.appiconset"
 try writePNG(
-  try oneInkSquareTile(size: 40, cut: .main, opaque: true),
+  try oneInkSquareTile(size: 40, fit: .distribution, opaque: true),
   to: url("\(iosAppIconDirectory)/AppIcon-20@2x.png")
 )
 // iOS 18+ appearances for both slots. Dark keeps the crew mark at 1024 px

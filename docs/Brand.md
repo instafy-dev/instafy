@@ -91,15 +91,13 @@ palettes.
   body and arms stay in the one ink.
 - **One-ink system mark:** every piece in the one ink. This is the default and
   the only colorway below 28 CSS px.
-- **Small cut:** the only sanctioned redraw, for marks shown at 24 CSS px (or
-  points) and below. It is the same mark with the same lean, pixel-fitted to
-  the 16 px grid (4 units are 1 px there): one body, and the four nodes
-  separated on grid corners, each a solid 2 × 2 px cell at 16 px. It is always
-  one ink. Today it ships in the favicons (`icon.svg`, the 16 and 32 px entries
-  of `favicon.ico`, and `icon-32.png`) and the smallest desktop
-  representations (the 16 pt slots of `icon.icns`, drawn into their 12 and
-  26 px grid bodies, and the 16 and 24 px entries of `icon.ico`); in-app
-  `OctoMark` still draws the main cut at every size.
+- **One logo at every size:** there is no small-size redraw. Marks shown at
+  24 CSS px (or points) and below draw the same canonical geometry, one ink,
+  enlarged to fill the icon (see [full-bleed](#scale-clear-space-and-wordmark)):
+  the favicons (`icon.svg`, the 16 and 32 px entries of `favicon.ico`, and
+  `icon-32.png`) and the smallest desktop representations (the 16 pt slots of
+  `icon.icns`, in their 12 and 26 px grid bodies, and the 16 and 24 px entries
+  of `icon.ico`). In-app `OctoMark` draws the same geometry at every size too.
 
 Inline React marks render with `currentColor`, so every call site owns the
 contrast choice. The normal responsive treatment is
@@ -138,11 +136,11 @@ expressions belong only to Cub, the landing hero's character, who has no blush.
 | Google Play developer profile artwork | Crew tile: brand-paper body, dark crew set, brand-ink tile |
 | GitHub App and OAuth App badges | One ink, reverse; transparent brand-paper Octo over GitHub's brand-ink circular badge background. GitHub draws the badge down to 20 px, so it never takes crew |
 | PWA regular and maskable icons | Crew tile: brand-paper body, dark crew set, brand-ink tile. The maskable icons draw the mark at `0.78` instead of `0.85`, so every node, the outer pink and violet included, stays inside the W3C safe zone (a centered circle with a radius of 40% of the icon) |
-| Desktop app | Crew tile on a rounded brand-ink tile, each size drawn at its own size: one ink under 48 device px of tile and crew from 48 px. macOS uses `icon.icns`, on the macOS icon grid: the tile is the 824 px body of a 1024 px canvas with Apple's continuous corners and fully transparent margins, rounded per slot as Apple's own icons are (16 → 12, 32 → 26, 64 → 52, 128 → 102, 256 → 206, 512 → 412, 1024 → 824), so it is the same size as its neighbours in the Dock and Finder; the 16 pt slots carry the small cut in their 12 and 26 px bodies, the 32 pt slot (a 26 px body) the one-ink main cut. Windows uses `icon.ico` and Linux the 1024 px `icon.png`, both full-bleed rounded tiles (radius 22%) with transparent outer corners; the `.ico` takes the small cut in its 16 and 24 px entries and the main cut from 32 px |
+| Desktop app | Crew tile on a rounded brand-ink tile, each size drawn at its own size: one ink under 48 device px of tile and crew from 48 px. macOS uses `icon.icns`, on the macOS icon grid: the tile is the 824 px body of a 1024 px canvas with Apple's continuous corners and fully transparent margins, rounded per slot as Apple's own icons are (16 → 12, 32 → 26, 64 → 52, 128 → 102, 256 → 206, 512 → 412, 1024 → 824), so it is the same size as its neighbours in the Dock and Finder; the 16 pt slots draw the one-ink mark full-bleed in their 12 and 26 px bodies, the 32 pt slot (a 26 px body) the one-ink mark at 0.85. Windows uses `icon.ico` and Linux the 1024 px `icon.png`, both full-bleed rounded tiles (radius 22%) with transparent outer corners; the `.ico` draws the mark full-bleed in its 16 and 24 px entries and at 0.85 from 32 px |
 | Native splash, light (iOS launch screen, Android splash) | Crew, positive: brand-ink body with the light crew set on brand paper |
 | Native splash, dark | Crew, reverse: a white body with the dark crew set on the dark canvas (`#141414`), the same size and placement as the positive splash. iOS registers it as the Splash image set's dark appearance (`splash-dark-2732x2732*.png`); Android ships it under the night qualifier (`drawable-night` and `drawable-{land,port}-night-<density>`, since orientation outranks night mode). The Android launch theme (`values/styles.xml`, `values-night/styles.xml`) paints the Android 12+ system splash and both system bars with the generated ground (`splash_background`: brand paper, or the dark canvas under night) and sets dark bar icons on paper, light ones on the dark canvas |
-| Adaptive SVG favicon (`icon.svg`) | Small cut, one ink, full-bleed: brand ink, or brand paper under a dark OS color-scheme preference |
-| Fixed ICO/PNG favicon fallback | One ink, reverse on a brand-ink tile. `favicon.ico` 16 and 32 px and `icon-32.png` use the small cut full-bleed; the 48 px ICO entry uses the main cut at 0.85. The page offers only `icon.svg`, `favicon.ico` and `icon-32.png` as `rel="icon"`, never a crew tile |
+| Adaptive SVG favicon (`icon.svg`) | The logo, one ink, full-bleed: brand ink, or brand paper under a dark OS color-scheme preference |
+| Fixed ICO/PNG favicon fallback | One ink, reverse on a brand-ink tile. `favicon.ico` 16 and 32 px and `icon-32.png` draw the logo full-bleed; the 48 px ICO entry draws it at 0.85. The page offers only `icon.svg`, `favicon.ico` and `icon-32.png` as `rel="icon"`, never a crew tile |
 | Android 13+ themed icon | A dedicated one-ink layer (`ic_launcher_monochrome`), with the foreground's silhouette but never its crew colors; Android recolors it with the user/system palette |
 | Social/OG card | The landing hero, cropped: a `crew` header lockup on flat marketing paper, the dot grid, the headline and sub copy, and the window's ledge with Cub on its corner looking at his crew ink; generated (see [Source of truth and generated assets](#source-of-truth-and-generated-assets)) |
 
@@ -471,24 +469,29 @@ its center, past the W3C maskable safe circle (40%), so the maskable PWA icons
 use `maskableScale` (`0.78`, about 38.6%). Android adaptive foregrounds already
 stay inside their 66 dp safe circle at `0.85`.
 
-Marks shown at 24 CSS px (or points) and below use the small cut
-(`packages/frontend/src/assets/octo-mark-small.geometry.json`): a pixel-fitted
-drawing of the same mark, with the same lean, in which 4 units are 1 px at
-16 px, so the nodes are 2 × 2 px on grid corners with a clear pixel between each
-arm tip and its node. The 16 px rasters draw each node as that solid 2 × 2 px
-cell rather than an antialiased disc. It is drawn full-bleed (it already keeps
-a 4-unit margin), not at the `0.85` distribution scale. It is the only
-sanctioned redraw: never draw the main cut at 24 CSS px or below where the
-small cut ships, never show the small cut above 24 CSS px, and never squeeze or
-simplify the mark by hand.
+One logo is used at every size. Marks shown at 24 CSS px (or points) and below
+draw the same canonical geometry full-bleed instead of at the `0.85`
+distribution scale: the mark's own ink box (the nodes at left, right and bottom,
+the dome at top) is scaled to 56 of the 64 units, its height, and centered,
+which leaves a 4-unit margin and keeps the lean, the proportions and the nodes
+as they are. Full-bleed marks are always one ink: at these sizes they are
+below every crew threshold. Never redraw, squeeze or simplify the mark for a
+small size. A pixel-fitted small cut once shipped here and drifted from the
+logo (a taller head with flared shoulders, longer and wider-spread legs, bigger
+dots further apart), so the owner retired it for the logo itself. On
+high-density screens, where a 16 px icon is drawn at 32 device px, the logo
+reads clearly. At 16 device px (1x tabs, the 16 px `.ico` entries and the
+16 pt@1x macOS slot) its legs are under a pixel wide and the nodes soften into
+the arm tips; that is the accepted cost of one logo.
 
-The threshold is in CSS px or points, not device pixels. A raster takes the
-small cut only when it is 32 device px or less and is shown at 24 CSS px or
-less: the 32 px favicon rasters (`favicon.ico`'s 32 px entry and `icon-32.png`)
-and the macOS 16 pt@2x slot are the 2x rendering of a 16 CSS px or 16 pt icon.
-A raster that can be shown at its own size above 24 px keeps the main cut: the
-32 px entry of the desktop `icon.ico` and the 32 pt macOS slot. The iOS 20 pt@2x
-slot also keeps the main cut, because iOS masks it like every other iOS size.
+The threshold is in CSS px or points, not device pixels. A raster draws the
+mark full-bleed only when it is 32 device px or less and is shown at 24 CSS px
+or less: the 32 px favicon rasters (`favicon.ico`'s 32 px entry and
+`icon-32.png`) and the macOS 16 pt@2x slot are the 2x rendering of a 16 CSS px
+or 16 pt icon. A raster that can be shown at its own size above 24 px keeps the
+distribution scale: the 32 px entry of the desktop `icon.ico` and the 32 pt
+macOS slot. The iOS 20 pt@2x slot also keeps the distribution scale, because
+iOS masks it like every other iOS size.
 
 For a standalone inline mark, leave at least one detached-node diameter of
 clear space around the visible artwork. When paired with the product name, use
@@ -500,10 +503,9 @@ geometry.
 ## Source of truth and generated assets
 
 The canonical Octo geometry is
-`packages/frontend/src/assets/octo-mark.geometry.json`; its small cut is
-`packages/frontend/src/assets/octo-mark-small.geometry.json` (the same schema,
-one body path and the four nodes, no transform). Distribution color, scale,
-the maskable scale (`maskableScale`), the crew colors (`colors.crew.light` and
+`packages/frontend/src/assets/octo-mark.geometry.json`, the only logo source
+for every size. Distribution color, scale, the maskable scale
+(`maskableScale`), the crew colors (`colors.crew.light` and
 `colors.crew.dark`, slots 1 to 4 left to right), the crew tile threshold
 (`crewTileMinPx`) and the cache revision live in `scripts/app-icon-brand.json`. `OctoMark.tsx`, the icon generator, and the
 checker consume those sources. The generator ranks the nodes into crew slots
@@ -517,13 +519,18 @@ sizes, alpha and optical bounds (measured over the body ink and the node
 colors together, since the nodes are the mark's outer extremes), it samples
 every crew asset's four node centers for their slot colors in order, rejects
 any stray hue, proves the one-ink assets (favicons, the GitHub badge, the
-Android themed layer, the iOS 20 pt@2x slot) carry no crew color, tells the
-small cut from the main cut in every favicon entry, requires solid pixel nodes
-in the 16 px favicon and `.ico` entries, and requires the crew colors in
+Android themed layer, the iOS 20 pt@2x slot) carry no crew color, requires
+`icon.svg` to draw the canonical geometry at the full-bleed fit it derives from
+that geometry's own ink box, tells full-bleed from the distribution scale by
+the ink box in every favicon entry, requires every node of each full-bleed
+raster to read as ink (its center pixel at least half ink) and the raster
+itself to match a reference rendering of the canonical geometry per pixel, within a
+tolerance (which a redraw of nearly the same ink box, or a mark one pixel off
+center, fails), and requires the crew colors in
 `packages/frontend/src/styles/tailwind.css` (`--crew-1` … `--crew-4` and the
 `.dark` lift) to equal the icon config. It decodes every representation of the
 desktop `icon.icns` (PNG and ARGB) and `icon.ico` (DIB and PNG) and applies the
-same size, cut and color rules to each, on the body of the macOS grid for every
+same size, fit and color rules to each, on the body of the macOS grid for every
 `.icns` slot, whose margins must be fully transparent; keeps the maskable icons
 and Android adaptive foregrounds inside their circular safe zones; pins the iOS
 AppIcon catalog's six entries (two slots, each in the any, Dark and Tinted

@@ -347,37 +347,48 @@ export function createOneInkTargets({ navy, white, canvasDark }) {
 }
 
 /**
- * The ink box of the mark on a square tile of `side` device px. The main cut
- * at the 0.85 distribution scale measures 667.6 x 705.3 px at 1024; the small
- * cut is drawn full-bleed and fills 56 of 64 units both ways.
+ * The mark's ink box at the 0.85 distribution scale: 667.6 x 705.3 px on a
+ * 1024 px tile (the main cut's ink box is 49.09 x 51.86 units).
  */
-export function expectedTileInk(side, cut) {
+const DISTRIBUTION_INK = { width: 667.6 / 1024, height: 705.3 / 1024 };
+/**
+ * The same mark drawn full-bleed: its height spans 56 of 64 units (a 4-unit
+ * margin, FULL_BLEED_MARGIN) and its width keeps the mark's own proportions.
+ */
+const FULL_BLEED_INK = {
+  width: (56 / 64) * (DISTRIBUTION_INK.width / DISTRIBUTION_INK.height),
+  height: 56 / 64,
+};
+
+/**
+ * The ink box of the mark on a square tile of `side` device px, at the
+ * distribution scale ("distribution") or full-bleed ("full-bleed").
+ */
+export function expectedTileInk(side, fit) {
   const tolerance = Math.max(1, Math.round(side / 256));
-  if (cut === "small") {
-    return { width: (56 / 64) * side, height: (56 / 64) * side, tolerance };
-  }
-  return { width: (667.6 / 1024) * side, height: (705.3 / 1024) * side, tolerance };
+  const ink = fit === "full-bleed" ? FULL_BLEED_INK : DISTRIBUTION_INK;
+  return { width: ink.width * side, height: ink.height * side, tolerance };
 }
 
 /**
- * favicon.ico is a monochrome context: every entry is one ink. The 16 and 32
- * entries serve a 16 CSS px tab at 1x and 2x, so they carry the small cut
- * full-bleed (56 of 64 units), the 16 px one with solid 2 x 2 px nodes; the 48
- * entry keeps the main cut at the distribution scale.
+ * favicon.ico is a monochrome context: every entry is one ink and draws the
+ * main cut. The 16 and 32 entries serve a 16 CSS px tab at 1x and 2x, so they
+ * draw it full-bleed (56 of 64 units tall); the 48 entry keeps the
+ * distribution scale.
  */
 export const FAVICON_ENTRY_CONTRACTS = [
-  { size: 16, cut: "small", pixelNodes: true, expectedInk: { width: 14, height: 14, tolerance: 1 } },
-  { size: 32, cut: "small", expectedInk: { width: 28, height: 28, tolerance: 1 } },
-  { size: 48, cut: "main", expectedInk: { width: 32, height: 33, tolerance: 2 } },
+  { size: 16, fit: "full-bleed", expectedInk: { ...expectedTileInk(16, "full-bleed"), tolerance: 1 } },
+  { size: 32, fit: "full-bleed", expectedInk: { ...expectedTileInk(32, "full-bleed"), tolerance: 1 } },
+  { size: 48, fit: "distribution", expectedInk: { width: 32, height: 33, tolerance: 2 } },
 ];
 
 /**
  * The desktop icons. electron-builder uses icon.icns for macOS and icon.ico
  * for Windows as they are, and derives the Linux sizes from icon.png. Every
- * representation is drawn at its own size: under the crew threshold it is one
- * ink, and the 16 pt macOS slots and the 16/24 px Windows entries take the
- * small cut (16 px with solid pixel nodes). Windows gets classic DIB entries
- * under 256 px and one PNG-compressed 256 px entry.
+ * representation draws the main cut at its own size: under the crew threshold
+ * it is one ink, and the 16 pt macOS slots and the 16/24 px Windows entries
+ * draw it full-bleed. Windows gets classic DIB entries under 256 px and one
+ * PNG-compressed 256 px entry.
  */
 export const DESKTOP_ICON_PNG_PATH = "packages/desktop-app/assets/icon.png";
 export const DESKTOP_ICNS_PATH = "packages/desktop-app/assets/icon.icns";
@@ -400,39 +411,38 @@ export function macGridBody(side) {
 
 /**
  * Every icon.icns representation sits on the macOS grid (`grid: true`): the
- * rounded brand-ink body with transparent margins. Crew and cut are judged on
+ * rounded brand-ink body with transparent margins. Crew and fit are judged on
  * the body's device px, so the 32 pt slot (a 26 px body) stays one ink; the
- * 16 pt slots keep the small cut, drawn into 12 and 26 px bodies, where its
- * nodes can no longer be whole 2 x 2 px cells.
+ * 16 pt slots draw the mark full-bleed into their 12 and 26 px bodies.
  */
 export const DESKTOP_ICNS_CONTRACTS = [
-  { type: "ic04", side: 16, cut: "small", crew: false },
-  { type: "ic11", side: 32, cut: "small", crew: false },
-  { type: "ic05", side: 32, cut: "main", crew: false },
-  { type: "ic12", side: 64, cut: "main", crew: true },
-  { type: "ic07", side: 128, cut: "main", crew: true },
-  { type: "ic13", side: 256, cut: "main", crew: true },
-  { type: "ic08", side: 256, cut: "main", crew: true },
-  { type: "ic14", side: 512, cut: "main", crew: true },
-  { type: "ic09", side: 512, cut: "main", crew: true },
-  { type: "ic10", side: 1024, cut: "main", crew: true },
+  { type: "ic04", side: 16, fit: "full-bleed", crew: false },
+  { type: "ic11", side: 32, fit: "full-bleed", crew: false },
+  { type: "ic05", side: 32, fit: "distribution", crew: false },
+  { type: "ic12", side: 64, fit: "distribution", crew: true },
+  { type: "ic07", side: 128, fit: "distribution", crew: true },
+  { type: "ic13", side: 256, fit: "distribution", crew: true },
+  { type: "ic08", side: 256, fit: "distribution", crew: true },
+  { type: "ic14", side: 512, fit: "distribution", crew: true },
+  { type: "ic09", side: 512, fit: "distribution", crew: true },
+  { type: "ic10", side: 1024, fit: "distribution", crew: true },
 ].map((contract) => ({ ...contract, grid: true }));
 export const DESKTOP_ICO_CONTRACTS = [
-  { side: 16, cut: "small", crew: false, format: "bmp" },
-  { side: 24, cut: "small", crew: false, format: "bmp" },
-  { side: 32, cut: "main", crew: false, format: "bmp" },
-  { side: 48, cut: "main", crew: true, format: "bmp" },
-  { side: 64, cut: "main", crew: true, format: "bmp" },
-  { side: 128, cut: "main", crew: true, format: "bmp" },
-  { side: 256, cut: "main", crew: true, format: "png" },
+  { side: 16, fit: "full-bleed", crew: false, format: "bmp" },
+  { side: 24, fit: "full-bleed", crew: false, format: "bmp" },
+  { side: 32, fit: "distribution", crew: false, format: "bmp" },
+  { side: 48, fit: "distribution", crew: true, format: "bmp" },
+  { side: 64, fit: "distribution", crew: true, format: "bmp" },
+  { side: 128, fit: "distribution", crew: true, format: "bmp" },
+  { side: 256, fit: "distribution", crew: true, format: "png" },
 ];
 
-/** The PNG favicon fallback matches favicon.ico's 32 px small-cut entry. */
+/** The PNG favicon fallback matches favicon.ico's 32 px full-bleed entry. */
 export const PNG_FAVICON_TARGET = {
   relativePath: "packages/frontend/public/icon-32.png",
   viewport: { x: 0, y: 0, width: 32, height: 32 },
-  expectedInk: { width: 28, height: 28, tolerance: 1 },
-  artworkLabel: "one-ink small-cut Octo",
+  expectedInk: { ...expectedTileInk(32, "full-bleed"), tolerance: 1 },
+  artworkLabel: "one-ink full-bleed Octo",
 };
 
 /** W3C maskable icons keep their content inside a centered circle of 40% radius. */
@@ -702,8 +712,8 @@ export function createRevisionedAssetContracts({ frontendIndex, manifest, servic
 }
 
 /**
- * The only files a page may offer as rel="icon": the adaptive small-cut SVG and
- * the one-ink favicon tiles. A crew tile (icon-192 and up) would be downscaled
+ * The only files a page may offer as rel="icon": the adaptive full-bleed SVG
+ * and the one-ink favicon tiles. A crew tile (icon-192 and up) would be downscaled
  * into a 16 px tab, where its nodes become specks.
  */
 export const FAVICON_LINK_PATHS = ["/icon.svg", "/favicon.ico", "/icon-32.png"];
@@ -756,4 +766,7 @@ export const STALE_ASSET_PATHS = [
   "packages/frontend/android/app/src/main/res/drawable-v24/ic_launcher_foreground.xml",
   "packages/frontend/android/app/src/main/res/drawable/ic_launcher_background.xml",
   "packages/frontend/src/assets/side-octo.png",
+  // The retired small cut, a redraw that drifted from the logo: one logo is
+  // drawn at every size.
+  "packages/frontend/src/assets/octo-mark-small.geometry.json",
 ];
