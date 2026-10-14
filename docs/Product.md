@@ -80,8 +80,9 @@ Stop targets the captured job IDs, never the whole conversation as a fallback. I
 shows a pending indicator, then a disabled Stop icon until updated job state arrives; accessible
 labels distinguish **Stopping…** and **Stop requested**. Controller acceptance
 is not a physical executor shutdown acknowledgment; failures and timeouts remain visible with a
-retry for the same jobs. The request preserves queued messages and suppresses the selected plan's
-follow-up when all remaining workers were stopped. A muted persisted notice identifies who asked
+retry for the same jobs. Separately queued messages are preserved and remain eligible for normal
+delivery; Stop does not pause the chat's queue. It suppresses the selected plan's follow-up when
+all remaining workers were stopped. A muted persisted notice identifies who asked
 the agent to stop. **Continue**, when the chat is idle and writable, sends a fresh targeted request
 to check existing work before proceeding; it does not replay the original turn or consume a draft.
 

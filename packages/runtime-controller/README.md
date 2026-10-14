@@ -66,7 +66,9 @@ Conversation Stop acknowledges committed controller cancellation, not executor s
 Runtimes observe lease loss on heartbeat or rejected output, then request local shutdown;
 an in-flight tool may take longer to exit, and completed side effects are not rolled back.
 Terminal jobs are safe no-ops. The endpoint never broadens its supplied job snapshot and
-does not automatically drain already queued user messages. If it selects every live worker
+does not trigger an immediate queue drain. Separately queued user messages are preserved
+and remain eligible for normal queue scheduling, including the recovery sweep; Stop does
+not pause the conversation's queue. If it selects every live worker
 of a plan group, the same transaction persists checkpoint suppression in its trusted
 `run_cancellation` notice; later completions and sweeps check that intent under the group's
 checkpoint lock. A lead checkpoint committed before Stop acquired that lock is separate

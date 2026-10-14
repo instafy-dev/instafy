@@ -1,5 +1,6 @@
 //! Human Stop cancels only the jobs visible in the caller's snapshot. It does
-//! not drain queued messages or turn a stopped plan into a new lead checkpoint.
+//! not trigger a queue drain or turn a stopped plan into a new lead checkpoint.
+//! Separately queued messages remain eligible for normal queue scheduling.
 use std::collections::BTreeSet;
 
 use axum::{
@@ -82,7 +83,8 @@ pub(crate) async fn stop_conversation_jobs(
         )
         .await;
     }
-    // Deliberately do not spawn_send_queue_drain or checkpoint canceled workers.
+    // Do not trigger a drain here; separately queued messages remain eligible
+    // for normal queue recovery. Do not checkpoint canceled workers.
     // This acknowledges the controller commit, not physical executor shutdown.
     Ok(Json(response))
 }
