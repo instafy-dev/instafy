@@ -183,6 +183,28 @@
   --avatar-coin-shadow: 0 0 #0000;
 }
 
+/* The opaque surface behind a thread spine. A masked notch (ThreadSpine with
+   maskLine) hides the straight stem behind its bend by painting this colour
+   over it, so it must equal what is actually underneath: the Studio working
+   surface and the landing demo's workspace are white in light and the dark
+   panel in dark. A container that paints a different background behind a
+   spine overrides this variable (as an opaque colour: composite any
+   translucent fill over its base with color-mix). */
+:root {
+  --thread-spine-surface: #ffffff;
+}
+
+.dark {
+  --thread-spine-surface: var(--color-studio-dark-panel);
+}
+
+/* Forced colours repaint every surface as Canvas. */
+@media (forced-colors: active) {
+  :root {
+    --thread-spine-surface: Canvas;
+  }
+}
+
 /* Crew-coloured logo nodes (OctoMark colorway="crew" | "crew-hidpi"). Each
    node fills var(--octo-dot-N, currentColor), N counted left to right. */
 .octo-mark--crew {

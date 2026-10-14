@@ -15,7 +15,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 47,
+    minimumTests: 51,
     files: [
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
@@ -38,6 +38,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "settings-history-scroll.spec.ts",
       "segmented-control-responsive.spec.ts",
       "studio-history-controls.spec.ts",
+      "thread-spine-surface.spec.ts",
     ],
     titles: [
       "Skills import keeps its title and actions reachable across keyboard resize and rotation",
@@ -71,6 +72,10 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "segmented choices retain 44px targets on 1280px touch screens",
       "notification settings keep current-channel controls compact and independent on phone",
       "notification settings keep current-channel controls compact and independent on desktop",
+      "thread spine notches erase to the surface behind them in light at 390px",
+      "thread spine notches erase to the surface behind them in light at 1280px",
+      "thread spine notches erase to the surface behind them in dark at 390px",
+      "thread spine notches erase to the surface behind them in dark at 1280px",
     ],
   },
   "shared-studio": {
