@@ -7,6 +7,7 @@ pnpm exec vite --config tests/fixtures/run-stop-control/vite.config.ts --host 12
 ```
 
 Open `http://127.0.0.1:5208/tests/fixtures/run-stop-control/index.html`.
+Append `?navigation=compact` to inspect the rounder compact navigation composer.
 
 The playground mounts the production composer, Lexical editor, Stop hook/control,
 typing status, thread rail, command surface, menus, dialogs and styles. Scenario controls supply synthetic jobs

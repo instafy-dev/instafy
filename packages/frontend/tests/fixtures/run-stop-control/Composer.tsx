@@ -41,7 +41,8 @@ export function Composer({ controller, readOnly, recording }: { controller: Chat
           onKeyDown: event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } } }}
         imageInputRef={image} onImageInputChange={noop} imageAttachments={[]} onOpenImage={noop} onRemoveImageAttachment={noop}
         showVoiceStatus={recording} voiceStatusMessage={recording ? "Recording…" : ""} providerTriggerNoticeProps={null}
-        showComposerNavigationButton={false} onOpenNavigation={noop} homeAttentionCount={0} homeAttentionBadge=""
+        showComposerNavigationButton={new URLSearchParams(location.search).get("navigation") === "compact"}
+        composerNavigationDestination="chats" onOpenNavigation={noop} homeAttentionCount={0} homeAttentionBadge=""
         composerActionMenuProps={{ pendingNewBrowser: false, onOpenBrowser: noop, onOpenNewBrowser: noop,
           onOpenInvite: noop, onImportGithubRepo: noop, onInsertCommand: value => { setDraft(value); setEditorState(null); },
           showBrowserAction: false, showNewBrowserAction: false, showInviteAction: false }}

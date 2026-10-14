@@ -8,6 +8,7 @@ import type {
   RefObject,
 } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import "./ChatComposerSurface.css";
 import {
   Archery,
   Bookmark,
@@ -273,8 +274,8 @@ export function ChatComposerSurface({
   sendButtonVariant,
   primaryActionMode = "send",
   onSendButtonPress,
-  composerGhostActionClass,
-  composerPrimaryActionClass,
+  composerGhostActionClass: ghostActionClass,
+  composerPrimaryActionClass: primaryActionClass,
   composerActionIconClass,
   inviteModalProps,
   mutationDisabled = false,
@@ -283,6 +284,8 @@ export function ChatComposerSurface({
   silenceHintProps = null,
   composerRunStopController = null,
 }: ChatComposerSurfaceProps) {
+  const composerGhostActionClass = `chat-composer-action ${ghostActionClass}`;
+  const composerPrimaryActionClass = `chat-composer-action ${primaryActionClass}`;
   const [draftExpanded, setDraftExpanded] = useState(false);
   useEffect(() => setDraftExpanded(false), [chatInputProps.draftKey]);
   // Dialogs and menus keep precedence over this in-pane layout change.
@@ -981,6 +984,7 @@ export function ChatComposerSurface({
           size="md"
           radius="xl"
           className={[
+            "chat-composer-action",
             sendButtonVariant === "primary"
               ? composerPrimaryActionClass
               : COMPOSER_SEND_REST_CLASS,
@@ -1366,12 +1370,13 @@ export function ChatComposerSurface({
             {viewNavigation}
             <Surface
               tone="default"
-              radius={compactNavigationLayout ? "none" : "3xl"}
+              radius="none"
               shadow="none"
               // The composer keeps the raised-control background but borrows the
               // panel border tier: raised-control (13%) is meant for small
               // controls, and reads too hard along a full-width composer edge.
-              className={`${compactNavigationLayout ? "rounded-[1.75rem] " : ""}flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS} ${draftExpanded ? "min-h-0 flex-1" : ""}`}
+              className={`chat-composer-surface flex flex-col overflow-hidden border-slate-200/70 bg-slate-50 p-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS} ${draftExpanded ? "min-h-0 flex-1" : ""}`}
+              data-compact-navigation={compactNavigationLayout ? "true" : undefined}
               data-testid="chat-composer-surface"
             >
               {draftExpanded ? (
