@@ -916,12 +916,8 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
                 "workingStateError",
             ],
         ),
-        // A pool-retirement drain's own actions and the generation it woke
-        // to flush a checkout (which the credit sweep never bills): ids,
-        // statuses and counts only.
-        "pool_retirement_flush_wake" => {
-            copy_runtime_event_fields(&data, &["phase", "runtimeLeaseId"])
-        }
+        // A pool-retirement drain's own actions: ids, statuses and counts
+        // only.
         "pool_retirement_drain" => copy_runtime_event_fields(
             &data,
             &[
@@ -931,7 +927,6 @@ pub(crate) fn sanitize_runtime_event_data(kind: &str, data: JsonValue) -> JsonVa
                 "skipReason",
                 "flushStatus",
                 "unpushedRefs",
-                "checkoutKnown",
             ],
         ),
         // Tenant metadata can describe another project. The event kind itself
@@ -1126,5 +1121,41 @@ mod runtime_event_tests {
                 "workingStateError": "push_ambiguous"
             })
         );
+    }
+
+    /// A drain event keeps the fields the drain's stop writes and nothing
+    /// else; the drain writes no other kind, so a former one keeps nothing.
+    #[test]
+    fn pool_retirement_drain_runtime_event_keeps_only_the_drain_fields() {
+        let drained = sanitize_runtime_event_data(
+            "pool_retirement_drain",
+            json!({
+                "action": "pool_retirement_drain",
+                "runtimeLeaseId": "lease-safe",
+                "statusChanged": false,
+                "skipReason": "runtime_lease_mismatch",
+                "flushStatus": "skipped",
+                "unpushedRefs": 0,
+                "checkoutKnown": true,
+                "unpushedRefNames": ["20261010T080000Z-unsaved-abc"],
+            }),
+        );
+        assert_eq!(
+            drained,
+            json!({
+                "action": "pool_retirement_drain",
+                "runtimeLeaseId": "lease-safe",
+                "statusChanged": false,
+                "skipReason": "runtime_lease_mismatch",
+                "flushStatus": "skipped",
+                "unpushedRefs": 0
+            })
+        );
+
+        let former = sanitize_runtime_event_data(
+            "pool_retirement_flush_wake",
+            json!({ "phase": "started", "runtimeLeaseId": "lease-safe" }),
+        );
+        assert_eq!(former, json!({}));
     }
 }

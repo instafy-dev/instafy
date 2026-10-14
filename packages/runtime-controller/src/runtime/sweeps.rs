@@ -1541,27 +1541,7 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
                  replace(lower(r.provider), '-', '_') = 'instafy_cloud'
                  or replace(lower(r.provider), '-', '_') like 'instafy\\_cloud\\_%'
                )
-               and r.status not in ('stopped','offline','removed')
-               -- A generation an earlier pool-retirement drain started only
-               -- to flush its checkout ran no turn and is never billed: that
-               -- drain marked it `starting` before its launch and `started`
-               -- with its lease once it existed. No drain wakes a runtime any
-               -- more; this stays while such marks are inside the event
-               -- retention.
-               and not exists (
-                 select 1
-                 from runtime_events wake
-                 where wake.runtime_id = r.id
-                   and wake.kind = 'pool_retirement_flush_wake'
-                   and (
-                     wake.data ->> 'runtimeLeaseId' = r.active_lease_id::text
-                     or (
-                       wake.data ->> 'phase' = 'starting'
-                       and wake.created_at > now() - interval '3 minutes'
-                       and rl.requested_at >= wake.created_at
-                     )
-                   )
-               )",
+               and r.status not in ('stopped','offline','removed')",
             &[],
         )
         .await
