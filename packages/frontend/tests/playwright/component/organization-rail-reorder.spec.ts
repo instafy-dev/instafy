@@ -230,6 +230,9 @@ test.describe("touch", () => {
       await expect(page.getByTestId("rail-selected")).toHaveText("two");
       await expect(page.getByTestId("rail-selection-count")).toHaveText("0");
       expect(await fixedControls(page)).toEqual(controls);
+      // dnd-kit's pointer sensor retains its capture-click blocker for 50ms
+      // after drag end. Let it detach before testing a separate user tap.
+      await page.waitForTimeout(100);
       await page.getByTestId("sidebar-team-one").tap();
       await expect(page.getByTestId("rail-selected")).toHaveText("one");
       await expect(page.getByTestId("rail-selection-count")).toHaveText("1");

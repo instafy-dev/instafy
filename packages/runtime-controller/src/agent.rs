@@ -788,19 +788,29 @@ pub(crate) async fn agent_lease(
             .set(runtime_id, resources)
             .await;
     }
+    // One checkout serves the whole poll: the preference check below, the
+    // idle check and, when there may be work, the leasing transaction.
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
     let mut allow_untargeted_jobs = true;
     if let Some(preference) = state.runtime_preferences.get(&project_id).await {
         if let Some(preferred_runtime_id) = preference.runtime_id {
-            let preference_is_project_shareable =
-                workspace::fetch_runtime_candidate(&state.pool, &project_id, &preferred_runtime_id)
-                    .await?
-                    .is_some_and(|candidate| {
-                        !runtime::runtime_is_private_self_hosted(
-                            &state,
-                            &candidate.provider,
-                            &candidate.capabilities,
-                        )
-                    });
+            let preference_is_project_shareable = workspace::fetch_runtime_candidate_with_client(
+                &*connection,
+                &project_id,
+                &preferred_runtime_id,
+            )
+            .await?
+            .is_some_and(|candidate| {
+                !runtime::runtime_is_private_self_hosted(
+                    &state,
+                    &candidate.provider,
+                    &candidate.capabilities,
+                )
+            });
             if preference_is_project_shareable && runtime_id != preferred_runtime_id {
                 publish_controller_event(
                     &state.events,
@@ -856,11 +866,19 @@ pub(crate) async fn agent_lease(
         max_jobs = 1;
     }
 
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    if idle_lease_poll_finds_no_work(
+        &state,
+        &connection,
+        &project_id,
+        &runtime_id,
+        token_lease_id,
+        token_runtime_generation,
+    )
+    .await
+    {
+        info!(project_id = %project_id, "agent lease returned no jobs");
+        return Ok(Json(AgentLeaseResponse { jobs: Vec::new() }));
+    }
     let transaction = connection
         .transaction()
         .await
@@ -1130,6 +1148,102 @@ struct LeasingRuntime {
     is_private_self_hosted: bool,
     /// The runtime downloads `attachment_downloads` before a turn.
     accepts_attachment_downloads: bool,
+}
+
+/// Whether one read shows that a lease poll can lease nothing and has nothing
+/// to write, so the route answers it without the leasing transaction.
+///
+/// The leasing transaction share-locks the runtime row (Postgres records that
+/// lock on the row itself), touches `last_seen_at` and runs the lease query:
+/// five statements on every poll, every two seconds per runtime, nearly all of
+/// them from runtimes with nothing to do. This read answers such a poll on its
+/// own when all of these hold:
+///
+/// - the runtime is registered for the project, its token matches its current
+///   generation and it may lease: [`ensure_runtime_can_lease`]'s checks, on the
+///   same columns;
+/// - its `last_seen_at` is younger than
+///   [`runtime::RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS`], so
+///   [`runtime::touch_runtime_last_seen`] would not write it;
+/// - no queued job of the project can be this runtime's. The lease query takes
+///   only the project's queued jobs, and of those only one that targets this
+///   runtime, targets none, or carries runtime routing metadata (a spread job
+///   may run on a runtime it does not target). This read counts every such
+///   job, whatever the lease query's other filters would say about it.
+///
+/// Anything else, a failed check or a failed read included, takes the leasing
+/// transaction. Every lease and every refusal therefore still happens under
+/// the row lock that orders it with a stop, and `last_seen_at` is written
+/// exactly when it was before.
+async fn idle_lease_poll_finds_no_work(
+    state: &AppState,
+    client: &tokio_postgres::Client,
+    project_id: &Uuid,
+    runtime_id: &Uuid,
+    token_lease_id: Option<Uuid>,
+    token_runtime_generation: Option<Uuid>,
+) -> bool {
+    let row = match client
+        .query_opt(
+            "select r.provider, r.status, r.capabilities, r.active_lease_id,
+                    r.last_seen_at is not null
+                      and r.last_seen_at >= now() - ($3::bigint * interval '1 second')
+                      as seen_recently,
+                    exists (
+                        select 1
+                        from agent_jobs aj
+                        where aj.project_id = r.project_id
+                          and aj.status = 'queued'
+                          and (
+                              aj.target_runtime_id is null
+                              or aj.target_runtime_id = r.id
+                              or aj.payload #> '{metadata,runtimeRouting}' is not null
+                              or aj.payload #> '{metadata,runtime_routing}' is not null
+                          )
+                    ) as has_queued_work
+             from runtimes r
+             where r.id = $1 and r.project_id = $2",
+            &[
+                runtime_id,
+                project_id,
+                &runtime::RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS,
+            ],
+        )
+        .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return false,
+        Err(error) => {
+            warn!(
+                ?error,
+                runtime_id = %runtime_id,
+                "idle lease check failed; leasing in a transaction"
+            );
+            return false;
+        }
+    };
+    let seen_recently = row.get::<_, Option<bool>>("seen_recently").unwrap_or(false);
+    let has_queued_work = row
+        .get::<_, Option<bool>>("has_queued_work")
+        .unwrap_or(true);
+    if !seen_recently || has_queued_work {
+        return false;
+    }
+    let provider: String = row.get("provider");
+    let status: String = row.get("status");
+    let capabilities: JsonValue = row.get("capabilities");
+    let active_lease_id: Option<Uuid> = row.get("active_lease_id");
+    let is_private_self_hosted =
+        runtime::runtime_is_private_self_hosted(state, &provider, &capabilities);
+    ensure_agent_token_runtime_binding_matches(
+        &capabilities,
+        token_lease_id,
+        active_lease_id,
+        token_runtime_generation,
+        is_private_self_hosted,
+    )
+    .is_ok()
+        && runtime_record_can_lease(&provider, &status, &capabilities, is_private_self_hosted)
 }
 
 /// Validate that the runtime may lease jobs, and return whether it is a

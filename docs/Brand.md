@@ -144,7 +144,7 @@ expressions belong only to Cub, the landing hero's character, who has no blush.
 | Adaptive SVG favicon (`icon.svg`) | Small cut, one ink, full-bleed: brand ink, or brand paper under a dark OS color-scheme preference |
 | Fixed ICO/PNG favicon fallback | One ink, reverse on a brand-ink tile. `favicon.ico` 16 and 32 px and `icon-32.png` use the small cut full-bleed; the 48 px ICO entry uses the main cut at 0.85. The page offers only `icon.svg`, `favicon.ico` and `icon-32.png` as `rel="icon"`, never a crew tile |
 | Android 13+ themed icon | A dedicated one-ink layer (`ic_launcher_monochrome`), with the foreground's silhouette but never its crew colors; Android recolors it with the user/system palette |
-| Social/OG card | Static positive composition on a light warm surface; known stale (see below) |
+| Social/OG card | The landing hero, cropped: a `crew` header lockup on flat marketing paper, the dot grid, the headline and sub copy, and the window's ledge with Cub on its corner looking at his crew ink; generated (see [Source of truth and generated assets](#source-of-truth-and-generated-assets)) |
 
 Generated tiles follow one size rule: a tile of at least 48 device px
 (`crewTileMinPx` in `scripts/app-icon-brand.json`, where the drawn mark is about
@@ -213,7 +213,12 @@ instead.
 
 The reverse native splash is generated with its positive twin and configured
 for both platforms, status and navigation bars included (see the splash rows
-above). Do not hand-edit the derived splash PNGs, the splash image set's
+above). On Android the dark launch also carries through to the first page
+paint: `MainActivity` paints the WebView with `splash_background` and, under a
+night system theme, hands the StatusBar plugin `ThemeProvider`'s dark bar
+(`#181818`, light icons) in place of the light pair in `capacitor.config.ts`,
+so no white bar or white WebView appears before `ThemeProvider` runs. Do not
+hand-edit the derived splash PNGs, the splash image set's
 `Contents.json` or the generated `splash_background.xml` colors; change the
 generator.
 
@@ -306,7 +311,10 @@ shown or logged. The still is captured from the landing itself
 (`packages/frontend/scripts/capture-cub-fallback.mjs`) and is regenerated with
 any change to his pose or perch; so is the layout his geometry tests run on
 (`packages/frontend/scripts/capture-cub-landing-layout.mjs`, whose `--check`
-fails when the page has drifted from it). Login shows no Cub. In a dev build of
+fails when the page has drifted from it), and so is the social card, which he
+also appears on (`pnpm generate:og-image`, under
+[Source of truth and generated assets](#source-of-truth-and-generated-assets)).
+Login shows no Cub. In a dev build of
 the frontend a small Cub button at the bottom left of the landing (`?cub-dev=1`
 opens it, `?cub-dev=0` hides it) switches theme, motion, eyes, the splash and
 click reaction, the logo's dots, a debug overlay, a scrubbed or still turn and
@@ -530,18 +538,55 @@ script and `ThemeProvider`, and to brand paper in the manifest, never brand
 ink; and treats any `<link>` whose `rel` includes `icon`, in any attribute
 order, as a favicon that must be one of the one-ink files.
 
-`packages/frontend/public/og-image.png` is the one current static social-card
-exception. It uses the positive mark and wordmark composition, is checked for
-its 1200×630 delivery shape, and should move into the generator if its artwork
-is redesigned. It is a known stale exception to the landing rules above: it
-still shows the retired tentacle artwork, an orange Octo pill and a blue
-headline line. Regenerating it (ideally with Cub) is an open owner follow-up;
-until then shared links show the old composition.
+`packages/frontend/public/og-image.png`, the social card every page shares,
+is generated too: `pnpm generate:og-image` (`scripts/generate-og-image.mjs`)
+renders `scripts/og-image/card.html` in headless Chromium at 1200×630 and
+writes it as an opaque RGB PNG (some unfurlers composite a transparent card on
+black). The card is the landing hero, cropped: marketing paper with a flat
+header band and the hero's dot grid below it; the header lockup in the `crew`
+colorway, drawn from the canonical geometry at 80 px with a 50 px `Instafy`
+wordmark, and `instafy.dev` in slate on the wordmark's baseline at the right;
+the all-ink headline and the sub copy, whose first glyphs share one optical
+left edge with the mark's leftmost node; and the studio window reduced to a
+plain white slab, its ledge, running off the bottom edge, with Cub on its
+corner and his crew ink on the ledge. The ink is the card's color: in a feed it
+is what catches the eye, so the window gives up its title and roster to leave
+it room. Cub is drawn by the shipping engine with the landing's theme, perch
+tuning and timeline, run live on the generator's paused fake clock: booped 7 s
+after he boots and shot 1.25 s later, when the four splats have landed in logo
+order and he looks at them with both eyes open. The splats are the engine's own
+(its keep-outs keep them off the lockup, the domain, the headline and the sub
+copy); none are drawn by hand. A 2 px warm hairline frames the card so it keeps
+an edge on white feeds.
+Its mark box is 80 px on the card, about 33 CSS px in a 500 px wide unfurl,
+which the high-density screens that show unfurls draw at 1.5 to 2 device pixels
+per CSS pixel: the `crew-hidpi` rule. Smaller previews (Slack and iMessage at
+300 to 360 px) take the box below 28 CSS px; the card keeps its crew dots there
+as an accepted exception, since it is one raster for every size. The square
+crops some chat apps take cut the lockup and Cub; every page asks for
+`summary_large_image`, so X keeps the full card.
+
+Fonts come from the pinned `@fontsource/inter` devDependency and the script is
+bundled from the frontend's sources, so nothing is fetched and two runs on one
+machine write identical bytes (a different Chromium build may move pixels).
+The generator also points every reference at the card's content-versioned URL
+(`/og-image.png?sha=<first 12 hex of its SHA-256>`) so unfurlers drop a cached
+older card: the two meta tags in `packages/frontend/index.html` and
+`SOCIAL_CARD_IMAGE` in `packages/frontend/src/utils/seo.ts`, which every page
+passes to `applyPageMeta`. `pnpm check:app-icons` checks the card's 1200×630
+RGB shape. The frontend unit suite (`src/utils/__tests__/socialCard.test.ts`,
+run on every pull request) checks that both meta tags and `SOCIAL_CARD_IMAGE`
+match the committed file and that no other frontend source (`src/` and
+`hosted/`) spells the path. The headline and sub copy in
+`scripts/og-image/card.html` repeat `LandingHero.tsx`. Regenerate the card with any change to
+the mark, the crew colors, the hero copy, or Cub's drawing or perch; its new
+digest needs the public boundary policy's approval like every binary asset.
 
 After changing geometry, color treatment, or distribution scale, run:
 
 ```sh
 pnpm generate:app-icons
+pnpm generate:og-image
 pnpm check:app-icons
 ```
 

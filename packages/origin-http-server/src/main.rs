@@ -1,4 +1,5 @@
 use std::env;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
@@ -14,6 +15,11 @@ use origin_http_server::config::{
 use origin_http_server::hosted::HostedGatewayConfig;
 use origin_http_server::server::OriginHttpServer;
 
+// Returning from `main` drops the runtime, which waits for blocking work
+// still running: a mirror fetch, a cache sweep, or the git command of a
+// request the stop no longer waits for. That is deliberate. Such work is
+// not cut short, and the supervisor's stop timeout bounds the wait, as
+// `docker stop` does at ten seconds.
 #[tokio::main]
 async fn main() {
     if let Err(error) = real_main().await {
@@ -25,6 +31,7 @@ async fn main() {
 async fn real_main() -> Result<()> {
     init_tracing()?;
     let config = load_config()?;
+    let stop = stop_signal()?;
     let mut server = if config.multi_tenant {
         let hosted = HostedGatewayConfig::from_cache_max_bytes(
             read_env("ORIGIN_CACHE_MAX_BYTES").as_deref(),
@@ -42,13 +49,39 @@ async fn real_main() -> Result<()> {
         "origin HTTP server listening"
     );
 
-    tokio::signal::ctrl_c()
-        .await
-        .context("failed to install ctrl-c handler")?;
-
-    info!("origin HTTP server shutting down");
+    let signal = stop.await;
+    info!(signal, "origin HTTP server shutting down");
     server.stop_flushing_workspace().await?;
     Ok(())
+}
+
+/// Resolves on SIGTERM, which `docker stop` and most supervisors send, or
+/// on SIGINT (Ctrl-C), naming the one that came. Both handlers are in place
+/// when this returns, so a stop sent while the server starts still counts.
+#[cfg(unix)]
+fn stop_signal() -> Result<impl Future<Output = &'static str>> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate =
+        signal(SignalKind::terminate()).context("failed to install the SIGTERM handler")?;
+    let mut interrupt =
+        signal(SignalKind::interrupt()).context("failed to install the SIGINT handler")?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        }
+    })
+}
+
+#[cfg(windows)]
+fn stop_signal() -> Result<impl Future<Output = &'static str>> {
+    let mut ctrl_c =
+        tokio::signal::windows::ctrl_c().context("failed to install the Ctrl-C handler")?;
+    Ok(async move {
+        ctrl_c.recv().await;
+        "Ctrl-C"
+    })
 }
 
 fn init_tracing() -> Result<()> {

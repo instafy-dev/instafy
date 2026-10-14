@@ -34,6 +34,7 @@ pub(crate) use access::{
 pub(crate) use db::{
     ensure_runtime_record, mark_runtime_ready, record_runtime_event,
     record_runtime_event_with_conversation, touch_runtime_last_seen, RuntimeRecord,
+    RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS,
 };
 pub(crate) use drain::RuntimeDrainState;
 pub(crate) use ensure::{

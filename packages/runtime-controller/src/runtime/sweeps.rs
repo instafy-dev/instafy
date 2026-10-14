@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::background_loops::TickConnection;
 use crate::bug_reports::{record_system_bug_report, SystemBugReportInput};
 use crate::credits::{process_credit_burn, ManagedAiRefundOutcome};
 use crate::provider_identifiers::provider_id_key;
@@ -141,11 +142,23 @@ pub(crate) fn reset_hosted_runtime_credit_sweep_pool_pressure(
     *transient_failure_started_at = None;
 }
 
+/// One tick of the idle sweep. Its steps run in this order, and the first
+/// that fails ends the tick; the next tick runs every step again.
+///
+/// The lease releases for the projects the in-memory activity tracker found
+/// idle run first, each on connections of its own, before the tick checks
+/// anything out, so such a project adds only its release's own checkouts.
+/// The steps after them run their queries on one pool connection
+/// ([`TickConnection`]), so a tick with nothing to do takes one checkout. A
+/// step that finds work gives the connection back before any action that
+/// takes its own (a stop, a publish that reads the run), and the next step's
+/// query checks out again; what a step does on the tick's connection alone
+/// (the drain recovery's update, the expiry transactions) needs no release.
+/// The tick never holds its connection while an action waits for another, so
+/// it never holds more connections than its steps did when each took its
+/// own, and a pool of one still works.
 pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
-    resume_expired_runtime_drains(state).await?;
-    let candidates = state.runtime_activity.idle_candidates().await;
-
-    for (project_id, entry) in candidates {
+    for (project_id, entry) in state.runtime_activity.idle_candidates().await {
         let released = release_leases_for_project(
             state,
             &project_id,
@@ -164,25 +177,24 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
         }
     }
 
-    auto_stop_orphan_requested_runtimes(state).await?;
-    auto_stop_stuck_requested_runtimes(state).await?;
-    auto_stop_stale_runtimes(state).await?;
-    auto_stop_idle_hosted_runtimes(state).await?;
-    expire_stale_requeued_jobs(state).await?;
-    auto_recover_stuck_queued_runtimes(state).await?;
-    cleanup_terminal_runtime_records(state).await?;
-    fail_platform_jobs_stranded_on_private_runtimes(state).await?;
+    let mut tick = TickConnection::new(&state.pool);
+    resume_expired_runtime_drains(&mut tick).await?;
+    auto_stop_orphan_requested_runtimes(state, &mut tick).await?;
+    auto_stop_stuck_requested_runtimes(state, &mut tick).await?;
+    auto_stop_stale_runtimes(state, &mut tick).await?;
+    auto_stop_idle_hosted_runtimes(state, &mut tick).await?;
+    expire_stale_requeued_jobs(state, &mut tick).await?;
+    auto_recover_stuck_queued_runtimes(state, &mut tick).await?;
+    cleanup_terminal_runtime_records(state, &mut tick).await?;
+    fail_platform_jobs_stranded_on_private_runtimes(state, &mut tick).await?;
 
     Ok(())
 }
 
-pub(super) async fn resume_expired_runtime_drains(state: &AppState) -> AnyResult<()> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for expired runtime drain recovery")?;
-    let resumed = connection
+pub(super) async fn resume_expired_runtime_drains(tick: &mut TickConnection<'_>) -> AnyResult<()> {
+    let resumed = tick
+        .client("failed to acquire connection for expired runtime drain recovery")
+        .await?
         .execute(
             "update runtimes
              set status = 'ready', drain_expires_at = null, updated_at = now()
@@ -794,17 +806,19 @@ fn platform_job_has_only_private_runners(state: &AppState, row: &tokio_postgres:
 ///
 /// A job queued less than [`STRANDED_PLATFORM_JOB_GRACE_SECONDS`] ago is left
 /// to a later sweep, in case its dispatch is about to unpin it.
-async fn fail_platform_jobs_stranded_on_private_runtimes(state: &AppState) -> AnyResult<usize> {
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for stranded platform job expiry")?;
-    let stranded = load_platform_jobs_stranded_on_private_runtimes(state, &connection).await?;
-    let Some(failed) = fail_stranded_platform_jobs(&mut connection, &stranded).await? else {
+async fn fail_platform_jobs_stranded_on_private_runtimes(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<usize> {
+    let connection = tick
+        .client("failed to acquire connection for stranded platform job expiry")
+        .await?;
+    let stranded = load_platform_jobs_stranded_on_private_runtimes(state, connection).await?;
+    let Some(failed) = fail_stranded_platform_jobs(connection, &stranded).await? else {
         return Ok(0);
     };
-    drop(connection);
+    // Publishing reads runs and credits on connections of its own.
+    tick.release();
 
     for (project_id, job_id, _, _) in &failed.jobs {
         info!(
@@ -998,13 +1012,13 @@ async fn fail_stranded_platform_jobs(
 /// (`send_queue::spawn_send_queue_recovery_sweep`) sends a failed entry; its
 /// owner can send it now or remove it. A message queued after the Stop asks
 /// again and goes out as usual.
-pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
-    let mut connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for requeued job expiry")?;
-    let mut transaction = connection
+pub(crate) async fn expire_stale_requeued_jobs(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let mut transaction = tick
+        .client("failed to acquire connection for requeued job expiry")
+        .await?
         .transaction()
         .await
         .context("failed to start requeued job expiry transaction")?;
@@ -1130,7 +1144,8 @@ pub(crate) async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()
         .commit()
         .await
         .context("failed to commit requeued job expiry")?;
-    drop(connection);
+    // Publishing reads runs and credits on connections of its own.
+    tick.release();
 
     for row in &rows {
         let job_id: Uuid = row.get("id");
@@ -1268,17 +1283,18 @@ async fn count_recent_oom_events(state: &AppState, project_id: &Uuid) -> Option<
 /// and the daily refill lets it keep draining every day's allowance.
 /// The workspace mount survives; the runtime wakes via the existing
 /// auto-ensure on the next interaction.
-async fn auto_stop_idle_hosted_runtimes(state: &AppState) -> AnyResult<()> {
+async fn auto_stop_idle_hosted_runtimes(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
     let idle_stop_seconds = state.config.runtime_idle_stop_seconds;
     if idle_stop_seconds <= 0 {
         return Ok(());
     }
 
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for idle runtime sweep")?;
+    let connection = tick
+        .client("failed to acquire connection for idle runtime sweep")
+        .await?;
 
     // Every condition here is durable (DB) on purpose: the in-memory activity
     // tracker is refreshed by sweep bookkeeping and dies on restart, so it can
@@ -1328,9 +1344,6 @@ async fn auto_stop_idle_hosted_runtimes(state: &AppState) -> AnyResult<()> {
             return Err(error).context("failed to select idle runtimes");
         }
     };
-    // Safe stop acquires its own connection; release the candidate-query slot
-    // before entering the loop so DATABASE_POOL_SIZE=1 remains viable.
-    drop(connection);
 
     for row in rows {
         let runtime_id: Uuid = row.get("id");
@@ -1341,6 +1354,9 @@ async fn auto_stop_idle_hosted_runtimes(state: &AppState) -> AnyResult<()> {
         if !crate::provider_identifiers::is_instafy_cloud_provider_id(&provider) {
             continue;
         }
+        // Safe stop acquires its own connection; give the tick's back first
+        // so DATABASE_POOL_SIZE=1 remains viable.
+        tick.release();
 
         let stop_options = StopOptions {
             source: "idle_stop",
@@ -1600,6 +1616,24 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
                 continue;
             }
         };
+        // With the default ten-minute bucket, nine passes in ten land in a
+        // bucket an earlier pass already billed. The burn would find that
+        // ledger row and write nothing, after a transaction and three balance
+        // reads whose result this sweep does not use; one read of the same
+        // row skips all of it. A failed read leaves the decision to the burn.
+        match hosted_runtime_bucket_billed(&burn_connection, &org_id, &project_id, &idempotency_key)
+            .await
+        {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    runtime_id = %runtime_id,
+                    %error,
+                    "failed to check hosted runtime billing bucket"
+                );
+            }
+        }
         let transaction = match burn_connection.transaction().await {
             Ok(tx) => tx,
             Err(error) => {
@@ -1668,6 +1702,24 @@ pub(crate) async fn sweep_hosted_runtime_credit_usage(state: &AppState) -> AnyRe
     publish_credits_updated_for_orgs(state, burned_org_ids).await;
 
     Ok(())
+}
+
+/// Whether the ledger already holds the burn for `idempotency_key`: the row
+/// [`process_credit_burn`] looks for before it burns, and writes when it does.
+async fn hosted_runtime_bucket_billed(
+    client: &tokio_postgres::Client,
+    org_id: &Uuid,
+    project_id: &Uuid,
+    idempotency_key: &str,
+) -> AnyResult<bool> {
+    Ok(client
+        .query_opt(
+            "select 1 from org_credit_ledger where org_id = $1 and project_id = $2 and idempotency_key = $3 limit 1",
+            &[org_id, project_id, &idempotency_key],
+        )
+        .await
+        .context("failed to check hosted runtime billing bucket")?
+        .is_some())
 }
 
 /// One `credits.updated` per org after a sweep's writes have committed.
@@ -1756,19 +1808,20 @@ async fn stop_runtime_for_credit_exhaustion(state: &AppState, runtime_id: Uuid) 
     Ok(())
 }
 
-async fn auto_stop_stale_runtimes(state: &AppState) -> AnyResult<()> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for stale runtime sweep")?;
-
-    let rows = connection
+async fn auto_stop_stale_runtimes(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let rows = tick
+        .client("failed to acquire connection for stale runtime sweep")
+        .await?
         .query(AUTO_STOP_STALE_RUNTIMES_QUERY, &[])
         .await
         .context("failed to select stale runtimes")?;
-    // OOM inspection and safe stop both acquire their own pool slot.
-    drop(connection);
+    if !rows.is_empty() {
+        // OOM inspection and safe stop both acquire their own pool slot.
+        tick.release();
+    }
 
     for row in rows {
         let runtime_id: Uuid = row.get("id");
@@ -1888,14 +1941,13 @@ async fn auto_stop_stale_runtimes(state: &AppState) -> AnyResult<()> {
     Ok(())
 }
 
-async fn auto_recover_stuck_queued_runtimes(state: &AppState) -> AnyResult<()> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for stuck queued runtime recovery")?;
-
-    let rows = connection
+async fn auto_recover_stuck_queued_runtimes(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let rows = tick
+        .client("failed to acquire connection for stuck queued runtime recovery")
+        .await?
         .query(
             "select r.id as runtime_id,
                     r.provider,
@@ -1929,8 +1981,6 @@ async fn auto_recover_stuck_queued_runtimes(state: &AppState) -> AnyResult<()> {
         )
         .await
         .context("failed to select stuck queued runtime recovery candidates")?;
-    // Safe stop acquires its own connection; do not pin the query slot.
-    drop(connection);
 
     for row in rows {
         let runtime_id: Uuid = row.get("runtime_id");
@@ -1952,6 +2002,8 @@ async fn auto_recover_stuck_queued_runtimes(state: &AppState) -> AnyResult<()> {
         ) {
             continue;
         }
+        // Safe stop acquires its own connection; do not pin the query slot.
+        tick.release();
 
         let stop_options = StopOptions {
             source: "queued_stall_recovery",
@@ -2040,12 +2092,13 @@ async fn auto_recover_stuck_queued_runtimes(state: &AppState) -> AnyResult<()> {
     Ok(())
 }
 
-async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for requested runtime sweep")?;
+async fn auto_stop_stuck_requested_runtimes(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let connection = tick
+        .client("failed to acquire connection for requested runtime sweep")
+        .await?;
 
     // A stop's quarantine also leaves a runtime `requested` and unseen, with
     // the lease it launched on hours ago `cleanup_pending`. That release is
@@ -2088,8 +2141,10 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
         )
         .await
         .context("failed to select stuck requested runtimes")?;
-    // Safe stop acquires its own connection; do not pin the query slot.
-    drop(connection);
+    if !rows.is_empty() {
+        // Safe stop acquires its own connection; do not pin the query slot.
+        tick.release();
+    }
 
     for row in rows {
         let runtime_id: Uuid = row.get("id");
@@ -2234,14 +2289,13 @@ async fn auto_stop_stuck_requested_runtimes(state: &AppState) -> AnyResult<()> {
     Ok(())
 }
 
-async fn auto_stop_orphan_requested_runtimes(state: &AppState) -> AnyResult<()> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for orphan requested runtime sweep")?;
-
-    let rows = connection
+async fn auto_stop_orphan_requested_runtimes(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let rows = tick
+        .client("failed to acquire connection for orphan requested runtime sweep")
+        .await?
         .query(
             "select id
              from runtimes
@@ -2258,8 +2312,10 @@ async fn auto_stop_orphan_requested_runtimes(state: &AppState) -> AnyResult<()> 
         )
         .await
         .context("failed to select orphan requested runtimes")?;
-    // Safe stop acquires its own connection; do not pin the query slot.
-    drop(connection);
+    if !rows.is_empty() {
+        // Safe stop acquires its own connection; do not pin the query slot.
+        tick.release();
+    }
 
     for row in rows {
         let runtime_id: Uuid = row.get("id");
@@ -2314,14 +2370,13 @@ async fn auto_stop_orphan_requested_runtimes(state: &AppState) -> AnyResult<()> 
     Ok(())
 }
 
-async fn cleanup_terminal_runtime_records(state: &AppState) -> AnyResult<()> {
-    let connection = state
-        .pool
-        .get()
-        .await
-        .context("failed to acquire connection for terminal runtime cleanup")?;
-
-    let rows = connection
+async fn cleanup_terminal_runtime_records(
+    state: &AppState,
+    tick: &mut TickConnection<'_>,
+) -> AnyResult<()> {
+    let rows = tick
+        .client("failed to acquire connection for terminal runtime cleanup")
+        .await?
         .query(
             "select id
              from runtimes
@@ -2336,7 +2391,10 @@ async fn cleanup_terminal_runtime_records(state: &AppState) -> AnyResult<()> {
         )
         .await
         .context("failed to select terminal runtime cleanup candidates")?;
-    drop(connection);
+    if !rows.is_empty() {
+        // Safe stop and the removal transaction each take their own.
+        tick.release();
+    }
 
     let mut removed_count = 0usize;
 
@@ -2612,7 +2670,11 @@ mod tests {
 
         let _watch = fixture.state.events.watch_project(fixture.project_id);
         let mut credit_events = fixture.state.events.subscribe();
-        super::expire_stale_requeued_jobs(&fixture.state).await?;
+        super::expire_stale_requeued_jobs(
+            &fixture.state,
+            &mut super::TickConnection::new(&fixture.state.pool),
+        )
+        .await?;
         assert_eq!(
             crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
             1,
@@ -2664,7 +2726,11 @@ mod tests {
         );
 
         // Sweeping again finds nothing to expire and nothing to refund.
-        super::expire_stale_requeued_jobs(&fixture.state).await?;
+        super::expire_stale_requeued_jobs(
+            &fixture.state,
+            &mut super::TickConnection::new(&fixture.state.pool),
+        )
+        .await?;
         assert_eq!(
             credit_balance(&fixture.pool, &fixture.org_id).await?,
             restored_balance
@@ -3061,7 +3127,11 @@ mod tests {
 
         let _watch = fixture.state.events.watch_project(fixture.project_id);
         let mut credit_events = fixture.state.events.subscribe();
-        super::expire_stale_requeued_jobs(&fixture.state).await?;
+        super::expire_stale_requeued_jobs(
+            &fixture.state,
+            &mut super::TickConnection::new(&fixture.state.pool),
+        )
+        .await?;
         assert_eq!(
             crate::tests::queued_credit_signals(&mut credit_events, fixture.project_id),
             0,
@@ -3379,7 +3449,11 @@ mod tests {
 
             let _watch = fixture.state.events.watch_project(fixture.project_id);
             let mut events = fixture.state.events.subscribe();
-            super::expire_stale_requeued_jobs(&fixture.state).await?;
+            super::expire_stale_requeued_jobs(
+                &fixture.state,
+                &mut super::TickConnection::new(&fixture.state.pool),
+            )
+            .await?;
 
             let connection = fixture.pool.get().await?;
             let job = connection
@@ -3477,7 +3551,11 @@ mod tests {
 
             // A second sweep finds nothing to expire, writes nothing and
             // says nothing.
-            super::expire_stale_requeued_jobs(&fixture.state).await?;
+            super::expire_stale_requeued_jobs(
+                &fixture.state,
+                &mut super::TickConnection::new(&fixture.state.pool),
+            )
+            .await?;
             let mut repeated = Vec::new();
             while let Ok(event) = events.try_recv() {
                 if event.project_id == Some(fixture.project_id) {
@@ -3648,7 +3726,11 @@ mod tests {
             let asked_again = queue_a_follow_up(stopped, stopped_conversation, 60).await?;
 
             let mut events = stopped.state.events.subscribe();
-            super::expire_stale_requeued_jobs(&stopped.state).await?;
+            super::expire_stale_requeued_jobs(
+                &stopped.state,
+                &mut super::TickConnection::new(&stopped.state.pool),
+            )
+            .await?;
             for (space, reason, ..) in &queued_before_the_stop {
                 let status: String = space
                     .pool
@@ -3813,7 +3895,11 @@ mod tests {
             .await?;
             turn.let_the_runtime_go_quiet().await?;
 
-            super::auto_stop_stale_runtimes(&turn.state).await?;
+            super::auto_stop_stale_runtimes(
+                &turn.state,
+                &mut super::TickConnection::new(&turn.state.pool),
+            )
+            .await?;
 
             assert_eq!(turn.releases(), 1);
             turn.assert_interrupted("heartbeat_timeout").await?;
@@ -3919,7 +4005,11 @@ mod tests {
             assert_eq!(turn.releases(), 1);
             let mut events = turn.state.events.subscribe();
 
-            super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
+            super::auto_stop_stuck_requested_runtimes(
+                &turn.state,
+                &mut super::TickConnection::new(&turn.state.pool),
+            )
+            .await?;
 
             assert_eq!(turn.releases(), 1, "the sweep released the machine again");
             let published = drain(&mut events);
@@ -4060,7 +4150,11 @@ mod tests {
             .await?;
             quarantine_a_persons_stop(&turn, quarantined_seconds).await?;
 
-            super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
+            super::auto_stop_stuck_requested_runtimes(
+                &turn.state,
+                &mut super::TickConnection::new(&turn.state.pool),
+            )
+            .await?;
 
             assert_eq!(turn.releases(), 2, "the sweep left the failed release");
             assert_eq!(
@@ -4101,7 +4195,11 @@ mod tests {
             quarantine_a_persons_stop(&turn, 20 * 60).await?;
             let mut events = turn.state.events.subscribe();
 
-            super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
+            super::auto_stop_stuck_requested_runtimes(
+                &turn.state,
+                &mut super::TickConnection::new(&turn.state.pool),
+            )
+            .await?;
 
             assert_eq!(turn.releases(), 2);
             assert_eq!(
@@ -4185,7 +4283,11 @@ mod tests {
             assert_eq!(turn.releases(), 1);
             let mut events = turn.state.events.subscribe();
 
-            super::auto_stop_stuck_requested_runtimes(&turn.state).await?;
+            super::auto_stop_stuck_requested_runtimes(
+                &turn.state,
+                &mut super::TickConnection::new(&turn.state.pool),
+            )
+            .await?;
 
             assert_eq!(
                 runtime_and_lease_status(&turn).await?,
@@ -4205,3 +4307,7 @@ mod tests {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "sweeps_tick_tests.rs"]
+mod tick_tests;

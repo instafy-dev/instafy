@@ -5,7 +5,7 @@ import { MarketingHeader } from "../components/MarketingHeader";
 import { MarketingFooter } from "../components/MarketingFooter";
 import { useAuth } from "../providers/AuthProvider";
 import { useMarketingCanvas } from "../theme/useMarketingCanvas";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 import { LandingIntegrationChips } from "./landing/LandingIntegrationChips";
 import { LandingFeatures } from "./landing/LandingFeatures";
 import { LANDING_GUTTER, LandingHero, PRIMARY_LINK } from "./landing/LandingHero";
@@ -33,7 +33,7 @@ export function LandingPage() {
       title: "Instafy · The shared studio for your team and its AI agents",
       description:
         "Bring your people, your AI, and your work into one shared studio. Build software, work through the numbers, and launch something together, with real files you control.",
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, []);
 

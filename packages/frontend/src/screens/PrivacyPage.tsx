@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Heading } from "../components/Heading";
 import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 
 const LAST_UPDATED = "September 23, 2026";
 const CONTACT_EMAIL = "contact@instafy.dev";
@@ -13,7 +13,7 @@ export function PrivacyPage() {
       title: "Privacy Policy · Instafy",
       description:
         "Learn how Instafy collects, uses, and shares information when you use our chat-first AI space.",
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, []);
 

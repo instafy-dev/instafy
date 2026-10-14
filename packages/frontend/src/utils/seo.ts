@@ -1,3 +1,11 @@
+/**
+ * The social card every page shares (public/og-image.png), at its
+ * content-versioned URL so link unfurlers drop a cached older card.
+ * scripts/generate-og-image.mjs rewrites the query (and index.html's copy)
+ * whenever it regenerates the card; pnpm check:app-icons verifies both.
+ */
+export const SOCIAL_CARD_IMAGE = "/og-image.png?sha=9002ba1ee3dd";
+
 export type PageMeta = {
   title: string;
   description: string;

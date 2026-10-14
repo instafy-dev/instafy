@@ -91,7 +91,11 @@ Stop everything with `pnpm runtime:down`, which tears down the controller stack.
   root that is not empty to `.legacy/` when it starts, and refuses to start on a folder that holds
   the provider's `.instafy-checkout-stamps/` or `.instafy-evicted/`, or a runtime checkout with a
   clean-stop marker or local recovery refs. Run it with an init as PID 1
-  (`docker run --init`, or `init: true` as in `docker/docker-compose.runtime.yml`). Started on the
+  (`docker run --init`, or `init: true` as in `docker/docker-compose.runtime.yml`). On SIGTERM
+  (`docker stop`) it stops taking connections, lets the requests in progress finish for up to
+  eight seconds, and exits 0 once the git work it already started (a mirror fetch, a pack or a
+  request's git command) has returned; `docker stop` kills it if that work outlasts the stop
+  timeout, and `docker rm -f` cuts everything at once. Started on the
   volume of an older, stateful gateway image, it first moves that image's per-space working copies
   to `.legacy/` on the same volume. Those copies are disposable; see
   [Retiring gateway working copies](../docs/Git-Service.md#retiring-gateway-working-copies).

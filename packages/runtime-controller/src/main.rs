@@ -92,11 +92,17 @@ mod tests_chat_attachment_lease;
 #[cfg(test)]
 mod tests_chat_attachment_policies;
 #[cfg(test)]
+mod tests_hosted_runtime_billing;
+#[cfg(test)]
+mod tests_idle_lease_poll;
+#[cfg(test)]
 mod tests_managed_ai_refund;
 #[cfg(test)]
 mod tests_managed_credential;
 #[cfg(test)]
 mod tests_platform_job_record;
+#[cfg(test)]
+mod tests_presence_beat;
 #[cfg(test)]
 mod tests_runtime_stop_fence;
 mod tokens;

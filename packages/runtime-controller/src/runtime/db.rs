@@ -681,6 +681,11 @@ pub(crate) async fn mark_runtime_ready(
     map_runtime_row(&row)
 }
 
+/// How old a runtime's `last_seen_at` gets before [`touch_runtime_last_seen`]
+/// writes it again. A younger one is left alone, so a runtime that polls
+/// every few seconds writes its row at most once per interval.
+pub(crate) const RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS: i64 = 30;
+
 pub(crate) async fn touch_runtime_last_seen(
     transaction: &Transaction<'_>,
     runtime_id: &Uuid,
@@ -691,8 +696,9 @@ pub(crate) async fn touch_runtime_last_seen(
              set last_seen_at = now(),
                  updated_at = now()
              where id = $1
-               and (last_seen_at is null or last_seen_at < now() - interval '30 seconds')",
-            &[runtime_id],
+               and (last_seen_at is null
+                    or last_seen_at < now() - ($2::bigint * interval '1 second'))",
+            &[runtime_id, &RUNTIME_LAST_SEEN_TOUCH_INTERVAL_SECONDS],
         )
         .await
         .map_err(|error| {

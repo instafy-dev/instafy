@@ -55,11 +55,11 @@ async function expectTargets(page: Page, xs: number, sm: number) {
 test.describe("fine pointer", () => {
   test.use({ hasTouch: false });
 
-  test("segmented choices retain 44px targets at phone width and support keyboard selection", async ({ page }) => {
+  test("segmented choices stay compact at narrow mouse widths and support keyboard selection", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await mountControls(page);
     expect(await page.evaluate(() => matchMedia("(pointer: fine)").matches)).toBe(true);
-    await expectTargets(page, 44, 44);
+    await expectTargets(page, 28, 36);
 
     const appearance = page.getByRole("radiogroup", { name: "Appearance", exact: true });
     const light = appearance.getByRole("radio", { name: "Light", exact: true });
@@ -94,14 +94,16 @@ test.describe("fine pointer", () => {
 test.describe("touch pointer", () => {
   test.use({ hasTouch: true });
 
-  test("segmented choices retain 44px targets on wide touch screens", async ({ page }) => {
-    await page.setViewportSize({ width: 1280, height: 800 });
-    await mountControls(page);
-    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
-    await expectTargets(page, 44, 44);
-    await page.getByTestId("xs-dark").tap();
-    const appearance = page.getByRole("radiogroup", { name: "Appearance", exact: true });
-    await expect(appearance.getByRole("radio", { name: "Dark", exact: true })).toBeChecked();
-    await expect(appearance.getByRole("radio", { name: "Light", exact: true })).not.toBeChecked();
-  });
+  for (const width of [390, 1280]) {
+    test(`segmented choices retain 44px targets on ${width}px touch screens`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 800 });
+      await mountControls(page);
+      expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+      await expectTargets(page, 44, 44);
+      await page.getByTestId("xs-dark").tap();
+      const appearance = page.getByRole("radiogroup", { name: "Appearance", exact: true });
+      await expect(appearance.getByRole("radio", { name: "Dark", exact: true })).toBeChecked();
+      await expect(appearance.getByRole("radio", { name: "Light", exact: true })).not.toBeChecked();
+    });
+  }
 });

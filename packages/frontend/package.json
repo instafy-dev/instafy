@@ -112,6 +112,7 @@
     "@capacitor/android": "^8.0.0",
     "@capacitor/cli": "^8.0.2",
     "@capacitor/ios": "^8.0.0",
+    "@fontsource/inter": "5.2.8",
     "@instafy/desktop-runtime-agent": "workspace:*",
     "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "^4.1.13",

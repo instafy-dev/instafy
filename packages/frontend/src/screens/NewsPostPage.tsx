@@ -7,7 +7,7 @@ import { MarketingHeader } from "../components/MarketingHeader";
 import { Text } from "../components/Text";
 import { useAuth } from "../providers/AuthProvider";
 import { theme } from "../styles/theme";
-import { applyPageMeta } from "../utils/seo";
+import { SOCIAL_CARD_IMAGE, applyPageMeta } from "../utils/seo";
 import { formatNewsDate, getNewsPostBySlug } from "./news/newsPosts";
 
 export function NewsPostPage() {
@@ -23,7 +23,7 @@ export function NewsPostPage() {
       title: `${post.title} · Instafy News`,
       description: post.excerpt,
       type: "article",
-      image: "/og-image.png",
+      image: SOCIAL_CARD_IMAGE,
     });
   }, [post]);
 

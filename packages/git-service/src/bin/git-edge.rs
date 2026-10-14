@@ -1,8 +1,10 @@
+use std::future::{Future, IntoFuture};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use axum::extract::{Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
@@ -11,7 +13,7 @@ use axum::Router;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use git_service::auth::{extract_token, TokenValidator};
 use git_service::config::{GitEdgeConfig, GitEdgeRoutingMode};
@@ -43,6 +45,12 @@ struct GitShardRouteResponse {
     shard_url: String,
 }
 
+/// How long a stop lets requests in progress finish once the listener has
+/// closed. It stays under Docker's default ten-second stop timeout, so
+/// `docker stop` ends in a clean exit rather than SIGKILL; a clone or push
+/// still streaming then is cut, as the kill would have cut it.
+const SHUTDOWN_DRAIN_LIMIT: Duration = Duration::from_secs(8);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -51,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    let stop = stop_signal().context("failed to install the stop signal handlers")?;
     let config = Arc::new(GitEdgeConfig::from_env()?);
     let http = reqwest::Client::builder()
         .user_agent("instafy-git-edge/0.1")
@@ -77,9 +86,68 @@ async fn main() -> anyhow::Result<()> {
     info!(%addr, shards = ?shards, "git-edge listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service())
+    serve(listener, app, stop, SHUTDOWN_DRAIN_LIMIT)
         .await
         .map_err(Into::into)
+}
+
+/// Resolves on SIGTERM, which `docker stop` and most supervisors send, or
+/// on SIGINT (Ctrl-C), naming the one that came. Both handlers are in place
+/// when this returns, so a stop sent while the edge starts still counts.
+#[cfg(unix)]
+fn stop_signal() -> io::Result<impl Future<Output = &'static str>> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        tokio::select! {
+            _ = terminate.recv() => "SIGTERM",
+            _ = interrupt.recv() => "SIGINT",
+        }
+    })
+}
+
+#[cfg(windows)]
+fn stop_signal() -> io::Result<impl Future<Output = &'static str>> {
+    let mut ctrl_c = tokio::signal::windows::ctrl_c()?;
+    Ok(async move {
+        ctrl_c.recv().await;
+        "Ctrl-C"
+    })
+}
+
+/// Serves `app` until `stop` resolves, then closes the listener and lets
+/// the requests in progress finish for at most `drain_limit`.
+async fn serve(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    stop: impl Future<Output = &'static str> + Send + 'static,
+    drain_limit: Duration,
+) -> io::Result<()> {
+    let (stopping, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move {
+            let signal = stop.await;
+            info!(signal, "git-edge stopping; finishing requests in progress");
+            let _ = stopping.send(());
+        })
+        .into_future();
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => return result,
+        _ = stopped => {}
+    }
+    match tokio::time::timeout(drain_limit, server).await {
+        Ok(result) => result,
+        Err(_) => {
+            warn!(
+                limit_ms = drain_limit.as_millis() as u64,
+                "requests were still open at the shutdown drain limit; exiting without them"
+            );
+            Ok(())
+        }
+    }
 }
 
 async fn handle_proxy(
@@ -584,6 +652,59 @@ mod tests {
             head.starts_with(&format!("post /{PROJECT_ID}.git/git-upload-pack")),
             "the refused pushes never reached the shard: {head}"
         );
+    }
+
+    /// Once stopped the edge takes no new connections, and it waits for a
+    /// request in progress only up to the drain limit.
+    #[tokio::test]
+    async fn a_stop_waits_for_a_stalled_request_only_up_to_the_drain_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (started, mut handling) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/stall",
+            get(move || {
+                let started = started.clone();
+                async move {
+                    let _ = started.send(());
+                    std::future::pending::<&'static str>().await
+                }
+            }),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let limit = Duration::from_millis(300);
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            async move {
+                let _ = stopped.await;
+                "test"
+            },
+            limit,
+        ));
+        let client = tokio::spawn(reqwest::get(format!("http://{addr}/stall")));
+        handling
+            .recv()
+            .await
+            .expect("the request reached its handler");
+
+        let begun = Instant::now();
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), served)
+            .await
+            .expect("the stop waited past its drain limit")
+            .unwrap()
+            .unwrap();
+        assert!(
+            begun.elapsed() >= limit,
+            "the stop did not wait for the request in progress: {:?}",
+            begun.elapsed()
+        );
+        assert!(
+            tokio::net::TcpStream::connect(addr).await.is_err(),
+            "the edge still takes connections after the stop"
+        );
+        client.abort();
     }
 
     #[test]
