@@ -49,6 +49,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "settings-history-scroll.spec.ts",
   "segmented-control-responsive.spec.ts",
   "studio-history-controls.spec.ts",
+  "thread-spine-surface.spec.ts",
 ];
 
 export default defineConfig({

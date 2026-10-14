@@ -121,7 +121,7 @@ test("browser UI lane requires the mobile sidebar geometry regression", async (t
 test("minimum count cannot hide the mobile workspace Escape dismissal regression", async (t) => {
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
   const requiredTitle = "Escape returns from the mobile workspace drill-in before dismissing navigation";
-  assert.equal(contract.minimumTests, 47);
+  assert.equal(contract.minimumTests, 51);
   assert.ok(contract.titles.includes(requiredTitle));
   const run = setup(t, "browser-ui");
   const tests = browserUiInventory(run).map((item) => item.title === requiredTitle
@@ -146,7 +146,7 @@ test("minimum count cannot hide a replaced Shared full-modal safe-area case", as
 
 test("browser UI requires both portrait and short-landscape session/status cases", async (t) => {
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
-  assert.equal(contract.minimumTests, 47);
+  assert.equal(contract.minimumTests, 51);
   assert.ok(contract.files.includes("shared-browser-sessions-responsive.spec.ts"));
   const sessionTitles = contract.titles.filter((title) => title.startsWith("Shared sessions and saved status "));
   assert.deepEqual(sessionTitles, [
@@ -215,7 +215,7 @@ test("browser UI cannot omit a thumb navigation viewport or replace its spec", a
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
   const file = "mobile-thumb-navigation.spec.ts";
   const titles = [375, 390, 844].map((width) => `thumb navigation preserves history, selection and input at ${width}px`);
-  assert.equal(contract.minimumTests, 47);
+  assert.equal(contract.minimumTests, 51);
   assert.ok(contract.files.includes(file));
   for (const title of titles) assert.ok(contract.titles.includes(title));
   for (const target of [file, ...titles]) {
@@ -247,5 +247,23 @@ test("browser UI requires every Studio navigation, scroll and cross-space race p
       ? { ...item, title: "unrelated passing navigation test" } : item);
     run.begin(selected); run.pass(selected);
     assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, requiredTitle);
+  }
+});
+
+test("browser UI cannot omit a thread-spine surface theme or viewport", async (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  const file = "thread-spine-surface.spec.ts";
+  const titles = ["light", "dark"].flatMap((theme) => [390, 1280].map((width) =>
+    `thread spine notches erase to the surface behind them in ${theme} at ${width}px`));
+  assert.ok(contract.files.includes(file));
+  for (const title of titles) assert.ok(contract.titles.includes(title), title);
+  for (const target of [file, ...titles]) {
+    const run = setup(t, "browser-ui");
+    const selected = browserUiInventory(run).map((item) => item.title === target
+      ? { ...item, title: "unrelated passing spine case" }
+      : target === file && item.location.file.endsWith(file)
+        ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
+    run.begin(selected); run.pass(selected);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, target);
   }
 });

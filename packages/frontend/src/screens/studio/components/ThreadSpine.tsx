@@ -25,6 +25,17 @@ const THREAD_SPINE_NOTCH_HEIGHT_PX = 8;
 const THREAD_SPINE_VIEWBOX_WIDTH_PX = 18;
 const THREAD_SPINE_STEM_CENTER_X = 2.5;
 
+/**
+ * A masked notch hides the straight stem drawn behind it (the parent rail or a
+ * neighbouring row's spine) by painting over it in the colour of the surface
+ * underneath. That colour must be the effective surface, never a fixed palette
+ * colour: a hard-coded `slate-950` painted a near-black strip beside every bend
+ * on the charcoal dark surfaces. `--thread-spine-surface` is defined per theme
+ * in styles/tailwind.css and overridden by any container that paints a
+ * different background behind a spine (see DeferredChatMessageRow.css).
+ */
+export const THREAD_SPINE_ERASER_CLASS = "stroke-[var(--thread-spine-surface)]";
+
 function resolveThreadSpineSegmentBounds(
   segment: ThreadSpineSegment,
   heightPx: number,
@@ -235,7 +246,8 @@ export function ThreadSpine({
             {maskPathData ? (
               <path
                 d={maskPathData}
-                className="stroke-white dark:stroke-slate-950"
+                data-thread-spine-eraser=""
+                className={THREAD_SPINE_ERASER_CLASS}
                 strokeWidth={maskStrokeWidthPx}
                 strokeLinecap="round"
                 strokeLinejoin="round"

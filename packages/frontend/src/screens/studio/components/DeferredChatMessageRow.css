@@ -4,10 +4,15 @@
   box-shadow: 0 0 0 6px var(--message-target-background);
   outline: 2px solid color-mix(in srgb, var(--color-primary-400) 60%, transparent);
   outline-offset: 4px;
+  /* The row's spines sit on this tint: their notch erasers take the same
+     colour composited over the working surface (white), or the highlighted
+     row shows a white strip beside every bend. */
+  --thread-spine-surface: color-mix(in srgb, var(--color-primary-100) 70%, #ffffff);
 }
 
 .dark .chat-message-row[data-chat-message-target="true"] {
   --message-target-background: color-mix(in srgb, var(--color-primary-500) 20%, transparent);
+  --thread-spine-surface: color-mix(in srgb, var(--color-primary-500) 20%, var(--color-studio-dark-panel));
 }
 
 .chat-message-row:focus-visible {
@@ -21,6 +26,10 @@
     outline: 2px solid Highlight;
     outline-offset: 4px;
     box-shadow: none;
+  }
+
+  .chat-message-row[data-chat-message-target="true"] {
+    --thread-spine-surface: Canvas;
   }
 }
 
